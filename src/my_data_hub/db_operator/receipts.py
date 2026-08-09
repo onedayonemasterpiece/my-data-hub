@@ -114,6 +114,7 @@ class ReceiptSigner:
         preview_affected_rows: int,
         backup_evidence_revision: str,
         backup_fingerprint: str,
+        impact_tier: str,
     ) -> str:
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("now must be timezone-aware")
@@ -136,6 +137,7 @@ class ReceiptSigner:
                 "preview_affected_rows": preview_affected_rows,
                 "backup_evidence_revision": backup_evidence_revision,
                 "backup_fingerprint": backup_fingerprint,
+                "impact_tier": impact_tier,
             }
         )
 

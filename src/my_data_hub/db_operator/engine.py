@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -15,6 +14,7 @@ from uuid import UUID
 from my_data_hub.hashing import sha256_value
 
 from .errors import EffectBoundsError, IdempotencyConflict, ReceiptError, RevisionConflict
+from .journal import OperatorJournal
 from .policy import (
     BackupFreshnessPolicy,
     BackupState,
@@ -111,22 +111,6 @@ class ApplyResult:
     replayed: bool = False
 
 
-class InMemoryIdempotencyStore:
-    """Process-local R1 store; deployments may inject a durable implementation."""
-
-    def __init__(self) -> None:
-        self._values: dict[str, tuple[str, ApplyResult]] = {}
-
-    def get(self, key: str) -> tuple[str, ApplyResult] | None:
-        return self._values.get(key)
-
-    def put(self, key: str, request_fingerprint: str, result: ApplyResult) -> None:
-        existing = self._values.get(key)
-        if existing is not None and existing[0] != request_fingerprint:
-            raise IdempotencyConflict("idempotency key was already used for another request")
-        self._values[key] = (request_fingerprint, result)
-
-
 class DatabaseOperator:
     def __init__(
         self,
@@ -140,7 +124,7 @@ class DatabaseOperator:
         limits: OperatorLimits | None = None,
         freshness: BackupFreshnessPolicy | None = None,
         clock: Clock = _utcnow,
-        idempotency_store: InMemoryIdempotencyStore | None = None,
+        journal: OperatorJournal,
     ) -> None:
         if schema_revision < 0:
             raise ValueError("schema_revision must not be negative")
@@ -159,8 +143,7 @@ class DatabaseOperator:
         self._limits = limits or OperatorLimits()
         self._freshness = freshness or BackupFreshnessPolicy()
         self._clock = clock
-        self._idempotency = idempotency_store or InMemoryIdempotencyStore()
-        self._apply_lock = threading.Lock()
+        self._journal = journal
 
     def _begin(self, cursor: Cursor, *, read_only: bool) -> None:
         mode = "READ ONLY" if read_only else "READ WRITE"
@@ -223,11 +206,14 @@ class DatabaseOperator:
             max_bytes=self._limits.max_bytes,
         )
 
-    def _open_gate(self, state: BackupState, *, now: datetime) -> None:
+    def _open_gate(
+        self, state: BackupState, *, now: datetime, require_checkpoint: bool = False
+    ) -> None:
         self._freshness.require_open(
             state,
             now=now,
             expected_schema_revision=self._schema_revision,
+            require_checkpoint=require_checkpoint,
         )
 
     @staticmethod
@@ -246,6 +232,7 @@ class DatabaseOperator:
         expected_revision: int,
         expected_row_min: int,
         expected_row_max: int,
+        impact_tier: str = "low",
     ) -> PreviewResult:
         for name, value in (
             ("principal", principal),
@@ -257,12 +244,18 @@ class DatabaseOperator:
             raise ValueError("expected_revision must not be negative")
         if not 0 <= expected_row_min <= expected_row_max <= self._limits.max_write_rows:
             raise EffectBoundsError("expected row bounds exceed the bounded editor policy")
+        if impact_tier not in {"low", "medium", "high", "bulk"}:
+            raise ValueError("impact_tier must be low, medium, high, or bulk")
         analysis = analyze_editor_sql(sql, allowlist=self._allowlist, params=params)
         assert analysis.target is not None
         query, bound = compile_psycopg_parameters(analysis.normalized_sql, params)
         now = self._clock()
         backup = self._backup_state_provider()
-        self._open_gate(backup, now=now)
+        self._open_gate(
+            backup,
+            now=now,
+            require_checkpoint=impact_tier in {"high", "bulk"} or expected_row_max > 10,
+        )
         connection = self._connection_factory()
         cursor = connection.cursor()
         try:
@@ -299,8 +292,10 @@ class DatabaseOperator:
             preview_affected_rows=affected,
             backup_evidence_revision=backup.evidence_revision,
             backup_fingerprint=backup.fingerprint,
+            impact_tier=impact_tier,
         )
         payload = self._signer.verify_preview(token, now=now)
+        self._journal.record_preview(payload, token)
         return PreviewResult(
             receipt=token,
             affected_rows=affected,
@@ -354,62 +349,62 @@ class DatabaseOperator:
             }
         )
 
-        with self._apply_lock:
-            existing = self._idempotency.get(idempotency_key)
+        backup = self._backup_state_provider()
+        impact_tier = str(preview.get("impact_tier", ""))
+        if impact_tier not in {"low", "medium", "high", "bulk"}:
+            raise ReceiptError("preview receipt contains an invalid impact tier")
+        self._open_gate(
+            backup,
+            now=now,
+            require_checkpoint=impact_tier in {"high", "bulk"}
+            or int(preview["expected_row_max"]) > 10,
+        )
+        self._require_binding(preview, "backup_evidence_revision", backup.evidence_revision)
+        self._require_binding(preview, "backup_fingerprint", backup.fingerprint)
+        query, bound = compile_psycopg_parameters(analysis.normalized_sql, params)
+        expected_revision = int(preview["expected_revision"])
+        expected_min = int(preview["expected_row_min"])
+        expected_max = int(preview["expected_row_max"])
+        preview_affected = int(preview["preview_affected_rows"])
+        if not 0 <= expected_min <= expected_max <= self._limits.max_write_rows:
+            raise ReceiptError("preview receipt contains invalid effect bounds")
+
+        connection = self._connection_factory()
+        cursor = connection.cursor()
+        committed = False
+        try:
+            self._begin(cursor, read_only=False)
+            existing = self._journal.find_apply(
+                cursor, principal=principal, idempotency_key=idempotency_key
+            )
             if existing is not None:
-                previous_fingerprint, previous = existing
+                previous_fingerprint, receipt, affected, before, after = existing
                 if previous_fingerprint != request_fingerprint:
                     raise IdempotencyConflict(
                         "idempotency key was already used for another apply request"
                     )
                 return ApplyResult(
-                    receipt=previous.receipt,
-                    affected_rows=previous.affected_rows,
-                    revision_before=previous.revision_before,
-                    revision_after=previous.revision_after,
-                    idempotency_key=previous.idempotency_key,
+                    receipt=receipt,
+                    affected_rows=affected,
+                    revision_before=before,
+                    revision_after=after,
+                    idempotency_key=idempotency_key,
                     replayed=True,
                 )
-
-            backup = self._backup_state_provider()
-            self._open_gate(backup, now=now)
-            self._require_binding(preview, "backup_evidence_revision", backup.evidence_revision)
-            self._require_binding(preview, "backup_fingerprint", backup.fingerprint)
-            query, bound = compile_psycopg_parameters(analysis.normalized_sql, params)
-            expected_revision = int(preview["expected_revision"])
-            expected_min = int(preview["expected_row_min"])
-            expected_max = int(preview["expected_row_max"])
-            preview_affected = int(preview["preview_affected_rows"])
-            if not 0 <= expected_min <= expected_max <= self._limits.max_write_rows:
-                raise ReceiptError("preview receipt contains invalid effect bounds")
-
-            connection = self._connection_factory()
-            cursor = connection.cursor()
-            committed = False
-            try:
-                self._begin(cursor, read_only=False)
-                revision_before = int(self._revision_reader(cursor))
-                if revision_before != expected_revision:
-                    raise RevisionConflict(
-                        "canonical revision no longer matches the preview: "
-                        f"expected={expected_revision}, actual={revision_before}"
-                    )
-                cursor.execute(query, bound)
-                affected = int(cursor.rowcount)
-                if not expected_min <= affected <= expected_max or affected != preview_affected:
-                    raise EffectBoundsError(
-                        f"apply affected {affected} rows; preview={preview_affected}, "
-                        f"bounds=[{expected_min}, {expected_max}]"
-                    )
-                revision_after = int(self._revision_reader(cursor))
-                connection.commit()
-                committed = True
-            finally:
-                if not committed:
-                    connection.rollback()
-                cursor.close()
-                connection.close()
-
+            revision_before = int(self._revision_reader(cursor))
+            if revision_before != expected_revision:
+                raise RevisionConflict(
+                    "canonical revision no longer matches the preview: "
+                    f"expected={expected_revision}, actual={revision_before}"
+                )
+            cursor.execute(query, bound)
+            affected = int(cursor.rowcount)
+            if not expected_min <= affected <= expected_max or affected != preview_affected:
+                raise EffectBoundsError(
+                    f"apply affected {affected} rows; preview={preview_affected}, "
+                    f"bounds=[{expected_min}, {expected_max}]"
+                )
+            revision_after = int(self._revision_reader(cursor))
             apply_payload = {
                 "receipt_id": str(preview["receipt_id"]),
                 "preview_receipt_fingerprint": sha256_value(preview_receipt),
@@ -428,12 +423,29 @@ class DatabaseOperator:
                 "committed_at": now.astimezone(UTC).isoformat(),
             }
             apply_receipt = self._signer.issue_apply(apply_payload)
-            result = ApplyResult(
+            self._journal.record_apply(
+                cursor,
+                preview=preview,
+                principal=principal,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint,
                 receipt=apply_receipt,
                 affected_rows=affected,
                 revision_before=revision_before,
                 revision_after=revision_after,
-                idempotency_key=idempotency_key,
             )
-            self._idempotency.put(idempotency_key, request_fingerprint, result)
-            return result
+            connection.commit()
+            committed = True
+        finally:
+            if not committed:
+                connection.rollback()
+            cursor.close()
+            connection.close()
+
+        return ApplyResult(
+            receipt=apply_receipt,
+            affected_rows=affected,
+            revision_before=revision_before,
+            revision_after=revision_after,
+            idempotency_key=idempotency_key,
+        )

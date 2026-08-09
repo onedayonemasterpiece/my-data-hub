@@ -87,8 +87,10 @@ denied, so runner firewall state is also unverified.
 - Repeated migration: PASS, zero migrations applied.
 - Upgrade from released revision 9 to 10: PASS; disposable database dropped.
 - Bootstrap invariants: PASS.
-- Role provisioning: PASS, ten group roles.
-- PostgreSQL positive/adversarial probes: PASS, 39 probes.
+- Role provisioning: PASS, twelve password-free group roles.
+- PostgreSQL positive/adversarial/ownership probes: PASS, 66 probes. All application
+  objects in the fresh audit database were owned by `mdh_owner`; direct canonical
+  singleton mutation was denied outside the dedicated bounded committer function.
 - OAuth revocation before/after durable row: PASS (`false -> true`).
 - Process-kill recovery: PASS in a separate disposable container; an immediate server
   stop caused Docker restart count `1` and PostgreSQL WAL recovery.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -290,9 +291,16 @@ class ConnectorTransport(Protocol):
 class RetryPolicy:
     initial_seconds: float = 1.0
     maximum_seconds: float = 300.0
+    jitter_fraction: float = 0.2
 
-    def delay(self, attempts_already_made: int) -> timedelta:
-        seconds = min(self.maximum_seconds, self.initial_seconds * (2**attempts_already_made))
+    def delay(self, attempts_already_made: int, *, jitter_key: str = "") -> timedelta:
+        base = self.initial_seconds * (2**attempts_already_made)
+        digest = hashlib.sha256(
+            f"{jitter_key}:{attempts_already_made}".encode()
+        ).digest()
+        unit = int.from_bytes(digest[:8], "big") / (2**64 - 1)
+        factor = 1.0 + self.jitter_fraction * ((2.0 * unit) - 1.0)
+        seconds = min(self.maximum_seconds, max(0.0, base * factor))
         return timedelta(seconds=seconds)
 
 
@@ -338,7 +346,9 @@ class ConnectorDeliveryService:
                 retry_delay = (
                     timedelta(seconds=result.retry_after_seconds)
                     if result.retry_after_seconds is not None
-                    else self.retry_policy.delay(item.state.attempts)
+                    else self.retry_policy.delay(
+                        item.state.attempts, jitter_key=str(item.spool_id)
+                    )
                 )
                 self.spool.record_retry(
                     item,

@@ -30,11 +30,14 @@ jobs:
         run: |
           test -f artifacts/recovery-receipt.json
           python - <<'PY'
-          import json
+          import hashlib, json
           from jsonschema import Draft202012Validator, FormatChecker
           schema=json.load(open('schemas/recovery-receipt.v1.schema.json'))
           receipt=json.load(open('artifacts/recovery-receipt.json'))
           Draft202012Validator(schema, format_checker=FormatChecker()).validate(receipt)
+          unsigned={key:value for key,value in receipt.items() if key != 'receipt_sha256'}
+          encoded=json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
+          assert receipt['receipt_sha256'] == hashlib.sha256(encoded).hexdigest()
           PY
       - name: Write workflow receipt
         if: always()

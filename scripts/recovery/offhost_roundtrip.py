@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -40,7 +41,27 @@ def _run_adapter(
     destination: Path | None,
     timeout: int,
 ) -> None:
-    environment = os.environ.copy()
+    environment = {
+        name: os.environ[name]
+        for name in ("PATH", "HOME", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR")
+        if name in os.environ
+    }
+    raw_allowlist = os.environ.get("MY_DATA_HUB_OFFHOST_ADAPTER_ENV_ALLOWLIST", "")
+    forbidden_fragments = (
+        "DATABASE_URL",
+        "AGE_IDENTITY",
+        "WORKER_RESULT_TOKEN",
+        "CONNECTOR_CREDENTIALS",
+        "MCP_",
+    )
+    for name in (part.strip() for part in raw_allowlist.split(",") if part.strip()):
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", name):
+            raise RecoveryContractError("off-host adapter environment allowlist is invalid")
+        if any(fragment in name for fragment in forbidden_fragments):
+            raise RecoveryContractError(f"secret {name} is forbidden in adapter environment")
+        if name not in os.environ:
+            raise RecoveryContractError(f"allowlisted adapter environment variable {name} is absent")
+        environment[name] = os.environ[name]
     environment.update(
         {
             "MDH_RECOVERY_ACTION": action,

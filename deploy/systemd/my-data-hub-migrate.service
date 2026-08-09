@@ -1,6 +1,6 @@
 [Unit]
-Description=my-data-hub PostgreSQL backup
-After=postgresql.service
+Description=my-data-hub owner-scoped PostgreSQL migrations
+After=postgresql.service my-data-hub-role-bootstrap.service
 
 [Service]
 Type=oneshot
@@ -8,10 +8,8 @@ User=mydatahub
 Group=mydatahub
 WorkingDirectory=/opt/my-data-hub/current
 EnvironmentFile=/etc/my-data-hub/my-data-hub.env
-ExecStart=/opt/my-data-hub/current/scripts/backup_postgres.sh
-StateDirectory=my-data-hub/backups
+ExecStart=/opt/my-data-hub/venv/bin/my-data-hub db migrate
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/my-data-hub/backups

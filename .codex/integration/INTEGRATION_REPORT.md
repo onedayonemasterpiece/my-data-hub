@@ -20,7 +20,7 @@ requirement asks for runtime evidence.
 | L05 operator / R09 | merged | bounded engine plus live PostgreSQL disposable canary |
 | L06 OAuth / R06 | merged | admission primitives plus JWKS/revocation/RFC9728 production wiring |
 | L07 integration / R01–R05/R11 | in progress | workflows, central migration/grants/API/MCP/deploy evidence |
-| L08 review / R12 | in progress | separate maximum-available reviewer audit |
+| L08 review / R12 | remediation in progress | maximum-available High audit found critical issues; fixes are in this branch and require re-review |
 
 No worker change was dropped. Shared migrations, config, MCP catalog and workflows were
 reconciled serially by the integration owner.
@@ -30,24 +30,24 @@ reconciled serially by the integration owner.
 | ID | Status | Proof / exact gap |
 |---|---|---|
 | R01 observed devstand | **BLOCKED** | `docs/operations/first-deploy.md`; YC auth restored, but both authorized folders contain zero Compute instances/ALBs, required DNS is absent, and runner has no installed service |
-| R02 reproducible baseline | **PASS (local)** | `make validate`, `make test`, `make lint`, `make notebooks`, compileall all pass; 186 tests and 1433 repository checks at the last documentation run |
-| R03 PostgreSQL | **PARTIAL** | clean/repeat/9→10 upgrade, 10 roles, 39 role probes, bootstrap and process-kill recovery pass on PostgreSQL 18.4/pgvector 0.8.6; host reboot/private devstand listener proof blocked |
-| R04 recovery | **PARTIAL** | encrypted streaming, exact independent readback contract, fresh isolated restore and receipt implementation/tests pass; real off-host credential, live encrypted artifact/readback SHA and isolated restore receipt blocked |
+| R02 reproducible baseline | **PASS (local)** | exact Make commands use the checked-in `.venv` when present and pass with compileall; PR CI remains the independent proof |
+| R03 PostgreSQL | **PARTIAL** | privileged extension bootstrap followed by owner-scoped clean migration, 12 group roles, 66 strict-SQLSTATE probes and object ownership pass on PostgreSQL 18.4/pgvector 0.8.6; restricted LOGIN creation and host reboot/private listener proof require devstand secrets/access |
+| R04 recovery | **PARTIAL** | encrypted streaming, sanitized adapter environment, strict age-key mode/owner, exact readback, post-restore object/outbox/MCP verification, durable `recovery.evidence` recorder/provider and receipt tests pass; real off-host artifact/readback/restore evidence remains blocked |
 | R05 workflows | **PARTIAL** | all five workflow definitions and receipt schema exist; PR CI can run without secrets, but deploy/nightly/restore/provider run IDs require absent environments/secrets/runner/backend |
 | R06 remote MCP | **PARTIAL** | JWT/JWKS, exact claims, PostgreSQL revocation, RFC9728 metadata, Host/Origin/proxy/body/response/rate/timeout tests and read-only catalog pass; DNS/TLS/issuer/backend/Inspector/ChatGPT connection blocked |
-| R07 connectors | **PASS (disposable)** | intake → exact acceptance → commit/outbox → MCP read → replay → conflict quarantine plus durable outage/restart/eventual delivery; events-bot producer PR exists but live credential/canary blocked |
+| R07 connectors | **PASS (disposable)** | intake → exact acceptance → single CAS committer/outbox → MCP read → replay → conflict quarantine plus durable outage/restart/eventual delivery; events-bot producer shape now has an exact target normalizer test, while merge/live credential/canary remain blocked |
 | R08 Kaggle | **PARTIAL** | four classes, conservative inventory policy, protected denials, leases/fingerprints, exchange and canary receipt contracts pass offline; account inventory and private dataset/notebook lifecycle/cleanup blocked by missing tested adapter/credentials |
-| R09 DB operator | **PASS (R1 disposable only)** | AST/allowlist/limits/preview/signed binding/apply/backup gate/idempotency tests plus live PostgreSQL read/preview/apply/replay/DDL-denial/cleanup; production-empty and remote undiscoverable |
+| R09 DB operator | **PARTIAL** | apply DML + durable receipt/idempotency now commit in one PostgreSQL transaction; journal failure rolls back, replay is durable, high/bulk impact requires checkpoint, and live disposable apply/replay passes. Production remains empty/remote-undiscoverable until real recovery evidence exists |
 | R10 Region Talk | **PASS (bounded R1 scope)** | exact vision imported; donor entries remain explicitly pending; fixture only; pipeline paused and publication disabled; no YDB mutation/cutover |
-| R11 PR/merge/deploy | **IN PROGRESS** | primary PR/check/merge not yet created at this report revision; events-bot PR #478 open |
-| R12 security review | **IN PROGRESS** | separate read-only reviewer launched with maximum available high reasoning; findings must be resolved before merge |
+| R11 PR/merge/deploy | **IN PROGRESS** | [primary PR #1](https://github.com/onedayonemasterpiece/my-data-hub/pull/1) and events-bot PR #478 are open; security remediation must be pushed/green/re-reviewed before merge |
+| R12 security review | **PARTIAL** | maximum-available High checklist review completed with a not-ready verdict; critical/high findings were remediated locally and a second review is mandatory before merge |
 
 ## Local PostgreSQL evidence
 
 - image digest: `sha256:691673308c99d2161ba298736f3147f1f22d79de2fb7ec93ae9b4afcab870b62`;
 - PostgreSQL `18.4`; pgvector `0.8.6`;
 - clean migration: 1–10; repeat: zero; upgrade: 9→10 then zero repeat;
-- role probes: 39 PASS;
+- password-free roles: 12; strict role/ownership probes: 66 PASS;
 - process-kill: Docker restart count 1 plus PostgreSQL WAL recovery;
 - host reboot: not performed/claimed.
 
@@ -67,10 +67,11 @@ reconciled serially by the integration owner.
 - role: `mdh_mcp_editor`;
 - preview/apply affected rows: 1/1;
 - apply receipt SHA-256:
-  `ec38ae8a5495bf38355439b786ea48faa94c1b0654ca35037782b0cf3f53f133`;
+  `bdb0ff6f21efc2a2dc37b23f4c006d0966a5d41056c3e9a27fe495e3a808fb4c`;
 - replay: idempotent;
 - PostgreSQL DDL denial: PASS;
 - cleanup: schema dropped and canary grants revoked;
+- apply receipt/idempotency insertion occurred in the same transaction as DML;
 - the freshness object was synthetic and explicitly cannot open a production gate.
 
 ## Exact external blockers and verification commands

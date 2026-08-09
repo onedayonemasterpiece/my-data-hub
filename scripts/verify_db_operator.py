@@ -10,12 +10,14 @@ import os
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 from my_data_hub.db_operator import (
     BackupState,
     DatabaseAllowlist,
     DatabaseOperator,
     Function,
+    PostgresOperatorJournal,
     ReceiptSigner,
 )
 
@@ -45,6 +47,7 @@ def main() -> int:
 
     cleanup = "not_started"
     now = datetime.now(UTC)
+    evidence_id = uuid4()
     try:
         with psycopg.connect(args.database_url, autocommit=True) as connection:
             connection.execute(f"DROP SCHEMA IF EXISTS {DISPOSABLE_SCHEMA} CASCADE")
@@ -63,6 +66,25 @@ def main() -> int:
             )
             connection.execute("GRANT USAGE ON SCHEMA hub TO mdh_mcp_editor")
             connection.execute("GRANT SELECT ON hub.canonical_state TO mdh_mcp_editor")
+            connection.execute(
+                """
+                INSERT INTO recovery.evidence (
+                    evidence_id, run_id, commit_sha, evidence_type, status,
+                    artifact_sha256, readback_sha256, encrypted, private_offhost,
+                    readback_verified, restore_verified, schema_revision, manifest,
+                    completed_at
+                ) VALUES (%s, 'disposable-operator-canary', %s, 'isolated_restore',
+                    'passed', %s, %s, true, true, true, true, 10, %s::jsonb, %s)
+                """,
+                (
+                    evidence_id,
+                    "0" * 40,
+                    "0" * 64,
+                    "0" * 64,
+                    json.dumps({"test_only": True}),
+                    now - timedelta(minutes=1),
+                ),
+            )
 
         allowlist = DatabaseAllowlist.rollout_r1(
             environment="test",
@@ -72,7 +94,7 @@ def main() -> int:
             readable_functions=(Function("pg_catalog", "count"),),
         )
         backup = BackupState(
-            evidence_revision="disposable-canary-only",
+            evidence_revision=str(evidence_id),
             completed_at=now - timedelta(minutes=1),
             readback_verified=True,
             offsite_available=True,
@@ -92,6 +114,9 @@ def main() -> int:
             schema_revision=10,
             signer=ReceiptSigner(secrets.token_bytes(32)),
             clock=lambda: now,
+            journal=PostgresOperatorJournal(
+                lambda: _operator_connection(args.database_url)
+            ),
         )
 
         read_before = operator.read(

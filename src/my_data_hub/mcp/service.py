@@ -705,12 +705,8 @@ class HubService:
                 if bool(result.get("canonical_change")):
                     accepted_revision += 1
                     cursor.execute(
-                        """
-                        UPDATE hub.canonical_state
-                        SET canonical_revision = %s, updated_at = now()
-                        WHERE singleton = true
-                        """,
-                        (accepted_revision,),
+                        "SELECT hub.advance_canonical_revision(%s)",
+                        (canonical_revision,),
                     )
                 cursor.execute(
                     """

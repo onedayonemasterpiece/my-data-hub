@@ -153,7 +153,7 @@ def test_http_guard_accepts_allowed_ipv6_host() -> None:
         echo_app,
         token="secret",
         allowed_origins=(),
-        allowed_hosts=("[::1]",),
+        allowed_hosts=("[::1]:8765",),
     )
     messages = asyncio.run(
         run_asgi(app, headers=[(b"host", b"[::1]:8765"), (b"authorization", b"Bearer secret")])

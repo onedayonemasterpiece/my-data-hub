@@ -15,6 +15,7 @@ from my_data_hub.db_operator import (
     Function,
     GateClosed,
     IdempotencyConflict,
+    InMemoryOperatorJournal,
     OperatorLimits,
     ReceiptError,
     ReceiptSigner,
@@ -124,6 +125,7 @@ def make_operator(
     *,
     backup_provider: Any = backup_state,
     limits: OperatorLimits | None = None,
+    journal: Any | None = None,
 ) -> DatabaseOperator:
     return DatabaseOperator(
         connection_factory=factory,
@@ -134,6 +136,7 @@ def make_operator(
         signer=ReceiptSigner(b"s" * 32),
         limits=limits,
         clock=lambda: NOW,
+        journal=journal or InMemoryOperatorJournal(),
     )
 
 
@@ -301,7 +304,10 @@ def _preview(operator: DatabaseOperator) -> str:
 def test_preview_apply_binds_inputs_commits_once_and_replays_idempotently() -> None:
     preview_connection = FakeConnection(FakeCursor(rowcount=1, revisions=[7]))
     apply_connection = FakeConnection(FakeCursor(rowcount=1, revisions=[7, 8]))
-    operator = make_operator(FakeFactory(preview_connection, apply_connection))
+    replay_connection = FakeConnection(FakeCursor())
+    operator = make_operator(
+        FakeFactory(preview_connection, apply_connection, replay_connection)
+    )
     receipt = _preview(operator)
     assert preview_connection.rollbacks == 1
     assert preview_connection.commits == 0
@@ -338,6 +344,7 @@ def test_apply_rejects_forgery_other_principal_and_idempotency_collision() -> No
         FakeConnection(FakeCursor(rowcount=1, revisions=[7])),
         FakeConnection(FakeCursor(rowcount=1, revisions=[7, 8])),
         FakeConnection(FakeCursor(rowcount=1, revisions=[7])),
+        FakeConnection(FakeCursor()),
     ]
     operator = make_operator(FakeFactory(*connections))
     receipt = _preview(operator)
@@ -438,6 +445,47 @@ def test_apply_rechecks_backup_freshness_and_exact_bound_state() -> None:
         )
 
 
+def test_high_impact_preview_requires_a_checkpoint() -> None:
+    operator = make_operator(FakeFactory())
+    with pytest.raises(GateClosed, match="checkpoint"):
+        operator.preview(
+            "UPDATE operator_disposable.items SET label = $1 WHERE item_id = $2",
+            params=("fixed", 4),
+            principal="owner",
+            session_id="session-1",
+            correlation_id="correlation-1",
+            expected_revision=7,
+            expected_row_min=1,
+            expected_row_max=1,
+            impact_tier="high",
+        )
+
+
+def test_journal_failure_rolls_back_dml_before_commit() -> None:
+    class FailingJournal(InMemoryOperatorJournal):
+        def record_apply(self, cursor: Any, **values: Any) -> None:
+            raise RuntimeError("durable journal unavailable")
+
+    preview_connection = FakeConnection(FakeCursor(rowcount=1, revisions=[7]))
+    apply_connection = FakeConnection(FakeCursor(rowcount=1, revisions=[7, 8]))
+    operator = make_operator(
+        FakeFactory(preview_connection, apply_connection), journal=FailingJournal()
+    )
+    receipt = _preview(operator)
+    with pytest.raises(RuntimeError, match="journal unavailable"):
+        operator.apply(
+            "UPDATE operator_disposable.items SET label = $1 WHERE item_id = $2",
+            params=("fixed", 4),
+            principal="owner",
+            session_id="session-1",
+            correlation_id="correlation-1",
+            preview_receipt=receipt,
+            idempotency_key="journal-failure",
+        )
+    assert apply_connection.commits == 0
+    assert apply_connection.rollbacks == 1
+
+
 def test_expired_preview_is_rejected() -> None:
     signer = ReceiptSigner(b"x" * 32, preview_ttl=timedelta(seconds=1))
     token = signer.issue_preview(
@@ -454,6 +502,7 @@ def test_expired_preview_is_rejected() -> None:
         preview_affected_rows=1,
         backup_evidence_revision="backup",
         backup_fingerprint="c" * 64,
+        impact_tier="low",
     )
     with pytest.raises(ReceiptError, match="expired"):
         signer.verify_preview(token, now=NOW + timedelta(seconds=1))

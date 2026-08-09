@@ -98,11 +98,13 @@ def create_app(settings: Settings) -> FastAPI:
         redoc_url=None,
     )
     repository = WorkerResultRepository(
-        settings.database_url,
+        settings.application_database_url or settings.database_url,
         LocalArtifactStore(settings.artifact_root),
     )
     authenticate_worker = _worker_auth(settings)
-    connector_repository = PostgresConnectorAcceptanceRepository(settings.database_url)
+    connector_repository = PostgresConnectorAcceptanceRepository(
+        settings.connector_intake_database_url or settings.database_url
+    )
     connector_service = ConnectorIntakeService(
         connector_repository,
         max_envelope_bytes=settings.connector_intake_max_bytes,
@@ -142,7 +144,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.get("/health/ready")
     def ready() -> dict[str, Any]:
-        health = verify_database(settings.database_url)
+        health = verify_database(settings.application_database_url or settings.database_url)
         if not health.ok:
             raise HTTPException(status_code=503, detail={"findings": health.findings})
         return {

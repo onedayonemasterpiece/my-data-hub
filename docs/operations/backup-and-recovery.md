@@ -53,7 +53,7 @@ export MY_DATA_HUB_BACKUP_DATABASE_URL='<from secret store>'
 export MY_DATA_HUB_BACKUP_AGE_RECIPIENT='age1...'
 export MY_DATA_HUB_BACKUP_SOURCE_INSTANCE='production-primary'
 export MY_DATA_HUB_BACKUP_SOURCE_ENVIRONMENT='production'
-export MY_DATA_HUB_BACKUP_ROOT='/var/backups/my-data-hub'
+export MY_DATA_HUB_BACKUP_ROOT='/var/lib/my-data-hub/backups'
 scripts/backup_postgres.sh
 ```
 
@@ -145,15 +145,14 @@ Every accepted backup records:
 
 - backup ID and timestamps;
 - source instance/environment;
-- repository commit and canonical/schema revision;
-- PostgreSQL major, extension versions and locale/collation;
+- repository commit supplied by the deployment;
 - dump tool version/options;
-- plaintext-before-encryption hash where safely retained;
-- encrypted artifact hash, size and encryption metadata without key;
-- local/off-host locator identity;
-- upload/readback verification;
-- retention class and parent generation;
-- restore compatibility notes.
+- encrypted artifact hash, size and age recipient fingerprint.
+
+Off-host locator/readback evidence and isolated-target verification belong to the
+separate recovery evidence and recovery receipt, not to the backup manifest. Canonical
+revision, object counts, extension versions, locale/collation and plaintext hashes are
+not recorded by the current manifest and must not be inferred from it.
 
 ## Cadence and operator gates
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=my-data-hub PostgreSQL backup
+Description=my-data-hub restricted database verification
 After=postgresql.service
 
 [Service]
@@ -8,10 +8,8 @@ User=mydatahub
 Group=mydatahub
 WorkingDirectory=/opt/my-data-hub/current
 EnvironmentFile=/etc/my-data-hub/my-data-hub.env
-ExecStart=/opt/my-data-hub/current/scripts/backup_postgres.sh
-StateDirectory=my-data-hub/backups
+ExecStart=/opt/my-data-hub/venv/bin/my-data-hub db verify
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/my-data-hub/backups

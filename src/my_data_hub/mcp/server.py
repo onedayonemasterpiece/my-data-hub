@@ -27,7 +27,7 @@ def create_server(settings: Settings):  # type: ignore[no-untyped-def]
         raise RuntimeError("install my-data-hub to run the MCP server") from exc
 
     service = HubService(
-        settings.database_url,
+        settings.mcp_reader_database_url or settings.database_url,
         scopes=settings.mcp_scopes,
         write_enabled=settings.mcp_write_enabled,
     )
@@ -203,11 +203,8 @@ def serve(*, transport: str) -> None:
     from my_data_hub.mcp.oauth_postgres import PostgresRevocationStore
 
     allowed_hosts = sorted(
-        {
-            entry
-            for host in settings.mcp_allowed_hosts
-            for entry in (host, host if host.endswith(":*") else f"{host}:*")
-        }
+        set(settings.mcp_allowed_hosts)
+        | {f"{settings.mcp_host}:{settings.mcp_port}"}
     )
     mcp_app = mcp.streamable_http_app(
         host=settings.mcp_host,
@@ -260,7 +257,7 @@ def serve(*, transport: str) -> None:
                 allowed_scopes=settings.mcp_scopes,
                 max_token_lifetime_seconds=settings.mcp_token_max_lifetime_seconds,
             ),
-            revocations=PostgresRevocationStore(settings.database_url),
+            revocations=PostgresRevocationStore(settings.mcp_revocation_database_url),
         )
         guarded = OAuthAdmissionSecurity(
             mounted,

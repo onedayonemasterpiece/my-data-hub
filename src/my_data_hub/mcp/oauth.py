@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import math
 import time
@@ -216,8 +217,15 @@ class OAuthBearerValidator:
         if not token or len(token) > 16_384 or any(char.isspace() or ord(char) < 0x21 for char in token):
             raise TokenValidationError("invalid_token")
         try:
-            decoded = self.decoder(token)
-            claims = await decoded if inspect.isawaitable(decoded) else decoded
+            decoder_is_async = inspect.iscoroutinefunction(
+                self.decoder
+            ) or inspect.iscoroutinefunction(type(self.decoder).__call__)
+            if decoder_is_async:
+                claims = await self.decoder(token)
+            else:
+                # JWKS retrieval and signature verification are synchronous; keep
+                # them outside the ASGI event loop so request_timeout can bound them.
+                claims = await asyncio.to_thread(self.decoder, token)
         except TokenValidationError:
             raise
         except Exception as exc:
@@ -239,8 +247,12 @@ class OAuthBearerValidator:
             issued_at=identity.issued_at,
         )
         try:
-            result = self.revocations.is_revoked(key)
-            revoked = await result if inspect.isawaitable(result) else result
+            revocation_check = self.revocations.is_revoked
+            if inspect.iscoroutinefunction(revocation_check):
+                revoked = await revocation_check(key)
+            else:
+                # psycopg's synchronous connection/query must not stall admission.
+                revoked = await asyncio.to_thread(revocation_check, key)
         except Exception as exc:
             # Availability of the revocation authority is part of authentication.
             raise TokenValidationError("invalid_token") from exc

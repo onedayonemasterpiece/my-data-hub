@@ -11,12 +11,23 @@ class PostgresRevocationStore:
 
     database_url: str
     statement_timeout_ms: int = 1000
+    connect_timeout_seconds: int = 3
+
+    def __post_init__(self) -> None:
+        if not self.database_url:
+            raise ValueError("revocation database URL is required")
+        if not 1 <= self.statement_timeout_ms <= 30_000:
+            raise ValueError("statement timeout must be between 1 and 30000 ms")
+        if not 1 <= self.connect_timeout_seconds <= 30:
+            raise ValueError("connect timeout must be between 1 and 30 seconds")
 
     def is_revoked(self, key: RevocationKey) -> bool:
         try:
             import psycopg
 
-            with psycopg.connect(self.database_url) as connection, connection.cursor() as cursor:
+            with psycopg.connect(
+                self.database_url, connect_timeout=self.connect_timeout_seconds
+            ) as connection, connection.cursor() as cursor:
                 cursor.execute("SET TRANSACTION READ ONLY")
                 cursor.execute(
                     f"SET LOCAL statement_timeout = '{int(self.statement_timeout_ms)}ms'"

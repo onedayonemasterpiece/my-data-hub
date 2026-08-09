@@ -41,10 +41,11 @@ def command_api_serve(_args: argparse.Namespace) -> int:
 
 def command_db_migrate(_args: argparse.Namespace) -> int:
     settings = _database_settings()
-    executed = migrate(settings.database_url, MIGRATION_DIRECTORY)
+    database_url = os.getenv("MY_DATA_HUB_MIGRATOR_DATABASE_URL", "").strip() or settings.database_url
+    executed = migrate(database_url, MIGRATION_DIRECTORY)
     definition = load_pipeline_definition(REGION_TALK_PIPELINE)
     registration = register_pipeline(
-        settings.database_url, definition, REGION_TALK_PIPELINE
+        database_url, definition, REGION_TALK_PIPELINE
     )
     _print(
         {
@@ -73,7 +74,8 @@ def command_db_status(_args: argparse.Namespace) -> int:
 
 
 def command_db_verify(_args: argparse.Namespace) -> int:
-    health = verify_database(_database_settings().database_url)
+    settings = _database_settings()
+    health = verify_database(settings.application_database_url or settings.database_url)
     _print(asdict(health))
     return 0 if health.ok else 2
 
@@ -109,7 +111,7 @@ def command_orchestrator_plan(args: argparse.Namespace) -> int:
 def command_orchestrator_loop(args: argparse.Namespace) -> int:
     settings = _database_settings()
     run_loop(
-        settings.database_url,
+        settings.orchestrator_database_url or settings.database_url,
         settings.instance_id,
         interval_seconds=args.interval_seconds or settings.orchestrator_interval_seconds,
         scheduler_enabled=settings.scheduler_enabled,

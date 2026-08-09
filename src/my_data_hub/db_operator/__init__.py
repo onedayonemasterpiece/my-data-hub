@@ -7,7 +7,6 @@ core engine for a separately enabled operator profile under ADR-0012.
 from .engine import (
     ApplyResult,
     DatabaseOperator,
-    InMemoryIdempotencyStore,
     PreviewResult,
     ReadResult,
 )
@@ -20,6 +19,7 @@ from .errors import (
     RevisionConflict,
     SqlRejected,
 )
+from .journal import InMemoryOperatorJournal, OperatorJournal, PostgresOperatorJournal
 from .policy import (
     BackupFreshnessPolicy,
     BackupState,
@@ -29,6 +29,7 @@ from .policy import (
     Relation,
 )
 from .receipts import ReceiptSigner, parameter_fingerprint
+from .recovery import PostgresBackupStateProvider
 from .sql import (
     SqlAnalysis,
     analyze_editor_sql,
@@ -47,8 +48,11 @@ __all__ = [
     "Function",
     "GateClosed",
     "IdempotencyConflict",
-    "InMemoryIdempotencyStore",
+    "InMemoryOperatorJournal",
+    "OperatorJournal",
     "OperatorLimits",
+    "PostgresBackupStateProvider",
+    "PostgresOperatorJournal",
     "PreviewResult",
     "ReadResult",
     "ReceiptError",

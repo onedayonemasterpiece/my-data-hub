@@ -158,6 +158,8 @@ def test_pipeline_registration_refresh_preserves_operational_status(
     assert registration.status == "active"
     assert registration.pipeline_id == UUID("11111111-1111-4111-8111-111111111111")
     assert committed is True
-    registration_sql = executed[0][0]
+    registration_sql = next(
+        sql for sql, _parameters in executed if "INSERT INTO orchestration.pipeline" in sql
+    )
     assert "status = EXCLUDED.status" not in registration_sql
     assert "RETURNING pipeline_id, status" in registration_sql

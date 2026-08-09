@@ -6,6 +6,33 @@ CREATE SCHEMA recovery;
 CREATE SCHEMA operator_control;
 CREATE SCHEMA auth;
 
+-- The only runtime boundary permitted to advance the canonical revision. Service
+-- roles receive EXECUTE on this bounded function but no UPDATE/DELETE privilege on
+-- the singleton itself. An optional expected value provides compare-and-swap.
+CREATE FUNCTION hub.advance_canonical_revision(expected_previous bigint)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    next_revision bigint;
+BEGIN
+    UPDATE hub.canonical_state
+    SET canonical_revision = canonical_revision + 1,
+        updated_at = now()
+    WHERE singleton = true
+      AND expected_previous IS NOT NULL
+      AND canonical_revision = expected_previous
+    RETURNING canonical_revision INTO next_revision;
+    IF next_revision IS NULL THEN
+        RAISE EXCEPTION 'canonical revision compare-and-swap failed';
+    END IF;
+    RETURN next_revision;
+END
+$$;
+REVOKE ALL ON FUNCTION hub.advance_canonical_revision(bigint) FROM PUBLIC;
+
 CREATE TABLE auth.oauth_revocation (
     revocation_id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     issuer                  text NOT NULL,
@@ -83,6 +110,7 @@ CREATE TABLE integration.batch (
     correction_reason       text,
     status                  text NOT NULL DEFAULT 'accepted' CHECK (status IN (
                                 'accepted', 'staged', 'normalized', 'canonical_committed', 'reconciled',
+                                'superseded',
                                 'rejected_contract', 'conflicting_replay', 'quarantined_semantic',
                                 'expired_uncommitted'
                             )),
@@ -118,6 +146,30 @@ $$;
 CREATE TRIGGER integration_batch_identity_immutable
 BEFORE UPDATE ON integration.batch
 FOR EACH ROW EXECUTE FUNCTION integration.reject_batch_identity_change();
+
+CREATE FUNCTION integration.validate_batch_correction()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    prior integration.batch%ROWTYPE;
+BEGIN
+    IF NEW.supersedes_batch_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+    SELECT * INTO prior FROM integration.batch WHERE batch_id = NEW.supersedes_batch_id;
+    IF prior.batch_id IS NULL
+       OR prior.connector_id <> NEW.connector_id
+       OR prior.data_product <> NEW.data_product
+       OR prior.batch_id = NEW.batch_id THEN
+        RAISE EXCEPTION 'correction must supersede an earlier batch in the same connector/product';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER integration_batch_correction_same_stream
+BEFORE INSERT ON integration.batch
+FOR EACH ROW EXECUTE FUNCTION integration.validate_batch_correction();
 
 CREATE TABLE integration.batch_payload (
     batch_id                uuid PRIMARY KEY REFERENCES integration.batch(batch_id) ON DELETE RESTRICT,
@@ -166,8 +218,11 @@ CREATE TABLE integration.daily_statistic (
     counters                jsonb NOT NULL CHECK (jsonb_typeof(counters) = 'object'),
     canonical_revision      bigint NOT NULL UNIQUE CHECK (canonical_revision >= 1),
     committed_at            timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (data_product, reporting_date, timezone)
+    supersedes_batch_id     uuid REFERENCES integration.daily_statistic(batch_id) ON DELETE RESTRICT
 );
+CREATE UNIQUE INDEX integration_daily_statistic_initial_identity
+    ON integration.daily_statistic (data_product, reporting_date, timezone)
+    WHERE supersedes_batch_id IS NULL;
 CREATE TRIGGER integration_daily_statistic_append_only
 BEFORE UPDATE OR DELETE ON integration.daily_statistic
 FOR EACH ROW EXECUTE FUNCTION hub_meta.reject_update_delete();

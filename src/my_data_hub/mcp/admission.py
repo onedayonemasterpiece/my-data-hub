@@ -313,7 +313,11 @@ class HTTPAdmissionSecurity:
             raise AdmissionError(400, "invalid_host") from exc
         if not any(
             parsed_host[0] == allowed[0]
-            and (allowed[1] is None or parsed_host[1] == allowed[1])
+            and (
+                parsed_host[1] == allowed[1]
+                if allowed[1] is not None
+                else parsed_host[1] in {None, 443}
+            )
             for allowed in self.allowed_hosts
         ):
             raise AdmissionError(403, "host_not_allowed")

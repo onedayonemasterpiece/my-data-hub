@@ -38,6 +38,15 @@ if [[ ! -f "$AGE_IDENTITY_FILE" || -L "$AGE_IDENTITY_FILE" ]]; then
   echo "MY_DATA_HUB_RESTORE_AGE_IDENTITY_FILE must be a regular non-symlink file" >&2
   exit 2
 fi
+identity_mode="$(stat -c '%a' "$AGE_IDENTITY_FILE")"
+if [[ "$identity_mode" != "600" && "$identity_mode" != "400" ]]; then
+  echo "age identity must have mode 0600 or 0400" >&2
+  exit 2
+fi
+if [[ "$(stat -c '%u' "$AGE_IDENTITY_FILE")" != "$(id -u)" ]]; then
+  echo "age identity must be owned by the restore process user" >&2
+  exit 2
+fi
 if [[ -e "$RECEIPT" ]]; then
   echo "recovery receipt output already exists; choose a new path" >&2
   exit 2
@@ -85,6 +94,10 @@ PGDATABASE="$DATABASE_URL" pg_restore --exit-on-error --single-transaction \
 # The application verifier is mandatory. Its output may contain deployment metadata, so
 # it is not copied into the receipt.
 MY_DATA_HUB_DATABASE_URL="$DATABASE_URL" "$PYTHON_BIN" -m my_data_hub db verify >/dev/null
+verification_file="$(mktemp "${TMPDIR:-/tmp}/my-data-hub-verify.XXXXXX.json")"
+cleanup() { rm -f "$plain" "$verification_file"; }
+MY_DATA_HUB_RESTORE_DATABASE_URL="$DATABASE_URL" "$PYTHON_BIN" \
+  -m my_data_hub.recovery_verify --database-url "$DATABASE_URL" >"$verification_file"
 restore_completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 "$PYTHON_BIN" "$SCRIPT_ROOT/recovery/write_receipt.py" \
   --artifact "$ENCRYPTED" \
@@ -95,5 +108,12 @@ restore_completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   --started-at "$restore_started_at" \
   --completed-at "$restore_completed_at" \
   --relations-before "$relations_before" \
+  --verification "$verification_file" \
   --output "$RECEIPT"
+if [[ -n "${MY_DATA_HUB_RECOVERY_CONTROL_DATABASE_URL:-}" ]]; then
+  "$PYTHON_BIN" -m my_data_hub.recovery_record \
+    --database-url "$MY_DATA_HUB_RECOVERY_CONTROL_DATABASE_URL" --receipt "$RECEIPT"
+else
+  echo "warning: recovery receipt is not recorded in recovery.evidence; operator gate remains closed" >&2
+fi
 echo "restore completed into isolated target; automatic promotion is forbidden"

@@ -21,7 +21,7 @@
     "verified_at": "2026-08-09T20:30:00Z"
   },
   "receipt_id": "0f6da614-893a-4a15-8f11-4c726545bea8",
-  "receipt_sha256": "7af3eb76cc5a33fcd022d3657853812965529a301bc26213875740b214dbf693",
+  "receipt_sha256": "103e71c0ab8cc24b1508904f5ef2a3a80825a69d7c238b2cab33f8cd07fdf973",
   "restore": {
     "application_verify": "passed",
     "automatic_promotion": false,
@@ -30,6 +30,9 @@
     "isolated": true,
     "pg_restore": "passed",
     "relations_before": 0,
+    "restored_state_verify": "passed",
+    "restored_state_verify_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "schema_revision": 10,
     "started_at": "2026-08-09T20:31:00Z",
     "target_database": "my_data_hub_recovery",
     "target_id": "recovery-drill-20260809"

@@ -83,6 +83,7 @@ def _offhost_evidence(tmp_path: Path, artifact: Path, manifest: Path) -> Path:
             "MY_DATA_HUB_OFFHOST_IS_REMOTE": "OFF_HOST_PRIVATE_STORAGE",
             "MY_DATA_HUB_OFFHOST_UPLOAD_ADAPTER": str(adapter),
             "MY_DATA_HUB_OFFHOST_READBACK_ADAPTER": str(adapter),
+            "MY_DATA_HUB_OFFHOST_ADAPTER_ENV_ALLOWLIST": "REMOTE_STORE",
             "REMOTE_STORE": str(tmp_path / "remote-object"),
         }
     )
@@ -151,6 +152,7 @@ def test_offhost_roundtrip_requires_exact_provider_readback(tmp_path: Path) -> N
             "MY_DATA_HUB_OFFHOST_IS_REMOTE": "OFF_HOST_PRIVATE_STORAGE",
             "MY_DATA_HUB_OFFHOST_UPLOAD_ADAPTER": str(corrupt),
             "MY_DATA_HUB_OFFHOST_READBACK_ADAPTER": str(corrupt),
+            "MY_DATA_HUB_OFFHOST_ADAPTER_ENV_ALLOWLIST": "REMOTE_STORE",
             "REMOTE_STORE": str(tmp_path / "remote-object-corrupt"),
         }
     )
@@ -188,7 +190,11 @@ def test_restore_orchestrates_fresh_isolated_target_and_writes_receipt(tmp_path:
     (bin_directory / "pg_restore").write_text(f"#!/bin/sh\nprintf ran > '{marker}'\n")
     python_wrapper = bin_directory / "recovery-python"
     python_wrapper.write_text(
-        "#!/bin/sh\nif [ \"${1:-}\" = -m ]; then exit 0; fi\nexec "
+        "#!/bin/sh\nif [ \"${1:-}\" = -m ]; then\n"
+        "  if [ \"${2:-}\" = my_data_hub.recovery_verify ]; then\n"
+        "    printf '{\"ok\":true,\"evidence\":{\"schema_revision\":10}}\\n'\n"
+        "  fi\n"
+        "  exit 0\nfi\nexec "
         f"'{sys.executable}' \"$@\"\n"
     )
     for executable in bin_directory.iterdir():
@@ -226,6 +232,7 @@ def test_restore_orchestrates_fresh_isolated_target_and_writes_receipt(tmp_path:
     assert value["status"] == "succeeded"
     assert value["restore"]["relations_before"] == 0
     assert value["restore"]["automatic_promotion"] is False
+    assert value["restore"]["restored_state_verify"] == "passed"
     schema = json.loads((ROOT / "schemas/recovery-receipt.v1.schema.json").read_text())
     jsonschema.Draft202012Validator(schema).validate(value)
 

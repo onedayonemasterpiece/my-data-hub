@@ -16,6 +16,7 @@ class JwksJwtDecoder:
     audience: str
     algorithms: Sequence[str] = ("RS256",)
     cache_lifespan_seconds: int = 300
+    network_timeout_seconds: float = 5.0
     _client: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -33,6 +34,7 @@ class JwksJwtDecoder:
             self.jwks_url,
             cache_keys=True,
             lifespan=self.cache_lifespan_seconds,
+            timeout=self.network_timeout_seconds,
         )
 
     def __call__(self, token: str) -> Mapping[str, Any]:

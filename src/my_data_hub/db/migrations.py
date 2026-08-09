@@ -64,10 +64,27 @@ def _connect(database_url: str):  # type: ignore[no-untyped-def]
     return psycopg.connect(database_url)
 
 
+def _assume_owner_if_available(cursor: object) -> None:
+    cursor.execute(  # type: ignore[attr-defined]
+        """
+        SELECT coalesce(
+            pg_has_role(current_user, to_regrole('mdh_owner'), 'MEMBER')
+            AND has_database_privilege('mdh_owner', current_database(), 'CREATE'), false
+        )
+        """
+    )
+    if bool(cursor.fetchone()[0]):  # type: ignore[attr-defined]
+        cursor.execute("SET LOCAL ROLE mdh_owner")  # type: ignore[attr-defined]
+
+
 def applied_migrations(database_url: str) -> dict[int, tuple[str, str]]:
     with _connect(database_url) as connection:
         with connection.cursor() as cursor:
-            cursor.execute(BOOTSTRAP_SQL)
+            _assume_owner_if_available(cursor)
+            cursor.execute("SELECT to_regclass('hub_meta.schema_migration')")
+            if cursor.fetchone()[0] is None:
+                connection.rollback()
+                return {}
             cursor.execute(
                 "SELECT version, filename, sha256 FROM hub_meta.schema_migration ORDER BY version"
             )
@@ -105,6 +122,7 @@ def migrate(database_url: str, directory: Path) -> list[Migration]:
         with _connect(database_url) as connection:
             try:
                 with connection.cursor() as cursor:
+                    _assume_owner_if_available(cursor)
                     cursor.execute(BOOTSTRAP_SQL)
                     cursor.execute(sql)
                     cursor.execute(

@@ -71,6 +71,7 @@ def main() -> int:
     parser.add_argument("--started-at", required=True)
     parser.add_argument("--completed-at", required=True)
     parser.add_argument("--relations-before", type=int, required=True)
+    parser.add_argument("--verification", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -84,6 +85,14 @@ def main() -> int:
     require_timestamp(args.completed_at, "restore.completed_at")
     if args.relations_before != 0:
         raise RecoveryContractError("recovery receipt requires a fresh target with zero relations")
+    verification = load_object(args.verification)
+    if verification.get("ok") is not True:
+        raise RecoveryContractError("restored-state verification did not pass")
+    verification_evidence = verification.get("evidence")
+    if not isinstance(verification_evidence, dict) or not isinstance(
+        verification_evidence.get("schema_revision"), int
+    ):
+        raise RecoveryContractError("restored-state verification lacks schema revision")
 
     artifact = manifest["artifact"]
     receipt = {
@@ -121,6 +130,9 @@ def main() -> int:
             "completed_at": args.completed_at,
             "pg_restore": "passed",
             "application_verify": "passed",
+            "restored_state_verify": "passed",
+            "restored_state_verify_sha256": sha256_file(args.verification),
+            "schema_revision": verification_evidence["schema_revision"],
             "automatic_promotion": False,
         },
     }

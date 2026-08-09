@@ -50,6 +50,9 @@ def _secret_map(name: str) -> tuple[tuple[str, str], ...]:
         for key, secret in value.items()
     ):
         raise ConfigurationError(f"{name} must map connector IDs to non-empty secrets")
+    secrets = tuple(value.values())
+    if len(secrets) != len(set(secrets)):
+        raise ConfigurationError(f"{name} must assign a distinct secret to every connector")
     return tuple(sorted(value.items()))
 
 
@@ -88,6 +91,11 @@ class Settings:
     mcp_trusted_proxies: tuple[str, ...] = ()
     mcp_token_max_lifetime_seconds: int = 3600
     mcp_operator_profile_enabled: bool = False
+    mcp_revocation_database_url: str = ""
+    mcp_reader_database_url: str = ""
+    application_database_url: str = ""
+    connector_intake_database_url: str = ""
+    orchestrator_database_url: str = ""
 
     @classmethod
     def from_env(cls, *, require_database: bool = True) -> Settings:
@@ -166,6 +174,21 @@ class Settings:
             mcp_operator_profile_enabled=_bool(
                 "MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED", False
             ),
+            mcp_revocation_database_url=os.getenv(
+                "MY_DATA_HUB_MCP_REVOCATION_DATABASE_URL", ""
+            ).strip(),
+            mcp_reader_database_url=os.getenv(
+                "MY_DATA_HUB_MCP_READER_DATABASE_URL", ""
+            ).strip(),
+            application_database_url=os.getenv(
+                "MY_DATA_HUB_APPLICATION_DATABASE_URL", ""
+            ).strip(),
+            connector_intake_database_url=os.getenv(
+                "MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL", ""
+            ).strip(),
+            orchestrator_database_url=os.getenv(
+                "MY_DATA_HUB_ORCHESTRATOR_DATABASE_URL", ""
+            ).strip(),
         )
         settings.validate()
         return settings
@@ -204,6 +227,22 @@ class Settings:
                 raise ConfigurationError("worker result token is required in production")
             if self.mcp_remote_enabled and self.mcp_auth_mode != "oauth":
                 raise ConfigurationError("production remote MCP requires OAuth")
+            runtime_urls = {
+                "MY_DATA_HUB_APPLICATION_DATABASE_URL": self.application_database_url,
+                "MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL": self.connector_intake_database_url,
+                "MY_DATA_HUB_ORCHESTRATOR_DATABASE_URL": self.orchestrator_database_url,
+            }
+            missing_runtime = sorted(name for name, value in runtime_urls.items() if not value)
+            if missing_runtime:
+                raise ConfigurationError(
+                    "production restricted database identities are incomplete: "
+                    + ", ".join(missing_runtime)
+                )
+            usernames = [urlsplit(value).username for value in runtime_urls.values()]
+            if any(not username for username in usernames) or len(set(usernames)) != len(usernames):
+                raise ConfigurationError(
+                    "production service database URLs require distinct login principals"
+                )
         if self.mcp_remote_enabled and self.mcp_auth_mode == "stdio-environment":
             raise ConfigurationError("remote MCP cannot use stdio-environment authentication")
         remote_read_scopes = {
@@ -226,6 +265,8 @@ class Settings:
                 "MY_DATA_HUB_MCP_OAUTH_AUDIENCE": self.mcp_oauth_audience,
                 "MY_DATA_HUB_MCP_OAUTH_RESOURCE": self.mcp_oauth_resource,
                 "MY_DATA_HUB_MCP_OAUTH_JWKS_URL": self.mcp_oauth_jwks_url,
+                "MY_DATA_HUB_MCP_REVOCATION_DATABASE_URL": self.mcp_revocation_database_url,
+                "MY_DATA_HUB_MCP_READER_DATABASE_URL": self.mcp_reader_database_url,
             }
             missing = sorted(name for name, value in oauth_values.items() if not value)
             if missing:
@@ -234,6 +275,16 @@ class Settings:
                 )
             if not self.mcp_oauth_jwks_url.startswith("https://"):
                 raise ConfigurationError("OAuth JWKS URL must use HTTPS")
+            issuer = urlsplit(self.mcp_oauth_issuer)
+            if (
+                issuer.scheme != "https"
+                or not issuer.netloc
+                or issuer.username is not None
+                or issuer.password is not None
+                or issuer.query
+                or issuer.fragment
+            ):
+                raise ConfigurationError("OAuth issuer must be a canonical HTTPS URL")
             resource = urlsplit(self.mcp_oauth_resource)
             if (
                 resource.scheme != "https"
@@ -245,6 +296,18 @@ class Settings:
             ):
                 raise ConfigurationError(
                     "OAuth resource must be an HTTPS URL without credentials, query, or fragment"
+                )
+            if self.mcp_oauth_audience != self.mcp_oauth_resource:
+                raise ConfigurationError("OAuth audience must equal the exact protected resource")
+            resource_authority = resource.hostname or ""
+            if resource.port not in {None, 443}:
+                resource_authority = f"{resource_authority}:{resource.port}"
+            allowed_authorities = {
+                value.casefold().removesuffix(":443") for value in self.mcp_allowed_hosts
+            }
+            if resource_authority.casefold().removesuffix(":443") not in allowed_authorities:
+                raise ConfigurationError(
+                    "OAuth resource authority must be present in the MCP Host allowlist"
                 )
             allowed_algorithms = {"RS256", "RS384", "RS512", "ES256", "ES384"}
             if not self.mcp_oauth_algorithms or not set(self.mcp_oauth_algorithms) <= allowed_algorithms:

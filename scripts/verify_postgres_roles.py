@@ -24,6 +24,10 @@ def _set_role(cursor: Any, role: str) -> None:
     from psycopg import sql
 
     cursor.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(role)))
+    cursor.execute("SELECT current_user")
+    current = str(cursor.fetchone()[0])
+    if current != role:
+        raise RuntimeError(f"SET ROLE identity mismatch: expected={role}, actual={current}")
 
 
 def _positive(cursor: Any, role: str, name: str, statement: str) -> Probe:
@@ -49,7 +53,15 @@ def _negative(cursor: Any, role: str, name: str, statement: str) -> Probe:
         cursor.execute("ROLLBACK TO SAVEPOINT negative_probe")
         cursor.execute("RELEASE SAVEPOINT negative_probe")
         cursor.execute("RESET ROLE")
-        return Probe(role, name, "deny", True, getattr(exc, "sqlstate", None), str(exc).splitlines()[0])
+        sqlstate = getattr(exc, "sqlstate", None)
+        return Probe(
+            role,
+            name,
+            "deny",
+            sqlstate in {"42501", "P0001"},
+            sqlstate,
+            str(exc).splitlines()[0],
+        )
     cursor.execute("ROLLBACK TO SAVEPOINT negative_probe")
     cursor.execute("RELEASE SAVEPOINT negative_probe")
     cursor.execute("RESET ROLE")
@@ -80,6 +92,19 @@ def main() -> int:
                     "mdh_mcp_reader",
                     "bounded application read",
                     "SELECT schema_revision FROM hub.canonical_state",
+                ),
+                _positive(
+                    cursor,
+                    "mdh_canonical_committer",
+                    "bounded canonical compare-and-swap",
+                    "SELECT hub.advance_canonical_revision((SELECT canonical_revision "
+                    "FROM hub.canonical_state WHERE singleton))",
+                ),
+                _positive(
+                    cursor,
+                    "mdh_authenticator",
+                    "revocation lookup",
+                    "SELECT count(*) FROM auth.oauth_revocation",
                 ),
                 _positive(
                     cursor,
@@ -118,7 +143,7 @@ def main() -> int:
             "permanent DDL": "CREATE TABLE hub.mcp_forbidden(id integer)",
             "temporary DDL": "CREATE TEMP TABLE mcp_forbidden(id integer)",
             "role management": "CREATE ROLE mcp_forbidden",
-            "extension management": "CREATE EXTENSION hstore",
+            "extension management": "CREATE EXTENSION hstore WITH SCHEMA public",
             "server file": "SELECT pg_read_file('/etc/passwd', 0, 1)",
             "COPY PROGRAM": "COPY (SELECT 1) TO PROGRAM 'true'",
             "migration accounting write": "DELETE FROM hub_meta.schema_migration",
@@ -127,9 +152,73 @@ def main() -> int:
             "audit mutation": "DELETE FROM sync.audit_event",
             "operator receipt mutation": "DELETE FROM operator_control.apply_receipt",
         }
-        for role in ("mdh_mcp_reader", "mdh_mcp_editor", "mdh_connector_intake"):
+        for role in (
+            "mdh_mcp_reader",
+            "mdh_mcp_editor",
+            "mdh_connector_intake",
+            "mdh_authenticator",
+        ):
             for name, statement in adversarial.items():
                 probes.append(_negative(cursor, role, name, statement))
+        for role in ("mdh_mcp_reader", "mdh_mcp_editor", "mdh_connector_intake"):
+            probes.append(
+                _negative(
+                    cursor,
+                    role,
+                    "revocation journal read",
+                    "SELECT * FROM auth.oauth_revocation",
+                )
+            )
+        for role in (
+            "mdh_application",
+            "mdh_mcp_reader",
+            "mdh_mcp_editor",
+            "mdh_connector_intake",
+            "mdh_canonical_committer",
+        ):
+            probes.extend(
+                [
+                    _negative(
+                        cursor,
+                        role,
+                        "direct canonical revision update",
+                        "UPDATE hub.canonical_state SET canonical_revision = canonical_revision + 1",
+                    ),
+                    _negative(
+                        cursor,
+                        role,
+                        "canonical singleton delete",
+                        "DELETE FROM hub.canonical_state",
+                    ),
+                ]
+            )
+
+        cursor.execute("RESET ROLE")
+        cursor.execute(
+            """
+            SELECT n.nspname, c.relname, r.rolname
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_roles r ON r.oid = c.relowner
+            WHERE c.relkind IN ('r', 'p', 'S', 'v', 'm')
+              AND n.nspname IN (
+                'hub_meta', 'hub', 'analysis', 'orchestration', 'sync', 'region_talk',
+                'migration', 'joplin', 'integration', 'recovery', 'operator_control', 'auth'
+              )
+              AND r.rolname <> 'mdh_owner'
+            ORDER BY n.nspname, c.relname
+            """
+        )
+        wrong_owners = cursor.fetchall()
+        probes.append(
+            Probe(
+                "mdh_owner",
+                "all canonical objects owned by non-login owner",
+                "allow",
+                not wrong_owners,
+                detail=None if not wrong_owners else str(wrong_owners[:10]),
+            )
+        )
 
         # The entire disposable probe environment and all successful DML are removed.
         cursor.execute("RESET ROLE")

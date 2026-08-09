@@ -26,6 +26,38 @@ class CommitReceipt:
     duplicate: bool
 
 
+def normalize_daily_counters(data_product: str, record: dict[str, Any]) -> dict[str, Any]:
+    """Return the bounded canonical counter object for each registered R1 product."""
+
+    if data_product == "synthetic.daily-statistics.v1":
+        counters = record.get("counts")
+        if not isinstance(counters, dict) or not all(
+            isinstance(key, str) and isinstance(value, int) and value >= 0
+            for key, value in counters.items()
+        ):
+            raise ValueError("synthetic daily-statistics counts must be non-negative integers")
+        return counters
+    if data_product == "events-bot.daily-statistics.v1":
+        total_names = ("events_added_total", "deferred_total", "error_total")
+        grouped_names = ("counts_by_city", "counts_by_type")
+        if not all(
+            isinstance(record.get(name), int) and record[name] >= 0
+            for name in total_names
+        ):
+            raise ValueError("events-bot daily totals must be non-negative integers")
+        if not all(
+            isinstance(record.get(name), dict)
+            and all(
+                isinstance(key, str) and key and isinstance(value, int) and value >= 0
+                for key, value in record[name].items()
+            )
+            for name in grouped_names
+        ):
+            raise ValueError("events-bot grouped counts must be non-negative integers")
+        return {name: record[name] for name in (*total_names, *grouped_names)}
+    raise ValueError("no bounded R1 normalizer is registered for data product")
+
+
 class PostgresConnectorAcceptanceRepository:
     """Atomic PostgreSQL intake boundary; never mutates shared canonical tables."""
 
@@ -293,7 +325,8 @@ class PostgresDailyStatisticsCommitter:
             cursor.execute(
                 """
                 SELECT b.data_product, b.status, b.correlation_id, p.inline_payload,
-                       b.source_cursor, b.period_end
+                       b.source_cursor, b.period_end, b.supersedes_batch_id,
+                       b.connector_id
                 FROM integration.batch b
                 JOIN integration.batch_payload p ON p.batch_id = b.batch_id
                 WHERE b.batch_id = %s
@@ -327,33 +360,66 @@ class PostgresDailyStatisticsCommitter:
             if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
                 raise ValueError("daily-statistics payload must contain exactly one object")
             record = records[0]
-            counters = record.get("counts")
-            if not isinstance(counters, dict) or not all(
-                isinstance(key, str) and isinstance(value, int) and value >= 0
-                for key, value in counters.items()
-            ):
-                raise ValueError("daily-statistics counts must be non-negative integer values")
+            counters = normalize_daily_counters(str(row[0]), record)
             reporting_date = record.get("reporting_date")
             timezone = record.get("timezone")
             source_revision = record.get("source_revision")
             if not all(isinstance(value, str) and value for value in (reporting_date, timezone, source_revision)):
                 raise ValueError("daily-statistics identity fields are required")
 
+            supersedes_batch_id = row[6]
+            if supersedes_batch_id is None:
+                cursor.execute(
+                    """
+                    SELECT batch_id FROM integration.daily_statistic
+                    WHERE data_product = %s AND reporting_date = %s::date AND timezone = %s
+                    LIMIT 1
+                    """,
+                    (str(row[0]), reporting_date, timezone),
+                )
+                if cursor.fetchone() is not None:
+                    raise ValueError("a correction must explicitly identify the superseded batch")
+            else:
+                cursor.execute(
+                    """
+                    SELECT ds.reporting_date::text, ds.timezone, b.connector_id,
+                           b.data_product, b.status
+                    FROM integration.daily_statistic ds
+                    JOIN integration.batch b ON b.batch_id = ds.batch_id
+                    WHERE ds.batch_id = %s
+                    FOR UPDATE OF b
+                    """,
+                    (supersedes_batch_id,),
+                )
+                prior = cursor.fetchone()
+                if prior is None or (
+                    str(prior[0]), str(prior[1]), str(prior[2]), str(prior[3]), str(prior[4])
+                ) != (
+                    reporting_date, timezone, str(row[7]), str(row[0]), "canonical_committed"
+                ):
+                    raise ValueError("correction does not match a committed logical stream record")
+
             cursor.execute(
                 """
-                UPDATE hub.canonical_state
-                SET canonical_revision = canonical_revision + 1, updated_at = now()
+                SELECT canonical_revision
+                FROM hub.canonical_state
                 WHERE singleton = true
-                RETURNING canonical_revision
+                FOR UPDATE
                 """
+            )
+            state = cursor.fetchone()
+            if state is None:
+                raise RuntimeError("canonical state singleton is missing")
+            cursor.execute(
+                "SELECT hub.advance_canonical_revision(%s)", (int(state[0]),)
             )
             canonical_revision = int(cursor.fetchone()[0])
             cursor.execute(
                 """
                 INSERT INTO integration.daily_statistic (
                     batch_id, data_product, reporting_date, timezone, source_revision,
-                    counters, canonical_revision
-                ) VALUES (%s, %s, %s::date, %s, %s, %s::jsonb, %s)
+                    counters, canonical_revision, supersedes_batch_id
+                ) VALUES (%s, %s, %s::date, %s, %s, %s::jsonb, %s, %s)
                 """,
                 (
                     batch_id,
@@ -363,8 +429,14 @@ class PostgresDailyStatisticsCommitter:
                     source_revision,
                     json.dumps(counters, sort_keys=True),
                     canonical_revision,
+                    supersedes_batch_id,
                 ),
             )
+            if supersedes_batch_id is not None:
+                cursor.execute(
+                    "UPDATE integration.batch SET status = 'superseded' WHERE batch_id = %s",
+                    (supersedes_batch_id,),
+                )
             cursor.execute(
                 """
                 UPDATE integration.batch

@@ -15,6 +15,7 @@ from my_data_hub.connectors.contracts import (
     payload_sha256,
     validate_envelope_bytes,
 )
+from my_data_hub.connectors.postgres import normalize_daily_counters
 from my_data_hub.connectors.repository import (
     AcceptanceDisposition,
     AcceptanceSubmission,
@@ -30,9 +31,11 @@ from my_data_hub.connectors.spool import (
     DeliveryDisposition,
     DeliveryResult,
     DurableConnectorSpool,
+    RetryPolicy,
     SpoolConflict,
 )
 from my_data_hub.connectors.synthetic import SYNTHETIC_NAMESPACE, SyntheticConnectorProducer
+from my_data_hub.connectors.transport import HttpConnectorTransport
 
 ROOT = Path(__file__).resolve().parents[1]
 ACCEPTED_AT = datetime(2026, 8, 9, 12, tzinfo=UTC)
@@ -257,3 +260,32 @@ def test_synthetic_producer_is_deterministic_and_changes_identity_by_sequence() 
     assert validate_envelope_bytes(first).envelope.batch_id != validate_envelope_bytes(
         correction
     ).envelope.batch_id
+
+
+def test_events_bot_product_normalizes_the_deployed_producer_shape() -> None:
+    record = {
+        "events_added_total": 27,
+        "deferred_total": 3,
+        "error_total": 0,
+        "counts_by_city": {"Калининград": 27},
+        "counts_by_type": {"концерт": 9, "другое": 18},
+    }
+    assert normalize_daily_counters("events-bot.daily-statistics.v1", record) == record
+
+
+def test_connector_transport_requires_https_and_retry_has_bounded_jitter() -> None:
+    with pytest.raises(ValueError, match="HTTPS"):
+        HttpConnectorTransport("http://intake.example/v1/batches", "secret")
+    local = HttpConnectorTransport(
+        "http://127.0.0.1:8080/intake/v1/batches",
+        "secret",
+        allow_insecure_loopback=True,
+    )
+    assert local.intake_url.startswith("http://127.0.0.1")
+    policy = RetryPolicy(initial_seconds=10, maximum_seconds=30, jitter_fraction=0.2)
+    first = policy.delay(0, jitter_key="batch-a").total_seconds()
+    second = policy.delay(0, jitter_key="batch-b").total_seconds()
+    assert 8 <= first <= 12
+    assert 8 <= second <= 12
+    assert first != second
+    assert policy.delay(99, jitter_key="batch-a").total_seconds() <= 30

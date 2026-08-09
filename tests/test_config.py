@@ -39,6 +39,16 @@ def test_invalid_boolean_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
         Settings.from_env(require_database=False)
 
 
+def test_connector_credentials_must_be_distinct(monkeypatch: pytest.MonkeyPatch) -> None:
+    clear_hub_environment(monkeypatch)
+    monkeypatch.setenv(
+        "MY_DATA_HUB_CONNECTOR_CREDENTIALS_JSON",
+        '{"connector-a":"same-secret","connector-b":"same-secret"}',
+    )
+    with pytest.raises(ConfigurationError, match="distinct secret"):
+        Settings.from_env(require_database=False)
+
+
 def test_write_mode_requires_explicit_scope(monkeypatch: pytest.MonkeyPatch) -> None:
     clear_hub_environment(monkeypatch)
     monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_ENABLED", "true")
@@ -94,3 +104,43 @@ def test_development_token_http_can_bind_loopback(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("MY_DATA_HUB_MCP_HOST", "127.0.0.1")
     settings = Settings.from_env(require_database=False)
     assert settings.mcp_remote_enabled is True
+
+
+def test_production_oauth_requires_separate_revocation_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_hub_environment(monkeypatch)
+    values = {
+        "MY_DATA_HUB_DATABASE_URL": "postgresql://reader@db/hub",
+        "MY_DATA_HUB_APPLICATION_DATABASE_URL": "postgresql://application@db/hub",
+        "MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL": "postgresql://connector@db/hub",
+        "MY_DATA_HUB_ORCHESTRATOR_DATABASE_URL": "postgresql://orchestrator@db/hub",
+        "MY_DATA_HUB_ENVIRONMENT": "production",
+        "MY_DATA_HUB_WORKER_RESULT_TOKEN": "worker-secret",
+        "MY_DATA_HUB_MCP_REMOTE_ENABLED": "true",
+        "MY_DATA_HUB_MCP_AUTH_MODE": "oauth",
+        "MY_DATA_HUB_MCP_SCOPES": "hub:read,connector:read,provider:read",
+        "MY_DATA_HUB_MCP_OAUTH_ISSUER": "https://identity.example",
+        "MY_DATA_HUB_MCP_OAUTH_AUDIENCE": "https://mcp-datahub.kenigevents.ru/mcp",
+        "MY_DATA_HUB_MCP_OAUTH_RESOURCE": "https://mcp-datahub.kenigevents.ru/mcp",
+        "MY_DATA_HUB_MCP_OAUTH_JWKS_URL": "https://identity.example/jwks.json",
+        "MY_DATA_HUB_MCP_ALLOWED_HOSTS": "mcp-datahub.kenigevents.ru",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(ConfigurationError, match="REVOCATION_DATABASE_URL"):
+        Settings.from_env()
+
+    monkeypatch.setenv(
+        "MY_DATA_HUB_MCP_REVOCATION_DATABASE_URL",
+        "postgresql://authenticator@db/hub",
+    )
+    with pytest.raises(ConfigurationError, match="READER_DATABASE_URL"):
+        Settings.from_env()
+    monkeypatch.setenv(
+        "MY_DATA_HUB_MCP_READER_DATABASE_URL",
+        "postgresql://mcp_reader@db/hub",
+    )
+    settings = Settings.from_env()
+    assert settings.mcp_revocation_database_url.endswith("@db/hub")
+    assert settings.mcp_reader_database_url.endswith("@db/hub")

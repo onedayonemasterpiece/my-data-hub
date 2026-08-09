@@ -40,13 +40,13 @@ jobs:
         run: |
           ssh "$USER@$HOST" 'set -Eeuo pipefail; cd /opt/my-data-hub/current; \
             systemctl is-active --quiet my-data-hub-api my-data-hub-orchestrator my-data-hub-mcp my-data-hub-backup.timer; \
-            /opt/my-data-hub/venv/bin/my-data-hub db verify; \
+            sudo systemctl start my-data-hub-db-verify.service; \
             test "$(find /var/lib/my-data-hub/backups -name "*.manifest.json" -mmin -1500 | wc -l)" -ge 1; \
             grep -qx MY_DATA_HUB_SCHEDULER_ENABLED=false /etc/my-data-hub/my-data-hub.env; \
             grep -qx MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED=false /etc/my-data-hub/my-data-hub.env; \
             grep -qx MY_DATA_HUB_MCP_WRITE_ENABLED=false /etc/my-data-hub/my-data-hub.env'
       - name: Prove auth/Host/Origin negatives and bounded provider policy offline
-        run: pytest -q tests/test_mcp_oauth.py tests/test_http_security.py tests/test_kaggle_control_plane.py
+        run: pytest -q tests/test_mcp_oauth.py tests/test_http_security.py tests/test_kaggle_control.py
       - name: Write nightly receipt
         if: always()
         run: |

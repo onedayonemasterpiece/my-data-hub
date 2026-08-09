@@ -4,7 +4,8 @@ import json
 from dataclasses import dataclass, replace
 from email.message import Message
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from my_data_hub.connectors.contracts import ConnectorReceipt, ReceiptStatus
 from my_data_hub.connectors.spool import DeliveryDisposition, DeliveryResult
@@ -40,6 +41,36 @@ class HttpConnectorTransport:
     intake_url: str
     bearer_token: str
     timeout_seconds: float = 15.0
+    allow_insecure_loopback: bool = False
+    max_response_bytes: int = 256 * 1024
+
+    def __post_init__(self) -> None:
+        parsed = urlsplit(self.intake_url)
+        loopback = parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+        if parsed.scheme != "https" and not (
+            self.allow_insecure_loopback and parsed.scheme == "http" and loopback
+        ):
+            raise ValueError("connector intake URL must use HTTPS")
+        if (
+            not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("connector intake URL must be an absolute URL without credentials/query/fragment")
+        if not self.bearer_token:
+            raise ValueError("connector bearer token must not be empty")
+        if not 0.1 <= self.timeout_seconds <= 120:
+            raise ValueError("connector timeout must be between 0.1 and 120 seconds")
+        if not 1024 <= self.max_response_bytes <= 2 * 1024 * 1024:
+            raise ValueError("connector response cap must be between 1 KiB and 2 MiB")
+
+    def _read_bounded(self, response: object) -> bytes:
+        body = response.read(self.max_response_bytes + 1)  # type: ignore[attr-defined]
+        if len(body) > self.max_response_bytes:
+            raise ValueError("connector response exceeded the byte cap")
+        return body
 
     def _success(self, status_code: int, body: bytes) -> DeliveryResult:
         try:
@@ -75,8 +106,16 @@ class HttpConnectorTransport:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
-                body = response.read()
+            class _RejectRedirects(HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+                    return None
+
+            # Redirects are deliberately rejected: replaying Authorization at a
+            # different authority could disclose the connector credential.
+            with build_opener(_RejectRedirects).open(
+                request, timeout=self.timeout_seconds
+            ) as response:
+                body = self._read_bounded(response)
                 if response.status in {200, 201, 202}:
                     return self._success(response.status, body)
                 return DeliveryResult(
@@ -84,7 +123,10 @@ class HttpConnectorTransport:
                     message=f"unexpected HTTP status {response.status}",
                 )
         except HTTPError as exc:
-            body = exc.read()
+            try:
+                body = self._read_bounded(exc)
+            except ValueError as body_error:
+                return DeliveryResult(DeliveryDisposition.REJECTED, message=str(body_error))
             if exc.code == 409:
                 return DeliveryResult(DeliveryDisposition.CONFLICT, message=_message(body))
             if exc.code == 422:
@@ -101,6 +143,8 @@ class HttpConnectorTransport:
                 DeliveryDisposition.REJECTED,
                 message=_message(body) or f"HTTP {exc.code}",
             )
+        except ValueError as exc:
+            return DeliveryResult(DeliveryDisposition.REJECTED, message=str(exc))
         except (TimeoutError, URLError) as exc:
             return DeliveryResult(
                 DeliveryDisposition.RETRY,

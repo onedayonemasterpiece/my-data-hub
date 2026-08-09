@@ -28,6 +28,14 @@ stop agent access without rotating database owner credentials.
 The MCP data editor uses its own restricted PostgreSQL login/role. Owner/migrator and
 break-glass credentials are local only.
 
+On the devstand, `/etc/my-data-hub/my-data-hub.env` supplies distinct restricted LOGIN
+URLs for application, connector intake, orchestrator, MCP reader and OAuth revocation
+lookup plus the local migrator URL. `/etc/my-data-hub/admin.env` contains only
+`MY_DATA_HUB_ROLE_ADMIN_DATABASE_URL`, is mode 0600/root-owned, and is consumed solely by
+the short-lived root oneshot role-bootstrap/provision services. Long-running API,
+orchestrator and MCP units must never receive the admin URL. Deployment runs
+`my-data-hub-identity-verify.service` before starting them.
+
 ## Lifecycle
 
 - YDB secrets exist only during migration/rollback window.

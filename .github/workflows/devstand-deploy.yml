@@ -59,7 +59,11 @@ jobs:
           test "$(git rev-parse "${commit}^{commit}")" = "$commit"
           git checkout --detach "$commit"
           /opt/my-data-hub/venv/bin/pip install -e '.[dev]'
-          /opt/my-data-hub/venv/bin/my-data-hub db migrate
+          sudo systemctl start my-data-hub-role-bootstrap.service
+          sudo systemctl start my-data-hub-migrate.service
+          sudo systemctl start my-data-hub-role-provision.service
+          sudo systemctl start my-data-hub-db-verify.service
+          sudo systemctl start my-data-hub-identity-verify.service
           sudo systemctl restart my-data-hub-api my-data-hub-orchestrator my-data-hub-mcp
           sudo systemctl is-active --quiet my-data-hub-api my-data-hub-orchestrator my-data-hub-mcp
           test "$(git rev-parse HEAD)" = "$commit"

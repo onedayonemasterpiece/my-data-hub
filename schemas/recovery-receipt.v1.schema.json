@@ -80,6 +80,9 @@
         "completed_at",
         "pg_restore",
         "application_verify",
+        "restored_state_verify",
+        "restored_state_verify_sha256",
+        "schema_revision",
         "automatic_promotion"
       ],
       "properties": {
@@ -92,6 +95,9 @@
         "completed_at": {"type": "string", "format": "date-time"},
         "pg_restore": {"const": "passed"},
         "application_verify": {"const": "passed"},
+        "restored_state_verify": {"const": "passed"},
+        "restored_state_verify_sha256": {"$ref": "#/$defs/sha256"},
+        "schema_revision": {"type": "integer", "minimum": 1},
         "automatic_promotion": {"const": false}
       }
     },
