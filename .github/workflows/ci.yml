@@ -50,6 +50,7 @@ jobs:
       MY_DATA_HUB_MCP_AUTH_MODE: stdio-environment
       MY_DATA_HUB_MIGRATOR_DATABASE_URL: postgresql://my_data_hub_test:integration-only-password@127.0.0.1:5432/my_data_hub_test
       MY_DATA_HUB_ROLE_ADMIN_DATABASE_URL: postgresql://my_data_hub_test:integration-only-password@127.0.0.1:5432/my_data_hub_test
+      MY_DATA_HUB_CONNECTOR_DATABASE_URL: postgresql://my_data_hub_test:integration-only-password@127.0.0.1:5432/my_data_hub_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

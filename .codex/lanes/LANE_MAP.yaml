@@ -28,7 +28,7 @@ lanes:
     forbidden_files: [sql/migrations, src/my_data_hub/mcp, .github/workflows]
     expected_output: committed exact import/provenance update and tests
     verification_scope: targeted
-    status: planned
+    status: completed
   - id: L02-recovery
     role: worker
     effort: high
@@ -42,7 +42,7 @@ lanes:
     forbidden_files: [sql/migrations, src/my_data_hub/config.py, .github/workflows]
     expected_output: committed fail-closed encrypted recovery tooling and targeted tests
     verification_scope: targeted
-    status: planned
+    status: completed
   - id: L03-connectors
     role: worker
     effort: high
@@ -56,7 +56,21 @@ lanes:
     forbidden_files: [sql/migrations, src/my_data_hub/api/app.py, src/my_data_hub/config.py, src/my_data_hub/mcp, .github/workflows]
     expected_output: committed connector core with deterministic replay/quarantine/spool tests
     verification_scope: targeted
-    status: planned
+    status: completed
+  - id: L03b-events-bot-producer
+    role: worker
+    effort: high
+    requirement_ids: [R07]
+    target: opt-in non-sensitive events-bot daily aggregate producer with durable spool
+    depends_on: [L03-connectors]
+    execution_mode: parallel_external_repository
+    branch: agent/my-data-hub-daily-statistics-producer
+    worktree: /home/dev/.codex/worktrees/events-bot-new/mdh-daily-statistics
+    writable_files: [events-bot-new producer module, tests, configuration docs, lane results]
+    forbidden_files: [my-data-hub canonical SQL, production credentials]
+    expected_output: separate normal PR, disabled-by-default producer and canary blockers
+    verification_scope: targeted_cross_repository
+    status: completed
   - id: L04-kaggle
     role: worker
     effort: high
@@ -70,7 +84,7 @@ lanes:
     forbidden_files: [sql/migrations, src/my_data_hub/config.py, src/my_data_hub/mcp, .github/workflows]
     expected_output: committed fail-closed policy/inventory/lifecycle code and tests
     verification_scope: targeted
-    status: planned
+    status: completed
   - id: L05-operator
     role: worker
     effort: high
@@ -84,7 +98,7 @@ lanes:
     forbidden_files: [sql/migrations, src/my_data_hub/config.py, src/my_data_hub/mcp, .github/workflows]
     expected_output: committed parser/policy/service with disposable-schema tests
     verification_scope: targeted
-    status: planned
+    status: completed
   - id: L06-oauth
     role: worker
     effort: high
@@ -98,7 +112,7 @@ lanes:
     forbidden_files: [src/my_data_hub/mcp/server.py, src/my_data_hub/mcp/service.py, src/my_data_hub/mcp/scopes.py, sql/migrations, .github/workflows]
     expected_output: committed production-capable fail-closed auth/admission primitives and negative tests
     verification_scope: targeted
-    status: planned
+    status: completed
   - id: L07-integrator
     role: merge_integrator
     effort: maximum_available_high
@@ -112,7 +126,7 @@ lanes:
     forbidden_files: []
     expected_output: integrated feature branch, full validation, deployment evidence, PR and merge
     verification_scope: full_local
-    status: planned
+    status: in_progress
   - id: L08-xhigh-review
     role: reviewer
     effort: maximum_available_high
@@ -126,4 +140,4 @@ lanes:
     forbidden_files: [all]
     expected_output: requirement-by-requirement findings for OAuth/MCP, grants, recovery, operator and Kaggle protections
     verification_scope: inspection_only
-    status: planned
+    status: in_progress
