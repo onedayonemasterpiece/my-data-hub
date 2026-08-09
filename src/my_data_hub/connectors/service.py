@@ -38,6 +38,8 @@ class ConnectorIntakeService:
         exact_bytes: bytes,
         *,
         authenticated_connector_id: str,
+        authenticated_principal: str | None = None,
+        correlation_id: str | None = None,
         artifact_record_count: int | None = None,
     ) -> RepositoryDecision:
         validated = self.validate(
@@ -48,4 +50,10 @@ class ConnectorIntakeService:
             raise ConnectorAuthorizationError(
                 "authenticated principal is not bound to the submitted connector_id"
             )
-        return self.repository.accept(AcceptanceSubmission.from_validated(validated))
+        return self.repository.accept(
+            AcceptanceSubmission.from_validated(
+                validated,
+                authenticated_principal=authenticated_principal,
+                correlation_id=correlation_id,
+            )
+        )

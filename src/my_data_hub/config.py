@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,22 @@ def _int(name: str, default: int) -> int:
         raise ConfigurationError(f"{name} must be an integer") from exc
 
 
+def _secret_map(name: str) -> tuple[tuple[str, str], ...]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return ()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError(f"{name} must be a JSON object") from exc
+    if not isinstance(value, dict) or not all(
+        isinstance(key, str) and key and isinstance(secret, str) and secret
+        for key, secret in value.items()
+    ):
+        raise ConfigurationError(f"{name} must map connector IDs to non-empty secrets")
+    return tuple(sorted(value.items()))
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     database_url: str
@@ -60,9 +77,11 @@ class Settings:
     mcp_auth_mode: str
     mcp_development_token: str | None
     mcp_scopes: frozenset[str]
+    connector_credentials: tuple[tuple[str, str], ...] = ()
+    connector_intake_max_bytes: int = 2 * 1024 * 1024
 
     @classmethod
-    def from_env(cls, *, require_database: bool = True) -> "Settings":
+    def from_env(cls, *, require_database: bool = True) -> Settings:
         database_url = os.getenv("MY_DATA_HUB_DATABASE_URL", "").strip()
         if require_database and not database_url:
             raise ConfigurationError("MY_DATA_HUB_DATABASE_URL is required")
@@ -116,6 +135,12 @@ class Settings:
                     )
                 )
             ),
+            connector_credentials=_secret_map(
+                "MY_DATA_HUB_CONNECTOR_CREDENTIALS_JSON"
+            ),
+            connector_intake_max_bytes=_int(
+                "MY_DATA_HUB_CONNECTOR_INTAKE_MAX_BYTES", 2 * 1024 * 1024
+            ),
         )
         settings.validate()
         return settings
@@ -132,6 +157,10 @@ class Settings:
         if not 1024 <= self.worker_result_max_bytes <= 64 * 1024 * 1024:
             raise ConfigurationError(
                 "MY_DATA_HUB_WORKER_RESULT_MAX_BYTES must be between 1 KiB and 64 MiB"
+            )
+        if not 1024 <= self.connector_intake_max_bytes <= 16 * 1024 * 1024:
+            raise ConfigurationError(
+                "MY_DATA_HUB_CONNECTOR_INTAKE_MAX_BYTES must be between 1 KiB and 16 MiB"
             )
         if self.orchestrator_interval_seconds < 1:
             raise ConfigurationError("orchestrator interval must be positive")

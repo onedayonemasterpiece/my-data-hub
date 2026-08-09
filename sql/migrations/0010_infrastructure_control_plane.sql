@@ -133,6 +133,21 @@ CREATE TABLE integration.watermark (
     PRIMARY KEY (data_product, producer_partition)
 );
 
+CREATE TABLE integration.daily_statistic (
+    batch_id                uuid PRIMARY KEY REFERENCES integration.batch(batch_id) ON DELETE RESTRICT,
+    data_product            text NOT NULL REFERENCES integration.data_product(data_product) ON DELETE RESTRICT,
+    reporting_date          date NOT NULL,
+    timezone                text NOT NULL,
+    source_revision         text NOT NULL,
+    counters                jsonb NOT NULL CHECK (jsonb_typeof(counters) = 'object'),
+    canonical_revision      bigint NOT NULL UNIQUE CHECK (canonical_revision >= 1),
+    committed_at            timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (data_product, reporting_date, timezone)
+);
+CREATE TRIGGER integration_daily_statistic_append_only
+BEFORE UPDATE OR DELETE ON integration.daily_statistic
+FOR EACH ROW EXECUTE FUNCTION hub_meta.reject_update_delete();
+
 CREATE TABLE integration.quarantine (
     quarantine_id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     batch_id                uuid REFERENCES integration.batch(batch_id) ON DELETE RESTRICT,
@@ -302,6 +317,36 @@ CREATE TABLE operator_control.apply_receipt (
 CREATE TRIGGER operator_apply_append_only
 BEFORE UPDATE OR DELETE ON operator_control.apply_receipt
 FOR EACH ROW EXECUTE FUNCTION hub_meta.reject_update_delete();
+
+INSERT INTO integration.connector (
+    connector_id, owner_principal, service_principal, delivery_mode, status,
+    expected_cadence, policy
+) VALUES
+    (
+        'synthetic.daily-statistics', 'my-data-hub',
+        'service:synthetic.daily-statistics', 'push', 'active', interval '1 day',
+        '{"non_sensitive": true, "test_only": true}'::jsonb
+    ),
+    (
+        'events-bot.daily-statistics', 'events-bot-new',
+        'service:events-bot.daily-statistics', 'push', 'paused', interval '1 day',
+        '{"non_sensitive": true, "opt_in": true, "disabled_until_canary": true}'::jsonb
+    );
+
+INSERT INTO integration.data_product (
+    data_product, connector_id, schema_version, normalizer_contract,
+    sensitivity, enabled, configuration
+) VALUES
+    (
+        'synthetic.daily-statistics.v1', 'synthetic.daily-statistics',
+        'synthetic-daily-statistics.v1', 'synthetic_daily_statistics_v1',
+        'non_sensitive', true, '{}'::jsonb
+    ),
+    (
+        'events-bot.daily-statistics.v1', 'events-bot.daily-statistics',
+        'events-bot-daily-statistics.v1', 'events_bot_daily_statistics_v1',
+        'non_sensitive', false, '{"canary_required": true}'::jsonb
+    );
 
 UPDATE hub.canonical_state
 SET schema_revision = 10,

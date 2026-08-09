@@ -38,13 +38,19 @@ REVOKE ALL ON SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
 
-GRANT USAGE ON SCHEMA hub, analysis, region_talk, joplin, sync TO mdh_application;
+GRANT USAGE ON SCHEMA hub, analysis, region_talk, joplin, sync, integration TO mdh_application;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA hub, analysis, region_talk, joplin TO mdh_application;
 GRANT SELECT, INSERT, UPDATE, DELETE ON sync.session, sync.command, sync.command_receipt,
     sync.changeset_header, sync.changeset_operation, sync.applied_changeset,
     sync.conflict, sync.id_remap, sync.external_outbox, sync.checkpoint TO mdh_application;
 GRANT INSERT ON sync.audit_event TO mdh_application;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA hub, analysis, region_talk, joplin, sync TO mdh_application;
+GRANT SELECT ON integration.connector, integration.data_product, integration.batch,
+    integration.batch_payload, integration.watermark, integration.daily_statistic TO mdh_application;
+GRANT UPDATE (status, committed_at) ON integration.batch TO mdh_application;
+GRANT INSERT ON integration.batch_event, integration.receipt, integration.watermark,
+    integration.daily_statistic TO mdh_application;
+GRANT UPDATE ON integration.watermark TO mdh_application;
 
 GRANT USAGE ON SCHEMA orchestration, hub, sync TO mdh_orchestrator;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA orchestration TO mdh_orchestrator;

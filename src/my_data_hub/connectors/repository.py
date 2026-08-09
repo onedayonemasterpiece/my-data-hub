@@ -25,9 +25,17 @@ class AcceptanceSubmission:
     exact_bytes_sha256: str
     exact_bytes: bytes
     validated: ValidatedEnvelope
+    authenticated_principal: str
+    correlation_id: str
 
     @classmethod
-    def from_validated(cls, validated: ValidatedEnvelope) -> AcceptanceSubmission:
+    def from_validated(
+        cls,
+        validated: ValidatedEnvelope,
+        *,
+        authenticated_principal: str | None = None,
+        correlation_id: str | None = None,
+    ) -> AcceptanceSubmission:
         envelope = validated.envelope
         return cls(
             identity=AcceptanceIdentity(envelope.connector_id, envelope.idempotency_key),
@@ -37,6 +45,10 @@ class AcceptanceSubmission:
             exact_bytes_sha256=validated.exact_bytes_sha256,
             exact_bytes=validated.exact_bytes,
             validated=validated,
+            authenticated_principal=(
+                authenticated_principal or f"service:{envelope.connector_id}"
+            ),
+            correlation_id=correlation_id or validated.exact_bytes_sha256[:32],
         )
 
 

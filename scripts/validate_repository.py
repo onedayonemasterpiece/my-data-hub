@@ -312,7 +312,11 @@ def validate_docs_and_layout(report: Report) -> None:
     )
     report.check(idea_source is not None, "canonical idea-hub source is absent from provenance manifest")
     if idea_source:
-        report.check(idea_source.get("source_commit") == "0c3fcf7", "wrong target-vision source commit")
+        report.check(
+            idea_source.get("source_commit")
+            == "0c3fcf71b2ee8ba8afa49624bef4b779873802f7",
+            "wrong target-vision source commit",
+        )
         report.check(
             idea_source.get("status") in {"pending_authenticated_import", "verified_import"},
             "target-vision source status is ambiguous",

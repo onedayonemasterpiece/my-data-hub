@@ -10,6 +10,11 @@ from my_data_hub.connectors.contracts import (
     payload_sha256,
     validate_envelope_bytes,
 )
+from my_data_hub.connectors.postgres import (
+    CommitReceipt,
+    PostgresConnectorAcceptanceRepository,
+    PostgresDailyStatisticsCommitter,
+)
 from my_data_hub.connectors.repository import (
     AcceptanceDisposition,
     AcceptanceSubmission,
@@ -30,6 +35,7 @@ __all__ = [
     "CONTRACT_VERSION",
     "AcceptanceDisposition",
     "AcceptanceSubmission",
+    "CommitReceipt",
     "ConnectorAcceptanceRepository",
     "ConnectorAuthorizationError",
     "ConnectorContractError",
@@ -39,6 +45,8 @@ __all__ = [
     "ConnectorReceipt",
     "ConnectorTransport",
     "DurableConnectorSpool",
+    "PostgresConnectorAcceptanceRepository",
+    "PostgresDailyStatisticsCommitter",
     "ReplayDisposition",
     "RepositoryDecision",
     "SyntheticConnectorProducer",
