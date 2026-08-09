@@ -3,53 +3,107 @@
 Checked: **2026-08-09**.
 
 These references constrain implementation details and dependency compatibility. They do
-not replace the product authority in `idea-hub` or the ADRs in this repository.
+not replace the product authority in `idea-hub` or accepted ADRs.
 
 ## PostgreSQL and pgvector
 
-- PostgreSQL current documentation: <https://www.postgresql.org/docs/current/>
 - PostgreSQL 18 documentation: <https://www.postgresql.org/docs/18/>
-- pgvector source, extension releases and SQL usage: <https://github.com/pgvector/pgvector>
-- pgvector Docker images/tags: <https://hub.docker.com/r/pgvector/pgvector/tags>
+- Database roles: <https://www.postgresql.org/docs/current/database-roles.html>
+- Role attributes: <https://www.postgresql.org/docs/current/role-attributes.html>
+- Role membership and `SET ROLE`:
+  <https://www.postgresql.org/docs/current/role-membership.html>
+- Client/session timeouts:
+  <https://www.postgresql.org/docs/current/runtime-config-client.html>
+- pgvector source/releases: <https://github.com/pgvector/pgvector>
+- pgvector Docker tags: <https://hub.docker.com/r/pgvector/pgvector/tags>
 
-Bootstrap target: PostgreSQL 18 plus pgvector, pinned in Compose and CI to
-`pgvector/pgvector:0.8.6-pg18-bookworm`. A deployment must still record the actual image
-digest and extension versions rather than trusting a mutable local cache.
+Bootstrap target: PostgreSQL 18 plus pgvector pinned in Compose/CI to
+`pgvector/pgvector:0.8.6-pg18-bookworm`. Deployment records actual image digest and
+extension versions.
+
+The operator implementation must rely on PostgreSQL roles/grants as the primary boundary
+and set per-session/local statement, transaction, lock and idle-in-transaction limits.
+No remote role receives superuser, `BYPASSRLS`, role/database creation or schema ownership.
 
 ## Model Context Protocol
 
 - MCP Python SDK: <https://github.com/modelcontextprotocol/python-sdk>
-- MCP specification/documentation: <https://modelcontextprotocol.io/>
+- MCP documentation: <https://modelcontextprotocol.io/>
+- OAuth 2.1 authorization tutorial:
+  <https://modelcontextprotocol.io/docs/2026-07-28/tutorials/security/authorization>
+- Security best practices:
+  <https://modelcontextprotocol.io/docs/2025-06-18/tutorials/security/security_best_practices>
 
-The bootstrap targets the stable Python SDK v2 API, uses stdio by default and permits
-Streamable HTTP only behind explicit transport/admission controls. Production HTTP remains
-fail-closed until OAuth resource/audience validation is ported and integration-tested.
+The bootstrap uses stdio by default. Production remote Streamable HTTP requires OAuth
+resource/audience, Host/Origin, body/timeout and admission controls. Development bearer
+mode remains loopback-only.
+
+## OpenAI / ChatGPT remote MCP
+
+- ChatGPT Developer mode:
+  <https://developers.openai.com/api/docs/guides/developer-mode>
+- Building MCP servers for ChatGPT integrations:
+  <https://developers.openai.com/api/docs/mcp>
+- Developer mode and MCP apps help:
+  <https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt>
+
+Current official documentation describes full MCP read/write tools in Developer mode and
+remote streaming HTTP/SSE with OAuth/no-auth/mixed authentication. `my-data-hub` uses
+OAuth for its high-privilege endpoint and connects using the exact `/mcp` URL only after
+read-only and negative security tests.
+
+## Kaggle CLI and provider behavior
+
+- Official Kaggle CLI: <https://github.com/Kaggle/kaggle-cli>
+- Kernels/notebooks commands:
+  <https://github.com/Kaggle/kaggle-cli/blob/main/docs/kernels.md>
+- Datasets commands:
+  <https://github.com/Kaggle/kaggle-cli/blob/main/docs/datasets.md>
+- Kernel metadata:
+  <https://github.com/Kaggle/kaggle-cli/blob/main/docs/kernel-metadata.md>
+- Authentication:
+  <https://github.com/Kaggle/kaggle-cli/blob/main/docs/authentication.md>
+
+The official CLI supports listing, creating/updating/running/pulling/status/output/deleting
+kernels/notebooks and listing/creating/versioning/downloading/deleting datasets. Dataset
+creation is private unless explicitly made public; the MCP wrapper omits public creation
+entirely and verifies privacy after provider write.
+
+No cancellation tool is exposed until a supported provider operation is present and
+proven by integration tests. Provider web UI behavior is not enough.
+
+Kaggle remains compute/private artifacts, not canonical PostgreSQL. Every provider
+resource is governed by the local registry/control class and exact receipts.
+
+## Yandex Cloud DNS, certificates and HTTPS edge
+
+- Cloud DNS CLI/tutorial examples using `yc dns zone add-records`:
+  <https://yandex.cloud/en/docs/tutorials/web/blue-green-canary-deployment>
+- Application Load Balancer quickstart:
+  <https://yandex.cloud/en/docs/application-load-balancer/quickstart>
+- Certificate Manager:
+  <https://yandex.cloud/en/docs/certificate-manager/>
+- Application Load Balancer CLI:
+  <https://yandex.cloud/en/docs/cli/cli-ref/application-load-balancer/cli-ref/>
+
+The code agent may use an existing reverse proxy or Yandex Application Load Balancer,
+provided DNS, managed/renewed TLS, public 443 only, private upstreams and rollback evidence
+meet [`20-remote-mcp-endpoint.md`](20-remote-mcp-endpoint.md).
 
 ## Joplin
 
-- Joplin Data API reference: <https://joplinapp.org/help/api/references/rest_api/>
+- Joplin Data API: <https://joplinapp.org/help/api/references/rest_api/>
 - Joplin plugin API: <https://joplinapp.org/api/references/plugin_api/>
 
 The desktop bridge uses a supported API on loopback. It does not read or write Joplin's
-internal SQLite database. Android participates through normal Joplin synchronization; the
-phone is not assumed to expose the desktop Data API.
+internal SQLite database. Android participates through normal Joplin synchronization.
 
 ## YDB migration source
 
 - YDB Python SDK documentation: <https://ydb.tech/docs/en/dev/ydb-sdk/>
 - YDB Python SDK source: <https://github.com/ydb-platform/ydb-python-sdk>
-- YDB transaction modes, including Snapshot Read-Only:
-  <https://ydb.tech/docs/en/concepts/transactions>
+- Transaction modes: <https://ydb.tech/docs/en/concepts/transactions>
 
 The migration exporter uses read-only credentials and a consistent snapshot where the
-actual source table/query supports it. The final migration must record endpoint/database/
-table identity, SDK version, source code revision, consistency mode, counts and hashes.
-
-## Kaggle artifacts and notebook execution
-
-- KaggleHub source and API documentation: <https://github.com/Kaggle/kagglehub>
-- Kaggle API/CLI source: <https://github.com/Kaggle/kaggle-api>
-
-Kaggle is a compute and private-artifact lane, not a direct canonical writer. Notebook
-outputs are accepted only through exact manifests/hashes and PostgreSQL reconciliation.
-Encrypted backups/checkpoints require readback verification and separate retention tests.
+actual source/query supports it. Final migration records endpoint/database/table identity,
+SDK/source revisions, consistency mode, counts and hashes.

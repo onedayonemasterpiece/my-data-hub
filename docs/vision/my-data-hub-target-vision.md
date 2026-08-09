@@ -83,3 +83,26 @@ The first release is successful only when:
 - MCP read tools work and write tools are scope- and revision-bound;
 - Kaggle result replay is idempotent;
 - YDB writes are stopped, rollback evidence is retained, and normal cycles use PostgreSQL.
+
+## Accepted infrastructure and operator supplement — 2026-08-09
+
+The following decisions extend the target vision through ADR-0009–ADR-0014:
+
+1. Canonical PostgreSQL remains supervised on the devstand and normally available.
+   Kaggle is compute/private artifacts and never a writable master database.
+2. Owned systems integrate recurring data through versioned idempotent connectors with
+   durable producer spool, intake receipt, staging, quarantine and reconciliation.
+3. The remote endpoint is `https://mcp-datahub.kenigevents.ru/mcp` through TLS/OAuth.
+4. The default semantic MCP remains bounded, but a separate operator profile may provide
+   broad bounded reads and preview/apply DML under restricted PostgreSQL roles. Remote
+   superuser/owner/DDL remains forbidden.
+5. Kaggle resources are governed by registry control classes. Orchestrator-owned
+   resources are status-only through remote MCP; MCP-owned private resources may be
+   managed; exchange packages are private, hashed, TTL-bound and non-canonical.
+6. Region Talk remains the first migration workload, but infrastructure, backup/restore,
+   connector, provider and operator workflows are proven first.
+7. An agent may manage Region Talk migration through typed gates, but cannot bypass
+   accounting, quarantine, shadow, backup, cutover or rollback evidence.
+
+These are explicit implementation decisions, not a renaming or replacement of the
+originating idea-hub vision.

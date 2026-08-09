@@ -145,3 +145,37 @@ Kaggle notebook не отправляет review card и не публикует
 - provider usage без secrets;
 - exact revision, увиденную оператором;
 - итог external target или ambiguous reconciliation state.
+
+## 11. Data connector responsibilities
+
+Оркестратор выполняет pull-коннекторы и downstream-нормализацию уже принятых
+push-batches, но HTTPS intake не ждёт завершения pipeline. Intake сначала фиксирует
+immutable batch и receipt; затем durable work продвигает его через validation, staging,
+normalization, canonical commit и reconciliation.
+
+Missed pull schedule восстанавливается из persisted due/watermark state. Push-producer
+при недоступности devstand хранит batch в собственном durable spool и повторяет exact
+idempotency identity. Оркестратор не является availability preflight service для
+producer.
+
+## 12. Kaggle resource ownership
+
+Каждый запуск/датасет имеет PostgreSQL registry control class:
+
+- orchestrator создаёт и управляет `orchestrator_protected` resources;
+- remote MCP видит для них только bounded status;
+- MCP-created resources относятся к `mcp_managed` или `mcp_exchange` и не могут быть
+  подхвачены оркестратором без explicit adoption;
+- provider rename/rediscovery не меняет authorization.
+
+Provider dispatch использует lease, expected provider fingerprint, idempotency и
+reconciliation after ambiguous outcome. Неподдержанная provider operation не
+эмулируется скрытым web automation без отдельного решения.
+
+## 13. Host/database availability
+
+PostgreSQL и orchestrator работают на одном initial devstand, поэтому orchestrator не
+может «поднять master DB через Kaggle», когда host/database недоступны. PostgreSQL
+supervisor/restart/restore — responsibility инфраструктуры. Optional external Yandex
+availability controller может быть добавлен позже, но он должен жить вне orchestrator и
+иметь минимальный IAM scope.

@@ -2,87 +2,233 @@
 
 ## Goal
 
-Turn this bootstrap into a running single-node production on the devstand,
-then migrate Region Talk from YDB with complete evidence. Do not redesign the
-project around Region Talk's old backend.
+Turn the user-reported devstand deployment into a verified, recoverable and tested
+platform; then add remote MCP, connectors, Kaggle control and restricted database
+operator access. Do **not** begin with the full Region Talk data migration.
+
+Region Talk remains the first migration workload after the reusable infrastructure gates
+pass. Do not redesign the project around Region Talk's legacy backend and do not use
+Kaggle as the master database.
+
+## Required reasoning level
+
+- Primary implementation: **high**.
+- Final security/data-integrity review: **xhigh** for OAuth, PostgreSQL grants,
+  operator SQL, backup/restore, Kaggle protected-resource controls and migration gates.
+
+## Phase 0 — freeze and capture the actual deployment
+
+1. Confirm the checkout remote/branch/commit and clean/dirty state.
+2. Record OS, Docker/Compose, image digests, PostgreSQL/pgvector versions, volumes,
+   listeners, firewall and service status.
+3. Keep all of the following false:
+
+   ```text
+   MY_DATA_HUB_SCHEDULER_ENABLED=false
+   MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED=false
+   MY_DATA_HUB_MCP_WRITE_ENABLED=false
+   MY_DATA_HUB_MCP_REMOTE_ENABLED=false
+   ```
+
+4. Confirm Region Talk pipeline is `paused`.
+5. Run liveness/readiness, `db status`, `db verify` and repository tests.
+6. Copy [`operations/first-deploy-template.md`](operations/first-deploy-template.md)
+   to `docs/operations/first-deploy.md`, fill it with observed evidence and do not claim a
+   check passed merely because configuration exists.
 
 ## Phase A — repository and source provenance
 
-1. Push this bootstrap commit to `onedayonemasterpiece/my-data-hub/main`.
-2. Import the exact target-vision document from `idea-hub` at commit `0c3fcf7`
-   into `docs/source-material/idea-hub/`; update SHA-256 manifest.
+1. Ensure this repository is in `onedayonemasterpiece/my-data-hub` through a reviewed
+   branch/PR after the initial base exists.
+2. Import exact target-vision bytes from `idea-hub` commit `0c3fcf7` and update SHA-256.
 3. Pin current source commits of `events-bot-new` and Region Talk.
-4. Curate/import donor MCP modules and Region Talk docs/code with a manifest;
-   do not copy `.env`, sessions, DB exports or unrelated events-bot runtime.
-5. Reconcile any target-vision conflict through ADR, not silent edits.
+4. Curate donor MCP and Region Talk code/docs through manifests; do not copy secrets,
+   sessions, exports or unrelated runtime.
+5. Reconcile target-vision conflicts through ADR.
+6. Preserve new ADR-0009 through ADR-0014 and the connector/exchange schemas.
 
-## Phase B — PostgreSQL deployment
+## Phase B — PostgreSQL roles, migrations and supervision
 
-1. Install Docker Compose or native PostgreSQL 18 + pgvector.
-2. Create split DB roles and strong credentials.
-3. Run `my-data-hub db migrate` on a clean database; migration `0009` creates the idempotent bootstrap rows/views and the command registers the paused Region Talk pipeline.
-4. Verify the implemented migration version tracking and idempotency against a live
-   PostgreSQL 18 instance; document rollback policy rather than replacing the
-   migration runner.
-5. Run `python scripts/verify_postgres_bootstrap.py` and then `python scripts/verify_region_talk_migration_flow.py`; archive both JSON outputs.
-6. Run API/orchestrator locally; install and verify the supplied systemd/autostart units.
-7. Configure nightly backup and execute a full restore drill with the supplied scripts.
-8. Record commands, versions, run IDs and evidence in `docs/operations/first-deploy.md`.
+1. Use PostgreSQL 18 + pinned pgvector target.
+2. Create separate owner/migrator, app, orchestrator, connector, MCP reader, MCP editor,
+   migration operator, backup and monitoring roles.
+3. Generate explicit grants and negative probes; new objects must not become remotely
+   writable automatically.
+4. Apply migrations on an empty database, verify, apply again and prove idempotency.
+5. Test upgrade from the previous released schema revision.
+6. Run live PostgreSQL verification scripts and archive JSON outputs.
+7. Prove API/PostgreSQL/orchestrator restart after process kill and host reboot.
+8. Verify only the intended TLS edge is public; PostgreSQL/API/MCP upstreams remain
+   loopback/private.
+9. Record the role matrix and commands without passwords.
 
-## Phase C — complete repositories/adapters
+## Phase C — backup/readback/restore gate
 
-1. Run live PostgreSQL integration tests for the existing MCP repositories and
-   semantic command path; fill only gaps exposed by those tests.
-2. Port/adapt the OAuth HTTP MCP boundary from `events-bot-new`; keep stdio for
-   the local code agent and retain the existing bounded tool catalog.
-3. Implement the missing Kaggle launch/status/download adapter using proven shared clients from `events-bot-new`.
-4. Port the actual Region Talk processors behind the existing worker contracts;
-   keep Candidate/E5, BGE-M3, ImageDiagnostic, FinalVerifier and Writer in
-   separate workers.
-5. Add artifact signature, size, archive, decompression and secret-scan gates
-   around the implemented immutable result intake.
-6. Harden the existing short scheduler tick with provider dispatch/reconciliation;
-   do not add long polling or a second queue.
+1. Run an encrypted local logical backup with manifest and SHA-256.
+2. Upload an encrypted copy to an approved off-host target; private Kaggle is acceptable
+   only as an `orchestrator_protected` backup resource.
+3. Read bytes back and verify exact hash/privacy/version.
+4. Restore into an isolated fresh PostgreSQL target.
+5. Run migration status, database verify, extension/version, object counts and core
+   invariants.
+6. Destroy the restore target only after receipt archival.
+7. Add backup freshness/restore status to health and make it an operator write gate.
+8. Retain multiple generations. Do not expose backup contents through remote MCP.
 
-## Phase D — YDB inventory/export
+## Phase D — automated workflows
 
-1. Create protected read-only migration credentials.
-2. Enumerate actual tables/row kinds and code references.
-3. Fill `inventory.json`; include counts, key order, caps and semantic owner.
-4. Run deterministic bounded export; verify repeat logical hashes.
-5. Land all rows in `migration.raw_record`.
-6. Remove/rotate temporary credentials after final export.
+Create/prove:
 
-## Phase E — transform and reconcile
+```text
+.github/workflows/ci.yml
+.github/workflows/devstand-deploy.yml
+.github/workflows/devstand-nightly.yml
+.github/workflows/kaggle-canary.yml
+.github/workflows/restore-drill.yml
+```
 
-1. Implement versioned row-kind transformers.
-2. Preserve all useful source/post/result/review/publication/history data.
-3. Repair queue into immutable `queue_seq`, separate priority and explicit
-   scheduler lanes.
-4. Rebuild current eligibility using one versioned contract.
-5. Generate row/identity/queue/candidate reconciliation reports.
-6. Reach 100% accounting; unresolved active rows block cutover.
+PR CI must cover static/unit/contracts, schemas/examples, clean and repeated migrations,
+upgrade path, connector flow, role negative tests and disposable operator preview/apply.
 
-## Phase F — shadow and cutover
+Post-deploy must verify commit/images/revision/services/disabled gates/read-only MCP and a
+synthetic connector replay.
 
-1. Port current Region Talk stages behind new task/result contracts.
-2. Run at least three representative shadow cycles.
-3. Explain every candidate/readiness/review drift.
-4. Run private review/render canary.
-5. Freeze legacy writers, final delta import, backup, switch scheduler.
-6. Keep production publishing off until separate owner approval.
-7. Keep YDB read-only through rollback window; do not delete automatically.
+Nightly must check backup, queue, connector cadence, remote auth negative cases and
+read-only Kaggle inventory.
 
-## Required final report
+Weekly/manual must exercise isolated restore and disposable private Kaggle resources.
+Each non-unit workflow emits a machine-readable receipt with run ID, commit, versions,
+checks, resource IDs, hashes, cleanup and blockers.
 
-- repository commit/PR links;
-- source provenance manifest;
-- deployment/service status and versions;
-- migration inventory and export manifest hashes;
-- row accounting and quarantine totals;
-- queue before/after integrity;
-- shadow run IDs and semantic diffs;
-- backup restore evidence;
-- MCP tools/scopes and test evidence;
-- exact remaining blockers;
-- explicit confirmation that production publishing is disabled/enabled and why.
+## Phase E — remote MCP endpoint
+
+1. Configure Yandex Cloud DNS/certificate/edge for:
+
+   ```text
+   https://mcp-datahub.kenigevents.ru/mcp
+   ```
+
+2. Expose only TCP 443; do not expose PostgreSQL or internal MCP port.
+3. Port/adapt OAuth 2.1 resource/audience, Host/Origin, no-store, correlation and bounded
+   response controls from the proven `events-bot-new` donor.
+4. Keep development token loopback-only.
+5. Start with semantic read-only tools only.
+6. Test through MCP Inspector/equivalent and then ChatGPT.
+7. Prove wrong/missing/expired token, audience, scope, Host and Origin fail.
+8. Prove token/client revocation.
+9. Archive DNS/certificate/listener IDs and non-secret receipts.
+
+## Phase F — connector plane and first real producer
+
+1. Add append-only `integration` migrations for connector registry, data products,
+   batches, payload/artifact refs, events, watermarks, quarantine and receipts.
+2. Implement `/intake/v1/batches` and receipt lookup under separate service auth.
+3. Implement strict `data-connector-envelope.v1` validation, body/item limits, SHA-256,
+   exact replay and conflicting-replay quarantine.
+4. Implement synthetic producer with durable local spool and retry/backoff.
+5. Prove platform outage/restart does not lose or duplicate a batch.
+6. Normalize/commit the synthetic product and read it through MCP.
+7. Register `events-bot.daily-statistics.v1` and implement a small non-sensitive daily
+   aggregate connector in `events-bot-new` using its own durable outbox.
+8. Monitor accepted/committed/spool/watermark/quarantine cadence.
+9. Do not let the bot write shared canonical tables directly.
+
+## Phase G — Kaggle inventory and protected control
+
+1. Implement provider-neutral resource/operation/event registry plus Kaggle projection.
+2. Inventory every visible notebook/kernel and private dataset with bounded pagination.
+3. Assign unknown resources `external_read_only`; never infer control from name.
+4. Register orchestrator workers/backups as `orchestrator_protected`.
+5. Remote MCP may expose only minimal status for protected resources.
+6. Add MCP-managed private dataset lifecycle: create, readback/hash/privacy, version,
+   download and guarded delete.
+7. Add MCP-managed notebook lifecycle: push/update/run/status/pull/output/delete using
+   only provider-supported operations.
+8. Do not expose cancel until a supported provider primitive and integration test exist.
+9. Create `mcp_exchange` private TTL/hash-manifest package flow.
+10. Ensure public dataset creation is absent from schemas/tools.
+11. Use a separate Kaggle canary/MCP credential from orchestrator production where
+    possible.
+12. Prove protected resource mutation/download/delete is denied even with normal Kaggle
+    write scope.
+
+## Phase H — broad MCP database reader/editor
+
+1. Add separate process/profile gates and OAuth scopes.
+2. Implement broad bounded read query under a read-only DB role:
+   - SQL AST classification;
+   - allowlisted schemas/views/functions;
+   - read-only transaction;
+   - statement/transaction/lock/idle timeouts;
+   - row/byte caps and explicit truncation;
+   - no multi-statement, DML/DDL/COPY/CALL/DO/SET or unsafe functions.
+3. Implement data-editor preview/apply for parameterized INSERT/UPDATE/DELETE:
+   - separate DB role;
+   - allowlisted targets;
+   - short-lived receipt bound to principal/SQL/params/revision/effect/backup;
+   - idempotency and one transaction;
+   - impact tiers and pre-change checkpoint;
+   - immutable audit and commit receipt.
+4. Prove database grants block forbidden actions if parser/application checks are
+   bypassed.
+5. Start in a disposable schema. Enable selected non-critical application tables only
+   after adversarial tests and restore evidence.
+6. Keep DDL, roles, ownership, extension installation, server files and superuser local
+   break-glass only.
+7. Generic editor must not change migration accounting/cutover, provider control class,
+   append-only audit/receipts or publication state.
+
+## Phase I — migration operator tools
+
+Implement typed tools for:
+
+- source revision/inventory/export plan;
+- bounded read-only YDB export and manifest validation;
+- raw landing dry-run/apply;
+- row-kind/disposition/quarantine inspection;
+- versioned transformer registration and bounded partition mapping;
+- expected-revision quarantine resolution;
+- row/identity/queue/semantic reconciliation;
+- shadow plan/run/diff;
+- backup/freeze/final-delta/cutover preview;
+- owner-approved cutover and rollback.
+
+An agent may drive these tools. It may not set `cutover_ready`, erase quarantine or
+bypass reconciliation with raw SQL.
+
+## Phase J — Region Talk inventory, migration and shadow
+
+Only after Phases B–I gates pass:
+
+1. create protected read-only YDB migration credentials;
+2. enumerate actual tables/row kinds and code references;
+3. complete inventory with counts, key order, caps and semantic owner;
+4. run deterministic bounded export and repeat logical hashes;
+5. land every row in `migration.raw_record`;
+6. implement versioned row-kind transformers;
+7. preserve useful source/post/result/review/publication/history data;
+8. repair queue into immutable `queue_seq` and explicit lanes;
+9. reach full accounting with zero quarantine for cutover;
+10. port actual Region Talk stages behind current worker contracts;
+11. run at least three representative shadow cycles;
+12. explain every candidate/readiness/review drift;
+13. run private review canary;
+14. fresh backup, freeze, final delta, cutover and rollback rehearsal;
+15. keep production publishing off until separate owner approval;
+16. retain YDB read-only through rollback window.
+
+## Required final report for the infrastructure-first assignment
+
+- commit/PR and deployed commit links;
+- first-deploy receipt and open ports;
+- PostgreSQL role/grant matrix and negative tests;
+- migration/upgrade/idempotency evidence;
+- service restart/reboot evidence;
+- backup/readback/isolated restore receipt;
+- CI/post-deploy/nightly/provider workflow run IDs;
+- remote MCP URL, OAuth/tool/scope/negative-test evidence;
+- synthetic connector and events-bot connector status;
+- Kaggle inventory/control-class/canary/protected-denial evidence;
+- database reader/editor disposable-schema evidence;
+- exact remaining blockers before Region Talk inventory;
+- explicit scheduler/publication/Region Talk pipeline states.

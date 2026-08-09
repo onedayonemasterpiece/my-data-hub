@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/data-connector-envelope.v1.schema.json",
+  "title": "my-data-hub data connector envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "ObservedPeriod": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "timezone"
+      ]
+    },
+    "SourceCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "partition": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "watermark": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "minProperties": 1
+    },
+    "ArtifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "locator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10737418240
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "locator",
+        "media_type",
+        "byte_size",
+        "sha256"
+      ]
+    },
+    "Correction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "supersedes_batch_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      },
+      "required": [
+        "supersedes_batch_id",
+        "reason"
+      ]
+    }
+  },
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "const": "my-data-hub-data-connector.v1"
+    },
+    "connector_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,199}$"
+    },
+    "data_product": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,199}$"
+    },
+    "batch_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 300
+    },
+    "schema_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "produced_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "observed_period": {
+      "$ref": "#/$defs/ObservedPeriod"
+    },
+    "source_cursor": {
+      "$ref": "#/$defs/SourceCursor"
+    },
+    "delivery_mode": {
+      "type": "string",
+      "enum": [
+        "push",
+        "pull",
+        "artifact_handoff",
+        "trusted_database_landing"
+      ]
+    },
+    "record_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000000
+    },
+    "payload_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "inline_records": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "artifact": {
+      "$ref": "#/$defs/ArtifactRef"
+    },
+    "correction": {
+      "$ref": "#/$defs/Correction"
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 1000
+      },
+      "maxProperties": 20
+    }
+  },
+  "required": [
+    "contract_version",
+    "connector_id",
+    "data_product",
+    "batch_id",
+    "idempotency_key",
+    "schema_version",
+    "produced_at",
+    "observed_period",
+    "delivery_mode",
+    "record_count",
+    "payload_sha256"
+  ],
+  "oneOf": [
+    {
+      "required": [
+        "inline_records"
+      ],
+      "not": {
+        "required": [
+          "artifact"
+        ]
+      }
+    },
+    {
+      "required": [
+        "artifact"
+      ],
+      "not": {
+        "required": [
+          "inline_records"
+        ]
+      }
+    }
+  ]
+}

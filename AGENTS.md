@@ -13,10 +13,13 @@ The historical `content-platform` name is an alias of `my-data-hub`, not a separ
 ## Hard invariants
 
 - Do not introduce SQLite, YDB, Supabase or another database as canonical application state.
+- Do not use Kaggle notebooks/datasets as master database, automatic failover or canonical pointer.
 - Joplin's internal local database is outside this boundary; never read or mutate it directly.
-- Do not expose arbitrary SQL, shell, filesystem or secret-reading tools through MCP.
+- The default MCP must not expose generic SQL. A separately enabled operator profile may expose bounded reads and preview/apply DML only under ADR-0012 restricted roles, limits, backup and audit gates; never owner/superuser/DDL.
 - Every business write that must leave a producer session must record semantic outbox operations in the same PostgreSQL transaction.
 - A notebook/worker emits a typed result or semantic changeset; it does not mutate canonical state directly.
+- Data connectors use versioned idempotent intake/landing contracts; they do not write shared canonical tables directly.
+- Orchestrator-protected Kaggle resources are status-only through remote MCP and cannot be reclassified by name.
 - Only one canonical committer may advance a revision.
 - External publication requires a canonical, exact approved revision and an idempotency key.
 - Never discard an unknown migration row. Land it and classify it.
@@ -35,3 +38,4 @@ The historical `content-platform` name is an alias of `my-data-hub`, not a separ
 - New pipeline stages define retry, timeout, terminal outcome and result contract.
 - Migration changes include accounting and rollback implications.
 - Documentation states what was actually proven, not merely scaffolded.
+- Infrastructure-first gates (roles, backup/restore, workflows, remote read-only MCP, synthetic connector and provider controls) precede full Region Talk migration.

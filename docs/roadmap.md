@@ -1,40 +1,58 @@
 # Roadmap
 
-## R0 — repository bootstrap (this commit)
+## R0 — repository bootstrap
 
 - target vision and ADRs;
 - PostgreSQL schemas/migration runner;
 - orchestrator and semantic command skeleton;
 - MCP and notebook contracts;
 - Region Talk migration package;
-- Joplin integration boundary;
-- CI/validation and local deployment scaffold.
+- Joplin boundary;
+- CI/local deployment scaffold.
 
-## R1 — devstand runtime
+## R1 — infrastructure and workflow baseline
 
-- install and harden PostgreSQL;
-- apply migrations and verify roles/backups;
-- deploy orchestrator/MCP with auto-start;
-- pin tested dependencies/images;
-- establish private artifact storage.
+- verify deployed devstand and split PostgreSQL roles;
+- clean/upgrade migration gates;
+- service/reboot supervision;
+- local/off-host backup, readback and isolated restore;
+- PR, post-deploy, nightly and restore workflows;
+- dangerous gates remain off.
 
-## R2 — Region Talk data migration
+## R2 — connector and remote read plane
 
-- complete YDB inventory/export adapter;
-- baseline import and mapping completion;
+- TLS/OAuth MCP at `mcp-datahub.kenigevents.ru`;
+- semantic read-only tools;
+- connector registry/intake/receipt/quarantine;
+- synthetic round trip and outage/replay proof;
+- events-bot daily statistics as first real data product.
+
+## R3 — Kaggle provider plane
+
+- complete inventory and control classes;
+- protected vs MCP-managed authorization;
+- private notebook/dataset lifecycle canary;
+- private exchange packages;
+- protected encrypted backup/checkpoint resources.
+
+## R4 — agent data operator
+
+- broad bounded reader;
+- preview/apply editor under restricted roles;
+- backup/revision/impact/audit gates;
+- migration operator tools;
+- no remote DDL/superuser/publication.
+
+## R5 — Region Talk migration and shadow
+
+- YDB inventory/export;
+- baseline landing/mapping/accounting;
 - reconciliation and incremental catch-up;
-- adapt donor workers and finalizer;
-- shadow cycles and private canary;
-- cutover and rollback window.
+- donor worker/finalizer adapters;
+- shadow cycles/private canary;
+- controlled cutover and rollback window.
 
-## R3 — agent operation
-
-- production OAuth/scopes for remote MCP;
-- richer bounded search/provenance tools;
-- conflict review surfaces and operational reports;
-- deliberate publication tool after canary evidence.
-
-## R4 — Joplin bridge
+## R6 — Joplin bridge
 
 - Windows bridge/plugin PoC;
 - selected notebook mapping and read-only sync;
@@ -43,5 +61,5 @@
 
 ## Later workloads
 
-New projects should reuse shared actor/content/analysis identities and add a workload schema
-only for genuinely project-specific policies and projections.
+New projects reuse shared identities, connector/provider planes and operator controls.
+A workload schema is added only for genuinely project-specific policy and projections.

@@ -10,32 +10,69 @@ though the code repository is public.
 
 | Threat | Control |
 |---|---|
-| Public database exposure | localhost/private binding, firewall, separate runtime user |
-| Agent overreach | scoped semantic tools, no arbitrary writes, confirmation for side effects |
-| Stolen/replayed worker result | run-bound manifest, SHA-256, idempotency and expected input revision |
-| Duplicate external effect | transactional outbox plus provider receipt and dedupe key |
-| Poisoned migration row | raw staging, schema validation, mapping quarantine, no silent coercion |
-| Secret in notebook/log | pre-archive scan, structured redaction, secret-free schemas |
-| DNS rebinding/host spoofing | origin and host validation at MCP/gateway |
-| Token leakage | short-lived OAuth tokens remotely; environment/credential store locally |
-| Destructive conflict resolution | expected conflict revision, elevated scope, audit reason |
-| Backup disclosure | client-side encryption, private storage, tested restore |
+| Public database exposure | private/loopback binding, firewall, TLS gateway only |
+| Agent overreach | separate profiles/scopes, restricted DB roles, provider control classes |
+| Unsafe broad DML | AST + grants + preview/apply + row limits + backup gate + audit |
+| Stolen/replayed worker result | run-bound manifest, SHA-256, idempotency, expected input revision |
+| Duplicate external effect | transactional outbox, provider receipt and dedupe key |
+| Lost connector batch | producer durable spool, idempotent intake and receipt |
+| Poisoned connector/migration row | immutable landing, schema validation and quarantine |
+| Protected Kaggle mutation | registry control class plus server-side provider policy |
+| Secret in notebook/log/exchange | scan, redaction, secret-free schemas, client encryption |
+| DNS rebinding/host spoofing | OAuth resource, Host and Origin validation |
+| Token leakage | short-lived/revocable OAuth; server-side provider/DB credentials |
+| Destructive conflict resolution | expected revision, elevated scope, audit reason |
+| Backup disclosure | client-side encryption, private storage, hash readback, restore tests |
+| Backup treated as permission | authorization remains roles/scopes/gates; backup is recovery only |
 
 ## Database roles
 
 Deployment creates distinct roles:
 
-- `hub_owner` — migrations only, no network login in normal operation;
-- `hub_app` — application reads/writes through repositories;
-- `hub_mcp_read` — bounded read views/functions;
-- `hub_migration` — temporary staging/import grants;
-- `hub_backup` — backup privileges only.
+- schema/migration owner — local migrations only;
+- application runtime;
+- orchestrator/committer;
+- connector intake/landing;
+- MCP data reader;
+- MCP data editor;
+- migration operator;
+- backup/restore;
+- monitoring.
 
-The bootstrap SQL creates schemas, not production passwords or broad external grants.
+Remote roles have no superuser, ownership, `BYPASSRLS`, `CREATEDB`, `CREATEROLE`,
+replication, extension installation, server-file or program-execution rights. Grants are
+explicit and negative-tested. New objects do not become remotely writable by default.
+
+## Remote MCP
+
+- endpoint: `https://mcp-datahub.kenigevents.ru/mcp`;
+- OAuth 2.1 resource/audience binding;
+- read-only tools first;
+- mutation profiles omitted until gates pass;
+- application and database-layer target authorization;
+- per-request timeout/row/byte/concurrency budgets;
+- immutable correlation/audit receipts;
+- development token never public.
+
+## Connector security
+
+Connector principals are service identities separate from human/agent MCP identity.
+Each principal is bound to connector IDs/data products. Intake verifies schema, hash,
+size and idempotency before acceptance. Artifact locations are allowlisted and scanned.
+
+## Kaggle security
+
+- all platform-created datasets are private;
+- orchestrator production credentials and MCP sandbox credentials are separated where
+  possible;
+- protected resource authorization comes from PostgreSQL registry, not names;
+- backup datasets are status-only through remote MCP;
+- exchange packages have recipients, hashes, TTL and no secrets;
+- ambiguous provider mutations reconcile before retry.
 
 ## Side-effect safety
 
-An approved publication revision and its outbound delivery are separate records. The
-publication dispatcher reads an outbox row, verifies the approval fingerprint, performs the
-provider call, then stores the provider receipt. A retry with the same dedupe key must not
-create a second publication.
+An approved publication revision and outbound delivery are separate records. The
+publication dispatcher reads a committed outbox row, verifies the approval fingerprint,
+performs the provider call and stores the exact receipt. Retry with the same dedupe key
+must not create a second publication.

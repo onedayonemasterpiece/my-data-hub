@@ -59,6 +59,8 @@ def validate_json_and_schemas(report: Report) -> None:
         "migration-reconciliation-report.v1.example.json": (
             "migration-reconciliation-report.v1.schema.json"
         ),
+        "data-connector-envelope.v1.example.json": "data-connector-envelope.v1.schema.json",
+        "kaggle-exchange-manifest.v1.example.json": "kaggle-exchange-manifest.v1.schema.json",
     }
     checker = FormatChecker()
     for example_name, schema_name in mappings.items():
@@ -275,6 +277,24 @@ def validate_docs_and_layout(report: Report) -> None:
         "scripts/verify_region_talk_migration_flow.py",
         "BOOTSTRAP_VALIDATION.md",
         "docs/13-external-references.md",
+        "docs/15-infrastructure-first-plan.md",
+        "docs/16-data-connectors.md",
+        "docs/17-kaggle-control-plane.md",
+        "docs/18-mcp-operator-and-database-access.md",
+        "docs/19-test-first-rollout.md",
+        "docs/20-remote-mcp-endpoint.md",
+        "docs/21-infrastructure-addendum-delivery.md",
+        "docs/operations/first-deploy-template.md",
+        "docs/adr/0009-canonical-postgres-availability.md",
+        "docs/adr/0010-data-connector-ingress-contract.md",
+        "docs/adr/0011-kaggle-resource-control-classes.md",
+        "docs/adr/0012-mcp-database-operator-profiles.md",
+        "docs/adr/0013-remote-mcp-endpoint.md",
+        "docs/adr/0014-test-first-infrastructure-rollout.md",
+        "schemas/data-connector-envelope.v1.schema.json",
+        "schemas/kaggle-exchange-manifest.v1.schema.json",
+        "examples/contracts/data-connector-envelope.v1.example.json",
+        "examples/contracts/kaggle-exchange-manifest.v1.example.json",
         "docs/migrations/region-talk/adaptation-manifest.json",
         "schemas/adaptation-manifest.v1.schema.json",
         "schemas/migration-reconciliation-report.v1.schema.json",

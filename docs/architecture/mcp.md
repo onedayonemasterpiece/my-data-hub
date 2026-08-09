@@ -2,62 +2,80 @@
 
 ## Boundary
 
-MCP is a scoped application protocol over `HubService`; it is not a database,
-provider or filesystem protocol. Tool handlers contain validation and service calls,
-not free-form SQL or provider credentials.
+MCP is a scoped operator/application protocol over services and restricted database/
+provider adapters. The default surface is semantic. A separately enabled operator
+surface permits broad bounded reads and controlled DML, but never a PostgreSQL
+owner/superuser, shell, filesystem or secret protocol.
 
 ## Layers
 
 ```text
 MCP client
   → stdio or Streamable HTTP transport
-  → transport authentication / Host / Origin / body limits
-  → tool registration by scope
+  → OAuth / Host / Origin / body limits
+  → profile and tool registration by scope
   → bounded input validation
-  → HubService
-  → PostgreSQL repositories / semantic command unit of work
-  → receipts and audit
+  → semantic service OR operator/provider adapter
+  → restricted PostgreSQL role / Kaggle registry policy
+  → receipts and immutable audit
 ```
 
 ## Transport profiles
 
-- **stdio** — default for a local trusted agent process; scopes are supplied by its
-  supervised environment.
-- **development Streamable HTTP** — loopback-only bearer profile for local testing.
-- **production Streamable HTTP** — TLS + OAuth resource/audience validation +
-  admission controls. It remains disabled until the donor OAuth boundary is ported
-  and integration-tested.
+- **stdio** — local trusted agent; supervised environment supplies scopes/credentials.
+- **development Streamable HTTP** — loopback-only bearer profile.
+- **production Streamable HTTP** — TLS + OAuth resource/audience at
+  `https://mcp-datahub.kenigevents.ru/mcp`.
 
-The MCP SDK/protocol version is pinned by `pyproject.toml` and imported in CI. The
-HTTP host application enters the SDK session-manager lifespan explicitly.
+The HTTP host enters the SDK session-manager lifespan explicitly. Internal ports are not
+published to the internet.
 
 ## Authorization model
 
-A tool is registered only when its required scope is present. Mutation tools also
-require the independent server-side `MCP_WRITE_ENABLED` gate. Publishing requires a
-separate future `hub:publish` profile and cannot be enabled by a generic write scope.
+A tool is registered only when profile, scope and server-side feature gate allow it.
+Dynamic authorization also evaluates target, environment, provider control class,
+PostgreSQL role, preview/lease/revision and backup evidence.
 
-Current exact tools and limits are canonical in [`../05-mcp.md`](../05-mcp.md) and
-`src/my_data_hub/mcp/scopes.py`.
+Profiles:
 
-## Mutation model
+- semantic default;
+- data reader;
+- data editor;
+- migration operator;
+- Kaggle operator;
+- local break-glass administration outside remote MCP.
 
-Writes are semantic commands with idempotency, preconditions and bounded payloads.
-The command, business state transition and transactional-outbox records share one
-PostgreSQL transaction. External effects are later executed by dedicated dispatchers
-only after canonical commit and exact approval.
+Current and planned tools are canonical in [`../05-mcp.md`](../05-mcp.md).
+
+## Mutation models
+
+### Semantic
+
+Typed command, idempotency and expected revision. Business transition, command receipt
+and transactional outbox commit together.
+
+### Database operator
+
+AST-validated, allowlisted DML follows preview → short-lived bound receipt → one
+transaction apply → audit/commit receipt. The DB role prevents prohibited targets even
+if application validation fails.
+
+### Provider operator
+
+Kaggle mutation follows local resource registry, control class, expected provider
+fingerprint, lease, idempotency and provider reconciliation after ambiguous outcomes.
 
 ## Security invariants
 
-- no arbitrary write SQL or table browser;
-- no secret/provider/session tools;
+- no remote owner/superuser, DDL/roles/extensions or server file access;
+- no secret/provider credential tools;
 - bounded rows, bytes, execution time and response content;
-- explicit Host/Origin checks for HTTP;
+- explicit OAuth resource/audience, Host and Origin checks;
 - loopback-only development bearer transport;
-- OAuth required for future production remote access;
+- protected Kaggle and migration state enforced at DB/service layer;
 - correlation/audit data never includes bearer tokens;
-- destructive and publication capabilities require additional gates and evidence.
+- production publication requires a separate future gate/ADR.
 
-`events-bot-new/private_events_mcp` is a donor for authentication, admission control,
-response bounding and provider isolation. Its domain/storage implementation is not copied
-as the `my-data-hub` architecture.
+`events-bot-new/private_events_mcp` remains the donor for authentication, admission,
+response bounding and provider isolation. Its domain/storage implementation is not the
+`my-data-hub` architecture.

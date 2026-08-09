@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/kaggle-exchange-manifest.v1.schema.json",
+  "title": "my-data-hub Kaggle exchange manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "FileEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10737418240
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "executable": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "path",
+        "media_type",
+        "byte_size",
+        "sha256",
+        "executable"
+      ]
+    }
+  },
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "const": "my-data-hub-kaggle-exchange.v1"
+    },
+    "package_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "control_class": {
+      "type": "string",
+      "const": "mcp_exchange"
+    },
+    "private": {
+      "type": "boolean",
+      "const": true
+    },
+    "dataset_ref": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+      "maxLength": 300
+    },
+    "dataset_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "created_by": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "purpose": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "target_project": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "intended_recipients": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300
+      },
+      "uniqueItems": true
+    },
+    "sensitivity": {
+      "type": "string",
+      "enum": [
+        "public_source",
+        "internal",
+        "confidential_encrypted"
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{7,64}$"
+        },
+        "parent_package_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "minProperties": 1
+    },
+    "instructions": {
+      "type": "string",
+      "maxLength": 10000
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000,
+      "items": {
+        "$ref": "#/$defs/FileEntry"
+      }
+    },
+    "manifest_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "required": [
+    "contract_version",
+    "package_id",
+    "control_class",
+    "private",
+    "dataset_ref",
+    "dataset_version",
+    "created_at",
+    "expires_at",
+    "created_by",
+    "purpose",
+    "target_project",
+    "intended_recipients",
+    "sensitivity",
+    "files",
+    "manifest_sha256"
+  ]
+}

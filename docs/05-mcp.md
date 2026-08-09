@@ -1,42 +1,90 @@
 # MCP к my-data-hub
 
-## Назначение и граница доверия
+## Назначение и границы доверия
 
-MCP предоставляет агентам предметный интерфейс к каталогу, оркестратору,
-миграции Region Talk и semantic command layer. MCP **не** является SQL proxy,
-оболочкой над provider SDK или способом читать секреты и произвольные файлы.
+MCP предоставляет агентам несколько явно разделённых профилей доступа к каталогу,
+оркестратору, коннекторам, Kaggle и миграции. **Реализованный bootstrap v0.1** пока
+содержит только bounded semantic tools. Принятое дополнение проектирует отдельный
+operator profile для широкого bounded-чтения и контролируемого DML; это ещё не
+реализованный PostgreSQL-superuser proxy.
 
-Транспортный слой реализован на MCP Python SDK v2 через `MCPServer`. Бизнес-tools
-вызывают `HubService`, поэтому transport/auth можно заменить без переноса SQL и
-доменной логики в обработчики MCP.
+Транспортный слой использует MCP Python SDK v2 через `MCPServer`. Business tools
+вызывают `HubService`, поэтому transport/auth меняются без переноса SQL и доменной
+логики в обработчики MCP.
 
 ## Реализованная поверхность bootstrap v0.1
 
-Tools регистрируются только при наличии требуемого scope. Это значит, что
-запрещённый tool не только завершится ошибкой, но и не появится в surface данного
-процесса.
+Tools регистрируются только при наличии требуемого scope. Запрещённый tool не только
+завершается ошибкой, но и не появляется в surface данного процесса.
 
 | Tool | Scope | Режим | Контракт |
 |---|---|---|---|
 | `hub.health` | `hub:read` | read | canonical/schema revision и write gate |
 | `hub.project.list` | `hub:read` | read | не более 100 проектов |
-| `hub.content.search` | `hub:read` | read | PostgreSQL FTS, query ≤500 символов, limit ≤50, statement timeout |
-| `hub.content.get` | `hub:read` | read | один compact content object и не более 20 assets |
-| `hub.trace.get` | `hub:read` | read | exact subject UUID, не более 100 provenance events |
+| `hub.content.search` | `hub:read` | read | PostgreSQL FTS, query ≤500 символов, limit ≤50, timeout |
+| `hub.content.get` | `hub:read` | read | compact content object и ≤20 assets |
+| `hub.trace.get` | `hub:read` | read | exact UUID, ≤100 provenance events |
 | `region_talk.queue.summary` | `region-talk:read` | read | агрегаты очереди, без payload dump |
-| `region_talk.plan.preview` | `region-talk:read` | read | plan-only, без dispatch и side effects |
-| `region_talk.migration.status` | `migration:read` | read | последние export batches, quarantine и `cutover_ready` |
-| `region_talk.migration.accounting` | `migration:read` | read | bounded per-kind counts, `fully_accounted` и `cutover_ready` |
-| `region_talk.work.enqueue` | `region-talk:write` | semantic write | allowlisted stage, bounded URL/priority; `dry_run=true` по умолчанию |
+| `region_talk.plan.preview` | `region-talk:read` | read | plan-only, без dispatch/side effects |
+| `region_talk.migration.status` | `migration:read` | read | export batches, quarantine, `cutover_ready` |
+| `region_talk.migration.accounting` | `migration:read` | read | bounded counts и accounting gates |
+| `region_talk.work.enqueue` | `region-talk:write` | semantic write | allowlisted stage; `dry_run=true` по умолчанию |
 | `hub.command.submit` | `hub:write` | semantic write | typed idempotent command, без raw SQL |
 
-Оба mutation tools создаются только если одновременно выполнены два условия:
+Mutation tools создаются только если одновременно включён server-side write gate и
+присутствует write scope. Production publication tool отсутствует.
 
-1. `MY_DATA_HUB_MCP_WRITE_ENABLED=true`;
-2. в `MY_DATA_HUB_MCP_SCOPES` есть соответствующий write scope.
+## Принятые целевые профили
 
-Production publication tool в v1 отсутствует. Добавление scope само по себе не
-может включить публикацию.
+### 1. `semantic_default`
+
+Текущая предметная поверхность. Предпочтительна для повторяемых продуктовых операций,
+поскольку кодирует invariants, idempotency и domain receipts.
+
+### 2. `data_reader`
+
+Широкие bounded `SELECT` и schema/catalog inspection по allowlisted application schemas:
+
+- отдельная read-only PostgreSQL role;
+- одна statement/transaction на вызов;
+- AST validation;
+- statement/transaction/lock timeouts;
+- row/byte caps и явная truncation;
+- запрет DML/DDL/COPY/CALL/DO/SET, unsafe functions и sensitive catalogs.
+
+### 3. `data_editor`
+
+Контролируемые `INSERT`/`UPDATE`/`DELETE` через preview → short-lived receipt → apply:
+
+- отдельная PostgreSQL role без ownership/superuser/BYPASSRLS;
+- allowlisted schemas/tables/columns;
+- expected canonical revision/effect bounds;
+- idempotency key;
+- recent backup/restore gate;
+- pre-change checkpoint для bulk/high-impact;
+- immutable audit/commit receipt;
+- database-layer prohibition for protected tables.
+
+### 4. `migration_operator`
+
+Typed tools для inventory/export/landing/mapping/quarantine/reconciliation/shadow/
+cutover/rollback. Агент может управлять Region Talk migration, но raw DML не может
+фальсифицировать accounting, `cutover_ready` или publication state.
+
+### 5. `kaggle_operator`
+
+Provider tools, фильтруемые PostgreSQL registry control class:
+
+- inventory всех visible notebooks/private datasets;
+- status-only для `orchestrator_protected`;
+- lifecycle для `mcp_managed`;
+- private TTL/hash exchange packages для `mcp_exchange`;
+- metadata/status-only для `external_read_only`.
+
+Полные требования:
+
+- [`17-kaggle-control-plane.md`](17-kaggle-control-plane.md)
+- [`18-mcp-operator-and-database-access.md`](18-mcp-operator-and-database-access.md)
 
 ## Транспортные профили
 
@@ -50,25 +98,12 @@ export MY_DATA_HUB_MCP_SCOPES='hub:read,orchestrator:read,region-talk:read,migra
 my-data-hub mcp serve --transport stdio
 ```
 
-Пример client configuration:
-
-```json
-{
-  "mcpServers": {
-    "my-data-hub": {
-      "command": "/opt/my-data-hub/venv/bin/my-data-hub",
-      "args": ["mcp", "serve", "--transport", "stdio"]
-    }
-  }
-}
-```
-
-Database URL и scopes должны передаваться process supervisor-ом или защищённым
-client environment, а не храниться в репозитории либо client JSON.
+Database URL и scopes передаются supervisor/защищённым environment, а не client JSON
+или repository.
 
 ### Локальный Streamable HTTP для отладки
 
-Development bearer profile разрешён только на loopback:
+Development bearer разрешён только на loopback:
 
 ```text
 MY_DATA_HUB_MCP_REMOTE_ENABLED=true
@@ -77,66 +112,98 @@ MY_DATA_HUB_MCP_HOST=127.0.0.1
 MY_DATA_HUB_MCP_DEVELOPMENT_TOKEN=<random secret>
 ```
 
-Конфигурация отклоняет `0.0.0.0` и другие non-loopback bind addresses для
-`development-token`. Сервер дополнительно проверяет `Host`, `Origin`, bearer
-token и размер тела запроса; MCP SDK transport security остаётся включённой.
+Конфигурация отклоняет non-loopback bind, дополнительно проверяет Host, Origin, bearer,
+body size и SDK transport security.
 
-### Удалённый агент / телефон / другая машина
+### Production remote
 
-Development-token profile для этого не используется. Целевой контур:
+Канонический URL:
 
 ```text
-client
-  → TLS reverse proxy
-  → OAuth resource/audience validation
-  → MCP Host/Origin/admission checks
-  → scoped tools
-  → HubService
-  → PostgreSQL
+https://mcp-datahub.kenigevents.ru/mcp
 ```
 
-Production remote HTTP намеренно fail-closed до переноса и интеграционной
-проверки OAuth boundary из проверенного MCP-контура `events-bot-new`.
+Контур:
+
+```text
+ChatGPT / remote agent
+  → TLS edge
+  → OAuth 2.1 resource/audience validation
+  → MCP Host/Origin/admission checks
+  → profile/scoped tools
+  → application services / restricted PostgreSQL roles / provider adapters
+```
+
+Development token на public listener запрещён. Порядок настройки и acceptance:
+[`20-remote-mcp-endpoint.md`](20-remote-mcp-endpoint.md).
 
 ## Semantic write contract
 
-Каждая mutation должна включать или выводить сервером:
+Каждая предметная mutation включает или сервер выводит:
 
 - principal/client identity и scopes;
 - session ID и idempotency key;
 - versioned command type;
 - target identity и expected revision/preconditions;
 - bounded payload и reason/evidence;
-- dependency IDs, если операция причинно зависит от другой;
-- dry-run, где операция допускает preview.
+- dependency IDs;
+- dry-run/preview, где применимо.
 
-Business mutation, command receipt и semantic outbox записываются одной
-PostgreSQL-транзакцией. Внешний side effect не выполняется обработчиком MCP.
+Business mutation, command receipt и semantic outbox фиксируются одной PostgreSQL
+transaction. Внешний side effect не выполняется MCP handler.
 
-## Запрещённая поверхность
+## Operator write contract
 
-- `execute_sql`, `query_any_table`, database shell;
-- arbitrary filesystem read или secret/session dump;
-- raw YDB/provider mutation;
-- unbounded export/search;
-- generic content patch без domain preconditions;
-- `publish_now` без exact revision approval и отдельного dispatcher gate.
+Generic DML является отдельной привилегированной функцией, а не расширением
+`hub.command.submit`. Обязательны:
 
-## Донор и что из него переносится
+```text
+parse and authorize
+→ preview under restricted DB role
+→ bind short-lived receipt
+→ revalidate backup/revision/effects
+→ apply one transaction
+→ audit + commit receipt
+```
 
-`events-bot-new/private_events_mcp` используется как donor для OAuth,
-resource/audience validation, admission control, bounded responses, no-store
-headers, correlation IDs и provider isolation. Его event-domain и
-SQLite-specific storage code не определяют архитектуру `my-data-hub`.
+Break-glass DDL/roles/extensions выполняются только локально и не входят в normal remote
+profile.
 
-## Следующие MCP этапы
+## Data connectors are not MCP calls
 
-После deployment и Region Talk migration добавляются только поверх тех же
-service/repository boundaries:
+Боты и сервисы передают регулярные данные через `/intake/v1` по versioned connector
+envelope. У них отдельная service identity, limits, receipt и outage spool. MCP только
+наблюдает, приостанавливает и разрешает connector quarantine. См.
+[`16-data-connectors.md`](16-data-connectors.md).
 
-- exact candidate/revision read;
-- review decision по immutable revision fingerprint;
-- run/task diagnostics;
-- Joplin link/sync tools;
-- conflict resolution с expected conflict revision;
-- production release tool — только после отдельного ADR и canary acceptance.
+## Всё ещё запрещено
+
+- remote PostgreSQL owner/superuser;
+- shell, arbitrary filesystem и secret/session dump;
+- raw YDB/provider credentials;
+- unbounded query/export;
+- public Kaggle dataset creation;
+- mutation `orchestrator_protected` Kaggle resources;
+- direct notebook canonical writes;
+- `publish_now` без отдельного ADR, exact revision и dispatcher gate;
+- обход migration accounting/cutover через generic editor DML.
+
+## Донор
+
+`events-bot-new/private_events_mcp` остаётся donor для OAuth,
+resource/audience validation, admission control, bounded responses, no-store headers,
+correlation IDs и provider isolation. Его event-domain/SQLite code не определяет
+архитектуру `my-data-hub`.
+
+## Release order
+
+1. devstand/backup/test evidence;
+2. production OAuth and remote read-only semantic tools;
+3. connector status + synthetic connector;
+4. Kaggle inventory read-only;
+5. data-reader profile;
+6. MCP-managed Kaggle provider canary;
+7. data-editor in disposable schema;
+8. allowlisted application DML;
+9. migration-operator tools and Region Talk migration;
+10. publication remains a separate future gate.

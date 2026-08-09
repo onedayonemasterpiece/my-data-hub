@@ -64,3 +64,28 @@ source commit: 0c3fcf7 (Add research record)
   canonical tables.
 - **MCP** — предметная агентская поверхность над Hub/Orchestrator.
 - **Artifact** — immutable файл/набор файлов с hash и manifest; это не БД.
+
+## 6. Принятое инфраструктурное дополнение
+
+ADR-0009–ADR-0014 и документы `15`–`20` уточняют реализацию исходного видения:
+
+- PostgreSQL supervised/always-on; Kaggle не является master DB;
+- data connectors — отдельная idempotent ingress boundary;
+- `mcp-datahub.kenigevents.ru` — canonical remote MCP URL;
+- default semantic MCP и privileged operator MCP разделены;
+- Kaggle resources имеют registry control classes;
+- infrastructure/test workflows precede Region Talk migration.
+
+Это не второй проект и не замена исходного idea-hub документа. При конфликте с точным
+импортом исходника требуется новый ADR с явным сравнением и решением владельца.
+
+## 7. Дополнительная терминология
+
+- **Data connector** — versioned producer/adapter с batch identity, hash, receipt,
+  watermark и retry semantics.
+- **Intake** — authenticated acceptance/staging boundary; не canonical application.
+- **Operator MCP** — отдельно разрешённый профиль broad bounded reads/controlled DML под
+  restricted PostgreSQL role.
+- **Kaggle control class** — registry-enforced provider authorization независимо от
+  resource name.
+- **Exchange package** — private TTL/hash-manifested artifact transfer; не canonical data.

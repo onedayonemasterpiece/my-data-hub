@@ -1,38 +1,44 @@
 # Code-agent completion task
 
 Repository: `onedayonemasterpiece/my-data-hub`
-Target host: existing devstand, which is also the initial production runtime.
+Target host: existing devstand, also the initial production runtime.
 
 ## Goal
 
-Complete and deploy the existing scaffold without redesigning it. PostgreSQL is canonical;
-Region Talk is the first workload; YDB is read-only migration source; Kaggle notebooks are
-immutable-result workers; MCP exposes bounded semantic tools.
+Verify and harden the deployed platform before Region Talk migration. PostgreSQL is the
+supervised canonical head; Kaggle is compute/private artifacts, not a database failover.
+Add connectors, remote MCP, Kaggle resource control and restricted database operator
+access through the accepted contracts.
+
+Primary reasoning: **high**. Final authorization/recovery review: **xhigh**.
 
 ## Required work
 
-1. Review accepted ADRs and run repository validation/tests.
-2. Pin tested Python/MCP/PostgreSQL/pgvector and container image versions/digests.
-3. Deploy PostgreSQL on the devstand, create separated runtime/migration/backup roles, apply
-   migrations, run integrity checks and a restore drill.
-4. Run live PostgreSQL integration for the implemented repositories/UoW and
-   complete only gaps found by evidence; add the missing production OAuth/gateway
-   integration for MCP while retaining request/response, scope, rate, concurrency,
-   origin and egress limits from the proven `events-bot-new/private_events_mcp`
-   patterns.
-5. Inspect `events-bot-new` at an exact commit and create the adaptation provenance manifest.
-6. Implement complete read-only YDB inventory/export, import every row, finish mappings for
-   all discovered kinds and produce reconciliation evidence. Do not discard unknown rows.
-7. Port the actual Region Talk candidate/E5/BGE/image/finalizer/review/publication
-   processors behind the already defined PostgreSQL/orchestrator and notebook
-   contracts. Workers may not write canonical state directly.
-8. Run shadow cycles, then a private-channel canary. Keep production publication disabled.
-9. Configure orchestrator/MCP/database auto-start and reboot verification.
-10. Return exact commit/PR, deployment receipt, migration/export/reconciliation IDs, service
-    health, backup/restore evidence, test results and the remaining blocked secrets/decisions.
+1. Read ADR-0009–ADR-0014 and `docs/15-infrastructure-first-plan.md`.
+2. Capture actual commit/images/services/ports/versions in
+   `docs/operations/first-deploy.md`, created from
+   [`../operations/first-deploy-template.md`](../operations/first-deploy-template.md); keep
+   scheduler/publication/remote writes off and Region Talk paused.
+3. Split PostgreSQL roles; prove clean/upgrade migrations and negative grants.
+4. Prove process/reboot auto-start, encrypted local/off-host backup, readback and isolated
+   restore.
+5. Implement PR, post-deploy, nightly, Kaggle canary and restore workflows with receipts.
+6. Publish read-only OAuth MCP at `https://mcp-datahub.kenigevents.ru/mcp` through Yandex
+   DNS/TLS/private upstream and prove negative auth/Host/Origin cases.
+7. Implement connector registry/intake/receipt/quarantine, synthetic outage/replay flow and
+   `events-bot.daily-statistics.v1` producer.
+8. Implement Kaggle inventory/control classes; prove protected resources cannot be
+   mutated and disposable MCP-managed private notebook/dataset lifecycle works.
+9. Implement broad bounded DB reader and preview/apply editor under restricted roles,
+   first in a disposable schema with backup/audit/impact gates.
+10. Implement typed migration-operator tools.
+11. Only then perform Region Talk read-only inventory/export, full accounting, mapping,
+    shadow/private canary, backup/rollback and controlled cutover.
+12. Keep production publication disabled until separate owner approval.
 
 ## Acceptance
 
-Use `docs/migrations/region-talk/acceptance.md`. Do not mark migration complete on green CI
-alone; prove data accounting, behaviour, idempotency, private review/publication receipt and
-rollback.
+Return commit/PR, deployment receipt, role/grant probes, workflow run IDs, backup/restore,
+remote MCP, connector, Kaggle protected/control and operator canary evidence. Do not mark
+Region Talk complete on green CI alone; prove data accounting, behavior, idempotency,
+exact revision, private canary and rollback.

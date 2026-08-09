@@ -1,0 +1,39 @@
+{
+  "contract_version": "my-data-hub-kaggle-exchange.v1",
+  "package_id": "9412f808-71b0-46c0-bb57-ac328df20863",
+  "control_class": "mcp_exchange",
+  "private": true,
+  "dataset_ref": "onedayonemasterpiece/mdh-xfer-example",
+  "dataset_version": 1,
+  "created_at": "2026-08-09T20:00:00Z",
+  "expires_at": "2026-08-16T20:00:00Z",
+  "created_by": "chatgpt-owner-session",
+  "purpose": "Transfer reviewed documentation and code scaffold to a code agent",
+  "target_project": "my-data-hub",
+  "intended_recipients": [
+    "code-agent-devstand"
+  ],
+  "sensitivity": "internal",
+  "source": {
+    "repository": "onedayonemasterpiece/my-data-hub",
+    "commit": "0fc9c8a7ace0b9cd702ff3b64f735deef78285e1"
+  },
+  "instructions": "Verify all hashes, inspect README-FIRST.md, and import through a reviewed repository change.",
+  "files": [
+    {
+      "path": "README-FIRST.md",
+      "media_type": "text/markdown",
+      "byte_size": 17,
+      "sha256": "47f79f04667fdf6d91f0bab59af274db6ab497186ea037d2e60bbcd0ddf572d8",
+      "executable": false
+    },
+    {
+      "path": "payload/my-data-hub-docs.patch",
+      "media_type": "text/x-diff",
+      "byte_size": 47,
+      "sha256": "03d60b35e28eedda292f897cf3df901b767016d1d4b5ecbc934ebf2bd8ad78cb",
+      "executable": false
+    }
+  ],
+  "manifest_sha256": "ab23b5f6b6818459bbcbe560a85de8995c35571c02dc1bc43b77f96605a76ba3"
+}

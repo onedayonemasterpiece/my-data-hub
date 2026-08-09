@@ -1,0 +1,46 @@
+{
+  "contract_version": "my-data-hub-data-connector.v1",
+  "connector_id": "events-bot.daily-statistics",
+  "data_product": "events-bot.daily-statistics.v1",
+  "batch_id": "61f276c2-e127-4ce3-9c13-f6af096bd1eb",
+  "idempotency_key": "events-bot.daily-statistics:2026-08-09:Europe-Kaliningrad:v1",
+  "schema_version": "events-bot-daily-statistics.v1",
+  "produced_at": "2026-08-10T00:05:00Z",
+  "observed_period": {
+    "start": "2026-08-08T22:00:00Z",
+    "end": "2026-08-09T22:00:00Z",
+    "timezone": "Europe/Kaliningrad"
+  },
+  "source_cursor": {
+    "partition": "daily",
+    "watermark": "2026-08-09",
+    "sequence": 20260809
+  },
+  "delivery_mode": "push",
+  "record_count": 1,
+  "payload_sha256": "bf6793905541e870a5596cb2ee07c56acbe93d395a291860b58135a2689f54ae",
+  "inline_records": [
+    {
+      "reporting_date": "2026-08-09",
+      "events_added_total": 27,
+      "counts_by_city": {
+        "Калининград": 19,
+        "Зеленоградск": 4,
+        "Светлогорск": 4
+      },
+      "counts_by_type": {
+        "концерт": 9,
+        "лекция": 5,
+        "выставка": 7,
+        "другое": 6
+      },
+      "deferred_total": 3,
+      "error_total": 0,
+      "source_revision": "example-commit"
+    }
+  ],
+  "trace": {
+    "producer_instance": "events-bot-production",
+    "report_job": "daily-statistics"
+  }
+}

@@ -172,3 +172,50 @@ integration идёт через Joplin Data API/плагин и semantic note de
 - full HTML/media/model artifacts — отдельное artifact storage с retention class;
 - credentials, Telegram sessions и private keys — никогда не попадают в БД,
   notebook output или repository artifacts.
+
+## Planned integration plane
+
+The infrastructure supplement reserves a future `integration` schema, to be introduced
+only through append-only migrations and repository tests.
+
+### Data connectors
+
+```text
+integration.connector
+integration.data_product
+integration.batch
+integration.batch_payload
+integration.batch_event
+integration.watermark
+integration.quarantine
+integration.receipt
+```
+
+Acceptance evidence and canonical application are separate. Exact replay reuses the
+receipt; a conflicting hash is quarantined. Corrections append a superseding batch.
+
+### Provider resources and operations
+
+```text
+integration.provider_resource
+integration.provider_operation
+integration.provider_event
+```
+
+A resource records provider reference, privacy, origin and control class. Provider
+mutation requires expected fingerprint, lease/fencing token, idempotency and receipt.
+Names/prefixes do not authorize access.
+
+### Operator evidence
+
+The final schema/name will be chosen with the implementation ADR/migration, but it must
+persist append-only:
+
+- query/write request identity and principal;
+- preview receipt and expiry;
+- SQL/parameter fingerprints and approved targets;
+- backup/revision/effect gates;
+- apply/rollback outcome and affected identities/counts;
+- immutable audit/commit receipt.
+
+The MCP editor role cannot modify its own audit or protected gate tables.

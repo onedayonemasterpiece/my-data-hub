@@ -3,59 +3,83 @@
 ## 1. Canonical PostgreSQL
 
 Owns normalized identities, project membership, content, provenance, analysis metadata,
-work state, Region Talk state, MCP command receipts, outbox, audit and Joplin links.
-Schemas are separated by responsibility, not by deployment:
+work state, Region Talk state, connector/provider registry, MCP receipts, outbox, audit
+and Joplin links. Schemas are separated by responsibility, not deployment:
 
 | Schema | Responsibility |
 |---|---|
 | `hub` | shared projects, actors, accounts, content, identities, relations and provenance |
-| `analysis` | model registry, immutable analysis results and vector projections |
-| `orchestration` | pipelines, stages, work items, runs, leases, artifacts and transitions |
-| `sync` | sessions, commands/changesets, operations, receipts, conflicts and outbox |
+| `analysis` | model registry, immutable results and vector projections |
+| `orchestration` | pipelines, stages, work, runs, leases, artifacts and transitions |
+| `sync` | sessions, commands/changesets, receipts, conflicts and outbox |
 | `region_talk` | product-specific source, gate, review and publication projections |
 | `migration` | raw YDB import, mappings, exceptions and reconciliation evidence |
-| `joplin` | note/notebook links, sync cursors and conflict records |
+| `joplin` | note/notebook links, sync cursors and conflicts |
+| future `integration` | connector batches, provider resources/operations and receipts |
 
-## 2. Orchestrator
+PostgreSQL is supervised on the devstand. Kaggle and artifacts do not provide an
+alternate canonical head.
 
-The orchestrator is a policy engine and canonical result committer. It:
+## 2. Orchestrator / canonical committer
+
+The orchestrator:
 
 - selects bounded work according to priorities, leases and backpressure;
-- creates exact input manifests;
-- launches or observes local/Kaggle workers;
+- executes pull connectors and normalizer/committer stages;
+- creates exact notebook input manifests;
+- launches/observes protected local/Kaggle workers;
 - validates schema, hashes, run identity and expected input revision;
 - records result acceptance, rejection or quarantine atomically;
 - emits transactional outbox events for external effects;
-- measures the product funnel and queue health.
+- measures product, connector and queue health.
 
-It does not embed all worker implementation in a single process.
+It does not embed every worker implementation and cannot wake its own stopped host.
 
-## 3. Notebook workers
+## 3. Connector intake
+
+Receives authenticated versioned batches, verifies idempotency/schema/hash/size, records
+a durable acceptance receipt and stages normalization. It does not run expensive model
+work synchronously and does not let producers write shared canonical tables.
+
+## 4. Notebook workers
 
 Workers are stateless with respect to canonical data. They may cache models within a run,
-but their durable output is only a signed/hash-addressed result envelope. Separate heavy
-models remain separate workers (for example E5, BGE-M3 and image diagnostics).
+but durable output is a strict hash-addressed result envelope. Separate heavy models
+remain separate workers.
 
-## 4. MCP server
+## 5. MCP server profiles
 
-MCP exposes bounded search/resources and semantic commands. The transport adapter is not
-the domain service: tool handlers call application services that are also testable from
-CLI and orchestration code.
+- semantic product/orchestration tools;
+- broad bounded data reader;
+- preview/apply data editor;
+- typed migration operator;
+- Kaggle control-class-aware operator.
 
-## 5. Joplin bridge
+The remote endpoint is HTTPS/OAuth. PostgreSQL roles and provider registry remain the
+primary target authorization boundaries.
 
-A Windows-local bridge or plugin uses the supported Joplin Data/Plugin API, converts
-selected note changes into semantic commands and stores stable cross-system links. Android
-participates through normal Joplin synchronization; no service writes Joplin's SQLite file.
+## 6. Kaggle provider adapter
 
-## 6. Artifact and backup storage
+Reconciles account resources into the local registry and executes only operations allowed
+by control class. Orchestrator-protected resources are status-only through remote MCP;
+MCP-managed resources support tested provider lifecycle; exchange datasets are private,
+TTL-bound and hash-manifested.
 
-Private object-like storage (initially private Kaggle Datasets where practical) stores:
+## 7. Joplin bridge
+
+A Windows-local bridge/plugin uses the supported Joplin Data/Plugin API, converts selected
+note changes into semantic commands/connector batches and stores stable links. Android
+participates through normal Joplin synchronization; no service writes Joplin SQLite.
+
+## 8. Artifact and backup storage
+
+Private storage, initially including private Kaggle Datasets where practical, stores:
 
 - immutable notebook result bundles;
 - large run evidence;
 - encrypted PostgreSQL backups/checkpoints;
+- private exchange packages;
 - manifests and hashes.
 
-An artifact is not canonical merely because its version is numerically latest. PostgreSQL
-receipts and verified manifests establish acceptance.
+An artifact is not canonical because its version is latest. PostgreSQL receipts and
+verified manifests establish acceptance.
