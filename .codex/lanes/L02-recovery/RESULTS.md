@@ -6,7 +6,7 @@
 - Requirement: `R04`
 - Status: **Done**
 - Base SHA: `0b6b7311081bdfecdd4f3004e5d6842a42f64253`
-- Implementation head SHA: `df04b716dfc4590a95b6bd1163da921218440d31`
+- Implementation head SHA: `df04b7196bf76742ef4b8064834152dd9594f99d`
 
 ## Delivered
 
