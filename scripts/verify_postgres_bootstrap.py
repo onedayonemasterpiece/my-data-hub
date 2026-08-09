@@ -12,9 +12,12 @@ EXPECTED_SCHEMAS = {
     "analysis",
     "hub",
     "hub_meta",
+    "integration",
     "joplin",
     "migration",
+    "operator_control",
     "orchestration",
+    "recovery",
     "region_talk",
     "sync",
 }
@@ -67,7 +70,7 @@ def main() -> int:
             )
             migrations = [(int(row[0]), str(row[1])) for row in cursor.fetchall()]
             evidence["migrations"] = migrations
-            expected_versions = list(range(1, 10))
+            expected_versions = list(range(1, 11))
             if [row[0] for row in migrations] != expected_versions:
                 findings.append(f"migration history mismatch: {migrations}")
 
@@ -81,7 +84,7 @@ def main() -> int:
                 if state
                 else None
             )
-            if state is None or int(state[0]) != 9 or int(state[1]) != 0:
+            if state is None or int(state[0]) != 10 or int(state[1]) != 0:
                 findings.append(f"unexpected canonical state: {state}")
 
             cursor.execute(
@@ -130,6 +133,10 @@ def main() -> int:
                        to_regclass('migration.region_talk_accounting'),
                        to_regclass('orchestration.queue_health'),
                        to_regclass('region_talk.funnel_current'),
+                       to_regclass('integration.batch'),
+                       to_regclass('integration.provider_resource'),
+                       to_regclass('recovery.evidence'),
+                       to_regclass('operator_control.preview_receipt'),
                        to_regprocedure('orchestration.claim_work_items(uuid,text,integer,integer)')
                 """
             )

@@ -446,7 +446,14 @@ def validate_deployment(report: Report) -> None:
 def validate_secret_hygiene(report: Report) -> None:
     forbidden_files = re.compile(r"(^|/)(\.env|.*\.pem|.*\.key|.*\.sqlite(?:3)?|.*\.db)$")
     for path in ROOT.rglob("*"):
-        ignored_parts = {".git", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+        ignored_parts = {
+            ".git",
+            ".venv",
+            "__pycache__",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".mypy_cache",
+        }
         if not path.is_file() or ignored_parts.intersection(path.parts):
             continue
         relative = path.relative_to(ROOT).as_posix()
