@@ -20,6 +20,8 @@ TOOL_SCOPES: dict[str, str] = {
     "region_talk.plan.preview": "region-talk:read",
     "region_talk.migration.status": "migration:read",
     "region_talk.migration.accounting": "migration:read",
+    "connector.status.list": "connector:read",
+    "provider.resource.status": "provider:read",
     "region_talk.work.enqueue": "region-talk:write",
     "hub.command.submit": "hub:write",
 }

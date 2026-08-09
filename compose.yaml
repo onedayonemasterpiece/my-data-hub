@@ -53,6 +53,32 @@ services:
       - ./artifacts:/var/lib/my-data-hub/artifacts
     networks: [internal]
 
+  mcp:
+    profiles: [remote-mcp]
+    build: .
+    restart: unless-stopped
+    command: ["mcp", "serve", "--transport", "streamable-http"]
+    env_file: .env
+    environment:
+      # The host-side publication remains loopback-only. The edge proxy is the only
+      # component permitted to reach this backend listener.
+      MY_DATA_HUB_MCP_HOST: 0.0.0.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${MY_DATA_HUB_MCP_PORT:-8765}:${MY_DATA_HUB_MCP_PORT:-8765}"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,socket; p=int(os.getenv('MY_DATA_HUB_MCP_PORT','8765')); s=socket.create_connection(('127.0.0.1',p),3); s.close()"
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
 networks:
   internal:
     driver: bridge

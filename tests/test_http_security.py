@@ -13,7 +13,12 @@ from my_data_hub.mcp.http_security import DevelopmentBearerSecurity
 
 
 async def run_asgi(
-    app, *, headers: list[tuple[bytes, bytes]], chunks: list[bytes] | None = None
+    app,
+    *,
+    headers: list[tuple[bytes, bytes]],
+    chunks: list[bytes] | None = None,
+    method: str = "POST",
+    path: str = "/mcp",
 ):  # type: ignore[no-untyped-def]
     chunks = chunks or [b""]
     messages = [
@@ -30,8 +35,8 @@ async def run_asgi(
 
     scope = {
         "type": "http",
-        "method": "POST",
-        "path": "/mcp",
+        "method": method,
+        "path": path,
         "headers": headers,
     }
     await app(scope, receive, send)
@@ -68,6 +73,41 @@ def status_of(messages: list[dict[str, Any]]) -> int:
 def test_http_guard_requires_bearer_token() -> None:
     messages = asyncio.run(run_asgi(guard(), headers=[(b"host", b"localhost")]))
     assert status_of(messages) == 401
+
+
+def test_oauth_metadata_path_is_public_and_challenge_advertises_it() -> None:
+    metadata_path = "/.well-known/oauth-protected-resource/mcp"
+    metadata_url = f"https://mcp.example{metadata_path}"
+
+    def reject_auth(_header: str) -> None:
+        raise AssertionError("public metadata must not invoke bearer authentication")
+
+    app = HTTPAdmissionSecurity(
+        echo_app,
+        allowed_origins=(),
+        allowed_hosts=("mcp.example",),
+        authenticator=reject_auth,
+        unauthenticated_paths=(metadata_path,),
+        resource_metadata_url=metadata_url,
+    )
+    public = asyncio.run(
+        run_asgi(
+            app,
+            headers=[(b"host", b"mcp.example")],
+            method="GET",
+            path=metadata_path,
+        )
+    )
+    assert status_of(public) == 200
+
+    protected = asyncio.run(
+        run_asgi(app, headers=[(b"host", b"mcp.example")])
+    )
+    assert status_of(protected) == 401
+    assert (
+        f'resource_metadata="{metadata_url}"'.encode()
+        in header_of(protected, b"www-authenticate")
+    )
 
 
 def test_http_guard_validates_host_and_origin() -> None:

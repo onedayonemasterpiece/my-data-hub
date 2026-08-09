@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tempfile
 from dataclasses import asdict
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 from my_data_hub.connectors.contracts import canonical_json_bytes, payload_sha256
 from my_data_hub.connectors.postgres import (
@@ -16,7 +18,14 @@ from my_data_hub.connectors.postgres import (
 )
 from my_data_hub.connectors.repository import AcceptanceDisposition
 from my_data_hub.connectors.service import ConnectorIntakeService
+from my_data_hub.connectors.spool import (
+    ConnectorDeliveryService,
+    DeliveryDisposition,
+    DeliveryResult,
+    DurableConnectorSpool,
+)
 from my_data_hub.connectors.synthetic import SyntheticConnectorProducer
+from my_data_hub.mcp.service import HubService
 
 
 def main() -> int:
@@ -74,6 +83,63 @@ def main() -> int:
     ):
         raise SystemExit("connector canonical commit was not exactly once")
 
+    outage_exact = producer.exact_bytes(date(2026, 8, 10), sequence=988)
+    outage_at = datetime(2026, 8, 10, tzinfo=UTC)
+
+    class UnavailableTransport:
+        def submit(self, _exact_envelope_bytes: bytes) -> DeliveryResult:
+            raise TimeoutError("synthetic transport outage")
+
+    class IntakeTransport:
+        def submit(self, exact_envelope_bytes: bytes) -> DeliveryResult:
+            result = intake.submit(
+                exact_envelope_bytes,
+                authenticated_connector_id=producer.connector_id,
+                authenticated_principal=f"service:{producer.connector_id}",
+                correlation_id="r1-synthetic-eventual-delivery",
+            )
+            if result.receipt is None:
+                return DeliveryResult(DeliveryDisposition.CONFLICT, message="intake conflict")
+            disposition = (
+                DeliveryDisposition.ACCEPTED
+                if result.disposition is AcceptanceDisposition.ACCEPTED
+                else DeliveryDisposition.REPLAYED
+            )
+            return DeliveryResult(disposition, receipt=result.receipt)
+
+    with tempfile.TemporaryDirectory(prefix="mdh-connector-spool-") as temp:
+        spool_root = Path(temp) / "spool"
+        first_spool = DurableConnectorSpool(spool_root)
+        first_spool.enqueue(outage_exact, queued_at=outage_at)
+        outage_summary = ConnectorDeliveryService(
+            first_spool, UnavailableTransport()
+        ).deliver_ready(now=outage_at)
+        restarted_spool = DurableConnectorSpool(spool_root)
+        recovery_summary = ConnectorDeliveryService(
+            restarted_spool, IntakeTransport()
+        ).deliver_ready(now=outage_at + timedelta(seconds=2))
+        receipt_files = list(restarted_spool.receipts_dir.glob("*.json"))
+        eventual_receipt = json.loads(receipt_files[0].read_bytes())
+        eventual_commit = committer.commit(eventual_receipt["batch_id"])
+        eventual_replay = committer.commit(eventual_receipt["batch_id"])
+        spool_ok = (
+            outage_summary.deferred == 1
+            and recovery_summary.delivered == 1
+            and not restarted_spool.pending(ready_at=outage_at + timedelta(seconds=2))
+            and len(receipt_files) == 1
+            and not eventual_commit.duplicate
+            and eventual_replay.duplicate
+        )
+
+    mcp_status = HubService(
+        args.database_url,
+        scopes=frozenset({"connector:read"}),
+        write_enabled=False,
+    ).connector_status()
+    mcp_row = next(
+        row for row in mcp_status if row["data_product"] == "synthetic.daily-statistics.v1"
+    )
+
     with psycopg.connect(args.database_url) as connection, connection.cursor() as cursor:
         cursor.execute(
             """
@@ -92,7 +158,12 @@ def main() -> int:
             ),
         )
         counts = tuple(int(value) for value in cursor.fetchone())
-    ok = counts[:4] == (1, 1, 1, 1) and counts[4] == first_commit.canonical_revision
+    ok = (
+        counts[:4] == (1, 1, 1, 1)
+        and counts[4] >= first_commit.canonical_revision
+        and spool_ok
+        and mcp_row["committed_batches"] >= 2
+    )
     report = {
         "ok": ok,
         "batch_id": str(accepted.receipt.batch_id),
@@ -110,6 +181,14 @@ def main() -> int:
             "semantic_outbox": counts[3],
             "canonical_revision": counts[4],
         },
+        "outage_restart": {
+            "first_delivery_deferred": outage_summary.deferred,
+            "eventual_delivery_count": recovery_summary.delivered,
+            "durable_receipts": len(receipt_files),
+            "eventual_batch_id": str(eventual_receipt["batch_id"]),
+            "commit_replayed": eventual_replay.duplicate,
+        },
+        "mcp_read": mcp_row,
     }
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if ok else 2

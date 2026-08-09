@@ -247,6 +247,8 @@ class HTTPAdmissionSecurity:
         limits: AdmissionLimits | None = None,
         authenticator: Authenticator | None = None,
         trusted_proxy_ips: tuple[str, ...] = (),
+        unauthenticated_paths: tuple[str, ...] = (),
+        resource_metadata_url: str | None = None,
     ) -> None:
         if not allowed_hosts:
             raise ValueError("at least one exact allowed Host is required")
@@ -256,6 +258,12 @@ class HTTPAdmissionSecurity:
         self.allowed_hosts = frozenset(parse_host_header(value) for value in allowed_hosts)
         self.allowed_origins = frozenset(normalize_origin(value) for value in allowed_origins)
         self.trusted_proxy_ips = frozenset(ipaddress.ip_address(value).compressed for value in trusted_proxy_ips)
+        if any(not path.startswith("/") for path in unauthenticated_paths):
+            raise ValueError("unauthenticated paths must be exact absolute paths")
+        if resource_metadata_url is not None and not resource_metadata_url.startswith("https://"):
+            raise ValueError("OAuth resource metadata URL must use HTTPS")
+        self.unauthenticated_paths = frozenset(unauthenticated_paths)
+        self.resource_metadata_url = resource_metadata_url
         self._semaphore = asyncio.Semaphore(self.limits.max_concurrency)
         self._rate = SlidingWindowRateLimiter(max_keys=self.limits.max_rate_keys)
 
@@ -424,7 +432,11 @@ class HTTPAdmissionSecurity:
                     raise AdmissionError(400, "query_bearer_forbidden")
             authorization = headers.get("authorization", [""])[0]
             identity: AccessIdentity | None = None
-            if self.authenticator is not None:
+            public_metadata = (
+                scope.get("method") == "GET"
+                and scope.get("path") in self.unauthenticated_paths
+            )
+            if self.authenticator is not None and not public_metadata:
                 if not authorization:
                     raise AdmissionError(401, "authentication_required", authenticate=True)
                 try:
@@ -487,6 +499,9 @@ class HTTPAdmissionSecurity:
                 correlation_id,
                 authenticate=exc.authenticate,
                 retry_after=exc.status in {429, 503},
+                resource_metadata_url=(
+                    self.resource_metadata_url if exc.authenticate else None
+                ),
             )
         except Exception:
             # Never expose application, adapter, or ASGI protocol exception text.
@@ -525,11 +540,14 @@ class HTTPAdmissionSecurity:
         *,
         authenticate: bool = False,
         retry_after: bool = False,
+        resource_metadata_url: str | None = None,
     ) -> None:
         body = json.dumps({"error": code}, separators=(",", ":")).encode("utf-8")
         headers = cls._secure_headers(((b"content-type", b"application/json"),), correlation_id)
         if authenticate:
             challenge = 'Bearer realm="my-data-hub"'
+            if resource_metadata_url:
+                challenge += f', resource_metadata="{resource_metadata_url}"'
             if code in {"invalid_token", "insufficient_scope"}:
                 challenge += f', error="{code}"'
             headers.append((b"www-authenticate", challenge.encode("ascii")))
@@ -550,6 +568,8 @@ class OAuthAdmissionSecurity(HTTPAdmissionSecurity):
         allowed_origins: tuple[str, ...],
         limits: AdmissionLimits | None = None,
         trusted_proxy_ips: tuple[str, ...] = (),
+        metadata_path: str | None = None,
+        resource_metadata_url: str | None = None,
     ) -> None:
         async def authenticate(header: str) -> AccessIdentity:
             return await validator.validate_authorization_header(
@@ -565,4 +585,6 @@ class OAuthAdmissionSecurity(HTTPAdmissionSecurity):
             limits=limits,
             authenticator=authenticate,
             trusted_proxy_ips=trusted_proxy_ips,
+            unauthenticated_paths=(metadata_path,) if metadata_path else (),
+            resource_metadata_url=resource_metadata_url,
         )

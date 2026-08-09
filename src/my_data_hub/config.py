@@ -4,6 +4,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 class ConfigurationError(RuntimeError):
@@ -210,6 +211,8 @@ class Settings:
             "orchestrator:read",
             "region-talk:read",
             "migration:read",
+            "connector:read",
+            "provider:read",
         }
         if self.mcp_remote_enabled and (
             self.mcp_write_enabled or not self.mcp_scopes <= remote_read_scopes
@@ -231,6 +234,18 @@ class Settings:
                 )
             if not self.mcp_oauth_jwks_url.startswith("https://"):
                 raise ConfigurationError("OAuth JWKS URL must use HTTPS")
+            resource = urlsplit(self.mcp_oauth_resource)
+            if (
+                resource.scheme != "https"
+                or not resource.netloc
+                or resource.username is not None
+                or resource.password is not None
+                or resource.query
+                or resource.fragment
+            ):
+                raise ConfigurationError(
+                    "OAuth resource must be an HTTPS URL without credentials, query, or fragment"
+                )
             allowed_algorithms = {"RS256", "RS384", "RS512", "ES256", "ES384"}
             if not self.mcp_oauth_algorithms or not set(self.mcp_oauth_algorithms) <= allowed_algorithms:
                 raise ConfigurationError("OAuth algorithms must be an asymmetric allowlist")

@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-mcp_server_module = pytest.importorskip("mcp.server")
-
 from my_data_hub.config import Settings
-from my_data_hub.mcp.server import create_server
+from my_data_hub.mcp.server import create_server, oauth_resource_metadata_url
 
+mcp_server_module = pytest.importorskip("mcp.server")
 
 READ_ONLY_TOOLS = {
     "hub.health",
@@ -18,6 +17,8 @@ READ_ONLY_TOOLS = {
     "region_talk.plan.preview",
     "region_talk.migration.status",
     "region_talk.migration.accounting",
+    "connector.status.list",
+    "provider.resource.status",
 }
 WRITE_TOOLS = {"region_talk.work.enqueue", "hub.command.submit"}
 
@@ -32,7 +33,7 @@ def read_only_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_ENABLED", "false")
     monkeypatch.setenv(
         "MY_DATA_HUB_MCP_SCOPES",
-        "hub:read,orchestrator:read,region-talk:read,migration:read",
+        "hub:read,orchestrator:read,region-talk:read,migration:read,connector:read,provider:read",
     )
     return Settings.from_env()
 
@@ -62,3 +63,9 @@ def test_mcp_v2_streamable_http_builder_accepts_security_limits(
     )
     assert app is not None
     assert server.session_manager is not None
+
+
+def test_rfc9728_metadata_url_is_path_derived() -> None:
+    assert oauth_resource_metadata_url("https://mcp-datahub.kenigevents.ru/mcp") == (
+        "https://mcp-datahub.kenigevents.ru/.well-known/oauth-protected-resource/mcp"
+    )
