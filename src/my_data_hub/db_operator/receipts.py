@@ -52,9 +52,14 @@ def _b64_encode(value: bytes) -> str:
 
 def _b64_decode(value: str) -> bytes:
     try:
-        return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
     except Exception as exc:
         raise ReceiptError("receipt has invalid base64") from exc
+    # Reject alternate encodings with non-zero unused padding bits. Otherwise a
+    # last-character mutation can decode to the same signed bytes.
+    if _b64_encode(decoded) != value:
+        raise ReceiptError("receipt has non-canonical base64")
+    return decoded
 
 
 @dataclass(frozen=True, slots=True)
