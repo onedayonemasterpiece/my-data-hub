@@ -5,12 +5,18 @@
 ```text
 Source repository: onedayonemasterpiece/idea-hub
 Source path: ideas/portfolio.inbox/idea-20260809-content-platform-current-design.md
-Source commit reported by owner: 0c3fcf7
-Historical project name: content-platform
-Final project name: my-data-hub
+Source commit: 0c3fcf71b2ee8ba8afa49624bef4b779873802f7
+SHA-256: c7efb28231223caa6fd02fcc001a38e0f16bcc3fa4c4cd53e744721b2eac0852
+Import status: verified_import
+Canonical project name: my-data-hub
+Historical alias (not a separate project): content-platform
 ```
 
-The bootstrap may be committed with the source gate explicitly marked pending, but the exact file must be imported from the immutable commit before the architecture is marked verified or the deployment/migration gate is closed. Its full original text is authoritative evidence; the documents in this repository normalize it for implementation without downgrading it to an ordinary inbox idea.
+The exact file has been imported from the immutable commit through
+`scripts/import_source_material.py`. Its full original bytes are authoritative evidence;
+the documents in this repository normalize it for implementation without downgrading it
+to an ordinary inbox idea. The source import verifies provenance only; it does not by
+itself close deployment, migration or publication gates.
 
 ## Architecture research
 

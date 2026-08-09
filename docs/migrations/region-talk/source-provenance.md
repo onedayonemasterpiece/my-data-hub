@@ -28,3 +28,17 @@ source commits and hashes are pinned:
 
 Do not wholesale copy unrelated `events-bot-new` runtime or any environment/session/data
 file.
+
+## Bounded status and safety claims
+
+The verified target-vision source is pinned separately at
+`onedayonemasterpiece/idea-hub@0c3fcf71b2ee8ba8afa49624bef4b779873802f7` with
+SHA-256 `c7efb28231223caa6fd02fcc001a38e0f16bcc3fa4c4cd53e744721b2eac0852`.
+That source describes Region Talk as an incomplete architectural prototype, not a finished
+production reference. It does not prove access to either Region Talk donor repository or
+verify any still-pending donor manifest entry.
+
+In `my-data-hub`, Region Talk remains `paused` while donor provenance, migration accounting,
+shadow comparison and canary gates are open. Production publication remains disabled and
+requires its own exact-revision canary, receipt and owner approval; importing target-vision
+bytes changes none of those gates.
