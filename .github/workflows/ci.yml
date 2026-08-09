@@ -40,6 +40,7 @@ jobs:
           --health-timeout 5s
           --health-retries 30
     env:
+      MY_DATA_HUB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
       MY_DATA_HUB_DATABASE_URL: postgresql://my_data_hub_test:integration-only-password@127.0.0.1:5432/my_data_hub_test
       MY_DATA_HUB_ENVIRONMENT: test
       MY_DATA_HUB_INSTANCE_ID: github-actions

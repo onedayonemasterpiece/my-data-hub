@@ -68,7 +68,13 @@ def main() -> int:
             raise SystemExit("--hash-file must use key=existing-path")
         hashes[key] = hashlib.sha256(path.read_bytes()).hexdigest()
 
-    commit = os.getenv("GITHUB_SHA") or _version(["git", "rev-parse", "HEAD"])
+    # pull_request workflows run on a synthetic merge commit. Evidence must bind
+    # the reviewed source head instead, supplied explicitly by the workflow.
+    commit = (
+        os.getenv("MY_DATA_HUB_SOURCE_COMMIT")
+        or os.getenv("GITHUB_SHA")
+        or _version(["git", "rev-parse", "HEAD"])
+    )
     receipt = {
         "schema_version": "my-data-hub-workflow-receipt.v1",
         "workflow": args.workflow,
