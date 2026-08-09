@@ -1,0 +1,26 @@
+{
+  "schema_version": "my-data-hub-workflow-receipt.v1",
+  "workflow": "ci-postgres-integration",
+  "run_id": "31337930703",
+  "run_attempt": 1,
+  "trigger": "pull_request",
+  "actor": "github-actions",
+  "repository": "onedayonemasterpiece/my-data-hub",
+  "commit": "0b6b7311081bdfecdd4f3004e5d6842a42f64253",
+  "environment": "ci",
+  "started_at": "2026-08-09T20:00:00Z",
+  "finished_at": "2026-08-09T20:01:00Z",
+  "versions": {"python": "3.12", "postgresql": "18"},
+  "resource_ids": {"database": "my_data_hub_test"},
+  "hashes": {"migration_contract": "1111111111111111111111111111111111111111111111111111111111111111"},
+  "checks": [
+    {
+      "name": "clean migrations",
+      "expected": "revision 10",
+      "observed": "revision 10",
+      "outcome": "PASS"
+    }
+  ],
+  "cleanup": "not_required",
+  "blockers": []
+}

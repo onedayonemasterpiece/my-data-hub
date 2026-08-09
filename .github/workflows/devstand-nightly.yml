@@ -1,0 +1,64 @@
+name: devstand-nightly
+
+on:
+  schedule:
+    - cron: '23 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devstand-nightly
+  cancel-in-progress: false
+
+jobs:
+  read-only-runtime-proof:
+    runs-on: ubuntu-latest
+    environment: devstand-readonly
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[dev]'
+      - name: Preflight read-only SSH credential
+        env:
+          HOST: ${{ secrets.DEVSTAND_SSH_HOST }}
+          USER: ${{ secrets.DEVSTAND_READONLY_SSH_USER }}
+          KEY: ${{ secrets.DEVSTAND_READONLY_SSH_PRIVATE_KEY }}
+          HOST_KEY: ${{ secrets.DEVSTAND_SSH_HOST_KEY }}
+        run: |
+          test -n "$HOST" && test -n "$USER" && test -n "$KEY" && test -n "$HOST_KEY"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519; chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+      - name: Prove non-destructive runtime health and freshness
+        env:
+          HOST: ${{ secrets.DEVSTAND_SSH_HOST }}
+          USER: ${{ secrets.DEVSTAND_READONLY_SSH_USER }}
+        run: |
+          ssh "$USER@$HOST" 'set -Eeuo pipefail; cd /opt/my-data-hub/current; \
+            systemctl is-active --quiet my-data-hub-api my-data-hub-orchestrator my-data-hub-mcp my-data-hub-backup.timer; \
+            /opt/my-data-hub/venv/bin/my-data-hub db verify; \
+            test "$(find /var/lib/my-data-hub/backups -name "*.manifest.json" -mmin -1500 | wc -l)" -ge 1; \
+            grep -qx MY_DATA_HUB_SCHEDULER_ENABLED=false /etc/my-data-hub/my-data-hub.env; \
+            grep -qx MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED=false /etc/my-data-hub/my-data-hub.env; \
+            grep -qx MY_DATA_HUB_MCP_WRITE_ENABLED=false /etc/my-data-hub/my-data-hub.env'
+      - name: Prove auth/Host/Origin negatives and bounded provider policy offline
+        run: pytest -q tests/test_mcp_oauth.py tests/test_http_security.py tests/test_kaggle_control_plane.py
+      - name: Write nightly receipt
+        if: always()
+        run: |
+          outcome=PASS; observed="nightly non-destructive checks passed"
+          if [[ "${{ job.status }}" != success ]]; then outcome=FAIL; observed="nightly check failed"; fi
+          python scripts/write_workflow_receipt.py --workflow devstand-nightly --environment devstand \
+            --outcome "$outcome" --observed "$observed" --cleanup not_required \
+            --output artifacts/devstand-nightly-receipt.json
+      - name: Upload nightly receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devstand-nightly-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/devstand-nightly-receipt.json
+          if-no-files-found: error
