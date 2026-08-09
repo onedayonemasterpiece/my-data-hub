@@ -7,7 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from my_data_hub.config import Settings
+from my_data_hub.config import ConfigurationError, Settings
 from my_data_hub.db.health import verify_database
 from my_data_hub.db.migrations import applied_migrations, discover_migrations, migrate
 from my_data_hub.orchestrator.backlog import load_region_talk_backlog
@@ -110,6 +110,10 @@ def command_orchestrator_plan(args: argparse.Namespace) -> int:
 
 def command_orchestrator_loop(args: argparse.Namespace) -> int:
     settings = _database_settings()
+    if settings.environment in {"prod", "production"} and not settings.orchestrator_database_url:
+        raise ConfigurationError(
+            "production orchestrator requires MY_DATA_HUB_ORCHESTRATOR_DATABASE_URL"
+        )
     run_loop(
         settings.orchestrator_database_url or settings.database_url,
         settings.instance_id,

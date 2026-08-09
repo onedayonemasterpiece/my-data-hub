@@ -192,7 +192,9 @@ def test_restore_orchestrates_fresh_isolated_target_and_writes_receipt(tmp_path:
     python_wrapper.write_text(
         "#!/bin/sh\nif [ \"${1:-}\" = -m ]; then\n"
         "  if [ \"${2:-}\" = my_data_hub.recovery_verify ]; then\n"
-        "    printf '{\"ok\":true,\"evidence\":{\"schema_revision\":10}}\\n'\n"
+        "    printf '{\"ok\":true,\"evidence\":{\"schema_revision\":10,"
+        "\"canonical_revision\":0,\"postgres_major\":18,"
+        "\"extension_versions\":{\"vector\":\"0.8.1\"}}}\\n'\n"
         "  fi\n"
         "  exit 0\nfi\nexec "
         f"'{sys.executable}' \"$@\"\n"

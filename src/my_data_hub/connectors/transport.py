@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, replace
 from email.message import Message
 from urllib.error import HTTPError, URLError
@@ -19,7 +20,9 @@ def _retry_after(headers: Message) -> float | None:
         parsed = float(value)
     except ValueError:
         return None
-    return max(0.0, parsed)
+    if not math.isfinite(parsed):
+        return None
+    return min(3600.0, max(0.0, parsed))
 
 
 def _message(body: bytes) -> str:

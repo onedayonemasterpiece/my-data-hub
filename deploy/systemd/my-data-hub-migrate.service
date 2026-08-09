@@ -4,10 +4,10 @@ After=postgresql.service my-data-hub-role-bootstrap.service
 
 [Service]
 Type=oneshot
-User=mydatahub
-Group=mydatahub
+User=mydatahub-migrator
+Group=mydatahub-migrator
 WorkingDirectory=/opt/my-data-hub/current
-EnvironmentFile=/etc/my-data-hub/my-data-hub.env
+EnvironmentFile=/etc/my-data-hub/migrator.env
 ExecStart=/opt/my-data-hub/venv/bin/my-data-hub db migrate
 NoNewPrivileges=true
 PrivateTmp=true

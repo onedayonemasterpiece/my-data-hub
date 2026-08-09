@@ -1,7 +1,7 @@
 # First deployment receipt — R1
 
-Status: **BLOCKED — no devstand/backend is discoverable in the authorized cloud**  
-Receipt observation time: `2026-08-09T22:46:15Z`  
+Status: **BLOCKED — no devstand/backend is discoverable in the authorized cloud**
+Receipt observation time: `2026-08-09T22:46:15Z`
 Repository branch under test: `integration/r1-infrastructure-workflow`
 
 This document deliberately separates observations from the current Codex runner and
@@ -88,7 +88,7 @@ denied, so runner firewall state is also unverified.
 - Upgrade from released revision 9 to 10: PASS; disposable database dropped.
 - Bootstrap invariants: PASS.
 - Role provisioning: PASS, twelve password-free group roles.
-- PostgreSQL positive/adversarial/ownership probes: PASS, 66 probes. All application
+- PostgreSQL positive/adversarial/ownership probes: PASS, 89 probes. All application
   objects in the fresh audit database were owned by `mdh_owner`; direct canonical
   singleton mutation was denied outside the dedicated bounded committer function.
 - OAuth revocation before/after durable row: PASS (`false -> true`).
@@ -99,22 +99,22 @@ denied, so runner firewall state is also unverified.
 
 ## Synthetic connector receipt
 
-Latest fresh disposable flow at `2026-08-09T22:45:46Z`:
+Latest restricted-login disposable flow at `2026-08-09T23:56:09Z`:
 
 | Evidence | Identifier/value |
 |---|---|
-| accepted batch | `04c6230c-647e-5b9c-aef2-65329a97444d` |
-| acceptance receipt | `aebded4b-5a17-4672-9112-ede0b3912e78` |
-| conflict quarantine | `d7fda5b7-584a-426e-9aa9-f363331b55c0` |
-| first semantic outbox | `3e97a75c-fe50-4789-b141-a47740610cf3` |
-| outage/restart eventual batch | `b251b189-2747-50ad-a06e-809d7455d535` |
-| canonical revision after both commits | `2` |
+| accepted batch | `44855fdd-7bb7-5b00-b25d-b04b47aac8c7` |
+| acceptance receipt | `f6454369-f9b6-4d32-a1f5-045c006ba5c6` |
+| conflict quarantine | `92975ca4-714a-470a-a94f-a3af1b34d35b` |
+| first semantic outbox | `38e15e90-7f1d-46ec-93ea-a35e5f0a14be` |
+| outage/restart eventual batch | `7e20e6f1-d140-51c5-90ef-8cbd05e44ae1` |
+| canonical revision after both latest commits | `4` |
 | durable producer receipt count | `1` |
 
 The producer spool first deferred delivery during a synthetic outage, was reopened as a
 new spool instance, delivered the exact bytes once, retained one durable receipt, and
 replayed the canonical commit without a duplicate. The semantic MCP connector status
-projection observed two committed batches. This remains disposable CI evidence, not a
+projection observed four committed batches across repeatable canary runs. This remains disposable CI evidence, not a
 production events-bot canary.
 
 ## Safety gates required at deployment

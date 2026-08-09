@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import tempfile
+import time
 from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -30,16 +31,46 @@ from my_data_hub.mcp.service import HubService
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--database-url", default=os.getenv("MY_DATA_HUB_CONNECTOR_DATABASE_URL", ""))
+    parser.add_argument(
+        "--intake-database-url",
+        default=os.getenv("MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL", ""),
+    )
+    parser.add_argument(
+        "--committer-database-url",
+        default=os.getenv("MY_DATA_HUB_CANONICAL_COMMITTER_DATABASE_URL", ""),
+    )
+    parser.add_argument(
+        "--mcp-reader-database-url",
+        default=os.getenv("MY_DATA_HUB_MCP_READER_DATABASE_URL", ""),
+    )
+    parser.add_argument(
+        "--verification-database-url",
+        default=os.getenv("MY_DATA_HUB_ROLE_ADMIN_DATABASE_URL", ""),
+    )
+    parser.add_argument("--sequence", type=int, default=None)
     args = parser.parse_args()
-    if not args.database_url:
-        raise SystemExit("MY_DATA_HUB_CONNECTOR_DATABASE_URL or --database-url is required")
+    urls = {
+        "intake": args.intake_database_url,
+        "committer": args.committer_database_url,
+        "MCP reader": args.mcp_reader_database_url,
+        "verification": args.verification_database_url,
+    }
+    missing = [name for name, value in urls.items() if not value]
+    if missing:
+        raise SystemExit("missing dedicated database URL(s): " + ", ".join(missing))
 
     import psycopg
 
     producer = SyntheticConnectorProducer()
-    exact = producer.exact_bytes(date(2026, 8, 9), sequence=987)
-    repository = PostgresConnectorAcceptanceRepository(args.database_url)
+    # Millisecond epoch values remain unique enough for a serialized canary while
+    # staying inside RFC 8785's interoperable IEEE-754 integer range.
+    sequence = args.sequence if args.sequence is not None else time.time_ns() // 1_000_000
+    # The daily projection has one initial row per logical date. Map the unique canary
+    # sequence into a wide, bounded fixture-only date range so repeated post-deploy runs
+    # never masquerade as corrections to an earlier canary.
+    reporting_date = date(2000, 1, 1) + timedelta(days=sequence % 1_000_000)
+    exact = producer.exact_bytes(reporting_date, sequence=sequence)
+    repository = PostgresConnectorAcceptanceRepository(args.intake_database_url)
     intake = ConnectorIntakeService(repository)
     accepted = intake.submit(
         exact,
@@ -72,7 +103,7 @@ def main() -> int:
     ):
         raise SystemExit("connector replay/conflict dispositions did not match the contract")
 
-    committer = PostgresDailyStatisticsCommitter(args.database_url)
+    committer = PostgresDailyStatisticsCommitter(args.committer_database_url)
     first_commit = committer.commit(accepted.receipt.batch_id)
     repeated_commit = committer.commit(accepted.receipt.batch_id)
     if first_commit.duplicate or not repeated_commit.duplicate or first_commit != repeated_commit.__class__(
@@ -83,8 +114,10 @@ def main() -> int:
     ):
         raise SystemExit("connector canonical commit was not exactly once")
 
-    outage_exact = producer.exact_bytes(date(2026, 8, 10), sequence=988)
-    outage_at = datetime(2026, 8, 10, tzinfo=UTC)
+    outage_exact = producer.exact_bytes(
+        reporting_date + timedelta(days=1), sequence=sequence + 1
+    )
+    outage_at = datetime.now(UTC)
 
     class UnavailableTransport:
         def submit(self, _exact_envelope_bytes: bytes) -> DeliveryResult:
@@ -132,7 +165,7 @@ def main() -> int:
         )
 
     mcp_status = HubService(
-        args.database_url,
+        args.mcp_reader_database_url,
         scopes=frozenset({"connector:read"}),
         write_enabled=False,
     ).connector_status()
@@ -140,20 +173,22 @@ def main() -> int:
         row for row in mcp_status if row["data_product"] == "synthetic.daily-statistics.v1"
     )
 
-    with psycopg.connect(args.database_url) as connection, connection.cursor() as cursor:
+    with psycopg.connect(
+        args.verification_database_url
+    ) as connection, connection.cursor() as cursor:
         cursor.execute(
             """
             SELECT
                 (SELECT count(*) FROM integration.batch WHERE batch_id = %s),
                 (SELECT count(*) FROM integration.daily_statistic WHERE batch_id = %s),
-                (SELECT count(*) FROM integration.quarantine WHERE connector_id = %s),
+                (SELECT count(*) FROM integration.quarantine WHERE quarantine_id = %s),
                 (SELECT count(*) FROM sync.external_outbox WHERE idempotency_key = %s),
                 (SELECT canonical_revision FROM hub.canonical_state WHERE singleton = true)
             """,
             (
                 accepted.receipt.batch_id,
                 accepted.receipt.batch_id,
-                producer.connector_id,
+                conflict.quarantine.quarantine_id,
                 f"connector-commit:{accepted.receipt.batch_id}",
             ),
         )

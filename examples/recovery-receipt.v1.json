@@ -21,14 +21,22 @@
     "verified_at": "2026-08-09T20:30:00Z"
   },
   "receipt_id": "0f6da614-893a-4a15-8f11-4c726545bea8",
-  "receipt_sha256": "103e71c0ab8cc24b1508904f5ef2a3a80825a69d7c238b2cab33f8cd07fdf973",
+  "receipt_sha256": "0dacbfb85a7eeec132b4bd163309e861334b1d25a15eb1aff83123980b6bc6a0",
   "restore": {
     "application_verify": "passed",
     "automatic_promotion": false,
+    "canonical_revision": 0,
     "completed_at": "2026-08-09T20:34:00Z",
+    "extension_versions": {
+      "citext": "1.6",
+      "pg_trgm": "1.6",
+      "pgcrypto": "1.3",
+      "vector": "0.8.1"
+    },
     "freshness_check": "passed",
     "isolated": true,
     "pg_restore": "passed",
+    "postgres_major": 18,
     "relations_before": 0,
     "restored_state_verify": "passed",
     "restored_state_verify_sha256": "4444444444444444444444444444444444444444444444444444444444444444",

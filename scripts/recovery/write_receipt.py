@@ -89,10 +89,21 @@ def main() -> int:
     if verification.get("ok") is not True:
         raise RecoveryContractError("restored-state verification did not pass")
     verification_evidence = verification.get("evidence")
-    if not isinstance(verification_evidence, dict) or not isinstance(
-        verification_evidence.get("schema_revision"), int
+    if not isinstance(verification_evidence, dict):
+        raise RecoveryContractError("restored-state verification lacks evidence")
+    for integer_field in ("schema_revision", "canonical_revision", "postgres_major"):
+        if not isinstance(verification_evidence.get(integer_field), int):
+            raise RecoveryContractError(
+                f"restored-state verification lacks integer {integer_field}"
+            )
+    extension_versions = verification_evidence.get("extension_versions")
+    if not isinstance(extension_versions, dict) or not extension_versions or not all(
+        isinstance(name, str) and isinstance(version, str)
+        for name, version in extension_versions.items()
     ):
-        raise RecoveryContractError("restored-state verification lacks schema revision")
+        raise RecoveryContractError(
+            "restored-state verification lacks extension versions"
+        )
 
     artifact = manifest["artifact"]
     receipt = {
@@ -133,6 +144,9 @@ def main() -> int:
             "restored_state_verify": "passed",
             "restored_state_verify_sha256": sha256_file(args.verification),
             "schema_revision": verification_evidence["schema_revision"],
+            "canonical_revision": verification_evidence["canonical_revision"],
+            "postgres_major": verification_evidence["postgres_major"],
+            "extension_versions": extension_versions,
             "automatic_promotion": False,
         },
     }

@@ -265,12 +265,14 @@ def test_synthetic_producer_is_deterministic_and_changes_identity_by_sequence() 
 def test_events_bot_product_normalizes_the_deployed_producer_shape() -> None:
     record = {
         "events_added_total": 27,
-        "deferred_total": 3,
-        "error_total": 0,
         "counts_by_city": {"Калининград": 27},
         "counts_by_type": {"концерт": 9, "другое": 18},
     }
-    assert normalize_daily_counters("events-bot.daily-statistics.v1", record) == record
+    assert normalize_daily_counters("events-bot.daily-statistics.v1", record) == {
+        **record,
+        "deferred_total": 0,
+        "error_total": 0,
+    }
 
 
 def test_connector_transport_requires_https_and_retry_has_bounded_jitter() -> None:
@@ -289,3 +291,4 @@ def test_connector_transport_requires_https_and_retry_has_bounded_jitter() -> No
     assert 8 <= second <= 12
     assert first != second
     assert policy.delay(99, jitter_key="batch-a").total_seconds() <= 30
+    assert policy.delay(1_000_000, jitter_key="batch-a").total_seconds() <= 30

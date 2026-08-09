@@ -28,8 +28,10 @@ jobs:
           USER: ${{ secrets.DEVSTAND_READONLY_SSH_USER }}
           KEY: ${{ secrets.DEVSTAND_READONLY_SSH_PRIVATE_KEY }}
           HOST_KEY: ${{ secrets.DEVSTAND_SSH_HOST_KEY }}
+          MCP_TOKEN: ${{ secrets.DEVSTAND_MCP_READONLY_TOKEN }}
         run: |
           test -n "$HOST" && test -n "$USER" && test -n "$KEY" && test -n "$HOST_KEY"
+          test -n "$MCP_TOKEN" || { echo 'missing DEVSTAND_MCP_READONLY_TOKEN' >&2; exit 2; }
           install -m 700 -d ~/.ssh
           printf '%s\n' "$KEY" > ~/.ssh/id_ed25519; chmod 600 ~/.ssh/id_ed25519
           printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
@@ -39,13 +41,22 @@ jobs:
           USER: ${{ secrets.DEVSTAND_READONLY_SSH_USER }}
         run: |
           ssh "$USER@$HOST" 'set -Eeuo pipefail; cd /opt/my-data-hub/current; \
-            systemctl is-active --quiet my-data-hub-api my-data-hub-orchestrator my-data-hub-mcp my-data-hub-backup.timer; \
+            systemctl is-active --quiet my-data-hub-api my-data-hub-orchestrator my-data-hub-mcp my-data-hub-backup.timer my-data-hub-connector-committer.timer; \
             sudo systemctl start my-data-hub-db-verify.service; \
+            sudo systemctl start my-data-hub-nightly-state.service; \
             test "$(find /var/lib/my-data-hub/backups -name "*.manifest.json" -mmin -1500 | wc -l)" -ge 1; \
-            grep -qx MY_DATA_HUB_SCHEDULER_ENABLED=false /etc/my-data-hub/my-data-hub.env; \
-            grep -qx MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED=false /etc/my-data-hub/my-data-hub.env; \
-            grep -qx MY_DATA_HUB_MCP_WRITE_ENABLED=false /etc/my-data-hub/my-data-hub.env'
-      - name: Prove auth/Host/Origin negatives and bounded provider policy offline
+            grep -qx MY_DATA_HUB_SCHEDULER_ENABLED=false /etc/my-data-hub/orchestrator.env; \
+            grep -qx MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED=false /etc/my-data-hub/api.env; \
+            grep -qx MY_DATA_HUB_MCP_WRITE_ENABLED=false /etc/my-data-hub/mcp.env'
+      - name: Prove live read-only MCP and live auth negatives
+        env:
+          MY_DATA_HUB_MCP_CANARY_TOKEN: ${{ secrets.DEVSTAND_MCP_READONLY_TOKEN }}
+        run: |
+          test "$(curl --max-time 15 -sS -o /dev/null -w '%{http_code}' https://mcp-datahub.kenigevents.ru/mcp)" = 401
+          test "$(curl --max-time 15 -sS -o /dev/null -w '%{http_code}' \
+            -H 'Authorization: Bearer invalid-nightly-token' https://mcp-datahub.kenigevents.ru/mcp)" = 401
+          python scripts/verify_remote_mcp.py
+      - name: Prove bounded provider and OAuth policy offline
         run: pytest -q tests/test_mcp_oauth.py tests/test_http_security.py tests/test_kaggle_control.py
       - name: Write nightly receipt
         if: always()

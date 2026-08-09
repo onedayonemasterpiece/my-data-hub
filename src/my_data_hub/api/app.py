@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from my_data_hub.api.intake import WorkerResultConflict, WorkerResultRepository
 from my_data_hub.artifact_store import LocalArtifactStore
-from my_data_hub.config import Settings
+from my_data_hub.config import ConfigurationError, Settings
 from my_data_hub.connectors.contracts import ConnectorContractError
 from my_data_hub.connectors.postgres import PostgresConnectorAcceptanceRepository
 from my_data_hub.connectors.repository import AcceptanceDisposition
@@ -91,6 +91,25 @@ async def _bounded_json_body(request: Request, max_bytes: int) -> dict[str, Any]
 
 
 def create_app(settings: Settings) -> FastAPI:
+    if settings.environment in {"prod", "production"}:
+        missing = [
+            name
+            for name, value in (
+                ("MY_DATA_HUB_APPLICATION_DATABASE_URL", settings.application_database_url),
+                (
+                    "MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL",
+                    settings.connector_intake_database_url,
+                ),
+            )
+            if not value
+        ]
+        if missing:
+            raise ConfigurationError(
+                "production API restricted database identities are incomplete: "
+                + ", ".join(missing)
+            )
+        if not settings.worker_result_token:
+            raise ConfigurationError("worker result token is required by the production API")
     app = FastAPI(
         title="my-data-hub control API",
         version="0.1.0",

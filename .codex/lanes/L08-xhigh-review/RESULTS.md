@@ -1,6 +1,6 @@
 # L08 separate security/data-integrity review
 
-Status: **initial review complete; remediation requires second review**
+Status: **second review complete; final remediation requires third review**
 
 The requested `XHigh` label was not available to the read-only reviewer role. The audit
 therefore ran at the maximum available `checklist_reviewer` **High** effort and did not
@@ -26,5 +26,17 @@ Integration-owner remediation includes:
   transport with jitter.
 
 External deployment/provider findings remain blockers rather than fabricated passes.
-This lane is not closed until the remediation commit is pushed, CI is green and the
-same independent reviewer completes a second audit.
+The second review of `b214f24` found no remaining Critical issue, but correctly kept the
+PR not merge-ready because per-service secret isolation was not runtime-usable, the
+application role lacked its orchestration access, the events-bot payload still differed
+from its target normalizer, no supervised canonical committer existed, workflows lacked
+live post-deploy probes, and the recovery-to-operator checkpoint path was disconnected.
+
+The current integration remediation adds per-service Unix users/environment files,
+process-specific configuration validation, application/orchestrator role positives and
+89 strict role/ownership probes, an exact events-bot producer-shape normalizer, a
+supervised bounded committer, live connector/OAuth/MCP/revocation/process-kill/reboot
+workflow probes, fail-closed nightly cadence/queue/recovery/provider checks, and a
+verified recovery receipt → `sync.checkpoint` → operator gate path. The branch is not
+merge-ready until these changes are committed, CI is green, and the same independent
+reviewer returns a final no-Critical/no-High verdict.

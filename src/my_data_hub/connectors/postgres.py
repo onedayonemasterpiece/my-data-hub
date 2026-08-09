@@ -38,7 +38,8 @@ def normalize_daily_counters(data_product: str, record: dict[str, Any]) -> dict[
             raise ValueError("synthetic daily-statistics counts must be non-negative integers")
         return counters
     if data_product == "events-bot.daily-statistics.v1":
-        total_names = ("events_added_total", "deferred_total", "error_total")
+        total_names = ("events_added_total",)
+        optional_total_names = ("deferred_total", "error_total")
         grouped_names = ("counts_by_city", "counts_by_type")
         if not all(
             isinstance(record.get(name), int) and record[name] >= 0
@@ -54,7 +55,17 @@ def normalize_daily_counters(data_product: str, record: dict[str, Any]) -> dict[
             for name in grouped_names
         ):
             raise ValueError("events-bot grouped counts must be non-negative integers")
-        return {name: record[name] for name in (*total_names, *grouped_names)}
+        if not all(
+            name not in record
+            or (isinstance(record[name], int) and record[name] >= 0)
+            for name in optional_total_names
+        ):
+            raise ValueError("optional events-bot totals must be non-negative integers")
+        return {
+            **{name: record[name] for name in total_names},
+            **{name: int(record.get(name, 0)) for name in optional_total_names},
+            **{name: record[name] for name in grouped_names},
+        }
     raise ValueError("no bounded R1 normalizer is registered for data product")
 
 
@@ -75,13 +86,18 @@ class PostgresConnectorAcceptanceRepository:
         correction = envelope.correction
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            # Serialize one connector/idempotency identity without granting the intake
+            # role UPDATE solely for SELECT ... FOR UPDATE row locks.
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s || chr(31) || %s, 0))",
+                (submission.identity.connector_id, submission.identity.idempotency_key),
+            )
             cursor.execute(
                 """
                 SELECT c.service_principal, c.status, p.enabled, p.schema_version
                 FROM integration.connector c
                 JOIN integration.data_product p ON p.connector_id = c.connector_id
                 WHERE c.connector_id = %s AND p.data_product = %s
-                FOR SHARE OF c, p
                 """,
                 (submission.identity.connector_id, envelope.data_product),
             )
@@ -107,7 +123,6 @@ class PostgresConnectorAcceptanceRepository:
                     LIMIT 1
                 ) r ON true
                 WHERE b.connector_id = %s AND b.idempotency_key = %s
-                FOR UPDATE OF b
                 """,
                 (submission.identity.connector_id, submission.identity.idempotency_key),
             )
@@ -404,7 +419,6 @@ class PostgresDailyStatisticsCommitter:
                 SELECT canonical_revision
                 FROM hub.canonical_state
                 WHERE singleton = true
-                FOR UPDATE
                 """
             )
             state = cursor.fetchone()

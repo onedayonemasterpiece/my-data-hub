@@ -96,6 +96,7 @@ class Settings:
     application_database_url: str = ""
     connector_intake_database_url: str = ""
     orchestrator_database_url: str = ""
+    canonical_committer_database_url: str = ""
 
     @classmethod
     def from_env(cls, *, require_database: bool = True) -> Settings:
@@ -189,6 +190,9 @@ class Settings:
             orchestrator_database_url=os.getenv(
                 "MY_DATA_HUB_ORCHESTRATOR_DATABASE_URL", ""
             ).strip(),
+            canonical_committer_database_url=os.getenv(
+                "MY_DATA_HUB_CANONICAL_COMMITTER_DATABASE_URL", ""
+            ).strip(),
         )
         settings.validate()
         return settings
@@ -223,25 +227,24 @@ class Settings:
                 raise ConfigurationError(
                     "development-token MCP authentication is forbidden in production"
                 )
-            if not self.worker_result_token:
-                raise ConfigurationError("worker result token is required in production")
             if self.mcp_remote_enabled and self.mcp_auth_mode != "oauth":
                 raise ConfigurationError("production remote MCP requires OAuth")
-            runtime_urls = {
-                "MY_DATA_HUB_APPLICATION_DATABASE_URL": self.application_database_url,
-                "MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL": self.connector_intake_database_url,
-                "MY_DATA_HUB_ORCHESTRATOR_DATABASE_URL": self.orchestrator_database_url,
-            }
-            missing_runtime = sorted(name for name, value in runtime_urls.items() if not value)
-            if missing_runtime:
-                raise ConfigurationError(
-                    "production restricted database identities are incomplete: "
-                    + ", ".join(missing_runtime)
+            configured_runtime_urls = tuple(
+                value
+                for value in (
+                    self.application_database_url,
+                    self.connector_intake_database_url,
+                    self.orchestrator_database_url,
+                    self.canonical_committer_database_url,
+                    self.mcp_reader_database_url,
+                    self.mcp_revocation_database_url,
                 )
-            usernames = [urlsplit(value).username for value in runtime_urls.values()]
+                if value
+            )
+            usernames = [urlsplit(value).username for value in configured_runtime_urls]
             if any(not username for username in usernames) or len(set(usernames)) != len(usernames):
                 raise ConfigurationError(
-                    "production service database URLs require distinct login principals"
+                    "database URLs present in one production process require distinct login principals"
                 )
         if self.mcp_remote_enabled and self.mcp_auth_mode == "stdio-environment":
             raise ConfigurationError("remote MCP cannot use stdio-environment authentication")

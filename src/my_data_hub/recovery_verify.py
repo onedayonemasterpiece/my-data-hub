@@ -30,6 +30,16 @@ def main() -> int:
     import psycopg
 
     with psycopg.connect(args.database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SHOW server_version_num")
+        evidence["postgres_major"] = int(str(cursor.fetchone()[0])) // 10000
+        cursor.execute(
+            "SELECT extname, extversion FROM pg_extension "
+            "WHERE extname = ANY(%s) ORDER BY extname",
+            (list(health.extensions),),
+        )
+        evidence["extension_versions"] = {
+            str(name): str(version) for name, version in cursor.fetchall()
+        }
         cursor.execute(
             """
             SELECT to_regclass('integration.batch'),

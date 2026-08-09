@@ -1,7 +1,7 @@
 # R1 integration report
 
-Generated: 2026-08-09 UTC  
-Base: `0b6b7311081bdfecdd4f3004e5d6842a42f64253`  
+Generated: 2026-08-09 UTC
+Base: `0b6b7311081bdfecdd4f3004e5d6842a42f64253`
 Integration branch: `integration/r1-infrastructure-workflow`
 
 This report distinguishes implemented code, disposable local proof, and external
@@ -20,7 +20,7 @@ requirement asks for runtime evidence.
 | L05 operator / R09 | merged | bounded engine plus live PostgreSQL disposable canary |
 | L06 OAuth / R06 | merged | admission primitives plus JWKS/revocation/RFC9728 production wiring |
 | L07 integration / R01–R05/R11 | in progress | workflows, central migration/grants/API/MCP/deploy evidence |
-| L08 review / R12 | remediation in progress | maximum-available High audit found critical issues; fixes are in this branch and require re-review |
+| L08 review / R12 | second remediation in progress | maximum-available High second audit found no Critical and identified remaining High issues; current fixes require final re-review |
 
 No worker change was dropped. Shared migrations, config, MCP catalog and workflows were
 reconciled serially by the integration owner.
@@ -31,35 +31,35 @@ reconciled serially by the integration owner.
 |---|---|---|
 | R01 observed devstand | **BLOCKED** | `docs/operations/first-deploy.md`; YC auth restored, but both authorized folders contain zero Compute instances/ALBs, required DNS is absent, and runner has no installed service |
 | R02 reproducible baseline | **PASS (local)** | exact Make commands use the checked-in `.venv` when present and pass with compileall; PR CI remains the independent proof |
-| R03 PostgreSQL | **PARTIAL** | privileged extension bootstrap followed by owner-scoped clean migration, 12 group roles, 66 strict-SQLSTATE probes and object ownership pass on PostgreSQL 18.4/pgvector 0.8.6; restricted LOGIN creation and host reboot/private listener proof require devstand secrets/access |
-| R04 recovery | **PARTIAL** | encrypted streaming, sanitized adapter environment, strict age-key mode/owner, exact readback, post-restore object/outbox/MCP verification, durable `recovery.evidence` recorder/provider and receipt tests pass; real off-host artifact/readback/restore evidence remains blocked |
-| R05 workflows | **PARTIAL** | all five workflow definitions and receipt schema exist; PR CI can run without secrets, but deploy/nightly/restore/provider run IDs require absent environments/secrets/runner/backend |
+| R03 PostgreSQL | **PARTIAL** | privileged extension bootstrap followed by owner-scoped clean migration, 12 group roles, 89 strict-SQLSTATE probes and object ownership pass on PostgreSQL 18.4/pgvector 0.8.6; restricted service LOGINs prove connector/committer/reader flow locally, while host reboot/private listener proof requires devstand access |
+| R04 recovery | **PARTIAL** | encrypted streaming, sanitized adapter environment, strict age-key mode/owner, exact readback, post-restore object/outbox/MCP verification and verified receipt→checkpoint→operator-gate wiring pass; real off-host artifact/readback/restore evidence remains blocked |
+| R05 workflows | **PARTIAL** | all five workflow definitions and receipt schema exist; deploy now encodes role/identity/connector/process-kill/reboot/live OAuth/MCP/revocation/listener evidence and nightly fails closed on queue/cadence/recovery/inventory, but external run IDs require absent environments/secrets/backend |
 | R06 remote MCP | **PARTIAL** | JWT/JWKS, exact claims, PostgreSQL revocation, RFC9728 metadata, Host/Origin/proxy/body/response/rate/timeout tests and read-only catalog pass; DNS/TLS/issuer/backend/Inspector/ChatGPT connection blocked |
 | R07 connectors | **PASS (disposable)** | intake → exact acceptance → single CAS committer/outbox → MCP read → replay → conflict quarantine plus durable outage/restart/eventual delivery; events-bot producer shape now has an exact target normalizer test, while merge/live credential/canary remain blocked |
 | R08 Kaggle | **PARTIAL** | four classes, conservative inventory policy, protected denials, leases/fingerprints, exchange and canary receipt contracts pass offline; account inventory and private dataset/notebook lifecycle/cleanup blocked by missing tested adapter/credentials |
 | R09 DB operator | **PARTIAL** | apply DML + durable receipt/idempotency now commit in one PostgreSQL transaction; journal failure rolls back, replay is durable, high/bulk impact requires checkpoint, and live disposable apply/replay passes. Production remains empty/remote-undiscoverable until real recovery evidence exists |
 | R10 Region Talk | **PASS (bounded R1 scope)** | exact vision imported; donor entries remain explicitly pending; fixture only; pipeline paused and publication disabled; no YDB mutation/cutover |
-| R11 PR/merge/deploy | **IN PROGRESS** | [primary PR #1](https://github.com/onedayonemasterpiece/my-data-hub/pull/1) and events-bot PR #478 are open; security remediation must be pushed/green/re-reviewed before merge |
-| R12 security review | **PARTIAL** | maximum-available High checklist review completed with a not-ready verdict; critical/high findings were remediated locally and a second review is mandatory before merge |
+| R11 PR/merge/deploy | **IN PROGRESS** | [primary PR #1](https://github.com/onedayonemasterpiece/my-data-hub/pull/1) and events-bot PR #478 are open; second-audit remediation must be pushed/green/finally reviewed before merge |
+| R12 security review | **PARTIAL** | two maximum-available High reviews completed; the second found no Critical but retained High findings. Current remediation requires a final review before merge |
 
 ## Local PostgreSQL evidence
 
 - image digest: `sha256:691673308c99d2161ba298736f3147f1f22d79de2fb7ec93ae9b4afcab870b62`;
 - PostgreSQL `18.4`; pgvector `0.8.6`;
 - clean migration: 1–10; repeat: zero; upgrade: 9→10 then zero repeat;
-- password-free roles: 12; strict role/ownership probes: 66 PASS;
+- password-free roles: 12; strict role/ownership probes: 89 PASS;
 - process-kill: Docker restart count 1 plus PostgreSQL WAL recovery;
 - host reboot: not performed/claimed.
 
 ## Connector receipt
 
-- batch: `04c6230c-647e-5b9c-aef2-65329a97444d`;
-- acceptance receipt: `aebded4b-5a17-4672-9112-ede0b3912e78`;
-- conflict quarantine: `d7fda5b7-584a-426e-9aa9-f363331b55c0`;
-- semantic outbox: `3e97a75c-fe50-4789-b141-a47740610cf3`;
-- outage/restart eventual batch: `b251b189-2747-50ad-a06e-809d7455d535`;
-- canonical revision after two commits: 2;
-- MCP read observed two committed batches.
+- batch: `44855fdd-7bb7-5b00-b25d-b04b47aac8c7`;
+- acceptance receipt: `f6454369-f9b6-4d32-a1f5-045c006ba5c6`;
+- conflict quarantine: `92975ca4-714a-470a-a94f-a3af1b34d35b`;
+- semantic outbox: `38e15e90-7f1d-46ec-93ea-a35e5f0a14be`;
+- outage/restart eventual batch: `7e20e6f1-d140-51c5-90ef-8cbd05e44ae1`;
+- canonical revision after the two latest commits: 4;
+- MCP read observed four committed batches in the reusable disposable database.
 
 ## Operator receipt
 

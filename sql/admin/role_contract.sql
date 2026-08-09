@@ -39,21 +39,22 @@ REVOKE ALL ON SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
 
-GRANT USAGE ON SCHEMA hub, analysis, region_talk, joplin, sync, integration TO mdh_application;
+GRANT USAGE ON SCHEMA hub, analysis, region_talk, joplin, sync, integration,
+    orchestration TO mdh_application;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA hub, analysis, region_talk, joplin TO mdh_application;
 REVOKE INSERT, UPDATE, DELETE ON hub.canonical_state FROM mdh_application;
 GRANT SELECT ON hub.canonical_state TO mdh_application;
 GRANT SELECT, INSERT, UPDATE, DELETE ON sync.session, sync.command, sync.command_receipt,
     sync.changeset_header, sync.changeset_operation, sync.applied_changeset,
-    sync.conflict, sync.id_remap, sync.external_outbox, sync.checkpoint TO mdh_application;
+    sync.conflict, sync.id_remap, sync.external_outbox TO mdh_application;
+REVOKE ALL ON sync.checkpoint FROM mdh_application;
 GRANT INSERT ON sync.audit_event TO mdh_application;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA hub, analysis, region_talk, joplin, sync TO mdh_application;
 GRANT SELECT ON integration.connector, integration.data_product, integration.batch,
     integration.batch_payload, integration.watermark, integration.daily_statistic TO mdh_application;
-GRANT UPDATE (status, committed_at) ON integration.batch TO mdh_application;
-GRANT INSERT ON integration.batch_event, integration.receipt, integration.watermark,
-    integration.daily_statistic TO mdh_application;
-GRANT UPDATE ON integration.watermark TO mdh_application;
+GRANT SELECT ON orchestration.pipeline, orchestration.pipeline_stage,
+    orchestration.stage_run, orchestration.worker_result_inbox TO mdh_application;
+GRANT INSERT ON orchestration.worker_result_inbox TO mdh_application;
 
 GRANT USAGE ON SCHEMA orchestration, hub, sync TO mdh_orchestrator;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA orchestration TO mdh_orchestrator;
@@ -76,7 +77,8 @@ REVOKE INSERT, UPDATE, DELETE ON hub.canonical_state FROM mdh_mcp_reader, mdh_mc
 -- A single non-login role owns the one bounded canonical-revision transition.
 GRANT USAGE ON SCHEMA hub, integration, sync TO mdh_canonical_committer;
 GRANT SELECT ON hub.canonical_state, integration.batch, integration.batch_payload,
-    integration.data_product, integration.daily_statistic TO mdh_canonical_committer;
+    integration.data_product, integration.daily_statistic, integration.watermark,
+    sync.external_outbox TO mdh_canonical_committer;
 GRANT UPDATE (status, committed_at) ON integration.batch TO mdh_canonical_committer;
 GRANT INSERT ON integration.daily_statistic, integration.batch_event,
     integration.watermark, sync.external_outbox TO mdh_canonical_committer;
@@ -97,8 +99,9 @@ REVOKE ALL ON auth.oauth_revocation FROM mdh_mcp_reader, mdh_mcp_editor, mdh_con
 
 -- R1 editor production allowlist is intentionally empty. Disposable verification grants
 -- are created and removed by scripts/verify_postgres_roles.py.
-GRANT USAGE ON SCHEMA operator_control, recovery TO mdh_mcp_editor;
+GRANT USAGE ON SCHEMA operator_control, recovery, sync TO mdh_mcp_editor;
 GRANT SELECT ON recovery.evidence TO mdh_mcp_editor;
+GRANT SELECT ON sync.checkpoint TO mdh_mcp_editor;
 GRANT SELECT, INSERT ON operator_control.preview_receipt,
     operator_control.apply_receipt TO mdh_mcp_editor;
 GRANT USAGE ON SCHEMA migration, hub TO mdh_migration_operator;
@@ -113,6 +116,17 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA migration TO mdh_migration_operat
 
 GRANT CONNECT ON DATABASE postgres TO mdh_backup;
 GRANT pg_read_all_data TO mdh_backup;
+-- Group roles are deliberately NOINHERIT, so pg_read_all_data membership is not relied
+-- upon at runtime. Enumerate the current backup surface and re-run this contract after
+-- every owner-scoped migration; new relations remain fail-closed until then.
+GRANT USAGE ON SCHEMA hub_meta, hub, analysis, orchestration, sync, region_talk,
+    migration, joplin, integration, recovery, operator_control, auth TO mdh_backup;
+GRANT SELECT ON ALL TABLES IN SCHEMA hub_meta, hub, analysis, orchestration, sync,
+    region_talk, migration, joplin, integration, recovery, operator_control, auth
+    TO mdh_backup;
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA hub_meta, hub, analysis, orchestration, sync,
+    region_talk, migration, joplin, integration, recovery, operator_control, auth
+    TO mdh_backup;
 GRANT pg_monitor TO mdh_monitoring;
 GRANT USAGE ON SCHEMA hub, orchestration, integration, recovery TO mdh_monitoring;
 GRANT SELECT ON hub.canonical_state, orchestration.queue_health,

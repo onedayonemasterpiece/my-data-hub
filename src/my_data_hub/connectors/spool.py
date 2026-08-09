@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import tempfile
 from dataclasses import dataclass
@@ -293,8 +294,21 @@ class RetryPolicy:
     maximum_seconds: float = 300.0
     jitter_fraction: float = 0.2
 
+    def __post_init__(self) -> None:
+        if self.initial_seconds <= 0 or self.maximum_seconds < self.initial_seconds:
+            raise ValueError("retry bounds must be positive and ordered")
+        if not 0 <= self.jitter_fraction <= 1:
+            raise ValueError("retry jitter fraction must be between 0 and 1")
+
     def delay(self, attempts_already_made: int, *, jitter_key: str = "") -> timedelta:
-        base = self.initial_seconds * (2**attempts_already_made)
+        attempts = max(0, attempts_already_made)
+        maximum_exponent = max(
+            0, math.ceil(math.log2(self.maximum_seconds / self.initial_seconds))
+        )
+        base = min(
+            self.maximum_seconds,
+            self.initial_seconds * (2 ** min(attempts, maximum_exponent)),
+        )
         digest = hashlib.sha256(
             f"{jitter_key}:{attempts_already_made}".encode()
         ).digest()

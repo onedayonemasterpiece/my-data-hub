@@ -83,6 +83,9 @@
         "restored_state_verify",
         "restored_state_verify_sha256",
         "schema_revision",
+        "canonical_revision",
+        "postgres_major",
+        "extension_versions",
         "automatic_promotion"
       ],
       "properties": {
@@ -98,6 +101,13 @@
         "restored_state_verify": {"const": "passed"},
         "restored_state_verify_sha256": {"$ref": "#/$defs/sha256"},
         "schema_revision": {"type": "integer", "minimum": 1},
+        "canonical_revision": {"type": "integer", "minimum": 0},
+        "postgres_major": {"type": "integer", "minimum": 15},
+        "extension_versions": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"type": "string", "minLength": 1}
+        },
         "automatic_promotion": {"const": false}
       }
     },

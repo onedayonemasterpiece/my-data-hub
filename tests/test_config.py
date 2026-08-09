@@ -64,7 +64,7 @@ def test_remote_stdio_auth_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
         Settings.from_env(require_database=False)
 
 
-def test_production_remote_requires_oauth_and_worker_token(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_production_remote_requires_oauth_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     clear_hub_environment(monkeypatch)
     monkeypatch.setenv("MY_DATA_HUB_ENVIRONMENT", "production")
     monkeypatch.setenv("MY_DATA_HUB_MCP_REMOTE_ENABLED", "true")
@@ -75,7 +75,7 @@ def test_production_remote_requires_oauth_and_worker_token(monkeypatch: pytest.M
 
     monkeypatch.setenv("MY_DATA_HUB_MCP_AUTH_MODE", "oauth")
     monkeypatch.delenv("MY_DATA_HUB_MCP_DEVELOPMENT_TOKEN", raising=False)
-    with pytest.raises(ConfigurationError, match="worker result token"):
+    with pytest.raises(ConfigurationError, match="OAuth configuration"):
         Settings.from_env(require_database=False)
 
 
@@ -115,6 +115,7 @@ def test_production_oauth_requires_separate_revocation_database(
         "MY_DATA_HUB_APPLICATION_DATABASE_URL": "postgresql://application@db/hub",
         "MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL": "postgresql://connector@db/hub",
         "MY_DATA_HUB_ORCHESTRATOR_DATABASE_URL": "postgresql://orchestrator@db/hub",
+        "MY_DATA_HUB_CANONICAL_COMMITTER_DATABASE_URL": "postgresql://committer@db/hub",
         "MY_DATA_HUB_ENVIRONMENT": "production",
         "MY_DATA_HUB_WORKER_RESULT_TOKEN": "worker-secret",
         "MY_DATA_HUB_MCP_REMOTE_ENABLED": "true",
@@ -144,3 +145,15 @@ def test_production_oauth_requires_separate_revocation_database(
     settings = Settings.from_env()
     assert settings.mcp_revocation_database_url.endswith("@db/hub")
     assert settings.mcp_reader_database_url.endswith("@db/hub")
+
+
+def test_production_settings_allow_per_process_database_url_isolation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_hub_environment(monkeypatch)
+    monkeypatch.setenv("MY_DATA_HUB_DATABASE_URL", "postgresql://orchestrator@db/hub")
+    monkeypatch.setenv("MY_DATA_HUB_ORCHESTRATOR_DATABASE_URL", "postgresql://orchestrator@db/hub")
+    monkeypatch.setenv("MY_DATA_HUB_ENVIRONMENT", "production")
+    monkeypatch.setenv("MY_DATA_HUB_WORKER_RESULT_TOKEN", "unused-by-orchestrator-but-required")
+    settings = Settings.from_env()
+    assert settings.orchestrator_database_url.endswith("@db/hub")

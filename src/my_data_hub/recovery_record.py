@@ -30,6 +30,7 @@ def main() -> int:
     backup = receipt["backup"]
     off_host = receipt["off_host"]
     evidence_id = UUID(str(receipt["receipt_id"]))
+    canonical_revision = int(restore["canonical_revision"])
 
     import psycopg
 
@@ -58,8 +59,43 @@ def main() -> int:
                     str(restore["completed_at"]),
                 ),
             )
+            cursor.execute(
+                """
+                INSERT INTO sync.checkpoint (
+                    canonical_revision, checkpoint_kind, locator, sha256,
+                    manifest_sha256, postgres_major, extension_versions,
+                    encrypted, verified_readback_at
+                ) VALUES (%s, 'portable_logical', %s, %s, %s, %s, %s::jsonb,
+                    true, %s)
+                ON CONFLICT (canonical_revision) DO NOTHING
+                """,
+                (
+                    canonical_revision,
+                    str(off_host["object_locator"]),
+                    str(backup["encrypted_artifact_sha256"]),
+                    str(backup["manifest_sha256"]),
+                    int(restore["postgres_major"]),
+                    json.dumps(restore["extension_versions"], sort_keys=True),
+                    str(off_host["verified_at"]),
+                ),
+            )
+            cursor.execute(
+                "SELECT checkpoint_id FROM sync.checkpoint WHERE canonical_revision = %s",
+                (canonical_revision,),
+            )
+            checkpoint_id = cursor.fetchone()[0]
         connection.commit()
-    print(json.dumps({"ok": True, "evidence_id": str(evidence_id)}, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "evidence_id": str(evidence_id),
+                "checkpoint_id": str(checkpoint_id),
+                "canonical_revision": canonical_revision,
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 

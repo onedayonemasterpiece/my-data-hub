@@ -5,10 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=mydatahub
-Group=mydatahub
+User=mydatahub-mcp
+Group=mydatahub-mcp
 WorkingDirectory=/opt/my-data-hub/current
-EnvironmentFile=/etc/my-data-hub/my-data-hub.env
+EnvironmentFile=/etc/my-data-hub/mcp.env
 ExecStart=/opt/my-data-hub/venv/bin/my-data-hub mcp serve --transport streamable-http
 Restart=on-failure
 RestartSec=5

@@ -51,7 +51,9 @@ jobs:
       MY_DATA_HUB_MCP_AUTH_MODE: stdio-environment
       MY_DATA_HUB_MIGRATOR_DATABASE_URL: postgresql://my_data_hub_test:integration-only-password@127.0.0.1:5432/my_data_hub_test
       MY_DATA_HUB_ROLE_ADMIN_DATABASE_URL: postgresql://my_data_hub_test:integration-only-password@127.0.0.1:5432/my_data_hub_test
-      MY_DATA_HUB_CONNECTOR_DATABASE_URL: postgresql://my_data_hub_test:integration-only-password@127.0.0.1:5432/my_data_hub_test
+      MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL: postgresql://ci_connector:ci-connector-password@127.0.0.1:5432/my_data_hub_test
+      MY_DATA_HUB_CANONICAL_COMMITTER_DATABASE_URL: postgresql://ci_committer:ci-committer-password@127.0.0.1:5432/my_data_hub_test
+      MY_DATA_HUB_MCP_READER_DATABASE_URL: postgresql://ci_mcp_reader:ci-reader-password@127.0.0.1:5432/my_data_hub_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -73,6 +75,19 @@ jobs:
         run: python scripts/verify_postgres_upgrade.py
       - name: Provision explicit PostgreSQL role contract
         run: python scripts/provision_postgres_roles.py
+      - name: Provision ephemeral restricted CI logins
+        run: |
+          psql "$MY_DATA_HUB_ROLE_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE ci_connector LOGIN PASSWORD 'ci-connector-password'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE ci_committer LOGIN PASSWORD 'ci-committer-password'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE ci_mcp_reader LOGIN PASSWORD 'ci-reader-password'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          GRANT mdh_connector_intake TO ci_connector;
+          GRANT mdh_canonical_committer TO ci_committer;
+          GRANT mdh_mcp_reader TO ci_mcp_reader;
+          SQL
       - name: Prove PostgreSQL positive and adversarial role probes
         run: python scripts/verify_postgres_roles.py
       - name: Verify database health

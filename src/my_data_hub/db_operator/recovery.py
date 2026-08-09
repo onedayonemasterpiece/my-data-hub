@@ -24,8 +24,12 @@ class PostgresBackupStateProvider:
                 SELECT evidence_id, completed_at, readback_verified,
                        private_offhost, schema_revision, restore_verified,
                        manifest->'restore'->>'completed_at',
-                       manifest->'restore'->>'checkpoint_revision'
+                       checkpoint.checkpoint_id::text
                 FROM recovery.evidence
+                JOIN sync.checkpoint AS checkpoint
+                  ON checkpoint.canonical_revision =
+                     (manifest->'restore'->>'canonical_revision')::bigint
+                 AND checkpoint.verified_readback_at IS NOT NULL
                 WHERE evidence_type = 'isolated_restore' AND status = 'passed'
                 ORDER BY completed_at DESC, recorded_at DESC
                 LIMIT 1

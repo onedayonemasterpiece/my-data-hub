@@ -37,11 +37,19 @@ jobs:
           DEVSTAND_SSH_USER: ${{ secrets.DEVSTAND_SSH_USER }}
           DEVSTAND_SSH_PRIVATE_KEY: ${{ secrets.DEVSTAND_SSH_PRIVATE_KEY }}
           DEVSTAND_SSH_HOST_KEY: ${{ secrets.DEVSTAND_SSH_HOST_KEY }}
+          VALID_TOKEN: ${{ secrets.DEVSTAND_MCP_VALID_TOKEN }}
+          EXPIRED_TOKEN: ${{ secrets.DEVSTAND_MCP_EXPIRED_TOKEN }}
+          WRONG_AUDIENCE_TOKEN: ${{ secrets.DEVSTAND_MCP_WRONG_AUDIENCE_TOKEN }}
+          WRONG_SCOPE_TOKEN: ${{ secrets.DEVSTAND_MCP_WRONG_SCOPE_TOKEN }}
         run: |
           test -n "$DEVSTAND_SSH_HOST" || { echo 'missing DEVSTAND_SSH_HOST' >&2; exit 2; }
           test -n "$DEVSTAND_SSH_USER" || { echo 'missing DEVSTAND_SSH_USER' >&2; exit 2; }
           test -n "$DEVSTAND_SSH_PRIVATE_KEY" || { echo 'missing DEVSTAND_SSH_PRIVATE_KEY' >&2; exit 2; }
           test -n "$DEVSTAND_SSH_HOST_KEY" || { echo 'missing DEVSTAND_SSH_HOST_KEY' >&2; exit 2; }
+          test -n "$VALID_TOKEN" || { echo 'missing DEVSTAND_MCP_VALID_TOKEN' >&2; exit 2; }
+          test -n "$EXPIRED_TOKEN" || { echo 'missing DEVSTAND_MCP_EXPIRED_TOKEN' >&2; exit 2; }
+          test -n "$WRONG_AUDIENCE_TOKEN" || { echo 'missing DEVSTAND_MCP_WRONG_AUDIENCE_TOKEN' >&2; exit 2; }
+          test -n "$WRONG_SCOPE_TOKEN" || { echo 'missing DEVSTAND_MCP_WRONG_SCOPE_TOKEN' >&2; exit 2; }
           install -m 700 -d ~/.ssh
           printf '%s\n' "$DEVSTAND_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
@@ -59,32 +67,142 @@ jobs:
           test "$(git rev-parse "${commit}^{commit}")" = "$commit"
           git checkout --detach "$commit"
           /opt/my-data-hub/venv/bin/pip install -e '.[dev]'
+          sudo ./deploy/systemd/install.sh INSTALL_MY_DATA_HUB_SYSTEMD
           sudo systemctl start my-data-hub-role-bootstrap.service
           sudo systemctl start my-data-hub-migrate.service
           sudo systemctl start my-data-hub-role-provision.service
+          sudo systemctl start my-data-hub-role-probe.service
           sudo systemctl start my-data-hub-db-verify.service
           sudo systemctl start my-data-hub-identity-verify.service
-          sudo systemctl restart my-data-hub-api my-data-hub-orchestrator my-data-hub-mcp
-          sudo systemctl is-active --quiet my-data-hub-api my-data-hub-orchestrator my-data-hub-mcp
+          sudo systemctl start my-data-hub-connector-canary.service
+          sudo systemctl restart my-data-hub-api my-data-hub-orchestrator my-data-hub-mcp \
+            my-data-hub-connector-committer.timer
+          sudo systemctl is-active --quiet my-data-hub-api my-data-hub-orchestrator \
+            my-data-hub-mcp my-data-hub-connector-committer.timer
+          old_pid="$(systemctl show -p MainPID --value my-data-hub-mcp)"
+          test "$old_pid" -gt 1
+          sudo systemctl kill --kill-whom=main --signal=KILL my-data-hub-mcp
+          for attempt in $(seq 1 30); do
+            new_pid="$(systemctl show -p MainPID --value my-data-hub-mcp)"
+            if systemctl is-active --quiet my-data-hub-mcp && [[ "$new_pid" -gt 1 && "$new_pid" != "$old_pid" ]]; then
+              break
+            fi
+            sleep 1
+          done
+          test "$new_pid" -gt 1 && test "$new_pid" != "$old_pid"
           test "$(git rev-parse HEAD)" = "$commit"
-          grep -qx 'MY_DATA_HUB_SCHEDULER_ENABLED=false' /etc/my-data-hub/my-data-hub.env
-          grep -qx 'MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED=false' /etc/my-data-hub/my-data-hub.env
-          grep -qx 'MY_DATA_HUB_MCP_WRITE_ENABLED=false' /etc/my-data-hub/my-data-hub.env
+          grep -qx 'MY_DATA_HUB_SCHEDULER_ENABLED=false' /etc/my-data-hub/orchestrator.env
+          grep -qx 'MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED=false' /etc/my-data-hub/api.env
+          grep -qx 'MY_DATA_HUB_MCP_WRITE_ENABLED=false' /etc/my-data-hub/mcp.env
           ! ss -H -ltn | awk '{print $4}' | grep -Eq '(^0\.0\.0\.0:|^\*:|^\[::\]:)(5432|8080|8765)$'
           for port in 5432 8080 8765; do
             ss -H -ltn | awk '{print $4}' | grep -qx "127.0.0.1:$port"
           done
+          install -d artifacts
+          {
+            printf 'commit=%s\n' "$(git rev-parse HEAD)"
+            printf 'dirty=%s\n' "$(test -z "$(git status --porcelain)" && echo false || echo true)"
+            printf 'postgres=%s\n' "$(psql --version)"
+            printf 'python=%s\n' "$(/opt/my-data-hub/venv/bin/python --version 2>&1)"
+            printf 'mcp_pid_before=%s\n' "$old_pid"
+            printf 'mcp_pid_after=%s\n' "$new_pid"
+            printf 'containers=%s\n' "$(docker ps --format '{{.Image}}@{{.ID}}' 2>/dev/null | paste -sd, - || true)"
+            sha256sum /opt/my-data-hub/venv/bin/my-data-hub
+          } | tee artifacts/devstand-runtime-observations.txt
           REMOTE
-      - name: Prove public endpoint rejects missing token
-        run: test "$(curl -sS -o /dev/null -w '%{http_code}' https://mcp-datahub.kenigevents.ru/mcp)" = 401
+      - name: Prove reboot autostart and private listeners
+        env:
+          DEVSTAND_SSH_HOST: ${{ secrets.DEVSTAND_SSH_HOST }}
+          DEVSTAND_SSH_USER: ${{ secrets.DEVSTAND_SSH_USER }}
+        run: |
+          ssh "$DEVSTAND_SSH_USER@$DEVSTAND_SSH_HOST" sudo systemctl reboot || true
+          sleep 10
+          ready=false
+          for attempt in $(seq 1 60); do
+            if ssh -o ConnectTimeout=5 "$DEVSTAND_SSH_USER@$DEVSTAND_SSH_HOST" \
+              'systemctl is-active --quiet my-data-hub-api my-data-hub-orchestrator my-data-hub-mcp my-data-hub-backup.timer my-data-hub-connector-committer.timer'; then
+              ready=true; break
+            fi
+            sleep 5
+          done
+          test "$ready" = true
+          mkdir -p artifacts
+          scp "$DEVSTAND_SSH_USER@$DEVSTAND_SSH_HOST:/opt/my-data-hub/current/artifacts/devstand-runtime-observations.txt" \
+            artifacts/devstand-runtime-observations.txt
+          ssh "$DEVSTAND_SSH_USER@$DEVSTAND_SSH_HOST" \
+            '! ss -H -ltn | awk '\''{print $4}'\'' | grep -Eq '\''(^0\.0\.0\.0:|^\*:|^\[::\]:)(5432|8080|8765)$'\'''
+      - name: Prove live OAuth matrix and semantic read-only MCP
+        env:
+          MY_DATA_HUB_MCP_CANARY_TOKEN: ${{ secrets.DEVSTAND_MCP_VALID_TOKEN }}
+          EXPIRED_TOKEN: ${{ secrets.DEVSTAND_MCP_EXPIRED_TOKEN }}
+          WRONG_AUDIENCE_TOKEN: ${{ secrets.DEVSTAND_MCP_WRONG_AUDIENCE_TOKEN }}
+          WRONG_SCOPE_TOKEN: ${{ secrets.DEVSTAND_MCP_WRONG_SCOPE_TOKEN }}
+        run: |
+          mkdir -p artifacts
+          endpoint=https://mcp-datahub.kenigevents.ru/mcp
+          expect_status() {
+            expected="$1"; shift
+            actual="$(curl --max-time 15 --silent --show-error --output /dev/null --write-out '%{http_code}' "$@")"
+            test "$actual" = "$expected" || { echo "expected HTTP $expected, got $actual" >&2; exit 1; }
+          }
+          expect_status 401 "$endpoint"
+          expect_status 401 -H 'Authorization: Bearer definitely-not-a-token' "$endpoint"
+          expect_status 401 -H "Authorization: Bearer $EXPIRED_TOKEN" "$endpoint"
+          expect_status 401 -H "Authorization: Bearer $WRONG_AUDIENCE_TOKEN" "$endpoint"
+          expect_status 401 -H "Authorization: Bearer $WRONG_SCOPE_TOKEN" "$endpoint"
+          expect_status 403 -H 'Host: forbidden.example' "$endpoint"
+          expect_status 403 -H 'Origin: https://forbidden.example' "$endpoint"
+          python scripts/verify_remote_mcp.py | tee artifacts/remote-mcp-canary.json
+          python - <<'PY'
+          import base64,json,os,re,time
+          token=os.environ['MY_DATA_HUB_MCP_CANARY_TOKEN']
+          parts=token.split('.')
+          if len(parts)!=3: raise SystemExit('accepted canary token is not a JWT')
+          claims=json.loads(base64.urlsafe_b64decode(parts[1]+'='*(-len(parts[1])%4)))
+          issuer,jti,expires=claims.get('iss'),claims.get('jti'),claims.get('exp')
+          safe=re.compile(r'^[A-Za-z0-9._:/@+-]{1,512}$')
+          if not isinstance(issuer,str) or not safe.fullmatch(issuer): raise SystemExit('unsafe/missing iss')
+          if not isinstance(jti,str) or not safe.fullmatch(jti): raise SystemExit('unsafe/missing jti')
+          if not isinstance(expires,int) or expires <= time.time(): raise SystemExit('missing/expired exp')
+          with open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as output:
+              output.write(f'MDH_CANARY_ISSUER={issuer}\nMDH_CANARY_JTI={jti}\n')
+              output.write('MDH_CANARY_EXPIRES_AT='+time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime(expires))+'\n')
+          PY
+      - name: Prove live token revocation
+        env:
+          DEVSTAND_SSH_HOST: ${{ secrets.DEVSTAND_SSH_HOST }}
+          DEVSTAND_SSH_USER: ${{ secrets.DEVSTAND_SSH_USER }}
+          VALID_TOKEN: ${{ secrets.DEVSTAND_MCP_VALID_TOKEN }}
+        run: |
+          ssh "$DEVSTAND_SSH_USER@$DEVSTAND_SSH_HOST" bash -s -- \
+            "$MDH_CANARY_ISSUER" "$MDH_CANARY_JTI" "$MDH_CANARY_EXPIRES_AT" <<'REMOTE'
+          set -Eeuo pipefail
+          issuer="$1"; jti="$2"; expires_at="$3"
+          sudo systemd-run --quiet --wait --pipe --collect \
+            --unit="my-data-hub-oauth-revoke-canary-${RANDOM}" \
+            --property=Type=oneshot \
+            --property=WorkingDirectory=/opt/my-data-hub/current \
+            --property=EnvironmentFile=/etc/my-data-hub/admin.env \
+            /opt/my-data-hub/venv/bin/python scripts/record_oauth_canary_revocation.py \
+              --issuer "$issuer" --jti "$jti" --expires-at "$expires_at"
+          REMOTE
+          test "$(curl --max-time 15 -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $VALID_TOKEN" https://mcp-datahub.kenigevents.ru/mcp)" = 401
       - name: Write deployment receipt
         if: always()
         run: |
           outcome=PASS; observed="deploy and post-deploy checks passed"
           if [[ "${{ job.status }}" != success ]]; then outcome=FAIL; observed="deploy or post-deploy check failed"; fi
+          mkdir -p artifacts
+          for path in artifacts/devstand-runtime-observations.txt artifacts/remote-mcp-canary.json; do
+            test -f "$path" || printf 'unavailable: prior step failed\n' >"$path"
+          done
           python scripts/write_workflow_receipt.py --workflow devstand-deploy --environment devstand \
             --outcome "$outcome" --observed "$observed" --resource deployed_commit="$DEPLOY_COMMIT" \
-            --hash-file compose=compose.yaml --output artifacts/devstand-deploy-receipt.json
+            --hash-file compose=compose.yaml \
+            --hash-file runtime_observations=artifacts/devstand-runtime-observations.txt \
+            --hash-file remote_mcp=artifacts/remote-mcp-canary.json \
+            --output artifacts/devstand-deploy-receipt.json
       - name: Upload deployment receipt
         if: always()
         uses: actions/upload-artifact@v4

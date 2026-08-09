@@ -1,5 +1,5 @@
 [Unit]
-Description=my-data-hub restricted PostgreSQL runtime identity verification
+Description=my-data-hub PostgreSQL adversarial role and ownership probes
 After=my-data-hub-role-provision.service
 
 [Service]
@@ -7,8 +7,8 @@ Type=oneshot
 User=root
 Group=root
 WorkingDirectory=/opt/my-data-hub/current
-EnvironmentFile=/etc/my-data-hub/identity-verify.env
-ExecStart=/opt/my-data-hub/venv/bin/python scripts/verify_service_identities.py
+EnvironmentFile=/etc/my-data-hub/admin.env
+ExecStart=/opt/my-data-hub/venv/bin/python scripts/verify_postgres_roles.py
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

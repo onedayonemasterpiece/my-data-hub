@@ -66,8 +66,8 @@ Canonical documents:
 The integrated repository was revalidated after the R1 implementation:
 
 ```text
-pytest -q                                     186 passed
-python scripts/validate_repository.py         1432 checks / 0 errors
+pytest -q                                     194 passed
+python scripts/validate_repository.py         1465 checks / 0 errors
 python -m compileall -q src tests scripts     PASS
 python scripts/create_notebooks.py --check    PASS / no drift
 git diff --check                              PASS

@@ -33,11 +33,15 @@ def _set_role(cursor: Any, role: str) -> None:
 def _positive(cursor: Any, role: str, name: str, statement: str) -> Probe:
     cursor.execute("RESET ROLE")
     _set_role(cursor, role)
+    cursor.execute("SAVEPOINT positive_probe")
     try:
         cursor.execute(statement)
         cursor.fetchall() if cursor.description else None
+        cursor.execute("RELEASE SAVEPOINT positive_probe")
         return Probe(role, name, "allow", True)
     except Exception as exc:  # pragma: no cover - exercised by live PostgreSQL job
+        cursor.execute("ROLLBACK TO SAVEPOINT positive_probe")
+        cursor.execute("RELEASE SAVEPOINT positive_probe")
         return Probe(role, name, "allow", False, getattr(exc, "sqlstate", None), str(exc).splitlines()[0])
     finally:
         cursor.execute("RESET ROLE")
@@ -84,6 +88,13 @@ def main() -> int:
         cursor.execute("CREATE TABLE operator_disposable.probe (id integer PRIMARY KEY, value text NOT NULL)")
         cursor.execute("GRANT USAGE ON SCHEMA operator_disposable TO mdh_mcp_editor")
         cursor.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON operator_disposable.probe TO mdh_mcp_editor")
+        cursor.execute(
+            """
+            INSERT INTO orchestration.run (run_id, pipeline_id, run_kind, canonical_revision)
+            SELECT '00000000-0000-4000-8000-000000000091', pipeline_id, 'manual', 0
+            FROM orchestration.pipeline WHERE workload = 'region-talk'
+            """
+        )
 
         probes.extend(
             [
@@ -116,6 +127,63 @@ def main() -> int:
                     cursor,
                     "mdh_monitoring",
                     "health projection read",
+                    "SELECT schema_revision FROM hub.canonical_state",
+                ),
+                _positive(
+                    cursor,
+                    "mdh_application",
+                    "worker intake orchestration read",
+                    "SELECT stage_id FROM orchestration.pipeline_stage LIMIT 1",
+                ),
+                _positive(
+                    cursor,
+                    "mdh_application",
+                    "worker result intake write",
+                    "INSERT INTO orchestration.worker_result_inbox "
+                    "(result_id, run_id, workload, stage_key, stage_contract_version, "
+                    "input_manifest_sha256, result_sha256, byte_size, producer, "
+                    "result_status, envelope) VALUES "
+                    "('00000000-0000-4000-8000-000000000092', "
+                    "'00000000-0000-4000-8000-000000000091', 'probe', 'probe', 'v1', "
+                    "repeat('a',64), repeat('b',64), 0, '{}'::jsonb, 'succeeded', '{}'::jsonb)",
+                ),
+                _positive(
+                    cursor,
+                    "mdh_application",
+                    "worker intake audit write",
+                    "INSERT INTO sync.audit_event "
+                    "(actor_id, client_id, action, outcome, details) VALUES "
+                    "('role-probe', 'application', 'probe', 'passed', '{}'::jsonb)",
+                ),
+                _positive(
+                    cursor,
+                    "mdh_orchestrator",
+                    "queue read",
+                    "SELECT count(*) FROM orchestration.work_item",
+                ),
+                _positive(
+                    cursor,
+                    "mdh_orchestrator",
+                    "orchestrator audit write",
+                    "INSERT INTO sync.audit_event "
+                    "(actor_id, client_id, action, outcome, details) VALUES "
+                    "('role-probe', 'orchestrator', 'probe', 'passed', '{}'::jsonb)",
+                ),
+                _positive(
+                    cursor,
+                    "mdh_migration_operator",
+                    "bounded export batch landing",
+                    "INSERT INTO migration.export_batch "
+                    "(export_batch_id, source_system, source_database, source_tables, "
+                    "source_scope, schema_version, consistency_mode, expected_row_count, "
+                    "manifest_sha256) VALUES "
+                    "('00000000-0000-4000-8000-000000000093', 'ydb', 'probe', '[]'::jsonb, "
+                    "'probe', 'v1', 'bounded_fixture', 0, repeat('c',64))",
+                ),
+                _positive(
+                    cursor,
+                    "mdh_backup",
+                    "backup read-all-data",
                     "SELECT schema_revision FROM hub.canonical_state",
                 ),
                 _positive(
@@ -168,6 +236,43 @@ def main() -> int:
                     "revocation journal read",
                     "SELECT * FROM auth.oauth_revocation",
                 )
+            )
+        probes.append(
+            _negative(
+                cursor,
+                "mdh_application",
+                "recovery checkpoint forgery",
+                "INSERT INTO sync.checkpoint "
+                "(canonical_revision, checkpoint_kind, locator, sha256, manifest_sha256, "
+                "postgres_major, extension_versions, encrypted) VALUES "
+                "(999999, 'portable_logical', 'forbidden', repeat('a',64), repeat('b',64), "
+                "18, '{}'::jsonb, true)",
+            )
+        )
+        for role in (
+            "mdh_application",
+            "mdh_orchestrator",
+            "mdh_migration_operator",
+            "mdh_backup",
+            "mdh_monitoring",
+        ):
+            probes.extend(
+                [
+                    _negative(cursor, role, "role management", "CREATE ROLE mdh_forbidden"),
+                    _negative(
+                        cursor,
+                        role,
+                        "COPY PROGRAM",
+                        "COPY (SELECT 1) TO PROGRAM 'true'",
+                    ),
+                    _negative(
+                        cursor,
+                        role,
+                        "canonical revision bypass",
+                        "UPDATE hub.canonical_state "
+                        "SET canonical_revision = canonical_revision + 1",
+                    ),
+                ]
             )
         for role in (
             "mdh_application",

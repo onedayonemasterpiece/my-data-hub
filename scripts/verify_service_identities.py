@@ -13,6 +13,11 @@ IDENTITIES = {
     "MY_DATA_HUB_ORCHESTRATOR_DATABASE_URL": "mdh_orchestrator",
     "MY_DATA_HUB_MCP_READER_DATABASE_URL": "mdh_mcp_reader",
     "MY_DATA_HUB_MCP_REVOCATION_DATABASE_URL": "mdh_authenticator",
+    "MY_DATA_HUB_CANONICAL_COMMITTER_DATABASE_URL": "mdh_canonical_committer",
+    "MY_DATA_HUB_BACKUP_DATABASE_URL": "mdh_backup",
+    "MY_DATA_HUB_MIGRATOR_DATABASE_URL": "mdh_migrator",
+    "MY_DATA_HUB_MONITORING_DATABASE_URL": "mdh_monitoring",
+    "MY_DATA_HUB_MIGRATION_OPERATOR_DATABASE_URL": "mdh_migration_operator",
 }
 
 
