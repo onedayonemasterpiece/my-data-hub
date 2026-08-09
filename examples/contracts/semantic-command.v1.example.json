@@ -1,0 +1,20 @@
+{
+  "schema_version": "my-data-hub-semantic-command.v1",
+  "command_id": "9c91ecb0-6d4a-44fd-82ce-777cf4a0cba0",
+  "session_id": null,
+  "client_id": "example-agent",
+  "actor_id": "owner",
+  "idempotency_key": "example-001",
+  "command_type": "region_talk.work.enqueue",
+  "base_revision": 0,
+  "expected_revision": null,
+  "target": null,
+  "depends_on": [],
+  "input_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+  "payload": {
+    "stage": "exact_url_intake",
+    "url": "https://example.org/article"
+  },
+  "reason": "Synthetic contract example",
+  "dry_run": true
+}

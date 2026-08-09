@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/joplin-note-delta.v1.schema.json",
+  "title": "Joplin note delta v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "joplin_profile_id", "joplin_note_id",
+    "joplin_updated_time", "content_hash", "operation", "note"
+  ],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-joplin-note-delta.v1"},
+    "joplin_profile_id": {"type": "string", "minLength": 1},
+    "joplin_note_id": {"type": "string", "minLength": 1},
+    "joplin_updated_time": {"type": "integer", "minimum": 0},
+    "content_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "operation": {"enum": ["upsert", "delete"]},
+    "note": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "body", "tags", "parent_id"],
+      "properties": {
+        "title": {"type": "string"},
+        "body": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "parent_id": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/commit-receipt.v1.schema.json",
+  "title": "my-data-hub commit receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "receipt_id", "changeset_id", "status",
+    "canonical_revision", "operation_results", "id_remap", "conflicts",
+    "created_at", "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-commit-receipt.v1"},
+    "receipt_id": {"type": "string", "format": "uuid"},
+    "changeset_id": {"type": "string", "format": "uuid"},
+    "status": {"enum": ["applied", "deduplicated", "merged", "stale", "conflict", "rejected", "quarantined"]},
+    "canonical_revision": {"type": ["integer", "null"], "minimum": 0},
+    "operation_results": {"type": "array", "items": {"type": "object"}},
+    "id_remap": {"type": "object", "additionalProperties": {"type": "string", "format": "uuid"}},
+    "conflicts": {"type": "array", "items": {"type": "object"}},
+    "created_at": {"type": "string", "format": "date-time"},
+    "receipt_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

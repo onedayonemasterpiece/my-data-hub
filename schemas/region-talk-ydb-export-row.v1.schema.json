@@ -1,0 +1,66 @@
+{
+  "$id": "https://schemas.my-data-hub.local/region-talk-ydb-export-row.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "export_batch_id": {
+      "format": "uuid",
+      "title": "Export Batch Id",
+      "type": "string"
+    },
+    "payload": {
+      "title": "Payload"
+    },
+    "payload_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Payload Sha256",
+      "type": "string"
+    },
+    "row_kind": {
+      "pattern": "^[A-Za-z0-9_./:-]+$",
+      "title": "Row Kind",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "region-talk-ydb-export-row.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_pk": {
+      "maxLength": 4000,
+      "minLength": 1,
+      "title": "Source Pk",
+      "type": "string"
+    },
+    "source_table": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Source Table",
+      "type": "string"
+    },
+    "source_updated_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Updated At"
+    }
+  },
+  "required": [
+    "schema_version",
+    "export_batch_id",
+    "source_table",
+    "source_pk",
+    "row_kind",
+    "payload",
+    "payload_sha256"
+  ],
+  "title": "Region Talk lossless YDB export row v1",
+  "type": "object"
+}

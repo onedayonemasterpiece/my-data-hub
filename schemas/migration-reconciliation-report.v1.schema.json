@@ -1,0 +1,238 @@
+{
+  "$defs": {
+    "MigrationAccountingRow": {
+      "additionalProperties": false,
+      "properties": {
+        "row_kind": {
+          "pattern": "^[A-Za-z0-9_./:-]+$",
+          "title": "Row Kind",
+          "type": "string"
+        },
+        "expected": {
+          "minimum": 0,
+          "title": "Expected",
+          "type": "integer"
+        },
+        "raw": {
+          "minimum": 0,
+          "title": "Raw",
+          "type": "integer"
+        },
+        "normalized": {
+          "minimum": 0,
+          "title": "Normalized",
+          "type": "integer"
+        },
+        "deduplicated": {
+          "minimum": 0,
+          "title": "Deduplicated",
+          "type": "integer"
+        },
+        "intentionally_excluded": {
+          "minimum": 0,
+          "title": "Intentionally Excluded",
+          "type": "integer"
+        },
+        "retained_raw": {
+          "minimum": 0,
+          "title": "Retained Raw",
+          "type": "integer"
+        },
+        "quarantined": {
+          "minimum": 0,
+          "title": "Quarantined",
+          "type": "integer"
+        },
+        "undispositioned": {
+          "minimum": 0,
+          "title": "Undispositioned",
+          "type": "integer"
+        },
+        "raw_matches_expected": {
+          "title": "Raw Matches Expected",
+          "type": "boolean"
+        },
+        "fully_accounted": {
+          "title": "Fully Accounted",
+          "type": "boolean"
+        },
+        "cutover_ready": {
+          "title": "Cutover Ready",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "row_kind",
+        "expected",
+        "raw",
+        "normalized",
+        "deduplicated",
+        "intentionally_excluded",
+        "retained_raw",
+        "quarantined",
+        "undispositioned",
+        "raw_matches_expected",
+        "fully_accounted",
+        "cutover_ready"
+      ],
+      "title": "MigrationAccountingRow",
+      "type": "object"
+    },
+    "MigrationBlockingFinding": {
+      "additionalProperties": false,
+      "properties": {
+        "row_kind": {
+          "pattern": "^[A-Za-z0-9_./:-]+$",
+          "title": "Row Kind",
+          "type": "string"
+        },
+        "reasons": {
+          "items": {
+            "enum": [
+              "raw_count_mismatch",
+              "undispositioned_rows",
+              "quarantined_rows"
+            ],
+            "type": "string"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "title": "Reasons",
+          "type": "array"
+        },
+        "accounting": {
+          "$ref": "#/$defs/MigrationAccountingRow"
+        }
+      },
+      "required": [
+        "row_kind",
+        "reasons",
+        "accounting"
+      ],
+      "title": "MigrationBlockingFinding",
+      "type": "object"
+    },
+    "MigrationReconciliationSource": {
+      "additionalProperties": false,
+      "properties": {
+        "database": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Database",
+          "type": "string"
+        },
+        "tables": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "title": "Tables",
+          "type": "array"
+        }
+      },
+      "required": [
+        "database",
+        "tables"
+      ],
+      "title": "MigrationReconciliationSource",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "migration-reconciliation-report.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "workload": {
+      "const": "region-talk",
+      "title": "Workload",
+      "type": "string"
+    },
+    "export_batch_id": {
+      "format": "uuid",
+      "title": "Export Batch Id",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/MigrationReconciliationSource"
+    },
+    "batch_status": {
+      "enum": [
+        "created",
+        "validating",
+        "landing",
+        "landed",
+        "mapping",
+        "reconciled",
+        "accepted",
+        "rejected"
+      ],
+      "title": "Batch Status",
+      "type": "string"
+    },
+    "expected_row_count": {
+      "minimum": 0,
+      "title": "Expected Row Count",
+      "type": "integer"
+    },
+    "manifest_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "logical_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Logical Sha256",
+      "type": "string"
+    },
+    "completed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Completed At"
+    },
+    "accounting": {
+      "items": {
+        "$ref": "#/$defs/MigrationAccountingRow"
+      },
+      "title": "Accounting",
+      "type": "array"
+    },
+    "blocking_findings": {
+      "items": {
+        "$ref": "#/$defs/MigrationBlockingFinding"
+      },
+      "title": "Blocking Findings",
+      "type": "array"
+    },
+    "passed": {
+      "title": "Passed",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "workload",
+    "export_batch_id",
+    "source",
+    "batch_status",
+    "expected_row_count",
+    "manifest_sha256",
+    "logical_sha256",
+    "completed_at",
+    "accounting",
+    "blocking_findings",
+    "passed"
+  ],
+  "title": "MigrationReconciliationReport",
+  "type": "object"
+}

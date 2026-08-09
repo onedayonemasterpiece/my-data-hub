@@ -1,0 +1,159 @@
+{
+  "$defs": {
+    "Target": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_.-]+$",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "title": "Target",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.my-data-hub.local/semantic-command.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "actor_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Actor Id",
+      "type": "string"
+    },
+    "base_revision": {
+      "minimum": 0,
+      "title": "Base Revision",
+      "type": "integer"
+    },
+    "client_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Client Id",
+      "type": "string"
+    },
+    "command_id": {
+      "format": "uuid",
+      "title": "Command Id",
+      "type": "string"
+    },
+    "command_type": {
+      "maxLength": 200,
+      "minLength": 3,
+      "pattern": "^[a-z][a-z0-9_.-]+$",
+      "title": "Command Type",
+      "type": "string"
+    },
+    "depends_on": {
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "maxItems": 1000,
+      "title": "Depends On",
+      "type": "array"
+    },
+    "dry_run": {
+      "default": false,
+      "title": "Dry Run",
+      "type": "boolean"
+    },
+    "expected_revision": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Revision"
+    },
+    "idempotency_key": {
+      "maxLength": 300,
+      "minLength": 1,
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "input_fingerprint": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Input Fingerprint",
+      "type": "string"
+    },
+    "payload": {
+      "additionalProperties": true,
+      "title": "Payload",
+      "type": "object"
+    },
+    "reason": {
+      "anyOf": [
+        {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reason"
+    },
+    "schema_version": {
+      "const": "my-data-hub-semantic-command.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "target": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Target"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "schema_version",
+    "command_id",
+    "client_id",
+    "actor_id",
+    "idempotency_key",
+    "command_type",
+    "base_revision",
+    "input_fingerprint",
+    "payload"
+  ],
+  "title": "my-data-hub semantic command v1",
+  "type": "object"
+}

@@ -1,0 +1,35 @@
+{
+  "schema_version": "my-data-hub-notebook-input.v1",
+  "run_id": "9d898ee3-e6ae-44fb-ab44-1e4f66ead8d2",
+  "workload": "region-talk",
+  "stage": "bge_m3_embedding",
+  "stage_contract_version": "bge_m3_flagembedding_dense_v1",
+  "canonical_revision": 12,
+  "work_items": [
+    {
+      "work_item_id": "e5dc8514-50d1-4ad8-8940-55bf2248f726",
+      "subject_type": "hub.content_item",
+      "subject_id": "b3caa1a2-2050-4eb5-9a92-d8bf9f52ef19",
+      "input_fingerprint": "3333333333333333333333333333333333333333333333333333333333333333",
+      "payload": {
+        "text": "Synthetic contract input"
+      }
+    }
+  ],
+  "artifacts": [],
+  "model": {
+    "provider": "BAAI",
+    "name": "bge-m3",
+    "version": "example",
+    "task": "text-embedding",
+    "encoder_contract": "bge_m3_flagembedding_dense_v1",
+    "configuration": {}
+  },
+  "policy_versions": {},
+  "limits": {
+    "max_runtime_seconds": 1200,
+    "max_output_bytes": 4194304,
+    "max_items": 100
+  },
+  "created_at": "2026-08-09T00:00:00Z"
+}

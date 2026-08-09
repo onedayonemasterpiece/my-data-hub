@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+
+# Runtime
+.env
+.env.*
+!.env.example
+artifacts/*
+!artifacts/.gitkeep
+backups/*
+!backups/.gitkeep
+*.log
+*.pid
+
+# Migration exports and secrets
+migration-data/
+*.session
+*.secret
+*.key
+*.pem
+*.p12
+
+# Notebook outputs
+.ipynb_checkpoints/
+notebooks/**/output/
+
+# IDE / OS
+.vscode/settings.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build output
+dist/

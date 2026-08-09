@@ -1,0 +1,164 @@
+{
+  "schema_version": "my-data-hub-pipeline.v1",
+  "workload": "region-talk",
+  "name": "region-talk-main",
+  "version": "1.0.0",
+  "status": "paused",
+  "planning_policy": "region-talk-pressure-aware.v1",
+  "stages": [
+    {
+      "key": "reconcile_worker_results",
+      "version": "v1",
+      "compute_lane": "local",
+      "priority": 10,
+      "max_attempts": 5,
+      "timeout_seconds": 300,
+      "contract": "my-data-hub-notebook-result.v1"
+    },
+    {
+      "key": "exact_url_intake",
+      "version": "v1",
+      "compute_lane": "local",
+      "priority": 20,
+      "max_attempts": 5,
+      "timeout_seconds": 300,
+      "contract": "region-talk.exact-url.v1"
+    },
+    {
+      "key": "source_discovery",
+      "version": "v1",
+      "compute_lane": "kaggle-candidate-report",
+      "priority": 110,
+      "max_attempts": 3,
+      "timeout_seconds": 1200,
+      "contract": "region-talk.source-discovery.v1"
+    },
+    {
+      "key": "post_discovery",
+      "version": "v1",
+      "compute_lane": "kaggle-candidate-report",
+      "priority": 100,
+      "max_attempts": 3,
+      "timeout_seconds": 1200,
+      "contract": "region-talk.post-discovery.v1"
+    },
+    {
+      "key": "e5_embedding",
+      "version": "v1",
+      "compute_lane": "kaggle-e5",
+      "priority": 60,
+      "max_attempts": 3,
+      "timeout_seconds": 900,
+      "contract": "e5_semantic_bank_scores_v1"
+    },
+    {
+      "key": "bge_m3_embedding",
+      "version": "v1",
+      "compute_lane": "kaggle-bge-m3",
+      "priority": 50,
+      "max_attempts": 3,
+      "timeout_seconds": 1200,
+      "contract": "bge_m3_flagembedding_dense_v1"
+    },
+    {
+      "key": "vector_fusion",
+      "version": "v1",
+      "compute_lane": "local",
+      "priority": 40,
+      "max_attempts": 3,
+      "timeout_seconds": 300,
+      "contract": "region-talk.vector-fusion.v1"
+    },
+    {
+      "key": "text_eligibility",
+      "version": "v5",
+      "compute_lane": "local",
+      "priority": 35,
+      "max_attempts": 3,
+      "timeout_seconds": 300,
+      "contract": "region_talk_publication_eligibility_v5"
+    },
+    {
+      "key": "image_scoring",
+      "version": "v1",
+      "compute_lane": "kaggle-image-diagnostic",
+      "priority": 30,
+      "max_attempts": 3,
+      "timeout_seconds": 1200,
+      "contract": "region-talk.image-diagnostic.v1"
+    },
+    {
+      "key": "source_profile",
+      "version": "v1",
+      "compute_lane": "kaggle-source-profile",
+      "priority": 28,
+      "max_attempts": 3,
+      "timeout_seconds": 1200,
+      "contract": "region-talk.source-profile.v1"
+    },
+    {
+      "key": "final_verifier",
+      "version": "v1",
+      "compute_lane": "local",
+      "priority": 25,
+      "max_attempts": 3,
+      "timeout_seconds": 600,
+      "contract": "region-talk.final-verifier.v1"
+    },
+    {
+      "key": "writer",
+      "version": "v1",
+      "compute_lane": "kaggle-writer",
+      "priority": 18,
+      "max_attempts": 3,
+      "timeout_seconds": 900,
+      "contract": "region-talk.writer.v1"
+    },
+    {
+      "key": "review_dispatch",
+      "version": "v1",
+      "compute_lane": "local-side-effect",
+      "priority": 15,
+      "max_attempts": 5,
+      "timeout_seconds": 300,
+      "contract": "region-talk.review-card.v1"
+    },
+    {
+      "key": "review_sync",
+      "version": "v1",
+      "compute_lane": "local",
+      "priority": 12,
+      "max_attempts": 5,
+      "timeout_seconds": 300,
+      "contract": "region-talk.review-decision.v1"
+    },
+    {
+      "key": "publication_plan",
+      "version": "v1",
+      "compute_lane": "local",
+      "priority": 11,
+      "max_attempts": 3,
+      "timeout_seconds": 300,
+      "contract": "region-talk.publication-plan.v1"
+    },
+    {
+      "key": "publication_dispatch",
+      "version": "v1",
+      "compute_lane": "local-side-effect",
+      "priority": 10,
+      "max_attempts": 5,
+      "timeout_seconds": 300,
+      "contract": "region-talk.publication-receipt.v1",
+      "enabled_by_default": false
+    },
+    {
+      "key": "health_metrics",
+      "version": "v1",
+      "compute_lane": "local",
+      "priority": 200,
+      "max_attempts": 2,
+      "timeout_seconds": 120,
+      "contract": "region-talk.health-metrics.v1"
+    }
+  ]
+}

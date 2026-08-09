@@ -1,0 +1,28 @@
+{
+  "schema_version": "my-data-hub-notebook-result.v1",
+  "result_id": "d9df54e2-ec64-4f12-a1fb-4d7bd137412f",
+  "run_id": "9d898ee3-e6ae-44fb-ab44-1e4f66ead8d2",
+  "workload": "region-talk",
+  "stage": "bge_m3_embedding",
+  "stage_contract_version": "region-talk.bge-m3.v1",
+  "input_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "producer": {
+    "code_revision": "synthetic",
+    "runtime": "local-test",
+    "model": {
+      "provider": "BAAI",
+      "name": "bge-m3",
+      "version": "example"
+    }
+  },
+  "status": "succeeded",
+  "items": [],
+  "failures": [],
+  "metrics": {
+    "processed": 0
+  },
+  "provider_usage": [],
+  "artifacts": [],
+  "started_at": "2026-08-09T00:00:00Z",
+  "completed_at": "2026-08-09T00:00:01Z"
+}

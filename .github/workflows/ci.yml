@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e '.[dev]'
+      - run: python scripts/validate_repository.py
+      - run: python -m compileall -q src tests scripts
+      - run: pytest
+      - run: ruff check src tests scripts
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18-bookworm
+        env:
+          POSTGRES_DB: my_data_hub_test
+          POSTGRES_USER: my_data_hub_test
+          POSTGRES_PASSWORD: integration-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U my_data_hub_test -d my_data_hub_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      MY_DATA_HUB_DATABASE_URL: postgresql://my_data_hub_test:integration-only-password@127.0.0.1:5432/my_data_hub_test
+      MY_DATA_HUB_ENVIRONMENT: test
+      MY_DATA_HUB_INSTANCE_ID: github-actions
+      MY_DATA_HUB_SCHEDULER_ENABLED: 'false'
+      MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED: 'false'
+      MY_DATA_HUB_MCP_REMOTE_ENABLED: 'false'
+      MY_DATA_HUB_MCP_AUTH_MODE: stdio-environment
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e '.[dev]'
+      - name: Apply migrations and register paused pipeline
+        run: my-data-hub db migrate
+      - name: Prove migration and pipeline registration idempotency
+        run: my-data-hub db migrate
+      - name: Verify database health
+        run: my-data-hub db verify
+      - name: Verify PostgreSQL bootstrap contract
+        run: python scripts/verify_postgres_bootstrap.py
+      - name: Verify Region Talk lossless migration flow
+        run: python scripts/verify_region_talk_migration_flow.py
+      - name: Import MCP v2 server contract
+        run: python -c "from my_data_hub.config import Settings; from my_data_hub.mcp.server import create_server; assert create_server(Settings.from_env()) is not None"

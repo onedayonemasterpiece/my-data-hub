@@ -1,0 +1,291 @@
+{
+  "$defs": {
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_type": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "byte_size": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Byte Size"
+        },
+        "locator": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Locator",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_type",
+        "locator",
+        "sha256"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    },
+    "Producer": {
+      "additionalProperties": false,
+      "properties": {
+        "code_revision": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Code Revision",
+          "type": "string"
+        },
+        "model": {
+          "additionalProperties": true,
+          "title": "Model",
+          "type": "object"
+        },
+        "runtime": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Runtime",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code_revision",
+        "runtime",
+        "model"
+      ],
+      "title": "Producer",
+      "type": "object"
+    },
+    "ResultFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        },
+        "message": {
+          "maxLength": 5000,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "retryable": {
+          "default": false,
+          "title": "Retryable",
+          "type": "boolean"
+        },
+        "work_item_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Work Item Id"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "ResultFailure",
+      "type": "object"
+    },
+    "ResultItem": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "additionalProperties": true,
+          "title": "Evidence",
+          "type": "object"
+        },
+        "input_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Input Fingerprint",
+          "type": "string"
+        },
+        "output_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Output Fingerprint",
+          "type": "string"
+        },
+        "result": {
+          "additionalProperties": true,
+          "title": "Result",
+          "type": "object"
+        },
+        "status": {
+          "enum": [
+            "succeeded",
+            "failed",
+            "skipped"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "work_item_id": {
+          "format": "uuid",
+          "title": "Work Item Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "work_item_id",
+        "input_fingerprint",
+        "output_fingerprint",
+        "status",
+        "result"
+      ],
+      "title": "ResultItem",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.my-data-hub.local/notebook-result.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "items": {
+        "$ref": "#/$defs/ArtifactRef"
+      },
+      "maxItems": 1000,
+      "title": "Artifacts",
+      "type": "array"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
+      "type": "string"
+    },
+    "failures": {
+      "items": {
+        "$ref": "#/$defs/ResultFailure"
+      },
+      "maxItems": 5000,
+      "title": "Failures",
+      "type": "array"
+    },
+    "input_manifest_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Input Manifest Sha256",
+      "type": "string"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/ResultItem"
+      },
+      "maxItems": 5000,
+      "title": "Items",
+      "type": "array"
+    },
+    "metrics": {
+      "additionalProperties": true,
+      "title": "Metrics",
+      "type": "object"
+    },
+    "producer": {
+      "$ref": "#/$defs/Producer"
+    },
+    "provider_usage": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "maxItems": 5000,
+      "title": "Provider Usage",
+      "type": "array"
+    },
+    "result_id": {
+      "format": "uuid",
+      "title": "Result Id",
+      "type": "string"
+    },
+    "run_id": {
+      "format": "uuid",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "my-data-hub-notebook-result.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "stage": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Stage",
+      "type": "string"
+    },
+    "stage_contract_version": {
+      "maxLength": 300,
+      "minLength": 1,
+      "title": "Stage Contract Version",
+      "type": "string"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "succeeded",
+        "partial",
+        "failed"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "workload": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Workload",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "result_id",
+    "run_id",
+    "workload",
+    "stage",
+    "stage_contract_version",
+    "input_manifest_sha256",
+    "producer",
+    "status",
+    "items",
+    "failures",
+    "metrics",
+    "artifacts",
+    "started_at",
+    "completed_at"
+  ],
+  "title": "my-data-hub notebook result v1",
+  "type": "object"
+}

@@ -1,0 +1,234 @@
+{
+  "$defs": {
+    "ExportConsistency": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "consistent_snapshot",
+            "bounded_scan",
+            "final_delta"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "ordering": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "minItems": 1,
+          "title": "Ordering",
+          "type": "array"
+        },
+        "watermark_end": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Watermark End"
+        },
+        "watermark_start": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Watermark Start"
+        }
+      },
+      "required": [
+        "mode",
+        "ordering"
+      ],
+      "title": "ExportConsistency",
+      "type": "object"
+    },
+    "ExportFile": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_size": {
+          "minimum": 0,
+          "title": "Byte Size",
+          "type": "integer"
+        },
+        "path": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "row_count": {
+          "minimum": 0,
+          "title": "Row Count",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "source_table": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Source Table",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "source_table",
+        "sha256",
+        "row_count",
+        "byte_size"
+      ],
+      "title": "ExportFile",
+      "type": "object"
+    },
+    "YdbExportSource": {
+      "additionalProperties": false,
+      "properties": {
+        "database": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Database",
+          "type": "string"
+        },
+        "scope": {
+          "default": "region-talk",
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Scope",
+          "type": "string"
+        },
+        "source_code_revision": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Code Revision"
+        },
+        "source_revision": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Revision"
+        },
+        "system": {
+          "const": "ydb",
+          "default": "ydb",
+          "title": "System",
+          "type": "string"
+        },
+        "tables": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "title": "Tables",
+          "type": "array"
+        }
+      },
+      "required": [
+        "database",
+        "tables"
+      ],
+      "title": "YdbExportSource",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.my-data-hub.local/region-talk-ydb-export-manifest.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "consistency": {
+      "$ref": "#/$defs/ExportConsistency"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "expected_row_count": {
+      "minimum": 0,
+      "title": "Expected Row Count",
+      "type": "integer"
+    },
+    "export_batch_id": {
+      "format": "uuid",
+      "title": "Export Batch Id",
+      "type": "string"
+    },
+    "files": {
+      "items": {
+        "$ref": "#/$defs/ExportFile"
+      },
+      "minItems": 1,
+      "title": "Files",
+      "type": "array"
+    },
+    "logical_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Logical Sha256",
+      "type": "string"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "title": "Metadata",
+      "type": "object"
+    },
+    "row_kind_counts": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Row Kind Counts",
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "region-talk-ydb-export-manifest.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/YdbExportSource"
+    }
+  },
+  "required": [
+    "schema_version",
+    "export_batch_id",
+    "source",
+    "consistency",
+    "expected_row_count",
+    "row_kind_counts",
+    "files",
+    "logical_sha256",
+    "created_at"
+  ],
+  "title": "Region Talk lossless YDB export manifest v1",
+  "type": "object"
+}

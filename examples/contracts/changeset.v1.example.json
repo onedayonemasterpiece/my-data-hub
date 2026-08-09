@@ -1,0 +1,27 @@
+{
+  "schema_version": "my-data-hub-changeset.v1",
+  "changeset_id": "53f79b9a-183f-46ad-a7b5-5192c0cf81c6",
+  "session_id": "ea84b123-e9d6-4a67-b850-1161157bf719",
+  "client_id": "example-offline-agent",
+  "actor_id": "owner",
+  "idempotency_key": "example-changeset-001",
+  "base_revision": 12,
+  "depends_on": [],
+  "input_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222",
+  "operations": [
+    {
+      "operation_id": "057aee83-4d23-4262-9d7e-f82f3caf9254",
+      "kind": "set.add",
+      "target_type": "hub.content_item",
+      "target_id": "b3caa1a2-2050-4eb5-9a92-d8bf9f52ef19",
+      "expected_revision": 3,
+      "preconditions": {},
+      "payload": {
+        "field": "tags",
+        "value": "калининград"
+      }
+    }
+  ],
+  "reason": "Synthetic contract example",
+  "dry_run": true
+}

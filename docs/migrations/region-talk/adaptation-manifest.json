@@ -1,0 +1,18 @@
+{
+  "schema_version": "my-data-hub-adaptation-manifest.v1",
+  "status": "pending_authenticated_source_review",
+  "generated_at": null,
+  "sources": [
+    {
+      "repository": "onedayonemasterpiece/region-talk",
+      "source_commit": null,
+      "role": "current Region Talk product, pipeline, migration and operational donor"
+    },
+    {
+      "repository": "onedayonemasterpiece/events-bot-new",
+      "source_commit": null,
+      "role": "historical Region Talk implementation and proven MCP/Kaggle lifecycle donor"
+    }
+  ],
+  "adaptations": []
+}

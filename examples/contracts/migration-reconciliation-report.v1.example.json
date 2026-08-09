@@ -1,0 +1,34 @@
+{
+  "schema_version": "migration-reconciliation-report.v1",
+  "workload": "region-talk",
+  "export_batch_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "source": {
+    "database": "/ru-central1/example/region-talk",
+    "tables": [
+      "region_talk_state"
+    ]
+  },
+  "batch_status": "landed",
+  "expected_row_count": 2,
+  "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "logical_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "completed_at": "2026-08-09T18:00:00Z",
+  "accounting": [
+    {
+      "row_kind": "source_queue_item",
+      "expected": 2,
+      "raw": 2,
+      "normalized": 1,
+      "deduplicated": 1,
+      "intentionally_excluded": 0,
+      "retained_raw": 0,
+      "quarantined": 0,
+      "undispositioned": 0,
+      "raw_matches_expected": true,
+      "fully_accounted": true,
+      "cutover_ready": true
+    }
+  ],
+  "blocking_findings": [],
+  "passed": true
+}

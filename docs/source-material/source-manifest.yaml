@@ -1,0 +1,33 @@
+schema_version: my-data-hub-source-manifest-v1
+sources:
+  - source_repository: onedayonemasterpiece/idea-hub
+    source_path: ideas/portfolio.inbox/idea-20260809-content-platform-current-design.md
+    source_commit: 0c3fcf7
+    destination_path: docs/source-material/idea-hub/idea-20260809-content-platform-current-design.md
+    sha256: null
+    status: pending_authenticated_import
+    role: canonical_target_vision
+
+  - source_repository: onedayonemasterpiece/events-bot-new
+    source_path: private_events_mcp/
+    source_commit: null
+    destination_path: docs/source-material/events-bot-new/private_events_mcp/
+    sha256: null
+    status: reference_only_until_curated_import
+    role: mcp_security_protocol_donor
+
+  - source_repository: onedayonemasterpiece/events-bot-new
+    source_path: docs/features/region-talk-channel/
+    source_commit: null
+    destination_path: docs/source-material/events-bot-new/region-talk/
+    sha256: null
+    status: pending_curated_import
+    role: region_talk_product_and_operational_semantics
+
+  - source_repository: onedayonemasterpiece/region-talk
+    source_path: .
+    source_commit: null
+    destination_path: docs/source-material/region-talk/
+    sha256: null
+    status: pending_curated_import
+    role: region_talk_current_workload_and_data_migration_source

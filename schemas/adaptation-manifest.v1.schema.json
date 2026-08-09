@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://onedayonemasterpiece.github.io/my-data-hub/schemas/adaptation-manifest.v1.schema.json",
+  "title": "my-data-hub donor adaptation manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "sources", "adaptations"],
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-adaptation-manifest.v1"
+    },
+    "status": {
+      "enum": [
+        "pending_authenticated_source_review",
+        "in_progress",
+        "verified"
+      ]
+    },
+    "generated_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repository", "source_commit", "role"],
+        "properties": {
+          "repository": {"type": "string", "minLength": 1},
+          "source_commit": {
+            "type": ["string", "null"],
+            "pattern": "^[a-f0-9]{40}$"
+          },
+          "role": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "adaptations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_repository",
+          "source_commit",
+          "source_path",
+          "source_sha256",
+          "destination_path",
+          "destination_sha256",
+          "classification",
+          "architectural_changes",
+          "verification"
+        ],
+        "properties": {
+          "source_repository": {"type": "string", "minLength": 1},
+          "source_commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+          "source_path": {"type": "string", "minLength": 1},
+          "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "destination_path": {"type": "string", "minLength": 1},
+          "destination_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "classification": {
+            "enum": ["copied", "adapted", "behavioural-reference-only"]
+          },
+          "architectural_changes": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "verification": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    }
+  }
+}
