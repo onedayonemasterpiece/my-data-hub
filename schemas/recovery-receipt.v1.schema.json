@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/recovery-receipt.v1.schema.json",
+  "title": "my-data-hub recovery receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "backup_id",
+    "status",
+    "created_at",
+    "backup",
+    "off_host",
+    "restore",
+    "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-recovery-receipt.v1"},
+    "receipt_id": {"type": "string", "format": "uuid"},
+    "backup_id": {"type": "string", "format": "uuid"},
+    "status": {"const": "succeeded"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest_sha256",
+        "encrypted_artifact_sha256",
+        "encrypted_byte_size",
+        "encryption",
+        "source_instance",
+        "source_environment",
+        "repository_commit"
+      ],
+      "properties": {
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "encrypted_artifact_sha256": {"$ref": "#/$defs/sha256"},
+        "encrypted_byte_size": {"type": "integer", "minimum": 1},
+        "encryption": {"const": "age"},
+        "source_instance": {"$ref": "#/$defs/label"},
+        "source_environment": {"$ref": "#/$defs/label"},
+        "repository_commit": {"type": "string", "pattern": "^[a-f0-9]{40,64}$"}
+      }
+    },
+    "off_host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "object_locator",
+        "uploaded_sha256",
+        "readback_sha256",
+        "readback_byte_size",
+        "exact_match",
+        "verified_at",
+        "evidence_sha256"
+      ],
+      "properties": {
+        "provider": {"$ref": "#/$defs/label"},
+        "object_locator": {"$ref": "#/$defs/label"},
+        "uploaded_sha256": {"$ref": "#/$defs/sha256"},
+        "readback_sha256": {"$ref": "#/$defs/sha256"},
+        "readback_byte_size": {"type": "integer", "minimum": 1},
+        "exact_match": {"const": true},
+        "verified_at": {"type": "string", "format": "date-time"},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "restore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_id",
+        "target_database",
+        "isolated",
+        "freshness_check",
+        "relations_before",
+        "started_at",
+        "completed_at",
+        "pg_restore",
+        "application_verify",
+        "automatic_promotion"
+      ],
+      "properties": {
+        "target_id": {"$ref": "#/$defs/label"},
+        "target_database": {"$ref": "#/$defs/label"},
+        "isolated": {"const": true},
+        "freshness_check": {"const": "passed"},
+        "relations_before": {"const": 0},
+        "started_at": {"type": "string", "format": "date-time"},
+        "completed_at": {"type": "string", "format": "date-time"},
+        "pg_restore": {"const": "passed"},
+        "application_verify": {"const": "passed"},
+        "automatic_promotion": {"const": false}
+      }
+    },
+    "receipt_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    }
+  }
+}
