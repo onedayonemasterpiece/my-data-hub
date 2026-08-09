@@ -46,11 +46,11 @@ Production publication выключена. Region Talk pipeline остаётся
 ```text
 onedayonemasterpiece/idea-hub
 ideas/portfolio.inbox/idea-20260809-content-platform-current-design.md
-source commit: 0c3fcf7
+source commit: 0c3fcf71b2ee8ba8afa49624bef4b779873802f7
+source SHA-256: c7efb28231223caa6fd02fcc001a38e0f16bcc3fa4c4cd53e744721b2eac0852
 ```
 
-Точный импорт исходника пока помечен `pending_authenticated_import`, а не заменён
-пересказом. Состояние provenance:
+Точный файл импортирован и проверен побайтно; это не пересказ. Состояние provenance:
 [`docs/source-material/source-manifest.yaml`](docs/source-material/source-manifest.yaml).
 
 ## Архитектурные решения дополнения

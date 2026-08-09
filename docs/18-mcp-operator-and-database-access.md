@@ -1,8 +1,16 @@
 # MCP operator profiles and broad PostgreSQL access
 
-Status: `ACCEPTED DESIGN / IMPLEMENTATION PENDING`
+Status: `R1 DISPOSABLE OPERATOR IMPLEMENTED / REMOTE PROFILE DISABLED`
 Date: 2026-08-09
 Related decision: ADR-0012
+
+Implemented in R1: pglast AST classification, exact relation/function/column
+allowlists, parameterized DML only, read/write transaction controls, row/byte/effect
+caps, preview rollback, short-lived signed binding receipts, revision/backup freshness
+gates, idempotent apply, restricted PostgreSQL roles, and a live disposable-schema
+preview/apply/DDL-denial canary. Production targets are empty. The remote profile is
+absent from tool discovery and remains disabled; durable transaction-coordinated
+idempotency/audit storage is an explicit prerequisite before production rollout.
 
 ## 1. Product requirement
 
