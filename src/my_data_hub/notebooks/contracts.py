@@ -57,7 +57,7 @@ class NotebookInputManifest(BaseModel):
     created_at: datetime
 
     @model_validator(mode="after")
-    def work_items_must_be_unique_and_bounded(self) -> "NotebookInputManifest":
+    def work_items_must_be_unique_and_bounded(self) -> NotebookInputManifest:
         ids = [item.work_item_id for item in self.work_items]
         if len(ids) != len(set(ids)):
             raise ValueError("work_item_id values must be unique")
@@ -121,7 +121,7 @@ class NotebookResult(BaseModel):
     completed_at: datetime
 
     @model_validator(mode="after")
-    def every_work_item_is_accounted_once(self) -> "NotebookResult":
+    def every_work_item_is_accounted_once(self) -> NotebookResult:
         completed = [item.work_item_id for item in self.items]
         failed = [item.work_item_id for item in self.failures if item.work_item_id is not None]
         identities = completed + failed

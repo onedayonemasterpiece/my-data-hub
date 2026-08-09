@@ -6,7 +6,6 @@ import pytest
 
 from my_data_hub.config import ConfigurationError, Settings
 
-
 PREFIX = "MY_DATA_HUB_"
 
 

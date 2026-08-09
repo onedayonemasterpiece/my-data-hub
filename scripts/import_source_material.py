@@ -28,8 +28,7 @@ class SourceImportError(RuntimeError):
 def _git(repo: Path, *args: str) -> bytes:
     process = subprocess.run(
         ["git", "-C", str(repo), *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     if process.returncode != 0:

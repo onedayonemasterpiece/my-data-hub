@@ -5,7 +5,6 @@ from typing import Literal
 
 from my_data_hub.hashing import sha256_value
 
-
 SyncDecision = Literal["no_change", "import", "push", "conflict", "tombstone"]
 
 

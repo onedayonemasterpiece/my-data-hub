@@ -11,7 +11,6 @@ from my_data_hub.orchestrator.models import RegionTalkBacklog
 from my_data_hub.orchestrator.policy import plan_region_talk
 from my_data_hub.orchestrator.registry import load_pipeline_definition
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 

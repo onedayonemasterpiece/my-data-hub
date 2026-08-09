@@ -7,14 +7,13 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from my_data_hub.hashing import sha256_value
 from my_data_hub.workloads.region_talk.contracts import MigrationReconciliationReport
 from my_data_hub.workloads.region_talk.migration import (
     RegionTalkMigrationError,
     build_reconciliation_accounting,
     load_manifest,
-    reconciliation_blocking_findings,
     raw_record_id,
+    reconciliation_blocking_findings,
     validate_export,
 )
 from my_data_hub.workloads.region_talk.ydb_export import (
@@ -73,7 +72,7 @@ def test_tampered_export_is_rejected(tmp_path: Path) -> None:
     )
     data = next(bundle.directory.glob("*.jsonl"))
     data.write_text(data.read_text(encoding="utf-8") + "{}\n", encoding="utf-8")
-    with pytest.raises(RegionTalkMigrationError, match="byte-size mismatch|SHA-256 mismatch"):
+    with pytest.raises(RegionTalkMigrationError, match=r"byte-size mismatch|SHA-256 mismatch"):
         validate_export(bundle.manifest_path)
 
 

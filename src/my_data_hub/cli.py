@@ -19,7 +19,6 @@ from my_data_hub.orchestrator.repository import register_pipeline
 from my_data_hub.workloads.region_talk.migration import import_raw_export, validate_export
 from my_data_hub.workloads.region_talk.ydb_export import export_ydb_table
 
-
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_DIRECTORY = REPOSITORY_ROOT / "sql" / "migrations"
 REGION_TALK_PIPELINE = REPOSITORY_ROOT / "config" / "pipelines" / "region-talk.v1.json"

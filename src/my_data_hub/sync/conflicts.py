@@ -5,7 +5,6 @@ from typing import Literal
 
 from my_data_hub.domain.commands import Operation
 
-
 ConflictDisposition = Literal["idempotent", "auto_merge", "conditional", "quarantine"]
 
 
