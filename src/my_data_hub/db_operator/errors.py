@@ -29,4 +29,3 @@ class EffectBoundsError(DatabaseOperatorError):
 
 class IdempotencyConflict(DatabaseOperatorError):
     """An idempotency key was already used for a different request."""
-

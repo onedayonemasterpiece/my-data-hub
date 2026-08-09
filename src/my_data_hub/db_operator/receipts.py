@@ -157,4 +157,3 @@ class ReceiptSigner:
 
     def issue_apply(self, payload: Mapping[str, Any]) -> str:
         return self.sign({"kind": "operator-apply-v1", **dict(payload)})
-
