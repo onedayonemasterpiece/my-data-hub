@@ -157,12 +157,6 @@ def serve(*, transport: str) -> None:
 
     if not settings.mcp_remote_enabled:
         raise ConfigurationError("remote MCP is disabled by configuration")
-    if settings.environment in {"prod", "production"}:
-        raise ConfigurationError(
-            "OAuth adapter must be implemented and integration-tested before production HTTP MCP"
-        )
-    if settings.mcp_auth_mode != "development-token" or not settings.mcp_development_token:
-        raise ConfigurationError("development Streamable HTTP requires a bearer token")
     try:
         import uvicorn
         from mcp.server.transport_security import TransportSecuritySettings
@@ -173,7 +167,11 @@ def serve(*, transport: str) -> None:
     from starlette.applications import Starlette
     from starlette.routing import Mount
 
+    from my_data_hub.mcp.admission import AdmissionLimits, OAuthAdmissionSecurity
     from my_data_hub.mcp.http_security import DevelopmentBearerSecurity
+    from my_data_hub.mcp.oauth import OAuthBearerValidator, OAuthValidationPolicy
+    from my_data_hub.mcp.oauth_jwt import JwksJwtDecoder
+    from my_data_hub.mcp.oauth_postgres import PostgresRevocationStore
 
     allowed_hosts = sorted(
         {
@@ -197,13 +195,50 @@ def serve(*, transport: str) -> None:
             yield
 
     mounted = Starlette(routes=[Mount("/", app=mcp_app)], lifespan=lifespan)
-    guarded = DevelopmentBearerSecurity(
-        mounted,
-        token=settings.mcp_development_token,
-        allowed_origins=settings.mcp_allowed_origins,
-        allowed_hosts=settings.mcp_allowed_hosts,
-        max_request_bytes=1_048_576,
-    )
+    if settings.mcp_auth_mode == "oauth":
+        decoder = JwksJwtDecoder(
+            jwks_url=settings.mcp_oauth_jwks_url,
+            issuer=settings.mcp_oauth_issuer,
+            audience=settings.mcp_oauth_audience,
+            algorithms=settings.mcp_oauth_algorithms,
+        )
+        validator = OAuthBearerValidator(
+            decoder=decoder,
+            policy=OAuthValidationPolicy(
+                issuer=settings.mcp_oauth_issuer,
+                audience=settings.mcp_oauth_audience,
+                resource=settings.mcp_oauth_resource,
+                allowed_scopes=settings.mcp_scopes,
+                max_token_lifetime_seconds=settings.mcp_token_max_lifetime_seconds,
+            ),
+            revocations=PostgresRevocationStore(settings.database_url),
+        )
+        guarded = OAuthAdmissionSecurity(
+            mounted,
+            validator=validator,
+            required_scopes=settings.mcp_scopes,
+            allowed_origins=settings.mcp_allowed_origins,
+            allowed_hosts=settings.mcp_allowed_hosts,
+            trusted_proxy_ips=settings.mcp_trusted_proxies,
+            limits=AdmissionLimits(
+                max_request_bytes=1_048_576,
+                max_response_bytes=2_097_152,
+                max_concurrency=16,
+                requests_per_window=120,
+                rate_window_seconds=60,
+                request_timeout_seconds=30,
+            ),
+        )
+    elif settings.mcp_auth_mode == "development-token" and settings.mcp_development_token:
+        guarded = DevelopmentBearerSecurity(
+            mounted,
+            token=settings.mcp_development_token,
+            allowed_origins=settings.mcp_allowed_origins,
+            allowed_hosts=settings.mcp_allowed_hosts,
+            max_request_bytes=1_048_576,
+        )
+    else:
+        raise ConfigurationError("Streamable HTTP requires OAuth or a loopback development token")
     uvicorn.run(
         guarded,
         host=settings.mcp_host,

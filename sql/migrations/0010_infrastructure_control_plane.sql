@@ -4,6 +4,30 @@
 CREATE SCHEMA integration;
 CREATE SCHEMA recovery;
 CREATE SCHEMA operator_control;
+CREATE SCHEMA auth;
+
+CREATE TABLE auth.oauth_revocation (
+    revocation_id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    issuer                  text NOT NULL,
+    token_jti               text,
+    client_id               text,
+    subject                 text,
+    reason                  text NOT NULL,
+    revoked_at              timestamptz NOT NULL DEFAULT now(),
+    expires_at              timestamptz,
+    created_by              text NOT NULL,
+    CHECK (num_nonnulls(token_jti, client_id, subject) >= 1),
+    CHECK (expires_at IS NULL OR expires_at > revoked_at)
+);
+CREATE INDEX oauth_revocation_token_idx
+    ON auth.oauth_revocation (issuer, token_jti) WHERE token_jti IS NOT NULL;
+CREATE INDEX oauth_revocation_client_idx
+    ON auth.oauth_revocation (issuer, client_id) WHERE client_id IS NOT NULL;
+CREATE INDEX oauth_revocation_subject_idx
+    ON auth.oauth_revocation (issuer, subject) WHERE subject IS NOT NULL;
+CREATE TRIGGER oauth_revocation_append_only
+BEFORE UPDATE OR DELETE ON auth.oauth_revocation
+FOR EACH ROW EXECUTE FUNCTION hub_meta.reject_update_delete();
 
 CREATE TABLE integration.connector (
     connector_id            text PRIMARY KEY,

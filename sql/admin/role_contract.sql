@@ -65,7 +65,8 @@ GRANT INSERT ON integration.batch, integration.batch_payload, integration.batch_
     integration.quarantine, integration.receipt TO mdh_connector_intake;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA integration TO mdh_connector_intake;
 
-GRANT USAGE ON SCHEMA hub, analysis, orchestration, sync, region_talk, migration, joplin, integration
+GRANT USAGE ON SCHEMA hub, analysis, orchestration, sync, region_talk, migration, joplin,
+    integration, auth
     TO mdh_mcp_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA hub, analysis, orchestration, sync, region_talk, migration, joplin
     TO mdh_mcp_reader;
@@ -73,6 +74,7 @@ GRANT SELECT ON integration.connector, integration.data_product, integration.bat
     integration.batch_event, integration.watermark, integration.quarantine, integration.receipt,
     integration.provider_resource, integration.provider_operation, integration.provider_event
     TO mdh_mcp_reader;
+GRANT SELECT ON auth.oauth_revocation TO mdh_mcp_reader;
 
 -- R1 editor production allowlist is intentionally empty. Disposable verification grants
 -- are created and removed by scripts/verify_postgres_roles.py.

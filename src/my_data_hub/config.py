@@ -79,6 +79,14 @@ class Settings:
     mcp_scopes: frozenset[str]
     connector_credentials: tuple[tuple[str, str], ...] = ()
     connector_intake_max_bytes: int = 2 * 1024 * 1024
+    mcp_oauth_issuer: str = ""
+    mcp_oauth_audience: str = ""
+    mcp_oauth_resource: str = ""
+    mcp_oauth_jwks_url: str = ""
+    mcp_oauth_algorithms: tuple[str, ...] = ("RS256",)
+    mcp_trusted_proxies: tuple[str, ...] = ()
+    mcp_token_max_lifetime_seconds: int = 3600
+    mcp_operator_profile_enabled: bool = False
 
     @classmethod
     def from_env(cls, *, require_database: bool = True) -> Settings:
@@ -141,6 +149,22 @@ class Settings:
             connector_intake_max_bytes=_int(
                 "MY_DATA_HUB_CONNECTOR_INTAKE_MAX_BYTES", 2 * 1024 * 1024
             ),
+            mcp_oauth_issuer=os.getenv("MY_DATA_HUB_MCP_OAUTH_ISSUER", "").strip(),
+            mcp_oauth_audience=os.getenv("MY_DATA_HUB_MCP_OAUTH_AUDIENCE", "").strip(),
+            mcp_oauth_resource=os.getenv("MY_DATA_HUB_MCP_OAUTH_RESOURCE", "").strip(),
+            mcp_oauth_jwks_url=os.getenv("MY_DATA_HUB_MCP_OAUTH_JWKS_URL", "").strip(),
+            mcp_oauth_algorithms=_csv(
+                os.getenv("MY_DATA_HUB_MCP_OAUTH_ALGORITHMS", "RS256")
+            ),
+            mcp_trusted_proxies=_csv(
+                os.getenv("MY_DATA_HUB_MCP_TRUSTED_PROXIES", "")
+            ),
+            mcp_token_max_lifetime_seconds=_int(
+                "MY_DATA_HUB_MCP_TOKEN_MAX_LIFETIME_SECONDS", 3600
+            ),
+            mcp_operator_profile_enabled=_bool(
+                "MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED", False
+            ),
         )
         settings.validate()
         return settings
@@ -170,8 +194,50 @@ class Settings:
             raise ConfigurationError("orchestrator lease must be between 30 and 86400 seconds")
         if self.mcp_auth_mode not in {"development-token", "oauth", "stdio-environment"}:
             raise ConfigurationError(f"unsupported MCP auth mode: {self.mcp_auth_mode}")
+        if self.environment in {"prod", "production"}:
+            if self.mcp_auth_mode == "development-token":
+                raise ConfigurationError(
+                    "development-token MCP authentication is forbidden in production"
+                )
+            if not self.worker_result_token:
+                raise ConfigurationError("worker result token is required in production")
+            if self.mcp_remote_enabled and self.mcp_auth_mode != "oauth":
+                raise ConfigurationError("production remote MCP requires OAuth")
         if self.mcp_remote_enabled and self.mcp_auth_mode == "stdio-environment":
             raise ConfigurationError("remote MCP cannot use stdio-environment authentication")
+        remote_read_scopes = {
+            "hub:read",
+            "orchestrator:read",
+            "region-talk:read",
+            "migration:read",
+        }
+        if self.mcp_remote_enabled and (
+            self.mcp_write_enabled or not self.mcp_scopes <= remote_read_scopes
+        ):
+            raise ConfigurationError(
+                "R1 remote MCP is semantic read-only; write/operator/provider mutation scopes are forbidden"
+            )
+        if self.mcp_remote_enabled and self.mcp_auth_mode == "oauth":
+            oauth_values = {
+                "MY_DATA_HUB_MCP_OAUTH_ISSUER": self.mcp_oauth_issuer,
+                "MY_DATA_HUB_MCP_OAUTH_AUDIENCE": self.mcp_oauth_audience,
+                "MY_DATA_HUB_MCP_OAUTH_RESOURCE": self.mcp_oauth_resource,
+                "MY_DATA_HUB_MCP_OAUTH_JWKS_URL": self.mcp_oauth_jwks_url,
+            }
+            missing = sorted(name for name, value in oauth_values.items() if not value)
+            if missing:
+                raise ConfigurationError(
+                    "production OAuth configuration is incomplete: " + ", ".join(missing)
+                )
+            if not self.mcp_oauth_jwks_url.startswith("https://"):
+                raise ConfigurationError("OAuth JWKS URL must use HTTPS")
+            allowed_algorithms = {"RS256", "RS384", "RS512", "ES256", "ES384"}
+            if not self.mcp_oauth_algorithms or not set(self.mcp_oauth_algorithms) <= allowed_algorithms:
+                raise ConfigurationError("OAuth algorithms must be an asymmetric allowlist")
+        if not 60 <= self.mcp_token_max_lifetime_seconds <= 86400:
+            raise ConfigurationError("OAuth access token maximum lifetime must be 60..86400 seconds")
+        if self.mcp_operator_profile_enabled and not self.mcp_write_enabled:
+            raise ConfigurationError("database operator profile requires the MCP write gate")
         if self.mcp_auth_mode == "development-token" and not self.mcp_development_token:
             raise ConfigurationError("development-token auth requires a token")
         if (
@@ -188,14 +254,5 @@ class Settings:
             "region-talk:write",
         }.intersection(self.mcp_scopes):
             raise ConfigurationError("MCP write mode requires an explicit write scope")
-        if self.environment in {"prod", "production"}:
-            if self.mcp_auth_mode == "development-token":
-                raise ConfigurationError(
-                    "development-token MCP authentication is forbidden in production"
-                )
-            if self.mcp_remote_enabled and self.mcp_auth_mode != "oauth":
-                raise ConfigurationError("production remote MCP requires OAuth")
-            if not self.worker_result_token:
-                raise ConfigurationError("worker result token is required in production")
         if self.production_publish_enabled and self.environment not in {"prod", "production"}:
             raise ConfigurationError("production publication may be enabled only in production")
