@@ -29,7 +29,11 @@ lanes:
     forbidden_files: [sql/migrations]
     expected_output: same-host install/runbook and runtime evidence
     verification_scope: full_local
-    status: planned
+    status: prepared_install_pending_explicit_confirmation
+    evidence:
+      - exact release 3f9c1f0266ace518e94e6096ac1b8b86a153c06e staged read-only
+      - PREPARE left current pointer, root environment hashes and disabled/inactive unit unchanged
+      - permanent PostgreSQL volume, migrations and autostart not started
   - id: R02
     role: integrator
     requirement_ids: [R02]
@@ -42,7 +46,10 @@ lanes:
     forbidden_files: [sql/migrations]
     expected_output: proxy route plus bounded MCP path configuration
     verification_scope: full_local
-    status: planned
+    status: edge_plan_complete_live_change_blocked
+    blockers:
+      - production OAuth issuer/JWKS is not configured
+      - DNS/TLS/Xray-nginx SNI cutover requires separate disruptive-change confirmation
   - id: R03
     role: integrator
     requirement_ids: [R03]
@@ -55,5 +62,9 @@ lanes:
     forbidden_files: [sql/migrations, src]
     expected_output: reviewed documentation merge without losing R1 changes
     verification_scope: full_local
-    status: planned
+    status: completed
+    evidence:
+      - archive and internal manifest checksums verified
+      - 28 modified and 2 new documentation files merged semantically
+      - R1 implementation claims preserved; ADR-0015 runtime remains explicitly pending
 ```
