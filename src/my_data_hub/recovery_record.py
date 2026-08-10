@@ -80,10 +80,34 @@ def main() -> int:
                 ),
             )
             cursor.execute(
-                "SELECT checkpoint_id FROM sync.checkpoint WHERE canonical_revision = %s",
-                (canonical_revision,),
+                """
+                SELECT checkpoint_id FROM sync.checkpoint
+                WHERE canonical_revision = %s
+                  AND checkpoint_kind = 'portable_logical'
+                  AND locator = %s
+                  AND sha256 = %s
+                  AND manifest_sha256 = %s
+                  AND postgres_major = %s
+                  AND extension_versions = %s::jsonb
+                  AND encrypted
+                  AND verified_readback_at = %s
+                """,
+                (
+                    canonical_revision,
+                    str(off_host["object_locator"]),
+                    str(backup["encrypted_artifact_sha256"]),
+                    str(backup["manifest_sha256"]),
+                    int(restore["postgres_major"]),
+                    json.dumps(restore["extension_versions"], sort_keys=True),
+                    str(off_host["verified_at"]),
+                ),
             )
-            checkpoint_id = cursor.fetchone()[0]
+            checkpoint = cursor.fetchone()
+            if checkpoint is None:
+                raise RuntimeError(
+                    "canonical revision is already bound to different checkpoint evidence"
+                )
+            checkpoint_id = checkpoint[0]
         connection.commit()
     print(
         json.dumps(

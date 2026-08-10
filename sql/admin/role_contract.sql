@@ -128,10 +128,11 @@ GRANT SELECT ON ALL SEQUENCES IN SCHEMA hub_meta, hub, analysis, orchestration, 
     region_talk, migration, joplin, integration, recovery, operator_control, auth
     TO mdh_backup;
 GRANT pg_monitor TO mdh_monitoring;
-GRANT USAGE ON SCHEMA hub, orchestration, integration, recovery TO mdh_monitoring;
+GRANT USAGE ON SCHEMA hub, orchestration, integration, recovery, sync TO mdh_monitoring;
 GRANT SELECT ON hub.canonical_state, orchestration.queue_health,
     integration.connector, integration.data_product, integration.batch,
-    integration.provider_resource, recovery.evidence TO mdh_monitoring;
+    integration.daily_statistic, integration.quarantine,
+    integration.provider_resource, recovery.evidence, sync.external_outbox TO mdh_monitoring;
 
 -- New objects fail closed. Re-running this explicit contract after a migration is required
 -- before a new object is visible to any service role.

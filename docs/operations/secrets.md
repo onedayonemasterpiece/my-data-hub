@@ -40,7 +40,8 @@ before starting application services.
 
 `connector-canary.env` is loaded only by the bounded, short-lived synthetic canary and
 contains four distinct restricted URLs: connector intake, canonical committer, MCP
-reader and role-admin verification. It is never loaded by an API, orchestrator, MCP,
+reader and monitoring verification. It never contains owner, role-admin or migrator
+credentials and is never loaded by an API, orchestrator, MCP,
 committer timer or backup process. The post-deploy OAuth canary token remains in the
 protected GitHub environment; only its already-public issuer, JTI and expiry are passed
 to a root transient unit which appends the revocation row using `admin.env`.

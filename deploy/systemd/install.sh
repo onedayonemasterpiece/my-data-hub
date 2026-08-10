@@ -33,4 +33,6 @@ for unit in "$unit_root"/*.service "$unit_root"/*.timer; do
   install -o root -g root -m 0644 "$unit" "/etc/systemd/system/$(basename "$unit")"
 done
 systemctl daemon-reload
-systemctl enable my-data-hub-backup.timer my-data-hub-connector-committer.timer
+systemctl enable my-data-hub-api.service my-data-hub-orchestrator.service \
+  my-data-hub-mcp.service my-data-hub-backup.timer \
+  my-data-hub-connector-committer.timer

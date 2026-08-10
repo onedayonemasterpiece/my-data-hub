@@ -54,6 +54,8 @@ jobs:
       MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL: postgresql://ci_connector:ci-connector-password@127.0.0.1:5432/my_data_hub_test
       MY_DATA_HUB_CANONICAL_COMMITTER_DATABASE_URL: postgresql://ci_committer:ci-committer-password@127.0.0.1:5432/my_data_hub_test
       MY_DATA_HUB_MCP_READER_DATABASE_URL: postgresql://ci_mcp_reader:ci-reader-password@127.0.0.1:5432/my_data_hub_test
+      MY_DATA_HUB_MONITORING_DATABASE_URL: postgresql://ci_monitoring:ci-monitoring-password@127.0.0.1:5432/my_data_hub_test
+      MY_DATA_HUB_OPERATOR_DATABASE_URL: postgresql://ci_editor:ci-editor-password@127.0.0.1:5432/my_data_hub_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -84,12 +86,30 @@ jobs:
             NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
           CREATE ROLE ci_mcp_reader LOGIN PASSWORD 'ci-reader-password'
             NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE ci_monitoring LOGIN PASSWORD 'ci-monitoring-password'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE ci_editor LOGIN PASSWORD 'ci-editor-password'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
           GRANT mdh_connector_intake TO ci_connector;
           GRANT mdh_canonical_committer TO ci_committer;
           GRANT mdh_mcp_reader TO ci_mcp_reader;
+          GRANT mdh_monitoring TO ci_monitoring;
+          GRANT mdh_mcp_editor TO ci_editor;
           SQL
       - name: Prove PostgreSQL positive and adversarial role probes
         run: python scripts/verify_postgres_roles.py
+      - name: Prove verified recovery checkpoint opens only the restricted operator read gate
+        run: |
+          python -m my_data_hub.recovery_record \
+            --database-url "$MY_DATA_HUB_ROLE_ADMIN_DATABASE_URL" \
+            --receipt examples/recovery-receipt.v1.json
+          python - <<'PY'
+          import os
+          from my_data_hub.db_operator.recovery import PostgresBackupStateProvider
+          state = PostgresBackupStateProvider(os.environ['MY_DATA_HUB_OPERATOR_DATABASE_URL'])()
+          assert state.checkpoint_revision
+          assert state.restore_drill_succeeded and state.readback_verified
+          PY
       - name: Verify database health
         run: my-data-hub db verify
       - name: Verify Region Talk lossless migration flow

@@ -30,6 +30,16 @@ class PostgresBackupStateProvider:
                   ON checkpoint.canonical_revision =
                      (manifest->'restore'->>'canonical_revision')::bigint
                  AND checkpoint.verified_readback_at IS NOT NULL
+                 AND checkpoint.checkpoint_kind = 'portable_logical'
+                 AND checkpoint.encrypted
+                 AND checkpoint.locator = manifest->'off_host'->>'object_locator'
+                 AND checkpoint.sha256 =
+                     manifest->'backup'->>'encrypted_artifact_sha256'
+                 AND checkpoint.manifest_sha256 = manifest->'backup'->>'manifest_sha256'
+                 AND checkpoint.postgres_major =
+                     (manifest->'restore'->>'postgres_major')::integer
+                 AND checkpoint.extension_versions =
+                     manifest->'restore'->'extension_versions'
                 WHERE evidence_type = 'isolated_restore' AND status = 'passed'
                 ORDER BY completed_at DESC, recorded_at DESC
                 LIMIT 1

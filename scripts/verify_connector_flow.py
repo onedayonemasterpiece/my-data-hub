@@ -45,7 +45,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--verification-database-url",
-        default=os.getenv("MY_DATA_HUB_ROLE_ADMIN_DATABASE_URL", ""),
+        default=os.getenv("MY_DATA_HUB_MONITORING_DATABASE_URL", ""),
     )
     parser.add_argument("--sequence", type=int, default=None)
     args = parser.parse_args()
@@ -53,7 +53,7 @@ def main() -> int:
         "intake": args.intake_database_url,
         "committer": args.committer_database_url,
         "MCP reader": args.mcp_reader_database_url,
-        "verification": args.verification_database_url,
+        "monitoring verification": args.verification_database_url,
     }
     missing = [name for name, value in urls.items() if not value]
     if missing:

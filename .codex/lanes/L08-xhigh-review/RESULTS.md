@@ -40,3 +40,10 @@ workflow probes, fail-closed nightly cadence/queue/recovery/provider checks, and
 verified recovery receipt → `sync.checkpoint` → operator gate path. The branch is not
 merge-ready until these changes are committed, CI is green, and the same independent
 reviewer returns a final no-Critical/no-High verdict.
+
+Pre-final-review inspection found and remediated three additional High issues: recovery
+evidence/checkpoints now bind the exact canonical revision, artifact/manifest hashes,
+off-host locator, PostgreSQL major and extension versions and reject conflicting reuse;
+the installer enables API/orchestrator/MCP as well as the two timers before any reboot
+proof; and the connector canary's final accounting now uses a read-only monitoring
+login rather than receiving a role-admin credential.
