@@ -1,0 +1,53 @@
+{
+  "artifact_id": "44444444-4444-4444-8444-444444444444",
+  "completed_at": "2026-08-10T00:05:00Z",
+  "execution_policy": {
+    "batch_size": 64,
+    "max_attempts": 3,
+    "retry_backoff_seconds": [
+      30,
+      120
+    ],
+    "retryable_failure_codes": [
+      "encoder_unavailable",
+      "timeout"
+    ],
+    "schema_version": "embedding-worker-policy.v1",
+    "terminal_failure_codes": [
+      "invalid_vector",
+      "model_contract_mismatch"
+    ],
+    "timeout_seconds": 1800
+  },
+  "failures": [
+    {
+      "code": "timeout",
+      "job_key": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "message": "bounded encoder timeout",
+      "retryable": true,
+      "terminal": false
+    }
+  ],
+  "input_jobs_sha256": "ac6b9e8785ddc0681eb0eb230ffbbe70430a0c662da617fc3d5ed2c6afa568a6",
+  "model": {
+    "dimensions": 768,
+    "document_prefix": "passage: ",
+    "encoder_contract_version": "e5-attention-mask-mean-l2-prefixes-max512.v1",
+    "max_tokens": 512,
+    "model_key": "intfloat/multilingual-e5-base",
+    "normalization": "l2",
+    "output_modes": [
+      "dense"
+    ],
+    "pooling": "attention_mask_mean",
+    "query_prefix": "query: ",
+    "revision": "d128750597153bb5987e10b1c3493a34e5a4502a",
+    "vector_space": "e5_multilingual_base_768_v1"
+  },
+  "payload_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "run_id": "55555555-5555-4555-8555-555555555555",
+  "schema_version": "embedding-artifact-manifest.v1",
+  "started_at": "2026-08-10T00:00:00Z",
+  "successful_results": [],
+  "total_jobs": 1
+}
