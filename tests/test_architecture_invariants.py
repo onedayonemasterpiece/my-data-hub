@@ -94,10 +94,42 @@ def test_production_control_profile_has_no_local_database_path() -> None:
 
 
 def test_repository_wide_deployment_surface_is_closed() -> None:
-    assert {path.relative_to(ROOT).as_posix() for path in ROOT.glob("compose*.yaml")} == {
+    def is_compose_filename(path: Path) -> bool:
+        name = path.name.lower()
+        return path.suffix.lower() in {".yml", ".yaml"} and (
+            name.startswith("compose.") or name.startswith("docker-compose.")
+        )
+
+    repository_files = [
+        path
+        for path in ROOT.rglob("*")
+        if path.is_file()
+        and not any(part in {".git", ".venv", "__pycache__"} for part in path.parts)
+    ]
+    assert {
+        path.relative_to(ROOT).as_posix() for path in repository_files if is_compose_filename(path)
+    } == {
         "compose.yaml",
         "compose.control-plane.yaml",
     }
+    workflow_directory = ROOT / ".github/workflows"
+    assert {
+        path.name
+        for path in workflow_directory.iterdir()
+        if path.is_file() and path.suffix.lower() in {".yml", ".yaml"}
+    } == {"ci.yml"}
+    for path in repository_files:
+        if path.suffix.lower() not in {".yml", ".yaml"}:
+            continue
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            continue
+        if isinstance(document, dict) and isinstance(document.get("services"), dict):
+            assert path.relative_to(ROOT).as_posix() in {
+                "compose.yaml",
+                "compose.control-plane.yaml",
+            }
     assert {
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / "deploy").rglob("*")
@@ -135,6 +167,7 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
             'PGDATABASE="$DATABASE_URL" pg_dump --format=custom --compress=9 \\',
             'pg_dump_version="$(pg_dump --version)"',
         ],
+        (3, "scripts/recovery/create_manifest.py"): ['"format": "pg_dump-custom",'],
         (5, "deploy/same-host/install.sh"): [
             'if [[ "${1:-}" == "INSTALL_MY_DATA_HUB_SAME_HOST" || "${1:-}" == "PREPARE" ]]; then',
         ],
@@ -143,19 +176,18 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
         ],
     }
     observed_occurrences: dict[tuple[int, str], list[str]] = {}
-    for path in ROOT.rglob("*"):
-        if not path.is_file() or any(
-            part in {".git", ".venv", "__pycache__"} for part in path.parts
-        ):
-            continue
+    for path in repository_files:
         relative_path = path.relative_to(ROOT)
         if not (
             path.suffix in {".sh", ".service", ".timer"}
             or path.name == "Makefile"
             or path.name.startswith("Dockerfile")
             or relative_path.parts[:2] == (".github", "workflows")
-            or path.name.startswith("compose")
+            or is_compose_filename(path)
+            or (path.suffix == ".py" and bool(path.stat().st_mode & 0o111))
         ):
+            continue
+        if relative_path.as_posix() == "scripts/validate_repository.py":
             continue
         text = path.read_text(encoding="utf-8")
         for index, pattern in enumerate(patterns):

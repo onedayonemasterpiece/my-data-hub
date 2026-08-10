@@ -496,7 +496,21 @@ def validate_deployment(report: Report) -> None:
         report.check(token not in control_installer, f"control installer contains forbidden local-master operation: {token}")
     report.check(not (ROOT / "deploy/systemd").exists(), "DB-coupled legacy systemd deployment directory remains")
     report.check(not (ROOT / "compose.same-host.yaml").exists(), "legacy same-host production Compose remains")
-    compose_files = {path.relative_to(ROOT).as_posix() for path in ROOT.glob("compose*.yaml")}
+    def is_compose_filename(path: Path) -> bool:
+        name = path.name.lower()
+        return path.suffix.lower() in {".yml", ".yaml"} and (
+            name.startswith("compose.") or name.startswith("docker-compose.")
+        )
+
+    repository_files = [
+        path
+        for path in ROOT.rglob("*")
+        if path.is_file()
+        and not any(part in {".git", ".venv", "__pycache__"} for part in path.parts)
+    ]
+    compose_files = {
+        path.relative_to(ROOT).as_posix() for path in repository_files if is_compose_filename(path)
+    }
     report.check(
         compose_files == {"compose.yaml", "compose.control-plane.yaml"},
         f"unclassified Compose deployment profile exists: {sorted(compose_files)}",
@@ -528,7 +542,11 @@ def validate_deployment(report: Report) -> None:
     report.check("docker compose down -v --remove-orphans" in makefile, "disposable integration cleanup does not remove volumes")
 
     workflow_directory = ROOT / ".github/workflows"
-    workflows = {path.name for path in workflow_directory.glob("*.yml")}
+    workflows = {
+        path.name
+        for path in workflow_directory.iterdir()
+        if path.is_file() and path.suffix.lower() in {".yml", ".yaml"}
+    }
     report.check(workflows == {"ci.yml"}, "deferred deployment/provider workflows remain enabled")
     ci_path = workflow_directory / "ci.yml"
     ci = ci_path.read_text(encoding="utf-8")
@@ -538,6 +556,20 @@ def validate_deployment(report: Report) -> None:
     report.check(postgres_job.get("runs-on") == "ubuntu-latest", "PostgreSQL integration must remain GitHub-hosted disposable CI")
     report.check(postgres_service.get("image") == postgres_image, "CI PostgreSQL image differs from integration target")
     report.check("volumes" not in postgres_service and "docker volume create" not in ci, "CI PostgreSQL declares persistent volume state")
+    for path in repository_files:
+        if path.suffix.lower() not in {".yml", ".yaml"}:
+            continue
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            continue
+        if not isinstance(document, dict) or not isinstance(document.get("services"), dict):
+            continue
+        relative = path.relative_to(ROOT).as_posix()
+        report.check(
+            relative in {"compose.yaml", "compose.control-plane.yaml"},
+            f"unclassified YAML service/deployment document exists: {relative}",
+        )
     for command in (
         "python scripts/verify_postgres_bootstrap.py",
         "python scripts/verify_region_talk_migration_flow.py",
@@ -581,6 +613,9 @@ def validate_deployment(report: Report) -> None:
             'PGDATABASE="$DATABASE_URL" pg_dump --format=custom --compress=9 \\',
             'pg_dump_version="$(pg_dump --version)"',
         ],
+        ("local master dump", "scripts/recovery/create_manifest.py"): [
+            '"format": "pg_dump-custom",',
+        ],
         ("legacy confirmation token", "deploy/same-host/install.sh"): [
             'if [[ "${1:-}" == "INSTALL_MY_DATA_HUB_SAME_HOST" || "${1:-}" == "PREPARE" ]]; then',
         ],
@@ -589,17 +624,18 @@ def validate_deployment(report: Report) -> None:
         ],
     }
     executable_candidates: list[Path] = []
-    for path in ROOT.rglob("*"):
-        if not path.is_file() or any(part in {".git", ".venv", "__pycache__"} for part in path.parts):
-            continue
+    for path in repository_files:
         relative = path.relative_to(ROOT)
         if (
             path.suffix in {".sh", ".service", ".timer"}
             or path.name == "Makefile"
             or path.name.startswith("Dockerfile")
             or relative.parts[:2] == (".github", "workflows")
-            or path.name.startswith("compose")
+            or is_compose_filename(path)
+            or (path.suffix == ".py" and bool(path.stat().st_mode & 0o111))
         ):
+            if relative.as_posix() == "scripts/validate_repository.py":
+                continue  # scanner implementation contains its own forbidden-pattern fixtures
             executable_candidates.append(path)
     observed_occurrences: dict[tuple[str, str], list[str]] = {}
     for path in executable_candidates:
