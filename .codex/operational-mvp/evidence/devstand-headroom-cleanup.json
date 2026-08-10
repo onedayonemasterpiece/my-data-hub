@@ -1,0 +1,32 @@
+{
+  "schema_version": "my-data-hub.devstand-headroom-cleanup/v1",
+  "observed_at": "2026-08-10T23:56:36Z",
+  "removed": [
+    {
+      "kind": "docker_volume",
+      "identity": "my-data-hub-postgres-data",
+      "reason": "unattached prohibited PR-A residue"
+    },
+    {
+      "kind": "docker_anonymous_volumes",
+      "scope": "unreferenced_only",
+      "reason": "disposable integration residues"
+    },
+    {
+      "kind": "docker_images",
+      "scope": "unused my-data-hub and disposable PostgreSQL test images",
+      "reason": "rebuildable task artifacts"
+    },
+    {
+      "kind": "cache",
+      "scope": "pip cache and obsolete R1 integration venv",
+      "reason": "rebuildable"
+    }
+  ],
+  "preserved": [
+    "all running VPN containers and images",
+    "all named unrelated Docker volumes",
+    "user source repositories"
+  ],
+  "local_postgresql_volume_present": false
+}
