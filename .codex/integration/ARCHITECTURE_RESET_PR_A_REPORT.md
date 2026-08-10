@@ -27,7 +27,7 @@ At the implementation head before review:
 - `python -m compileall -q src tests scripts`: PASS
 - `ruff check .`: PASS
 - `pytest -q`: PASS, 242 tests
-- `python scripts/validate_repository.py`: PASS, 2389 checks / 0 errors
+- `python scripts/validate_repository.py`: PASS, 2386 checks / 0 errors
 - `python scripts/create_notebooks.py --check`: PASS, no drift
 - integration and control Compose parsing: PASS; neither declares named volumes
 - `bash -n deploy/same-host/install.sh deploy/control-plane/install.sh`: PASS
@@ -48,7 +48,8 @@ incomplete control-plane credential denylist. The same PR now:
 - binds orchestrator availability, security trust zones, post-deploy/nightly evidence and
   Region Talk readiness to the control-plane/Kaggle-master split;
 - inventories every Compose/deploy/workflow surface and scans all executable-shaped files
-  with pattern-specific, exact-count exceptions in addition to semantic document checks;
+  with pattern/path/line-specific occurrence multisets in addition to semantic document
+  checks; any extra or rewritten matching command fails;
 - rejects every known database credential variable, standard libpq connection variables
   (including future `PG*` additions) and any future `*_DATABASE_URL` in the DB-free control
   process.

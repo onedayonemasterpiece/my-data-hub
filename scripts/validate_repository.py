@@ -552,32 +552,41 @@ def validate_deployment(report: Report) -> None:
     # Compose document. Exact allowlist entries are topology-neutral tools or disposable
     # test paths and each addition requires an explicit architecture review here.
     executable_patterns = {
-        "postgresql service supervision": re.compile(r"postgresql\.service", re.I),
+        "postgresql service supervision": re.compile(r"^.*postgresql\.service.*$", re.I | re.M),
         "PostgreSQL/PGDATA volume creation": re.compile(
-            r"docker\s+volume\s+create[^\n]*(?:postgres|pgdata)|"
-            r"docker\s+compose[^\n]*up[^\n]*(?:postgres|pgdata)",
-            re.I,
+            r"^.*(?:docker\s+volume\s+create[^\n]*(?:postgres|pgdata)|"
+            r"docker\s+compose[^\n]*up[^\n]*(?:postgres|pgdata)).*$",
+            re.I | re.M,
         ),
-        "PostgreSQL process initialization": re.compile(r"\b(?:initdb|pg_ctl)\b", re.I),
-        "local master dump": re.compile(r"\bpg_dump\b", re.I),
-        "master migration from deployment": re.compile(r"\bdb\s+migrate\b", re.I),
-        "legacy confirmation token": re.compile(r"INSTALL_MY_DATA_HUB_SAME_HOST"),
+        "PostgreSQL process initialization": re.compile(r"^.*\b(?:initdb|pg_ctl)\b.*$", re.I | re.M),
+        "local master dump": re.compile(r"^.*\bpg_dump\b.*$", re.I | re.M),
+        "master migration from deployment": re.compile(r"^.*\bdb\s+migrate\b.*$", re.I | re.M),
+        "legacy confirmation token": re.compile(r"^.*INSTALL_MY_DATA_HUB_SAME_HOST.*$", re.M),
     }
-    executable_allowlist = {
-        "PostgreSQL/PGDATA volume creation": {
-            "Makefile": "one explicit disposable integration-up command",
-        },
-        "master migration from deployment": {
-            "Makefile": "two explicit disposable integration migration commands",
-            ".github/workflows/ci.yml": "two GitHub-hosted disposable migration commands",
-        },
-        "local master dump": {
-            "scripts/backup_postgres.sh": "preserved Kaggle-master checkpoint tool only",
-        },
-        "legacy confirmation token": {
-            "deploy/same-host/install.sh": "permanent pre-side-effect rejection guard",
-            "deploy/control-plane/install.sh": "rejects the legacy token before prerequisites",
-        },
+    allowed_occurrences = {
+        ("PostgreSQL/PGDATA volume creation", "Makefile"): [
+            "docker compose up -d postgres",
+        ],
+        ("master migration from deployment", "Makefile"): [
+            "docker compose run --rm api db migrate",
+            "docker compose run --rm api db migrate",
+        ],
+        ("master migration from deployment", ".github/workflows/ci.yml"): [
+            "run: my-data-hub db migrate",
+            "run: my-data-hub db migrate",
+        ],
+        ("local master dump", "scripts/backup_postgres.sh"): [
+            'command -v pg_dump >/dev/null || { echo "pg_dump is required" >&2; exit 2; }',
+            "# pg_dump streams directly into age. No plaintext dump is ever written to local storage.",
+            'PGDATABASE="$DATABASE_URL" pg_dump --format=custom --compress=9 \\',
+            'pg_dump_version="$(pg_dump --version)"',
+        ],
+        ("legacy confirmation token", "deploy/same-host/install.sh"): [
+            'if [[ "${1:-}" == "INSTALL_MY_DATA_HUB_SAME_HOST" || "${1:-}" == "PREPARE" ]]; then',
+        ],
+        ("legacy confirmation token", "deploy/control-plane/install.sh"): [
+            'if [[ "$action" == "INSTALL_MY_DATA_HUB_SAME_HOST" ]]; then',
+        ],
     }
     executable_candidates: list[Path] = []
     for path in ROOT.rglob("*"):
@@ -592,29 +601,20 @@ def validate_deployment(report: Report) -> None:
             or path.name.startswith("compose")
         ):
             executable_candidates.append(path)
+    observed_occurrences: dict[tuple[str, str], list[str]] = {}
     for path in executable_candidates:
         relative = path.relative_to(ROOT).as_posix()
         text = path.read_text(encoding="utf-8")
         for label, pattern in executable_patterns.items():
-            if not pattern.search(text):
-                continue
-            report.check(
-                relative in executable_allowlist.get(label, {}),
-                f"repository-wide forbidden execution pattern ({label}) in {relative}",
-            )
-    report.check(
-        makefile.count("docker compose up -d postgres") == 1
-        and "docker volume create" not in makefile,
-        "disposable Makefile PostgreSQL startup exception broadened",
-    )
-    report.check(
-        makefile.count("docker compose run --rm api db migrate") == 2,
-        "disposable Makefile migration exceptions drifted",
-    )
-    report.check(
-        ci.count("run: my-data-hub db migrate") == 2,
-        "disposable CI migration exceptions drifted",
-    )
+            matches = [match.group(0).strip() for match in pattern.finditer(text)]
+            if matches:
+                observed_occurrences[(label, relative)] = matches
+    all_occurrence_keys = set(observed_occurrences) | set(allowed_occurrences)
+    for key in sorted(all_occurrence_keys):
+        report.check(
+            sorted(observed_occurrences.get(key, [])) == sorted(allowed_occurrences.get(key, [])),
+            f"repository-wide forbidden execution occurrences drifted for {key}",
+        )
 
     pipeline = load_json(ROOT / "config/pipelines/region-talk.v1.json")
     report.check(pipeline.get("status") == "paused", "Region Talk pipeline is not paused")

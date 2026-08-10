@@ -108,23 +108,41 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
         "deploy/same-host/install.sh",
     }
     patterns = (
-        re.compile(r"postgresql\.service", re.I),
+        re.compile(r"^.*postgresql\.service.*$", re.I | re.M),
         re.compile(
-            r"docker\s+volume\s+create[^\n]*(?:postgres|pgdata)|"
-            r"docker\s+compose[^\n]*up[^\n]*(?:postgres|pgdata)",
-            re.I,
+            r"^.*(?:docker\s+volume\s+create[^\n]*(?:postgres|pgdata)|"
+            r"docker\s+compose[^\n]*up[^\n]*(?:postgres|pgdata)).*$",
+            re.I | re.M,
         ),
-        re.compile(r"\b(?:initdb|pg_ctl)\b", re.I),
-        re.compile(r"\bpg_dump\b", re.I),
-        re.compile(r"\bdb\s+migrate\b", re.I),
-        re.compile(r"INSTALL_MY_DATA_HUB_SAME_HOST"),
+        re.compile(r"^.*\b(?:initdb|pg_ctl)\b.*$", re.I | re.M),
+        re.compile(r"^.*\bpg_dump\b.*$", re.I | re.M),
+        re.compile(r"^.*\bdb\s+migrate\b.*$", re.I | re.M),
+        re.compile(r"^.*INSTALL_MY_DATA_HUB_SAME_HOST.*$", re.M),
     )
-    allowlist = {
-        1: {"Makefile"},
-        3: {"scripts/backup_postgres.sh"},
-        4: {"Makefile", ".github/workflows/ci.yml"},
-        5: {"deploy/same-host/install.sh", "deploy/control-plane/install.sh"},
+    allowed_occurrences = {
+        (1, "Makefile"): ["docker compose up -d postgres"],
+        (4, "Makefile"): [
+            "docker compose run --rm api db migrate",
+            "docker compose run --rm api db migrate",
+        ],
+        (4, ".github/workflows/ci.yml"): [
+            "run: my-data-hub db migrate",
+            "run: my-data-hub db migrate",
+        ],
+        (3, "scripts/backup_postgres.sh"): [
+            'command -v pg_dump >/dev/null || { echo "pg_dump is required" >&2; exit 2; }',
+            "# pg_dump streams directly into age. No plaintext dump is ever written to local storage.",
+            'PGDATABASE="$DATABASE_URL" pg_dump --format=custom --compress=9 \\',
+            'pg_dump_version="$(pg_dump --version)"',
+        ],
+        (5, "deploy/same-host/install.sh"): [
+            'if [[ "${1:-}" == "INSTALL_MY_DATA_HUB_SAME_HOST" || "${1:-}" == "PREPARE" ]]; then',
+        ],
+        (5, "deploy/control-plane/install.sh"): [
+            'if [[ "$action" == "INSTALL_MY_DATA_HUB_SAME_HOST" ]]; then',
+        ],
     }
+    observed_occurrences: dict[tuple[int, str], list[str]] = {}
     for path in ROOT.rglob("*"):
         if not path.is_file() or any(
             part in {".git", ".venv", "__pycache__"} for part in path.parts
@@ -141,14 +159,12 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
             continue
         text = path.read_text(encoding="utf-8")
         for index, pattern in enumerate(patterns):
-            if pattern.search(text):
-                assert relative_path.as_posix() in allowlist.get(index, set())
-    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert makefile.count("docker compose up -d postgres") == 1
-    assert "docker volume create" not in makefile
-    assert makefile.count("docker compose run --rm api db migrate") == 2
-    assert ci.count("run: my-data-hub db migrate") == 2
+            matches = [match.group(0).strip() for match in pattern.finditer(text)]
+            if matches:
+                observed_occurrences[(index, relative_path.as_posix())] = matches
+    assert set(observed_occurrences) == set(allowed_occurrences)
+    for key, expected in allowed_occurrences.items():
+        assert sorted(observed_occurrences[key]) == sorted(expected)
 
 
 def test_legacy_install_token_hard_fails_before_side_effects(tmp_path: Path) -> None:
