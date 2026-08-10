@@ -5,6 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+TimeoutStartSec=60
 User=mydatahub-committer
 Group=mydatahub-committer
 WorkingDirectory=/opt/my-data-hub/current

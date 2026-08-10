@@ -31,6 +31,8 @@ def main() -> int:
     ) as connection, connection.cursor() as cursor:
         cursor.execute("SET TRANSACTION READ ONLY")
         cursor.execute("SET LOCAL statement_timeout = '2000ms'")
+        cursor.execute("SET LOCAL lock_timeout = '1000ms'")
+        cursor.execute("SET LOCAL transaction_timeout = '5000ms'")
         cursor.execute(
             """
             SELECT batch_id

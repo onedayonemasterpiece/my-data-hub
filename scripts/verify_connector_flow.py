@@ -129,6 +129,24 @@ def main() -> int:
     ):
         raise SystemExit("connector replay/conflict dispositions did not match the contract")
 
+    # A locked oldest row must fail within the bounded lock timeout rather than hang
+    # the sole timer. Once the transient lock is gone, the same batch progresses.
+    with psycopg.connect(
+        args.committer_database_url, connect_timeout=3
+    ) as lock_connection, lock_connection.cursor() as lock_cursor:
+        lock_cursor.execute(
+            "SELECT batch_id FROM integration.batch WHERE batch_id = %s FOR UPDATE",
+            (accepted.receipt.batch_id,),
+        )
+        lock_timeout_sqlstate = None
+        try:
+            committer.commit(accepted.receipt.batch_id)
+        except psycopg.errors.LockNotAvailable as exc:
+            lock_timeout_sqlstate = exc.sqlstate
+        else:
+            raise SystemExit("canonical committer did not honor its bounded row-lock timeout")
+        finally:
+            lock_connection.rollback()
     first_commit = committer.commit(accepted.receipt.batch_id)
     repeated_commit = committer.commit(accepted.receipt.batch_id)
     if first_commit.duplicate or not repeated_commit.duplicate or first_commit != repeated_commit.__class__(
@@ -260,6 +278,10 @@ def main() -> int:
             "quarantine_id": str(semantic_quarantine.quarantine_id),
             "terminal_replay": semantic_quarantine_replay.duplicate,
             "later_valid_batches_progressed": True,
+        },
+        "transient_lock": {
+            "bounded_sqlstate": lock_timeout_sqlstate,
+            "eventual_commit": True,
         },
     }
     print(json.dumps(report, indent=2, sort_keys=True))

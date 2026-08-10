@@ -55,3 +55,9 @@ connector batches receive an idempotent terminal semantic-quarantine receipt wit
 starving later batches; and operator backup age now comes from the original backup
 manifest rather than restore time, while high/bulk gates require the checkpoint's
 canonical revision to equal the write's expected revision.
+
+The exact-head closure pass also required an availability bound on the sole supervised
+committer. Both commit and semantic quarantine now have connection, statement, lock,
+transaction and idle-transaction limits; the timer unit has `TimeoutStartSec=60`; and a
+live restricted-role row-lock proof observes SQLSTATE `55P03` before the same batch
+commits after lock release.

@@ -339,11 +339,21 @@ class PostgresDailyStatisticsCommitter:
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
 
+    @staticmethod
+    def _set_transaction_limits(cursor: Any) -> None:
+        cursor.execute("SET LOCAL statement_timeout = '10000ms'")
+        cursor.execute("SET LOCAL lock_timeout = '2000ms'")
+        cursor.execute("SET LOCAL transaction_timeout = '15000ms'")
+        cursor.execute("SET LOCAL idle_in_transaction_session_timeout = '15000ms'")
+
     def commit(self, batch_id: UUID) -> CommitReceipt:
         import psycopg
 
-        with psycopg.connect(self.database_url) as connection, connection.cursor() as cursor:
+        with psycopg.connect(
+            self.database_url, connect_timeout=3
+        ) as connection, connection.cursor() as cursor:
             cursor.execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            self._set_transaction_limits(cursor)
             cursor.execute(
                 """
                 SELECT b.data_product, b.status, b.correlation_id, p.inline_payload,
@@ -537,8 +547,11 @@ class PostgresDailyStatisticsCommitter:
 
         if reason_code != "semantic_normalization_failed":
             raise ValueError("unsupported semantic quarantine reason")
-        with psycopg.connect(self.database_url) as connection, connection.cursor() as cursor:
+        with psycopg.connect(
+            self.database_url, connect_timeout=3
+        ) as connection, connection.cursor() as cursor:
             cursor.execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            self._set_transaction_limits(cursor)
             cursor.execute(
                 """
                 SELECT connector_id, idempotency_key, payload_sha256, status
