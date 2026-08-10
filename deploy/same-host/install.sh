@@ -203,7 +203,6 @@ WantedBy=default.target
 EOF
 chmod 600 "$unit"
 systemctl --user daemon-reload
-systemctl --user enable my-data-hub-compose.service
 
 if [[ "$action" == "PREPARE" ]]; then
   echo "prepared_commit=$commit"
@@ -220,6 +219,7 @@ compose run --rm migrate
 compose run --rm role-provision
 compose run --rm identity-verify
 compose run --rm role-probe
+systemctl --user enable my-data-hub-compose.service
 systemctl --user start my-data-hub-compose.service
 
 for _attempt in $(seq 1 30); do
