@@ -29,7 +29,7 @@ def test_same_host_installer_preserves_fail_closed_gates_and_autostart() -> None
     assert "candidate_deployment_env" in installer
     assert "candidate_env_dir" in installer
     assert "failed INSTALL attempts cannot advance boot state" in installer
-    assert "restoring the previous supervised application set" in installer
+    assert "restoring the last published runtime" in installer
     assert "another same-host PREPARE or INSTALL is already running" in installer
     safe_start = installer.index("compose up -d postgres api orchestrator\n")
     publish = installer.index("published=true")
@@ -38,6 +38,12 @@ def test_same_host_installer_preserves_fail_closed_gates_and_autostart() -> None
     assert "start only after the candidate" in installer
     assert "existing release directory does not match exact commit" in installer
     assert "existing release environment does not match exact commit" in installer
+    assert "release modes do not match the read-only exact-commit contract" in installer
+    assert installer.index("trap rollback_install EXIT") < installer.index(
+        "runtime_touched=true\ncompose stop api orchestrator"
+    )
+    assert "unit_was_enabled" in installer
+    assert "unit_was_active" in installer
     assert "systemctl --user restart my-data-hub-compose.service" in installer
     assert "INSTALL_MY_DATA_HUB_SAME_HOST" in installer
 

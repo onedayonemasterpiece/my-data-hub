@@ -133,7 +133,7 @@ MY_DATA_HUB_MCP_WRITE_ENABLED=false
 Region Talk remains `paused`; `publication_dispatch` remains disabled. The remote tool
 catalog is read-only and contains no operator or provider mutation tools.
 
-## Evidence still required from the actual devstand
+## Evidence still required from the permanent same-host runtime
 
 1. exact merged commit and clean tree;
 2. OS/kernel, Docker/Compose, image IDs/digests and PostgreSQL/pgvector versions;

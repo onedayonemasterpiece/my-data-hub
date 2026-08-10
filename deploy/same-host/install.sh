@@ -50,6 +50,35 @@ fi
 rm -rf "$staging"
 trap - EXIT
 chmod -R a-w "$release"
+python3 - "$source_root" "$commit" "$release" <<'PY'
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+source_root, commit, release_raw = sys.argv[1:]
+release = Path(release_raw)
+tree = subprocess.check_output(
+    ["git", "-C", source_root, "ls-tree", "-rz", "-r", commit]
+).split(b"\0")
+expected_executable = {
+    entry.split(b"\t", 1)[1].decode()
+    for entry in tree
+    if entry and entry.split(b" ", 1)[0] == b"100755"
+}
+actual_executable: set[str] = set()
+writeable: list[str] = []
+for path in release.rglob("*"):
+    if path.is_file() and not path.is_symlink():
+        relative = path.relative_to(release).as_posix()
+        mode = path.stat().st_mode
+        if mode & 0o111:
+            actual_executable.add(relative)
+        if mode & 0o222:
+            writeable.append(relative)
+if actual_executable != expected_executable or writeable:
+    raise SystemExit("release modes do not match the read-only exact-commit contract")
+PY
 
 secret_file="$state_root/secrets.env"
 if [[ ! -e "$secret_file" ]]; then
@@ -229,8 +258,76 @@ if [[ "$action" == "PREPARE" ]]; then
   exit 0
 fi
 
+previous_deployment_env=""
+if [[ -f "$state_root/deployment.env" ]]; then
+  previous_deployment_env="$(mktemp "$state_root/.deployment.env.previous.XXXXXX")"
+  cp "$state_root/deployment.env" "$previous_deployment_env"
+fi
+unit="$HOME/.config/systemd/user/my-data-hub-compose.service"
+previous_unit=""
+unit_was_enabled=false
+unit_was_active=false
+if [[ -f "$unit" ]]; then
+  previous_unit="$(mktemp "$HOME/.config/systemd/user/.my-data-hub-compose.previous.XXXXXX")"
+  cp "$unit" "$previous_unit"
+fi
+if systemctl --user is-enabled --quiet my-data-hub-compose.service 2>/dev/null; then
+  unit_was_enabled=true
+fi
+if systemctl --user is-active --quiet my-data-hub-compose.service 2>/dev/null; then
+  unit_was_active=true
+fi
+published=false
+runtime_touched=false
+rollback_install() {
+  local status="$?"
+  if [[ "$runtime_touched" == true && "$status" -ne 0 ]]; then
+    set +e
+    echo "candidate install failed; restoring the last published runtime" >&2
+    if [[ "$published" == true ]]; then
+      if [[ -n "$previous_release" ]]; then
+        ln -sfn "$previous_release" "$current"
+      else
+        rm -f "$current"
+      fi
+      if [[ -n "$previous_deployment_env" ]]; then
+        cp "$previous_deployment_env" "$state_root/deployment.env"
+      else
+        rm -f "$state_root/deployment.env"
+      fi
+      if [[ -n "$previous_unit" ]]; then
+        cp "$previous_unit" "$unit"
+      else
+        rm -f "$unit"
+      fi
+      systemctl --user daemon-reload
+    fi
+    if [[ -n "$previous_release" && -f "$state_root/deployment.env" ]]; then
+      previous_compose up -d postgres api orchestrator connector-committer backup
+    else
+      compose stop api orchestrator connector-committer backup
+    fi
+    if [[ "$published" == true ]]; then
+      if [[ "$unit_was_enabled" == true ]]; then
+        systemctl --user enable my-data-hub-compose.service
+      else
+        systemctl --user disable my-data-hub-compose.service
+      fi
+      if [[ "$unit_was_active" == true ]]; then
+        systemctl --user restart my-data-hub-compose.service
+      else
+        systemctl --user stop my-data-hub-compose.service
+      fi
+    fi
+  fi
+  rm -f "$previous_deployment_env" "$previous_unit"
+  exit "$status"
+}
+trap rollback_install EXIT
+
 # Stop every prior application writer before changing the database or starting a
 # candidate. A failed candidate is reconciled back to the last published release.
+runtime_touched=true
 compose stop api orchestrator connector-committer backup
 compose up -d postgres
 compose run --rm role-bootstrap
@@ -251,62 +348,12 @@ for _attempt in $(seq 1 30); do
   sleep 2
 done
 if [[ "$ready" != true ]]; then
-  echo "candidate readiness failed; restoring the previous supervised application set" >&2
-  if [[ -n "$previous_release" && -f "$state_root/deployment.env" ]]; then
-    previous_compose up -d postgres api orchestrator connector-committer backup
-  else
-    compose stop api orchestrator connector-committer backup
-  fi
+  echo "candidate readiness failed" >&2
   exit 1
 fi
 
 # Publish the release and boot configuration only after every database/identity/readiness
 # gate has passed. PREPARE and failed INSTALL attempts cannot advance boot state.
-previous_deployment_env=""
-if [[ -f "$state_root/deployment.env" ]]; then
-  previous_deployment_env="$(mktemp "$state_root/.deployment.env.previous.XXXXXX")"
-  cp "$state_root/deployment.env" "$previous_deployment_env"
-fi
-unit="$HOME/.config/systemd/user/my-data-hub-compose.service"
-unit_existed=false
-unit_was_enabled=false
-if [[ -f "$unit" ]]; then
-  unit_existed=true
-fi
-if systemctl --user is-enabled --quiet my-data-hub-compose.service 2>/dev/null; then
-  unit_was_enabled=true
-fi
-published=false
-rollback_install() {
-  local status="$?"
-  if [[ "$published" == true && "$status" -ne 0 ]]; then
-    set +e
-    echo "post-readiness install failed; restoring the last published runtime" >&2
-    if [[ -n "$previous_release" && -n "$previous_deployment_env" ]]; then
-      ln -sfn "$previous_release" "$current"
-      mv -f "$previous_deployment_env" "$state_root/deployment.env"
-      previous_compose up -d postgres api orchestrator connector-committer backup
-      systemctl --user daemon-reload
-      if [[ "$unit_was_enabled" == true ]]; then
-        systemctl --user enable my-data-hub-compose.service
-        systemctl --user restart my-data-hub-compose.service
-      fi
-    else
-      compose stop api orchestrator connector-committer backup
-      rm -f "$current" "$state_root/deployment.env"
-      if [[ "$unit_existed" == false ]]; then
-        systemctl --user disable --now my-data-hub-compose.service 2>/dev/null || true
-        rm -f "$unit"
-        systemctl --user daemon-reload
-      fi
-    fi
-  fi
-  if [[ -n "$previous_deployment_env" ]]; then
-    rm -f "$previous_deployment_env"
-  fi
-  exit "$status"
-}
-trap rollback_install EXIT
 next_link="$release_root/.current.$commit"
 ln -sfn "$release" "$next_link"
 mv -Tf "$next_link" "$current"
@@ -364,11 +411,9 @@ payload = {
 }
 output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-published=false
+runtime_touched=false
 trap - EXIT
-if [[ -n "$previous_deployment_env" ]]; then
-  rm -f "$previous_deployment_env"
-fi
+rm -f "$previous_deployment_env" "$previous_unit"
 chmod 600 "$state_root/receipts/"*.json
 echo "installed_commit=$commit"
 echo "receipt=$state_root/receipts/install.json"
