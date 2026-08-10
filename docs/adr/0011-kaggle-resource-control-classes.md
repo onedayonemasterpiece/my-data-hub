@@ -12,7 +12,7 @@ boundary.
 
 ## Decision
 
-Every discovered Kaggle notebook/kernel and private dataset is represented in a local
+Every discovered Kaggle notebook/kernel and private dataset is represented in the devstand control-plane
 registry with an immutable provider reference, origin, control class and current
 provider fingerprint.
 
@@ -28,7 +28,7 @@ Control classes are:
   only and no mutation.
 
 Resource names and prefixes are audit hints, not authorization. Authorization comes
-from the PostgreSQL registry and current principal. A resource cannot change control
+from the control-plane registry, ACTIVE master binding and current principal. A resource cannot change control
 class implicitly because it was renamed or rediscovered.
 
 All datasets created by `my-data-hub` are private. Public dataset creation is absent

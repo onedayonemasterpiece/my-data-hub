@@ -1,4 +1,22 @@
-# MCP operator profiles and broad PostgreSQL access
+# MCP operator and database access
+
+Status: `BOUNDED CONTRACT PRESERVED / ACTIVE-MASTER BINDING DEFERRED`
+
+Default semantic MCP remains non-SQL. Optional reader/editor/migration profiles use separate
+OAuth scopes, preview/apply receipts, time/row/byte limits, expected revisions and restricted
+PostgreSQL roles inside the latest ACTIVE Kaggle master.
+
+Every operation resolves and records master instance and epoch. Credentials expire quickly
+and cannot outlive fencing. No remote profile receives owner/superuser/DDL/BYPASSRLS,
+role administration, server-file access or `COPY PROGRAM`. High-impact apply requires a
+verified checkpoint bound to the protected master revision.
+
+The devstand has no local canonical database for these tools. PR-A exposes no operator
+write endpoint and remote MCP writes remain disabled.
+
+## Preserved detailed contract — bound by ADR-0016
+
+The detailed material below is retained where topology-neutral. Any reference to a database, role, committer, backup or connector application is executed inside/against the latest ACTIVE Kaggle master; devstand execution claims are superseded.
 
 Status: `R1 DISPOSABLE OPERATOR IMPLEMENTED / REMOTE PROFILE DISABLED`
 Date: 2026-08-09

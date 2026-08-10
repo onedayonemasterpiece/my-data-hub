@@ -1,28 +1,16 @@
-# ADR-0002: PostgreSQL is the only canonical server-side database
+# ADR-0002: PostgreSQL is the only canonical server-side database engine
 
-- Status: Accepted
+- Status: Accepted; runtime clauses amended by ADR-0016
 - Date: 2026-08-09
 
-## Decision
+PostgreSQL remains the sole canonical server-side database engine. In production its only
+ACTIVE writable primary runs in the Kaggle master Notebook. The devstand holds operational
+control metadata only and no canonical business rows or PGDATA.
 
-A live PostgreSQL instance on the devstand is the sole canonical relational
-runtime. Core content, orchestration state, semantic commands, migration
-accounting, audit and transactional outbox live there. PostgreSQL FTS,
-`pgvector`, `pgcrypto` and `citext` are approved extensions.
+YDB is a read-only migration/rollback source. SQLite, Supabase, Joplin internals and
+artifacts are not alternate canonical databases. Private Kaggle Datasets are verified
+checkpoint storage, not a live database by themselves.
 
-YDB is a temporary read-only migration and rollback source. SQLite, Supabase,
-Kaggle Dataset, GitHub artifacts and Joplin are not alternate canonical state
-stores. Files/object stores may hold immutable artifacts and encrypted backups.
-
-## Rationale
-
-A single transactional boundary removes distributed queue/state drift while
-retaining ACID, Russian FTS and vector search. It also gives MCP and Region Talk
-a dependable online boundary on the already planned supervised host.
-
-## Consequences
-
-Workers return immutable results and never write canonical tables directly.
-Availability depends explicitly on a supervised PostgreSQL service, tested
-backup/readback and auto-start. The database may later move to another host
-without changing domain ownership.
+Canonical mutations and required outbox events share one master PostgreSQL transaction.
+Availability is provided by ensure/resolve, leases/fencing and verified checkpoint recovery,
+not a local devstand service.

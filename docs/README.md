@@ -5,7 +5,9 @@
 - [`00-source-of-truth.md`](00-source-of-truth.md)
 - [`01-project-charter.md`](01-project-charter.md)
 - [`vision/my-data-hub-target-vision.md`](vision/my-data-hub-target-vision.md)
-- accepted decisions in [`adr/`](adr/)
+- accepted decisions in [`adr/`](adr/), especially corrective [`ADR-0016`](adr/0016-kaggle-postgresql-master-architecture-reset.md)
+- machine-readable [`architecture invariants`](../architecture/invariants.yaml)
+- [`architecture drift incident`](incidents/2026-08-10-local-postgres-architecture-drift.md)
 
 ## Baseline architecture
 
@@ -35,7 +37,7 @@ Supporting architecture documents:
 ## Infrastructure-first supplement
 
 - [`15-infrastructure-first-plan.md`](15-infrastructure-first-plan.md) — what to do
-  first on the deployed devstand.
+  first across the lightweight control plane and Kaggle master lifecycle.
 - [`16-data-connectors.md`](16-data-connectors.md) — push/pull/artifact/direct-landing
   connector contract, receipts and the events-bot daily-statistics example.
 - [`17-kaggle-control-plane.md`](17-kaggle-control-plane.md) — protected,
@@ -50,13 +52,14 @@ Supporting architecture documents:
 
 Associated decisions:
 
-- [`adr/0009-canonical-postgres-availability.md`](adr/0009-canonical-postgres-availability.md)
+- [`adr/0009-canonical-postgres-availability.md`](adr/0009-canonical-postgres-availability.md) — superseded historical decision
 - [`adr/0010-data-connector-ingress-contract.md`](adr/0010-data-connector-ingress-contract.md)
 - [`adr/0011-kaggle-resource-control-classes.md`](adr/0011-kaggle-resource-control-classes.md)
 - [`adr/0012-mcp-database-operator-profiles.md`](adr/0012-mcp-database-operator-profiles.md)
 - [`adr/0013-remote-mcp-endpoint.md`](adr/0013-remote-mcp-endpoint.md)
 - [`adr/0014-test-first-infrastructure-rollout.md`](adr/0014-test-first-infrastructure-rollout.md)
 - [`adr/0015-data-scope-and-pipeline-participation.md`](adr/0015-data-scope-and-pipeline-participation.md)
+- [`adr/0016-kaggle-postgresql-master-architecture-reset.md`](adr/0016-kaggle-postgresql-master-architecture-reset.md)
 
 Machine-readable design contracts:
 

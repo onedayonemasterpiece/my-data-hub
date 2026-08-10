@@ -1,4 +1,35 @@
-# Backup and recovery
+# Master checkpoint and recovery contract
+
+Status: `TOOLING PRESERVED / KAGGLE-MASTER REBINDING DEFERRED`
+
+Production durability belongs to the Kaggle master Notebook and private Kaggle Datasets,
+not a devstand backup timer.
+
+Required generations:
+
+- current verified checkpoint;
+- previous verified checkpoint;
+- less frequent portable encrypted logical backup.
+
+Promotion chain:
+
+```text
+consistent master backup -> manifest -> private exact dataset version
+-> readback/hash -> isolated restore smoke -> atomic HEAD advance
+```
+
+Receipts include source instance/run/epoch, PostgreSQL major, extension versions,
+schema/canonical revision, counts, hashes, dataset ref/version, readback and restore result.
+A failed candidate never replaces current/previous. Drain closes new writes and finishes
+transactions before checkpointing; an expired epoch cannot reopen the DB gate.
+
+Existing backup/restore scripts and schemas remain reusable tooling. They are not wired to
+the devstand production installer and must be adapted/tested inside the master Notebook
+phase. No production checkpoint or restore was executed by PR-A.
+
+## Preserved detailed contract — bound by ADR-0016
+
+The detailed material below is retained where topology-neutral. Any reference to a database, role, committer, backup or connector application is executed inside/against the latest ACTIVE Kaggle master; devstand execution claims are superseded.
 
 ## Purpose
 
@@ -10,7 +41,7 @@ unbounded remote writes.
 
 1. PostgreSQL logical backup (`pg_dump` custom format) for portable recovery.
 2. Optional physical/base backup or WAL continuity when measured RPO requires it.
-3. Encrypted local generation with manifest/hash.
+3. Encrypted master-runtime generation with manifest/hash.
 4. Encrypted private off-host copy, initially a protected private Kaggle Dataset or
    another approved target.
 5. Schema/migration code in GitHub.
@@ -44,7 +75,7 @@ permission to mutate production.
 
 ### Backup invocation
 
-Keep the database URL and age identity in the deployment secret store, not shell history.
+Keep the database URL and age identity in Kaggle User Secrets/short-lived master secret injection, not shell history.
 The age recipient is public key material, but its value is represented in the manifest
 only by a SHA-256 fingerprint.
 
@@ -158,8 +189,8 @@ not recorded by the current manifest and must not be inferred from it.
 
 Initial policy before broad MCP writes:
 
-- frequent local backup/snapshot cadence based on measured write volume;
-- at least daily encrypted off-host generation;
+- frequent master checkpoint cadence based on measured write volume;
+- at least daily verified private-dataset generation and periodic portable logical backup;
 - pre-change checkpoint for bulk/high-impact database operation;
 - multiple retained generations;
 - at least weekly isolated restore drill during rollout;
@@ -199,7 +230,7 @@ A restore target is never promoted automatically.
 
 Before data-editor apply, verify:
 
-- newest accepted local/off-host backup age;
+- newest accepted master/private-checkpoint backup age;
 - readback/hash status;
 - last restore-drill outcome/age;
 - schema revision compatibility;

@@ -1,6 +1,24 @@
-# Data connector architecture
+# Data connector contract
 
-Status: `R1 PUSH INTAKE/SPOOL IMPLEMENTED / SAME-HOST CANARY PENDING`
+Status: `ENVELOPE/SPOOL CONTRACT PRESERVED / MASTER ROUTING DEFERRED`
+
+Producer durable spool -> register batch/ensure master -> resolve ACTIVE latest epoch ->
+short-lived connector role -> connector-specific landing in Kaggle PostgreSQL -> validate,
+normalize and commit with receipt -> producer removes spool item.
+
+The devstand records operation/idempotency/routing metadata only; it does not land canonical
+or product data in a local database. Exact replay returns the same receipt. A different hash
+for the same idempotency key is quarantined. Connector roles cannot write shared canonical
+tables. Canonical application and semantic outbox share one master transaction.
+
+Multi-consumer scope/application design from ADR-0015 remains accepted design and pending.
+PR-A performs no live connector deployment or producer change.
+
+## Preserved detailed contract — bound by ADR-0016
+
+The detailed material below is retained where topology-neutral. Any reference to a database, role, committer, backup or connector application is executed inside/against the latest ACTIVE Kaggle master; devstand execution claims are superseded.
+
+Status: `CONTRACT PRESERVED / ACTIVE-MASTER ROUTING PENDING`
 Date: 2026-08-10
 Related decisions: ADR-0010, ADR-0015
 Contract: [`../schemas/data-connector-envelope.v1.schema.json`](../schemas/data-connector-envelope.v1.schema.json)
@@ -62,7 +80,7 @@ artifact location is not canonical state and cannot replace a batch receipt.
 
 ### 2.4 Trusted database landing — exception
 
-A co-located or private-network service may write into a dedicated `integration`
+An approved service with direct ACTIVE-master access may write into a dedicated `integration`
 landing table or invoke a narrow stored procedure under its own PostgreSQL role.
 
 This mode is allowed only when all of the following are true:
@@ -96,9 +114,9 @@ The spool must survive producer restart. Retries reuse the same batch bytes,
 idempotency key and hash. A producer must not generate a fresh identity after an
 ambiguous timeout.
 
-If the devstand itself is stopped, neither PostgreSQL nor the orchestrator can wake
-itself. The connector therefore waits in its spool. A future independent Yandex Cloud
-availability controller may start the host, but it is not part of connector correctness.
+If the devstand control plane is unavailable, the connector waits in its spool. If the
+control plane is healthy and the master is ABSENT, batch registration creates/reuses an
+`ensure_master` operation and returns retry/status guidance until the latest epoch is ACTIVE.
 
 ### 3.1 Optional external wake controller
 

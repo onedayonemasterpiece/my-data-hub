@@ -1,5 +1,8 @@
 # Notebook worker contract
 
+This contract covers ordinary compute notebooks. The Kaggle master Notebook is governed
+by ADR-0016 and the lease/fencing/DB-gate/checkpoint contract instead.
+
 ## Principle
 
 A notebook is an ephemeral compute worker, not a database owner. It receives an immutable

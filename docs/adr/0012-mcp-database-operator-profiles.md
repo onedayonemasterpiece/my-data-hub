@@ -27,8 +27,8 @@ Profiles:
    schemas, using preview then apply, expected effects and strict limits;
 4. `migration_operator` — typed landing, mapping, quarantine, reconciliation, shadow,
    cutover-readiness and rollback tools for approved workloads;
-5. `break_glass_admin` — DDL, roles, extensions and ownership changes only from the
-   devstand/local administrative channel with short-lived credentials; it is not a
+5. `break_glass_admin` — DDL, roles, extensions and ownership changes only inside the
+   fenced master runtime through a separately approved administrative channel with short-lived credentials; it is not a
    normal remote ChatGPT profile.
 
 The database role is the primary enforcement boundary. SQL parsing, allowlists,
@@ -39,7 +39,7 @@ receives superuser, `BYPASSRLS`, role administration, secret access, server file
 A data-editor apply requires a recent successful backup/restore evidence state and a
 short-lived preview receipt tied to principal, SQL fingerprint, parameters, expected
 row bounds and canonical revision. High-impact operations require an elevated scope and
-a pre-change checkpoint.
+a verified pre-change checkpoint of the bound ACTIVE master revision.
 
 ## Consequences
 

@@ -146,7 +146,7 @@ fail-closed publication flags, CI PostgreSQL profile and live verification comma
 
 - push/merge в удалённый GitHub;
 - exact authenticated source import;
-- настоящий devstand PostgreSQL deployment;
+- настоящий Kaggle master Notebook и его checkpoint lifecycle;
 - выполнение migrations на PostgreSQL server в текущем окружении;
 - live MCP SDK process and production OAuth transport;
 - реальный YDB inventory/export/import;
@@ -157,16 +157,8 @@ fail-closed publication flags, CI PostgreSQL profile and live verification comma
 
 ## 5. Следующая исполняемая последовательность
 
-1. Push bootstrap to `main` and run CI.
-2. Import exact target vision and donor provenance.
-3. Deploy PostgreSQL on devstand; apply migrations twice and run live verification.
-4. Execute backup/readback/restore drill before migration data is admitted.
-5. Start local stdio MCP and plan-only orchestrator under systemd.
-6. Inventory and export YDB with read-only credentials.
-7. Land raw records; implement row-kind transformers; reach complete accounting and zero quarantine.
-8. Port Region Talk adapters using exact fixtures and source commit receipts.
-9. Run shadow cycles with all external side effects disabled.
-10. Run private exact-revision canary, rollback rehearsal and only then cut over.
+This historical bootstrap sequence is superseded by ADR-0016. The executable order is
+donor compatibility, FakeKaggle orchestrator, runtime SDK, real provider smoke, master
+Notebook PoC, dynamic MCP/connectors, durability/canary, then Region Talk.
 
-The environment-specific completion contract is
-[`docs/12-code-agent-handoff.md`](12-code-agent-handoff.md).
+The current contract is [`docs/12-code-agent-handoff.md`](12-code-agent-handoff.md).

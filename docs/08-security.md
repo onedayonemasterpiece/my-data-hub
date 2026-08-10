@@ -1,15 +1,45 @@
 # Security model
 
+Security spans two planes.
+
+## Devstand control plane
+
+- no production PostgreSQL, PGDATA, canonical business data or master credentials at rest;
+- operation/event ledgers store identities, epochs, leases and locators, never runtime
+  credentials;
+- provider actions are idempotent, fenced and auditable;
+- stable MCP uses OAuth, Host/Origin checks, scopes, limits and revocation only after its
+  later release gate.
+
+## Kaggle master data plane
+
+- write gate opens only after restore verification, migrations, latest epoch and live lease;
+- short-lived credentials are role- and epoch-bound;
+- connector landing, canonical committer, MCP reader/editor, backup/checkpoint and migrator
+  roles stay separate;
+- owner/superuser/DDL/BYPASSRLS/server-file/program execution are never remote-agent roles;
+- checkpoints are private, hashed, read back and restore-smoked before HEAD promotion.
+
+PR-A contains no production credentials, real provider calls or enabled write surface.
+Publication, Region Talk and remote MCP writes remain disabled.
+
+## Preserved detailed contract — bound by ADR-0016
+
+The detailed material below is retained where topology-neutral. Any reference to a database, role, committer, backup or connector application is executed inside/against the latest ACTIVE Kaggle master; devstand execution claims are superseded.
+
 ## Trust zones
 
-1. PostgreSQL/internal services on the private devstand.
-2. Public TLS/OAuth edge at `mcp-datahub.kenigevents.ru`.
-3. MCP clients with profile/scoped identity.
-4. Data connectors with separate service identity.
-5. External workers/notebooks with untrusted outputs.
-6. Kaggle provider account/resources with registry control classes.
-7. Provider APIs and external content — untrusted.
-8. Migration source credentials — temporary and read-only.
+1. Lightweight devstand control services and operational metadata, with no master secret
+   or canonical business rows.
+2. The fenced Kaggle master PostgreSQL data plane and its restricted runtime identities.
+3. Private Kaggle checkpoint Datasets and their separate promotion/readback authority.
+4. Public TLS/OAuth edge at `mcp-datahub.kenigevents.ru`.
+5. MCP clients with profile/scoped identity.
+6. Data connectors with separate, short-lived epoch-bound identity.
+7. External workers/notebooks with untrusted outputs.
+8. Kaggle provider account/resources with registry control classes.
+9. Provider APIs and external content — untrusted.
+10. Migration source credentials — temporary and read-only.
 
 ## Secrets
 
@@ -85,7 +115,7 @@ readback-verified.
 
 ## Kaggle
 
-- every resource has local registry control class;
+- every resource has an explicit devstand control-registry class;
 - all platform-created datasets are private;
 - protected notebooks/datasets are status-only through remote MCP;
 - public dataset creation is absent from tool schema;

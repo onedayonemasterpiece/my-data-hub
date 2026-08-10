@@ -1,6 +1,6 @@
 # ADR-0015: Project/pipeline scope, participation and policy are first-class data
 
-- Status: Accepted
+- Status: Accepted; runtime binding clarified by ADR-0016
 - Date: 2026-08-10
 
 ## Context
@@ -75,7 +75,7 @@ The detailed contract is in
   applicable deny invalidates a previously pending allow receipt.
 - Region Talk reconciliation gains scope-completeness gates in addition to row accounting and
   identity reconciliation.
-- The implementation requires an append-only schema migration, backfill, compatibility
+- The implementation inside the ACTIVE Kaggle master requires an append-only schema migration, backfill, compatibility
   views/adapters, repository changes and negative tests before the real YDB normalization.
 
 ## Rejected alternatives

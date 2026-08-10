@@ -1,4 +1,36 @@
-# Orchestrator design
+# Orchestrator and master lifecycle
+
+Status: `TARGET CONTRACT / FAKEKAGGLE IMPLEMENTATION DEFERRED AFTER PR-A`
+
+The devstand orchestrator is a lightweight control plane. It persists operation identity,
+provider intent, callbacks, run evidence, leases, fencing epochs, service registry and
+checkpoint locators. It does not store canonical content and is not a proxy for bulk data.
+
+## Required state machine
+
+`ABSENT -> REQUESTED -> STARTING -> RESTORING -> REGISTERING -> ACTIVE -> DRAINING -> CHECKPOINTING -> STOPPED`
+with `FAILED`, `FENCED`, `CHECKPOINT_FAILED`, and `ORPHANED` terminal/error states.
+
+Rules:
+
+- persist a transition before each provider side effect;
+- `ensure_master` is idempotent and concurrent calls create at most one run;
+- each new master uses a monotonically increasing epoch;
+- only latest-epoch ACTIVE service resolves;
+- lease expiry closes the DB gate and rejects old callbacks/heartbeats;
+- reconcile platform status with exact callback/output evidence;
+- never place credentials in event records.
+
+After resolve, workers/connectors use short-lived epoch-bound credentials and connect
+directly to the Kaggle master data plane. External clients use stable devstand MCP.
+
+PR-A exposes only a truthful `master=ABSENT` status. Deterministic clock, FakeKaggle,
+property tests, durable ledger and real adapter are later ordered work. Region Talk
+scheduling and publication remain disabled.
+
+## Preserved detailed contract — bound by ADR-0016
+
+The detailed material below is retained where topology-neutral. Any reference to a database, role, committer, backup or connector application is executed inside/against the latest ACTIVE Kaggle master; devstand execution claims are superseded.
 
 ## 1. Назначение
 
@@ -195,7 +227,7 @@ Planner не выводит membership или policy из существован
 
 ## 13. Kaggle resource ownership
 
-Каждый запуск/датасет имеет PostgreSQL registry control class:
+Каждый запуск/датасет имеет control-plane registry control class:
 
 - orchestrator создаёт и управляет `orchestrator_protected` resources;
 - remote MCP видит для них только bounded status;
@@ -207,10 +239,12 @@ Provider dispatch использует lease, expected provider fingerprint, ide
 reconciliation after ambiguous outcome. Неподдержанная provider operation не
 эмулируется скрытым web automation без отдельного решения.
 
-## 14. Host/database availability
+## 14. Control/master availability
 
-PostgreSQL и orchestrator работают на одном initial devstand, поэтому orchestrator не
-может «поднять master DB через Kaggle», когда host/database недоступны. PostgreSQL
-supervisor/restart/restore — responsibility инфраструктуры. Optional external Yandex
-availability controller может быть добавлен позже, но он должен жить вне orchestrator и
-иметь минимальный IAM scope.
+Оркестратор работает на lightweight devstand независимо от состояния master. При
+`master=ABSENT` он остаётся доступен, идемпотентно создаёт или возвращает `ensure_master`
+operation и через Kaggle adapter запускает fenced master lifecycle. PostgreSQL supervisor,
+restore, DB gate и checkpoint agent работают внутри master Notebook. Недоступный devstand
+не переносит control authority в worker: producer сохраняет exact payload в durable spool,
+а optional external wake controller может только поднять approved control host с минимальным
+IAM scope.

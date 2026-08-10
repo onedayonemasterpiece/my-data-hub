@@ -1,0 +1,29 @@
+name: my-data-hub-control-plane
+
+x-my-data-hub-profile: production-lightweight-control-plane
+
+services:
+  control-plane:
+    image: my-data-hub-control-plane:${MY_DATA_HUB_IMAGE_TAG:-architecture-reset}
+    build:
+      context: .
+      dockerfile: deploy/control-plane/Dockerfile
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    environment:
+      MY_DATA_HUB_ENVIRONMENT: production
+      MY_DATA_HUB_CONTROL_HOST: 0.0.0.0
+      MY_DATA_HUB_CONTROL_PORT: 8080
+      MY_DATA_HUB_SCHEDULER_ENABLED: "false"
+      MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED: "false"
+      MY_DATA_HUB_MCP_REMOTE_ENABLED: "false"
+      MY_DATA_HUB_MCP_WRITE_ENABLED: "false"
+    ports:
+      - "127.0.0.1:${MY_DATA_HUB_CONTROL_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 10

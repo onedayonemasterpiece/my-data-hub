@@ -30,13 +30,13 @@ idempotency key, record count and SHA-256. A correction supersedes an earlier ba
 it does not mutate the historical intake receipt.
 
 The intake transaction records the accepted batch before downstream normalization.
-Canonical application is a separate, auditable step through the local committer.
+Canonical application is a separate, auditable step through the designated committer inside the ACTIVE Kaggle master.
 
 ## Consequences
 
 - Producers can retry safely after timeout or service outage.
 - Connector schema changes are explicit and independently testable.
-- Direct PostgreSQL access is not the ordinary service-to-service protocol.
+- Producers do not receive general PostgreSQL access; after ensure/resolve, a bounded connector may use its epoch-bound master landing role.
 - Daily bot statistics can be added before Region Talk migration without importing its
   legacy storage model.
 - The connector API and MCP may share a TLS gateway, but use different routes,

@@ -45,7 +45,7 @@ The migration is accepted only when all mandatory conditions are evidenced.
 - [ ] Platform-wide hard deny/blacklist overrides Region Talk local allow in negative tests.
 - [ ] Scope relation, usage, state and policy cannot be substituted for one another.
 - [ ] Backup/restore drill passes.
-- [ ] Devstand auto-start and health checks work.
+- [ ] Lightweight devstand control-plane autostart/health and dynamic master resolve work.
 - [ ] Publication kill switch works.
 - [ ] Rollback package and post-cutover command export tested.
 

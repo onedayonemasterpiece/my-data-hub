@@ -1,0 +1,47 @@
+schema_version: 1
+reset_id: my-data-hub-architecture-reset-2026-08-10
+authority_order:
+  - owner_decisions
+  - exact_imported_source_research
+  - corrective_adr
+  - machine_readable_invariants
+  - derived_docs_code_tests
+canonical_source:
+  path: docs/source-material/idea-hub/idea-20260809-content-platform-current-design.md
+  sha256: c7efb28231223caa6fd02fcc001a38e0f16bcc3fa4c4cd53e744721b2eac0852
+corrective_adr: docs/adr/0016-kaggle-postgresql-master-architecture-reset.md
+architecture:
+  final_project_name: my-data-hub
+  legacy_alias: content-platform
+  canonical_database_engine: postgresql
+  canonical_database_runtime: kaggle_notebook
+  active_writable_primary_max: 1
+  devstand_role: lightweight_control_plane
+  persistent_local_postgresql: forbidden
+  persistent_local_pgdata: forbidden
+  canonical_business_data_on_devstand: forbidden
+  checkpoint_store: private_kaggle_datasets
+  checkpoint_generations_minimum: 2
+  direct_internal_data_plane: required
+  stable_external_mcp_on_devstand: required
+safety:
+  region_talk_state: paused
+  production_publication: disabled
+  remote_mcp_writes: disabled
+  legacy_same_host_install: forbidden
+  dns_vpn_443_changes_in_pr_a: forbidden
+master_lifecycle:
+  states: [ABSENT, REQUESTED, STARTING, RESTORING, REGISTERING, ACTIVE, DRAINING, CHECKPOINTING, STOPPED]
+  error_states: [FAILED, FENCED, CHECKPOINT_FAILED, ORPHANED]
+implementation_sequence:
+  - reusable_donor_runtime_baseline
+  - orchestrator_fakekaggle_state_machine
+  - generic_runtime_event_sdk
+  - real_kaggle_lifecycle_smoke
+  - postgresql_master_notebook_poc
+  - mcp_and_connectors_against_active_master
+  - e5_service
+  - bge_service
+  - durability_recovery_poc
+  - bounded_canary
+  - region_talk_inventory_and_migration

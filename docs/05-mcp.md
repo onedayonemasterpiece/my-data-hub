@@ -1,4 +1,25 @@
-# MCP к my-data-hub
+# MCP boundary
+
+Status: `CONTRACT PRESERVED / DYNAMIC MASTER BINDING DEFERRED`
+
+Stable MCP belongs on the lightweight devstand control plane. It never embeds a local
+canonical PostgreSQL. For a data operation it ensures/resolves the latest ACTIVE Kaggle
+master, binds the receipt to master instance/epoch/canonical revision/idempotency identity,
+and uses a bounded epoch credential. When no master exists it reports cold-start operation
+state rather than fake success.
+
+The default profile remains typed and semantic; it exposes no generic SQL, shell,
+filesystem or provider secret access. Segregated reader/editor/migration profiles preserve
+ADR-0012 limits and use restricted roles inside the master PostgreSQL. No remote profile
+receives owner, superuser, DDL, BYPASSRLS, server-file or program execution rights.
+
+Public Streamable HTTP, OAuth and the stable hostname are later gates. PR-A keeps remote
+MCP and all MCP writes disabled and makes no DNS/VPN/443 change. The database-free control
+status endpoint is not claimed as the final MCP gateway.
+
+## Preserved detailed contract — bound by ADR-0016
+
+The detailed material below is retained where topology-neutral. Any reference to a database, role, committer, backup or connector application is executed inside/against the latest ACTIVE Kaggle master; devstand execution claims are superseded.
 
 ## Назначение и границы доверия
 

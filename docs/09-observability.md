@@ -1,5 +1,24 @@
 # Observability and evidence
 
+Every operation is traceable by request/principal, operation/run, master instance/epoch,
+lease, canonical revision, input/result/provider fingerprints and receipts.
+
+Control plane: lifecycle state, registry freshness, callbacks, fencing, checkpoint HEAD,
+provider reconciliation and dangerous gates. `master=ABSENT` is healthy control state and
+false data-plane readiness.
+
+Kaggle master: PostgreSQL health, DB gate/watchdog, roles, migrations/revision, queues/outbox,
+direct credential issuance and checkpoint progress. Checkpoints record exact private Dataset
+version, hashes, readback, restore smoke and current/previous age.
+
+Connectors report spool/accept/replay/conflict/quarantine/commit latency. MCP reports
+principal/profile/scope/denials and instance/epoch/revision-bound receipts. Full payloads,
+tokens and credentials are redacted. Region Talk/publication metrics remain inactive.
+
+## Preserved detailed contract — bound by ADR-0016
+
+The detailed material below is retained where topology-neutral. Any reference to a database, role, committer, backup or connector application is executed inside/against the latest ACTIVE Kaggle master; devstand execution claims are superseded.
+
 ## Service health
 
 - DB connectivity, migration/canonical revision and connection budget;
@@ -7,7 +26,7 @@
 - due/leased/expired/quarantined work counts;
 - outbox age;
 - artifact store read/write probe;
-- local/off-host backup age, hash/readback and restore-drill status;
+- master/private-checkpoint backup age, hash/readback and restore-drill status;
 - public MCP TLS/OAuth/liveness and profile state;
 - internal ports/firewall exposure evidence.
 
