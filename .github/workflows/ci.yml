@@ -107,7 +107,7 @@ jobs:
           import os
           from my_data_hub.db_operator.recovery import PostgresBackupStateProvider
           state = PostgresBackupStateProvider(os.environ['MY_DATA_HUB_OPERATOR_DATABASE_URL'])()
-          assert state.checkpoint_revision
+          assert state.checkpoint_revision is not None
           assert state.restore_drill_succeeded and state.readback_verified
           PY
       - name: Verify database health
