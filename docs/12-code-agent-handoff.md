@@ -2,13 +2,19 @@
 
 ## Goal
 
-Turn the user-reported devstand deployment into a verified, recoverable and tested
-platform; then add remote MCP, connectors, Kaggle control and restricted database
-operator access. Do **not** begin with the full Region Talk data migration.
+Install the implemented R1 platform on the current permanent host, verify its recovery
+and read-only boundaries, and then implement ADR-0015. Do **not** begin with the full
+Region Talk data migration.
 
 Region Talk remains the first migration workload after the reusable infrastructure gates
 pass. Do not redesign the project around Region Talk's legacy backend and do not use
 Kaggle as the master database.
+
+Current handoff status: phases A-D have repository implementations and disposable test
+evidence. Phase E has a fail-closed OAuth resource server but still needs the current
+host's DNS/TLS/OAuth deployment receipt. Phase F is accepted design only. The checklists
+below remain acceptance criteria; they must not be interpreted as an instruction to
+discard or redo already-reviewed R1 code.
 
 ## Required reasoning level
 
@@ -16,7 +22,7 @@ Kaggle as the master database.
 - Final security/data-integrity review: **xhigh** for OAuth, PostgreSQL grants,
   operator SQL, backup/restore, Kaggle protected-resource controls and migration gates.
 
-## Phase 0 — freeze and capture the actual deployment
+## Phase 0 — capture the current same-host deployment
 
 1. Confirm the checkout remote/branch/commit and clean/dirty state.
 2. Record OS, Docker/Compose, image digests, PostgreSQL/pgvector versions, volumes,
@@ -45,7 +51,7 @@ Kaggle as the master database.
 4. Curate donor MCP and Region Talk code/docs through manifests; do not copy secrets,
    sessions, exports or unrelated runtime.
 5. Reconcile target-vision conflicts through ADR.
-6. Preserve new ADR-0009 through ADR-0014 and the connector/exchange schemas.
+6. Preserve ADR-0009 through ADR-0015 and the connector/exchange schemas.
 
 ## Phase B — PostgreSQL roles, migrations and supervision
 
@@ -88,7 +94,8 @@ Create/prove:
 ```
 
 PR CI must cover static/unit/contracts, schemas/examples, clean and repeated migrations,
-upgrade path, connector flow, role negative tests and disposable operator preview/apply.
+upgrade path, scope/backfill/policy negative tests, multi-consumer connector flow, role
+negative tests and disposable operator preview/apply.
 
 Post-deploy must verify commit/images/revision/services/disabled gates/read-only MCP and a
 synthetic connector replay.
@@ -118,22 +125,57 @@ checks, resource IDs, hashes, cleanup and blockers.
 8. Prove token/client revocation.
 9. Archive DNS/certificate/listener IDs and non-secret receipts.
 
-## Phase F — connector plane and first real producer
+## Phase F — shared data scope, participation and policy
+
+Implement ADR-0015 before connector fan-out or real Region Talk normalization:
+
+1. Add an append-only migration for stable `orchestration.pipeline_identity` and
+   `orchestration.project_pipeline`; keep existing `orchestration.pipeline` as the exact
+   versioned execution definition.
+2. Add catalog-object and `platform`/`project`/`pipeline`/`project_pipeline` scope registries
+   with database CHECK/unique/FK constraints.
+3. Add relation definitions, generic object-scope relations plus append-only relation
+   events, namespaced current state plus append-only state events, policy
+   definitions/decisions/evaluation receipts and object-usage events/summaries.
+4. Backfill supported `actor`, `external_account`, `content_item` and `content_asset` rows.
+5. Backfill `hub.project_content` into the generic relation without creating dual authority;
+   keep it only as a documented compatibility/domain extension until consumers migrate.
+6. Register idempotent Region Talk project, logical pipeline and exact project-pipeline scopes.
+7. Give every state namespace exactly one writer and a normalized-class mapping. Do not use
+   normalized class as publication authorization.
+8. Implement immutable effective-policy evaluations and prove platform hard deny overrides
+   local allow, including after duplicate identity remap.
+9. Prove one object can have two project relations and different states in two project-pipeline
+   scopes without duplication or cross-overwrite.
+10. Prove usage does not create membership and work execution state does not create approval.
+11. Update MCP/query views so an operator can explain relations, usage, exact/normalized state
+    and effective policy independently.
+12. Archive clean/upgrade/backfill/negative-test receipts. Do not claim the design implemented
+    from documentation alone.
+
+Canonical contract:
+[`22-data-scope-and-pipeline-participation.md`](22-data-scope-and-pipeline-participation.md).
+
+## Phase G — connector plane and first real producer
 
 1. Add append-only `integration` migrations for connector registry, data products,
-   batches, payload/artifact refs, events, watermarks, quarantine and receipts.
+   batches, payload/artifact refs, events, many-to-many consumers, per-consumer applications,
+   watermarks, quarantine and receipts.
 2. Implement `/intake/v1/batches` and receipt lookup under separate service auth.
 3. Implement strict `data-connector-envelope.v1` validation, body/item limits, SHA-256,
    exact replay and conflicting-replay quarantine.
 4. Implement synthetic producer with durable local spool and retry/backoff.
 5. Prove platform outage/restart does not lose or duplicate a batch.
-6. Normalize/commit the synthetic product and read it through MCP.
+6. Route one synthetic batch to at least two consumers/scopes; prove independent
+   application status/receipt, optional-consumer isolation, replay and dedupe preserving both
+   scope relations; read the results through MCP.
 7. Register `events-bot.daily-statistics.v1` and implement a small non-sensitive daily
    aggregate connector in `events-bot-new` using its own durable outbox.
-8. Monitor accepted/committed/spool/watermark/quarantine cadence.
+8. Monitor accepted plus per-consumer committed/reconciled/spool/watermark/quarantine
+   cadence.
 9. Do not let the bot write shared canonical tables directly.
 
-## Phase G — Kaggle inventory and protected control
+## Phase H — Kaggle inventory and protected control
 
 1. Implement provider-neutral resource/operation/event registry plus Kaggle projection.
 2. Inventory every visible notebook/kernel and private dataset with bounded pagination.
@@ -152,7 +194,7 @@ checks, resource IDs, hashes, cleanup and blockers.
 12. Prove protected resource mutation/download/delete is denied even with normal Kaggle
     write scope.
 
-## Phase H — broad MCP database reader/editor
+## Phase I — broad MCP database reader/editor
 
 1. Add separate process/profile gates and OAuth scopes.
 2. Implement broad bounded read query under a read-only DB role:
@@ -178,7 +220,7 @@ checks, resource IDs, hashes, cleanup and blockers.
 7. Generic editor must not change migration accounting/cutover, provider control class,
    append-only audit/receipts or publication state.
 
-## Phase I — migration operator tools
+## Phase J — migration operator tools
 
 Implement typed tools for:
 
@@ -188,7 +230,7 @@ Implement typed tools for:
 - row-kind/disposition/quarantine inspection;
 - versioned transformer registration and bounded partition mapping;
 - expected-revision quarantine resolution;
-- row/identity/queue/semantic reconciliation;
+- row/identity/scope/queue/semantic reconciliation;
 - shadow plan/run/diff;
 - backup/freeze/final-delta/cutover preview;
 - owner-approved cutover and rollback.
@@ -196,22 +238,26 @@ Implement typed tools for:
 An agent may drive these tools. It may not set `cutover_ready`, erase quarantine or
 bypass reconciliation with raw SQL.
 
-## Phase J — Region Talk inventory, migration and shadow
+## Phase K — Region Talk inventory, migration and shadow
 
-Only after Phases B–I gates pass:
+Only after Phases B–J gates pass:
 
 1. create protected read-only YDB migration credentials;
 2. enumerate actual tables/row kinds and code references;
 3. complete inventory with counts, key order, caps and semantic owner;
 4. run deterministic bounded export and repeat logical hashes;
-5. land every row in `migration.raw_record`;
-6. implement versioned row-kind transformers;
+5. attest `project:region-talk` and exact Region Talk project-pipeline scope on every export
+   batch, then land every row in `migration.raw_record`;
+6. implement versioned row-kind transformers that atomically write target, target refs,
+   provenance, required Region Talk relation/scoped state/usage and disposition;
 7. preserve useful source/post/result/review/publication/history data;
 8. repair queue into immutable `queue_seq` and explicit lanes;
-9. reach full accounting with zero quarantine for cutover;
+9. reach full accounting and scope completeness with zero quarantine for cutover; prove
+   normalized/deduplicated shared targets retain Region Talk relation and duplicate groups
+   preserve union aliases/provenance/scopes;
 10. port actual Region Talk stages behind current worker contracts;
 11. run at least three representative shadow cycles;
-12. explain every candidate/readiness/review drift;
+12. explain every candidate/readiness/review/state/policy drift;
 13. run private review canary;
 14. fresh backup, freeze, final delta, cutover and rollback rehearsal;
 15. keep production publishing off until separate owner approval;
@@ -230,5 +276,7 @@ Only after Phases B–I gates pass:
 - synthetic connector and events-bot connector status;
 - Kaggle inventory/control-class/canary/protected-denial evidence;
 - database reader/editor disposable-schema evidence;
+- scope/policy migration, backfill and negative-test receipts;
+- connector multi-consumer application receipts;
 - exact remaining blockers before Region Talk inventory;
 - explicit scheduler/publication/Region Talk pipeline states.

@@ -43,7 +43,10 @@ is exported and retained even before a normalized mapping exists.
 - large-row distribution;
 - null/missing update timestamp count;
 - all row kinds not in the initial mapping registry;
-- source code commit used for extraction.
+- source code commit used for extraction;
+- stable `project:region-talk`, `pipeline:region-talk.main` and exact
+  `project-pipeline:region-talk:region-talk.main` scope identities selected for import;
+- importer/mapping release that is allowed to assign those server-attested scopes.
 
 ## Semantic fields to preserve
 
@@ -55,8 +58,11 @@ not query them. Especially preserve:
 - discovery method/query/edge and timestamps;
 - text/full-text excerpt/summary fields allowed by current retention policy;
 - model IDs, encoder contracts, text/content hashes and semantic-bank versions;
-- source scope/geo/topic/externality verdict and evidence;
-- all gate versions, reasons, status transitions and retry metadata;
+- source domain scope/geo/topic/externality verdict and evidence; this legacy field is not
+  a substitute for the new canonical project/pipeline scope;
+- all gate versions, reasons, exact status namespaces/transitions and retry metadata;
+- global/project/pipeline approval, deny/blacklist evidence and decision provenance where
+  present; current-state rows must not invent unavailable history;
 - image URL/order/hash/verdict/evidence and terminal/unsupported status;
 - candidate revision, text, CTA, ordered media and approval fingerprint;
 - operator review and publication receipts;
@@ -79,3 +85,16 @@ One or more UTF-8 JSONL files. Each line conforms to
   "payload_sha256": "..."
 }
 ```
+
+Scope is attested once at export/import batch level, not copied into each source payload.
+Before live export, the versioned manifest/receipt contract must carry at least:
+
+```text
+origin_scope_key = project:region-talk
+target_scope_key = project-pipeline:region-talk:region-talk.main
+scope_contract_version
+mapping_version
+```
+
+If the current manifest schema cannot represent these fields, add a new schema version; do
+not mutate or reinterpret an already released v1 contract.

@@ -86,6 +86,30 @@ Provider tools, фильтруемые PostgreSQL registry control class:
 - [`17-kaggle-control-plane.md`](17-kaggle-control-plane.md)
 - [`18-mcp-operator-and-database-access.md`](18-mcp-operator-and-database-access.md)
 
+## Target scope/participation read surface
+
+После реализации ADR-0015 semantic/read profiles должны давать независимые bounded
+ответы, а не один смешанный `status`:
+
+| Tool | Scope | Режим | Контракт |
+|---|---|---|---|
+| `hub.object.context.get` | `hub:read` | read | catalog object + lifecycle, без payload dump |
+| `hub.object.relations.list` | `hub:read` | read | active/history project/pipeline relations |
+| `hub.object.states.list` | `hub:read` | read | exact namespaced state + normalized class per scope |
+| `hub.object.usage.list` | `orchestrator:read` | read | bounded append-only run/stage usage facts |
+| `hub.object.policy.explain` | `hub:read` | read | effective outcome, exact decisions, traversal and freshness |
+| `connector.batch.list_applications` | `connector:read` | read | independent consumer applications/receipts |
+
+Scope is resolved from server-side registries and FKs. Tools must not infer membership or
+permission from schema name, latest work item, producer hint or free-form metadata. Generic
+`data_reader` may inspect approved views; typed semantic tools remain preferred for stable
+contracts and explainability.
+
+Mutation of relation/state/policy is allowed only through typed commands with namespace/
+writer authority, expected revision, reason/evidence and immutable audit. The generic editor
+cannot rewrite append-only relation/state/policy histories or policy-evaluation receipts.
+Canonical model: [`22-data-scope-and-pipeline-participation.md`](22-data-scope-and-pipeline-participation.md).
+
 ## Транспортные профили
 
 ### Локальный агент: stdio
@@ -144,13 +168,15 @@ Development token на public listener запрещён. Порядок наст
 - principal/client identity и scopes;
 - session ID и idempotency key;
 - versioned command type;
-- target identity и expected revision/preconditions;
-- bounded payload и reason/evidence;
+- target identity, exact object/project-pipeline scope and expected revision/preconditions;
+- bounded payload, exact state/policy namespace and reason/evidence;
 - dependency IDs;
 - dry-run/preview, где применимо.
 
-Business mutation, command receipt и semantic outbox фиксируются одной PostgreSQL
-transaction. Внешний side effect не выполняется MCP handler.
+Business mutation, required scope relation/state/usage, command receipt and semantic outbox
+фиксируются одной PostgreSQL transaction. Внешний side effect не выполняется MCP handler.
+Side-effect intent references a fresh policy-evaluation receipt and input fingerprint; stale
+policy evidence fails closed before provider dispatch.
 
 ## Operator write contract
 
@@ -173,7 +199,8 @@ profile.
 
 Боты и сервисы передают регулярные данные через `/intake/v1` по versioned connector
 envelope. У них отдельная service identity, limits, receipt и outage spool. MCP только
-наблюдает, приостанавливает и разрешает connector quarantine. См.
+наблюдает, приостанавливает и разрешает connector quarantine, а также показывает
+independent per-consumer applications. См.
 [`16-data-connectors.md`](16-data-connectors.md).
 
 ## Всё ещё запрещено
@@ -186,7 +213,10 @@ envelope. У них отдельная service identity, limits, receipt и outa
 - mutation `orchestrator_protected` Kaggle resources;
 - direct notebook canonical writes;
 - `publish_now` без отдельного ADR, exact revision и dispatcher gate;
-- обход migration accounting/cutover через generic editor DML.
+- обход migration accounting/cutover через generic editor DML;
+- producer-assigned authoritative project/platform scope;
+- вывод membership/policy из work status, schema name или provenance text;
+- изменение append-only scope/state/policy evidence generic editor-ом.
 
 ## Донор
 
@@ -199,11 +229,12 @@ correlation IDs и provider isolation. Его event-domain/SQLite code не оп
 
 1. devstand/backup/test evidence;
 2. production OAuth and remote read-only semantic tools;
-3. connector status + synthetic connector;
-4. Kaggle inventory read-only;
-5. data-reader profile;
-6. MCP-managed Kaggle provider canary;
-7. data-editor in disposable schema;
-8. allowlisted application DML;
-9. migration-operator tools and Region Talk migration;
-10. publication remains a separate future gate.
+3. ADR-0015 scope/catalog/relation/state/usage/policy foundation and read views;
+4. connector status + synthetic multi-consumer connector;
+5. Kaggle inventory read-only;
+6. data-reader profile;
+7. MCP-managed Kaggle provider canary;
+8. data-editor in disposable schema;
+9. allowlisted application DML;
+10. migration-operator tools and Region Talk migration;
+11. publication remains a separate future gate.

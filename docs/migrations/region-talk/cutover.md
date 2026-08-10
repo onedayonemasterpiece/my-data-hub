@@ -7,14 +7,19 @@
 - clean migration on an empty PostgreSQL instance;
 - backup and restore drill passes;
 - migration/staging storage sized with margin;
-- application and migration roles separated.
+- application and migration roles separated;
+- ADR-0015 scope migration/backfill and negative constraints pass on clean and upgrade paths;
+- stable Region Talk project, logical pipeline and project-pipeline scopes are recorded.
 
 ### Gate B — data
 
 - baseline plus catch-up export imported;
 - all source rows accounted for with exact manifest/raw counts;
 - no undispositioned or quarantined rows remain;
-- every row-kind reports `cutover_ready = true`;
+- every row-kind reports `cutover_ready = true` under the new scope-aware report version;
+- every raw row resolves Region Talk origin scope;
+- normalized/deduplicated shared targets and Region Talk projections pass scope completeness;
+- duplicate groups preserve union aliases, provenance and project/pipeline relations;
 - critical identity and semantic reconciliation passes;
 - unknown kinds have an explicit accepted non-quarantine disposition.
 
@@ -24,7 +29,9 @@
 - duplicate/idempotency replay tests pass;
 - E5, BGE and image result acceptance proven;
 - exact candidate revision survives review flow;
-- zero-result and failure reasons are observable.
+- zero-result and failure reasons are observable;
+- exact namespaced state and execution work state remain independent;
+- global publication deny cannot be overridden by Region Talk local allow.
 
 ### Gate D — private canary
 
@@ -38,7 +45,7 @@
 1. Disable all YDB writers while retaining reads.
 2. Record freeze time and legacy deployment revision.
 3. Export all changes since previous watermark plus a hash comparison index.
-4. Import, normalize and reconcile.
+4. Import, normalize and reconcile, including scope-completeness and policy negative gates.
 5. Take a PostgreSQL pre-cutover backup.
 6. Switch service configuration to PostgreSQL.
 7. Start MCP and orchestrator with publication still disabled.
@@ -51,12 +58,12 @@ For at least the rollback window monitor:
 
 - queue inflow/outflow and oldest actionable age;
 - stage failure/retry/quarantine counts;
-- duplicate command/result conflicts;
-- source/content/candidate creation rates;
+- duplicate command/result conflicts and missing/ambiguous scope findings;
+- source/content/candidate creation rates and Region Talk relation coverage;
 - gate funnel versus pre-cutover baseline;
 - database size, slow queries, locks and backup success;
 - MCP auth/limit failures;
-- outbox lag and provider receipts.
+- scoped-state/usage anomalies, effective-policy denies and outbox/provider receipts.
 
 Do not delete YDB data or credentials until the rollback window is closed by an explicit
 receipt.

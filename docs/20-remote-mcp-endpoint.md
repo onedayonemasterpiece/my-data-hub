@@ -1,7 +1,7 @@
 # Remote MCP endpoint: mcp-datahub.kenigevents.ru
 
-Status: `R1 RESOURCE SERVER IMPLEMENTED / YC EDGE DEPLOYMENT BLOCKED`
-Date: 2026-08-09
+Status: `R1 RESOURCE SERVER IMPLEMENTED / SAME-HOST TLS AND OAUTH PENDING`
+Date: 2026-08-10
 Related decision: ADR-0013
 
 Implemented in R1: a private Streamable HTTP backend profile, asymmetric JWKS JWT
@@ -9,9 +9,9 @@ verification, exact issuer/audience/resource/scope/time claims, append-only Post
 revocation, RFC 9728 protected-resource metadata, `WWW-Authenticate` discovery,
 Host/Origin/trusted-proxy validation, no-store/correlation headers, bounded
 request/response/concurrency/rate/timeout controls, and read-only tool discovery.
-Cloud DNS/TLS/edge/backend deployment is not claimed; the authorized Yandex folders
-contain no discoverable devstand instance or ALB and the hostname currently has no DNS
-record.
+The permanent backend is the current `DevCoveer` server. Cloud DNS/TLS/edge deployment is
+not yet claimed; no Compute instance or ALB is required, and the hostname currently has
+no DNS record.
 
 ## 1. Canonical URL
 
@@ -28,8 +28,8 @@ Do not expose the internal application port or PostgreSQL directly.
 Internet client
   → Yandex Cloud DNS
   → public HTTPS listener / TLS certificate
-  → reverse proxy or Application Load Balancer
-  → private devstand upstream
+  → same-host nginx SNI/TLS edge (sharing 443 with existing Xray)
+  → loopback MCP upstream
   → MCP Streamable HTTP server
   → scoped application/database/provider services
 ```
@@ -42,14 +42,13 @@ provider identity and queue data require authentication.
 
 ## 3. DNS and certificate
 
-The code agent should use the existing Yandex Cloud organization/folder and CLI
-conventions to:
+Use the existing Yandex Cloud DNS zone to point the hostname at `188.227.84.107`, then:
 
 1. locate the authoritative Cloud DNS zone for `kenigevents.ru`;
 2. add the required `A`/`AAAA` or `CNAME` record for `mcp-datahub`;
 3. request or attach a certificate covering the exact hostname;
 4. complete DNS or HTTP validation;
-5. attach the certificate to the HTTPS listener/reverse proxy;
+5. attach the certificate to the same-host nginx HTTPS listener;
 6. verify renewal ownership and expiration monitoring;
 7. record zone, record set, certificate and listener IDs in a deployment receipt.
 
@@ -192,8 +191,8 @@ Before connecting the high-privilege profile:
 
 ## 10. Yandex CLI implementation acceptance
 
-The code agent may choose ALB, an existing reverse proxy or another already accepted
-Yandex deployment pattern. The implementation is acceptable only if evidence shows:
+The accepted implementation uses the existing same-host reverse proxy. It is acceptable
+only if evidence shows:
 
 - DNS resolves globally to the intended edge;
 - certificate chain and hostname validation pass;

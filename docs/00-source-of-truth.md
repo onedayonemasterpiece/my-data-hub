@@ -67,14 +67,18 @@ source commit: 0c3fcf7 (Add research record)
 
 ## 6. Принятое инфраструктурное дополнение
 
-ADR-0009–ADR-0014 и документы `15`–`20` уточняют реализацию исходного видения:
+ADR-0009–ADR-0015 и документы `15`–`22` уточняют реализацию исходного видения:
 
 - PostgreSQL supervised/always-on; Kaggle не является master DB;
 - data connectors — отдельная idempotent ingress boundary;
 - `mcp-datahub.kenigevents.ru` — canonical remote MCP URL;
 - default semantic MCP и privileged operator MCP разделены;
 - Kaggle resources имеют registry control classes;
-- infrastructure/test workflows precede Region Talk migration.
+- infrastructure/test workflows precede Region Talk migration;
+- shared data uses explicit platform/project/pipeline/project-pipeline scopes;
+- persistent relation, scoped workflow state, append-only usage and policy decision are
+  independent facts;
+- Region Talk raw lineage and normalized/deduplicated target relations are mandatory.
 
 Это не второй проект и не замена исходного idea-hub документа. При конфликте с точным
 импортом исходника требуется новый ADR с явным сравнением и решением владельца.
@@ -89,3 +93,13 @@ ADR-0009–ADR-0014 и документы `15`–`20` уточняют реал�
 - **Kaggle control class** — registry-enforced provider authorization независимо от
   resource name.
 - **Exchange package** — private TTL/hash-manifested artifact transfer; не canonical data.
+- **Scope** — устойчивый platform/project/pipeline/project-pipeline контекст для relation,
+  state, usage или policy; не свободный tag.
+- **Object-scope relation** — persisted membership/management/reference/origin fact; не
+  execution status и не policy allow.
+- **Scoped state** — exact namespaced workflow/domain state объекта в одном scope, с
+  normalized class только для общих отчётов.
+- **Pipeline usage** — append-only факт обработки объекта конкретным run/stage; не
+  membership.
+- **Policy decision/evaluation** — versioned authorization fact и immutable receipt его
+  эффективного вычисления для exact action/scope/revisions.

@@ -1,0 +1,80 @@
+# Complete same-host nginx shape. Merge it with the existing VPN nginx configuration;
+# do not copy it blindly. Xray REALITY must listen on 127.0.0.1:10443 first.
+events {
+    worker_connections 4096;
+}
+
+stream {
+    map $ssl_preread_server_name $same_host_upstream {
+        mcp-datahub.kenigevents.ru mcp_https;
+        default                    xray_reality;
+    }
+    upstream mcp_https { server 127.0.0.1:10445; }
+    upstream xray_reality { server 127.0.0.1:10443; }
+
+    server {
+        listen 443;
+        proxy_pass $same_host_upstream;
+        ssl_preread on;
+        proxy_connect_timeout 5s;
+        proxy_timeout 1h;
+    }
+}
+
+http {
+    access_log /var/log/nginx/access.log;
+    error_log /var/log/nginx/error.log warn;
+
+    server {
+        listen 80;
+        server_name 188.227.84.107 mcp-datahub.kenigevents.ru;
+        location /.well-known/acme-challenge/ { root /var/www/certbot; }
+        location /sub/ {
+            alias /var/www/subscriptions/;
+            default_type text/plain;
+            add_header Cache-Control "no-store";
+        }
+        location / { return 204; }
+    }
+
+    server {
+        listen 127.0.0.1:10445 ssl;
+        server_name mcp-datahub.kenigevents.ru;
+        ssl_certificate /etc/nginx/tls/mcp-datahub/fullchain.pem;
+        ssl_certificate_key /etc/nginx/tls/mcp-datahub/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        client_max_body_size 1m;
+        client_body_timeout 15s;
+        keepalive_timeout 75s;
+
+        location = /mcp {
+            proxy_pass http://127.0.0.1:8765/mcp;
+            proxy_http_version 1.1;
+            proxy_buffering off;
+            proxy_request_buffering off;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 65s;
+            proxy_send_timeout 65s;
+            proxy_set_header Host $host;
+            proxy_set_header Forwarded "";
+            proxy_set_header X-Forwarded-For "";
+            proxy_set_header X-Forwarded-Host "";
+            proxy_set_header X-Forwarded-Proto "";
+        }
+
+        location = /.well-known/oauth-protected-resource/mcp {
+            proxy_pass http://127.0.0.1:8765/.well-known/oauth-protected-resource/mcp;
+            proxy_http_version 1.1;
+            proxy_buffering off;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 30s;
+            proxy_set_header Host $host;
+            proxy_set_header Forwarded "";
+            proxy_set_header X-Forwarded-For "";
+            proxy_set_header X-Forwarded-Host "";
+            proxy_set_header X-Forwarded-Proto "";
+        }
+
+        location / { return 404; }
+    }
+}

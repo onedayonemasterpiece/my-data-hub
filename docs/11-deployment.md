@@ -1,4 +1,4 @@
-# Deployment profile: local devstand = initial production
+# Deployment profile: `DevCoveer` same-host production
 
 ## Services
 
@@ -14,14 +14,14 @@ Kaggle is compute/private-artifact storage, not a database service or automatic 
 
 ## Filesystem
 
-```text
-/opt/my-data-hub/current          # checkout/release
-/etc/my-data-hub/my-data-hub.env # root-readable secrets
-/var/lib/my-data-hub/artifacts   # immutable bundles
-/var/lib/my-data-hub/connectors  # local intake/spool staging where required
-/var/lib/my-data-hub/backups     # encrypted backups
-/var/log/my-data-hub             # journald preferred
-```
+The immediately deployable non-root profile uses immutable releases under
+`~/.local/opt/my-data-hub`, mode-0600 split environments and receipts/backups under
+`~/.local/state/my-data-hub`, plus fixed Docker volumes
+`my-data-hub-postgres-data` and `my-data-hub-artifacts`.
+
+`compose.same-host.yaml` is production-specific and does not reuse the development
+catch-all `.env`. The native root-owned units under `deploy/systemd/` remain an optional
+harder isolation profile when interactive sudo is available.
 
 ## Database roles
 
@@ -35,8 +35,9 @@ Kaggle is compute/private-artifact storage, not a database service or automatic 
 - backup/restore;
 - monitoring.
 
-Compose bootstrap uses one role only as a temporary convenience. Split roles and
-negative grant tests are required before remote writes or Region Talk import.
+The same-host installer uses the bootstrap login only for one-shot administration. Every
+long-running process receives only its required restricted URL(s); distinct LOGIN,
+membership and negative grant tests run before services start.
 
 ## Public endpoint
 
@@ -44,7 +45,8 @@ negative grant tests are required before remote writes or Region Talk import.
 https://mcp-datahub.kenigevents.ru/mcp
 ```
 
-Only TCP 443 is public. The edge handles DNS/TLS and coarse limits; MCP still validates
+Only TCP 443 is public. On this host it is shared with the existing Xray service through
+SNI routing; MCP receives only the exact hostname and `/mcp` resource. The edge handles DNS/TLS and coarse limits; MCP still validates
 OAuth resource/audience, Host, Origin, scopes, profiles and dynamic targets. Development
 token mode remains loopback-only.
 

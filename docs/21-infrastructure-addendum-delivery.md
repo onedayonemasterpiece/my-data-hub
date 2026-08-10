@@ -1,7 +1,12 @@
 # Infrastructure, connectors and operator MCP addendum — delivery record
 
-Status: `DOCUMENTED / IMPLEMENTATION PENDING`
-Date: 2026-08-09
+Status: `R1 REPOSITORY IMPLEMENTED / SAME-HOST RUNTIME PROOF IN PROGRESS`
+Date: 2026-08-10
+
+Historical note: ADR-0015 and
+[`22-data-scope-and-pipeline-participation.md`](22-data-scope-and-pipeline-participation.md)
+were accepted on 2026-08-10 after this validation snapshot. Their schema/runtime work and
+new tests are implementation-pending and are not covered by the counts below.
 
 ## 1. Scope delivered
 
@@ -16,8 +21,10 @@ implementation plan and adds the missing architectural boundaries for:
 - agent-operated Region Talk migration through typed gates;
 - PR, post-deploy, nightly, provider-canary and restore workflows.
 
-It does not claim those runtime capabilities are already deployed. The owner-reported
-devstand must produce the receipts and negative-test evidence defined by this package.
+The R1 repository capabilities were implemented after the historical snapshot below.
+They are not yet claimed as verified same-host runtime capabilities: the permanent host
+must still produce installation, backup, recovery, auth and restart receipts. ADR-0015
+remains design-only.
 
 ## 2. Accepted decisions
 
@@ -48,7 +55,8 @@ devstand must produce the receipts and negative-test evidence defined by this pa
 - [`19-test-first-rollout.md`](19-test-first-rollout.md)
 - [`20-remote-mcp-endpoint.md`](20-remote-mcp-endpoint.md)
 - [`operations/first-deploy-template.md`](operations/first-deploy-template.md)
-- ADR-0009 through ADR-0014 in [`adr/`](adr/)
+- ADR-0009 through ADR-0014 in [`adr/`](adr/) for this historical delivery; ADR-0015 is
+  the later scope/participation addendum.
 
 Machine-readable design contracts:
 
@@ -87,7 +95,9 @@ locally skipped dependency check into a pass.
 
 ## 5. Immediate implementation release
 
-The next release is **R1 Infrastructure and Workflow**, in this order:
+At the time of this historical delivery the combined assignment was called **R1
+Infrastructure and Workflow**. The current release plan splits the same pre-migration work
+across R1–R4; the dependency order remains:
 
 1. copy the first-deploy template and record observed devstand facts;
 2. keep scheduler, publication, remote MCP and operator writes disabled;
@@ -95,9 +105,11 @@ The next release is **R1 Infrastructure and Workflow**, in this order:
 4. prove encrypted backup, provider readback and isolated restore;
 5. create PR/post-deploy/nightly/Kaggle/restore workflows with receipts;
 6. publish read-only OAuth MCP at the accepted hostname;
-7. prove a synthetic connector including outage, exact replay and conflict handling;
-8. prove Kaggle protected-resource denial and disposable MCP-managed lifecycle;
-9. prove database reader/editor in a disposable schema;
-10. then begin Region Talk read-only inventory/export.
+7. implement/prove ADR-0015 scope, backfill and policy foundations;
+8. prove a synthetic multi-consumer connector including outage, exact replay and conflict
+   handling;
+9. prove Kaggle protected-resource denial and disposable MCP-managed lifecycle;
+10. prove database reader/editor in a disposable schema;
+11. then begin Region Talk read-only inventory/export.
 
 The executable handoff is [`12-code-agent-handoff.md`](12-code-agent-handoff.md).

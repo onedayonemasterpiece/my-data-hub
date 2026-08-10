@@ -15,14 +15,17 @@
 
 Per connector/data product:
 
-- last accepted and last canonical-committed batch;
-- expected cadence/lateness and watermark lag;
+- last accepted batch and acceptance age;
+- expected cadence/lateness;
 - producer spool depth/oldest batch where reported;
 - accepted, duplicate, conflict, rejected and quarantined counts;
 - bytes/records and schema-version distribution;
-- accepted-to-committed latency;
-- receipt delivery failures;
-- current pause/incident state.
+- acceptance receipt delivery failures;
+- routing fan-out and unmatched/disabled consumer counts;
+- last committed/reconciled, accepted-to-stage latency, watermark and quarantine per
+  consumer/scope;
+- oldest uncommitted consumer application;
+- current pause/incident state per connector and consumer.
 
 ## Kaggle provider health
 
@@ -55,7 +58,22 @@ Per run/stage:
 - provider/resource usage;
 - zero-result reason;
 - exact input/output hashes;
-- code/model/contract versions.
+- code/model/contract versions;
+- stable logical pipeline and exact project-pipeline scope;
+- relation/state/usage/policy anomalies kept separate from work execution status.
+
+## Data scope and policy health
+
+- active catalog objects and relations by object type/scope/relation kind;
+- required data with missing or ambiguous scope lineage;
+- namespaced-state counts plus normalized classes, writer conflicts and cross-scope overwrite
+  attempts;
+- usage events with unresolved run/stage/project-pipeline identity;
+- active policy decisions by scope/outcome/reason;
+- policy evaluations missing decisions, relationship evidence or a current input fingerprint;
+- pending outbox intents whose allow receipt became stale/expired;
+- Region Talk raw-without-batch-scope and normalized/deduplicated-target-without-relation
+  counters.
 
 ## Product funnel: Region Talk
 
@@ -95,6 +113,14 @@ Connector batch:
 
 ```text
 {connector_id, data_product, batch_id, idempotency_key, schema_version, payload_sha256}
+{consumer_id, application_id, target_scope_id, routing_registry_revision, application_status}
+```
+
+Object/policy decision:
+
+```text
+{object_id, object_revision, scope_id, relation/state revision, usage_event_id}
+{policy_key, policy_version, evaluation_id, policy_input_fingerprint, effective_outcome}
 ```
 
 Provider operation:
@@ -112,8 +138,8 @@ Operator write:
 ## Structured events
 
 A log line is JSON with timestamp, level, event name, correlation ID and relevant
-run/task/batch/resource/project identities. Full payloads, SQL parameters containing
-sensitive values, bearer tokens and secrets are not logged.
+run/task/batch/resource/project/pipeline/scope/object identities. Full payloads and SQL
+parameters containing sensitive values, bearer tokens and secrets are not logged.
 
 ## Scheduled evidence
 

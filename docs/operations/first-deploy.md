@@ -1,62 +1,56 @@
 # First deployment receipt — R1
 
-Status: **BLOCKED — no devstand/backend is discoverable in the authorized cloud**
-Receipt observation time: `2026-08-09T22:46:15Z`
-Repository branch under test: `integration/r1-infrastructure-workflow`
+Status: **CURRENT PERMANENT HOST IDENTIFIED / INSTALLATION NOT YET EXECUTED**
+Receipt correction time: `2026-08-10`
+Target host: `DevCoveer` (`188.227.84.107`)
 
-This document deliberately separates observations from the current Codex runner and
-observations from the actual devstand. The runner is **not** asserted to be the devstand.
-No output below is inferred from Compose or systemd configuration.
+The earlier receipt incorrectly treated this Codex host as a temporary runner and searched
+for another devstand. The owner clarified that this machine is the permanent execution
+host. The cloud inventory remains useful only to prove that no duplicate Compute/ALB was
+created.
 
-## Exact deployment blocker
+## Observed permanent-host baseline
 
-- Blocker ID: `DEVSTAND_BACKEND_IDENTITY_MISSING`.
-- The initially expired `yc` user session was successfully re-authenticated at
-  `2026-08-09T22:52Z`; a real API inventory then succeeded.
-- Observed cloud: `b1ghfk15fpug7mn5439l`.
-- Authorized folders: `b1g5tck18cgqtjb7rn3s` (`default`) and
-  `b1g0v4ur96gis5kot6ku` (`kenigevents-email-prod`).
-- Observed result: **zero Compute instances in both folders**, zero ALBs, and no
-  `mcp-datahub.kenigevents.ru` record in Cloud DNS. The current runner has no
-  `/opt/my-data-hub/current`, `/etc/my-data-hub/my-data-hub.env`, project systemd unit,
-  or project container. Public DNS lookup for the required endpoint returns NXDOMAIN.
-- Required permission/input: the exact existing devstand host/resource ID plus an
-  allowlisted SSH identity and pinned host key, **or** an explicit owner decision to
-  provision new billable compute/edge resources. The latter is not inferred from the
-  instruction to avoid duplicates.
-- Verification after the devstand identity is supplied:
+| Fact | Observation |
+|---|---|
+| host / OS | `DevCoveer`, Ubuntu 24.04.4 LTS, kernel `6.8.0-107-generic` |
+| public IPv4 | `188.227.84.107` |
+| Docker / Compose | Docker `29.4.1`; Compose `v5.1.3`; Docker enabled at boot |
+| capacity | 3.8 GiB RAM, 4 GiB swap, 18 GiB disk available |
+| existing edge | nginx owns TCP 80; Xray REALITY owns TCP 443 |
+| PostgreSQL / my-data-hub | no permanent service or volume at observation time |
+| privilege boundary | `dev` may use Docker; unattended sudo is unavailable |
+| user supervision | systemd user manager is running with `Linger=yes` |
 
-  ```bash
-  yc compute instance get "$DEVSTAND_INSTANCE_ID" --folder-id "$FOLDER_ID"
-  yc dns zone list --folder-id "$FOLDER_ID"
-  gh workflow run devstand-deploy.yml -f commit="$(git rev-parse origin/main)"
-  ```
+The existing VPN containers already recover at boot through `restart: unless-stopped`.
+The same-host deployment therefore uses `compose.same-host.yaml`, a stable project/volume
+identity, distinct service database credentials, loopback-only ports, Docker restart
+policies and an enabled user-systemd reconciliation unit. Native root systemd remains an
+optional stronger profile, not a prerequisite for this host.
 
-Until those commands succeed, the endpoint, devstand OS, firewall, listeners, volumes,
-service state, reboot recovery, TLS certificate, and image digests remain **unverified**.
+## Current exact blockers
 
-### Existing Yandex Cloud conventions observed read-only
+- The prepared same-host installer has not yet been allowed to run its PostgreSQL
+  bootstrap/migrations and start new services. No permanent-runtime receipt is claimed.
+- Public HTTPS cannot be added by a path-only nginx edit: TCP 443 is currently Xray. The
+  safe canonical design is SNI multiplexing for `mcp-datahub.kenigevents.ru`, which needs a
+  controlled Xray restart and regression test.
+- Production remote MCP also requires a real OAuth issuer/JWKS. Development-token mode
+  remains loopback-only and will not be exposed publicly.
+- Off-host backup storage and a recovery runner remain absent.
 
-- Shared network resources live in the `default` folder: network
-  `enpefopfcgibi1igmjt2` with the three default regional subnets.
-- Public `kenigevents.ru.` DNS is zone `dnsbhbtvj0l1lf8jpefb` in that folder.
-- The existing managed certificate `fpqi91sau05ifdvfsft4` covers only
-  `kenigevents.ru` and `www.kenigevents.ru`; it does not cover the required MCP host.
-- The email production folder is labeled `project=kenigevents`, `purpose=email`,
-  `environment=prod` and contains no network/compute/ALB/DNS resources. It must not be
-  repurposed silently as the data-hub runtime folder.
-- No duplicate network, DNS zone, certificate, ALB, or instance was created.
+## Corrected Yandex Cloud interpretation
 
-## Repository identity observed on the runner
+Cloud `b1ghfk15fpug7mn5439l` contains no Compute instance or ALB because the permanent
+runtime is this existing server. No duplicate billable resource is required. Cloud DNS
+zone `dnsbhbtvj0l1lf8jpefb` may point the canonical MCP hostname to `188.227.84.107`; the
+certificate must then be issued locally at the existing edge.
 
-| Fact | Observation | Command |
-|---|---|---|
-| commit at receipt start | `e3d269b0704e4d7c9451634d616d2b58ac7a8682` | `git rev-parse HEAD` |
-| dirty paths | `20` (expected implementation work; not a deploy receipt) | `git status --porcelain=v1 \| wc -l` |
-| expected main ancestry | `0fc9c8a… -> 0b6b731…` | verified earlier with `git log --reverse` |
+## Repository identity
 
-The final deploy receipt must replace the commit with the merged `main` commit and show
-zero dirty paths.
+R1 was merged to `main` as `cbea2a43ffa430e0d2c82b82db6198d30c362f65`. The supplied
+data-scope documentation is integrated separately and the final installation receipt must
+record the exact later merged commit deployed from a clean release archive.
 
 ## Local disposable PostgreSQL evidence (not devstand)
 

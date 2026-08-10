@@ -1,8 +1,8 @@
 # Infrastructure-first plan after the first devstand deployment
 
 Status: `ACCEPTED IMPLEMENTATION PLAN`
-Date: 2026-08-09
-Related decisions: ADR-0009, ADR-0013, ADR-0014
+Date: 2026-08-10
+Related decisions: ADR-0009, ADR-0013, ADR-0014, ADR-0015
 
 ## 1. What to do first
 
@@ -19,7 +19,8 @@ freeze dangerous capabilities
 → prove backup and isolated restore
 → establish CI and scheduled runtime tests
 → expose remote read-only MCP
-→ prove one synthetic data connector
+→ implement and backfill the shared scope/policy foundation
+→ prove one synthetic multi-consumer data connector
 → prove Kaggle sandbox control
 → prove bounded database-operator access
 → start Region Talk inventory and migration
@@ -95,6 +96,10 @@ Expected gates:
 
 - every migration checksum matches the repository;
 - the Region Talk pipeline is registered once and remains `paused`;
+- after ADR-0015 implementation, stable Region Talk project/pipeline/project-pipeline scopes
+  are registered once and resolve unambiguously;
+- catalog-object and `hub.project_content` compatibility backfills are idempotent and do not
+  create duplicate active relations;
 - no application service needs schema-owner privileges;
 - an invalid or modified historical migration fails closed.
 
@@ -160,27 +165,32 @@ The complete matrix and acceptance rules are in
 
 ## 7. First useful end-to-end flow
 
-Before importing Region Talk, implement one synthetic connector with the same delivery
-mechanics intended for `events-bot-new`:
+Before importing Region Talk, implement the ADR-0015 scope/policy backbone and one
+synthetic connector with the same delivery mechanics intended for `events-bot-new`:
 
 ```text
 fixture producer
 → durable local spool
 → HTTPS intake
-→ connector batch receipt
-→ validation and staging
-→ deterministic normalizer
-→ canonical commit
-→ query through read-only MCP
-→ reconciliation receipt
+→ one accepted immutable batch receipt
+→ server-attested routing to at least two project/pipeline consumers
+→ independent batch_application records
+→ deterministic normalizers and canonical commits
+→ explicit target relations plus append-only usage
+→ independent per-consumer receipts/reconciliation
+→ query relation, usage, state and effective policy through read-only MCP
+→ exact replay without duplicate target relation or consumer application
 ```
 
 This proves authentication, idempotency, outage retry, schema versioning, provenance,
-monitoring and MCP visibility without risking existing accumulated data.
+consumer isolation, scope preservation, monitoring and MCP visibility without risking
+existing accumulated data. A producer scope hint remains diagnostic; authoritative scope
+comes from the server-side consumer registry.
 
-After the synthetic flow passes, register `events-bot.daily_statistics.v1` and send a
+After the synthetic flow passes, register `events-bot.daily-statistics.v1` and send a
 non-sensitive daily aggregate as the first real producer. The connector architecture is
-specified in [`16-data-connectors.md`](16-data-connectors.md).
+specified in [`16-data-connectors.md`](16-data-connectors.md), and the scope contract is
+[`22-data-scope-and-pipeline-participation.md`](22-data-scope-and-pipeline-participation.md).
 
 ## 8. Remote MCP order
 
@@ -208,29 +218,36 @@ Region Talk inventory may begin after the platform can prove:
 - successful backup/readback/restore;
 - CI and devstand workflows are green;
 - remote MCP read-only access works;
-- connector idempotency and offline retry work;
+- the ADR-0015 schema/backfill is applied and stable Region Talk scopes resolve exactly once;
+- independent scope relations, namespaced state and platform hard-deny precedence pass
+  negative tests;
+- connector idempotency, offline retry and multi-consumer isolation work;
 - Kaggle protected-resource boundaries work;
 - operator writes are auditable and bounded;
 - the pipeline remains paused and production publication is disabled.
 
-The inventory/export step is read-only and may then proceed in parallel with porting
-row-kind transformers. Cutover remains blocked by the existing full-accounting,
-quarantine, shadow and rollback gates.
+The read-only export must attest the Region Talk origin scope in a new immutable contract
+version. It may then proceed in parallel with porting row-kind transformers. Real target
+normalization remains blocked until raw batch scope, target-relation writes and
+scope-completeness reconciliation are active. Cutover remains blocked by full accounting,
+quarantine, shadow, policy, backup and rollback gates.
 
-## 10. First code-agent assignment
+## 10. Infrastructure-first code-agent assignment
 
-The next code-agent task should implement and prove **R1 Infrastructure and Workflow**, not
-perform the full Region Talk migration. Its output must include:
+The executable handoff covers the staged pre-migration releases R1–R4. It must not perform
+full Region Talk migration or cutover. Its combined evidence must include:
 
 - deployment receipt;
 - role/grant matrix and negative tests;
 - backup plus isolated restore receipt;
 - updated GitHub Actions workflows;
 - remote read-only MCP at the accepted hostname;
-- synthetic connector round trip and outage/replay evidence;
+- ADR-0015 append-only migration/backfill plus relation/state/usage/policy negative tests;
+- synthetic multi-consumer connector round trip and outage/replay evidence;
 - Kaggle read inventory plus protected-resource authorization tests;
-- exact remaining blockers before enabling mutation profiles.
+- exact remaining blockers before enabling mutation profiles or Region Talk normalization.
 
-The recommended model level for this task is **high reasoning**. Use **xhigh** only for a
-review pass over authorization, database grants, backup/restore and negative provider
-controls, not for routine Compose or CI wiring.
+The recommended model level for this task is **high reasoning**. Use **xhigh** for the
+review pass over authorization, database grants, backup/restore, scope/policy invariants,
+deduplication relation preservation and negative provider controls, not for routine Compose
+or CI wiring.

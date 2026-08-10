@@ -1,7 +1,7 @@
 # Project status
 
-Date: 2026-08-09
-Status: `R1 IMPLEMENTED LOCALLY / EXTERNAL DEPLOYMENT BLOCKED`
+Date: 2026-08-10
+Status: `R1 IMPLEMENTED LOCALLY / SAME-HOST DEPLOYMENT IN PROGRESS`
 
 ## Reported runtime state
 
@@ -50,7 +50,12 @@ as deployed runtime:
 - preview/apply MCP data editor under restricted PostgreSQL role;
 - typed migration-operator tools for agent-driven Region Talk migration;
 - PR, post-deploy, nightly, weekly Kaggle and restore workflow definitions with receipts;
-- infrastructure-first release ordering.
+- infrastructure-first release ordering;
+- stable logical pipeline identity and platform/project/pipeline/project-pipeline scopes;
+- first-class object relations, namespaced scoped states, append-only usage and policy
+  decisions with global-deny precedence;
+- Region Talk scope-completeness requirements for raw, normalized and deduplicated data;
+- one connector batch with independently tracked applications for multiple consumers.
 
 Canonical documents:
 
@@ -60,10 +65,13 @@ Canonical documents:
 - [`docs/18-mcp-operator-and-database-access.md`](docs/18-mcp-operator-and-database-access.md)
 - [`docs/19-test-first-rollout.md`](docs/19-test-first-rollout.md)
 - [`docs/20-remote-mcp-endpoint.md`](docs/20-remote-mcp-endpoint.md)
+- [`docs/22-data-scope-and-pipeline-participation.md`](docs/22-data-scope-and-pipeline-participation.md)
+- [`docs/adr/0015-data-scope-and-pipeline-participation.md`](docs/adr/0015-data-scope-and-pipeline-participation.md)
 
-## Current repository proof
+## Last recorded repository proof before ADR-0015
 
-The integrated repository was revalidated after the R1 implementation:
+The integrated repository was revalidated after the R1 implementation and before the
+ADR-0015 scope/participation runtime work:
 
 ```text
 pytest -q                                     195 passed
@@ -76,9 +84,11 @@ relative Markdown link check                  PASS
 
 `pglast` is a runtime dependency for the separately gated operator implementation.
 These repository checks do not prove the user-reported devstand runtime or any Kaggle
-provider lifecycle.
+provider lifecycle. They also predate ADR-0015: the new scope/participation/policy design
+is documentation-only until a new append-only migration, implementation tests and
+same-host runtime receipts exist.
 
-## Next release gate: R1 infrastructure and workflow baseline
+## Next immediate release gate: R1 same-host infrastructure baseline
 
 Required:
 
@@ -88,11 +98,9 @@ Required:
 4. process-kill and host-reboot recovery;
 5. encrypted local/off-host backup, readback and isolated restore;
 6. PR/post-deploy/nightly/restore workflows;
-7. read-only OAuth MCP at the accepted hostname;
-8. synthetic connector accept/commit/read/replay/outage proof;
-9. Kaggle inventory and protected-resource authorization proof;
-10. disposable MCP-managed notebook/dataset lifecycle;
-11. database reader/editor canary in disposable schema;
-12. explicit confirmation that scheduler/publication remain off and Region Talk paused.
+7. explicit confirmation that scheduler/publication/write profiles remain off and Region
+   Talk is paused.
 
-Only after this gate should Region Talk YDB inventory/export and migration proceed.
+After R1, the release plan continues with R2 scope/remote-MCP/connectors, R3 Kaggle and R4
+operator access. Region Talk inventory begins at R5 only after those gates pass. See
+[`docs/10-release-plan.md`](docs/10-release-plan.md).

@@ -17,6 +17,8 @@
 - [`07-joplin-integration.md`](07-joplin-integration.md)
 - [`08-security.md`](08-security.md)
 - [`09-observability.md`](09-observability.md)
+- [`22-data-scope-and-pipeline-participation.md`](22-data-scope-and-pipeline-participation.md) —
+  first-class project/pipeline scopes, relations, scoped states, usage and policy.
 
 Supporting architecture documents:
 
@@ -54,6 +56,7 @@ Associated decisions:
 - [`adr/0012-mcp-database-operator-profiles.md`](adr/0012-mcp-database-operator-profiles.md)
 - [`adr/0013-remote-mcp-endpoint.md`](adr/0013-remote-mcp-endpoint.md)
 - [`adr/0014-test-first-infrastructure-rollout.md`](adr/0014-test-first-infrastructure-rollout.md)
+- [`adr/0015-data-scope-and-pipeline-participation.md`](adr/0015-data-scope-and-pipeline-participation.md)
 
 Machine-readable design contracts:
 
@@ -67,7 +70,8 @@ It separates read-only export, raw preservation, normalized import, reconciliati
 shadow operation, cutover and YDB retirement.
 
 Region Talk remains the first migration workload, but the infrastructure-first gates
-must pass before heavy import/cutover work.
+must pass before heavy import/cutover work. Its migration additionally requires explicit
+Region Talk batch scope and scope-complete normalized/deduplicated targets under ADR-0015.
 
 ## Operations
 

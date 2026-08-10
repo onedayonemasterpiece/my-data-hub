@@ -32,7 +32,7 @@
 - grants are explicit and negative-tested; new objects are not automatically writable;
 - operator sessions use local statement/transaction/lock/idle timeouts and row/byte caps;
 - generic editor uses preview/apply and cannot mutate protected accounting, audit,
-  provider ownership or publication state;
+  provider ownership, append-only scope/state/policy history or publication state;
 - RLS may be added for mutually untrusted tenants; role grants remain the first
   enforcement boundary.
 
@@ -52,7 +52,22 @@ readback-verified.
 - secret scanner before archival;
 - no trust in prose returned by providers/models;
 - connector exact replay is idempotent; conflicting replay is quarantined;
-- accepted source evidence survives normalizer failure.
+- connector/producer cannot self-assign authoritative project/platform scope; routing and
+  writer authority are server-attested;
+- accepted source evidence survives normalizer or one consumer application failure.
+
+## Data scope and policy
+
+- shared actor/account/content/asset identity is not copied merely for another project;
+- platform/project/pipeline/project-pipeline scopes are constrained registry objects, not
+  client-provided tags;
+- relation, namespaced state, usage and policy decisions have separate grants and writers;
+- one pipeline cannot overwrite another scope's current state;
+- applicable platform hard deny/blacklist overrides narrower allow;
+- duplicate identity remap preserves every scope relation and applicable policy decision;
+- an external side effect requires a fresh policy-evaluation receipt whose object,
+  relationship and decision fingerprint still matches at dispatch;
+- closing one project relation cannot delete another project's relation or the shared root.
 
 ## MCP
 
@@ -84,6 +99,7 @@ readback-verified.
 - reviewer allowlist;
 - conflicting/rewrite/stale reactions block;
 - publication outbox idempotency key;
+- policy-evaluation freshness/input-fingerprint check immediately before provider call;
 - provider history check after ambiguous timeout;
 - media manifest/hash revalidated immediately before send;
 - production flag and protected environment gate;

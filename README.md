@@ -3,7 +3,8 @@
 `my-data-hub` — PostgreSQL-first ядро личной контентной базы, предметного и
 операторского MCP, управляемых конвейеров и data connectors. Один общий каталог хранит
 авторов, аккаунты, материалы, provenance и результаты обработок; проекты вроде Region
-Talk подключаются отношениями и собственными проекциями, а не создают отдельные базы.
+Talk подключаются явными project/pipeline scopes, отношениями и собственными проекциями,
+а не создают отдельные базы.
 
 ## Статус
 
@@ -31,7 +32,9 @@ devstand; фактический runtime пока должен пройти infr
 - Kaggle inventory, protected/MCP-managed/exchange control classes;
 - широкий bounded database reader и preview/apply DML под отдельными roles;
 - agent-operated Region Talk migration через typed gates;
-- nightly/provider/restore/autotest workflows.
+- nightly/provider/restore/autotest workflows;
+- first-class project/pipeline scopes, multi-pipeline participation, namespaced states and
+  global/project/pipeline policy decisions.
 
 Production publication выключена. Region Talk pipeline остаётся `paused` до evidence
 и миграционных gates.
@@ -67,6 +70,10 @@ source SHA-256: c7efb28231223caa6fd02fcc001a38e0f16bcc3fa4c4cd53e744721b2eac0852
   canonical storage.
 - Region Talk migration может управляться агентом только через typed accounting,
   quarantine, shadow, backup, cutover и rollback gates.
+- Один canonical object переиспользуется несколькими проектами/конвейерами; membership,
+  workflow state, фактическое usage и policy decision хранятся раздельно.
+- Platform-wide hard deny/blacklist нельзя отменить локальным project/pipeline allow;
+  effective policy вычисляется по versioned combiner с audit receipt.
 
 ## С чего начать на devstand
 
@@ -78,7 +85,8 @@ source SHA-256: c7efb28231223caa6fd02fcc001a38e0f16bcc3fa4c4cd53e744721b2eac0852
 → выполнить backup + off-host readback + isolated restore
 → настроить PR/post-deploy/nightly/provider workflows
 → поднять remote read-only MCP
-→ доказать synthetic connector
+→ реализовать и доказать shared scope/policy foundation
+→ доказать synthetic multi-consumer connector
 → доказать Kaggle protected/MCP-managed canary
 → доказать DB operator в disposable schema
 → начать Region Talk inventory/export
@@ -126,6 +134,12 @@ YDB read-only inventory/export
 `intentionally_excluded`, `retained_raw` или `quarantined`. Неразобранные строки,
 manifest mismatch или quarantine блокируют cutover.
 
+Каждый Region Talk export batch получает явный Region Talk origin scope. Все raw rows
+наследуют его, а каждый `normalized` или `deduplicated` shared target получает отдельную
+Region Talk relation в той же canonical transaction. Deduplication не может удалить
+принадлежность/использование объекта проектом. Подробный контракт:
+[`docs/22-data-scope-and-pipeline-participation.md`](docs/22-data-scope-and-pipeline-participation.md).
+
 Read-only exporter получает фактическую source table только через защищённую переменную
 `MY_DATA_HUB_REGION_TALK_YDB_TABLE`; значение не фиксируется и не угадывается в публичном
 репозитории.
@@ -154,9 +168,10 @@ Read-only exporter получает фактическую source table толь
 20. [`docs/19-test-first-rollout.md`](docs/19-test-first-rollout.md)
 21. [`docs/20-remote-mcp-endpoint.md`](docs/20-remote-mcp-endpoint.md)
 22. [`docs/21-infrastructure-addendum-delivery.md`](docs/21-infrastructure-addendum-delivery.md)
-23. [`docs/operations/first-deploy-template.md`](docs/operations/first-deploy-template.md)
-24. [`docs/migrations/region-talk/README.md`](docs/migrations/region-talk/README.md)
-25. [`BOOTSTRAP_VALIDATION.md`](BOOTSTRAP_VALIDATION.md)
+23. [`docs/22-data-scope-and-pipeline-participation.md`](docs/22-data-scope-and-pipeline-participation.md)
+24. [`docs/operations/first-deploy-template.md`](docs/operations/first-deploy-template.md)
+25. [`docs/migrations/region-talk/README.md`](docs/migrations/region-talk/README.md)
+26. [`BOOTSTRAP_VALIDATION.md`](BOOTSTRAP_VALIDATION.md)
 
 ## Неподлежащие ослаблению инварианты
 
@@ -165,11 +180,17 @@ Read-only exporter получает фактическую source table толь
 - Business write и required outbox фиксируются одной SQL-транзакцией.
 - Notebook worker возвращает typed immutable result; canonical apply делает локальный
   committer.
-- Connector batch принимается идемпотентно и отделён от canonical application.
+- Connector batch принимается идемпотентно и отделён от independent per-consumer
+  canonical applications.
+- Scope relation, scoped state, pipeline usage и policy decision не подменяют друг друга.
+- Shared object не копируется для нового проекта/конвейера; merge сохраняет union scope
+  relations и provenance.
 - External side effect разрешён только после canonical commit по exact approved revision.
 - Default MCP не предоставляет generic SQL; operator SQL — отдельный restricted profile,
   без owner/superuser/DDL и с preview/apply/backup/audit gates.
 - Orchestrator-protected Kaggle resources не мутируются remote MCP.
 - Неизвестная YDB строка не отбрасывается и не считается мигрированной.
+- Region Talk raw row без Region Talk batch scope или normalized/deduplicated target без
+  Region Talk relation блокирует cutover.
 - Joplin используется через supported API, а не внутреннюю SQLite.
 - GitHub хранит код/contracts/receipts, но не production data/secrets.

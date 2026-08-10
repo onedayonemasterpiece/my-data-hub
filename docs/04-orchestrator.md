@@ -20,6 +20,7 @@ wake up
 → recover expired leases
 → inspect immutable worker-result inbox
 → validate and reconcile acceptable outputs
+→ resolve exact project-pipeline scope and effective policy
 → materialize newly eligible work
 → claim a bounded batch
 → dispatch a worker or execute a local stage
@@ -46,6 +47,10 @@ Supervisor может вызывать tick регулярно, но correctness
 Claiming использует `FOR UPDATE SKIP LOCKED` в
 `orchestration.claim_work_items(...)`. `queue_seq` immutable; выбор идёт по
 priority, available time и admission order.
+
+ADR-0015 дополнительно требует новой append-only migration для
+`orchestration.pipeline_identity`, `project_pipeline`, `object_usage_event` и scope/state/
+policy tables. Это accepted target, а не часть уже доказанного bootstrap.
 
 Повторная регистрация того же pipeline version обновляет definition/stage metadata,
 но **не изменяет operational status**. Поэтому `db migrate` не может случайно
@@ -91,13 +96,16 @@ pending → leased → running → succeeded
 ```
 
 Timeout/expired lease не удаляет work. Recovery создаёт evidence и возвращает
-работу в допустимое retry state с fencing token.
+работу в допустимое retry state с fencing token. Этот state machine описывает выполнение
+работы: `succeeded` не означает project membership, editorial approval или publication
+eligibility объекта.
 
 ## 7. Idempotency и causality
 
 - work identity: `(pipeline_id, stage_id, dedupe_key)`;
-- dispatch manifest: exact `run_id`, ordered `work_item_id`, canonical revision,
-  input fingerprint, contract/model/policy versions;
+- dispatch manifest: exact `run_id`, ordered `work_item_id`, stable logical pipeline,
+  exact project-pipeline scope, canonical/object revisions, input fingerprint,
+  contract/model/policy versions and policy-evaluation receipt;
 - worker result: `result_id`, exact input-manifest SHA-256 и result SHA-256;
 - inbox uniqueness предотвращает double apply;
 - dependency DAG не позволяет применить dependent result раньше prerequisites;
@@ -109,27 +117,32 @@ Timeout/expired lease не удаляет work. Recovery создаёт evidence
 Canonical committer проверяет:
 
 1. JSON Schema, byte/item limits и отсутствие запрещённых полей;
-2. run/stage/work identities;
+2. run/stage/work identities and unambiguous project-pipeline scope;
 3. exact input-manifest hash и expected canonical/input revision;
 4. model, prompt, policy и code identity;
 5. artifact locator/hash;
 6. explicit succeeded/partial/failed item accounting;
 7. stage-specific invariants;
 8. idempotency/conflict policy;
-9. secret scan до durable acceptance.
+9. required object-scope relations and effective policy revision;
+10. secret scan до durable acceptance.
 
-Только затем domain mutation, work transition, receipt и outbox фиксируются одной
-PostgreSQL transaction.
+Только затем domain mutation, required scoped state/relation/usage event, work
+transition, receipt и outbox фиксируются одной PostgreSQL transaction.
 
 ## 9. External side effects
 
 Review delivery и publication разделены на canonical intent и provider execution:
 
-1. transaction принимает exact revision и записывает `sync.external_outbox`;
-2. dedicated dispatcher выполняет network call;
-3. provider receipt/ambiguous outcome сохраняется;
-4. перед retry выполняется reconciliation с target;
-5. one idempotency identity не создаёт второй пост.
+1. transaction принимает exact object revision, project-pipeline scope, policy-evaluation
+   receipt и его input fingerprint и записывает `sync.external_outbox`;
+2. непосредственно перед network call dedicated dispatcher проверяет receipt TTL и что
+   текущий policy input fingerprint не изменился; stale/unknown приводит к повторной
+   evaluation либо fail-closed без provider call;
+3. dedicated dispatcher выполняет network call;
+4. provider receipt/ambiguous outcome сохраняется;
+5. перед retry выполняется reconciliation с target и повторная policy freshness check;
+6. one idempotency identity не создаёт второй пост.
 
 Kaggle notebook не отправляет review card и не публикует напрямую.
 
@@ -143,22 +156,44 @@ Kaggle notebook не отправляет review card и не публикует
 - terminal outcome или blocking gate;
 - canonical mutations и revision/receipt;
 - provider usage без secrets;
-- exact revision, увиденную оператором;
+- exact revision и project/pipeline scope, увиденные оператором;
+- object usage events, scoped state transition and effective policy decision IDs;
 - итог external target или ambiguous reconciliation state.
 
 ## 11. Data connector responsibilities
 
 Оркестратор выполняет pull-коннекторы и downstream-нормализацию уже принятых
 push-batches, но HTTPS intake не ждёт завершения pipeline. Intake сначала фиксирует
-immutable batch и receipt; затем durable work продвигает его через validation, staging,
-normalization, canonical commit и reconciliation.
+immutable batch и receipt; затем server-side routing создаёт независимую
+`batch_application` для каждого matched consumer-а. Durable work продвигает каждую
+application через validation, staging, normalization, canonical commit и reconciliation.
+Failure/paused state одного consumer-а не изменяет acceptance receipt и не блокирует другого,
+если consumer не объявлен required для общего gate.
 
 Missed pull schedule восстанавливается из persisted due/watermark state. Push-producer
 при недоступности devstand хранит batch в собственном durable spool и повторяет exact
 idempotency identity. Оркестратор не является availability preflight service для
 producer.
 
-## 12. Kaggle resource ownership
+## 12. Object participation and policy
+
+Planner не выводит membership или policy из существования work item. До materialization он:
+
+1. разрешает stable logical pipeline и exact platform/project/pipeline/project-pipeline
+   scopes;
+2. читает exact namespaced object state каждого applicable scope;
+3. вычисляет effective policy по versioned combiner;
+4. fail-closed при unknown/conflicting required policy;
+5. сохраняет policy evaluation receipt и object revision в work/dispatch manifest;
+6. после canonical apply пишет append-only object usage event.
+
+Один object может иметь разные states в разных scopes. Platform-wide hard deny/blacklist
+блокирует все applicable pipelines; local allow не может его ослабить. Usage event не
+создаёт project membership автоматически, а membership без фактического usage допустима.
+
+Подробности: [`22-data-scope-and-pipeline-participation.md`](22-data-scope-and-pipeline-participation.md).
+
+## 13. Kaggle resource ownership
 
 Каждый запуск/датасет имеет PostgreSQL registry control class:
 
@@ -172,7 +207,7 @@ Provider dispatch использует lease, expected provider fingerprint, ide
 reconciliation after ambiguous outcome. Неподдержанная provider operation не
 эмулируется скрытым web automation без отдельного решения.
 
-## 13. Host/database availability
+## 14. Host/database availability
 
 PostgreSQL и orchestrator работают на одном initial devstand, поэтому orchestrator не
 может «поднять master DB через Kaggle», когда host/database недоступны. PostgreSQL

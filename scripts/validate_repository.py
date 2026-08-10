@@ -366,8 +366,14 @@ def validate_docs_and_layout(report: Report) -> None:
     for path in sorted(ROOT.glob("*.md")) + sorted((ROOT / "docs").rglob("*.md")):
         text = path.read_text(encoding="utf-8")
         for token in stale_schema_tokens:
+            # Match a retired identifier, not a valid longer target name such as
+            # ``hub.object_scope_relation`` or an MCP tool such as
+            # ``hub.object.context.get``.
+            stale_pattern = re.compile(
+                rf"(?<![A-Za-z0-9_.]){re.escape(token)}(?![A-Za-z0-9_.])"
+            )
             report.check(
-                token not in text,
+                stale_pattern.search(text) is None,
                 f"stale schema token {token!r} in {path.relative_to(ROOT)}",
             )
         for raw in link_pattern.findall(text):
