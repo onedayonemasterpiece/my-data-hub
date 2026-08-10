@@ -92,14 +92,15 @@ def test_final_ydb_table_environment_name_is_canonical(monkeypatch) -> None:  # 
     )
 
 
-def test_postgresql_18_image_and_volume_contract_are_aligned() -> None:
+def test_postgresql_18_integration_profile_is_tmpfs_only() -> None:
     compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
     ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     image = "pgvector/pgvector:0.8.6-pg18-bookworm"
     assert image in compose
     assert image in ci
-    assert "postgres-data:/var/lib/postgresql" in compose
-    assert "postgres-data:/var/lib/postgresql/data" not in compose
+    assert "disposable-integration-test-only" in compose
+    assert "/var/lib/postgresql:size=1g" in compose
+    assert "postgres-data:" not in compose
 
 
 def test_pipeline_registration_refresh_preserves_operational_status(
