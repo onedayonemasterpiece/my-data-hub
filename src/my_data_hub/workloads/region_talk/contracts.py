@@ -6,7 +6,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-
 _SHA256_RE = r"^[a-f0-9]{64}$"
 _IDENTIFIER_RE = r"^[A-Za-z0-9_./:-]+$"
 
@@ -47,7 +46,7 @@ class ExportConsistency(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def watermark_order(self) -> "ExportConsistency":
+    def watermark_order(self) -> ExportConsistency:
         if (
             self.watermark_start is not None
             and self.watermark_end is not None
@@ -70,7 +69,7 @@ class YdbExportRow(BaseModel):
     payload_sha256: str = Field(pattern=_SHA256_RE)
 
     @model_validator(mode="after")
-    def source_identity_matches_kind(self) -> "YdbExportRow":
+    def source_identity_matches_kind(self) -> YdbExportRow:
         if not self.row_kind.startswith("unknown_") and not self.source_pk.startswith(
             f"{self.row_kind}:"
         ):
@@ -120,7 +119,7 @@ class YdbExportManifest(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def totals_and_sources_must_match(self) -> "YdbExportManifest":
+    def totals_and_sources_must_match(self) -> YdbExportManifest:
         if sum(self.row_kind_counts.values()) != self.expected_row_count:
             raise ValueError("sum(row_kind_counts) must equal expected_row_count")
         if sum(item.row_count for item in self.files) != self.expected_row_count:
@@ -172,7 +171,7 @@ class MigrationAccountingRow(BaseModel):
     cutover_ready: bool
 
     @model_validator(mode="after")
-    def arithmetic_is_self_consistent(self) -> "MigrationAccountingRow":
+    def arithmetic_is_self_consistent(self) -> MigrationAccountingRow:
         dispositioned = (
             self.normalized
             + self.deduplicated
@@ -211,7 +210,7 @@ class MigrationBlockingFinding(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def finding_matches_accounting(self) -> "MigrationBlockingFinding":
+    def finding_matches_accounting(self) -> MigrationBlockingFinding:
         if self.row_kind != self.accounting.row_kind:
             raise ValueError("finding row_kind must match accounting row_kind")
         expected: list[MigrationBlockingReason] = []
@@ -259,7 +258,7 @@ class MigrationReconciliationReport(BaseModel):
     passed: bool
 
     @model_validator(mode="after")
-    def report_is_self_consistent(self) -> "MigrationReconciliationReport":
+    def report_is_self_consistent(self) -> MigrationReconciliationReport:
         row_kinds = [row.row_kind for row in self.accounting]
         if len(row_kinds) != len(set(row_kinds)):
             raise ValueError("accounting row kinds must be unique")

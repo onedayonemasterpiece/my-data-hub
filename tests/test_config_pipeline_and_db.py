@@ -11,7 +11,6 @@ from my_data_hub.orchestrator.models import RegionTalkBacklog
 from my_data_hub.orchestrator.policy import plan_region_talk
 from my_data_hub.orchestrator.registry import load_pipeline_definition
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -41,12 +40,11 @@ def test_remote_mcp_requires_non_stdio_auth(monkeypatch) -> None:  # type: ignor
         Settings.from_env()
 
 
-def test_production_requires_worker_token(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_non_api_production_process_does_not_require_worker_token(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _clear(monkeypatch)
     monkeypatch.setenv("MY_DATA_HUB_DATABASE_URL", "postgresql://local/test")
     monkeypatch.setenv("MY_DATA_HUB_ENVIRONMENT", "production")
-    with pytest.raises(ConfigurationError, match="worker result token"):
-        Settings.from_env()
+    assert Settings.from_env().worker_result_token is None
 
 
 def test_pipeline_registry_and_notebook_contracts_align() -> None:

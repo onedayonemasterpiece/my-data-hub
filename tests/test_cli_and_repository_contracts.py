@@ -6,9 +6,23 @@ import sys
 from pathlib import Path
 
 from my_data_hub.cli import _required_value, build_parser
-
+from scripts import validate_repository
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_repository_secret_scan_ignores_local_virtual_environment(
+    tmp_path: Path, monkeypatch  # type: ignore[no-untyped-def]
+) -> None:
+    certificate = tmp_path / ".venv/lib/python3.12/site-packages/certifi/cacert.pem"
+    certificate.parent.mkdir(parents=True)
+    certificate.write_text("public CA fixture", encoding="utf-8")
+    monkeypatch.setattr(validate_repository, "ROOT", tmp_path)
+    report = validate_repository.Report()
+
+    validate_repository.validate_secret_hygiene(report)
+
+    assert report.errors == []
 
 
 def test_cli_exposes_real_ydb_export_and_safe_dry_run() -> None:
@@ -144,6 +158,8 @@ def test_pipeline_registration_refresh_preserves_operational_status(
     assert registration.status == "active"
     assert registration.pipeline_id == UUID("11111111-1111-4111-8111-111111111111")
     assert committed is True
-    registration_sql = executed[0][0]
+    registration_sql = next(
+        sql for sql, _parameters in executed if "INSERT INTO orchestration.pipeline" in sql
+    )
     assert "status = EXCLUDED.status" not in registration_sql
     assert "RETURNING pipeline_id, status" in registration_sql

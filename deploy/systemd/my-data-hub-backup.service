@@ -4,11 +4,12 @@ After=postgresql.service
 
 [Service]
 Type=oneshot
-User=mydatahub
-Group=mydatahub
+User=mydatahub-backup
+Group=mydatahub-backup
 WorkingDirectory=/opt/my-data-hub/current
-EnvironmentFile=/etc/my-data-hub/my-data-hub.env
+EnvironmentFile=/etc/my-data-hub/backup.env
 ExecStart=/opt/my-data-hub/current/scripts/backup_postgres.sh
+StateDirectory=my-data-hub/backups
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

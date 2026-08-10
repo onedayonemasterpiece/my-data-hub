@@ -1,9 +1,16 @@
 # Data connector architecture
 
-Status: `ACCEPTED DESIGN / IMPLEMENTATION PENDING`
+Status: `R1 PUSH INTAKE/SPOOL IMPLEMENTED / DEVSTAND CANARY BLOCKED`
 Date: 2026-08-09
 Related decision: ADR-0010
 Contract: [`../schemas/data-connector-envelope.v1.schema.json`](../schemas/data-connector-envelope.v1.schema.json)
+
+Implemented in R1: exact versioned push intake, explicit connector principal binding,
+PostgreSQL landing/receipt/watermark/quarantine tables, one-transaction acceptance,
+exact replay/conflict classification, a canonical daily-statistics committer with
+same-transaction semantic outbox, durable restart-safe producer spool, bounded status
+MCP read, and a live disposable PostgreSQL flow. Pull/artifact/trusted-landing adapters
+and a deployed events-bot canary are not claimed by this status.
 
 ## 1. Purpose
 

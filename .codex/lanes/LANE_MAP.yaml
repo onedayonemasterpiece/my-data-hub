@@ -1,0 +1,143 @@
+mode: full_fanout_with_serial_integration
+repo: /home/dev/projects/my-data-hub
+base_ref: 0b6b7311081bdfecdd4f3004e5d6842a42f64253
+base_branch: main
+integration_branch: integration/r1-infrastructure-workflow
+global_constraints:
+  - PostgreSQL is the only canonical server-side database
+  - no secrets, production dumps, private notes, or sessions in git
+  - migrations append-only and centrally ordered by L07
+  - remote MCP catalog remains semantic read-only
+  - scheduler, production publication, and remote writes remain false
+verification_owner: L07-integrator
+stop_conditions:
+  - destructive server action requires explicit confirmation under server-management contract
+  - absent credential leaves a fail-closed gate and exact blocker rather than fabricated evidence
+  - Region Talk bulk migration, cutover, source mutation, and publication are out of scope
+lanes:
+  - id: L01-provenance
+    role: worker
+    effort: high
+    requirement_ids: [R10]
+    target: exact target-vision import and bounded Region Talk provenance
+    depends_on: []
+    execution_mode: parallel
+    branch: agent/r1-infrastructure-workflow/l01-provenance
+    worktree: /home/dev/.codex/worktrees/my-data-hub/l01-provenance
+    writable_files: [docs/source-material, docs/migrations/region-talk, tests/test_source_import.py, .codex/lanes/L01-provenance]
+    forbidden_files: [sql/migrations, src/my_data_hub/mcp, .github/workflows]
+    expected_output: committed exact import/provenance update and tests
+    verification_scope: targeted
+    status: completed
+  - id: L02-recovery
+    role: worker
+    effort: high
+    requirement_ids: [R04]
+    target: encrypted backup/readback/restore receipt implementation
+    depends_on: []
+    execution_mode: parallel
+    branch: agent/r1-infrastructure-workflow/l02-recovery
+    worktree: /home/dev/.codex/worktrees/my-data-hub/l02-recovery
+    writable_files: [scripts/backup_postgres.sh, scripts/restore_postgres.sh, scripts/recovery, schemas/recovery-receipt.v1.schema.json, examples/recovery-receipt.v1.json, tests/test_recovery.py, docs/operations/backup-and-recovery.md, .codex/lanes/L02-recovery]
+    forbidden_files: [sql/migrations, src/my_data_hub/config.py, .github/workflows]
+    expected_output: committed fail-closed encrypted recovery tooling and targeted tests
+    verification_scope: targeted
+    status: completed
+  - id: L03-connectors
+    role: worker
+    effort: high
+    requirement_ids: [R07]
+    target: connector envelope validation, durable spool, repository/service core and synthetic flow
+    depends_on: []
+    execution_mode: parallel
+    branch: agent/r1-infrastructure-workflow/l03-connectors
+    worktree: /home/dev/.codex/worktrees/my-data-hub/l03-connectors
+    writable_files: [src/my_data_hub/connectors, scripts/run_synthetic_connector.py, tests/test_connectors.py, .codex/lanes/L03-connectors]
+    forbidden_files: [sql/migrations, src/my_data_hub/api/app.py, src/my_data_hub/config.py, src/my_data_hub/mcp, .github/workflows]
+    expected_output: committed connector core with deterministic replay/quarantine/spool tests
+    verification_scope: targeted
+    status: completed
+  - id: L03b-events-bot-producer
+    role: worker
+    effort: high
+    requirement_ids: [R07]
+    target: opt-in non-sensitive events-bot daily aggregate producer with durable spool
+    depends_on: [L03-connectors]
+    execution_mode: parallel_external_repository
+    branch: agent/my-data-hub-daily-statistics-producer
+    worktree: /home/dev/.codex/worktrees/events-bot-new/mdh-daily-statistics
+    writable_files: [events-bot-new producer module, tests, configuration docs, lane results]
+    forbidden_files: [my-data-hub canonical SQL, production credentials]
+    expected_output: separate normal PR, disabled-by-default producer and canary blockers
+    verification_scope: targeted_cross_repository
+    status: completed
+  - id: L04-kaggle
+    role: worker
+    effort: high
+    requirement_ids: [R08]
+    target: provider-neutral Kaggle registry policy, exchange validation and canary adapter/receipt
+    depends_on: []
+    execution_mode: parallel
+    branch: agent/r1-infrastructure-workflow/l04-kaggle
+    worktree: /home/dev/.codex/worktrees/my-data-hub/l04-kaggle
+    writable_files: [src/my_data_hub/providers, scripts/kaggle_canary.py, tests/test_kaggle_control.py, .codex/lanes/L04-kaggle]
+    forbidden_files: [sql/migrations, src/my_data_hub/config.py, src/my_data_hub/mcp, .github/workflows]
+    expected_output: committed fail-closed policy/inventory/lifecycle code and tests
+    verification_scope: targeted
+    status: completed
+  - id: L05-operator
+    role: worker
+    effort: high
+    requirement_ids: [R09]
+    target: bounded SQL reader/editor core and signed preview/apply receipts
+    depends_on: []
+    execution_mode: parallel
+    branch: agent/r1-infrastructure-workflow/l05-operator
+    worktree: /home/dev/.codex/worktrees/my-data-hub/l05-operator
+    writable_files: [src/my_data_hub/db_operator, tests/test_db_operator.py, .codex/lanes/L05-operator]
+    forbidden_files: [sql/migrations, src/my_data_hub/config.py, src/my_data_hub/mcp, .github/workflows]
+    expected_output: committed parser/policy/service with disposable-schema tests
+    verification_scope: targeted
+    status: completed
+  - id: L06-oauth
+    role: worker
+    effort: high
+    requirement_ids: [R06]
+    target: OAuth token/principal/revocation and HTTP admission security modules
+    depends_on: []
+    execution_mode: parallel
+    branch: agent/r1-infrastructure-workflow/l06-oauth
+    worktree: /home/dev/.codex/worktrees/my-data-hub/l06-oauth
+    writable_files: [src/my_data_hub/mcp/oauth.py, src/my_data_hub/mcp/admission.py, src/my_data_hub/mcp/http_security.py, tests/test_mcp_oauth.py, tests/test_http_security.py, .codex/lanes/L06-oauth]
+    forbidden_files: [src/my_data_hub/mcp/server.py, src/my_data_hub/mcp/service.py, src/my_data_hub/mcp/scopes.py, sql/migrations, .github/workflows]
+    expected_output: committed production-capable fail-closed auth/admission primitives and negative tests
+    verification_scope: targeted
+    status: completed
+  - id: L07-integrator
+    role: merge_integrator
+    effort: maximum_available_high
+    requirement_ids: [R01, R02, R03, R05, R11]
+    target: central SQL/config/API/MCP/deploy/workflow integration and all external evidence
+    depends_on: [L01-provenance, L02-recovery, L03-connectors, L04-kaggle, L05-operator, L06-oauth]
+    execution_mode: serial_after_dependency
+    branch: integration/r1-infrastructure-workflow
+    worktree: /home/dev/.codex/worktrees/my-data-hub/integration
+    writable_files: [sql, src/my_data_hub/config.py, src/my_data_hub/api, src/my_data_hub/mcp/server.py, src/my_data_hub/mcp/service.py, src/my_data_hub/mcp/scopes.py, compose.yaml, .env.example, deploy, .github/workflows, docs/operations/first-deploy.md, PROJECT_STATUS.md, README.md, .codex/integration]
+    forbidden_files: []
+    expected_output: integrated feature branch, full validation, deployment evidence, PR and merge
+    verification_scope: full_local
+    status: in_progress
+  - id: L08-xhigh-review
+    role: reviewer
+    effort: maximum_available_high
+    requirement_ids: [R12]
+    target: separate security and data-integrity closure audit
+    depends_on: [L07-integrator]
+    execution_mode: serial_after_dependency
+    branch: read-only against integration branch
+    worktree: none
+    writable_files: []
+    forbidden_files: [all]
+    expected_output: requirement-by-requirement findings for OAuth/MCP, grants, recovery, operator and Kaggle protections
+    verification_scope: inspection_only
+    status: in_progress

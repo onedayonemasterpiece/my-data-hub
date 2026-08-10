@@ -61,6 +61,7 @@ def validate_json_and_schemas(report: Report) -> None:
         ),
         "data-connector-envelope.v1.example.json": "data-connector-envelope.v1.schema.json",
         "kaggle-exchange-manifest.v1.example.json": "kaggle-exchange-manifest.v1.schema.json",
+        "workflow-receipt.v1.example.json": "workflow-receipt.v1.schema.json",
     }
     checker = FormatChecker()
     for example_name, schema_name in mappings.items():
@@ -183,7 +184,7 @@ def validate_sql(report: Report) -> None:
         "worker-result stage-run uniqueness invariant is missing",
     )
     report.check(
-        re.search(r"schema_revision\s*=\s*%d\b" % len(migrations), migrations[-1].read_text()),
+        re.search(rf"schema_revision\s*=\s*{len(migrations)}\b", migrations[-1].read_text()),
         "hub.canonical_state.schema_revision does not match latest migration",
     )
 
@@ -312,7 +313,11 @@ def validate_docs_and_layout(report: Report) -> None:
     )
     report.check(idea_source is not None, "canonical idea-hub source is absent from provenance manifest")
     if idea_source:
-        report.check(idea_source.get("source_commit") == "0c3fcf7", "wrong target-vision source commit")
+        report.check(
+            idea_source.get("source_commit")
+            == "0c3fcf71b2ee8ba8afa49624bef4b779873802f7",
+            "wrong target-vision source commit",
+        )
         report.check(
             idea_source.get("status") in {"pending_authenticated_import", "verified_import"},
             "target-vision source status is ambiguous",
@@ -432,12 +437,51 @@ def validate_deployment(report: Report) -> None:
         "pgvector/pgvector:0.8.6-pg16" not in ci,
         "stale PostgreSQL 16 integration service remains in CI",
     )
+    for workflow in (
+        "devstand-deploy.yml",
+        "devstand-nightly.yml",
+        "kaggle-canary.yml",
+        "restore-drill.yml",
+    ):
+        path = ROOT / ".github/workflows" / workflow
+        report.check(path.is_file(), f"missing required R1 workflow: {workflow}")
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            report.check(
+                "write_workflow_receipt.py" in text and "upload-artifact@v4" in text,
+                f"{workflow} does not emit and upload a machine-readable receipt",
+            )
+    report.check(
+        "python scripts/verify_postgres_upgrade.py" in ci,
+        "CI does not prove upgrade from the previous released revision",
+    )
+    report.check(
+        "python scripts/verify_postgres_roles.py" in ci,
+        "CI does not run PostgreSQL role-negative probes",
+    )
+    report.check(
+        "python scripts/verify_db_operator.py" in ci,
+        "CI does not run the disposable database operator proof",
+    )
+    report.check(
+        "python scripts/verify_connector_flow.py" in ci,
+        "CI does not run the synthetic connector proof",
+    )
     api_unit = (ROOT / "deploy/systemd/my-data-hub-api.service").read_text()
     orch_unit = (ROOT / "deploy/systemd/my-data-hub-orchestrator.service").read_text()
+    mcp_unit = (ROOT / "deploy/systemd/my-data-hub-mcp.service").read_text()
     report.check("my-data-hub api serve" in api_unit, "systemd API command does not match CLI")
     report.check(
         "my-data-hub orchestrator run-loop" in orch_unit,
         "systemd orchestrator command does not match CLI",
+    )
+    report.check(
+        "my-data-hub mcp serve --transport streamable-http" in mcp_unit,
+        "systemd MCP command does not match CLI",
+    )
+    report.check(
+        '127.0.0.1:${MY_DATA_HUB_MCP_PORT:-8765}' in compose,
+        "remote MCP backend must be published only on host loopback",
     )
     for script in sorted((ROOT / "scripts").glob("*.sh")):
         report.check(script.stat().st_mode & 0o111 != 0, f"script is not executable: {script.name}")
@@ -446,7 +490,14 @@ def validate_deployment(report: Report) -> None:
 def validate_secret_hygiene(report: Report) -> None:
     forbidden_files = re.compile(r"(^|/)(\.env|.*\.pem|.*\.key|.*\.sqlite(?:3)?|.*\.db)$")
     for path in ROOT.rglob("*"):
-        ignored_parts = {".git", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+        ignored_parts = {
+            ".git",
+            ".venv",
+            "__pycache__",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".mypy_cache",
+        }
         if not path.is_file() or ignored_parts.intersection(path.parts):
             continue
         relative = path.relative_to(ROOT).as_posix()

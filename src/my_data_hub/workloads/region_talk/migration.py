@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from my_data_hub.hashing import canonical_json_bytes, sha256_file, sha256_value
@@ -480,20 +481,19 @@ def reconciliation_report_from_database(
     except ImportError as exc:  # pragma: no cover
         raise RegionTalkMigrationError("psycopg is required for reconciliation") from exc
 
-    with psycopg.connect(database_url) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
+    with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
                 SELECT row_kind, expected_row_count
                 FROM migration.export_batch_kind
                 WHERE export_batch_id = %s
                 ORDER BY row_kind
                 """,
-                (export_batch_id,),
-            )
-            expected = {str(kind): int(count) for kind, count in cursor.fetchall()}
-            cursor.execute(
-                """
+            (export_batch_id,),
+        )
+        expected = {str(kind): int(count) for kind, count in cursor.fetchall()}
+        cursor.execute(
+            """
                 SELECT raw.row_kind, disp.disposition
                 FROM migration.raw_record raw
                 LEFT JOIN migration.row_disposition disp
@@ -501,25 +501,25 @@ def reconciliation_report_from_database(
                 WHERE raw.export_batch_id = %s
                 ORDER BY raw.row_kind, raw.source_table, raw.source_pk
                 """,
-                (export_batch_id,),
-            )
-            accounting = build_reconciliation_accounting(
-                expected_by_kind=expected,
-                actual_rows=(
-                    (str(kind), str(disposition) if disposition else None)
-                    for kind, disposition in cursor.fetchall()
-                ),
-            )
-            cursor.execute(
-                """
+            (export_batch_id,),
+        )
+        accounting = build_reconciliation_accounting(
+            expected_by_kind=expected,
+            actual_rows=(
+                (str(kind), str(disposition) if disposition else None)
+                for kind, disposition in cursor.fetchall()
+            ),
+        )
+        cursor.execute(
+            """
                 SELECT status, expected_row_count, manifest_sha256, logical_sha256,
                        source_database, source_tables, completed_at
                 FROM migration.export_batch
                 WHERE export_batch_id = %s
                 """,
-                (export_batch_id,),
-            )
-            batch = cursor.fetchone()
+            (export_batch_id,),
+        )
+        batch = cursor.fetchone()
     if batch is None:
         raise RegionTalkMigrationError(f"unknown export batch: {export_batch_id}")
     blocking = reconciliation_blocking_findings(accounting)

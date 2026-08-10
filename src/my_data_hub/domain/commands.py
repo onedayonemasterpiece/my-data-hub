@@ -5,7 +5,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-
 OperationKind = Literal[
     "object.create",
     "field.set",
@@ -46,7 +45,7 @@ class SemanticCommand(BaseModel):
     dry_run: bool = False
 
     @model_validator(mode="after")
-    def dependencies_are_unique(self) -> "SemanticCommand":
+    def dependencies_are_unique(self) -> SemanticCommand:
         if len(self.depends_on) != len(set(self.depends_on)):
             raise ValueError("depends_on values must be unique")
         if self.command_id in self.depends_on:
@@ -83,7 +82,7 @@ class Changeset(BaseModel):
     dry_run: bool = False
 
     @model_validator(mode="after")
-    def identities_are_unique(self) -> "Changeset":
+    def identities_are_unique(self) -> Changeset:
         if len(self.depends_on) != len(set(self.depends_on)):
             raise ValueError("depends_on values must be unique")
         if self.changeset_id in self.depends_on:

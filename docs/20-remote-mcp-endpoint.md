@@ -1,8 +1,17 @@
 # Remote MCP endpoint: mcp-datahub.kenigevents.ru
 
-Status: `ACCEPTED DEPLOYMENT DESIGN / IMPLEMENTATION PENDING`
+Status: `R1 RESOURCE SERVER IMPLEMENTED / YC EDGE DEPLOYMENT BLOCKED`
 Date: 2026-08-09
 Related decision: ADR-0013
+
+Implemented in R1: a private Streamable HTTP backend profile, asymmetric JWKS JWT
+verification, exact issuer/audience/resource/scope/time claims, append-only PostgreSQL
+revocation, RFC 9728 protected-resource metadata, `WWW-Authenticate` discovery,
+Host/Origin/trusted-proxy validation, no-store/correlation headers, bounded
+request/response/concurrency/rate/timeout controls, and read-only tool discovery.
+Cloud DNS/TLS/edge/backend deployment is not claimed; the authorized Yandex folders
+contain no discoverable devstand instance or ALB and the hostname currently has no DNS
+record.
 
 ## 1. Canonical URL
 

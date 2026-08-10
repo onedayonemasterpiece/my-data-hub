@@ -28,6 +28,33 @@ stop agent access without rotating database owner credentials.
 The MCP data editor uses its own restricted PostgreSQL login/role. Owner/migrator and
 break-glass credentials are local only.
 
+The devstand uses a separate root-owned, mode-0600 environment file and Unix account for
+each service: `api.env`, `orchestrator.env`, `mcp.env`, `committer.env`, `backup.env`,
+`migrator.env`, `verify.env` and `monitoring.env`. Each contains only that process's restricted database
+URL and directly required settings/secrets. `/etc/my-data-hub/admin.env` contains only
+`MY_DATA_HUB_ROLE_ADMIN_DATABASE_URL` and is consumed solely by short-lived root
+role-bootstrap/provision/probe services. `identity-verify.env` is another root-only
+oneshot input containing the URLs needed to prove LOGIN/group isolation; it is never
+loaded by a long-running process. Deployment runs `my-data-hub-identity-verify.service`
+before starting application services.
+
+`connector-canary.env` is loaded only by the bounded, short-lived synthetic canary and
+contains four distinct restricted URLs: connector intake, canonical committer, MCP
+reader and monitoring verification. It never contains owner, role-admin or migrator
+credentials and is never loaded by an API, orchestrator, MCP,
+committer timer or backup process. The post-deploy OAuth canary token remains in the
+protected GitHub environment; only its already-public issuer, JTI and expiry are passed
+to a root transient unit which appends the revocation row using `admin.env`.
+`DEVSTAND_MCP_VALID_TOKEN` is intentionally a one-time, short-lived post-deploy JWT with
+a unique JTI: the workflow permanently revokes it after the successful semantic call.
+Operators must issue and install a fresh unrevoked token before every rerun. The three
+negative-token secrets must be signed fixtures for the same issuer: expired, wrong exact
+audience, and otherwise-valid but insufficient-scope (which must return HTTP 403).
+
+`compose.yaml` and a single local `.env` are development conveniences only. They are not
+the production supervision or secret-isolation model; `deploy/systemd/install.sh`
+requires the per-service files above before it installs or enables any unit.
+
 ## Lifecycle
 
 - YDB secrets exist only during migration/rollback window.

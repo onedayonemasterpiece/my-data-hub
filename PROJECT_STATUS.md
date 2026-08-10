@@ -1,14 +1,16 @@
 # Project status
 
 Date: 2026-08-09
-Status: `DEVSTAND_DEPLOYED_USER_REPORTED / VERIFICATION_PENDING`
+Status: `R1 IMPLEMENTED LOCALLY / EXTERNAL DEPLOYMENT BLOCKED`
 
 ## Reported runtime state
 
-The owner reports that the project has been deployed on the devstand. This repository
-snapshot does not independently prove the running commit, services, database revision,
-backup/restore state or public endpoint. Those facts must be captured by the
-infrastructure-first deployment receipt.
+The owner reports that the project has been deployed on a devstand. A successfully
+authenticated Yandex Cloud inventory found no Compute instance or ALB in either
+authorized folder, the current runner has no installed my-data-hub service, and the
+required hostname has no DNS record. Therefore the reported runtime is not discoverable
+or independently proven. Exact evidence and the required host identity are recorded in
+[`docs/operations/first-deploy.md`](docs/operations/first-deploy.md).
 
 Until verified:
 
@@ -32,21 +34,22 @@ Until verified:
 - Docker/systemd/backup/CI handoff;
 - production publication and remote MCP disabled by default.
 
-## Accepted documentation supplement
+## R1 implementation now present in the repository
 
-The following architecture is now accepted but not yet claimed as implemented runtime:
+The following implementation is code- and disposable-PostgreSQL-proven, but not claimed
+as deployed runtime:
 
 - supervised canonical PostgreSQL; Kaggle is not master DB/failover;
 - data connector registry/intake/receipt/quarantine and durable producer spool;
 - `events-bot.daily-statistics.v1` as first real connector candidate;
-- remote endpoint `https://mcp-datahub.kenigevents.ru/mcp` through Yandex TLS/OAuth;
+- OAuth resource-server backend for `https://mcp-datahub.kenigevents.ru/mcp`;
 - Kaggle resource control classes:
   `orchestrator_protected`, `mcp_managed`, `mcp_exchange`, `external_read_only`;
-- provider inventory and protected-resource mutation denial;
+- bounded provider inventory policy and protected-resource mutation denial;
 - broad bounded MCP database reader;
 - preview/apply MCP data editor under restricted PostgreSQL role;
 - typed migration-operator tools for agent-driven Region Talk migration;
-- PR, post-deploy, nightly, weekly Kaggle and restore workflows;
+- PR, post-deploy, nightly, weekly Kaggle and restore workflow definitions with receipts;
 - infrastructure-first release ordering.
 
 Canonical documents:
@@ -60,20 +63,20 @@ Canonical documents:
 
 ## Current repository proof
 
-The documentation/contracts snapshot was revalidated after this supplement:
+The integrated repository was revalidated after the R1 implementation:
 
 ```text
-pytest -ra                                    90 passed, 1 skipped
-python scripts/validate_repository.py         1280 checks / 0 errors
+pytest -q                                     195 passed
+python scripts/validate_repository.py         1465 checks / 0 errors
 python -m compileall -q src tests scripts     PASS
 python scripts/create_notebooks.py --check    PASS / no drift
 git diff --check                              PASS
 relative Markdown link check                  PASS
 ```
 
-The skipped test requires the MCP Python SDK; PostgreSQL AST validation also requires
-`pglast`. CI/devstand must install the complete `.[dev]` dependencies and rerun all gates.
-These repository checks do not prove the user-reported devstand runtime.
+`pglast` is a runtime dependency for the separately gated operator implementation.
+These repository checks do not prove the user-reported devstand runtime or any Kaggle
+provider lifecycle.
 
 ## Next release gate: R1 infrastructure and workflow baseline
 

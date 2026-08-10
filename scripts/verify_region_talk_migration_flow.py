@@ -24,7 +24,6 @@ from my_data_hub.workloads.region_talk.migration import (
 )
 from my_data_hub.workloads.region_talk.ydb_export import LegacyYdbRecord, export_records
 
-
 SOURCE_TABLE = "region_talk_state"
 ACCOUNTING_COLUMNS = (
     "expected_row_count",

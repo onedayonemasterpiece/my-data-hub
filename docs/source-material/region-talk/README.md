@@ -38,3 +38,6 @@ override the accepted `my-data-hub` PostgreSQL architecture.
 Unknown YDB row kinds are exported and retained. They are not dropped because a
 mapper is not yet available. Production publication remains disabled until data
 accounting, shadow comparison, exact-review canary and owner approval all pass.
+The Region Talk pipeline remains `paused` throughout donor import and migration/cutover;
+neither a pending provenance entry nor the verified target-vision import is evidence that
+a Region Talk donor repository has been accessed or curated.

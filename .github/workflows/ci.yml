@@ -21,7 +21,7 @@ jobs:
       - run: python scripts/validate_repository.py
       - run: python -m compileall -q src tests scripts
       - run: pytest
-      - run: ruff check src tests scripts
+      - run: ruff check .
 
   postgres-integration:
     runs-on: ubuntu-latest
@@ -40,13 +40,22 @@ jobs:
           --health-timeout 5s
           --health-retries 30
     env:
+      MY_DATA_HUB_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
       MY_DATA_HUB_DATABASE_URL: postgresql://my_data_hub_test:integration-only-password@127.0.0.1:5432/my_data_hub_test
       MY_DATA_HUB_ENVIRONMENT: test
       MY_DATA_HUB_INSTANCE_ID: github-actions
       MY_DATA_HUB_SCHEDULER_ENABLED: 'false'
       MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED: 'false'
       MY_DATA_HUB_MCP_REMOTE_ENABLED: 'false'
+      MY_DATA_HUB_MCP_WRITE_ENABLED: 'false'
       MY_DATA_HUB_MCP_AUTH_MODE: stdio-environment
+      MY_DATA_HUB_MIGRATOR_DATABASE_URL: postgresql://my_data_hub_test:integration-only-password@127.0.0.1:5432/my_data_hub_test
+      MY_DATA_HUB_ROLE_ADMIN_DATABASE_URL: postgresql://my_data_hub_test:integration-only-password@127.0.0.1:5432/my_data_hub_test
+      MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL: postgresql://ci_connector:ci-connector-password@127.0.0.1:5432/my_data_hub_test
+      MY_DATA_HUB_CANONICAL_COMMITTER_DATABASE_URL: postgresql://ci_committer:ci-committer-password@127.0.0.1:5432/my_data_hub_test
+      MY_DATA_HUB_MCP_READER_DATABASE_URL: postgresql://ci_mcp_reader:ci-reader-password@127.0.0.1:5432/my_data_hub_test
+      MY_DATA_HUB_MONITORING_DATABASE_URL: postgresql://ci_monitoring:ci-monitoring-password@127.0.0.1:5432/my_data_hub_test
+      MY_DATA_HUB_OPERATOR_DATABASE_URL: postgresql://ci_editor:ci-editor-password@127.0.0.1:5432/my_data_hub_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -54,15 +63,82 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: python -m pip install -e '.[dev]'
+      - name: Record workflow start
+        run: echo "MY_DATA_HUB_WORKFLOW_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - name: Bootstrap password-free owner and service roles
+        run: psql "$MY_DATA_HUB_ROLE_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 -f sql/admin/bootstrap_roles.sql
       - name: Apply migrations and register paused pipeline
         run: my-data-hub db migrate
-      - name: Prove migration and pipeline registration idempotency
-        run: my-data-hub db migrate
-      - name: Verify database health
-        run: my-data-hub db verify
       - name: Verify PostgreSQL bootstrap contract
         run: python scripts/verify_postgres_bootstrap.py
+      - name: Prove migration and pipeline registration idempotency
+        run: my-data-hub db migrate
+      - name: Prove upgrade from released revision
+        run: python scripts/verify_postgres_upgrade.py
+      - name: Provision explicit PostgreSQL role contract
+        run: python scripts/provision_postgres_roles.py
+      - name: Provision ephemeral restricted CI logins
+        run: |
+          psql "$MY_DATA_HUB_ROLE_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE ci_connector LOGIN PASSWORD 'ci-connector-password'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE ci_committer LOGIN PASSWORD 'ci-committer-password'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE ci_mcp_reader LOGIN PASSWORD 'ci-reader-password'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE ci_monitoring LOGIN PASSWORD 'ci-monitoring-password'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE ci_editor LOGIN PASSWORD 'ci-editor-password'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+          GRANT mdh_connector_intake TO ci_connector;
+          GRANT mdh_canonical_committer TO ci_committer;
+          GRANT mdh_mcp_reader TO ci_mcp_reader;
+          GRANT mdh_monitoring TO ci_monitoring;
+          GRANT mdh_mcp_editor TO ci_editor;
+          SQL
+      - name: Prove PostgreSQL positive and adversarial role probes
+        run: python scripts/verify_postgres_roles.py
+      - name: Prove verified recovery checkpoint opens only the restricted operator read gate
+        run: |
+          python -m my_data_hub.recovery_record \
+            --database-url "$MY_DATA_HUB_ROLE_ADMIN_DATABASE_URL" \
+            --receipt examples/recovery-receipt.v1.json
+          python - <<'PY'
+          import os
+          from my_data_hub.db_operator.recovery import PostgresBackupStateProvider
+          state = PostgresBackupStateProvider(os.environ['MY_DATA_HUB_OPERATOR_DATABASE_URL'])()
+          assert state.checkpoint_revision is not None
+          assert state.restore_drill_succeeded and state.readback_verified
+          PY
+      - name: Verify database health
+        run: my-data-hub db verify
       - name: Verify Region Talk lossless migration flow
         run: python scripts/verify_region_talk_migration_flow.py
+      - name: Verify disposable database reader/editor
+        run: python scripts/verify_db_operator.py
+      - name: Verify synthetic connector exactly-once flow
+        run: python scripts/verify_connector_flow.py
       - name: Import MCP v2 server contract
         run: python -c "from my_data_hub.config import Settings; from my_data_hub.mcp.server import create_server; assert create_server(Settings.from_env()) is not None"
+      - name: Write PostgreSQL integration receipt
+        if: always()
+        shell: bash
+        run: |
+          outcome=PASS
+          observed="all PostgreSQL integration steps passed"
+          if [[ "${{ job.status }}" != "success" ]]; then
+            outcome=FAIL
+            observed="one or more PostgreSQL integration steps failed"
+          fi
+          python scripts/write_workflow_receipt.py \
+            --workflow ci-postgres-integration --environment ci --outcome "$outcome" \
+            --observed "$observed" --resource database=my_data_hub_test \
+            --hash-file migration_contract=sql/migrations/0010_infrastructure_control_plane.sql \
+            --output artifacts/ci-postgres-receipt.json
+      - name: Upload PostgreSQL integration receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-postgres-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/ci-postgres-receipt.json
+          if-no-files-found: error

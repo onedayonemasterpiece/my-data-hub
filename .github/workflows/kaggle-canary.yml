@@ -1,0 +1,65 @@
+name: kaggle-canary
+
+on:
+  schedule:
+    - cron: '41 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kaggle-private-canary
+  cancel-in-progress: false
+
+jobs:
+  private-disposable-lifecycle:
+    runs-on: ubuntu-latest
+    environment: kaggle-canary
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[dev,kaggle]'
+      - name: Prove offline provider protections
+        id: offline
+        continue-on-error: true
+        run: pytest -q tests/test_kaggle_control.py
+      - name: Fail closed until private lifecycle adapter credential is installed
+        id: adapter
+        continue-on-error: true
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_CANARY_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_CANARY_KEY }}
+        run: |
+          test -n "$KAGGLE_USERNAME" || { echo 'missing KAGGLE_CANARY_USERNAME' >&2; exit 2; }
+          test -n "$KAGGLE_KEY" || { echo 'missing KAGGLE_CANARY_KEY' >&2; exit 2; }
+          echo 'BLOCKED: no integration-tested private dataset/notebook delete adapter is present' >&2
+          exit 2
+      - name: Write canary receipt
+        if: always()
+        run: |
+          outcome=BLOCKED; observed="private lifecycle adapter is not installed"
+          blocker="KAGGLE_PRIVATE_LIFECYCLE_ADAPTER: add tested private create/readback/delete primitives and KAGGLE_CANARY credentials"
+          if [[ "${{ steps.offline.outcome }}" != success ]]; then
+            outcome=FAIL; observed="offline provider protection tests failed"
+            blocker="KAGGLE_OFFLINE_POLICY: repair the failing provider protection tests before any provider call"
+          fi
+          python scripts/write_workflow_receipt.py --workflow kaggle-canary --environment kaggle-canary \
+            --outcome "$outcome" --observed "$observed" --cleanup blocked \
+            --blocker "$blocker" \
+            --output artifacts/kaggle-canary-receipt.json
+      - name: Upload canary receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaggle-canary-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/kaggle-canary-receipt.json
+          if-no-files-found: error
+      - name: Enforce canary outcome
+        if: always()
+        run: |
+          test "${{ steps.offline.outcome }}" = success || exit 1
+          echo 'BLOCKED: private Kaggle lifecycle adapter is not installed' >&2
+          exit 2

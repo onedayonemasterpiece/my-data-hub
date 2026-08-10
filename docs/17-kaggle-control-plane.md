@@ -1,9 +1,17 @@
 # Kaggle control plane through my-data-hub MCP
 
-Status: `ACCEPTED DESIGN / IMPLEMENTATION PENDING`
+Status: `R1 POLICY/REGISTRY CONTRACT IMPLEMENTED / PROVIDER ADAPTER BLOCKED`
 Date: 2026-08-09
 Related decision: ADR-0011
 Exchange contract: [`../schemas/kaggle-exchange-manifest.v1.schema.json`](../schemas/kaggle-exchange-manifest.v1.schema.json)
+
+Implemented in R1: provider-neutral control-class models, bounded pagination,
+unknown-resource classification, immutable protected-class database enforcement,
+fingerprint/lease mutation policy, private exchange validation, private lifecycle
+receipt contracts, protected-resource negative tests, and a minimal remote status tool.
+No concrete Kaggle create/readback/delete adapter, account inventory, resource ID, or
+cleanup receipt is claimed; the provider workflow fails closed until those primitives
+and dedicated credentials exist.
 
 ## 1. Role of Kaggle
 

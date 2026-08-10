@@ -5,10 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=mydatahub
-Group=mydatahub
+User=mydatahub-orchestrator
+Group=mydatahub-orchestrator
+SupplementaryGroups=mydatahub-artifacts
 WorkingDirectory=/opt/my-data-hub/current
-EnvironmentFile=/etc/my-data-hub/my-data-hub.env
+EnvironmentFile=/etc/my-data-hub/orchestrator.env
 ExecStart=/opt/my-data-hub/venv/bin/my-data-hub orchestrator run-loop
 Restart=on-failure
 RestartSec=5

@@ -1,5 +1,9 @@
 .PHONY: up down logs install migrate status verify validate test lint notebooks bundle backup restore-check
 
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
+PYTEST ?= $(if $(wildcard .venv/bin/pytest),.venv/bin/pytest,pytest)
+RUFF ?= $(if $(wildcard .venv/bin/ruff),.venv/bin/ruff,ruff)
+
 up:
 	docker compose up -d postgres
 	docker compose run --rm api db migrate
@@ -12,7 +16,7 @@ logs:
 	docker compose logs -f --tail=200
 
 install:
-	python -m pip install -e '.[dev]'
+	$(PYTHON) -m pip install -e '.[dev]'
 
 migrate:
 	docker compose run --rm api db migrate
@@ -24,16 +28,16 @@ verify:
 	docker compose run --rm api db verify
 
 validate:
-	python scripts/validate_repository.py
+	$(PYTHON) scripts/validate_repository.py
 
 test: validate
-	pytest
+	$(PYTEST)
 
 lint:
-	ruff check .
+	$(RUFF) check .
 
 notebooks:
-	python scripts/create_notebooks.py --check
+	$(PYTHON) scripts/create_notebooks.py --check
 
 bundle:
 	bash scripts/build_release_bundle.sh

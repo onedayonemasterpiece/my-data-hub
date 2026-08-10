@@ -1,0 +1,21 @@
+[Unit]
+Description=my-data-hub bounded connector canonical committer
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=60
+User=mydatahub-committer
+Group=mydatahub-committer
+WorkingDirectory=/opt/my-data-hub/current
+EnvironmentFile=/etc/my-data-hub/committer.env
+ExecStart=/opt/my-data-hub/venv/bin/python scripts/run_connector_committer.py --limit 25
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

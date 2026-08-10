@@ -6,17 +6,17 @@ import os
 import re
 import shutil
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from uuid import UUID, uuid4
 
-from my_data_hub.hashing import canonical_json_bytes, sha256_file, sha256_value
+from my_data_hub.hashing import sha256_file, sha256_value
 from my_data_hub.workloads.region_talk.constants import KNOWN_YDB_ROW_KINDS
 from my_data_hub.workloads.region_talk.contracts import YdbExportManifest, YdbExportRow
 from my_data_hub.workloads.region_talk.migration import logical_row_bytes, validate_export
-
 
 _SAFE_TABLE_PATH = re.compile(r"^[A-Za-z0-9_./:-]+$")
 _SAFE_KIND = re.compile(r"^[A-Za-z0-9_./:-]+$")
@@ -279,8 +279,8 @@ def export_records(
             metadata=metadata,
         )
     except Exception:
-        if not writer._handle.closed:  # noqa: SLF001 - local cleanup guard
-            writer._handle.close()  # noqa: SLF001
+        if not writer._handle.closed:
+            writer._handle.close()
         shutil.rmtree(directory, ignore_errors=True)
         raise
 
@@ -377,8 +377,8 @@ def export_ydb_table(
                         writer.close()
                         successful_writer = writer
                     except Exception:
-                        if not writer._handle.closed:  # noqa: SLF001
-                            writer._handle.close()  # noqa: SLF001
+                        if not writer._handle.closed:
+                            writer._handle.close()
                         raise
 
                 pool.retry_tx_sync(

@@ -48,15 +48,14 @@ class HubService:
 
     def health(self) -> dict[str, Any]:
         self._require("hub:read")
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
                     SELECT canonical_revision, schema_revision, updated_at
                     FROM hub.canonical_state WHERE singleton = true
                     """
-                )
-                row = cursor.fetchone()
+            )
+            row = cursor.fetchone()
         if row is None:
             raise RuntimeError("canonical state singleton is missing")
         return {
@@ -70,17 +69,16 @@ class HubService:
     def list_projects(self, limit: int = 50) -> list[dict[str, Any]]:
         self._require("hub:read")
         limit = max(1, min(limit, 100))
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
                     SELECT project_id, slug, name, left(coalesce(description, ''), 1000),
                            status, revision, updated_at
                     FROM hub.project ORDER BY slug LIMIT %s
                     """,
-                    (limit,),
-                )
-                rows = cursor.fetchall()
+                (limit,),
+            )
+            rows = cursor.fetchall()
         return [
             {
                 "project_id": str(row[0]),
@@ -102,11 +100,10 @@ class HubService:
         if len(query) > 500:
             raise ValueError("query is too long")
         limit = max(1, min(limit, 50))
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute("SET LOCAL statement_timeout = '3000ms'")
-                cursor.execute(
-                    """
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SET LOCAL statement_timeout = '3000ms'")
+            cursor.execute(
+                """
                     SELECT content_id, content_type, left(coalesce(title, ''), 1000),
                            left(coalesce(summary, ''), 2000), canonical_url, published_at,
                            status, revision,
@@ -119,9 +116,9 @@ class HubService:
                     ORDER BY rank DESC, published_at DESC NULLS LAST, content_id
                     LIMIT %s
                     """,
-                    (query, query, limit),
-                )
-                rows = cursor.fetchall()
+                (query, query, limit),
+            )
+            rows = cursor.fetchall()
         return [
             {
                 "content_id": str(row[0]),
@@ -139,10 +136,9 @@ class HubService:
 
     def get_content(self, content_id: UUID) -> dict[str, Any] | None:
         self._require("hub:read")
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
                     SELECT content_id, content_type, left(coalesce(title, ''), 1000),
                            left(coalesce(summary, ''), 4000),
                            left(coalesce(body_excerpt, ''), 8000), language,
@@ -151,13 +147,13 @@ class HubService:
                     FROM hub.content_item
                     WHERE content_id = %s
                     """,
-                    (content_id,),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    return None
-                cursor.execute(
-                    """
+                (content_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            cursor.execute(
+                """
                     SELECT asset_id, asset_type, source_url, position, mime_type,
                            byte_size, sha256, width, height, status
                     FROM hub.content_asset
@@ -165,9 +161,9 @@ class HubService:
                     ORDER BY position, asset_id
                     LIMIT 20
                     """,
-                    (content_id,),
-                )
-                assets = cursor.fetchall()
+                (content_id,),
+            )
+            assets = cursor.fetchall()
         return {
             "content_id": str(row[0]),
             "content_type": str(row[1]),
@@ -209,10 +205,9 @@ class HubService:
         if not _SAFE_SUBJECT_TYPE.fullmatch(subject_type):
             raise ValueError("invalid subject_type")
         limit = max(1, min(limit, 100))
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
                     SELECT provenance_event_id, event_type, actor_kind, actor_ref,
                            left(coalesce(query_text, ''), 1000), source_uri, run_id,
                            observed_at, evidence
@@ -221,9 +216,9 @@ class HubService:
                     ORDER BY observed_at DESC, provenance_event_id DESC
                     LIMIT %s
                     """,
-                    (subject_type, subject_id, limit),
-                )
-                rows = cursor.fetchall()
+                (subject_type, subject_id, limit),
+            )
+            rows = cursor.fetchall()
         return [
             {
                 "provenance_event_id": str(row[0]),
@@ -241,18 +236,17 @@ class HubService:
 
     def region_talk_queue_summary(self) -> list[dict[str, Any]]:
         self._require("region-talk:read")
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
                     SELECT stage_key, status, item_count, oldest_created_at,
                            earliest_available_at, pipeline_status
                     FROM orchestration.queue_summary
                     WHERE workload = 'region-talk'
                     ORDER BY stage_key, status NULLS FIRST
                     """
-                )
-                rows = cursor.fetchall()
+            )
+            rows = cursor.fetchall()
         return [
             {
                 "stage": str(row[0]),
@@ -280,10 +274,9 @@ class HubService:
     def migration_status(self, limit: int = 20) -> list[dict[str, Any]]:
         self._require("migration:read")
         limit = max(1, min(limit, 50))
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
                     SELECT batch.export_batch_id, batch.status, batch.expected_row_count,
                            coalesce(acc.raw_count, 0),
                            coalesce(acc.dispositioned_count, 0),
@@ -300,9 +293,9 @@ class HubService:
                     ORDER BY batch.created_at DESC
                     LIMIT %s
                     """,
-                    (limit,),
-                )
-                rows = cursor.fetchall()
+                (limit,),
+            )
+            rows = cursor.fetchall()
         return [
             {
                 "export_batch_id": str(row[0]),
@@ -343,10 +336,9 @@ class HubService:
         else:
             query += " WHERE export_batch_id = %s ORDER BY row_kind LIMIT %s"
             params = (export_batch_id, limit)
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(query, params)
-                rows = cursor.fetchall()
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
         return [
             {
                 "export_batch_id": str(row[0]),
@@ -366,12 +358,86 @@ class HubService:
             for row in rows
         ]
 
+    def connector_status(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return bounded connector/product status without payloads or credentials."""
+
+        self._require("connector:read")
+        limit = max(1, min(limit, 100))
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT connector.connector_id, connector.status,
+                       product.data_product, product.schema_version, product.enabled,
+                       connector.expected_cadence,
+                       max(batch.accepted_at) AS last_accepted_at,
+                       max(batch.committed_at) AS last_committed_at,
+                       count(batch.batch_id) FILTER (WHERE batch.status = 'canonical_committed'),
+                       (SELECT count(*) FROM integration.quarantine quarantine
+                         WHERE quarantine.connector_id = connector.connector_id)
+                FROM integration.connector connector
+                JOIN integration.data_product product USING (connector_id)
+                LEFT JOIN integration.batch batch
+                  ON batch.connector_id = connector.connector_id
+                 AND batch.data_product = product.data_product
+                GROUP BY connector.connector_id, connector.status, product.data_product,
+                         product.schema_version, product.enabled, connector.expected_cadence
+                ORDER BY connector.connector_id, product.data_product
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+        return [
+            {
+                "connector_id": str(row[0]),
+                "connector_status": str(row[1]),
+                "data_product": str(row[2]),
+                "schema_version": str(row[3]),
+                "enabled": bool(row[4]),
+                "expected_cadence": str(row[5]) if row[5] else None,
+                "last_accepted_at": row[6].isoformat() if row[6] else None,
+                "last_committed_at": row[7].isoformat() if row[7] else None,
+                "committed_batches": int(row[8]),
+                "quarantined_or_conflicting_batches": int(row[9]),
+            }
+            for row in rows
+        ]
+
+    def provider_resource_status(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Return the same minimal status projection for every provider class."""
+
+        self._require("provider:read")
+        limit = max(1, min(limit, 200))
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT resource_id, provider, resource_kind, control_class,
+                       lifecycle_state, privacy_attestation = 'private', last_observed_at
+                FROM integration.provider_resource
+                ORDER BY last_observed_at DESC, resource_id
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+        return [
+            {
+                "resource_id": str(row[0]),
+                "provider": str(row[1]),
+                "resource_kind": str(row[2]),
+                "control_class": str(row[3]),
+                "lifecycle_state": str(row[4]),
+                "private": bool(row[5]) if row[5] is not None else None,
+                "last_observed_at": row[6].isoformat(),
+            }
+            for row in rows
+        ]
+
     def get_command(self, command_id: UUID) -> dict[str, Any] | None:
         self._require("hub:read")
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
                     SELECT cmd.command_id, cmd.command_type, cmd.status, cmd.created_at,
                            cmd.applied_at, receipt.accepted_revision, receipt.result,
                            receipt.output_fingerprint
@@ -380,9 +446,9 @@ class HubService:
                       ON receipt.command_id = cmd.command_id
                     WHERE cmd.command_id = %s
                     """,
-                    (command_id,),
-                )
-                row = cursor.fetchone()
+                (command_id,),
+            )
+            row = cursor.fetchone()
         if row is None:
             return None
         return {
@@ -399,10 +465,9 @@ class HubService:
     def list_conflicts(self, limit: int = 20) -> list[dict[str, Any]]:
         self._require("hub:read")
         limit = max(1, min(limit, 50))
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
                     SELECT conflict_id, conflict_kind, target_type, target_id,
                            status, created_at
                     FROM sync.conflict
@@ -410,9 +475,9 @@ class HubService:
                     ORDER BY created_at, conflict_id
                     LIMIT %s
                     """,
-                    (limit,),
-                )
-                rows = cursor.fetchall()
+                (limit,),
+            )
+            rows = cursor.fetchall()
         return [
             {
                 "conflict_id": str(row[0]),
@@ -490,12 +555,11 @@ class HubService:
         return self._submit_validated_command(command, required_scope="hub:write")
 
     def _canonical_revision(self) -> int:
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT canonical_revision FROM hub.canonical_state WHERE singleton = true"
-                )
-                row = cursor.fetchone()
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT canonical_revision FROM hub.canonical_state WHERE singleton = true"
+            )
+            row = cursor.fetchone()
         if row is None:
             raise SemanticCommandError("canonical state singleton is missing")
         return int(row[0])
@@ -641,12 +705,8 @@ class HubService:
                 if bool(result.get("canonical_change")):
                     accepted_revision += 1
                     cursor.execute(
-                        """
-                        UPDATE hub.canonical_state
-                        SET canonical_revision = %s, updated_at = now()
-                        WHERE singleton = true
-                        """,
-                        (accepted_revision,),
+                        "SELECT hub.advance_canonical_revision(%s)",
+                        (canonical_revision,),
                     )
                 cursor.execute(
                     """

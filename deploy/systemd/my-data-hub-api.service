@@ -5,10 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=mydatahub
-Group=mydatahub
+User=mydatahub-api
+Group=mydatahub-api
+SupplementaryGroups=mydatahub-artifacts
 WorkingDirectory=/opt/my-data-hub/current
-EnvironmentFile=/etc/my-data-hub/my-data-hub.env
+EnvironmentFile=/etc/my-data-hub/api.env
 ExecStart=/opt/my-data-hub/venv/bin/my-data-hub api serve
 Restart=on-failure
 RestartSec=5

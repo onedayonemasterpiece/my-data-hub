@@ -7,7 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from my_data_hub.config import Settings
+from my_data_hub.config import ConfigurationError, Settings
 from my_data_hub.db.health import verify_database
 from my_data_hub.db.migrations import applied_migrations, discover_migrations, migrate
 from my_data_hub.orchestrator.backlog import load_region_talk_backlog
@@ -18,7 +18,6 @@ from my_data_hub.orchestrator.registry import load_pipeline_definition
 from my_data_hub.orchestrator.repository import register_pipeline
 from my_data_hub.workloads.region_talk.migration import import_raw_export, validate_export
 from my_data_hub.workloads.region_talk.ydb_export import export_ydb_table
-
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_DIRECTORY = REPOSITORY_ROOT / "sql" / "migrations"
@@ -42,10 +41,11 @@ def command_api_serve(_args: argparse.Namespace) -> int:
 
 def command_db_migrate(_args: argparse.Namespace) -> int:
     settings = _database_settings()
-    executed = migrate(settings.database_url, MIGRATION_DIRECTORY)
+    database_url = os.getenv("MY_DATA_HUB_MIGRATOR_DATABASE_URL", "").strip() or settings.database_url
+    executed = migrate(database_url, MIGRATION_DIRECTORY)
     definition = load_pipeline_definition(REGION_TALK_PIPELINE)
     registration = register_pipeline(
-        settings.database_url, definition, REGION_TALK_PIPELINE
+        database_url, definition, REGION_TALK_PIPELINE
     )
     _print(
         {
@@ -74,7 +74,8 @@ def command_db_status(_args: argparse.Namespace) -> int:
 
 
 def command_db_verify(_args: argparse.Namespace) -> int:
-    health = verify_database(_database_settings().database_url)
+    settings = _database_settings()
+    health = verify_database(settings.application_database_url or settings.database_url)
     _print(asdict(health))
     return 0 if health.ok else 2
 
@@ -109,8 +110,12 @@ def command_orchestrator_plan(args: argparse.Namespace) -> int:
 
 def command_orchestrator_loop(args: argparse.Namespace) -> int:
     settings = _database_settings()
+    if settings.environment in {"prod", "production"} and not settings.orchestrator_database_url:
+        raise ConfigurationError(
+            "production orchestrator requires MY_DATA_HUB_ORCHESTRATOR_DATABASE_URL"
+        )
     run_loop(
-        settings.database_url,
+        settings.orchestrator_database_url or settings.database_url,
         settings.instance_id,
         interval_seconds=args.interval_seconds or settings.orchestrator_interval_seconds,
         scheduler_enabled=settings.scheduler_enabled,

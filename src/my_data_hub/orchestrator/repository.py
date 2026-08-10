@@ -34,6 +34,12 @@ def register_pipeline(
     with psycopg.connect(database_url) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
+                "SELECT coalesce(pg_has_role(current_user, to_regrole('mdh_owner'), 'MEMBER') "
+                "AND has_database_privilege('mdh_owner', current_database(), 'CREATE'), false)"
+            )
+            if bool(cursor.fetchone()[0]):
+                cursor.execute("SET LOCAL ROLE mdh_owner")
+            cursor.execute(
                 """
                 INSERT INTO orchestration.pipeline (workload, name, version, status, definition)
                 VALUES (%s, %s, %s, %s, %s::jsonb)

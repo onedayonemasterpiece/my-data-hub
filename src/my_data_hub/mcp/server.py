@@ -1,11 +1,23 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
 from my_data_hub.config import ConfigurationError, Settings
 from my_data_hub.mcp.scopes import TOOL_SCOPES, require_scope
 from my_data_hub.mcp.service import HubService
+
+
+def oauth_resource_metadata_url(resource: str) -> str:
+    """Return the RFC 9728 path-derived metadata URL for one exact resource."""
+
+    parsed = urlsplit(resource)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.query or parsed.fragment:
+        raise ConfigurationError("OAuth resource must be an HTTPS URL without query or fragment")
+    suffix_path = parsed.path.rstrip("/")
+    metadata_path = f"/.well-known/oauth-protected-resource{suffix_path}"
+    return urlunsplit((parsed.scheme, parsed.netloc, metadata_path, "", ""))
 
 
 def create_server(settings: Settings):  # type: ignore[no-untyped-def]
@@ -15,7 +27,7 @@ def create_server(settings: Settings):  # type: ignore[no-untyped-def]
         raise RuntimeError("install my-data-hub to run the MCP server") from exc
 
     service = HubService(
-        settings.database_url,
+        settings.mcp_reader_database_url or settings.database_url,
         scopes=settings.mcp_scopes,
         write_enabled=settings.mcp_write_enabled,
     )
@@ -105,6 +117,22 @@ def create_server(settings: Settings):  # type: ignore[no-untyped-def]
             parsed = UUID(export_batch_id) if export_batch_id else None
             return service.migration_accounting(parsed, limit)
 
+    if TOOL_SCOPES["connector.status.list"] in settings.mcp_scopes:
+
+        @mcp.tool(name="connector.status.list")
+        def connector_status(limit: int = 50) -> list[dict[str, Any]]:
+            """Return bounded connector and data-product delivery status."""
+            require_scope(settings.mcp_scopes, TOOL_SCOPES["connector.status.list"])
+            return service.connector_status(limit)
+
+    if TOOL_SCOPES["provider.resource.status"] in settings.mcp_scopes:
+
+        @mcp.tool(name="provider.resource.status")
+        def provider_resource_status(limit: int = 100) -> list[dict[str, Any]]:
+            """Return minimal Kaggle resource status without source or output."""
+            require_scope(settings.mcp_scopes, TOOL_SCOPES["provider.resource.status"])
+            return service.provider_resource_status(limit)
+
     if (
         settings.mcp_write_enabled
         and TOOL_SCOPES["region_talk.work.enqueue"] in settings.mcp_scopes
@@ -157,12 +185,6 @@ def serve(*, transport: str) -> None:
 
     if not settings.mcp_remote_enabled:
         raise ConfigurationError("remote MCP is disabled by configuration")
-    if settings.environment in {"prod", "production"}:
-        raise ConfigurationError(
-            "OAuth adapter must be implemented and integration-tested before production HTTP MCP"
-        )
-    if settings.mcp_auth_mode != "development-token" or not settings.mcp_development_token:
-        raise ConfigurationError("development Streamable HTTP requires a bearer token")
     try:
         import uvicorn
         from mcp.server.transport_security import TransportSecuritySettings
@@ -171,16 +193,18 @@ def serve(*, transport: str) -> None:
     from contextlib import asynccontextmanager
 
     from starlette.applications import Starlette
-    from starlette.routing import Mount
+    from starlette.responses import JSONResponse
+    from starlette.routing import Mount, Route
 
+    from my_data_hub.mcp.admission import AdmissionLimits, OAuthAdmissionSecurity
     from my_data_hub.mcp.http_security import DevelopmentBearerSecurity
+    from my_data_hub.mcp.oauth import OAuthBearerValidator, OAuthValidationPolicy
+    from my_data_hub.mcp.oauth_jwt import JwksJwtDecoder
+    from my_data_hub.mcp.oauth_postgres import PostgresRevocationStore
 
     allowed_hosts = sorted(
-        {
-            entry
-            for host in settings.mcp_allowed_hosts
-            for entry in (host, host if host.endswith(":*") else f"{host}:*")
-        }
+        set(settings.mcp_allowed_hosts)
+        | {f"{settings.mcp_host}:{settings.mcp_port}"}
     )
     mcp_app = mcp.streamable_http_app(
         host=settings.mcp_host,
@@ -196,14 +220,74 @@ def serve(*, transport: str) -> None:
         async with mcp.session_manager.run():
             yield
 
-    mounted = Starlette(routes=[Mount("/", app=mcp_app)], lifespan=lifespan)
-    guarded = DevelopmentBearerSecurity(
-        mounted,
-        token=settings.mcp_development_token,
-        allowed_origins=settings.mcp_allowed_origins,
-        allowed_hosts=settings.mcp_allowed_hosts,
-        max_request_bytes=1_048_576,
-    )
+    if settings.mcp_auth_mode == "oauth":
+        metadata_url = oauth_resource_metadata_url(settings.mcp_oauth_resource)
+        metadata_path = urlsplit(metadata_url).path
+
+        async def protected_resource_metadata(_request: Any) -> JSONResponse:
+            return JSONResponse(
+                {
+                    "resource": settings.mcp_oauth_resource,
+                    "authorization_servers": [settings.mcp_oauth_issuer],
+                    "bearer_methods_supported": ["header"],
+                    "scopes_supported": sorted(settings.mcp_scopes),
+                    "resource_name": "my-data-hub read-only MCP",
+                }
+            )
+
+        mounted = Starlette(
+            routes=[
+                Route(metadata_path, protected_resource_metadata, methods=["GET"]),
+                Mount("/", app=mcp_app),
+            ],
+            lifespan=lifespan,
+        )
+        decoder = JwksJwtDecoder(
+            jwks_url=settings.mcp_oauth_jwks_url,
+            issuer=settings.mcp_oauth_issuer,
+            audience=settings.mcp_oauth_audience,
+            algorithms=settings.mcp_oauth_algorithms,
+        )
+        validator = OAuthBearerValidator(
+            decoder=decoder,
+            policy=OAuthValidationPolicy(
+                issuer=settings.mcp_oauth_issuer,
+                audience=settings.mcp_oauth_audience,
+                resource=settings.mcp_oauth_resource,
+                allowed_scopes=settings.mcp_scopes,
+                max_token_lifetime_seconds=settings.mcp_token_max_lifetime_seconds,
+            ),
+            revocations=PostgresRevocationStore(settings.mcp_revocation_database_url),
+        )
+        guarded = OAuthAdmissionSecurity(
+            mounted,
+            validator=validator,
+            required_scopes=settings.mcp_scopes,
+            allowed_origins=settings.mcp_allowed_origins,
+            allowed_hosts=settings.mcp_allowed_hosts,
+            trusted_proxy_ips=settings.mcp_trusted_proxies,
+            limits=AdmissionLimits(
+                max_request_bytes=1_048_576,
+                max_response_bytes=2_097_152,
+                max_concurrency=16,
+                requests_per_window=120,
+                rate_window_seconds=60,
+                request_timeout_seconds=30,
+            ),
+            metadata_path=metadata_path,
+            resource_metadata_url=metadata_url,
+        )
+    elif settings.mcp_auth_mode == "development-token" and settings.mcp_development_token:
+        mounted = Starlette(routes=[Mount("/", app=mcp_app)], lifespan=lifespan)
+        guarded = DevelopmentBearerSecurity(
+            mounted,
+            token=settings.mcp_development_token,
+            allowed_origins=settings.mcp_allowed_origins,
+            allowed_hosts=settings.mcp_allowed_hosts,
+            max_request_bytes=1_048_576,
+        )
+    else:
+        raise ConfigurationError("Streamable HTTP requires OAuth or a loopback development token")
     uvicorn.run(
         guarded,
         host=settings.mcp_host,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -8,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import my_data_hub.api.app as api_module
-from my_data_hub.config import Settings
+from my_data_hub.config import ConfigurationError, Settings
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -92,6 +93,23 @@ def test_unconfigured_intake_is_fail_closed(monkeypatch: pytest.MonkeyPatch, tmp
     client = TestClient(api_module.create_app(settings(tmp_path, token=None)))
     response = client.post("/v1/worker-results", json=valid_result())
     assert response.status_code == 503
+
+
+def test_production_api_requires_only_its_two_database_identities_and_worker_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(api_module, "WorkerResultRepository", FakeRepository)
+    production = replace(settings(tmp_path), environment="production")
+    with pytest.raises(ConfigurationError, match="APPLICATION_DATABASE_URL"):
+        api_module.create_app(production)
+    production = replace(
+        production,
+        application_database_url="postgresql://application@db/hub",
+        connector_intake_database_url="postgresql://connector@db/hub",
+        worker_result_token=None,
+    )
+    with pytest.raises(ConfigurationError, match="worker result token"):
+        api_module.create_app(production)
 
 
 def test_chunked_or_declared_oversize_body_is_rejected(

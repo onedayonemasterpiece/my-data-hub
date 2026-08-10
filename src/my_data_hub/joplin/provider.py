@@ -54,8 +54,10 @@ class HttpJoplinDataApi:
             raise JoplinProviderError("aiohttp is required") from exc
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
         query = {**params, "token": self.token}
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(f"{self.base_url.rstrip('/')}{path}", params=query) as response:
+        async with (
+            aiohttp.ClientSession(timeout=timeout) as session,
+            session.get(f"{self.base_url.rstrip('/')}{path}", params=query) as response,
+        ):
                 if response.status == 404:
                     return {"_not_found": True}
                 if response.status != 200:

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/workflow-receipt.v1.schema.json",
+  "title": "my-data-hub non-unit workflow receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "workflow",
+    "run_id",
+    "run_attempt",
+    "trigger",
+    "actor",
+    "repository",
+    "commit",
+    "environment",
+    "started_at",
+    "finished_at",
+    "versions",
+    "resource_ids",
+    "hashes",
+    "checks",
+    "cleanup",
+    "blockers"
+  ],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-workflow-receipt.v1"},
+    "workflow": {"type": "string", "minLength": 1, "maxLength": 100},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 100},
+    "run_attempt": {"type": "integer", "minimum": 1},
+    "trigger": {"type": "string", "minLength": 1, "maxLength": 100},
+    "actor": {"type": "string", "minLength": 1, "maxLength": 200},
+    "repository": {"type": "string", "minLength": 1, "maxLength": 300},
+    "commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "environment": {"type": "string", "minLength": 1, "maxLength": 100},
+    "started_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": "string", "format": "date-time"},
+    "versions": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "maxLength": 500}
+    },
+    "resource_ids": {
+      "type": "object",
+      "additionalProperties": {"type": ["string", "integer", "boolean", "null"]}
+    },
+    "hashes": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "expected", "observed", "outcome"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "expected": {"type": "string"},
+          "observed": {"type": "string"},
+          "outcome": {"enum": ["PASS", "FAIL", "BLOCKED", "SKIPPED"]}
+        }
+      }
+    },
+    "cleanup": {"enum": ["not_required", "complete", "failed", "blocked"]},
+    "blockers": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  }
+}
