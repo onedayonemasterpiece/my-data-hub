@@ -69,6 +69,12 @@ services:
       postgres: {condition: service_healthy}
     volumes:
       - ${MY_DATA_HUB_RUNTIME_DIR}/backups:/var/lib/my-data-hub/backups
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /var/lib/my-data-hub/backups/last-success && test $$(($$(date +%s) - $$(date -d \"$$(cat /var/lib/my-data-hub/backups/last-success)\" +%s))) -lt 90000"]
+      interval: 1h
+      timeout: 5s
+      retries: 2
+      start_period: 30m
     networks: [internal]
 
   mcp:

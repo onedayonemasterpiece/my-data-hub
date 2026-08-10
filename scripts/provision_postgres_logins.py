@@ -88,9 +88,24 @@ def provision(admin_database_url: str, identities: tuple[LoginIdentity, ...]) ->
         connection.cursor() as cursor,
     ):
         for identity in identities:
-            cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (identity.login,))
-            exists = cursor.fetchone() is not None
+            managed_comment = f"my-data-hub managed login for {identity.group_role}"
+            cursor.execute(
+                """
+                SELECT oid, shobj_description(oid, 'pg_authid'), rolcanlogin, rolsuper,
+                       rolcreatedb, rolcreaterole, rolreplication, rolbypassrls, rolinherit
+                FROM pg_roles WHERE rolname = %s
+                """,
+                (identity.login,),
+            )
+            existing = cursor.fetchone()
+            exists = existing is not None
             if exists:
+                assert existing is not None
+                role_oid, observed_comment = int(existing[0]), existing[1]
+                if observed_comment != managed_comment:
+                    raise RuntimeError(f"{identity.login} exists without the expected managed-role marker")
+                if not bool(existing[2]) or any(bool(value) for value in existing[3:8]) or not bool(existing[8]):
+                    raise RuntimeError(f"{identity.login} existing role attributes are not restricted")
                 cursor.execute(
                     """
                     SELECT parent.rolname
@@ -109,20 +124,71 @@ def provision(admin_database_url: str, identities: tuple[LoginIdentity, ...]) ->
                         f"{identity.login} has unexpected direct memberships: " + ", ".join(sorted(unexpected))
                     )
                 cursor.execute(
+                    """
+                    SELECT
+                      EXISTS (SELECT 1 FROM pg_database WHERE datdba = %(role_oid)s)
+                      OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspowner = %(role_oid)s)
+                      OR EXISTS (SELECT 1 FROM pg_class WHERE relowner = %(role_oid)s)
+                      OR EXISTS (SELECT 1 FROM pg_proc WHERE proowner = %(role_oid)s)
+                      OR EXISTS (SELECT 1 FROM pg_type WHERE typowner = %(role_oid)s)
+                      OR EXISTS (
+                        SELECT 1 FROM pg_largeobject_metadata WHERE lomowner = %(role_oid)s
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM pg_database value,
+                          LATERAL aclexplode(value.datacl) acl
+                        WHERE value.datacl IS NOT NULL AND acl.grantee = %(role_oid)s
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM pg_namespace value,
+                          LATERAL aclexplode(value.nspacl) acl
+                        WHERE value.nspacl IS NOT NULL AND acl.grantee = %(role_oid)s
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM pg_class value,
+                          LATERAL aclexplode(value.relacl) acl
+                        WHERE value.relacl IS NOT NULL AND acl.grantee = %(role_oid)s
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM pg_proc value,
+                          LATERAL aclexplode(value.proacl) acl
+                        WHERE value.proacl IS NOT NULL AND acl.grantee = %(role_oid)s
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM pg_type value,
+                          LATERAL aclexplode(value.typacl) acl
+                        WHERE value.typacl IS NOT NULL AND acl.grantee = %(role_oid)s
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM pg_default_acl value
+                        WHERE value.defaclrole = %(role_oid)s
+                           OR EXISTS (
+                             SELECT 1 FROM aclexplode(value.defaclacl) acl
+                             WHERE acl.grantee = %(role_oid)s
+                           )
+                      )
+                      OR EXISTS (SELECT 1 FROM pg_policy WHERE %(role_oid)s = ANY(polroles))
+                    """,
+                    {"role_oid": role_oid},
+                )
+                if bool(cursor.fetchone()[0]):
+                    raise RuntimeError(f"{identity.login} owns objects or has direct database privileges")
+                cursor.execute(
                     sql.SQL(
                         "ALTER ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-                        "INHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 20 PASSWORD %s"
-                    ).format(sql.Identifier(identity.login)),
-                    (identity.password,),
+                        "INHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 20 PASSWORD {}"
+                    ).format(sql.Identifier(identity.login), sql.Literal(identity.password))
                 )
             else:
                 cursor.execute(
                     sql.SQL(
                         "CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-                        "INHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 20 PASSWORD %s"
-                    ).format(sql.Identifier(identity.login)),
-                    (identity.password,),
+                        "INHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 20 PASSWORD {}"
+                    ).format(sql.Identifier(identity.login), sql.Literal(identity.password))
                 )
+            cursor.execute(
+                sql.SQL("COMMENT ON ROLE {} IS {}").format(sql.Identifier(identity.login), sql.Literal(managed_comment))
+            )
             cursor.execute(
                 sql.SQL("GRANT {} TO {}").format(sql.Identifier(identity.group_role), sql.Identifier(identity.login))
             )

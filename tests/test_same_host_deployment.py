@@ -24,7 +24,19 @@ def test_same_host_installer_preserves_fail_closed_gates_and_autostart() -> None
     assert "MY_DATA_HUB_MCP_WRITE_ENABLED=false" in installer
     assert "MY_DATA_HUB_MCP_REMOTE_ENABLED=false" in installer
     assert "systemctl --user enable my-data-hub-compose.service" in installer
+    assert "candidate_deployment_env" in installer
+    assert "failed INSTALL attempts cannot advance boot state" in installer
+    assert "systemctl --user restart my-data-hub-compose.service" in installer
     assert "INSTALL_MY_DATA_HUB_SAME_HOST" in installer
+
+
+def test_backup_failure_is_visible_and_freshness_is_health_checked() -> None:
+    loop = (ROOT / "deploy/same-host/backup-loop.sh").read_text(encoding="utf-8")
+    compose = (ROOT / "compose.same-host.yaml").read_text(encoding="utf-8")
+    assert "backup_postgres.sh || true" not in loop
+    assert "last-success" in loop
+    assert "healthcheck:" in compose
+    assert "last-success" in compose
 
 
 def test_same_host_edge_routes_only_exact_mcp_and_metadata_paths() -> None:

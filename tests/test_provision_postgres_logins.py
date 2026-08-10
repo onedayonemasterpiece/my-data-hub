@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from scripts import provision_postgres_logins
 from scripts.provision_postgres_logins import IDENTITIES, load_identity_plan
 
 
@@ -40,3 +43,12 @@ def test_login_plan_rejects_different_database_endpoint() -> None:
     values[IDENTITIES[0][0]] = "postgresql://service:secret@other:5432/hub"
     with pytest.raises(ValueError, match="role-admin database endpoint"):
         load_identity_plan(values)
+
+
+def test_existing_login_path_is_fail_closed_for_collisions() -> None:
+    source = provision_postgres_logins.__file__
+    assert source is not None
+    text = Path(source).read_text(encoding="utf-8")
+    assert "managed-role marker" in text
+    assert "owns objects or has direct database privileges" in text
+    assert "existing role attributes are not restricted" in text

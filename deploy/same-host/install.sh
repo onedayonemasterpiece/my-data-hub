@@ -35,7 +35,6 @@ if [[ ! -d "$release" ]]; then
   mv "$staging" "$release"
   trap - EXIT
 fi
-ln -sfn "$release" "$current"
 
 secret_file="$state_root/secrets.env"
 if [[ ! -e "$secret_file" ]]; then
@@ -162,7 +161,8 @@ write_env mcp \
   "MY_DATA_HUB_MCP_HOST=0.0.0.0" \
   "MY_DATA_HUB_MCP_PORT=8765"
 
-cat > "$state_root/deployment.env" <<EOF
+candidate_deployment_env="$state_root/deployment.$commit.env"
+cat > "$candidate_deployment_env" <<EOF
 MY_DATA_HUB_RUNTIME_DIR=$state_root
 MY_DATA_HUB_IMAGE_TAG=$commit
 MY_DATA_HUB_RUNTIME_UID=$(id -u)
@@ -171,20 +171,57 @@ POSTGRES_PORT=5432
 MY_DATA_HUB_API_PORT=8080
 MY_DATA_HUB_MCP_PORT=8765
 EOF
-chmod 600 "$state_root/deployment.env"
+chmod 600 "$candidate_deployment_env"
 
 compose() {
   set -a
   # shellcheck disable=SC1090
-  source "$state_root/deployment.env"
+  source "$candidate_deployment_env"
   set +a
-  docker compose --project-directory "$current" -f "$current/compose.same-host.yaml" "$@"
+  docker compose --project-directory "$release" -f "$release/compose.same-host.yaml" "$@"
 }
 
 compose build api backup
 
+if [[ "$action" == "PREPARE" ]]; then
+  echo "prepared_commit=$commit"
+  echo "release=$release"
+  echo "runtime=$state_root"
+  echo "autostart=unchanged_until_install_gates_pass"
+  exit 0
+fi
+
+compose up -d postgres
+compose run --rm role-bootstrap
+compose run --rm login-provision
+compose run --rm migrate
+compose run --rm role-provision
+compose run --rm identity-verify
+compose run --rm role-probe
+compose up -d postgres api orchestrator connector-committer backup
+
+for _attempt in $(seq 1 30); do
+  if curl --fail --silent --show-error http://127.0.0.1:8080/health/ready \
+      > "$state_root/receipts/api-ready.json"; then
+    break
+  fi
+  sleep 2
+done
+curl --fail --silent --show-error http://127.0.0.1:8080/health/ready >/dev/null
+
+# Publish the release and boot configuration only after every database/identity/readiness
+# gate has passed. PREPARE and failed INSTALL attempts cannot advance boot state.
+next_link="$release_root/.current.$commit"
+ln -sfn "$release" "$next_link"
+mv -Tf "$next_link" "$current"
+deployment_env_tmp="$state_root/.deployment.env.$commit"
+cp "$candidate_deployment_env" "$deployment_env_tmp"
+chmod 600 "$deployment_env_tmp"
+mv -f "$deployment_env_tmp" "$state_root/deployment.env"
+
 unit="$HOME/.config/systemd/user/my-data-hub-compose.service"
-cat > "$unit" <<EOF
+unit_tmp="$HOME/.config/systemd/user/.my-data-hub-compose.service.$commit"
+cat > "$unit_tmp" <<EOF
 [Unit]
 Description=my-data-hub same-host Docker Compose reconciliation
 After=network-online.target
@@ -201,35 +238,15 @@ TimeoutStartSec=300
 [Install]
 WantedBy=default.target
 EOF
-chmod 600 "$unit"
+chmod 600 "$unit_tmp"
+mv -f "$unit_tmp" "$unit"
 systemctl --user daemon-reload
-
-if [[ "$action" == "PREPARE" ]]; then
-  echo "prepared_commit=$commit"
-  echo "release=$release"
-  echo "runtime=$state_root"
-  echo "autostart=unit_prepared_not_enabled"
-  exit 0
-fi
-
-compose up -d postgres
-compose run --rm role-bootstrap
-compose run --rm login-provision
-compose run --rm migrate
-compose run --rm role-provision
-compose run --rm identity-verify
-compose run --rm role-probe
 systemctl --user enable my-data-hub-compose.service
-systemctl --user start my-data-hub-compose.service
-
-for _attempt in $(seq 1 30); do
-  if curl --fail --silent --show-error http://127.0.0.1:8080/health/ready \
-      > "$state_root/receipts/api-ready.json"; then
-    break
-  fi
-  sleep 2
-done
-curl --fail --silent --show-error http://127.0.0.1:8080/health/ready >/dev/null
+if systemctl --user is-active --quiet my-data-hub-compose.service; then
+  systemctl --user restart my-data-hub-compose.service
+else
+  systemctl --user start my-data-hub-compose.service
+fi
 compose ps --format json > "$state_root/receipts/compose-ps.json"
 python3 - "$state_root/receipts/install.json" "$commit" <<'PY'
 import hashlib, json, sys
