@@ -26,8 +26,8 @@ At the implementation head before review:
 
 - `python -m compileall -q src tests scripts`: PASS
 - `ruff check .`: PASS
-- `pytest -q`: PASS, 242 tests
-- `python scripts/validate_repository.py`: PASS, 2389 checks / 0 errors
+- `pytest -q`: PASS, 243 tests
+- `python scripts/validate_repository.py`: PASS, 2409 checks / 0 errors
 - `python scripts/create_notebooks.py --check`: PASS, no drift
 - integration and control Compose parsing: PASS; neither declares named volumes
 - `bash -n deploy/same-host/install.sh deploy/control-plane/install.sh`: PASS
@@ -52,6 +52,10 @@ incomplete control-plane credential denylist. The same PR now:
   checks; any extra or rewritten matching command fails;
 - discovers both YAML suffixes, Compose and Docker-Compose filename families, arbitrary YAML
   service documents and executable Python scripts rather than relying on one filename glob;
+- AST-checks process-launch calls in every executable Python script (including the validator
+  itself), while non-Python execution surfaces use exact occurrence multisets;
+- rejects bind or anonymous mounts on the disposable PostgreSQL service, not only named
+  top-level volumes;
 - rejects every known database credential variable, standard libpq connection variables
   (including future `PG*` additions) and any future `*_DATABASE_URL` in the DB-free control
   process.

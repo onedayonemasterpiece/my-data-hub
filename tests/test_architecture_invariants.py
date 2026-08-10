@@ -9,6 +9,8 @@ from pathlib import Path
 
 import yaml
 
+from scripts.validate_repository import find_dangerous_python_process_calls
+
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "docs/source-material/idea-hub/idea-20260809-content-platform-current-design.md"
 EXPECTED_SOURCE_SHA = "c7efb28231223caa6fd02fcc001a38e0f16bcc3fa4c4cd53e744721b2eac0852"
@@ -130,6 +132,7 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
                 "compose.yaml",
                 "compose.control-plane.yaml",
             }
+    assert "volumes" not in load_yaml("compose.yaml")["services"]["postgres"]
     assert {
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / "deploy").rglob("*")
@@ -167,7 +170,6 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
             'PGDATABASE="$DATABASE_URL" pg_dump --format=custom --compress=9 \\',
             'pg_dump_version="$(pg_dump --version)"',
         ],
-        (3, "scripts/recovery/create_manifest.py"): ['"format": "pg_dump-custom",'],
         (5, "deploy/same-host/install.sh"): [
             'if [[ "${1:-}" == "INSTALL_MY_DATA_HUB_SAME_HOST" || "${1:-}" == "PREPARE" ]]; then',
         ],
@@ -184,10 +186,7 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
             or path.name.startswith("Dockerfile")
             or relative_path.parts[:2] == (".github", "workflows")
             or is_compose_filename(path)
-            or (path.suffix == ".py" and bool(path.stat().st_mode & 0o111))
         ):
-            continue
-        if relative_path.as_posix() == "scripts/validate_repository.py":
             continue
         text = path.read_text(encoding="utf-8")
         for index, pattern in enumerate(patterns):
@@ -197,6 +196,20 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
     assert set(observed_occurrences) == set(allowed_occurrences)
     for key, expected in allowed_occurrences.items():
         assert sorted(observed_occurrences[key]) == sorted(expected)
+    for path in repository_files:
+        if path.suffix == ".py" and bool(path.stat().st_mode & 0o111):
+            assert find_dangerous_python_process_calls(path.read_text(encoding="utf-8")) == []
+
+
+def test_executable_python_process_scan_rejects_local_master_commands() -> None:
+    unsafe_sources = (
+        "import subprocess\nsubprocess.run(['docker', 'compose', 'up', 'postgres'])\n",
+        "import subprocess\nsubprocess.run('docker volume create pgdata', shell=True)\n",
+        "import asyncio\nasyncio.create_subprocess_exec('pg_ctl', 'start')\n",
+        "import os\nos.system('my-data-hub db migrate')\n",
+    )
+    for source in unsafe_sources:
+        assert find_dangerous_python_process_calls(source)
 
 
 def test_legacy_install_token_hard_fails_before_side_effects(tmp_path: Path) -> None:

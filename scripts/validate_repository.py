@@ -41,6 +41,62 @@ def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def find_dangerous_python_process_calls(source: str) -> list[str]:
+    """Return static process commands that could create a local PostgreSQL runtime."""
+
+    tree = ast.parse(source)
+    process_calls = {
+        "os.system",
+        "os.execv",
+        "os.execve",
+        "os.execl",
+        "os.execlp",
+        "os.execvp",
+        "os.spawnl",
+        "os.spawnlp",
+        "os.spawnv",
+        "os.spawnvp",
+        "subprocess.run",
+        "subprocess.Popen",
+        "subprocess.call",
+        "subprocess.check_call",
+        "subprocess.check_output",
+        "asyncio.create_subprocess_exec",
+        "asyncio.create_subprocess_shell",
+    }
+    dangerous = re.compile(
+        r"docker\s+(?:compose|volume).*(?:postgres|pgdata)|"
+        r"\b(?:initdb|pg_ctl|pg_dump)\b|"
+        r"\bdb\s+migrate\b|"
+        r"systemctl.*postgres",
+        re.I,
+    )
+
+    def qualified_name(node: ast.AST) -> str:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            parent = qualified_name(node.value)
+            return f"{parent}.{node.attr}" if parent else node.attr
+        return ""
+
+    def literals(node: ast.AST) -> list[str]:
+        values: list[str] = []
+        for child in ast.walk(node):
+            if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                values.append(child.value)
+        return values
+
+    findings: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or qualified_name(node.func) not in process_calls:
+            continue
+        command = " ".join(value for argument in node.args for value in literals(argument))
+        if dangerous.search(command):
+            findings.append(f"line {node.lineno}: {command}")
+    return findings
+
+
 def validate_json_and_schemas(report: Report) -> None:
     schemas: dict[str, dict[str, Any]] = {}
     for path in sorted(SCHEMA_DIR.glob("*.json")):
@@ -535,6 +591,7 @@ def validate_deployment(report: Report) -> None:
     report.check(not disposable.get("volumes"), "disposable integration Compose must not declare named volumes")
     postgres = disposable.get("services", {}).get("postgres", {})
     report.check(postgres.get("restart") == "no", "disposable PostgreSQL restart policy must be disabled")
+    report.check("volumes" not in postgres, "disposable PostgreSQL must not declare bind/anonymous volumes")
     report.check(postgres.get("tmpfs") == ["/var/lib/postgresql:size=1g,mode=0700"], "disposable PostgreSQL must use exact tmpfs PGDATA parent")
     postgres_image = "pgvector/pgvector:0.8.6-pg18-bookworm"
     report.check(postgres.get("image") == postgres_image, "disposable PostgreSQL image is not pinned")
@@ -613,9 +670,6 @@ def validate_deployment(report: Report) -> None:
             'PGDATABASE="$DATABASE_URL" pg_dump --format=custom --compress=9 \\',
             'pg_dump_version="$(pg_dump --version)"',
         ],
-        ("local master dump", "scripts/recovery/create_manifest.py"): [
-            '"format": "pg_dump-custom",',
-        ],
         ("legacy confirmation token", "deploy/same-host/install.sh"): [
             'if [[ "${1:-}" == "INSTALL_MY_DATA_HUB_SAME_HOST" || "${1:-}" == "PREPARE" ]]; then',
         ],
@@ -632,10 +686,7 @@ def validate_deployment(report: Report) -> None:
             or path.name.startswith("Dockerfile")
             or relative.parts[:2] == (".github", "workflows")
             or is_compose_filename(path)
-            or (path.suffix == ".py" and bool(path.stat().st_mode & 0o111))
         ):
-            if relative.as_posix() == "scripts/validate_repository.py":
-                continue  # scanner implementation contains its own forbidden-pattern fixtures
             executable_candidates.append(path)
     observed_occurrences: dict[tuple[str, str], list[str]] = {}
     for path in executable_candidates:
@@ -650,6 +701,19 @@ def validate_deployment(report: Report) -> None:
         report.check(
             sorted(observed_occurrences.get(key, [])) == sorted(allowed_occurrences.get(key, [])),
             f"repository-wide forbidden execution occurrences drifted for {key}",
+        )
+    for path in repository_files:
+        if path.suffix != ".py" or not bool(path.stat().st_mode & 0o111):
+            continue
+        relative = path.relative_to(ROOT).as_posix()
+        try:
+            findings = find_dangerous_python_process_calls(path.read_text(encoding="utf-8"))
+        except SyntaxError as exc:
+            report.fail(f"cannot parse executable Python deployment surface {relative}: {exc}")
+            continue
+        report.check(
+            not findings,
+            f"executable Python local-master process call in {relative}: {findings}",
         )
 
     pipeline = load_json(ROOT / "config/pipelines/region-talk.v1.json")
