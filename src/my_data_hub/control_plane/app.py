@@ -8,11 +8,28 @@ from fastapi import FastAPI, HTTPException, status
 
 DATABASE_ENVIRONMENT_NAMES = (
     "MY_DATA_HUB_DATABASE_URL",
+    "MY_DATA_HUB_MIGRATOR_DATABASE_URL",
     "MY_DATA_HUB_APPLICATION_DATABASE_URL",
     "MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL",
     "MY_DATA_HUB_ORCHESTRATOR_DATABASE_URL",
+    "MY_DATA_HUB_CANONICAL_COMMITTER_DATABASE_URL",
+    "MY_DATA_HUB_MONITORING_DATABASE_URL",
+    "MY_DATA_HUB_MIGRATION_OPERATOR_DATABASE_URL",
     "MY_DATA_HUB_MCP_READER_DATABASE_URL",
     "MY_DATA_HUB_MCP_REVOCATION_DATABASE_URL",
+    "MY_DATA_HUB_BACKUP_DATABASE_URL",
+    "MY_DATA_HUB_RESTORE_DATABASE_URL",
+    "MY_DATA_HUB_RECOVERY_CONTROL_DATABASE_URL",
+    "MY_DATA_HUB_ROLE_ADMIN_DATABASE_URL",
+    "DATABASE_URL",
+    "PGHOST",
+    "PGPORT",
+    "PGDATABASE",
+    "PGUSER",
+    "PGPASSWORD",
+    "PGPASSFILE",
+    "PGSERVICE",
+    "PGSERVICEFILE",
 )
 
 
@@ -44,7 +61,9 @@ class ControlPlaneSettings:
 
     @classmethod
     def from_env(cls) -> ControlPlaneSettings:
-        leaked = [name for name in DATABASE_ENVIRONMENT_NAMES if os.getenv(name, "").strip()]
+        candidates = set(DATABASE_ENVIRONMENT_NAMES)
+        candidates.update(name for name in os.environ if name.endswith("_DATABASE_URL"))
+        leaked = sorted(name for name in candidates if os.getenv(name, "").strip())
         if leaked:
             raise ControlPlaneConfigurationError(
                 "lightweight control plane must not receive master database credentials: "

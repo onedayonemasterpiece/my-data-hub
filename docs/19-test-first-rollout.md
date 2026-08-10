@@ -114,54 +114,55 @@ Against the pinned PostgreSQL 18 + pgvector image:
 Migration changes must also be tested from the previous released schema revision, not
 only from empty state.
 
-## 4. Devstand post-deploy workflow
+## 4. Devstand control-plane post-deploy workflow
 
 Triggered explicitly after deployment and before marking a commit active.
 
 Checks:
 
 - deployed commit and image digests match the release input;
-- PostgreSQL migration revision matches repository head;
-- API liveness and readiness;
-- orchestrator is alive but scheduler/publication gates have expected values;
+- control/status liveness and readiness are green with `master=ABSENT` allowed;
+- no production PostgreSQL service, PGDATA, database URL, local master migration, committer
+  or backup path is reachable from the deployed profile;
+- lifecycle/MCP components that are implemented in that release expose only their gated
+  control surfaces; PR-A exposes none of the deferred data operations;
+- scheduler/publication/remote-write gates have expected disabled values;
 - Region Talk remains paused unless the release explicitly changes it;
-- remote MCP endpoint presents the expected certificate and OAuth resource;
-- read-only MCP can execute health and one bounded query;
+- after the separate remote-MCP release gate, the endpoint presents the expected certificate
+  and OAuth resource and a bounded read resolves only the latest ACTIVE master;
 - write/operator/Kaggle mutation tools are absent unless that release enables them;
-- stable logical pipeline and required scope identities resolve exactly once;
-- synthetic connector batch is accepted once and reaches at least two independently tracked
-  consumer applications/scopes;
-- MCP can explain relation, usage, exact/normalized state and effective policy separately;
-- exact replay returns the original batch and per-consumer receipts without duplicate active
-  relations;
+- once the master/FakeKaggle phases are implemented, stable logical pipelines, connector
+  replay and MCP semantic reads are tested against a disposable or latest ACTIVE master,
+  never against local devstand state;
 - service restart and one controlled process failure recover automatically;
 - no internal port is internet-facing;
 - a deployment receipt is archived.
 
-A failed post-deploy job triggers rollback to the previous image/commit; it must not
-continue into migration or provider canaries.
+A failed control-plane post-deploy job triggers rollback to the previous image/commit; it
+must not start a master lifecycle, migration or provider canary.
 
 ## 5. Nightly workflow
 
-Run against the devstand with non-destructive scopes.
+Run against the devstand control plane with non-destructive scopes. Master/data-plane checks
+run only when an independently resolved canary master is ACTIVE and are labelled separately.
 
-### Database and orchestrator
+### Control plane and optional ACTIVE-master observations
 
-- readiness, schema revision and connection budget;
-- work queue age, expired leases and retry/dead-letter counts;
+- control readiness, master lifecycle state and callback age;
+- operation age, expired leases/fences and retry/reconciliation counts;
 - publication and protected pipeline gate state;
-- slow/blocked transaction indicators;
-- disk/volume headroom;
-- latest canonical revision and commit activity sanity;
+- no local database/PGDATA/listener drift on the devstand;
+- when a canary master is ACTIVE: schema revision, connection budget, slow/blocked transaction
+  indicators, runtime storage headroom and canonical revision sanity;
 - ambiguous/missing required scope and cross-scope state-writer anomaly counts;
 - active policy decisions with invalid/superseded references or missing evaluation receipts.
 
-### Backup
+### Checkpoint and recovery
 
-- latest local and off-host generation age;
-- manifest/hash/readback verification;
+- current and previous private Kaggle checkpoint generation age;
+- exact dataset version, manifest/hash/readback verification;
 - encryption and retention state;
-- last successful restore-drill age;
+- portable logical backup and last isolated restore-drill age;
 - alert if the operator write gate would currently be closed.
 
 ### Connectors
@@ -287,14 +288,15 @@ Only after all prior gates:
 ```text
 .github/workflows/
   ci.yml                       # PR static/unit/contracts/ephemeral PostgreSQL
-  devstand-deploy.yml          # protected manual deploy + post-deploy smoke
-  devstand-nightly.yml         # non-destructive runtime checks
+  control-plane-deploy.yml     # later protected control-only deploy + smoke
+  control-plane-nightly.yml    # later non-destructive control/runtime checks
   kaggle-canary.yml            # weekly/manual disposable provider lifecycle
   restore-drill.yml            # weekly/manual isolated restore
   region-talk-migration.yml    # manual protected environment, later
 ```
 
-Use protected GitHub environments for devstand mutation, Kaggle canary and migration.
+These deferred workflows are not present in PR-A. When implemented, use protected GitHub
+environments for control-plane deployment, Kaggle canary and migration.
 A schedule can start a workflow, but production mutation still requires the appropriate
 environment, credential and runtime gate.
 
@@ -348,7 +350,8 @@ The platform is ready for Region Talk inventory when all are true:
 - [ ] deployed commit and runtime evidence are recorded;
 - [ ] PostgreSQL migrations pass twice on empty and upgrade-path databases;
 - [ ] database roles and negative grants are proven;
-- [ ] local plus off-host backup is hash-verified;
+- [ ] current and previous private checkpoint generations plus portable logical backup are
+  exact-version readback/hash verified;
 - [ ] isolated restore succeeds;
 - [ ] CI, post-deploy and nightly workflows are green;
 - [ ] remote read-only MCP works through OAuth/TLS;

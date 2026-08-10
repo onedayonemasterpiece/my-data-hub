@@ -57,7 +57,7 @@ lanes:
     forbidden_files: ['**']
     expected_output: exact-head Critical/High findings and merge verdict
     verification_scope: full_local
-    status: pending_exact_head_review
+    status: first_review_blockers_remediated_pending_exact_head_rereview
 ```
 
 ## Requirement map

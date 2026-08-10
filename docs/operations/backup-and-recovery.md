@@ -189,8 +189,8 @@ not recorded by the current manifest and must not be inferred from it.
 
 Initial policy before broad MCP writes:
 
-- frequent local backup/snapshot cadence based on measured write volume;
-- at least daily encrypted off-host generation;
+- frequent master checkpoint cadence based on measured write volume;
+- at least daily verified private-dataset generation and periodic portable logical backup;
 - pre-change checkpoint for bulk/high-impact database operation;
 - multiple retained generations;
 - at least weekly isolated restore drill during rollout;

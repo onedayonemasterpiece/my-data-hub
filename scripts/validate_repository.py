@@ -496,6 +496,25 @@ def validate_deployment(report: Report) -> None:
         report.check(token not in control_installer, f"control installer contains forbidden local-master operation: {token}")
     report.check(not (ROOT / "deploy/systemd").exists(), "DB-coupled legacy systemd deployment directory remains")
     report.check(not (ROOT / "compose.same-host.yaml").exists(), "legacy same-host production Compose remains")
+    compose_files = {path.relative_to(ROOT).as_posix() for path in ROOT.glob("compose*.yaml")}
+    report.check(
+        compose_files == {"compose.yaml", "compose.control-plane.yaml"},
+        f"unclassified Compose deployment profile exists: {sorted(compose_files)}",
+    )
+    deploy_files = {
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "deploy").rglob("*")
+        if path.is_file()
+    }
+    expected_deploy_files = {
+        "deploy/control-plane/Dockerfile",
+        "deploy/control-plane/install.sh",
+        "deploy/same-host/install.sh",
+    }
+    report.check(
+        deploy_files == expected_deploy_files,
+        f"unclassified production deployment file exists: {sorted(deploy_files - expected_deploy_files)}",
+    )
 
     disposable = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
     report.check(disposable.get("x-my-data-hub-profile") == "disposable-integration-test-only", "root Compose is not explicitly disposable")
@@ -529,6 +548,54 @@ def validate_deployment(report: Report) -> None:
     ):
         report.check(command in ci, f"CI lost topology-neutral integration proof: {command}")
 
+    # Scan every executable/deployment-shaped repository file, not merely the known
+    # Compose document. Exact allowlist entries are topology-neutral tools or disposable
+    # test paths and each addition requires an explicit architecture review here.
+    executable_patterns = {
+        "postgresql service supervision": re.compile(r"postgresql\.service", re.I),
+        "PostgreSQL/PGDATA volume creation": re.compile(
+            r"docker\s+volume\s+create[^\n]*(?:postgres|pgdata)|"
+            r"docker\s+compose[^\n]*up[^\n]*(?:postgres|pgdata)",
+            re.I,
+        ),
+        "PostgreSQL process initialization": re.compile(r"\b(?:initdb|pg_ctl)\b", re.I),
+        "local master dump": re.compile(r"\bpg_dump\b", re.I),
+        "master migration from deployment": re.compile(r"\bdb\s+migrate\b", re.I),
+        "legacy confirmation token": re.compile(r"INSTALL_MY_DATA_HUB_SAME_HOST"),
+    }
+    executable_allowlist = {
+        ".github/workflows/ci.yml": "GitHub-hosted disposable PostgreSQL integration",
+        "Makefile": "explicitly named disposable integration targets",
+        "compose.yaml": "tmpfs-backed disposable integration profile",
+        "deploy/same-host/install.sh": "permanent pre-side-effect rejection guard",
+        "deploy/control-plane/install.sh": "rejects the legacy token before prerequisites",
+        "scripts/backup_postgres.sh": "preserved Kaggle-master checkpoint tooling",
+        "scripts/restore_postgres.sh": "preserved isolated Kaggle-master restore tooling",
+    }
+    executable_candidates: list[Path] = []
+    for path in ROOT.rglob("*"):
+        if not path.is_file() or any(part in {".git", ".venv", "__pycache__"} for part in path.parts):
+            continue
+        relative = path.relative_to(ROOT)
+        if (
+            path.suffix in {".sh", ".service", ".timer"}
+            or path.name == "Makefile"
+            or path.name.startswith("Dockerfile")
+            or relative.parts[:2] == (".github", "workflows")
+            or path.name.startswith("compose")
+        ):
+            executable_candidates.append(path)
+    for path in executable_candidates:
+        relative = path.relative_to(ROOT).as_posix()
+        text = path.read_text(encoding="utf-8")
+        for label, pattern in executable_patterns.items():
+            if not pattern.search(text):
+                continue
+            report.check(
+                relative in executable_allowlist,
+                f"repository-wide forbidden execution pattern ({label}) in {relative}",
+            )
+
     pipeline = load_json(ROOT / "config/pipelines/region-talk.v1.json")
     report.check(pipeline.get("status") == "paused", "Region Talk pipeline is not paused")
     publication = next((stage for stage in pipeline.get("stages", []) if stage.get("key") == "publication_dispatch"), {})
@@ -541,6 +608,12 @@ def validate_deployment(report: Report) -> None:
         "never hosts a writable master database",
         "canonical postgresql instance remains on the devstand",
         "normally-always-on canonical postgresql on devstand",
+        "postgresql и orchestrator работают на одном initial devstand",
+        "postgresql/internal services on the private devstand",
+        "postgresql migration revision matches repository head",
+        "latest local and off-host generation age",
+        "local plus off-host backup is hash-verified",
+        "devstand auto-start and health checks work",
     )
     reversal_allowlist = {
         "docs/adr/0009-canonical-postgres-availability.md": "superseded historical decision",
@@ -551,8 +624,26 @@ def validate_deployment(report: Report) -> None:
         if relative.startswith("docs/source-material/") or relative in reversal_allowlist:
             continue
         text = path.read_text(encoding="utf-8").lower()
+        normalized = re.sub(r"\s+", " ", text)
         for pattern in reversal_patterns:
-            report.check(pattern not in text, f"architecture reversal phrase {pattern!r} in {relative}")
+            report.check(pattern not in normalized, f"architecture reversal phrase {pattern!r} in {relative}")
+        for claim in re.finditer(
+            r"(?:postgresql|postgres|pgdata|canonical database)[^.;,]{0,120}"
+            r"(?:on|in|at) (?:the )?(?:private |initial )?devstand|"
+            r"devstand[^.;,]{0,120}(?:hosts?|runs?|stores?|contains?|keeps?)[^.;,]{0,120}"
+            r"(?:postgresql|postgres|pgdata|canonical database)",
+            normalized,
+        ):
+            statement = claim.group(0)
+            context = normalized[max(0, claim.start() - 48) : claim.end()]
+            negated = any(
+                marker in context
+                for marker in (" no ", " not ", " never ", "without", "forbidden", "must not", "does not")
+            )
+            report.check(
+                negated,
+                f"positive local-devstand database claim in {relative}: {statement!r}",
+            )
 
     receipt = load_json(ROOT / "docs/operations/evidence/2026-08-10-pr-a-host.json")
     report.check(receipt.get("install_confirmation") == "explicitly_rejected", "host receipt omits rejected INSTALL")

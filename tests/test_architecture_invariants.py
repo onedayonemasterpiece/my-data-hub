@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -92,6 +93,60 @@ def test_production_control_profile_has_no_local_database_path() -> None:
     assert "pg_dump" not in installer
 
 
+def test_repository_wide_deployment_surface_is_closed() -> None:
+    assert {path.relative_to(ROOT).as_posix() for path in ROOT.glob("compose*.yaml")} == {
+        "compose.yaml",
+        "compose.control-plane.yaml",
+    }
+    assert {
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "deploy").rglob("*")
+        if path.is_file()
+    } == {
+        "deploy/control-plane/Dockerfile",
+        "deploy/control-plane/install.sh",
+        "deploy/same-host/install.sh",
+    }
+    patterns = (
+        re.compile(r"postgresql\.service", re.I),
+        re.compile(
+            r"docker\s+volume\s+create[^\n]*(?:postgres|pgdata)|"
+            r"docker\s+compose[^\n]*up[^\n]*(?:postgres|pgdata)",
+            re.I,
+        ),
+        re.compile(r"\b(?:initdb|pg_ctl)\b", re.I),
+        re.compile(r"\bpg_dump\b", re.I),
+        re.compile(r"\bdb\s+migrate\b", re.I),
+        re.compile(r"INSTALL_MY_DATA_HUB_SAME_HOST"),
+    )
+    allowlist = {
+        ".github/workflows/ci.yml",
+        "Makefile",
+        "compose.yaml",
+        "deploy/same-host/install.sh",
+        "deploy/control-plane/install.sh",
+        "scripts/backup_postgres.sh",
+        "scripts/restore_postgres.sh",
+    }
+    for path in ROOT.rglob("*"):
+        if not path.is_file() or any(
+            part in {".git", ".venv", "__pycache__"} for part in path.parts
+        ):
+            continue
+        relative_path = path.relative_to(ROOT)
+        if not (
+            path.suffix in {".sh", ".service", ".timer"}
+            or path.name == "Makefile"
+            or path.name.startswith("Dockerfile")
+            or relative_path.parts[:2] == (".github", "workflows")
+            or path.name.startswith("compose")
+        ):
+            continue
+        text = path.read_text(encoding="utf-8")
+        if any(pattern.search(text) for pattern in patterns):
+            assert relative_path.as_posix() in allowlist
+
+
 def test_legacy_install_token_hard_fails_before_side_effects(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
@@ -140,6 +195,12 @@ def test_docs_have_one_kaggle_master_topology() -> None:
         "never hosts a writable master database",
         "canonical PostgreSQL instance remains on the devstand",
         "normally-always-on canonical PostgreSQL on devstand",
+        "PostgreSQL и orchestrator работают на одном initial devstand",
+        "PostgreSQL/internal services on the private devstand",
+        "PostgreSQL migration revision matches repository head",
+        "latest local and off-host generation age",
+        "local plus off-host backup is hash-verified",
+        "Devstand auto-start and health checks work",
     )
     allow = {
         "docs/adr/0009-canonical-postgres-availability.md",
@@ -150,8 +211,22 @@ def test_docs_have_one_kaggle_master_topology() -> None:
         if relative.startswith("docs/source-material/") or relative in allow:
             continue
         text = path.read_text(encoding="utf-8")
+        normalized = re.sub(r"\s+", " ", text.lower())
         for pattern in reversal_patterns:
-            assert pattern.lower() not in text.lower(), f"{pattern!r} in {relative}"
+            assert pattern.lower() not in normalized, f"{pattern!r} in {relative}"
+        for claim in re.finditer(
+            r"(?:postgresql|postgres|pgdata|canonical database)[^.;,]{0,120}"
+            r"(?:on|in|at) (?:the )?(?:private |initial )?devstand|"
+            r"devstand[^.;,]{0,120}(?:hosts?|runs?|stores?|contains?|keeps?)[^.;,]{0,120}"
+            r"(?:postgresql|postgres|pgdata|canonical database)",
+            normalized,
+        ):
+            statement = claim.group(0)
+            context = normalized[max(0, claim.start() - 48) : claim.end()]
+            assert any(
+                marker in context
+                for marker in (" no ", " not ", " never ", "without", "forbidden", "must not", "does not")
+            ), f"positive local-devstand database claim in {relative}: {statement!r}"
 
 
 def test_region_talk_and_write_gates_remain_frozen() -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -31,8 +33,21 @@ def test_control_plane_is_ready_while_master_is_absent(monkeypatch: pytest.Monke
     }
 
 
-def test_control_plane_rejects_local_master_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MY_DATA_HUB_DATABASE_URL", "postgresql://forbidden/local")
+@pytest.mark.parametrize(
+    "name",
+    [
+        *DATABASE_ENVIRONMENT_NAMES,
+        "MY_DATA_HUB_FUTURE_DATABASE_URL",
+    ],
+)
+def test_control_plane_rejects_local_master_credentials(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    for candidate in set(DATABASE_ENVIRONMENT_NAMES) | {
+        key for key in os.environ if key.endswith("_DATABASE_URL")
+    }:
+        monkeypatch.delenv(candidate, raising=False)
+    monkeypatch.setenv(name, "postgresql://forbidden/local")
     with pytest.raises(ControlPlaneConfigurationError, match="must not receive"):
         ControlPlaneSettings.from_env()
 
