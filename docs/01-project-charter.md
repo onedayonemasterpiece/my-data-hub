@@ -57,17 +57,17 @@ foundation, synthetic multi-consumer connector, Kaggle control classes и operat
 - notebook skeletons;
 - Joplin adapter boundary;
 - backup/restore, audit, health и CI;
-- test-first devstand/nightly/provider workflows.
+- test-first control-plane/FakeKaggle/provider/master workflows.
 
 Не входит до отдельного решения:
 
 - публичный UI каталога;
 - production auto-publishing;
-- прямой доступ notebooks к canonical DB;
+- прямой canonical write access для обычных worker notebooks; master Notebook является отдельной fenced DB-runtime ролью;
 - попытка реализовать Joplin Sync Server или читать Joplin desktop SQLite;
 - remote PostgreSQL owner/superuser, DDL или role administration через MCP;
 - публичные Kaggle datasets, созданные через MCP;
-- использование Kaggle как master database/failover canonical head;
+- более одного ACTIVE writable master либо Dataset как живой database/failover;
 - удаление YDB сразу после cutover;
 - хранение больших media/full HTML как default.
 

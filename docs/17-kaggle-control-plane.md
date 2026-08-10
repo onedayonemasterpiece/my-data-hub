@@ -1,4 +1,27 @@
-# Kaggle control plane through my-data-hub MCP
+# Kaggle control plane
+
+Status: `CORE ARCHITECTURE / REAL PROVIDER IMPLEMENTATION DEFERRED`
+
+Kaggle has two distinct roles:
+
+1. the master Notebook hosts the single ACTIVE writable PostgreSQL-primary;
+2. private Datasets hold current/previous verified checkpoints and controlled artifacts.
+
+The devstand adapter owns lifecycle operations, service registry, leases/fencing, callbacks,
+checkpoint metadata and recovery coordination. Internal clients resolve a service then use
+the direct data plane. Provider status alone is insufficient; exact output/callback evidence
+must reconcile completion.
+
+Resource control classes remain: `orchestrator_protected`, `mcp_managed`, `mcp_exchange`,
+and `external_read_only`. Names never grant authorization. Master and checkpoint resources
+are orchestrator-protected. Public creation is absent.
+
+PR-A makes no provider call. Next are donor compatibility and FakeKaggle; real lifecycle and
+master Notebook are later PRs.
+
+## Preserved detailed contract — bound by ADR-0016
+
+The detailed material below is retained where topology-neutral. Any reference to a database, role, committer, backup or connector application is executed inside/against the latest ACTIVE Kaggle master; devstand execution claims are superseded.
 
 Status: `R1 POLICY/REGISTRY CONTRACT IMPLEMENTED / PROVIDER ADAPTER BLOCKED`
 Date: 2026-08-09
@@ -15,17 +38,16 @@ and dedicated credentials exist.
 
 ## 1. Role of Kaggle
 
-Kaggle is a provider lane for:
+Kaggle is the runtime/provider plane for:
 
-- intermittent CPU/GPU notebook execution;
-- private datasets used as bounded notebook inputs;
-- immutable notebook outputs and evidence;
-- encrypted backup/checkpoint copies;
-- private exchange packages containing documents, code or other artifacts.
+- the single fenced PostgreSQL master Notebook;
+- intermittent CPU/GPU worker and model-service notebooks;
+- private current/previous verified checkpoint Datasets;
+- immutable notebook outputs/evidence and private exchange packages.
 
-Kaggle is not the canonical database, scheduler or authorization source. PostgreSQL
-stores the provider registry, ownership/control class, desired operation, leases,
-receipts and accepted result identity.
+The devstand control ledger stores provider registry, ownership/control class, desired
+operation, leases, receipts and accepted runtime identity. Canonical business data remains
+in the ACTIVE master PostgreSQL; the control ledger is not a second business database.
 
 ## 2. Required account inventory
 
@@ -285,11 +307,10 @@ Remote MCP exposes only:
 - restore-drill freshness;
 - health/incident flags.
 
-It does not expose dump files or permit version/delete/download. A local backup operator
-uses a separate credential path.
-
-At least one non-Kaggle local backup generation is retained. Kaggle is an off-host copy,
-not the only recovery medium and not protection against account-wide loss.
+It does not expose dump files or permit version/delete/download. The master checkpoint
+agent uses a separate credential path. Current and previous verified private Dataset
+generations are mandatory; a less frequent portable encrypted logical backup may also be
+kept in another approved private target for account-wide loss.
 
 ## 10. Proposed MCP tools
 

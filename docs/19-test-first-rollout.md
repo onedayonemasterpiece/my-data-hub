@@ -1,6 +1,30 @@
-# Test-first infrastructure and workflow rollout
+# Test-first rollout after architecture reset
 
-Status: `R1 TEST AUTOMATION IMPLEMENTED / SAME-HOST AND ADR-0015 RUNTIME PROOF PENDING`
+Status: `PR-A SAFETY TESTS IMPLEMENTED / LIFECYCLE PHASES DEFERRED`
+
+PR-A tests hard-coded owner-approved invariants, exact-source authority, absence of a
+production local database path, deprecated-token failure, DB-free ABSENT readiness, docs
+consistency and frozen Region Talk/publication/MCP writes.
+
+Later test layers:
+
+1. donor compatibility fixtures;
+2. FakeKaggle deterministic/property lifecycle tests;
+3. runtime SDK callback/heartbeat evidence;
+4. real private provider smoke with cleanup;
+5. master PostgreSQL restore/gate/lease/checkpoint/rotation;
+6. MCP and connector cold-start/resolve/replay/conflict tests;
+7. durability/WAL and bounded canary;
+8. Region Talk only after all gates.
+
+CI PostgreSQL is a disposable GitHub-hosted service with no declared volume. Green local-DB
+integration proves schema compatibility only, never production topology.
+
+## Preserved detailed contract — bound by ADR-0016
+
+The detailed material below is retained where topology-neutral. Any reference to a database, role, committer, backup or connector application is executed inside/against the latest ACTIVE Kaggle master; devstand execution claims are superseded.
+
+Status: `PR-A SAFETY TESTS IMPLEMENTED / MASTER LIFECYCLE PROOF PENDING`
 Date: 2026-08-10
 Related decisions: ADR-0014, ADR-0015
 
@@ -17,7 +41,7 @@ independently green.
 
 The R1 repository and disposable PostgreSQL automation exists. The ADR-0015
 scope/participation cases added below are target tests and are not claimed as implemented;
-same-host, off-host recovery and provider receipts remain runtime gates.
+master lifecycle, checkpoint recovery and provider receipts remain runtime gates.
 
 ## 2. Test environments
 
@@ -27,7 +51,7 @@ same-host, off-host recovery and provider receipts remain runtime gates.
 | CI PostgreSQL | migrations/repositories/integration | synthetic fixtures | yes, disposable |
 | devstand sandbox | deployed services and auth | synthetic + approved non-sensitive canary | only in sandbox schemas/resources |
 | Kaggle canary | provider lifecycle | private disposable resources | yes, MCP-managed only |
-| devstand canonical | real platform state | canonical data | gated operator/migration tools only |
+| Kaggle master canary | fenced master runtime | synthetic/private only | gated and fully cleaned |
 | restore target | recovery proof | encrypted backup copy | isolated, destroyed after receipt |
 
 No test may use an orchestrator-protected production notebook or backup dataset as a

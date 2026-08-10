@@ -1,5 +1,9 @@
 # Notebook workers
 
+This contract covers ordinary compute notebooks. ADR-0016 defines one explicit exception:
+the fenced Kaggle master Notebook is the PostgreSQL database runtime, not a worker result
+producer.
+
 ## Принцип
 
 Notebook — вычислительный worker, а не владелец state. Он не получает

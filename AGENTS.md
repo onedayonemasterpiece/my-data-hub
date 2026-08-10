@@ -2,46 +2,48 @@
 
 ## Authority order
 
-1. `docs/00-source-of-truth.md`, `docs/01-project-charter.md` and accepted ADRs.
-2. Append-only database migrations and JSON schemas.
-3. Runtime evidence and migration receipts.
-4. Other documentation.
-5. Historical Region Talk implementation.
+1. Explicit owner decisions.
+2. Exact imported source research, currently
+   `docs/source-material/idea-hub/idea-20260809-content-platform-current-design.md`.
+3. Corrective ADR-0016.
+4. `architecture/invariants.yaml` and append-only migrations/JSON schemas.
+5. Derived documentation, code, tests and historical implementations.
 
-The historical `content-platform` name is an alias of `my-data-hub`, not a separate project.
+The derived overview [`docs/00-source-of-truth.md`](docs/00-source-of-truth.md) explains
+this order but does not outrank the exact imported source.
+
+`my-data-hub` is the final name; `content-platform` is its historical alias. Never edit
+the exact imported source to make derived decisions appear consistent.
 
 ## Hard invariants
 
-- Do not introduce SQLite, YDB, Supabase or another database as canonical application state.
-- Do not use Kaggle notebooks/datasets as master database, automatic failover or canonical pointer.
-- Joplin's internal local database is outside this boundary; never read or mutate it directly.
-- The default MCP must not expose generic SQL. A separately enabled operator profile may expose bounded reads and preview/apply DML only under ADR-0012 restricted roles, limits, backup and audit gates; never owner/superuser/DDL.
-- Every business write that must leave a producer session must record semantic outbox operations in the same PostgreSQL transaction.
-- A notebook/worker emits a typed result or semantic changeset; it does not mutate canonical state directly.
-- Data connectors use versioned idempotent intake/landing contracts; they do not write shared canonical tables directly or self-assign authoritative project/platform scope.
-- Never copy a shared actor/account/content/asset merely because another project or pipeline uses it. Preserve explicit scope relations and shared identity.
-- Entity lifecycle, project/scope relation, scoped workflow state, pipeline usage and policy decision are distinct. `orchestration.work_item.status` is execution state only.
-- A platform-wide hard deny/blacklist cannot be weakened by a project/pipeline allow; external effects require a fresh exact policy-evaluation receipt whose input fingerprint still matches at dispatch.
-- Orchestrator-protected Kaggle resources are status-only through remote MCP and cannot be reclassified by name.
-- Only one canonical committer may advance a revision.
-- External publication requires a canonical, exact approved revision and an idempotency key.
-- Never discard an unknown migration row. Land it and classify it.
-- Every Region Talk raw row must resolve Region Talk batch scope; every normalized/deduplicated shared target must have the required Region Talk relation before cutover.
-- Never fabricate YDB row counts, table names, model versions, hashes, IDs or migration completeness.
-- Do not silently merge duplicate people, accounts, materials or publications. Record a duplicate group and explicit decision; merge aliases, provenance and the union of all project/pipeline relations.
-- Migrations are append-only after merge. Never edit an applied migration.
-- The public repository must contain no credentials, decrypted exports, personal notes, Telegram sessions or production data.
+- PostgreSQL is the only canonical server-side database engine.
+- At most one writable PostgreSQL-primary is ACTIVE, and it runs only in the Kaggle
+  master Notebook.
+- Private Kaggle Datasets store current and previous verified checkpoints; they are not
+  a live database.
+- The devstand is a lightweight control plane and contains no production PostgreSQL,
+  PGDATA or canonical business data.
+- Internal workers/connectors resolve an ACTIVE epoch and then use the direct master
+  data plane with short-lived role-bound credentials.
+- The default MCP exposes no generic SQL. A separate bounded operator profile never
+  receives owner/superuser/DDL/BYPASSRLS/server-file rights.
+- Ordinary workers emit typed results; only the designated master Notebook is a database
+  runtime. Every canonical write and required semantic outbox operation share one
+  PostgreSQL transaction.
+- Data connectors use versioned idempotent contracts and dedicated master landing, never
+  shared canonical tables directly.
+- Only one canonical committer may advance a revision; expired epochs are fenced.
+- Kaggle resources marked orchestrator-protected remain status-only through remote MCP.
+- Region Talk remains paused until the ordered master lifecycle gates pass.
+- Never fabricate migrations, row counts, hashes, IDs, model versions or readiness.
+- Never expose credentials, production data, decrypted exports or personal sessions.
 
-## Definition of done for code changes
+## Definition of done
 
-- `python -m compileall src tests` passes.
-- `pytest` passes.
-- JSON schemas validate their examples.
-- SQL migration filenames remain strictly ordered and checksummed by the migration runner.
-- New MCP write tools declare and enforce a scope.
-- New pipeline stages define retry, timeout, terminal outcome, exact logical pipeline/project scope and result contract.
-- New shareable object types define catalog registration, scope-resolution rules, state namespace owner and policy applicability.
-- New connector consumers define target scope, routing predicate, contract version, required/optional behavior and independent application receipt.
-- Migration changes include accounting, scope-completeness, dedupe-relation and rollback implications.
-- Documentation states what was actually proven, not merely scaffolded.
-- Infrastructure-first gates (roles, backup/restore, workflows, remote read-only MCP, scope/policy foundation, multi-consumer connector and provider controls) precede full Region Talk migration.
+- `python -m compileall src tests` and `pytest` pass.
+- Repository/schema/notebook validation passes.
+- Migrations remain append-only and contiguous.
+- Architecture tests reject production local PostgreSQL/PGDATA paths.
+- New pipeline stages define retry, timeout, terminal result and receipt contracts.
+- Documentation reports observed evidence and blockers rather than scaffold as proof.

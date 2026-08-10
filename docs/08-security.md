@@ -1,5 +1,32 @@
 # Security model
 
+Security spans two planes.
+
+## Devstand control plane
+
+- no production PostgreSQL, PGDATA, canonical business data or master credentials at rest;
+- operation/event ledgers store identities, epochs, leases and locators, never runtime
+  credentials;
+- provider actions are idempotent, fenced and auditable;
+- stable MCP uses OAuth, Host/Origin checks, scopes, limits and revocation only after its
+  later release gate.
+
+## Kaggle master data plane
+
+- write gate opens only after restore verification, migrations, latest epoch and live lease;
+- short-lived credentials are role- and epoch-bound;
+- connector landing, canonical committer, MCP reader/editor, backup/checkpoint and migrator
+  roles stay separate;
+- owner/superuser/DDL/BYPASSRLS/server-file/program execution are never remote-agent roles;
+- checkpoints are private, hashed, read back and restore-smoked before HEAD promotion.
+
+PR-A contains no production credentials, real provider calls or enabled write surface.
+Publication, Region Talk and remote MCP writes remain disabled.
+
+## Preserved detailed contract — bound by ADR-0016
+
+The detailed material below is retained where topology-neutral. Any reference to a database, role, committer, backup or connector application is executed inside/against the latest ACTIVE Kaggle master; devstand execution claims are superseded.
+
 ## Trust zones
 
 1. PostgreSQL/internal services on the private devstand.

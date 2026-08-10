@@ -72,7 +72,7 @@ entirely and verifies privacy after provider write.
 No cancellation tool is exposed until a supported provider operation is present and
 proven by integration tests. Provider web UI behavior is not enough.
 
-Kaggle remains compute/private artifacts, not canonical PostgreSQL. Every provider
+Kaggle hosts the fenced master Notebook and private verified checkpoints; Datasets alone are not a live database. Every provider
 resource is governed by the local registry/control class and exact receipts.
 
 ## Yandex Cloud DNS, certificates and HTTPS edge

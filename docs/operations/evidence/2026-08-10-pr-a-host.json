@@ -1,0 +1,37 @@
+{
+  "baseline_commit": "bcc02df1f980ac6eefcd305d71cef94817033d70",
+  "host": "DevCoveer.local",
+  "install_confirmation": "explicitly_rejected",
+  "install_receipt_present": false,
+  "legacy_user_unit": {
+    "active": false,
+    "enabled": false,
+    "present": true
+  },
+  "listeners": {
+    "5432": false,
+    "8080": false,
+    "8765": false
+  },
+  "local_master_migrations_applied": false,
+  "local_postgresql_process_observed": false,
+  "my_data_hub_container_count": 0,
+  "observed_at": "2026-08-10T08:31:21Z",
+  "postgres_volume": {
+    "attached_container_count": 0,
+    "classification": "empty_validation_residue_not_runtime",
+    "created_at": "2026-08-10T07:04:46Z",
+    "deleted": false,
+    "deletion_note": "not deleted blindly; destructive cleanup requires separate approval",
+    "exists": true,
+    "name": "my-data-hub-postgres-data",
+    "pgdata_initialized": false,
+    "read_only_inventory_entry_count": 0
+  },
+  "prepared_release_residue_present": true,
+  "production_publication": false,
+  "production_runtime_deployed": false,
+  "region_talk_state": "paused",
+  "remote_mcp_writes": false,
+  "schema_version": "my-data-hub-pr-a-host-evidence.v1"
+}

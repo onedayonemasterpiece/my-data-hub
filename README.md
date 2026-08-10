@@ -1,196 +1,86 @@
 # my-data-hub
 
-`my-data-hub` — PostgreSQL-first ядро личной контентной базы, предметного и
-операторского MCP, управляемых конвейеров и data connectors. Один общий каталог хранит
-авторов, аккаунты, материалы, provenance и результаты обработок; проекты вроде Region
-Talk подключаются явными project/pipeline scopes, отношениями и собственными проекциями,
-а не создают отдельные базы.
+`my-data-hub` is a PostgreSQL-first personal data platform with a stable devstand control
+plane and a dynamically started Kaggle master Notebook.
 
-## Статус
+## Canonical architecture
 
-Репозиторий содержит реализационный bootstrap. Владелец сообщил, что проект развёрнут на
-devstand; фактический runtime пока должен пройти infrastructure-first verification и
-получить deployment/backup/restore/autotest receipts.
+- **Kaggle master Notebook:** the only ACTIVE writable PostgreSQL-primary. It contains
+  canonical catalog/pipeline state, FTS/pgvector, restricted roles, transactional queues,
+  write gate, lease watchdog and checkpoint agent.
+- **Private Kaggle Datasets:** current and previous verified checkpoints plus portable
+  logical backup, manifests, hashes and restore receipts.
+- **Devstand:** lightweight control/status endpoint, future stable MCP gateway, lifecycle
+  adapter, callbacks, registry, leases/fencing, checkpoint metadata, security and audit.
+  It holds no canonical business data, production PostgreSQL or PGDATA.
+- **Data plane:** workers/connectors call ensure/resolve, receive short-lived epoch-bound
+  access, then connect directly to the ACTIVE master. External agents use stable devstand
+  MCP, which resolves that master.
 
-Реализованный bootstrap включает:
+The exact source is
+[`docs/source-material/idea-hub/idea-20260809-content-platform-current-design.md`](docs/source-material/idea-hub/idea-20260809-content-platform-current-design.md).
+ADR-0016 records the owner-approved correction after a local-database architecture drift.
 
-- PostgreSQL 18 + pgvector как единственную каноническую server-side СУБД;
-- общий каталог, FTS/vector evidence, projects и provenance;
-- durable orchestration: pipelines, stages, work, runs, attempts, events и leases;
-- semantic changesets, transactional outbox, receipts и conflict quarantine;
-- bounded semantic MCP v0.1;
-- typed notebook input/result contracts и Region Talk worker lanes;
-- lossless YDB landing/mapping/reconciliation/cutover scaffold;
-- Joplin integration boundary;
-- Docker/systemd/backup/CI scaffold.
+## PR-A state
 
-Принятое документальное дополнение, ещё требующее реализации, добавляет:
+PR-A is safety and contract work only. The database-free control-plane health surface is
+healthy with `master_state=ABSENT`; master lifecycle, real Kaggle calls and data tools are
+not implemented by this PR. Region Talk and publication remain disabled. DNS/VPN/443 and
+remote MCP writes are frozen.
 
-- infrastructure/test-first порядок вместо немедленной тяжёлой миграции;
-- versioned data connector intake и первый продукт `events-bot.daily-statistics.v1`;
-- remote MCP `https://mcp-datahub.kenigevents.ru/mcp` через TLS/OAuth;
-- Kaggle inventory, protected/MCP-managed/exchange control classes;
-- широкий bounded database reader и preview/apply DML под отдельными roles;
-- agent-operated Region Talk migration через typed gates;
-- nightly/provider/restore/autotest workflows;
-- first-class project/pipeline scopes, multi-pipeline participation, namespaced states and
-  global/project/pipeline policy decisions.
-
-Production publication выключена. Region Talk pipeline остаётся `paused` до evidence
-и миграционных gates.
-
-## Каноническое имя и источник
-
-Финальное имя — **`my-data-hub`**. `content-platform` было черновым именем той же
-системы и сохраняется только в provenance исходного исследования.
-
-Каноническое целевое видение:
-
-```text
-onedayonemasterpiece/idea-hub
-ideas/portfolio.inbox/idea-20260809-content-platform-current-design.md
-source commit: 0c3fcf71b2ee8ba8afa49624bef4b779873802f7
-source SHA-256: c7efb28231223caa6fd02fcc001a38e0f16bcc3fa4c4cd53e744721b2eac0852
-```
-
-Точный файл импортирован и проверен побайтно; это не пересказ. Состояние provenance:
-[`docs/source-material/source-manifest.yaml`](docs/source-material/source-manifest.yaml).
-
-## Архитектурные решения дополнения
-
-- Canonical PostgreSQL supervised/always-on; Kaggle не является master DB/failover.
-- При недоступности devstand push-connectors сохраняют exact batch в durable local spool
-  и повторяют тот же idempotency key.
-- Default MCP остаётся semantic; operator MCP — отдельный профиль/роль/процесс с
-  preview/apply, limits, backup и audit gates.
-- Orchestrator-owned Kaggle resources доступны remote MCP только как status.
-- MCP-owned private notebooks/datasets могут управляться через проверенный provider
-  lifecycle.
-- Private `mcp_exchange` служит для передачи файлов/кода/документов, но не является
-  canonical storage.
-- Region Talk migration может управляться агентом только через typed accounting,
-  quarantine, shadow, backup, cutover и rollback gates.
-- Один canonical object переиспользуется несколькими проектами/конвейерами; membership,
-  workflow state, фактическое usage и policy decision хранятся раздельно.
-- Platform-wide hard deny/blacklist нельзя отменить локальным project/pipeline allow;
-  effective policy вычисляется по versioned combiner с audit receipt.
-
-## С чего начать на devstand
-
-Не начинать с полного YDB-переноса. Последовательность:
-
-```text
-зафиксировать deployment facts и выключенные gates
-→ проверить clean/upgrade migrations и split roles
-→ выполнить backup + off-host readback + isolated restore
-→ настроить PR/post-deploy/nightly/provider workflows
-→ поднять remote read-only MCP
-→ реализовать и доказать shared scope/policy foundation
-→ доказать synthetic multi-consumer connector
-→ доказать Kaggle protected/MCP-managed canary
-→ доказать DB operator в disposable schema
-→ начать Region Talk inventory/export
-```
-
-Полный план: [`docs/15-infrastructure-first-plan.md`](docs/15-infrastructure-first-plan.md).
-
-## Локальный запуск через Docker
+## Development
 
 ```bash
-cp .env.example .env
-# задать POSTGRES_PASSWORD и MY_DATA_HUB_DATABASE_URL для docker network
-make up
-make verify
-make test
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e '.[dev]'
+make validate test lint notebooks
 ```
 
-`make up` поднимает PostgreSQL, применяет append-only migrations, регистрирует paused
-Region Talk pipeline и запускает API/plan-only orchestrator.
+The root `compose.yaml` is **disposable integration-test infrastructure only**. Its
+PostgreSQL uses tmpfs and no named volume:
 
-После запуска:
+```bash
+cp .env.example .env                 # integration-only credentials
+make integration-up
+make integration-verify
+make integration-down                # always executes docker compose down -v
+```
 
-- liveness: `http://127.0.0.1:8080/health/live`
-- readiness: `http://127.0.0.1:8080/health/ready`
-- MCP stdio: `my-data-hub mcp serve --transport stdio`
-- PostgreSQL публикуется только на loopback host interface.
+`make up` intentionally fails: devstand must never start a local master database.
 
-## Region Talk
+Production/control-plane shape can be inspected without starting it:
 
-Region Talk — первый обязательный migration workload и первый полный перенос
-накопленных данных:
+```bash
+make control-config
+```
+
+The legacy command below is permanently forbidden and exits before side effects:
 
 ```text
-YDB read-only inventory/export
-→ immutable JSONL + manifest + hashes
-→ migration.raw_record landing
-→ explicit mapping / normalization / deduplication
-→ Region Talk projections over shared catalog
-→ reconciliation
-→ shadow/canary
-→ controlled cutover/rollback
+deploy/same-host/install.sh INSTALL_MY_DATA_HUB_SAME_HOST
 ```
 
-Каждая исходная строка получает disposition: `normalized`, `deduplicated`,
-`intentionally_excluded`, `retained_raw` или `quarantined`. Неразобранные строки,
-manifest mismatch или quarantine блокируют cutover.
+The replacement control-plane installer has a separate explicit token and must not be
+run without a later owner approval. It contains no database URL, migration or backup path.
 
-Каждый Region Talk export batch получает явный Region Talk origin scope. Все raw rows
-наследуют его, а каждый `normalized` или `deduplicated` shared target получает отдельную
-Region Talk relation в той же canonical transaction. Deduplication не может удалить
-принадлежность/использование объекта проектом. Подробный контракт:
-[`docs/22-data-scope-and-pipeline-participation.md`](docs/22-data-scope-and-pipeline-participation.md).
+## Preserved contracts
 
-Read-only exporter получает фактическую source table только через защищённую переменную
-`MY_DATA_HUB_REGION_TALK_YDB_TABLE`; значение не фиксируется и не угадывается в публичном
-репозитории.
+Append-only migrations, schema/role contracts, connector receipts, recovery tooling,
+MCP semantic/operator boundaries, Kaggle control classes and Region Talk accounting are
+kept. They are rebound to an ACTIVE Kaggle master in later PRs; keeping code does not mean
+that runtime already exists.
 
-## Основные документы
+## Documentation
 
-1. [`docs/00-source-of-truth.md`](docs/00-source-of-truth.md)
-2. [`docs/01-project-charter.md`](docs/01-project-charter.md)
-3. [`docs/02-target-architecture.md`](docs/02-target-architecture.md)
-4. [`docs/03-data-model.md`](docs/03-data-model.md)
-5. [`docs/04-orchestrator.md`](docs/04-orchestrator.md)
-6. [`docs/05-mcp.md`](docs/05-mcp.md)
-7. [`docs/06-notebooks.md`](docs/06-notebooks.md)
-8. [`docs/07-joplin-integration.md`](docs/07-joplin-integration.md)
-9. [`docs/08-security.md`](docs/08-security.md)
-10. [`docs/09-observability.md`](docs/09-observability.md)
-11. [`docs/10-release-plan.md`](docs/10-release-plan.md)
-12. [`docs/11-deployment.md`](docs/11-deployment.md)
-13. [`docs/12-code-agent-handoff.md`](docs/12-code-agent-handoff.md)
-14. [`docs/13-external-references.md`](docs/13-external-references.md)
-15. [`docs/14-bootstrap-delivery.md`](docs/14-bootstrap-delivery.md)
-16. [`docs/15-infrastructure-first-plan.md`](docs/15-infrastructure-first-plan.md)
-17. [`docs/16-data-connectors.md`](docs/16-data-connectors.md)
-18. [`docs/17-kaggle-control-plane.md`](docs/17-kaggle-control-plane.md)
-19. [`docs/18-mcp-operator-and-database-access.md`](docs/18-mcp-operator-and-database-access.md)
-20. [`docs/19-test-first-rollout.md`](docs/19-test-first-rollout.md)
-21. [`docs/20-remote-mcp-endpoint.md`](docs/20-remote-mcp-endpoint.md)
-22. [`docs/21-infrastructure-addendum-delivery.md`](docs/21-infrastructure-addendum-delivery.md)
-23. [`docs/22-data-scope-and-pipeline-participation.md`](docs/22-data-scope-and-pipeline-participation.md)
-24. [`docs/operations/first-deploy-template.md`](docs/operations/first-deploy-template.md)
-25. [`docs/migrations/region-talk/README.md`](docs/migrations/region-talk/README.md)
-26. [`BOOTSTRAP_VALIDATION.md`](BOOTSTRAP_VALIDATION.md)
+- [Source of truth](docs/00-source-of-truth.md)
+- [Target architecture](docs/02-target-architecture.md)
+- [Corrective ADR](docs/adr/0016-kaggle-postgresql-master-architecture-reset.md)
+- [Architecture invariants](architecture/invariants.yaml)
+- [Incident record](docs/incidents/2026-08-10-local-postgres-architecture-drift.md)
+- [Preservation map](docs/architecture/work-preservation-map.md)
+- [Ordered roadmap](docs/roadmap-architecture-reset.md)
+- [Region Talk migration](docs/migrations/region-talk/README.md)
 
-## Неподлежащие ослаблению инварианты
-
-- PostgreSQL — единственная canonical server-side СУБД и supervised live head.
-- Kaggle backup/notebook/dataset не становится master DB или canonical pointer.
-- Business write и required outbox фиксируются одной SQL-транзакцией.
-- Notebook worker возвращает typed immutable result; canonical apply делает локальный
-  committer.
-- Connector batch принимается идемпотентно и отделён от independent per-consumer
-  canonical applications.
-- Scope relation, scoped state, pipeline usage и policy decision не подменяют друг друга.
-- Shared object не копируется для нового проекта/конвейера; merge сохраняет union scope
-  relations и provenance.
-- External side effect разрешён только после canonical commit по exact approved revision.
-- Default MCP не предоставляет generic SQL; operator SQL — отдельный restricted profile,
-  без owner/superuser/DDL и с preview/apply/backup/audit gates.
-- Orchestrator-protected Kaggle resources не мутируются remote MCP.
-- Неизвестная YDB строка не отбрасывается и не считается мигрированной.
-- Region Talk raw row без Region Talk batch scope или normalized/deduplicated target без
-  Region Talk relation блокирует cutover.
-- Joplin используется через supported API, а не внутреннюю SQLite.
-- GitHub хранит код/contracts/receipts, но не production data/secrets.
+For historical YDB export tooling, set `MY_DATA_HUB_REGION_TALK_YDB_TABLE`; the pipeline
+remains paused and no real export/import is authorized by PR-A.

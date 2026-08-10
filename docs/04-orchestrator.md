@@ -1,4 +1,36 @@
-# Orchestrator design
+# Orchestrator and master lifecycle
+
+Status: `TARGET CONTRACT / FAKEKAGGLE IMPLEMENTATION DEFERRED AFTER PR-A`
+
+The devstand orchestrator is a lightweight control plane. It persists operation identity,
+provider intent, callbacks, run evidence, leases, fencing epochs, service registry and
+checkpoint locators. It does not store canonical content and is not a proxy for bulk data.
+
+## Required state machine
+
+`ABSENT -> REQUESTED -> STARTING -> RESTORING -> REGISTERING -> ACTIVE -> DRAINING -> CHECKPOINTING -> STOPPED`
+with `FAILED`, `FENCED`, `CHECKPOINT_FAILED`, and `ORPHANED` terminal/error states.
+
+Rules:
+
+- persist a transition before each provider side effect;
+- `ensure_master` is idempotent and concurrent calls create at most one run;
+- each new master uses a monotonically increasing epoch;
+- only latest-epoch ACTIVE service resolves;
+- lease expiry closes the DB gate and rejects old callbacks/heartbeats;
+- reconcile platform status with exact callback/output evidence;
+- never place credentials in event records.
+
+After resolve, workers/connectors use short-lived epoch-bound credentials and connect
+directly to the Kaggle master data plane. External clients use stable devstand MCP.
+
+PR-A exposes only a truthful `master=ABSENT` status. Deterministic clock, FakeKaggle,
+property tests, durable ledger and real adapter are later ordered work. Region Talk
+scheduling and publication remain disabled.
+
+## Preserved detailed contract — bound by ADR-0016
+
+The detailed material below is retained where topology-neutral. Any reference to a database, role, committer, backup or connector application is executed inside/against the latest ACTIVE Kaggle master; devstand execution claims are superseded.
 
 ## 1. Назначение
 
