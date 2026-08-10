@@ -78,7 +78,8 @@ Canonical URL:
 https://mcp-datahub.kenigevents.ru/mcp
 ```
 
-The DNS record points to `188.227.84.107`; no new Compute/ALB is needed. TCP 443 is already
+The DNS record is not yet created; it must point to `188.227.84.107` when the separately
+approved edge change is executed. No new Compute/ALB is needed. TCP 443 is already
 used by Xray REALITY, so nginx must SNI-multiplex the MCP hostname to a separate internal
 TLS listener and default traffic to the relocated loopback Xray listener. This is a
 controlled VPN change with rollback and client regression proof, not a blind nginx path

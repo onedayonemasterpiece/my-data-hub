@@ -108,7 +108,8 @@ def provision(admin_database_url: str, identities: tuple[LoginIdentity, ...]) ->
                     raise RuntimeError(f"{identity.login} existing role attributes are not restricted")
                 cursor.execute(
                     """
-                    SELECT parent.rolname
+                    SELECT parent.rolname, membership.admin_option,
+                           membership.inherit_option, membership.set_option
                     FROM pg_auth_members membership
                     JOIN pg_roles parent ON parent.oid = membership.roleid
                     JOIN pg_roles member ON member.oid = membership.member
@@ -117,11 +118,22 @@ def provision(admin_database_url: str, identities: tuple[LoginIdentity, ...]) ->
                     """,
                     (identity.login,),
                 )
-                direct_memberships = {str(row[0]) for row in cursor.fetchall()}
+                membership_rows = cursor.fetchall()
+                direct_memberships = {str(row[0]) for row in membership_rows}
                 unexpected = direct_memberships - {identity.group_role}
                 if unexpected:
                     raise RuntimeError(
                         f"{identity.login} has unexpected direct memberships: " + ", ".join(sorted(unexpected))
+                    )
+                unsafe_options = [
+                    str(row[0])
+                    for row in membership_rows
+                    if bool(row[1]) or not bool(row[2]) or not bool(row[3])
+                ]
+                if unsafe_options:
+                    raise RuntimeError(
+                        f"{identity.login} has unsafe membership options for: "
+                        + ", ".join(sorted(unsafe_options))
                     )
                 cursor.execute(
                     """
@@ -190,7 +202,9 @@ def provision(admin_database_url: str, identities: tuple[LoginIdentity, ...]) ->
                 sql.SQL("COMMENT ON ROLE {} IS {}").format(sql.Identifier(identity.login), sql.Literal(managed_comment))
             )
             cursor.execute(
-                sql.SQL("GRANT {} TO {}").format(sql.Identifier(identity.group_role), sql.Identifier(identity.login))
+                sql.SQL("GRANT {} TO {} WITH ADMIN FALSE, INHERIT TRUE, SET TRUE").format(
+                    sql.Identifier(identity.group_role), sql.Identifier(identity.login)
+                )
             )
             observations.append(
                 {

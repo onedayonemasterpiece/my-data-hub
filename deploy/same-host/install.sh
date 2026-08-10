@@ -7,7 +7,7 @@ if [[ "$action" != "PREPARE" && "$action" != "INSTALL_MY_DATA_HUB_SAME_HOST" ]];
   echo "usage: $0 PREPARE|INSTALL_MY_DATA_HUB_SAME_HOST" >&2
   exit 2
 fi
-for command_name in curl docker git python3 seq ssh-keygen systemctl tar; do
+for command_name in curl diff docker flock git python3 seq ssh-keygen systemctl tar; do
   command -v "$command_name" >/dev/null || { echo "$command_name is required" >&2; exit 2; }
 done
 docker info >/dev/null
@@ -25,18 +25,31 @@ release_root="${MY_DATA_HUB_RELEASE_ROOT:-$HOME/.local/opt/my-data-hub}"
 release="$release_root/releases/$commit"
 current="$release_root/current"
 candidate_env_dir="$state_root/releases/$commit"
-mkdir -p "$state_root" "$state_root/backups" "$state_root/recovery" "$state_root/receipts" \
-  "$candidate_env_dir" "$release_root/releases" "$HOME/.config/systemd/user"
-chmod 700 "$state_root" "$state_root/backups" "$state_root/recovery" "$state_root/receipts" \
-  "$state_root/releases" "$candidate_env_dir"
-
-if [[ ! -d "$release" ]]; then
-  staging="$(mktemp -d "$release_root/releases/.staging.XXXXXX")"
-  trap 'rmdir "$staging" 2>/dev/null || true' EXIT
-  git -C "$source_root" archive "$commit" | tar -x -C "$staging"
-  mv "$staging" "$release"
-  trap - EXIT
+mkdir -p "$state_root"
+exec 9>"$state_root/install.lock"
+if ! flock -n 9; then
+  echo "another same-host PREPARE or INSTALL is already running" >&2
+  exit 75
 fi
+chmod 600 "$state_root/install.lock"
+
+mkdir -p "$state_root/backups" "$state_root/recovery" "$state_root/receipts" \
+  "$state_root/releases" "$release_root/releases" "$HOME/.config/systemd/user"
+chmod 700 "$state_root" "$state_root/backups" "$state_root/recovery" "$state_root/receipts" \
+  "$state_root/releases"
+
+staging="$(mktemp -d "$release_root/releases/.staging.XXXXXX")"
+trap 'rm -rf "$staging"' EXIT
+git -C "$source_root" archive "$commit" | tar -x -C "$staging"
+if [[ ! -d "$release" ]]; then
+  mv "$staging" "$release"
+elif ! diff -qr --no-dereference "$staging" "$release" >/dev/null; then
+  echo "existing release directory does not match exact commit $commit" >&2
+  exit 2
+fi
+rm -rf "$staging"
+trap - EXIT
+chmod -R a-w "$release"
 
 secret_file="$state_root/secrets.env"
 if [[ ! -e "$secret_file" ]]; then
@@ -93,19 +106,22 @@ MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED=false
 MY_DATA_HUB_MCP_WRITE_ENABLED=false
 EOF
 }
+candidate_env_staging="$(mktemp -d "$state_root/releases/.${commit}.XXXXXX")"
+trap 'rm -rf "$candidate_env_staging"' EXIT
+chmod 700 "$candidate_env_staging"
 write_env() {
   local name="$1"
   shift
-  { common_environment; printf '%s\n' "$@"; } > "$candidate_env_dir/$name.env"
-  chmod 600 "$candidate_env_dir/$name.env"
+  { common_environment; printf '%s\n' "$@"; } > "$candidate_env_staging/$name.env"
+  chmod 600 "$candidate_env_staging/$name.env"
 }
 
-cat > "$candidate_env_dir/postgres.env" <<EOF
+cat > "$candidate_env_staging/postgres.env" <<EOF
 POSTGRES_DB=my_data_hub
 POSTGRES_USER=mdh_bootstrap
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 EOF
-chmod 600 "$candidate_env_dir/postgres.env"
+chmod 600 "$candidate_env_staging/postgres.env"
 
 write_env admin \
   "MY_DATA_HUB_DATABASE_URL=$admin_url" \
@@ -163,7 +179,7 @@ write_env mcp \
   "MY_DATA_HUB_MCP_HOST=0.0.0.0" \
   "MY_DATA_HUB_MCP_PORT=8765"
 
-candidate_deployment_env="$candidate_env_dir/deployment.env"
+candidate_deployment_env="$candidate_env_staging/deployment.env"
 cat > "$candidate_deployment_env" <<EOF
 MY_DATA_HUB_ENV_DIR=$candidate_env_dir
 MY_DATA_HUB_STATE_DIR=$state_root
@@ -175,6 +191,15 @@ MY_DATA_HUB_API_PORT=8080
 MY_DATA_HUB_MCP_PORT=8765
 EOF
 chmod 600 "$candidate_deployment_env"
+if [[ ! -d "$candidate_env_dir" ]]; then
+  mv "$candidate_env_staging" "$candidate_env_dir"
+elif ! diff -qr --no-dereference "$candidate_env_staging" "$candidate_env_dir" >/dev/null; then
+  echo "existing release environment does not match exact commit $commit" >&2
+  exit 2
+fi
+rm -rf "$candidate_env_staging"
+trap - EXIT
+candidate_deployment_env="$candidate_env_dir/deployment.env"
 
 compose() {
   set -a
@@ -204,6 +229,9 @@ if [[ "$action" == "PREPARE" ]]; then
   exit 0
 fi
 
+# Stop every prior application writer before changing the database or starting a
+# candidate. A failed candidate is reconciled back to the last published release.
+compose stop api orchestrator connector-committer backup
 compose up -d postgres
 compose run --rm role-bootstrap
 compose run --rm login-provision
@@ -211,7 +239,7 @@ compose run --rm migrate
 compose run --rm role-provision
 compose run --rm identity-verify
 compose run --rm role-probe
-compose up -d postgres api orchestrator connector-committer backup
+compose up -d postgres api orchestrator
 
 ready=false
 for _attempt in $(seq 1 30); do
@@ -234,6 +262,51 @@ fi
 
 # Publish the release and boot configuration only after every database/identity/readiness
 # gate has passed. PREPARE and failed INSTALL attempts cannot advance boot state.
+previous_deployment_env=""
+if [[ -f "$state_root/deployment.env" ]]; then
+  previous_deployment_env="$(mktemp "$state_root/.deployment.env.previous.XXXXXX")"
+  cp "$state_root/deployment.env" "$previous_deployment_env"
+fi
+unit="$HOME/.config/systemd/user/my-data-hub-compose.service"
+unit_existed=false
+unit_was_enabled=false
+if [[ -f "$unit" ]]; then
+  unit_existed=true
+fi
+if systemctl --user is-enabled --quiet my-data-hub-compose.service 2>/dev/null; then
+  unit_was_enabled=true
+fi
+published=false
+rollback_install() {
+  local status="$?"
+  if [[ "$published" == true && "$status" -ne 0 ]]; then
+    set +e
+    echo "post-readiness install failed; restoring the last published runtime" >&2
+    if [[ -n "$previous_release" && -n "$previous_deployment_env" ]]; then
+      ln -sfn "$previous_release" "$current"
+      mv -f "$previous_deployment_env" "$state_root/deployment.env"
+      previous_compose up -d postgres api orchestrator connector-committer backup
+      systemctl --user daemon-reload
+      if [[ "$unit_was_enabled" == true ]]; then
+        systemctl --user enable my-data-hub-compose.service
+        systemctl --user restart my-data-hub-compose.service
+      fi
+    else
+      compose stop api orchestrator connector-committer backup
+      rm -f "$current" "$state_root/deployment.env"
+      if [[ "$unit_existed" == false ]]; then
+        systemctl --user disable --now my-data-hub-compose.service 2>/dev/null || true
+        rm -f "$unit"
+        systemctl --user daemon-reload
+      fi
+    fi
+  fi
+  if [[ -n "$previous_deployment_env" ]]; then
+    rm -f "$previous_deployment_env"
+  fi
+  exit "$status"
+}
+trap rollback_install EXIT
 next_link="$release_root/.current.$commit"
 ln -sfn "$release" "$next_link"
 mv -Tf "$next_link" "$current"
@@ -241,8 +314,8 @@ deployment_env_tmp="$state_root/.deployment.env.$commit"
 cp "$candidate_deployment_env" "$deployment_env_tmp"
 chmod 600 "$deployment_env_tmp"
 mv -f "$deployment_env_tmp" "$state_root/deployment.env"
+published=true
 
-unit="$HOME/.config/systemd/user/my-data-hub-compose.service"
 unit_tmp="$HOME/.config/systemd/user/.my-data-hub-compose.service.$commit"
 cat > "$unit_tmp" <<EOF
 [Unit]
@@ -265,6 +338,9 @@ chmod 600 "$unit_tmp"
 mv -f "$unit_tmp" "$unit"
 systemctl --user daemon-reload
 systemctl --user enable my-data-hub-compose.service
+# The canonical committer and backup scheduler start only after the candidate has
+# passed readiness and become the published boot target.
+compose up -d connector-committer backup
 if systemctl --user is-active --quiet my-data-hub-compose.service; then
   systemctl --user restart my-data-hub-compose.service
 else
@@ -288,6 +364,11 @@ payload = {
 }
 output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
+published=false
+trap - EXIT
+if [[ -n "$previous_deployment_env" ]]; then
+  rm -f "$previous_deployment_env"
+fi
 chmod 600 "$state_root/receipts/"*.json
 echo "installed_commit=$commit"
 echo "receipt=$state_root/receipts/install.json"

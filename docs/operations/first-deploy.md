@@ -88,8 +88,9 @@ denied, so runner firewall state is also unverified.
 - OAuth revocation before/after durable row: PASS (`false -> true`).
 - Process-kill recovery: PASS in a separate disposable container; an immediate server
   stop caused Docker restart count `1` and PostgreSQL WAL recovery.
-- Host reboot recovery: **BLOCKED** pending devstand access. A container restart is not
-  reported as a host reboot.
+- Host reboot recovery: **NOT YET EXECUTED** on the identified permanent host. Access is
+  available, but reboot remains a separately approved disruptive operation; a container
+  restart is not reported as a host reboot.
 
 ## Synthetic connector receipt
 

@@ -52,3 +52,7 @@ def test_existing_login_path_is_fail_closed_for_collisions() -> None:
     assert "managed-role marker" in text
     assert "owns objects or has direct database privileges" in text
     assert "existing role attributes are not restricted" in text
+    assert "membership.admin_option" in text
+    assert "membership.inherit_option" in text
+    assert "membership.set_option" in text
+    assert "unsafe membership options" in text
