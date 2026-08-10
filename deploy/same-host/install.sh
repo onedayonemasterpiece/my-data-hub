@@ -208,7 +208,7 @@ if [[ "$action" == "PREPARE" ]]; then
   echo "prepared_commit=$commit"
   echo "release=$release"
   echo "runtime=$state_root"
-  echo "autostart=enabled_not_started"
+  echo "autostart=unit_prepared_not_enabled"
   exit 0
 fi
 
