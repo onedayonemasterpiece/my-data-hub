@@ -39,6 +39,9 @@ def test_same_host_installer_preserves_fail_closed_gates_and_autostart() -> None
     assert "existing release directory does not match exact commit" in installer
     assert "existing release environment does not match exact commit" in installer
     assert "release modes do not match the read-only exact-commit contract" in installer
+    assert 'git -C "$script_dir" rev-parse --show-toplevel' in installer
+    assert 'docker image inspect "my-data-hub:$commit"' in installer
+    assert 'docker image inspect "my-data-hub-backup:$commit"' in installer
     assert installer.index("trap rollback_install EXIT") < installer.index(
         "runtime_touched=true\ncompose stop api orchestrator"
     )
@@ -53,6 +56,7 @@ def test_backup_failure_is_visible_and_freshness_is_health_checked() -> None:
     compose = (ROOT / "compose.same-host.yaml").read_text(encoding="utf-8")
     assert "backup_postgres.sh || true" not in loop
     assert "last-success" in loop
+    assert "backup interval must be greater than zero" in loop
     assert "healthcheck:" in compose
     assert "last-success" in compose
 
