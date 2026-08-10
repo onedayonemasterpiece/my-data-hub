@@ -45,6 +45,11 @@ credentials and is never loaded by an API, orchestrator, MCP,
 committer timer or backup process. The post-deploy OAuth canary token remains in the
 protected GitHub environment; only its already-public issuer, JTI and expiry are passed
 to a root transient unit which appends the revocation row using `admin.env`.
+`DEVSTAND_MCP_VALID_TOKEN` is intentionally a one-time, short-lived post-deploy JWT with
+a unique JTI: the workflow permanently revokes it after the successful semantic call.
+Operators must issue and install a fresh unrevoked token before every rerun. The three
+negative-token secrets must be signed fixtures for the same issuer: expired, wrong exact
+audience, and otherwise-valid but insufficient-scope (which must return HTTP 403).
 
 `compose.yaml` and a single local `.env` are development conveniences only. They are not
 the production supervision or secret-isolation model; `deploy/systemd/install.sh`

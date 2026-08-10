@@ -21,10 +21,10 @@ class PostgresBackupStateProvider:
             cursor.execute("SET LOCAL statement_timeout = '1000ms'")
             cursor.execute(
                 """
-                SELECT evidence_id, completed_at, readback_verified,
+                SELECT evidence_id, manifest->'backup'->>'completed_at', readback_verified,
                        private_offhost, schema_revision, restore_verified,
                        manifest->'restore'->>'completed_at',
-                       checkpoint.checkpoint_id::text
+                       checkpoint.canonical_revision
                 FROM recovery.evidence
                 JOIN sync.checkpoint AS checkpoint
                   ON checkpoint.canonical_revision =
@@ -55,11 +55,11 @@ class PostgresBackupStateProvider:
 
         return BackupState(
             evidence_revision=str(row[0]),
-            completed_at=row[1],
+            completed_at=datetime.fromisoformat(str(row[1]).replace("Z", "+00:00")),
             readback_verified=bool(row[2]),
             offsite_available=bool(row[3]),
             schema_revision=int(row[4]),
             restore_drill_at=datetime.fromisoformat(str(restore_at).replace("Z", "+00:00")),
             restore_drill_succeeded=bool(row[5]),
-            checkpoint_revision=str(row[7]) if row[7] else None,
+            checkpoint_revision=int(row[7]) if row[7] is not None else None,
         )

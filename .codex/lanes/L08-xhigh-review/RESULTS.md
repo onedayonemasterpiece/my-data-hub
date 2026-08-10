@@ -34,7 +34,7 @@ live post-deploy probes, and the recovery-to-operator checkpoint path was discon
 
 The current integration remediation adds per-service Unix users/environment files,
 process-specific configuration validation, application/orchestrator role positives and
-89 strict role/ownership probes, an exact events-bot producer-shape normalizer, a
+90 strict role/ownership probes, an exact events-bot producer-shape normalizer, a
 supervised bounded committer, live connector/OAuth/MCP/revocation/process-kill/reboot
 workflow probes, fail-closed nightly cadence/queue/recovery/provider checks, and a
 verified recovery receipt → `sync.checkpoint` → operator gate path. The branch is not
@@ -47,3 +47,11 @@ off-host locator, PostgreSQL major and extension versions and reject conflicting
 the installer enables API/orchestrator/MCP as well as the two timers before any reboot
 proof; and the connector canary's final accounting now uses a read-only monitoring
 login rather than receiving a role-admin credential.
+
+The final-review pass then identified and remediated three more privilege/liveness/
+freshness gaps: service identity verification now rejects every unexpected direct or
+transitive membership instead of checking only one expected group; deterministic poison
+connector batches receive an idempotent terminal semantic-quarantine receipt without
+starving later batches; and operator backup age now comes from the original backup
+manifest rather than restore time, while high/bulk gates require the checkpoint's
+canonical revision to equal the write's expected revision.

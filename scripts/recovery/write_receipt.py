@@ -120,6 +120,7 @@ def main() -> int:
             "source_instance": manifest["source_instance"],
             "source_environment": manifest["source_environment"],
             "repository_commit": manifest["repository_commit"],
+            "completed_at": manifest["completed_at"],
         },
         "off_host": {
             "provider": evidence["provider"],

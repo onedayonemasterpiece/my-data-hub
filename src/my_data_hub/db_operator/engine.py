@@ -207,13 +207,19 @@ class DatabaseOperator:
         )
 
     def _open_gate(
-        self, state: BackupState, *, now: datetime, require_checkpoint: bool = False
+        self,
+        state: BackupState,
+        *,
+        now: datetime,
+        require_checkpoint: bool = False,
+        expected_canonical_revision: int | None = None,
     ) -> None:
         self._freshness.require_open(
             state,
             now=now,
             expected_schema_revision=self._schema_revision,
             require_checkpoint=require_checkpoint,
+            expected_canonical_revision=expected_canonical_revision,
         )
 
     @staticmethod
@@ -255,6 +261,7 @@ class DatabaseOperator:
             backup,
             now=now,
             require_checkpoint=impact_tier in {"high", "bulk"} or expected_row_max > 10,
+            expected_canonical_revision=expected_revision,
         )
         connection = self._connection_factory()
         cursor = connection.cursor()
@@ -353,16 +360,17 @@ class DatabaseOperator:
         impact_tier = str(preview.get("impact_tier", ""))
         if impact_tier not in {"low", "medium", "high", "bulk"}:
             raise ReceiptError("preview receipt contains an invalid impact tier")
+        expected_revision = int(preview["expected_revision"])
         self._open_gate(
             backup,
             now=now,
             require_checkpoint=impact_tier in {"high", "bulk"}
             or int(preview["expected_row_max"]) > 10,
+            expected_canonical_revision=expected_revision,
         )
         self._require_binding(preview, "backup_evidence_revision", backup.evidence_revision)
         self._require_binding(preview, "backup_fingerprint", backup.fingerprint)
         query, bound = compile_psycopg_parameters(analysis.normalized_sql, params)
-        expected_revision = int(preview["expected_revision"])
         expected_min = int(preview["expected_row_min"])
         expected_max = int(preview["expected_row_max"])
         preview_affected = int(preview["preview_affected_rows"])

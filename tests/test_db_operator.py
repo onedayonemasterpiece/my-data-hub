@@ -460,6 +460,16 @@ def test_high_impact_preview_requires_a_checkpoint() -> None:
             impact_tier="high",
         )
 
+    policy = BackupFreshnessPolicy()
+    with pytest.raises(GateClosed, match="expected canonical revision"):
+        policy.require_open(
+            replace(backup_state(), checkpoint_revision=6),
+            now=NOW,
+            expected_schema_revision=9,
+            require_checkpoint=True,
+            expected_canonical_revision=7,
+        )
+
 
 def test_journal_failure_rolls_back_dml_before_commit() -> None:
     class FailingJournal(InMemoryOperatorJournal):

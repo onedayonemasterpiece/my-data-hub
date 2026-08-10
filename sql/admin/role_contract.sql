@@ -39,22 +39,21 @@ REVOKE ALL ON SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
 
-GRANT USAGE ON SCHEMA hub, analysis, region_talk, joplin, sync, integration,
-    orchestration TO mdh_application;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA hub, analysis, region_talk, joplin TO mdh_application;
-REVOKE INSERT, UPDATE, DELETE ON hub.canonical_state FROM mdh_application;
-GRANT SELECT ON hub.canonical_state TO mdh_application;
-GRANT SELECT, INSERT, UPDATE, DELETE ON sync.session, sync.command, sync.command_receipt,
-    sync.changeset_header, sync.changeset_operation, sync.applied_changeset,
-    sync.conflict, sync.id_remap, sync.external_outbox TO mdh_application;
-REVOKE ALL ON sync.checkpoint FROM mdh_application;
-GRANT INSERT ON sync.audit_event TO mdh_application;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA hub, analysis, region_talk, joplin, sync TO mdh_application;
-GRANT SELECT ON integration.connector, integration.data_product, integration.batch,
-    integration.batch_payload, integration.watermark, integration.daily_statistic TO mdh_application;
+-- The production API is an intake/readiness process, not a generic application writer.
+-- Converge installations that applied the earlier broad scaffold before re-granting only
+-- the relations actually exercised by API readiness and worker-result intake.
+REVOKE ALL ON ALL TABLES IN SCHEMA hub, analysis, region_talk, joplin, sync,
+    integration, orchestration FROM mdh_application;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA hub, analysis, region_talk, joplin, sync,
+    integration, orchestration FROM mdh_application;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA hub, analysis, region_talk, joplin, sync,
+    integration, orchestration FROM mdh_application;
+GRANT USAGE ON SCHEMA hub, sync, orchestration TO mdh_application;
+GRANT SELECT ON hub.canonical_state, hub.project TO mdh_application;
 GRANT SELECT ON orchestration.pipeline, orchestration.pipeline_stage,
     orchestration.stage_run, orchestration.worker_result_inbox TO mdh_application;
 GRANT INSERT ON orchestration.worker_result_inbox TO mdh_application;
+GRANT INSERT ON sync.audit_event TO mdh_application;
 
 GRANT USAGE ON SCHEMA orchestration, hub, sync TO mdh_orchestrator;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA orchestration TO mdh_orchestrator;
@@ -78,10 +77,12 @@ REVOKE INSERT, UPDATE, DELETE ON hub.canonical_state FROM mdh_mcp_reader, mdh_mc
 GRANT USAGE ON SCHEMA hub, integration, sync TO mdh_canonical_committer;
 GRANT SELECT ON hub.canonical_state, integration.batch, integration.batch_payload,
     integration.data_product, integration.daily_statistic, integration.watermark,
+    integration.quarantine,
     sync.external_outbox TO mdh_canonical_committer;
 GRANT UPDATE (status, committed_at) ON integration.batch TO mdh_canonical_committer;
 GRANT INSERT ON integration.daily_statistic, integration.batch_event,
-    integration.watermark, sync.external_outbox TO mdh_canonical_committer;
+    integration.watermark, integration.quarantine, sync.external_outbox
+    TO mdh_canonical_committer;
 GRANT UPDATE ON integration.watermark TO mdh_canonical_committer;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA integration, sync TO mdh_canonical_committer;
 GRANT EXECUTE ON FUNCTION hub.advance_canonical_revision(bigint) TO mdh_canonical_committer;

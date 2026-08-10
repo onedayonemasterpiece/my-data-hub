@@ -149,7 +149,7 @@ jobs:
           expect_status 401 -H 'Authorization: Bearer definitely-not-a-token' "$endpoint"
           expect_status 401 -H "Authorization: Bearer $EXPIRED_TOKEN" "$endpoint"
           expect_status 401 -H "Authorization: Bearer $WRONG_AUDIENCE_TOKEN" "$endpoint"
-          expect_status 401 -H "Authorization: Bearer $WRONG_SCOPE_TOKEN" "$endpoint"
+          expect_status 403 -H "Authorization: Bearer $WRONG_SCOPE_TOKEN" "$endpoint"
           expect_status 403 -H 'Host: forbidden.example' "$endpoint"
           expect_status 403 -H 'Origin: https://forbidden.example' "$endpoint"
           python scripts/verify_remote_mcp.py | tee artifacts/remote-mcp-canary.json

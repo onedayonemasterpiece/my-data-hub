@@ -31,11 +31,11 @@ reconciled serially by the integration owner.
 |---|---|---|
 | R01 observed devstand | **BLOCKED** | `docs/operations/first-deploy.md`; YC auth restored, but both authorized folders contain zero Compute instances/ALBs, required DNS is absent, and runner has no installed service |
 | R02 reproducible baseline | **PASS (local)** | exact Make commands use the checked-in `.venv` when present and pass with compileall; PR CI remains the independent proof |
-| R03 PostgreSQL | **PARTIAL** | privileged extension bootstrap followed by owner-scoped clean migration, 12 group roles, 89 strict-SQLSTATE probes and object ownership pass on PostgreSQL 18.4/pgvector 0.8.6; restricted service LOGINs prove connector/committer/reader flow locally, while host reboot/private listener proof requires devstand access |
-| R04 recovery | **PARTIAL** | encrypted streaming, sanitized adapter environment, strict age-key mode/owner, exact readback, post-restore object/outbox/MCP verification and exact hash/locator/version-bound receipt→checkpoint→operator-gate wiring pass; conflicting checkpoint reuse fails closed; real off-host artifact/readback/restore evidence remains blocked |
+| R03 PostgreSQL | **PARTIAL** | privileged extension bootstrap followed by owner-scoped clean migration, 12 group roles, 90 strict-SQLSTATE probes and object ownership pass on PostgreSQL 18.4/pgvector 0.8.6; ten distinct service LOGINs pass exact direct/transitive-membership verification locally, while host reboot/private listener proof requires devstand access |
+| R04 recovery | **PARTIAL** | encrypted streaming, sanitized adapter environment, strict age-key mode/owner, exact readback, post-restore object/outbox/MCP verification and exact hash/locator/version-bound receipt→checkpoint→operator-gate wiring pass; freshness uses original backup time and high/bulk requires the expected canonical revision; real off-host evidence remains blocked |
 | R05 workflows | **PARTIAL** | all five workflow definitions and receipt schema exist; deploy now encodes role/identity/connector/process-kill/reboot/live OAuth/MCP/revocation/listener evidence and nightly fails closed on queue/cadence/recovery/inventory, but external run IDs require absent environments/secrets/backend |
 | R06 remote MCP | **PARTIAL** | JWT/JWKS, exact claims, PostgreSQL revocation, RFC9728 metadata, Host/Origin/proxy/body/response/rate/timeout tests and read-only catalog pass; DNS/TLS/issuer/backend/Inspector/ChatGPT connection blocked |
-| R07 connectors | **PASS (disposable)** | intake → exact acceptance → single CAS committer/outbox → MCP read → replay → conflict quarantine plus durable outage/restart/eventual delivery; events-bot producer shape now has an exact target normalizer test, while merge/live credential/canary remain blocked |
+| R07 connectors | **PASS (disposable)** | intake → exact acceptance → single CAS committer/outbox → MCP read → replay → conflict quarantine plus durable outage/restart/eventual delivery; deterministic poison input reaches idempotent terminal semantic quarantine without starving later batches; events-bot merge/live credential/canary remain blocked |
 | R08 Kaggle | **PARTIAL** | four classes, conservative inventory policy, protected denials, leases/fingerprints, exchange and canary receipt contracts pass offline; account inventory and private dataset/notebook lifecycle/cleanup blocked by missing tested adapter/credentials |
 | R09 DB operator | **PARTIAL** | apply DML + durable receipt/idempotency now commit in one PostgreSQL transaction; journal failure rolls back, replay is durable, high/bulk impact requires checkpoint, and live disposable apply/replay passes. Production remains empty/remote-undiscoverable until real recovery evidence exists |
 | R10 Region Talk | **PASS (bounded R1 scope)** | exact vision imported; donor entries remain explicitly pending; fixture only; pipeline paused and publication disabled; no YDB mutation/cutover |
@@ -47,7 +47,7 @@ reconciled serially by the integration owner.
 - image digest: `sha256:691673308c99d2161ba298736f3147f1f22d79de2fb7ec93ae9b4afcab870b62`;
 - PostgreSQL `18.4`; pgvector `0.8.6`;
 - clean migration: 1–10; repeat: zero; upgrade: 9→10 then zero repeat;
-- password-free roles: 12; strict role/ownership probes: 89 PASS;
+- password-free roles: 12; strict role/ownership probes: 90 PASS;
 - process-kill: Docker restart count 1 plus PostgreSQL WAL recovery;
 - host reboot: not performed/claimed.
 

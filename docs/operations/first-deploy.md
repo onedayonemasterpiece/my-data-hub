@@ -88,7 +88,7 @@ denied, so runner firewall state is also unverified.
 - Upgrade from released revision 9 to 10: PASS; disposable database dropped.
 - Bootstrap invariants: PASS.
 - Role provisioning: PASS, twelve password-free group roles.
-- PostgreSQL positive/adversarial/ownership probes: PASS, 89 probes. All application
+- PostgreSQL positive/adversarial/ownership probes: PASS, 90 probes. All application
   objects in the fresh audit database were owned by `mdh_owner`; direct canonical
   singleton mutation was denied outside the dedicated bounded committer function.
 - OAuth revocation before/after durable row: PASS (`false -> true`).
@@ -116,6 +116,13 @@ new spool instance, delivered the exact bytes once, retained one durable receipt
 replayed the canonical commit without a duplicate. The semantic MCP connector status
 projection observed four committed batches across repeatable canary runs. This remains disposable CI evidence, not a
 production events-bot canary.
+
+A later restricted-role poison-batch proof accepted generic envelope evidence, rejected
+the invalid product counters, wrote terminal semantic quarantine
+`2d676076-e238-4c23-8e8b-fd731bd3e72c`, replayed that terminal result idempotently and
+then committed two later valid batches. The supervised committer subsequently drained
+four older accepted/noncommittable test remnants into terminal quarantine without
+blocking or returning a false PASS.
 
 ## Safety gates required at deployment
 

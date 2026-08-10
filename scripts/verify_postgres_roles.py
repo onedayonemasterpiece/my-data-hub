@@ -249,6 +249,14 @@ def main() -> int:
                 "18, '{}'::jsonb, true)",
             )
         )
+        probes.append(
+            _negative(
+                cursor,
+                "mdh_application",
+                "canonical business row bypass",
+                "DELETE FROM hub.content_item",
+            )
+        )
         for role in (
             "mdh_application",
             "mdh_orchestrator",

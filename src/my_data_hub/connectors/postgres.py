@@ -26,6 +26,13 @@ class CommitReceipt:
     duplicate: bool
 
 
+@dataclass(frozen=True, slots=True)
+class SemanticQuarantineReceipt:
+    batch_id: UUID
+    quarantine_id: UUID
+    duplicate: bool
+
+
 def normalize_daily_counters(data_product: str, record: dict[str, Any]) -> dict[str, Any]:
     """Return the bounded canonical counter object for each registered R1 product."""
 
@@ -381,6 +388,14 @@ class PostgresDailyStatisticsCommitter:
             source_revision = record.get("source_revision")
             if not all(isinstance(value, str) and value for value in (reporting_date, timezone, source_revision)):
                 raise ValueError("daily-statistics identity fields are required")
+            from datetime import date
+            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+            try:
+                date.fromisoformat(reporting_date)
+                ZoneInfo(timezone)
+            except (ValueError, ZoneInfoNotFoundError) as exc:
+                raise ValueError("daily-statistics date/timezone identity is invalid") from exc
 
             supersedes_batch_id = row[6]
             if supersedes_batch_id is None:
@@ -511,4 +526,81 @@ class PostgresDailyStatisticsCommitter:
                     json.dumps({"canonical_revision": canonical_revision, "outbox_id": str(outbox_id)}),
                 ),
             )
-        return CommitReceipt(batch_id, canonical_revision, outbox_id, False)
+            return CommitReceipt(batch_id, canonical_revision, outbox_id, False)
+
+    def quarantine_semantic_failure(
+        self, batch_id: UUID, *, reason_code: str = "semantic_normalization_failed"
+    ) -> SemanticQuarantineReceipt:
+        """Terminally quarantine one deterministic product-normalization failure."""
+
+        import psycopg
+
+        if reason_code != "semantic_normalization_failed":
+            raise ValueError("unsupported semantic quarantine reason")
+        with psycopg.connect(self.database_url) as connection, connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            cursor.execute(
+                """
+                SELECT connector_id, idempotency_key, payload_sha256, status
+                FROM integration.batch
+                WHERE batch_id = %s
+                FOR UPDATE
+                """,
+                (batch_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise LookupError("connector batch was not found")
+            cursor.execute(
+                """
+                SELECT quarantine_id
+                FROM integration.quarantine
+                WHERE batch_id = %s AND reason_code = %s
+                ORDER BY created_at LIMIT 1
+                """,
+                (batch_id, reason_code),
+            )
+            existing = cursor.fetchone()
+            if existing is not None:
+                return SemanticQuarantineReceipt(batch_id, UUID(str(existing[0])), True)
+            if str(row[3]) != "accepted":
+                raise ValueError(f"batch is not semantic-quarantinable from status {row[3]}")
+            quarantine_id = uuid4()
+            cursor.execute(
+                """
+                INSERT INTO integration.quarantine (
+                    quarantine_id, batch_id, connector_id, idempotency_key,
+                    reason_code, expected_sha256, observed_sha256
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    quarantine_id,
+                    batch_id,
+                    str(row[0]),
+                    str(row[1]),
+                    reason_code,
+                    str(row[2]),
+                    str(row[2]),
+                ),
+            )
+            cursor.execute(
+                """
+                UPDATE integration.batch
+                SET status = 'quarantined_semantic'
+                WHERE batch_id = %s
+                """,
+                (batch_id,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO integration.batch_event (
+                    batch_id, event_type, actor_principal, correlation_id, details
+                ) VALUES (
+                    %s, 'semantic_quarantined', 'my-data-hub-committer',
+                    'connector-committer', %s::jsonb
+                )
+                """,
+                (batch_id, json.dumps({"reason_code": reason_code}, sort_keys=True)),
+            )
+            connection.commit()
+        return SemanticQuarantineReceipt(batch_id, quarantine_id, False)

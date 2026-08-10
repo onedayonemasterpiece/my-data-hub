@@ -1,5 +1,6 @@
 {
   "backup": {
+    "completed_at": "2026-08-09T20:01:00Z",
     "encrypted_artifact_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
     "encrypted_byte_size": 1048576,
     "encryption": "age",
@@ -21,7 +22,7 @@
     "verified_at": "2026-08-09T20:30:00Z"
   },
   "receipt_id": "0f6da614-893a-4a15-8f11-4c726545bea8",
-  "receipt_sha256": "0dacbfb85a7eeec132b4bd163309e861334b1d25a15eb1aff83123980b6bc6a0",
+  "receipt_sha256": "c140d4ab31c92845698f609c07d2a90dc08267214253f70762b7d466ffb0bc80",
   "restore": {
     "application_verify": "passed",
     "automatic_promotion": false,

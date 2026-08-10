@@ -72,6 +72,32 @@ def main() -> int:
     exact = producer.exact_bytes(reporting_date, sequence=sequence)
     repository = PostgresConnectorAcceptanceRepository(args.intake_database_url)
     intake = ConnectorIntakeService(repository)
+    committer = PostgresDailyStatisticsCommitter(args.committer_database_url)
+
+    poison = json.loads(
+        producer.exact_bytes(reporting_date + timedelta(days=2), sequence=sequence + 2)
+    )
+    poison["inline_records"][0]["counts"]["accepted"] = -1
+    poison["payload_sha256"] = payload_sha256(poison["inline_records"])
+    poison_result = intake.submit(
+        canonical_json_bytes(poison),
+        authenticated_connector_id=producer.connector_id,
+        authenticated_principal=f"service:{producer.connector_id}",
+        correlation_id="r1-synthetic-semantic-poison",
+    )
+    if poison_result.receipt is None:
+        raise SystemExit("semantic poison batch was not durably accepted for normalization")
+    try:
+        committer.commit(poison_result.receipt.batch_id)
+    except ValueError:
+        semantic_quarantine = committer.quarantine_semantic_failure(
+            poison_result.receipt.batch_id
+        )
+        semantic_quarantine_replay = committer.quarantine_semantic_failure(
+            poison_result.receipt.batch_id
+        )
+    else:
+        raise SystemExit("semantically invalid product record unexpectedly committed")
     accepted = intake.submit(
         exact,
         authenticated_connector_id=producer.connector_id,
@@ -103,7 +129,6 @@ def main() -> int:
     ):
         raise SystemExit("connector replay/conflict dispositions did not match the contract")
 
-    committer = PostgresDailyStatisticsCommitter(args.committer_database_url)
     first_commit = committer.commit(accepted.receipt.batch_id)
     repeated_commit = committer.commit(accepted.receipt.batch_id)
     if first_commit.duplicate or not repeated_commit.duplicate or first_commit != repeated_commit.__class__(
@@ -183,20 +208,25 @@ def main() -> int:
                 (SELECT count(*) FROM integration.daily_statistic WHERE batch_id = %s),
                 (SELECT count(*) FROM integration.quarantine WHERE quarantine_id = %s),
                 (SELECT count(*) FROM sync.external_outbox WHERE idempotency_key = %s),
-                (SELECT canonical_revision FROM hub.canonical_state WHERE singleton = true)
+                (SELECT canonical_revision FROM hub.canonical_state WHERE singleton = true),
+                (SELECT count(*) FROM integration.quarantine WHERE quarantine_id = %s)
             """,
             (
                 accepted.receipt.batch_id,
                 accepted.receipt.batch_id,
                 conflict.quarantine.quarantine_id,
                 f"connector-commit:{accepted.receipt.batch_id}",
+                semantic_quarantine.quarantine_id,
             ),
         )
         counts = tuple(int(value) for value in cursor.fetchone())
     ok = (
         counts[:4] == (1, 1, 1, 1)
         and counts[4] >= first_commit.canonical_revision
+        and counts[5] == 1
         and spool_ok
+        and not semantic_quarantine.duplicate
+        and semantic_quarantine_replay.duplicate
         and mcp_row["committed_batches"] >= 2
     )
     report = {
@@ -215,6 +245,7 @@ def main() -> int:
             "quarantine": counts[2],
             "semantic_outbox": counts[3],
             "canonical_revision": counts[4],
+            "semantic_quarantine": counts[5],
         },
         "outage_restart": {
             "first_delivery_deferred": outage_summary.deferred,
@@ -224,6 +255,12 @@ def main() -> int:
             "commit_replayed": eventual_replay.duplicate,
         },
         "mcp_read": mcp_row,
+        "semantic_poison": {
+            "batch_id": str(poison_result.receipt.batch_id),
+            "quarantine_id": str(semantic_quarantine.quarantine_id),
+            "terminal_replay": semantic_quarantine_replay.duplicate,
+            "later_valid_batches_progressed": True,
+        },
     }
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if ok else 2

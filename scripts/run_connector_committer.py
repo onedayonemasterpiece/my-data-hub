@@ -44,13 +44,25 @@ def main() -> int:
         batch_ids = [row[0] for row in cursor.fetchall()]
 
     committer = PostgresDailyStatisticsCommitter(args.database_url)
-    receipts = [committer.commit(batch_id) for batch_id in batch_ids]
+    receipts = []
+    quarantines = []
+    transient_failures = []
+    for batch_id in batch_ids:
+        try:
+            receipts.append(committer.commit(batch_id))
+        except ValueError:
+            quarantines.append(committer.quarantine_semantic_failure(batch_id))
+        except Exception as exc:  # keep later batches progressing; fail the unit for retry
+            transient_failures.append(
+                {"batch_id": str(batch_id), "error_type": type(exc).__name__}
+            )
     print(
         json.dumps(
             {
-                "ok": True,
+                "ok": not transient_failures,
                 "selected": len(batch_ids),
                 "committed": sum(not item.duplicate for item in receipts),
+                "semantic_quarantined": len(quarantines),
                 "receipts": [
                     {
                         **asdict(item),
@@ -59,11 +71,20 @@ def main() -> int:
                     }
                     for item in receipts
                 ],
+                "quarantines": [
+                    {
+                        **asdict(item),
+                        "batch_id": str(item.batch_id),
+                        "quarantine_id": str(item.quarantine_id),
+                    }
+                    for item in quarantines
+                ],
+                "transient_failures": transient_failures,
             },
             sort_keys=True,
         )
     )
-    return 0
+    return 0 if not transient_failures else 2
 
 
 if __name__ == "__main__":

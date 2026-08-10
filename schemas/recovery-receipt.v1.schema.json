@@ -31,7 +31,8 @@
         "encryption",
         "source_instance",
         "source_environment",
-        "repository_commit"
+        "repository_commit",
+        "completed_at"
       ],
       "properties": {
         "manifest_sha256": {"$ref": "#/$defs/sha256"},
@@ -40,7 +41,8 @@
         "encryption": {"const": "age"},
         "source_instance": {"$ref": "#/$defs/label"},
         "source_environment": {"$ref": "#/$defs/label"},
-        "repository_commit": {"type": "string", "pattern": "^[a-f0-9]{40,64}$"}
+        "repository_commit": {"type": "string", "pattern": "^[a-f0-9]{40,64}$"},
+        "completed_at": {"type": "string", "format": "date-time"}
       }
     },
     "off_host": {

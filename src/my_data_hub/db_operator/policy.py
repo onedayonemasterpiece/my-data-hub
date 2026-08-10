@@ -142,7 +142,7 @@ class BackupState:
     schema_revision: int
     restore_drill_at: datetime
     restore_drill_succeeded: bool
-    checkpoint_revision: str | None = None
+    checkpoint_revision: int | None = None
     unprotected_high_impact_change: bool = False
 
     def __post_init__(self) -> None:
@@ -150,6 +150,8 @@ class BackupState:
             raise ValueError("backup evidence revision must not be empty")
         if self.schema_revision < 0:
             raise ValueError("schema revision must not be negative")
+        if self.checkpoint_revision is not None and self.checkpoint_revision < 0:
+            raise ValueError("checkpoint canonical revision must not be negative")
         for value in (self.completed_at, self.restore_drill_at):
             if value.tzinfo is None or value.utcoffset() is None:
                 raise ValueError("backup timestamps must be timezone-aware")
@@ -190,6 +192,7 @@ class BackupFreshnessPolicy:
         now: datetime,
         expected_schema_revision: int,
         require_checkpoint: bool = False,
+        expected_canonical_revision: int | None = None,
     ) -> None:
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("now must be timezone-aware")
@@ -213,7 +216,10 @@ class BackupFreshnessPolicy:
             findings.append("restore drill is stale")
         if state.unprotected_high_impact_change:
             findings.append("a newer high-impact change is not protected")
-        if require_checkpoint and not state.checkpoint_revision:
-            findings.append("a pre-change checkpoint is required")
+        if require_checkpoint:
+            if expected_canonical_revision is None:
+                findings.append("expected canonical revision is required for checkpoint gating")
+            elif state.checkpoint_revision != expected_canonical_revision:
+                findings.append("checkpoint does not protect the expected canonical revision")
         if findings:
             raise GateClosed("; ".join(findings))
