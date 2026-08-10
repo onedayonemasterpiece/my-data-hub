@@ -14,7 +14,9 @@ from my_data_hub.control_plane.app import (
 
 
 def test_control_plane_is_ready_while_master_is_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in DATABASE_ENVIRONMENT_NAMES:
+    for name in set(DATABASE_ENVIRONMENT_NAMES) | {
+        key for key in os.environ if key.startswith("PG") or key.endswith("_DATABASE_URL")
+    }:
         monkeypatch.delenv(name, raising=False)
     settings = ControlPlaneSettings.from_env()
     response = TestClient(create_app(settings)).get("/health/ready")
@@ -38,13 +40,18 @@ def test_control_plane_is_ready_while_master_is_absent(monkeypatch: pytest.Monke
     [
         *DATABASE_ENVIRONMENT_NAMES,
         "MY_DATA_HUB_FUTURE_DATABASE_URL",
+        "PGHOSTADDR",
+        "PGSSLKEY",
+        "PGSSLCERT",
+        "PGSSLROOTCERT",
+        "PGOPTIONS",
     ],
 )
 def test_control_plane_rejects_local_master_credentials(
     monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     for candidate in set(DATABASE_ENVIRONMENT_NAMES) | {
-        key for key in os.environ if key.endswith("_DATABASE_URL")
+        key for key in os.environ if key.startswith("PG") or key.endswith("_DATABASE_URL")
     }:
         monkeypatch.delenv(candidate, raising=False)
     monkeypatch.setenv(name, "postgresql://forbidden/local")

@@ -63,6 +63,7 @@ class ControlPlaneSettings:
     def from_env(cls) -> ControlPlaneSettings:
         candidates = set(DATABASE_ENVIRONMENT_NAMES)
         candidates.update(name for name in os.environ if name.endswith("_DATABASE_URL"))
+        candidates.update(name for name in os.environ if name.startswith("PG"))
         leaked = sorted(name for name in candidates if os.getenv(name, "").strip())
         if leaked:
             raise ControlPlaneConfigurationError(

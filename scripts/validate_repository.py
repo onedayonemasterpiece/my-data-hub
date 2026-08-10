@@ -564,13 +564,20 @@ def validate_deployment(report: Report) -> None:
         "legacy confirmation token": re.compile(r"INSTALL_MY_DATA_HUB_SAME_HOST"),
     }
     executable_allowlist = {
-        ".github/workflows/ci.yml": "GitHub-hosted disposable PostgreSQL integration",
-        "Makefile": "explicitly named disposable integration targets",
-        "compose.yaml": "tmpfs-backed disposable integration profile",
-        "deploy/same-host/install.sh": "permanent pre-side-effect rejection guard",
-        "deploy/control-plane/install.sh": "rejects the legacy token before prerequisites",
-        "scripts/backup_postgres.sh": "preserved Kaggle-master checkpoint tooling",
-        "scripts/restore_postgres.sh": "preserved isolated Kaggle-master restore tooling",
+        "PostgreSQL/PGDATA volume creation": {
+            "Makefile": "one explicit disposable integration-up command",
+        },
+        "master migration from deployment": {
+            "Makefile": "two explicit disposable integration migration commands",
+            ".github/workflows/ci.yml": "two GitHub-hosted disposable migration commands",
+        },
+        "local master dump": {
+            "scripts/backup_postgres.sh": "preserved Kaggle-master checkpoint tool only",
+        },
+        "legacy confirmation token": {
+            "deploy/same-host/install.sh": "permanent pre-side-effect rejection guard",
+            "deploy/control-plane/install.sh": "rejects the legacy token before prerequisites",
+        },
     }
     executable_candidates: list[Path] = []
     for path in ROOT.rglob("*"):
@@ -592,9 +599,22 @@ def validate_deployment(report: Report) -> None:
             if not pattern.search(text):
                 continue
             report.check(
-                relative in executable_allowlist,
+                relative in executable_allowlist.get(label, {}),
                 f"repository-wide forbidden execution pattern ({label}) in {relative}",
             )
+    report.check(
+        makefile.count("docker compose up -d postgres") == 1
+        and "docker volume create" not in makefile,
+        "disposable Makefile PostgreSQL startup exception broadened",
+    )
+    report.check(
+        makefile.count("docker compose run --rm api db migrate") == 2,
+        "disposable Makefile migration exceptions drifted",
+    )
+    report.check(
+        ci.count("run: my-data-hub db migrate") == 2,
+        "disposable CI migration exceptions drifted",
+    )
 
     pipeline = load_json(ROOT / "config/pipelines/region-talk.v1.json")
     report.check(pipeline.get("status") == "paused", "Region Talk pipeline is not paused")

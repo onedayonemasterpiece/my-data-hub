@@ -120,13 +120,10 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
         re.compile(r"INSTALL_MY_DATA_HUB_SAME_HOST"),
     )
     allowlist = {
-        ".github/workflows/ci.yml",
-        "Makefile",
-        "compose.yaml",
-        "deploy/same-host/install.sh",
-        "deploy/control-plane/install.sh",
-        "scripts/backup_postgres.sh",
-        "scripts/restore_postgres.sh",
+        1: {"Makefile"},
+        3: {"scripts/backup_postgres.sh"},
+        4: {"Makefile", ".github/workflows/ci.yml"},
+        5: {"deploy/same-host/install.sh", "deploy/control-plane/install.sh"},
     }
     for path in ROOT.rglob("*"):
         if not path.is_file() or any(
@@ -143,8 +140,15 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
         ):
             continue
         text = path.read_text(encoding="utf-8")
-        if any(pattern.search(text) for pattern in patterns):
-            assert relative_path.as_posix() in allowlist
+        for index, pattern in enumerate(patterns):
+            if pattern.search(text):
+                assert relative_path.as_posix() in allowlist.get(index, set())
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert makefile.count("docker compose up -d postgres") == 1
+    assert "docker volume create" not in makefile
+    assert makefile.count("docker compose run --rm api db migrate") == 2
+    assert ci.count("run: my-data-hub db migrate") == 2
 
 
 def test_legacy_install_token_hard_fails_before_side_effects(tmp_path: Path) -> None:
