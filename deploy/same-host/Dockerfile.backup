@@ -1,0 +1,11 @@
+FROM pgvector/pgvector:0.8.6-pg18-bookworm
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends age ca-certificates coreutils python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY scripts ./scripts
+COPY deploy/same-host/backup-loop.sh ./deploy/same-host/backup-loop.sh
+
+ENTRYPOINT ["/bin/bash", "deploy/same-host/backup-loop.sh"]

@@ -1,18 +1,18 @@
-# Devstand deployment and auto-start
+# Permanent same-host deployment and auto-start
 
-The development host is the initial production host. The user reports that the project
-has been deployed there; this document defines the evidence needed before that deployment
-is considered verified and ready for broad writes or Region Talk migration.
+`DevCoveer` is the permanent execution host, not an SSH target to discover elsewhere.
+This document defines the evidence needed before that installation is considered verified
+and ready for broad writes or Region Talk migration.
 
 ## Host layout
 
 ```text
-/opt/my-data-hub/repo             checked-out release
-/var/lib/my-data-hub/postgres     Docker volume or dedicated data directory
-/var/lib/my-data-hub/artifacts    private bounded cache
-/var/lib/my-data-hub/connectors   private staging/spool where required
-/etc/my-data-hub/env              root-readable environment file
-/var/backups/my-data-hub          encrypted local staging
+~/.local/opt/my-data-hub/releases/<commit>  immutable user-owned release
+~/.local/opt/my-data-hub/current            atomic release symlink
+~/.local/state/my-data-hub/releases/<commit>/*.env  mode-0600 split environments
+my-data-hub-postgres-data                   stable Docker PostgreSQL volume
+my-data-hub-artifacts                       private Docker artifact volume
+~/.local/state/my-data-hub/backups          encrypted local staging
 ```
 
 ## Immediate safety state
@@ -42,7 +42,24 @@ Record these observed values after service start and host reboot.
 11. Prove operator access in a disposable schema.
 12. Only then begin Region Talk inventory/export.
 
-Write observed commands/results to `docs/operations/first-deploy.md`.
+Prepare without database mutation:
+
+```bash
+deploy/same-host/install.sh PREPARE
+```
+
+The reviewed installation command is:
+
+```bash
+deploy/same-host/install.sh INSTALL_MY_DATA_HUB_SAME_HOST
+```
+
+It stages the exact clean commit, provisions distinct PostgreSQL LOGINs, applies the
+append-only migrations and grant probes, starts PostgreSQL/API/orchestrator/committer and
+encrypted local backup containers, and enables `my-data-hub-compose.service` in the
+lingering user systemd manager. Docker ports 5432 and 8080 remain loopback-only. Remote MCP
+is not started until TLS and OAuth are complete. Write observed results to
+`docs/operations/first-deploy.md`.
 
 ## Required services
 
@@ -53,7 +70,7 @@ Write observed commands/results to `docs/operations/first-deploy.md`.
 - Backup: scheduled local/off-host generation and restore drill.
 - Reverse proxy/edge: public 443 only for `mcp-datahub.kenigevents.ru`.
 
-## Yandex public endpoint
+## Public endpoint on the same host
 
 Canonical URL:
 
@@ -61,9 +78,12 @@ Canonical URL:
 https://mcp-datahub.kenigevents.ru/mcp
 ```
 
-Use the existing Yandex CLI/deployment conventions to create Cloud DNS record,
-certificate and HTTPS listener/reverse proxy. Record non-secret resource IDs and
-certificate fingerprint. Do not expose port 8765 or PostgreSQL publicly.
+The DNS record is not yet created; it must point to `188.227.84.107` when the separately
+approved edge change is executed. No new Compute/ALB is needed. TCP 443 is already
+used by Xray REALITY, so nginx must SNI-multiplex the MCP hostname to a separate internal
+TLS listener and default traffic to the relocated loopback Xray listener. This is a
+controlled VPN change with rollback and client regression proof, not a blind nginx path
+edit. Do not expose port 8765 or PostgreSQL publicly.
 
 Connector `/intake/v1` may share the edge temporarily with separate service auth and
 upstream policy.

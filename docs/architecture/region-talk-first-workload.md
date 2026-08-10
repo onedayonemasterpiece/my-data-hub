@@ -48,10 +48,35 @@ Authors, outlets, accounts, content, assets and analysis results live in shared 
 Region Talk-specific eligibility, queues, review and publication projections live in
 `region_talk`. Another regional project can attach the same content without copying it.
 
+## Data scope contract
+
+Before real normalization, the database must contain stable identities for:
+
+```text
+project:region-talk
+pipeline:region-talk.main
+project-pipeline:region-talk:region-talk.main
+```
+
+Every YDB export batch declares Region Talk as origin project scope, and all raw rows
+inherit it. Every `normalized` or `deduplicated` shared actor/account/content/asset target
+gets an explicit Region Talk relation in the same transaction as disposition, target refs
+and provenance. A pre-existing deduplicated object gains the relation without being falsely
+marked `originated_in`.
+
+`intentionally_excluded`, `retained_raw` and `quarantined` rows remain attributable to
+Region Talk through batch lineage, but are not given fictitious active membership. Work
+and usage records resolve the exact Region Talk project-pipeline scope. Scope relation,
+workflow state, usage and publication policy remain independent.
+
+See [`../22-data-scope-and-pipeline-participation.md`](../22-data-scope-and-pipeline-participation.md).
+
 ## Proof required before cutover
 
-- every exported YDB row has a disposition;
+- every exported YDB row has a disposition and resolves Region Talk batch scope;
+- every normalized/deduplicated shared target has the required Region Talk relation;
 - source/content identities reconcile by natural keys, not only counts;
+- duplicate groups show one canonical object plus union aliases, provenance and scopes;
 - duplicate guard equivalence is demonstrated;
 - representative current queue cohorts produce equivalent gate decisions;
 - at least one full private canary reaches review and publication receipt;

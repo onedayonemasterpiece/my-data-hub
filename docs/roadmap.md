@@ -17,14 +17,18 @@
 - service/reboot supervision;
 - local/off-host backup, readback and isolated restore;
 - PR, post-deploy, nightly and restore workflows;
-- dangerous gates remain off.
+- dangerous gates remain off;
+- ADR-0015 scope/policy design reviewed before the next schema migration.
 
 ## R2 — connector and remote read plane
 
 - TLS/OAuth MCP at `mcp-datahub.kenigevents.ru`;
 - semantic read-only tools;
-- connector registry/intake/receipt/quarantine;
-- synthetic round trip and outage/replay proof;
+- stable logical pipeline identity and platform/project/pipeline/project-pipeline scopes;
+- catalog object backfill, generic relations, scoped states, usage and policy decisions;
+- `hub.project_content` compatibility/backfill without dual authority;
+- connector registry/intake/receipt/quarantine plus many-to-many consumer routing;
+- synthetic round trip, multi-consumer fan-out and outage/replay proof;
 - events-bot daily statistics as first real data product.
 
 ## R3 — Kaggle provider plane
@@ -46,7 +50,8 @@
 ## R5 — Region Talk migration and shadow
 
 - YDB inventory/export;
-- baseline landing/mapping/accounting;
+- baseline landing/mapping/accounting with mandatory Region Talk batch scope;
+- normalized/deduplicated target scope-relations and scope-completeness reconciliation;
 - reconciliation and incremental catch-up;
 - donor worker/finalizer adapters;
 - shadow cycles/private canary;
@@ -61,5 +66,7 @@
 
 ## Later workloads
 
-New projects reuse shared identities, connector/provider planes and operator controls.
-A workload schema is added only for genuinely project-specific policy and projections.
+New projects reuse shared identities, scope/policy/usage, connector/provider planes and
+operator controls. A workload schema is added only for genuinely project-specific rich
+projections; generic membership, global policy and pipeline participation remain shared.
+One accepted data product may feed several workloads through independent consumers.

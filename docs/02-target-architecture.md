@@ -1,14 +1,15 @@
 # Target architecture
 
-Status: `ACCEPTED BASELINE + INFRASTRUCTURE SUPPLEMENT`
+Status: `ACCEPTED BASELINE + INFRASTRUCTURE/SCOPE SUPPLEMENTS`
 
 ## 1. Core model
 
 The architecture is best described as:
 
 > PostgreSQL transactional branches and typed workers, semantic transactional outbox,
-> deterministic single canonical committer, versioned connector intake, append-only
-> evidence and versioned encrypted checkpoints.
+> deterministic single canonical committer, versioned connector intake, first-class
+> platform/project/pipeline scopes, append-only evidence and versioned encrypted
+> checkpoints.
 
 This is not generic event sourcing, transparent multi-master replication or replay of
 raw SQL.
@@ -72,6 +73,8 @@ producer durable spool
 → authenticated HTTPS intake
 → immutable batch + idempotency receipt
 → validation / staging / quarantine
+→ server-side consumer routing
+→ independent per-consumer application
 → versioned normalizer
 → canonical committer
 → reconciliation receipt
@@ -88,7 +91,9 @@ The canonical contract is documented in
 
 PostgreSQL stores:
 
-- project and pipeline definitions;
+- projects, stable logical pipeline identities and immutable/versioned pipeline definitions;
+- platform/project/pipeline/project-pipeline scopes and project-pipeline associations;
+- object-scope relations, namespaced states, append-only usage and policy decisions;
 - durable work items;
 - leases with expiration and fencing token;
 - stage attempts and terminal outputs;
@@ -141,7 +146,8 @@ See [`18-mcp-operator-and-database-access.md`](18-mcp-operator-and-database-acce
 
 ### Canonical core
 
-Compact business objects, relationships, provenance, review and publication state.
+Compact business objects, explicit project/pipeline relations, namespaced scoped state,
+versioned policy decisions, provenance, review and publication state.
 
 ### Derived projections
 
@@ -162,7 +168,49 @@ It is not queried as normal product state.
 Notebook outputs, exchange packages, encrypted checkpoints, manifests and receipts.
 Artifact storage is not a database and cannot decide which revision is canonical.
 
-## 9. Concurrency and ordering
+## 9. Data scope and policy plane
+
+A shared object is stored once and can participate in several projects/pipelines without
+copying its canonical identity:
+
+```mermaid
+flowchart LR
+    O[Catalog object] --> R[Object-scope relation]
+    R --> S[Project / pipeline scope]
+    O --> ST[Namespaced scoped state]
+    S --> ST
+    O --> PD[Versioned policy decision]
+    S --> PD
+    PI[Stable pipeline identity] --> PV[Versioned pipeline definition]
+    PV --> RUN[Run / stage / work]
+    RUN --> UE[Append-only object usage]
+    UE --> O
+    UE --> S
+```
+
+The architecture deliberately separates:
+
+- entity lifecycle from project membership;
+- persistent relation from a historical pipeline usage event;
+- workload state from execution state in `orchestration.work_item`;
+- normalized cross-pipeline state class from exact namespaced state;
+- workflow state from an authorization/policy decision.
+
+Applicable platform/project/pipeline policies are combined by a versioned policy
+definition. Publication uses a deny-overrides combiner: a platform-wide hard deny/blacklist
+cannot be weakened by a local allow. Every external effect cites the exact scope, object
+revision and policy-evaluation receipt.
+
+Raw connector/migration rows may inherit scope through an immutable batch; child and
+derived rows may resolve scope through a canonical parent or run. The system does not add
+ad-hoc `project_id`/`pipeline_id` columns to every physical row, but it rejects required data
+whose scope lineage is ambiguous.
+
+See
+[`22-data-scope-and-pipeline-participation.md`](22-data-scope-and-pipeline-participation.md)
+and ADR-0015.
+
+## 10. Concurrency and ordering
 
 - local database concurrency uses normal PostgreSQL MVCC;
 - session transactions have monotonically increasing `session_seq`;
@@ -174,20 +222,20 @@ Artifact storage is not a database and cannot decide which revision is canonical
 - stale base revision is context, not automatic rejection of every operation;
 - operation preconditions decide whether a change still applies.
 
-## 10. Merge classes
+## 11. Merge classes
 
 | Class | Examples | Policy |
 |---|---|---|
 | Idempotent | same discovery, same analysis identity, exact connector replay | no-op/deduplicate |
-| Set union | attach material to another project, add tag | merge |
-| Append-only | provenance, pipeline, connector/provider/operator event | append by stable event ID |
+| Set union | attach any catalog object to another scope, add tag | merge and preserve all relations |
+| Append-only | provenance, scoped-state, usage, policy, connector/provider/operator event | append by stable event ID |
 | Conditional | canonical summary edit, state transition | expected revision/precondition |
-| Domain merge | duplicate actor/account/material | explicit identity resolution + ID map |
+| Domain merge | duplicate actor/account/material | explicit identity resolution + ID map + union scope relations |
 | Correction | revised daily statistics/source observation | append and supersede prior batch |
 | Rebuildable | FTS, derived metrics | recompute |
 | External side effect | Telegram publication | forbidden before canonical commit and approval |
 
-## 11. Deployment profiles
+## 12. Deployment profiles
 
 ### A. Initial devstand / production
 
@@ -214,7 +262,7 @@ Artifact storage is not a database and cannot decide which revision is canonical
 - rebuild derived indexes;
 - advance canonical pointer only after readback verification.
 
-## 12. Test-first release rule
+## 13. Test-first release rule
 
 The platform proves infrastructure before Region Talk migration:
 
@@ -223,7 +271,8 @@ clean migrations and roles
 → backup/readback/restore
 → CI and devstand workflows
 → remote read-only MCP
-→ synthetic connector
+→ scope/policy migration and backfill proof
+→ synthetic multi-consumer connector
 → Kaggle protected/MCP-managed canary
 → operator disposable-schema canary
 → Region Talk inventory/migration
@@ -232,12 +281,14 @@ clean migrations and roles
 See [`15-infrastructure-first-plan.md`](15-infrastructure-first-plan.md) and
 [`19-test-first-rollout.md`](19-test-first-rollout.md).
 
-## 13. What is deliberately not used
+## 14. What is deliberately not used
 
 - PostgreSQL logical replication as offline merge protocol;
 - raw WAL as business intent;
 - Kaggle notebook/dataset as master database or automatic canonical failover;
 - direct connector writes to shared canonical tables;
+- one universal status or project/pipeline copy of each shared object;
+- inference of membership/authorization from schema names, work status or provenance text;
 - remote PostgreSQL owner/superuser through MCP;
 - resource-name prefixes as Kaggle authorization;
 - Doltgres while pgvector/extensions/compatibility remain insufficient;

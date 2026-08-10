@@ -1,18 +1,23 @@
 # Test-first infrastructure and workflow rollout
 
-Status: `ACCEPTED TEST STRATEGY / IMPLEMENTATION PENDING`
-Date: 2026-08-09
-Related decision: ADR-0014
+Status: `R1 TEST AUTOMATION IMPLEMENTED / SAME-HOST AND ADR-0015 RUNTIME PROOF PENDING`
+Date: 2026-08-10
+Related decisions: ADR-0014, ADR-0015
 
 ## 1. Principle
 
 The first production-quality result is not “Region Talk data was copied”. It is:
 
-> the platform can prove that a bounded input is accepted once, processed once, queried
-> safely, backed up, restored and protected against unauthorized provider/database
-> mutation.
+> the platform can prove that a bounded input is accepted once, independently applied to
+> its declared project/pipeline consumers, queried safely, backed up, restored and protected
+> against unauthorized provider/database mutation or cross-scope state/policy corruption.
 
-Migration starts only after those reusable platform paths are independently green.
+Migration starts only after those reusable platform paths and ADR-0015 scope invariants are
+independently green.
+
+The R1 repository and disposable PostgreSQL automation exists. The ADR-0015
+scope/participation cases added below are target tests and are not claimed as implemented;
+same-host, off-host recovery and provider receipts remain runtime gates.
 
 ## 2. Test environments
 
@@ -46,7 +51,13 @@ Run on every pull request and protected-branch change.
 ### 3.2 Unit and contract gates
 
 - domain and policy unit tests;
-- connector envelope/idempotency tests;
+- scope-registry CHECK/unique/FK and idempotent compatibility-backfill tests;
+- separation tests for relation vs usage vs scoped state vs policy decision;
+- namespaced-state writer and normalized-class mapping tests;
+- effective-policy tests proving platform hard deny overrides local/project/pipeline allow;
+- pending-side-effect tests proving a new deny or traversed relationship revision invalidates
+  a prior allow receipt before provider dispatch;
+- connector envelope/idempotency and multi-consumer routing/application tests;
 - MCP tool discovery by profile/scope;
 - SQL parser/allowlist/impact classification tests;
 - Kaggle control-class policy tests;
@@ -61,12 +72,20 @@ Against the pinned PostgreSQL 18 + pgvector image:
 2. run bootstrap verification;
 3. apply migrations again and prove idempotency;
 4. run repository integration tests;
-5. run Region Talk synthetic landing/replay/quarantine/reconciliation flow;
-6. run connector accept/replay/conflict/correction flow;
-7. create role matrix and execute positive/negative grant probes;
-8. run operator preview/apply in a disposable schema;
-9. prove generic editor cannot mutate protected objects;
-10. destroy the database.
+5. run scope/catalog-object/project-content backfill and upgrade-path verification;
+6. prove one canonical object has two project-pipeline relations and different namespaced
+   states without duplication or cross-overwrite;
+7. prove usage does not imply membership, workflow approval does not imply policy allow and
+   platform hard deny cannot be weakened by a narrower allow;
+8. prove a new applicable deny invalidates a pending allow receipt before provider dispatch;
+9. run Region Talk synthetic landing/replay/quarantine/reconciliation with mandatory batch
+   scope and target-relation completeness;
+10. run connector accept/replay/conflict/correction with one batch and at least two
+    independent consumer applications;
+11. create role matrix and execute positive/negative grant probes;
+12. run operator preview/apply in a disposable schema and prove protected objects remain
+    immutable through the generic editor;
+13. destroy the database.
 
 Migration changes must also be tested from the previous released schema revision, not
 only from empty state.
@@ -85,8 +104,12 @@ Checks:
 - remote MCP endpoint presents the expected certificate and OAuth resource;
 - read-only MCP can execute health and one bounded query;
 - write/operator/Kaggle mutation tools are absent unless that release enables them;
-- synthetic connector batch reaches a committed test projection once;
-- exact replay returns the original receipt;
+- stable logical pipeline and required scope identities resolve exactly once;
+- synthetic connector batch is accepted once and reaches at least two independently tracked
+  consumer applications/scopes;
+- MCP can explain relation, usage, exact/normalized state and effective policy separately;
+- exact replay returns the original batch and per-consumer receipts without duplicate active
+  relations;
 - service restart and one controlled process failure recover automatically;
 - no internal port is internet-facing;
 - a deployment receipt is archived.
@@ -105,7 +128,9 @@ Run against the devstand with non-destructive scopes.
 - publication and protected pipeline gate state;
 - slow/blocked transaction indicators;
 - disk/volume headroom;
-- latest canonical revision and commit activity sanity.
+- latest canonical revision and commit activity sanity;
+- ambiguous/missing required scope and cross-scope state-writer anomaly counts;
+- active policy decisions with invalid/superseded references or missing evaluation receipts.
 
 ### Backup
 
@@ -117,10 +142,11 @@ Run against the devstand with non-destructive scopes.
 
 ### Connectors
 
-- one synthetic batch and replay;
+- one synthetic batch, at least two consumer applications and exact replay;
 - expected daily connector lateness/spool health;
-- accepted-to-committed lag;
-- conflict/quarantine/schema-version anomalies.
+- accepted-to-committed lag per required consumer, not only per batch;
+- missing/duplicate target-scope relation and unmatched consumer-application counts;
+- conflict/quarantine/schema-version/routing anomalies.
 
 ### Remote MCP security
 
@@ -172,7 +198,8 @@ and run:
 - migration/status verification;
 - extension/version verification;
 - core object counts;
-- referential/invariant queries;
+- referential/invariant queries, including scope registry, relation, usage, state and policy;
+- compatibility-backfill and Region Talk scope-completeness counters;
 - representative FTS/vector setup checks;
 - outbox/receipt consistency checks;
 - synthetic read-only MCP query against the restored target.
@@ -219,13 +246,17 @@ requires:
 
 Only after all prior gates:
 
-- inventory/export is read-only;
-- raw landing is reversible and fully accounted;
-- mapping is partitioned/idempotent;
+- inventory/export is read-only and the export receipt attests stable Region Talk scopes;
+- raw landing is reversible, fully accounted and inherits Region Talk origin through batch;
+- mapping is partitioned/idempotent and normalized/deduplicated targets receive the required
+  Region Talk relation in the same canonical transaction;
+- deduplication into a pre-existing shared object preserves Region Talk membership/reference
+  without falsely assigning `originated_in`;
+- scope-completeness, identity and row-accounting blockers are all zero;
 - quarantine remains visible;
-- agent tools cannot falsify reconciliation;
+- agent tools cannot falsify reconciliation, policy evaluation or scope relations;
 - shadow/canary/backup/rollback gates are enforced;
-- publication remains separately disabled.
+- publication remains separately disabled and fails closed on missing policy evidence.
 
 ## 8. Suggested GitHub Actions layout
 
@@ -257,6 +288,8 @@ instance/environment identity
 started/finished timestamps
 checks with expected/observed/outcome
 affected synthetic resource IDs
+batch and per-consumer application IDs
+project/pipeline scope IDs and policy-evaluation refs where applicable
 artifact hashes
 cleanup outcome
 remaining blockers
@@ -271,6 +304,8 @@ Keep failures separate:
 
 - `CODE_CONTRACT` — tests/schema/parser/policy;
 - `DB_MIGRATION` — migration/repository/grant/invariant;
+- `DATA_SCOPE_POLICY` — missing/ambiguous scope, relation loss, state overwrite or policy
+  precedence/evaluation failure;
 - `DEPLOYMENT` — image/service/restart/routing;
 - `AUTHORIZATION` — OAuth/scope/role/control-class;
 - `CONNECTOR_DELIVERY` — spool/intake/replay/normalization;
@@ -293,9 +328,14 @@ The platform is ready for Region Talk inventory when all are true:
 - [ ] isolated restore succeeds;
 - [ ] CI, post-deploy and nightly workflows are green;
 - [ ] remote read-only MCP works through OAuth/TLS;
-- [ ] synthetic connector survives replay and outage;
+- [ ] ADR-0015 migrations/backfill are idempotent and stable Region Talk scopes resolve once;
+- [ ] relation/usage/state/policy separation and platform hard-deny precedence are proven;
+- [ ] pending publication cannot use an allow receipt invalidated by newer policy/relations;
+- [ ] synthetic connector survives replay/outage and isolates at least two consumer applications;
 - [ ] Kaggle inventory classifies every resource;
 - [ ] protected Kaggle resources reject mutation;
 - [ ] one disposable MCP-managed notebook and dataset lifecycle passes;
 - [ ] operator reader/editor pass in a disposable schema;
+- [ ] Region Talk fixture has zero raw-without-batch-scope and zero normalized/deduplicated
+  target-without-relation counters;
 - [ ] scheduler/publication remain disabled and Region Talk paused.
