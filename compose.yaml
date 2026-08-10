@@ -1,87 +1,61 @@
+name: my-data-hub-disposable-integration
+
+# CI/local integration-test infrastructure only. It has no restart policy, named volume,
+# or production/control-plane role. Always use `docker compose down -v`.
+x-my-data-hub-profile: disposable-integration-test-only
+
 services:
   postgres:
     image: pgvector/pgvector:0.8.6-pg18-bookworm
-    restart: unless-stopped
+    restart: "no"
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-my_data_hub}
-      POSTGRES_USER: ${POSTGRES_USER:-my_data_hub}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-my_data_hub_test}
+      POSTGRES_USER: ${POSTGRES_USER:-my_data_hub_test}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set an integration-only POSTGRES_PASSWORD}
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql
-    shm_size: 1gb
+    tmpfs:
+      - /var/lib/postgresql:size=1g,mode=0700
+    shm_size: 512mb
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-my_data_hub} -d ${POSTGRES_DB:-my_data_hub}"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 5s
       retries: 30
-    networks: [internal]
+    networks: [integration]
 
   api:
     build: .
-    restart: unless-stopped
+    restart: "no"
     command: ["api", "serve"]
-    env_file: .env
+    env_file: ${MY_DATA_HUB_INTEGRATION_ENV_FILE:-.env.example}
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres: {condition: service_healthy}
     ports:
       - "127.0.0.1:${MY_DATA_HUB_API_PORT:-8080}:${MY_DATA_HUB_API_PORT:-8080}"
-    volumes:
-      - ./artifacts:/var/lib/my-data-hub/artifacts
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import os,urllib.request; p=os.getenv('MY_DATA_HUB_API_PORT','8080'); urllib.request.urlopen(f'http://127.0.0.1:{p}/health/live', timeout=3).read()"
-      interval: 15s
-      timeout: 5s
-      retries: 10
-    networks: [internal]
+    networks: [integration]
 
   orchestrator:
     build: .
-    restart: unless-stopped
+    restart: "no"
     command: ["orchestrator", "run-loop"]
-    env_file: .env
+    env_file: ${MY_DATA_HUB_INTEGRATION_ENV_FILE:-.env.example}
     depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./artifacts:/var/lib/my-data-hub/artifacts
-    networks: [internal]
+      postgres: {condition: service_healthy}
+    networks: [integration]
 
   mcp:
-    profiles: [remote-mcp]
+    profiles: [disposable-mcp]
     build: .
-    restart: unless-stopped
+    restart: "no"
     command: ["mcp", "serve", "--transport", "streamable-http"]
-    env_file: .env
-    environment:
-      # The host-side publication remains loopback-only. The edge proxy is the only
-      # component permitted to reach this backend listener.
-      MY_DATA_HUB_MCP_HOST: 0.0.0.0
+    env_file: ${MY_DATA_HUB_INTEGRATION_ENV_FILE:-.env.example}
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres: {condition: service_healthy}
     ports:
       - "127.0.0.1:${MY_DATA_HUB_MCP_PORT:-8765}:${MY_DATA_HUB_MCP_PORT:-8765}"
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import os,socket; p=int(os.getenv('MY_DATA_HUB_MCP_PORT','8765')); s=socket.create_connection(('127.0.0.1',p),3); s.close()"
-      interval: 15s
-      timeout: 5s
-      retries: 10
-    networks: [internal]
+    networks: [integration]
 
 networks:
-  internal:
-    driver: bridge
-
-volumes:
-  postgres-data:
+  integration:
+    internal: true

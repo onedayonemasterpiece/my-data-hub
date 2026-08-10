@@ -39,6 +39,13 @@ def command_api_serve(_args: argparse.Namespace) -> int:
     return 0
 
 
+def command_control_plane_serve(_args: argparse.Namespace) -> int:
+    from my_data_hub.control_plane.app import serve
+
+    serve()
+    return 0
+
+
 def command_db_migrate(_args: argparse.Namespace) -> int:
     settings = _database_settings()
     database_url = os.getenv("MY_DATA_HUB_MIGRATOR_DATABASE_URL", "").strip() or settings.database_url
@@ -216,6 +223,14 @@ def build_parser() -> argparse.ArgumentParser:
     api = sub.add_parser("api")
     api_sub = api.add_subparsers(dest="api_command", required=True)
     api_sub.add_parser("serve").set_defaults(handler=command_api_serve)
+
+    control_plane = sub.add_parser("control-plane")
+    control_plane_sub = control_plane.add_subparsers(
+        dest="control_plane_command", required=True
+    )
+    control_plane_sub.add_parser("serve").set_defaults(
+        handler=command_control_plane_serve
+    )
 
     db = sub.add_parser("db")
     db_sub = db.add_subparsers(dest="db_command", required=True)
