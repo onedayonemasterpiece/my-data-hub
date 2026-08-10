@@ -13,6 +13,8 @@ def test_same_host_compose_uses_stable_private_resources_and_split_environments(
     assert '"127.0.0.1:${MY_DATA_HUB_MCP_PORT:-8765}:8765"' in compose
     for name in ("api", "orchestrator", "committer", "backup", "mcp"):
         assert f"/{name}.env" in compose
+    assert "MY_DATA_HUB_ENV_DIR" in compose
+    assert "MY_DATA_HUB_STATE_DIR" in compose
     assert "env_file: .env" not in compose
     assert "profiles: [remote-mcp]" in compose
 
@@ -25,7 +27,9 @@ def test_same_host_installer_preserves_fail_closed_gates_and_autostart() -> None
     assert "MY_DATA_HUB_MCP_REMOTE_ENABLED=false" in installer
     assert "systemctl --user enable my-data-hub-compose.service" in installer
     assert "candidate_deployment_env" in installer
+    assert "candidate_env_dir" in installer
     assert "failed INSTALL attempts cannot advance boot state" in installer
+    assert "restoring the previous supervised application set" in installer
     assert "systemctl --user restart my-data-hub-compose.service" in installer
     assert "INSTALL_MY_DATA_HUB_SAME_HOST" in installer
 

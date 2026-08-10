@@ -11,7 +11,7 @@ services:
   postgres:
     image: pgvector/pgvector:0.8.6-pg18-bookworm
     restart: unless-stopped
-    env_file: ${MY_DATA_HUB_RUNTIME_DIR:?set MY_DATA_HUB_RUNTIME_DIR}/postgres.env
+    env_file: ${MY_DATA_HUB_ENV_DIR:?set MY_DATA_HUB_ENV_DIR}/postgres.env
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -26,7 +26,7 @@ services:
 
   api:
     <<: *app
-    env_file: ${MY_DATA_HUB_RUNTIME_DIR}/api.env
+    env_file: ${MY_DATA_HUB_ENV_DIR}/api.env
     command: ["api", "serve"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -42,7 +42,7 @@ services:
 
   orchestrator:
     <<: *app
-    env_file: ${MY_DATA_HUB_RUNTIME_DIR}/orchestrator.env
+    env_file: ${MY_DATA_HUB_ENV_DIR}/orchestrator.env
     command: ["orchestrator", "run-loop"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -51,7 +51,7 @@ services:
 
   connector-committer:
     <<: *app
-    env_file: ${MY_DATA_HUB_RUNTIME_DIR}/committer.env
+    env_file: ${MY_DATA_HUB_ENV_DIR}/committer.env
     entrypoint: ["/bin/bash", "deploy/same-host/committer-loop.sh"]
     command: []
     depends_on:
@@ -64,11 +64,11 @@ services:
       dockerfile: deploy/same-host/Dockerfile.backup
     restart: unless-stopped
     user: "${MY_DATA_HUB_RUNTIME_UID:-1000}:${MY_DATA_HUB_RUNTIME_GID:-1000}"
-    env_file: ${MY_DATA_HUB_RUNTIME_DIR}/backup.env
+    env_file: ${MY_DATA_HUB_ENV_DIR}/backup.env
     depends_on:
       postgres: {condition: service_healthy}
     volumes:
-      - ${MY_DATA_HUB_RUNTIME_DIR}/backups:/var/lib/my-data-hub/backups
+      - ${MY_DATA_HUB_STATE_DIR:?set MY_DATA_HUB_STATE_DIR}/backups:/var/lib/my-data-hub/backups
     healthcheck:
       test: ["CMD-SHELL", "test -s /var/lib/my-data-hub/backups/last-success && test $$(($$(date +%s) - $$(date -d \"$$(cat /var/lib/my-data-hub/backups/last-success)\" +%s))) -lt 90000"]
       interval: 1h
@@ -80,7 +80,7 @@ services:
   mcp:
     <<: *app
     profiles: [remote-mcp]
-    env_file: ${MY_DATA_HUB_RUNTIME_DIR}/mcp.env
+    env_file: ${MY_DATA_HUB_ENV_DIR}/mcp.env
     command: ["mcp", "serve", "--transport", "streamable-http"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -91,7 +91,7 @@ services:
     <<: *app
     profiles: [admin]
     restart: "no"
-    env_file: ${MY_DATA_HUB_RUNTIME_DIR}/admin.env
+    env_file: ${MY_DATA_HUB_ENV_DIR}/admin.env
     entrypoint: ["python", "scripts/provision_postgres_roles.py"]
     command: ["--bootstrap-only"]
     depends_on:
@@ -101,7 +101,7 @@ services:
     <<: *app
     profiles: [admin]
     restart: "no"
-    env_file: ${MY_DATA_HUB_RUNTIME_DIR}/admin.env
+    env_file: ${MY_DATA_HUB_ENV_DIR}/admin.env
     entrypoint: ["python", "scripts/provision_postgres_logins.py"]
     command: []
     depends_on:
@@ -111,7 +111,7 @@ services:
     <<: *app
     profiles: [admin]
     restart: "no"
-    env_file: ${MY_DATA_HUB_RUNTIME_DIR}/migrator.env
+    env_file: ${MY_DATA_HUB_ENV_DIR}/migrator.env
     command: ["db", "migrate"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -120,7 +120,7 @@ services:
     <<: *app
     profiles: [admin]
     restart: "no"
-    env_file: ${MY_DATA_HUB_RUNTIME_DIR}/admin.env
+    env_file: ${MY_DATA_HUB_ENV_DIR}/admin.env
     entrypoint: ["python", "scripts/provision_postgres_roles.py"]
     command: []
     depends_on:
@@ -130,7 +130,7 @@ services:
     <<: *app
     profiles: [admin]
     restart: "no"
-    env_file: ${MY_DATA_HUB_RUNTIME_DIR}/admin.env
+    env_file: ${MY_DATA_HUB_ENV_DIR}/admin.env
     entrypoint: ["python", "scripts/verify_service_identities.py"]
     command: []
     depends_on:
@@ -140,7 +140,7 @@ services:
     <<: *app
     profiles: [admin]
     restart: "no"
-    env_file: ${MY_DATA_HUB_RUNTIME_DIR}/admin.env
+    env_file: ${MY_DATA_HUB_ENV_DIR}/admin.env
     entrypoint: ["python", "scripts/verify_postgres_roles.py"]
     command: []
     depends_on:

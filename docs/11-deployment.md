@@ -15,7 +15,8 @@ Kaggle is compute/private-artifact storage, not a database service or automatic 
 ## Filesystem
 
 The immediately deployable non-root profile uses immutable releases under
-`~/.local/opt/my-data-hub`, mode-0600 split environments and receipts/backups under
+`~/.local/opt/my-data-hub`, immutable per-release mode-0600 environments under
+`~/.local/state/my-data-hub/releases/<commit>`, stable receipts/backups under
 `~/.local/state/my-data-hub`, plus fixed Docker volumes
 `my-data-hub-postgres-data` and `my-data-hub-artifacts`.
 

@@ -9,7 +9,7 @@ and ready for broad writes or Region Talk migration.
 ```text
 ~/.local/opt/my-data-hub/releases/<commit>  immutable user-owned release
 ~/.local/opt/my-data-hub/current            atomic release symlink
-~/.local/state/my-data-hub/*.env            mode-0600 split service environments
+~/.local/state/my-data-hub/releases/<commit>/*.env  mode-0600 split environments
 my-data-hub-postgres-data                   stable Docker PostgreSQL volume
 my-data-hub-artifacts                       private Docker artifact volume
 ~/.local/state/my-data-hub/backups          encrypted local staging

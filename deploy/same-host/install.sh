@@ -24,9 +24,11 @@ state_root="${MY_DATA_HUB_RUNTIME_DIR:-$HOME/.local/state/my-data-hub}"
 release_root="${MY_DATA_HUB_RELEASE_ROOT:-$HOME/.local/opt/my-data-hub}"
 release="$release_root/releases/$commit"
 current="$release_root/current"
+candidate_env_dir="$state_root/releases/$commit"
 mkdir -p "$state_root" "$state_root/backups" "$state_root/recovery" "$state_root/receipts" \
-  "$release_root/releases" "$HOME/.config/systemd/user"
-chmod 700 "$state_root" "$state_root/backups" "$state_root/recovery" "$state_root/receipts"
+  "$candidate_env_dir" "$release_root/releases" "$HOME/.config/systemd/user"
+chmod 700 "$state_root" "$state_root/backups" "$state_root/recovery" "$state_root/receipts" \
+  "$state_root/releases" "$candidate_env_dir"
 
 if [[ ! -d "$release" ]]; then
   staging="$(mktemp -d "$release_root/releases/.staging.XXXXXX")"
@@ -94,16 +96,16 @@ EOF
 write_env() {
   local name="$1"
   shift
-  { common_environment; printf '%s\n' "$@"; } > "$state_root/$name.env"
-  chmod 600 "$state_root/$name.env"
+  { common_environment; printf '%s\n' "$@"; } > "$candidate_env_dir/$name.env"
+  chmod 600 "$candidate_env_dir/$name.env"
 }
 
-cat > "$state_root/postgres.env" <<EOF
+cat > "$candidate_env_dir/postgres.env" <<EOF
 POSTGRES_DB=my_data_hub
 POSTGRES_USER=mdh_bootstrap
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 EOF
-chmod 600 "$state_root/postgres.env"
+chmod 600 "$candidate_env_dir/postgres.env"
 
 write_env admin \
   "MY_DATA_HUB_DATABASE_URL=$admin_url" \
@@ -161,9 +163,10 @@ write_env mcp \
   "MY_DATA_HUB_MCP_HOST=0.0.0.0" \
   "MY_DATA_HUB_MCP_PORT=8765"
 
-candidate_deployment_env="$state_root/deployment.$commit.env"
+candidate_deployment_env="$candidate_env_dir/deployment.env"
 cat > "$candidate_deployment_env" <<EOF
-MY_DATA_HUB_RUNTIME_DIR=$state_root
+MY_DATA_HUB_ENV_DIR=$candidate_env_dir
+MY_DATA_HUB_STATE_DIR=$state_root
 MY_DATA_HUB_IMAGE_TAG=$commit
 MY_DATA_HUB_RUNTIME_UID=$(id -u)
 MY_DATA_HUB_RUNTIME_GID=$(id -g)
@@ -179,6 +182,16 @@ compose() {
   source "$candidate_deployment_env"
   set +a
   docker compose --project-directory "$release" -f "$release/compose.same-host.yaml" "$@"
+}
+
+previous_release="$(readlink -f "$current" 2>/dev/null || true)"
+previous_compose() {
+  set -a
+  # shellcheck disable=SC1090
+  source "$state_root/deployment.env"
+  set +a
+  docker compose --project-directory "$previous_release" \
+    -f "$previous_release/compose.same-host.yaml" "$@"
 }
 
 compose build api backup
@@ -200,14 +213,24 @@ compose run --rm identity-verify
 compose run --rm role-probe
 compose up -d postgres api orchestrator connector-committer backup
 
+ready=false
 for _attempt in $(seq 1 30); do
   if curl --fail --silent --show-error http://127.0.0.1:8080/health/ready \
       > "$state_root/receipts/api-ready.json"; then
+    ready=true
     break
   fi
   sleep 2
 done
-curl --fail --silent --show-error http://127.0.0.1:8080/health/ready >/dev/null
+if [[ "$ready" != true ]]; then
+  echo "candidate readiness failed; restoring the previous supervised application set" >&2
+  if [[ -n "$previous_release" && -f "$state_root/deployment.env" ]]; then
+    previous_compose up -d postgres api orchestrator connector-committer backup
+  else
+    compose stop api orchestrator connector-committer backup
+  fi
+  exit 1
+fi
 
 # Publish the release and boot configuration only after every database/identity/readiness
 # gate has passed. PREPARE and failed INSTALL attempts cannot advance boot state.
