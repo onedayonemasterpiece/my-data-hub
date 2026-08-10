@@ -27,7 +27,7 @@ At the implementation head before review:
 - `python -m compileall -q src tests scripts`: PASS
 - `ruff check .`: PASS
 - `pytest -q`: PASS, 243 tests
-- `python scripts/validate_repository.py`: PASS, 2409 checks / 0 errors
+- `python scripts/validate_repository.py`: PASS, 2426 checks / 0 errors
 - `python scripts/create_notebooks.py --check`: PASS, no drift
 - integration and control Compose parsing: PASS; neither declares named volumes
 - `bash -n deploy/same-host/install.sh deploy/control-plane/install.sh`: PASS
@@ -56,6 +56,9 @@ incomplete control-plane credential denylist. The same PR now:
   itself), while non-Python execution surfaces use exact occurrence multisets;
 - rejects bind or anonymous mounts on the disposable PostgreSQL service, not only named
   top-level volumes;
+- pins the complete disposable Compose service set and CI job/service sets, rejects mounts
+  and restart policies on every disposable service, and rejects any second PostgreSQL-like
+  service or self-hosted/unclassified job;
 - rejects every known database credential variable, standard libpq connection variables
   (including future `PG*` additions) and any future `*_DATABASE_URL` in the DB-free control
   process.

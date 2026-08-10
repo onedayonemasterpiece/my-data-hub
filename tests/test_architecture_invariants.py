@@ -231,12 +231,33 @@ def test_disposable_postgres_has_no_persistent_volume() -> None:
     compose = load_yaml("compose.yaml")
     assert compose["x-my-data-hub-profile"] == "disposable-integration-test-only"
     assert not compose.get("volumes")
+    assert set(compose["services"]) == {"postgres", "api", "orchestrator", "mcp"}
+    for name, service in compose["services"].items():
+        assert "volumes" not in service
+        assert service["restart"] == "no"
+        markers = json.dumps(
+            {
+                "name": name,
+                "image": service.get("image"),
+                "build": service.get("build"),
+                "command": service.get("command"),
+                "entrypoint": service.get("entrypoint"),
+            },
+            sort_keys=True,
+        ).lower()
+        if any(marker in markers for marker in ("postgres", "pgvector", "/var/lib/postgresql")):
+            assert name == "postgres"
     postgres = compose["services"]["postgres"]
     assert postgres["restart"] == "no"
     assert postgres["tmpfs"] == ["/var/lib/postgresql:size=1g,mode=0700"]
     makefile = (ROOT / "Makefile").read_text()
     assert "docker compose down -v --remove-orphans" in makefile
     ci = load_yaml(".github/workflows/ci.yml")
+    assert set(ci["jobs"]) == {"contracts", "postgres-integration"}
+    for name, candidate in ci["jobs"].items():
+        assert candidate["runs-on"] == "ubuntu-latest"
+        assert "container" not in candidate
+        assert set(candidate.get("services", {})) == ({"postgres"} if name == "postgres-integration" else set())
     job = ci["jobs"]["postgres-integration"]
     assert job["runs-on"] == "ubuntu-latest"
     assert "volumes" not in job["services"]["postgres"]

@@ -589,7 +589,27 @@ def validate_deployment(report: Report) -> None:
     disposable = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
     report.check(disposable.get("x-my-data-hub-profile") == "disposable-integration-test-only", "root Compose is not explicitly disposable")
     report.check(not disposable.get("volumes"), "disposable integration Compose must not declare named volumes")
-    postgres = disposable.get("services", {}).get("postgres", {})
+    disposable_services = disposable.get("services", {})
+    report.check(
+        set(disposable_services) == {"postgres", "api", "orchestrator", "mcp"},
+        "disposable Compose service inventory drifted",
+    )
+    for service_name, service in disposable_services.items():
+        report.check("volumes" not in service, f"disposable service {service_name} declares a persistent mount")
+        report.check(service.get("restart") == "no", f"disposable service {service_name} restart policy is not disabled")
+        postgres_markers = json.dumps(
+            {
+                "name": service_name,
+                "image": service.get("image"),
+                "build": service.get("build"),
+                "command": service.get("command"),
+                "entrypoint": service.get("entrypoint"),
+            },
+            sort_keys=True,
+        ).lower()
+        if any(marker in postgres_markers for marker in ("postgres", "pgvector", "/var/lib/postgresql")):
+            report.check(service_name == "postgres", f"unclassified PostgreSQL-like Compose service: {service_name}")
+    postgres = disposable_services.get("postgres", {})
     report.check(postgres.get("restart") == "no", "disposable PostgreSQL restart policy must be disabled")
     report.check("volumes" not in postgres, "disposable PostgreSQL must not declare bind/anonymous volumes")
     report.check(postgres.get("tmpfs") == ["/var/lib/postgresql:size=1g,mode=0700"], "disposable PostgreSQL must use exact tmpfs PGDATA parent")
@@ -608,7 +628,20 @@ def validate_deployment(report: Report) -> None:
     ci_path = workflow_directory / "ci.yml"
     ci = ci_path.read_text(encoding="utf-8")
     ci_yaml = yaml.safe_load(ci)
-    postgres_job = ci_yaml.get("jobs", {}).get("postgres-integration", {})
+    ci_jobs = ci_yaml.get("jobs", {})
+    report.check(
+        set(ci_jobs) == {"contracts", "postgres-integration"},
+        "CI job inventory drifted or gained an unclassified execution job",
+    )
+    for job_name, job in ci_jobs.items():
+        report.check(job.get("runs-on") == "ubuntu-latest", f"CI job {job_name} is not GitHub-hosted disposable")
+        report.check("container" not in job, f"CI job {job_name} declares an unclassified persistent container")
+        job_services = job.get("services", {})
+        if job_name == "postgres-integration":
+            report.check(set(job_services) == {"postgres"}, "PostgreSQL CI service inventory drifted")
+        else:
+            report.check(not job_services, f"non-integration CI job {job_name} declares services")
+    postgres_job = ci_jobs.get("postgres-integration", {})
     postgres_service = postgres_job.get("services", {}).get("postgres", {})
     report.check(postgres_job.get("runs-on") == "ubuntu-latest", "PostgreSQL integration must remain GitHub-hosted disposable CI")
     report.check(postgres_service.get("image") == postgres_image, "CI PostgreSQL image differs from integration target")
