@@ -11,6 +11,9 @@ from uuid import UUID
 
 from my_data_hub.hashing import canonical_json_bytes
 
+ROOT = Path(__file__).resolve().parents[2]
+RECEIPT_SCHEMA = ROOT / "schemas" / "recovery-receipt.v1.schema.json"
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -22,6 +25,15 @@ def main() -> int:
     if not args.database_url:
         parser.error("recovery control database URL is required")
     receipt = json.loads(args.receipt.read_text(encoding="utf-8"))
+    import jsonschema
+
+    schema = json.loads(RECEIPT_SCHEMA.read_text(encoding="utf-8"))
+    try:
+        jsonschema.Draft202012Validator(
+            schema, format_checker=jsonschema.FormatChecker()
+        ).validate(receipt)
+    except jsonschema.ValidationError as exc:
+        parser.error(f"recovery receipt schema validation failed: {exc.message}")
     unsigned = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
     expected = hashlib.sha256(canonical_json_bytes(unsigned)).hexdigest()
     if receipt.get("status") != "succeeded" or receipt.get("receipt_sha256") != expected:

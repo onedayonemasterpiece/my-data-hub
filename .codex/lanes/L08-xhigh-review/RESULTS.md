@@ -61,3 +61,9 @@ committer. Both commit and semantic quarantine now have connection, statement, l
 transaction and idle-transaction limits; the timer unit has `TimeoutStartSec=60`; and a
 live restricted-role row-lock proof observes SQLSTATE `55P03` before the same batch
 commits after lock release.
+
+Both final Medium follow-ups were also closed before merge: the recovery recorder now
+validates the complete draft-2020-12 receipt schema (including formats/constants) before
+opening PostgreSQL, with a malformed self-hashed negative test; and the deployment
+observation records each running container's content image ID and repository digests
+instead of conflating a mutable image name/container ID with an image digest.

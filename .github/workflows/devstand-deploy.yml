@@ -106,7 +106,17 @@ jobs:
             printf 'python=%s\n' "$(/opt/my-data-hub/venv/bin/python --version 2>&1)"
             printf 'mcp_pid_before=%s\n' "$old_pid"
             printf 'mcp_pid_after=%s\n' "$new_pid"
-            printf 'containers=%s\n' "$(docker ps --format '{{.Image}}@{{.ID}}' 2>/dev/null | paste -sd, - || true)"
+            if command -v docker >/dev/null 2>&1; then
+              while read -r container_id; do
+                test -n "$container_id" || continue
+                image_id="$(docker inspect --format '{{.Image}}' "$container_id")"
+                printf 'container=%s image_id=%s repo_digests=%s\n' \
+                  "$(docker inspect --format '{{.Name}}' "$container_id")" "$image_id" \
+                  "$(docker image inspect --format '{{json .RepoDigests}}' "$image_id")"
+              done < <(docker ps -q)
+            else
+              printf 'containers=none docker=not-installed\n'
+            fi
             sha256sum /opt/my-data-hub/venv/bin/my-data-hub
           } | tee artifacts/devstand-runtime-observations.txt
           REMOTE

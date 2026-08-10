@@ -117,6 +117,32 @@ def test_recovery_receipt_example_validates_and_self_hashes() -> None:
     assert "identity" not in serialized.lower()
 
 
+def test_recovery_recorder_rejects_malformed_but_self_hashed_receipt_before_db(
+    tmp_path: Path,
+) -> None:
+    receipt = json.loads((ROOT / "examples/recovery-receipt.v1.json").read_text())
+    receipt["off_host"]["exact_match"] = False
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+    receipt["receipt_sha256"] = hashlib.sha256(
+        json.dumps(
+            unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+    malformed = tmp_path / "malformed-receipt.json"
+    malformed.write_text(json.dumps(receipt), encoding="utf-8")
+    result = _run(
+        "-m",
+        "my_data_hub.recovery_record",
+        "--receipt",
+        str(malformed),
+        "--database-url",
+        "postgresql://must-not-connect.invalid/hub",
+    )
+    assert result.returncode != 0
+    assert "schema validation failed" in result.stderr
+    assert "could not translate host name" not in result.stderr
+
+
 def test_manifest_is_encrypted_only_and_detects_artifact_tampering(tmp_path: Path) -> None:
     artifact, manifest, payload = _manifest(tmp_path)
     assert payload["artifact"]["encryption"] == "age"  # type: ignore[index]
