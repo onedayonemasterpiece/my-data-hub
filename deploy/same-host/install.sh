@@ -13,7 +13,8 @@ done
 docker info >/dev/null
 docker compose version >/dev/null
 
-source_root="$(git rev-parse --show-toplevel)"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+source_root="$(git -C "$script_dir" rev-parse --show-toplevel)"
 commit="$(git -C "$source_root" rev-parse HEAD)"
 if [[ -n "$(git -C "$source_root" status --porcelain --untracked-files=no)" ]]; then
   echo "tracked worktree changes are forbidden for a release" >&2
@@ -248,7 +249,12 @@ previous_compose() {
     -f "$previous_release/compose.same-host.yaml" "$@"
 }
 
-compose build api backup
+if ! docker image inspect "my-data-hub:$commit" >/dev/null 2>&1; then
+  compose build api
+fi
+if ! docker image inspect "my-data-hub-backup:$commit" >/dev/null 2>&1; then
+  compose build backup
+fi
 
 if [[ "$action" == "PREPARE" ]]; then
   echo "prepared_commit=$commit"

@@ -3,6 +3,10 @@ set -Eeuo pipefail
 
 interval="${MY_DATA_HUB_BACKUP_INTERVAL_SECONDS:-86400}"
 case "$interval" in (*[!0-9]*|'') echo "invalid backup interval" >&2; exit 2;; esac
+if [[ "$interval" -eq 0 ]]; then
+  echo "backup interval must be greater than zero" >&2
+  exit 2
+fi
 
 while true; do
   timeout --signal=TERM 30m scripts/backup_postgres.sh
