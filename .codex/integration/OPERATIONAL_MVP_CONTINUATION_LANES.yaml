@@ -26,7 +26,7 @@ lanes:
     forbidden_files: [src/my_data_hub/embeddings/, src/my_data_hub/workloads/bloggers/, src/my_data_hub/control_plane/, src/my_data_hub/mcp/]
     expected_output: committed implementation plus RESULTS.md; credential-free run exits 78 before mutation; fake scenario driver cannot claim live PASS
     verification_scope: full_local
-    status: planned
+    status: code_done_live_blocked_modern_kaggle_token_and_deployed_runtime
   - id: FINAL-EMBED-LIVE
     role: worker
     requirement_ids: [EMBED]
@@ -39,7 +39,7 @@ lanes:
     forbidden_files: [scripts/provider/real_kaggle_matrix.py, src/my_data_hub/workloads/bloggers/importer.py, .github/workflows/provider-real.yml]
     expected_output: committed production code and tests; no fake production capability; real execution remains fail-closed without modern token and imported corpus
     verification_scope: full_local
-    status: planned
+    status: code_done_live_blocked_modern_kaggle_token_and_imported_corpus
   - id: FINAL-YDB-QUARANTINE
     role: worker
     requirement_ids: [YDB-Q]
@@ -52,7 +52,7 @@ lanes:
     forbidden_files: [scripts/provider/, src/my_data_hub/embeddings/, src/my_data_hub/mcp/, .github/workflows/]
     expected_output: committed append-only migration/code/tests and RESULTS.md; conflicting/malformed input has one durable terminal disposition and still blocks completion while quarantine is nonzero
     verification_scope: full_local
-    status: planned
+    status: done
   - id: FINAL-INTEGRATION-REVIEW
     role: merge_reviewer
     requirement_ids: [MATRIX, EMBED, YDB-Q, LIVE-KAGGLE, DEPLOY]
@@ -65,4 +65,4 @@ lanes:
     forbidden_files: [unknown external resources, unrelated VPN/DNS/firewall]
     expected_output: merged/rejected lane table, exact blockers or verified operational receipt
     verification_scope: full_local
-    status: planned
+    status: in_progress_exact_head_review_and_external_gate_audit

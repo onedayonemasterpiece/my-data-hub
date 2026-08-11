@@ -63,8 +63,8 @@ contains only the lightweight control ledger/process and no canonical rows.
   a cold `ABSENT` to fenced `ACTIVE` master read, forbidden-public-port probes,
   and fresh Ed25519-signed metadata-only host evidence for the three supervised
   services, absence of local database state, process replacement and reboot
-  recovery.  This is tested automation only: no public endpoint or signed live
-  host receipt exists yet.
+  recovery. This is tested automation only: the public TLS edge exists, but the
+  MCP/OAuth application routes and signed live host receipt do not.
 - A three-stage host-derived evidence collector and schemas now cover immutable
   image IDs, equal source/installed release tree hashes, loopback listeners,
   absence of local database state and process/reboot recovery.  GitHub's
@@ -89,26 +89,32 @@ contains only the lightweight control ledger/process and no canonical rows.
   independent restore, cold rotation, accounting, and bounded MCP projection.
   Persistent import-receipt callback loss fences/stops the ephemeral master and
   deliberately preserves the previous HEAD. This path has not been executed live.
-- The FINAL-EMBED command now validates the complete FINAL-BLOGGER receipt and exact
-  pinned generated E5/BGE worker identities before accepting worker/import evidence;
-  bearer input is environment-only. It remains an honest fail-closed scaffold:
-  the production control request/status endpoints and MCP vector capability are not
-  implemented, so even valid external credentials currently produce exit `78`
-  before mutation.
-- The provider-real driver can execute 16 distinct private generated-Notebook
-  platform-smoke runs with exact launch fences and reconciliation. It intentionally
-  emits only `SMOKE_PASS` plus `MANDATORY_OPERATIONAL_SCENARIOS_NOT_EXECUTED` and
-  exit `78`; it is not the required operational master/import/embedding/restore
-  scenario matrix.
-- At pre-documentation integration commit
-  `699f5b333dc40218f6a7d033a974ee356881108e`, local validation reports 3,085
-  repository checks with zero errors and 656 tests pass with only the separately
-  opt-in live PostgreSQL test skipped (657 collected). That disposable PostgreSQL
-  18 fencing test passes when explicitly enabled. Strict type checks cover the
-  high-risk protocol/manifest modules and a reachable-history secret scan passes.
-  These results are code and disposable-integration evidence, not real-provider
-  or deployment acceptance; exact-head hosted checks follow the final evidence
-  commit.
+- The FINAL-EMBED path now runs inside the ACTIVE master. It creates deterministic
+  compact documents and jobs, uses the single provider adapter for separate exact
+  private E5/BGE inputs and worker runs, selectively reads only the bounded typed
+  result, transactionally imports both vector spaces, records query vectors only in
+  the canonical master, and exposes exact/FTS/E5/BGE rank-only RRF through the
+  fenced MCP broker. Its stage receipt must be acknowledged before checkpointing.
+  This is implementation and disposable-test evidence only: no real corpus/model
+  run, coverage, checkpoint or restored query has been observed.
+- The provider-real workflow now has an exact 24-scenario operational catalog and
+  a checked-in trusted driver. It counts only reconciled numeric Kaggle run refs and
+  kernel IDs, requires at least three boots, two rotations, abrupt termination,
+  control restart, host reboot and a 60–90 minute soak, and cannot turn task UUIDs
+  or platform smoke into PASS. Missing live scenario evidence produces 24 typed
+  BLOCKED receipts with `mutations_started=0` and exit `78`; no live PASS is claimed.
+- A dedicated Yandex Cloud public TLS edge now exists at the two canonical names.
+  Its private gateway has no public IP, the certificate is hostname-valid, and the
+  restricted tunnel exposes only the three DevCoveer loopback destinations. The
+  public callback route returned bounded `master_absent`; a private gateway restart
+  recovered that path. MCP and OAuth still return `502` because the reviewed
+  three-process application and owner secrets are not installed. This is
+  edge/tunnel evidence, not endpoint acceptance.
+- At implementation commit `84303d5`, the repository validator reports 3,181
+  checks with zero errors and focused embedding/control/post-deploy suites pass.
+  Full exact-head tests, type/lint/secret checks and disposable PostgreSQL evidence
+  are rerun after this evidence update. These remain code and disposable-integration
+  evidence, not real-provider or deployment acceptance.
 
 ## Exact external blocker
 
@@ -143,15 +149,13 @@ and claim-bound cleanup before any permanent master resource is created.
 
 ## Gates not claimed
 
-Until the blocker is closed, the following remain fail-closed and must not be
-reported as complete: permanent master/checkpoint resources; 15 real run IDs;
-full YDB import into the Kaggle primary; E5/BGE 100% coverage; cold restore;
-direct tunnel/broker proof; owner MCP writes; public DNS/TLS/OAuth; host reboot;
-implementation PR merge; and deployment of its merge commit.
-
-In addition to external blockers, two implementation gates remain open: the
-16-run provider driver covers platform smoke only rather than the mandatory
-operational scenario matrix, and production embedding request/status plus vector
-MCP interfaces do not exist yet. Credentials alone cannot close those gates.
+Until the blockers are closed, the following remain fail-closed and must not be
+reported as complete: permanent master/checkpoint resources; 15 qualifying real
+Notebook run identities and all 24 scenario receipts; full YDB import into the
+Kaggle primary; E5/BGE 100% coverage; verified current/previous cold restores;
+live brokered reads; owner MCP writes; live OAuth/ChatGPT; signed DevCoveer
+three-process process-kill/reboot evidence; implementation PR merge; and deployment
+of its merge commit. Public DNS/TLS and the private edge tunnel are provisioned,
+but the MCP/OAuth application backends are not.
 
 Region Talk remains paused and production publication remains disabled.

@@ -1,10 +1,10 @@
 {
   "schema_version": "my-data-hub-operational-mvp-acceptance.v1",
   "verdict": "MY_DATA_HUB_OPERATIONAL_MVP_BLOCKED",
-  "evaluated_source_commit": "a7524eb39b20dfa43c0216641df635fab1d268fe",
+  "evaluated_source_commit": "84303d5358b4719b8c2c53db77c34e12bb737efa",
   "architecture_source_sha256": "c7efb28231223caa6fd02fcc001a38e0f16bcc3fa4c4cd53e744721b2eac0852",
-  "completed_at": "2026-08-11T06:47:35Z",
-  "summary": "Code and disposable integration gates pass, but two implementation gates and real Kaggle, import, embedding and deployment acceptance remain incomplete.",
+  "completed_at": "2026-08-11T08:30:00Z",
+  "summary": "Implementation and disposable gates are complete and the public TLS edge is provisioned, but real Kaggle runs, canonical import/embeddings, owner OAuth configuration, merged deployment and live recovery acceptance remain blocked.",
   "counts": {
     "real_kaggle_run_ids": 0,
     "ydb_bloggers_observed": 266,
@@ -21,7 +21,7 @@
     {
       "name": "code_and_disposable_integration",
       "outcome": "PASS",
-      "evidence": "656 tests passed with one opt-in disposable PostgreSQL test skipped; repository validator 3085/0"
+      "evidence": "Repository validator 3181/0 and focused embedding/control/post-deploy suites pass; final exact-head full gates follow this receipt update"
     },
     {
       "name": "readonly_ydb_inventory",
@@ -31,49 +31,59 @@
     {
       "name": "real_kaggle_run_matrix",
       "outcome": "BLOCKED",
-      "evidence": "No qualifying Notebook run IDs; implemented 16-run driver is deliberately platform-smoke-only and exits 78"
+      "evidence": "Exact 24-scenario runner and trusted driver are implemented, but no qualifying Notebook run identity or scenario PASS exists"
     },
     {
       "name": "bounded_blogger_import",
       "outcome": "BLOCKED",
-      "evidence": "Production command and in-master transaction/checkpoint/restore contract exist; no real import executed"
+      "evidence": "Production in-master transaction/quarantine/checkpoint/restore contract exists; no real import executed"
     },
     {
       "name": "embedding_coverage",
       "outcome": "BLOCKED",
-      "evidence": "Fail-closed closure command exists, but production control/MCP vector interfaces and real corpus runs are absent"
+      "evidence": "ACTIVE-master E5/BGE dispatch, transactional import, query cache and vector MCP path exist; no real corpus execution or coverage receipt"
     },
     {
-      "name": "public_mcp_deployment",
+      "name": "public_tls_edge",
+      "outcome": "PASS",
+      "evidence": "Canonical DNS, hostname-valid TLS, private gateway, restricted tunnel and gateway reboot recovery observed"
+    },
+    {
+      "name": "public_mcp_oauth_deployment",
       "outcome": "BLOCKED",
-      "evidence": "DNS, TLS, OAuth issuer, signed host evidence and reboot acceptance absent"
+      "evidence": "MCP/OAuth backends return 502; owner OAuth configuration, merged three-process install and signed DevCoveer reboot receipt are absent"
     }
   ],
   "blockers": [
     {
       "code": "KAGGLE_MODERN_API_TOKEN_REQUIRED",
-      "missing": "Modern Kaggle OAuth token required for exact private Notebook source/status/output",
-      "closure_proof": "Run .venv/bin/kaggle auth login locally, then the private notebook canary; never commit or paste the token"
+      "missing": "Modern Kaggle OAuth token required for exact private Notebook source/status/output and all live master/worker operations",
+      "closure_proof": "Run .venv/bin/kaggle auth login locally, then python scripts/provider/operational_kaggle_matrix.py preflight; never commit or paste the token"
     },
     {
-      "code": "REAL_KAGGLE_OPERATIONAL_MATRIX_UNIMPLEMENTED",
-      "missing": "Mandatory >=15-run master/callback/checkpoint/import/embedding/fault/soak scenario matrix; current 16-run driver is platform smoke only",
-      "closure_proof": "Implement schema-validated operational scenarios before running scripts/provider/real_kaggle_matrix.py matrix; SMOKE_PASS/78 is not acceptance"
+      "code": "REAL_KAGGLE_OPERATIONAL_MATRIX_NOT_EXECUTED",
+      "missing": "All 24 live master/callback/checkpoint/import/embedding/fault/soak scenarios and at least 15 exact provider run identities",
+      "closure_proof": "After installing the modern token and live control stack, run the exact command in docs/operations/operational-kaggle-matrix.md and require a schema-valid PASS receipt"
     },
     {
       "code": "BLOGGER_IMPORT_NOT_EXECUTED",
-      "missing": "Transactional import of the 266-row bounded YDB snapshot into an ACTIVE master plus verified restore",
-      "closure_proof": "After modern token and live control/MCP deployment, run scripts/bloggers/run_final_closure.py run with exact project/snapshot/source inputs and require a schema-valid DURABLE_COMPLETE receipt"
+      "missing": "Transactional import of the observed 266-row YDB snapshot into an ACTIVE master plus verified checkpoint, cold restore and MCP accounting",
+      "closure_proof": "After live master/control deployment, run scripts/bloggers/run_final_closure.py as documented in docs/operations/final-blogger-closure.md and require DURABLE_COMPLETE"
     },
     {
-      "code": "EMBEDDING_PRODUCTION_INTERFACES_MISSING",
-      "missing": "Production embedding request/status consumer and vector-enabled MCP capability; real E5/BGE corpus execution remains impossible even with credentials",
-      "closure_proof": "Implement the active-master control/MCP interfaces, then run scripts/embeddings/run_final_embedding_closure.py run and require 266/266 coverage for both pinned models plus verified restore"
+      "code": "EMBEDDING_LIVE_EXECUTION_NOT_RUN",
+      "missing": "Real pinned E5 and BGE-M3 corpus workers, 266/266 transactional coverage, verified checkpoint/cold restore and hybrid MCP proof",
+      "closure_proof": "After a DURABLE_COMPLETE blogger receipt, run scripts/embeddings/run_final_embedding_closure.py as documented in docs/operations/final-embedding-closure.md and require DURABLE_COMPLETE"
     },
     {
-      "code": "PUBLIC_EDGE_NOT_DEPLOYED",
-      "missing": "Merge-commit control/MCP/OAuth deployment, DNS/TLS, signed host receipt and reboot proof",
-      "closure_proof": "Complete the merge-bound deployment and three-stage procedure in docs/operations/deployment-evidence.md"
+      "code": "OWNER_OIDC_CONFIGURATION_REQUIRED",
+      "missing": "Owner OIDC client configuration and protected runtime secrets for the public OAuth authorization server and MCP reader/operator profiles",
+      "closure_proof": "Provision the exact owner OIDC/client and GitHub devstand secrets listed in docs/operations/devstand-deployment.md, then run the trusted post-deploy workflow"
+    },
+    {
+      "code": "MERGED_APPLICATION_DEPLOYMENT_NOT_EXECUTED",
+      "missing": "Merge-commit three-process control/MCP/OAuth install plus signed DevCoveer process-kill, reboot, cold-start and read acceptance",
+      "closure_proof": "Merge the exact reviewed PR, install only that merge commit, then complete docs/operations/deployment-evidence.md and the trusted post-deploy workflow"
     }
   ]
 }
