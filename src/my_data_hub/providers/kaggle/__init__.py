@@ -45,6 +45,7 @@ from .contracts import (
     TaskResourceClaim,
     UnauthenticatedDatasetProbe,
 )
+from .control_journal import ControlLedgerKaggleJournal
 from .provenance import DonorCompatibilityPin, compatibility_inventory
 from .retry import BoundedRetry, ClassifiedFailure, RetryPolicy, classify_failure, parse_retry_after
 
@@ -56,6 +57,7 @@ __all__ = [
     "BoundedRetry",
     "CanaryCleanupReceipt",
     "ClassifiedFailure",
+    "ControlLedgerKaggleJournal",
     "DatasetCanaryReceipt",
     "DatasetMutationResult",
     "DonorCompatibilityPin",

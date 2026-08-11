@@ -825,6 +825,93 @@ class ControlLedger:
                 ),
             )
 
+    def persist_provider_effect_intent(self, payload: Mapping[str, Any]) -> None:
+        """Persist the exact provider intent before any external mutation."""
+
+        intent_json = _safe_json(payload)
+        required = {
+            "effect_id", "operation_id", "idempotency_key", "task_id",
+            "action", "provider_ref", "request_sha256",
+        }
+        if not required.issubset(payload):
+            raise ValueError("provider effect intent is missing durable identity fields")
+        with self._transaction() as connection:
+            try:
+                connection.execute(
+                    "INSERT INTO provider_effect_intents(effect_id,operation_id,idempotency_key,task_id,action,"
+                    "provider_ref,request_sha256,intent_json,recorded_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        str(payload["effect_id"]), str(payload["operation_id"]),
+                        str(payload["idempotency_key"]), str(payload["task_id"]),
+                        str(payload["action"]), str(payload["provider_ref"]),
+                        str(payload["request_sha256"]), intent_json,
+                        _format_time(self.clock.now()),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                row = connection.execute(
+                    "SELECT intent_json FROM provider_effect_intents WHERE effect_id=? OR idempotency_key=?",
+                    (str(payload["effect_id"]), str(payload["idempotency_key"])),
+                ).fetchone()
+                if row is None or row["intent_json"] != intent_json:
+                    raise IdempotencyConflict("provider effect identity was reused for a different intent") from None
+
+    def persist_provider_effect_receipt(self, effect_id: str, payload: Mapping[str, Any]) -> None:
+        receipt_json = _safe_json(payload)
+        receipt_sha256 = hashlib.sha256(receipt_json.encode()).hexdigest()
+        with self._transaction() as connection:
+            if connection.execute(
+                "SELECT 1 FROM provider_effect_intents WHERE effect_id=?", (effect_id,)
+            ).fetchone() is None:
+                raise StaleRuntimeEvent("provider receipt has no persist-before-effect intent")
+            rows = connection.execute(
+                "SELECT receipt_sha256 FROM provider_effect_receipts WHERE effect_id=?", (effect_id,)
+            ).fetchall()
+            if rows and all(row["receipt_sha256"] != receipt_sha256 for row in rows):
+                raise IdempotencyConflict("provider effect already has a different receipt")
+            connection.execute(
+                "INSERT OR IGNORE INTO provider_effect_receipts(effect_id,receipt_json,receipt_sha256,recorded_at) "
+                "VALUES (?,?,?,?)",
+                (effect_id, receipt_json, receipt_sha256, _format_time(self.clock.now())),
+            )
+
+    def persist_provider_resource_claim(self, payload: Mapping[str, Any]) -> None:
+        claim_json = _safe_json(payload)
+        required = {
+            "claim_sha256", "task_id", "effect_id", "provider_ref", "kind",
+            "control_class", "disposable", "provider_version",
+        }
+        if not required.issubset(payload):
+            raise ValueError("provider resource claim is missing durable identity fields")
+        with self._transaction() as connection:
+            try:
+                connection.execute(
+                    "INSERT INTO provider_resource_claims(claim_sha256,task_id,effect_id,provider_ref,resource_kind,"
+                    "control_class,disposable,provider_version,claim_json,recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        str(payload["claim_sha256"]), str(payload["task_id"]), str(payload["effect_id"]),
+                        str(payload["provider_ref"]), str(payload["kind"]), str(payload["control_class"]),
+                        int(bool(payload["disposable"])), int(payload["provider_version"]), claim_json,
+                        _format_time(self.clock.now()),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                row = connection.execute(
+                    "SELECT claim_json FROM provider_resource_claims WHERE claim_sha256=?",
+                    (str(payload["claim_sha256"]),),
+                ).fetchone()
+                if row is None or row["claim_json"] != claim_json:
+                    raise IdempotencyConflict("provider claim hash was reused for different authority") from None
+
+    def assert_provider_resource_claim(self, claim_sha256: str, payload: Mapping[str, Any]) -> None:
+        claim_json = _safe_json(payload)
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT claim_json FROM provider_resource_claims WHERE claim_sha256=?", (claim_sha256,)
+            ).fetchone()
+        if row is None or not hmac.compare_digest(row["claim_json"], claim_json):
+            raise PermissionError("resource has no exact task-created claim in the durable control ledger")
+
     def acquire_resource_lease(
         self,
         *,
