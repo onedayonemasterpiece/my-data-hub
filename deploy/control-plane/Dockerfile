@@ -11,6 +11,7 @@ RUN useradd --create-home --uid 10001 mdh \
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
+COPY sql ./sql
 RUN pip install '.[kaggle]'
 
 USER mdh
