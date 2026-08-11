@@ -3258,7 +3258,9 @@ class ControlLedger:
         client_id: str,
         token_sha256: str,
         expires_at: datetime,
+        config: Mapping[str, Any],
         config_sha256: str,
+        expected_source_sha256: str,
     ) -> tuple[dict[str, Any], bool]:
         """Persist one owner-task checkpoint launch before provider mutation."""
 
@@ -3283,13 +3285,17 @@ class ControlLedger:
             or str(identity.get("task_run_id")) != values["task_run_id"]
             or identity.get("scope") != "acceptance:operate"
             or any(len(value) != 64 or any(c not in "0123456789abcdef" for c in value)
-                   for value in (request_sha256, token_sha256, config_sha256))
+                   for value in (
+                       request_sha256, token_sha256, config_sha256, expected_source_sha256
+                   ))
             or expires_at.tzinfo is None
         ):
             raise ValueError("checkpoint acceptance launch binding is invalid")
         request_json = _safe_json(request, max_bytes=64 * 1024)
+        config_json = _safe_json(config, max_bytes=64 * 1024)
         now = _format_time(self.clock.now())
         expiry = _format_time(expires_at)
+        creator_claim_until = expiry
         with self._transaction() as connection:
             existing = connection.execute(
                 "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=? OR idempotency_key=?",
@@ -3307,8 +3313,6 @@ class ControlLedger:
                     and row["request_json"] == request_json
                     and row["principal_id"] == principal_id
                     and row["client_id"] == client_id
-                    and row["token_sha256"] == token_sha256
-                    and row["config_sha256"] == config_sha256
                 )
                 if not exact:
                     raise IdempotencyConflict("checkpoint acceptance launch identity changed")
@@ -3317,11 +3321,13 @@ class ControlLedger:
                 "INSERT INTO checkpoint_acceptance_launches("
                 "request_id,scenario_id,operation_id,task_run_id,attempt_id,idempotency_key,"
                 "request_sha256,request_json,principal_id,client_id,token_sha256,expires_at,state,"
-                "config_sha256,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "creator_claim_until,config_sha256,config_json,expected_source_sha256,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (values["request_id"], request["scenario"], values["operation_id"],
                  values["task_run_id"], values["attempt_id"], request["idempotency_key"],
                  request_sha256, request_json, principal_id, client_id, token_sha256, expiry,
-                 "REQUESTED", config_sha256, now, now),
+                 "REQUESTED", creator_claim_until, config_sha256, config_json,
+                 expected_source_sha256, now, now),
             )
             row = connection.execute(
                 "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=?",
@@ -3337,6 +3343,42 @@ class ControlLedger:
                 (str(UUID(request_id)),),
             ).fetchone()
         return self._checkpoint_acceptance_launch_from_row(row) if row is not None else None
+
+    def attest_checkpoint_acceptance_source(
+        self, *, request_id: str, attempt_id: str, observed_source_sha256: str
+    ) -> dict[str, Any]:
+        if len(observed_source_sha256) != 64 or any(
+            value not in "0123456789abcdef" for value in observed_source_sha256
+        ):
+            raise ValueError("checkpoint acceptance source SHA-256 is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=? AND attempt_id=?",
+                (request_id, attempt_id),
+            ).fetchone()
+            if row is None or row["state"] not in {"REQUESTED", "RUNNING"}:
+                raise StaleRuntimeEvent("checkpoint acceptance source authority is stale")
+            state = (
+                "MATCHED"
+                if hmac.compare_digest(str(row["expected_source_sha256"]), observed_source_sha256)
+                else "MISMATCH"
+            )
+            if row["observed_source_sha256"] is not None and (
+                row["observed_source_sha256"] != observed_source_sha256
+                or row["source_attestation_state"] != state
+            ):
+                raise IdempotencyConflict("checkpoint acceptance source attestation changed")
+            connection.execute(
+                "UPDATE checkpoint_acceptance_launches SET observed_source_sha256=?,"
+                "source_attestation_state=?,updated_at=? WHERE request_id=?",
+                (observed_source_sha256, state, now, request_id),
+            )
+            current = connection.execute(
+                "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=?", (request_id,)
+            ).fetchone()
+            assert current is not None
+            return self._checkpoint_acceptance_launch_from_row(current)
 
     def authenticate_checkpoint_acceptance(
         self, *, request_id: str, attempt_id: str, token: str
@@ -3444,10 +3486,16 @@ class ControlLedger:
         counts: dict[str, int] = {}
         event_uids: list[str] = []
         receipt_sha256s: list[str] = []
+        runtime_source_sha256: str | None = None
         for row in rows:
             counts[str(row["event_type"])] = counts.get(str(row["event_type"]), 0) + 1
             event_uids.append(str(row["event_uid"]))
             receipt_sha256s.append(str(row["body_sha256"]))
+            if row["event_type"] == "runtime.started":
+                progress = json.loads(str(row["progress_json"]))
+                observed = progress.get("runtime_source_sha256")
+                if isinstance(observed, str):
+                    runtime_source_sha256 = observed
         latest = rows[-1]
         return {
             "latest_phase": latest["phase"],
@@ -3457,6 +3505,7 @@ class ControlLedger:
             "event_uids": event_uids,
             "event_receipt_sha256s": receipt_sha256s,
             "last_local_sequence": int(latest["local_sequence"]),
+            "runtime_source_sha256": runtime_source_sha256,
         }
 
     def record_checkpoint_acceptance_provider_run(
@@ -3470,6 +3519,8 @@ class ControlLedger:
             ).fetchone()
             if row is None:
                 raise KeyError(request_id)
+            if provider_run.get("source_sha256") != row["expected_source_sha256"]:
+                raise StaleRuntimeEvent("checkpoint provider run source differs from push intent")
             if row["provider_run_json"] is not None and row["provider_run_json"] != payload:
                 raise IdempotencyConflict("checkpoint acceptance provider run changed")
             connection.execute(
@@ -3580,6 +3631,7 @@ class ControlLedger:
     def _checkpoint_acceptance_launch_from_row(row: sqlite3.Row) -> dict[str, Any]:
         value = dict(row)
         value["request"] = json.loads(str(value.pop("request_json")))
+        value["config"] = json.loads(str(value.pop("config_json")))
         provider = value.pop("provider_run_json")
         status_dataset = value.pop("status_dataset_json")
         cleanup = value.pop("cleanup_receipt_json")
@@ -3733,6 +3785,22 @@ class ControlLedger:
             ).rowcount
             if changed != 1:
                 raise LeaseRejected("resource lease release is stale or fenced")
+
+    def release_resource_lease_exact(self, lease_id: str, holder_id: str, epoch: int) -> None:
+        """Idempotently release one already-bound owner-task lease."""
+
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT holder_id,epoch,released_at FROM resource_leases WHERE lease_id=?",
+                (lease_id,),
+            ).fetchone()
+            if row is None or row["holder_id"] != holder_id or int(row["epoch"]) != epoch:
+                raise LeaseRejected("resource lease release is stale or fenced")
+            if row["released_at"] is None:
+                connection.execute(
+                    "UPDATE resource_leases SET released_at=? WHERE lease_id=? AND released_at IS NULL",
+                    (_format_time(self.clock.now()), lease_id),
+                )
 
     def prune_runtime_events(
         self,

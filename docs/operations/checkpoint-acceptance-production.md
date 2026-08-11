@@ -121,14 +121,15 @@ token, Kaggle credential, PostgreSQL URL, checkpoint bytes or verifier bytes.
 The control process creates a unique private disposable status Dataset before
 the Notebook push. Its exact version contains only bounded `kaggle_run.json`
 (`run_id`, `attempt_id`, kind, Notebook, credential-free callback URL,
-one-time token and an empty fixed lease list) plus the fixed bootstrap helper.
+one-time token and the exact bounded Notebook resource lease) plus the fixed bootstrap helper.
 The ledger stores only the token hash and exact Dataset claim/hashes. The
 Notebook verifies both files, exports `MY_DATA_HUB_RUN_SECRET` locally and then
 uses the existing Bearer/header transport with redacted JSONL fallback. It
 never receives a manually provisioned callback root User Secret. The status
 Dataset is deleted through its exact disposable claim after a reconciled
 terminal run; ambiguous launch response retains it rather than risking deletion
-under an unknown live run.
+under an unknown live run. Control acquires that task/notebook lease before the
+push and idempotently releases the exact lease epoch only with cleanup.
 
 The fixed source adapts the canonical events-bot envelopes through
 `RuntimeClient`: stable `event_uid` values cover `kernel_started`,

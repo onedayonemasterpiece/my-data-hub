@@ -199,6 +199,8 @@ require_regular_file "$tls_ca_file" "master TLS CA"
   exit 2
 }
 [[ -d "$asset_dir" && ! -L "$asset_dir" ]] || { echo "master asset directory is required" >&2; exit 2; }
+python3 "$release/scripts/provider/verify_master_assets.py" \
+  --bundle "$asset_dir" --expected-commit "$commit" >/dev/null
 for env_file in "$provider_env" "$mcp_env" "$oauth_env"; do
   reject_data_plane_environment "$env_file" "$(basename "$env_file")"
 done
@@ -289,9 +291,9 @@ services:
   control-plane:
     environment:
       MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "true"
-      MY_DATA_HUB_CHECKPOINT_ACCEPTANCE_DEPLOYMENT_FILE: /run/mdh-acceptance/checkpoint-deployment.json
+      MY_DATA_HUB_CHECKPOINT_ACCEPTANCE_DEPLOYMENT_FILE: /run/mdh-checkpoint-acceptance/deployment.json
     volumes:
-      - "$checkpoint_acceptance_deployment:/run/mdh-acceptance/checkpoint-deployment.json:ro"
+      - "$checkpoint_acceptance_deployment:/run/mdh-checkpoint-acceptance/deployment.json:ro"
   remote-mcp:
     environment:
       MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "true"

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -111,15 +113,24 @@ def _request():
 
 
 class FakeAdapter:
-    def __init__(self, ledger: ControlLedger, *, lose_push: bool = False) -> None:
+    def __init__(
+        self, ledger: ControlLedger, *, lose_push: bool = False, lose_status: bool = False
+    ) -> None:
         self.ledger = ledger
         self.lose_push = lose_push
+        self.lose_status = lose_status
+        self.dataset_calls = 0
         self.push_calls = 0
         self.dataset_sources: tuple[str, ...] = ()
         self.status_files: dict[str, bytes] = {}
         self.source = b""
+        self.push_entered: threading.Event | None = None
+        self.push_release: threading.Event | None = None
 
     def create_private_dataset(self, *, intent, files, title, control_class, disposable):
+        self.dataset_calls += 1
+        if self.lose_status:
+            raise RuntimeError("simulated status-input crash")
         assert self.ledger.checkpoint_acceptance_launch(str(TASK)) is not None
         assert control_class is ControlClass.MCP_EXCHANGE and disposable is True
         self.status_files = dict(files)
@@ -157,10 +168,16 @@ class FakeAdapter:
         )
         return DatasetMutationResult(identity=identity, claim=claim, effect=receipt)
 
-    def push_private_notebook(self, *, intent, task_run_id, source, dataset_sources, **kwargs):
+    def push_private_notebook_pending_runtime_attestation(
+        self, *, intent, task_run_id, source, dataset_sources, **kwargs
+    ):
         self.push_calls += 1
         self.source = source
         self.dataset_sources = tuple(dataset_sources)
+        if self.push_entered is not None:
+            self.push_entered.set()
+        if self.push_release is not None:
+            assert self.push_release.wait(timeout=5)
         if self.lose_push:
             raise RuntimeError("simulated lost provider response")
         fingerprint = ProviderFingerprint(value="b" * 64)
@@ -220,7 +237,6 @@ def test_launcher_persists_then_attaches_exact_private_status_dataset(tmp_path: 
         ledger=ledger,
         adapter=adapter,  # type: ignore[arg-type]
         deployment=_deployment(),
-        control_token_root="control-owned-root-value-that-is-not-a-kaggle-secret",
     )
 
     result = launcher.launch_checkpoint_acceptance(_request())
@@ -233,14 +249,28 @@ def test_launcher_persists_then_attaches_exact_private_status_dataset(tmp_path: 
     status = json.loads(adapter.status_files["kaggle_run.json"])
     token = status["token"]
     assert status["run_id"] == str(TASK) and status["attempt_id"] == str(ATTEMPT)
-    assert status["resource_leases"] == []
+    assert len(status["resource_leases"]) == 1
+    assert status["resource_leases"][0]["resource_ref"] == "owner/checkpoint-evidence"
+    assert status["resource_leases"][0]["holder_id"] == str(TASK)
     assert token not in adapter.source.decode()
-    assert "control-owned-root-value" not in adapter.source.decode()
     assert "MDH_KAGGLE_USERNAME" in adapter.source.decode()
+    for marker in (
+        "kernel_started",
+        "preflight_ok",
+        "alive",
+        "report_written",
+        "resource_acquire",
+        "resource_release",
+        "kaggle_status_events.jsonl",
+        "/internal/acceptance/events",
+    ):
+        assert marker in adapter.source.decode()
     row = ledger.checkpoint_acceptance_launch(str(TASK))
     assert row is not None
     assert token not in json.dumps(row, sort_keys=True)
     assert row["token_sha256"] == hashlib.sha256(token.encode()).hexdigest()
+    assert result.status_input.resource_lease.resource_ref == "owner/checkpoint-evidence"
+    assert result.status_input.resource_lease.released is False
     assert ledger.authenticate_checkpoint_acceptance(
         request_id=str(TASK), attempt_id=str(ATTEMPT), token=token
     ) is not None
@@ -260,7 +290,6 @@ def test_lost_push_response_is_not_retried_or_status_input_deleted(tmp_path: Pat
         ledger=ledger,
         adapter=adapter,  # type: ignore[arg-type]
         deployment=_deployment(),
-        control_token_root="control-owned-root-value-that-is-not-a-kaggle-secret",
     )
     request = _request()
 
@@ -268,8 +297,92 @@ def test_lost_push_response_is_not_retried_or_status_input_deleted(tmp_path: Pat
         launcher.launch_checkpoint_acceptance(request)
     replay = launcher.launch_checkpoint_acceptance(request)
 
+    assert replay.state == "REQUESTED"
+    ledger.clock.advance(901)  # type: ignore[attr-defined]
+    replay = launcher.launch_checkpoint_acceptance(request)
+
     assert replay.state == "FAIL"
     assert replay.failure_code == "CHECKPOINT_PUSH_RESPONSE_AMBIGUOUS"
     assert adapter.push_calls == 1
     row = ledger.checkpoint_acceptance_launch(str(TASK))
     assert row is not None and row["cleanup_receipt"] is None
+
+
+def test_crash_after_launch_intent_never_regenerates_token_or_mutates(tmp_path: Path) -> None:
+    ledger = ControlLedger(tmp_path / "ledger.sqlite3", clock=DeterministicClock(NOW))
+    adapter = FakeAdapter(ledger, lose_status=True)
+    launcher = ControlCheckpointAcceptanceLauncher(
+        ledger=ledger,
+        adapter=adapter,  # type: ignore[arg-type]
+        deployment=_deployment(),
+    )
+    request = _request()
+
+    with pytest.raises(RuntimeError, match="status-input crash"):
+        launcher.launch_checkpoint_acceptance(request)
+    stored = ledger.checkpoint_acceptance_launch(str(TASK))
+    assert stored is not None and stored["status_dataset"] is None
+    token_hash = stored["token_sha256"]
+    assert launcher.launch_checkpoint_acceptance(request).state == "REQUESTED"
+    assert ledger.checkpoint_acceptance_launch(str(TASK))["token_sha256"] == token_hash  # type: ignore[index]
+    assert adapter.dataset_calls == 1
+    ledger.clock.advance(901)  # type: ignore[attr-defined]
+    terminal = launcher.launch_checkpoint_acceptance(request)
+    assert terminal.state == "FAIL"
+    assert terminal.failure_code == "CHECKPOINT_STATUS_INPUT_RESPONSE_AMBIGUOUS"
+    assert adapter.dataset_calls == 1
+
+
+def test_twenty_concurrent_exact_requests_create_one_status_input_and_one_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    ledger = ControlLedger(tmp_path / "ledger.sqlite3", clock=DeterministicClock(NOW))
+    adapter = FakeAdapter(ledger)
+    launcher = ControlCheckpointAcceptanceLauncher(
+        ledger=ledger,
+        adapter=adapter,  # type: ignore[arg-type]
+        deployment=_deployment(),
+    )
+    request = _request()
+    barrier = threading.Barrier(20)
+    counter = iter(range(20))
+
+    def candidate_token(_size: int) -> str:
+        value = next(counter)
+        barrier.wait(timeout=5)
+        return f"{value:064x}"
+
+    monkeypatch.setattr(
+        "my_data_hub.acceptance.checkpoint_launcher.secrets.token_hex", candidate_token
+    )
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        states = list(pool.map(lambda _: launcher.launch_checkpoint_acceptance(request).state, range(20)))
+
+    assert set(states) <= {"REQUESTED", "RUNNING"}
+    assert adapter.dataset_calls == 1
+    assert adapter.push_calls == 1
+
+
+def test_follower_does_not_terminalize_creator_between_status_record_and_push(
+    tmp_path: Path,
+) -> None:
+    ledger = ControlLedger(tmp_path / "ledger.sqlite3", clock=DeterministicClock(NOW))
+    adapter = FakeAdapter(ledger)
+    adapter.push_entered = threading.Event()
+    adapter.push_release = threading.Event()
+    launcher = ControlCheckpointAcceptanceLauncher(
+        ledger=ledger,
+        adapter=adapter,  # type: ignore[arg-type]
+        deployment=_deployment(),
+    )
+    request = _request()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        creator = pool.submit(launcher.launch_checkpoint_acceptance, request)
+        assert adapter.push_entered.wait(timeout=5)
+        follower = launcher.launch_checkpoint_acceptance(request)
+        assert follower.state == "REQUESTED"
+        adapter.push_release.set()
+        assert creator.result(timeout=5).state == "RUNNING"
+
+    assert adapter.dataset_calls == 1
+    assert adapter.push_calls == 1

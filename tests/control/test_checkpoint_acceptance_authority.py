@@ -89,7 +89,9 @@ def test_checkpoint_task_authority_is_exact_and_does_not_borrow_master_epoch(tmp
         client_id="operator",
         token_sha256=hashlib.sha256(TOKEN.encode()).hexdigest(),
         expires_at=NOW + timedelta(seconds=900),
+        config={"schema_version": "test-only"},
         config_sha256="6" * 64,
+        expected_source_sha256="8" * 64,
     )
     client = TestClient(app)
 
@@ -97,9 +99,9 @@ def test_checkpoint_task_authority_is_exact_and_does_not_borrow_master_epoch(tmp
     assert client.get(
         "/internal/checkpoints/postgres-master/head", headers=_headers(launch, "wrong-token")
     ).status_code == 401
-    head = client.get("/internal/checkpoints/postgres-master/head", headers=_headers(launch))
-    assert head.status_code == 200
-    assert head.json()["generation"] == 0
+    assert client.get(
+        "/internal/checkpoints/postgres-master/head", headers=_headers(launch)
+    ).status_code == 409
 
     event = {
         "schema": "content-runtime-event/v1",
@@ -118,7 +120,11 @@ def test_checkpoint_task_authority_is_exact_and_does_not_borrow_master_epoch(tmp
         "data": {
             "donor_event": "kernel_started",
             "donor_event_uid": f"{TASK}:kernel_started:0",
-            "progress": {"completed_steps": 0, "sequence": 0},
+            "progress": {
+                "completed_steps": 0,
+                "sequence": 0,
+                "runtime_source_sha256": "8" * 64,
+            },
             "donor_body_sha256": "7" * 64,
         },
         "artifact_refs": [],
@@ -142,6 +148,10 @@ def test_checkpoint_task_authority_is_exact_and_does_not_borrow_master_epoch(tmp
     assert observation is not None
     assert observation["latest_phase"] == "bootstrap"
     assert observation["event_counts"] == {"runtime.started": 1}
+    assert observation["runtime_source_sha256"] == "8" * 64
+    head = client.get("/internal/checkpoints/postgres-master/head", headers=_headers(launch))
+    assert head.status_code == 200
+    assert head.json()["generation"] == 0
 
     intent = ProviderEffectIntent.create(
         operation_id=launch.operation_id,
@@ -172,6 +182,58 @@ def test_checkpoint_task_authority_is_exact_and_does_not_borrow_master_epoch(tmp
         json={"intent": forbidden.model_dump(mode="json")},
     )
     assert denied.status_code in {403, 422}
+
+
+def test_checkpoint_source_mismatch_is_persisted_and_fences_authority(tmp_path) -> None:
+    app = create_app(ControlPlaneSettings(ledger_path=tmp_path / "control.sqlite3"))
+    ledger = app.state.control_ledger
+    launch = _launch()
+    ledger.ensure_checkpoint_acceptance_launch(
+        request=launch.model_dump(mode="json"),
+        request_sha256=launch.request_sha256,
+        principal_id="owner",
+        client_id="operator",
+        token_sha256=hashlib.sha256(TOKEN.encode()).hexdigest(),
+        expires_at=NOW + timedelta(seconds=900),
+        config={"schema_version": "test-only"},
+        config_sha256="6" * 64,
+        expected_source_sha256="8" * 64,
+    )
+    event = {
+        "schema": "content-runtime-event/v1",
+        "event_id": "44444444-4444-4444-8444-444444444444",
+        "run_id": str(TASK),
+        "attempt_id": str(launch.control_identity.attempt_id),
+        "service_instance_id": str(TASK),
+        "source_identity": launch.evidence_notebook_ref,
+        "source_version": launch.source_revision,
+        "event_type": "runtime.started",
+        "emitted_at": NOW.isoformat(),
+        "local_sequence": 1,
+        "epoch": 1,
+        "phase": "bootstrap",
+        "status": "running",
+        "data": {
+            "donor_event": "kernel_started",
+            "donor_event_uid": f"{TASK}:kernel_started:mismatch",
+            "progress": {"runtime_source_sha256": "9" * 64},
+            "donor_body_sha256": "7" * 64,
+        },
+        "artifact_refs": [],
+        "metrics": {},
+    }
+    client = TestClient(app)
+
+    assert client.post(
+        "/internal/acceptance/events", headers=_headers(launch), json=event
+    ).status_code == 200
+    stored = ledger.checkpoint_acceptance_launch(str(TASK))
+    assert stored is not None
+    assert stored["observed_source_sha256"] == "9" * 64
+    assert stored["source_attestation_state"] == "MISMATCH"
+    assert client.get(
+        "/internal/checkpoints/postgres-master/head", headers=_headers(launch)
+    ).status_code == 409
 
 
 def test_enabled_app_assembles_checkpoint_launcher_without_runtime_impersonation(

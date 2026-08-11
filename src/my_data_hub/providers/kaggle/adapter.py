@@ -824,7 +824,7 @@ class KaggleProviderAdapter:
             pending_runtime_attestation=False,
         )
 
-    def push_private_master_notebook_pending_attestation(
+    def push_private_notebook_pending_runtime_attestation(
         self,
         *,
         intent: ProviderEffectIntent,
@@ -840,11 +840,12 @@ class KaggleProviderAdapter:
         enable_internet: bool = False,
         timeout_seconds: int | None = None,
     ) -> NotebookMutationResult:
-        """Persist an exact legacy push response pending runtime source proof.
+        """Persist an exact protected push pending authenticated runtime source proof.
 
-        This is deliberately master-only: ordinary workers retain independent
-        GetKernel source readback.  The caller must gate ACTIVE authority on
-        the authenticated runtime-computed source digest.
+        This is deliberately restricted to permanent orchestrator-protected
+        runtimes. Ordinary workers retain independent GetKernel source
+        readback. The caller must gate all effect authority on the
+        authenticated runtime-computed source digest.
         """
 
         if control_class is not ControlClass.ORCHESTRATOR_PROTECTED or disposable:
@@ -863,6 +864,37 @@ class KaggleProviderAdapter:
             enable_internet=enable_internet,
             timeout_seconds=timeout_seconds,
             pending_runtime_attestation=True,
+        )
+
+    def push_private_master_notebook_pending_attestation(
+        self,
+        *,
+        intent: ProviderEffectIntent,
+        task_run_id: UUID,
+        source: bytes,
+        title: str,
+        code_file: str,
+        kernel_type: str,
+        language: str,
+        control_class: ControlClass,
+        disposable: bool,
+        dataset_sources: Sequence[str] = (),
+        enable_internet: bool = False,
+        timeout_seconds: int | None = None,
+    ) -> NotebookMutationResult:
+        return self.push_private_notebook_pending_runtime_attestation(
+            intent=intent,
+            task_run_id=task_run_id,
+            source=source,
+            title=title,
+            code_file=code_file,
+            kernel_type=kernel_type,
+            language=language,
+            control_class=control_class,
+            disposable=disposable,
+            dataset_sources=dataset_sources,
+            enable_internet=enable_internet,
+            timeout_seconds=timeout_seconds,
         )
 
     def _push_private_notebook(

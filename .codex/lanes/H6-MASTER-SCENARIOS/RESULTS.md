@@ -123,6 +123,9 @@ protected pre-STOPPED context capture is the remaining internal assembly gap.
   progress counters, with exact-body duplicate replay/tamper rejection and a
   bounded status projection. Provider COMPLETE alone cannot bypass this event
   evidence;
+- the shared evidence Notebook slug is serialized by one exact task resource
+  lease included in the status input; terminal cleanup releases only its bound
+  lease ID/holder/epoch, while an ambiguous launch safely ages out;
 - only provider-side checkpoint API access may use reviewed User Secret names,
   with exactly one access-token name or a complete legacy username/key name
   pair. Values never enter source, Dataset metadata, callbacks, logs or receipts;

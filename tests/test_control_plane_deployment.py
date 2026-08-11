@@ -124,6 +124,8 @@ def test_install_requires_private_split_inputs_without_static_master_credentials
     assert "require_private_file \"$oauth_env\"" in source
     assert "require_private_file \"$oauth_key\"" in source
     assert "require_regular_file \"$oauth_overlap_jwks\"" in source
+    assert 'verify_master_assets.py"' in source
+    assert '--bundle "$asset_dir" --expected-commit "$commit"' in source
     assert "reject_data_plane_environment" in source
     assert "external DNS" not in source
     assert "yc " not in source.casefold()
@@ -177,7 +179,7 @@ def test_acceptance_scenarios_are_owner_opt_in_and_use_provider_status_input() -
     assert "I_ACKNOWLEDGE_PROTECTED_ACCEPTANCE_EFFECTS" in source
     assert "acceptance scenarios require operator install" in source
     assert 'MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "true"' in source
-    assert "/run/mdh-acceptance/checkpoint-deployment.json:ro" in source
+    assert "/run/mdh-checkpoint-acceptance/deployment.json:ro" in source
     assert "acceptance:operate" in source
     assert '"runtime_root_secret_name" in value' in source
     assert "callback roots may not be provisioned as Kaggle User Secrets" in source

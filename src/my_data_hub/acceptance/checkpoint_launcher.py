@@ -13,10 +13,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -50,6 +51,7 @@ from .scenario_operator import (
     CheckpointAcceptanceLaunchStatus,
     CheckpointDatasetInputClaim,
     CheckpointProviderRunOutput,
+    CheckpointResourceLeaseObservation,
     CheckpointRuntimeObservation,
     CheckpointStatusDatasetObservation,
     CheckpointVerifierInputClaim,
@@ -92,17 +94,6 @@ _STATUS_HELPER = (
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
-
-
-def derive_checkpoint_acceptance_secret(root: str, request_id: UUID, attempt_id: UUID) -> str:
-    """Derive an attempt token inside control; the raw token is provider-input only."""
-
-    if len(root) < 24:
-        raise ValueError("checkpoint acceptance root secret is too short")
-    message = f"my-data-hub-checkpoint-acceptance-v1:{request_id}:{attempt_id}".encode()
-    import hmac
-
-    return hmac.new(root.encode(), message, hashlib.sha256).hexdigest()
 
 
 class CheckpointRuntimeInput(BaseModel):
@@ -174,16 +165,49 @@ class ControlCheckpointAcceptanceLauncher:
     ledger: ControlLedger
     adapter: KaggleProviderAdapter
     deployment: CheckpointAcceptanceDeployment
-    control_token_root: str
 
     def launch_checkpoint_acceptance(
         self, request: CheckpointAcceptanceLaunchRequest
     ) -> CheckpointAcceptanceLaunchStatus:
-        token = derive_checkpoint_acceptance_secret(
-            self.control_token_root, request.request_id, request.control_identity.attempt_id
-        )
+        existing = self.ledger.checkpoint_acceptance_launch(str(request.request_id))
+        if existing is not None:
+            if (
+                existing["request_sha256"] != request.request_sha256
+                or existing["principal_id"] != request.control_identity.principal_id
+                or existing["client_id"] != request.control_identity.client_id
+            ):
+                raise ValueError("checkpoint acceptance request identity changed")
+            config = CheckpointAcceptanceProductionConfig.model_validate(existing["config"])
+            if existing["status_dataset"] is None:
+                if self._creator_claim_fresh(existing):
+                    return self._status(request, config, existing, state="REQUESTED")
+                return self._terminal(
+                    self._status(
+                        request,
+                        config,
+                        existing,
+                        state="FAIL",
+                        failure="CHECKPOINT_STATUS_INPUT_RESPONSE_AMBIGUOUS",
+                    )
+                )
+            if existing["provider_run"] is None:
+                if self._creator_claim_fresh(existing):
+                    return self._status(request, config, existing, state="REQUESTED")
+                return self._terminal(
+                    self._status(
+                        request,
+                        config,
+                        existing,
+                        state="FAIL",
+                        failure="CHECKPOINT_PUSH_RESPONSE_AMBIGUOUS",
+                    )
+                )
+            return self._reconcile(existing, request, config)
+
+        token = secrets.token_hex(32)
         status_files = self._status_files(request, token)
         config = self._config(request, status_files)
+        source = self._render_source(request, config)
         stored, created = self.ledger.ensure_checkpoint_acceptance_launch(
             request=request.model_dump(mode="json"),
             request_sha256=request.request_sha256,
@@ -191,21 +215,49 @@ class ControlCheckpointAcceptanceLauncher:
             client_id=request.control_identity.client_id,
             token_sha256=_sha256(token.encode()),
             expires_at=request.started_at + timedelta(seconds=_AUTHORITY_TTL_SECONDS),
+            config=config.model_dump(mode="json"),
             config_sha256=config.config_sha256,
+            expected_source_sha256=_sha256(source),
         )
+        if not created:
+            config = CheckpointAcceptanceProductionConfig.model_validate(stored["config"])
+            if stored["status_dataset"] is None:
+                if self._creator_claim_fresh(stored):
+                    return self._status(request, config, stored, state="REQUESTED")
+                return self._terminal(
+                    self._status(
+                        request,
+                        config,
+                        stored,
+                        state="FAIL",
+                        failure="CHECKPOINT_STATUS_INPUT_RESPONSE_AMBIGUOUS",
+                    )
+                )
         if stored["provider_run"] is not None:
             return self._reconcile(stored, request, config)
         if not created and stored["status_dataset"] is not None:
             # A persisted status input with no run may be a lost push response.
             # Never repeat or delete an input that an unknown live run may use.
-            return self._status(
-                request,
-                config,
-                stored,
-                state="FAIL",
-                failure="CHECKPOINT_PUSH_RESPONSE_AMBIGUOUS",
+            if self._creator_claim_fresh(stored):
+                return self._status(request, config, stored, state="REQUESTED")
+            return self._terminal(
+                self._status(
+                    request,
+                    config,
+                    stored,
+                    state="FAIL",
+                    failure="CHECKPOINT_PUSH_RESPONSE_AMBIGUOUS",
+                )
             )
         if stored["status_dataset"] is None:
+            lease_payload = self._resource_lease_payload(request)
+            lease = self.ledger.acquire_resource_lease(
+                lease_id=lease_payload["lease_id"],
+                resource_kind=lease_payload["resource_kind"],
+                resource_ref=lease_payload["resource_ref"],
+                holder_id=lease_payload["holder_id"],
+                lease_until=request.started_at + timedelta(seconds=_AUTHORITY_TTL_SECONDS),
+            )
             status_result = self.adapter.create_private_dataset(
                 intent=self._status_create_intent(request, status_files),
                 files=status_files,
@@ -224,10 +276,13 @@ class ControlCheckpointAcceptanceLauncher:
                     "content_tree_sha256": mapping_sha256(status_files),
                     "status_config_sha256": _sha256(status_files["kaggle_run.json"]),
                     "status_helper_sha256": _sha256(_STATUS_HELPER),
+                    "resource_lease": {
+                        **lease_payload,
+                        "epoch": lease.epoch,
+                    },
                 },
             )
-        source = self._render_source(request, config)
-        result = self.adapter.push_private_notebook(
+        result = self.adapter.push_private_notebook_pending_runtime_attestation(
             intent=self._notebook_intent(request, source),
             task_run_id=request.task_run_id,
             source=source,
@@ -255,10 +310,15 @@ class ControlCheckpointAcceptanceLauncher:
         if stored is None:
             return None
         request = CheckpointAcceptanceLaunchRequest.model_validate(stored["request"])
-        token = derive_checkpoint_acceptance_secret(
-            self.control_token_root, request.request_id, request.control_identity.attempt_id
+        return self._reconcile(
+            stored,
+            request,
+            CheckpointAcceptanceProductionConfig.model_validate(stored["config"]),
         )
-        return self._reconcile(stored, request, self._config(request, self._status_files(request, token)))
+
+    def _creator_claim_fresh(self, stored: Mapping[str, Any]) -> bool:
+        value = datetime.fromisoformat(str(stored["creator_claim_until"]).replace("Z", "+00:00"))
+        return value > self.ledger.clock.now()
 
     def _reconcile(
         self,
@@ -268,8 +328,40 @@ class ControlCheckpointAcceptanceLauncher:
     ) -> CheckpointAcceptanceLaunchStatus:
         if stored["result"] is not None:
             return CheckpointAcceptanceLaunchStatus.model_validate(stored["result"])
+        if stored["source_attestation_state"] == "MISMATCH":
+            return self._terminal(
+                self._status(
+                    request,
+                    config,
+                    stored,
+                    state="FAIL",
+                    failure="CHECKPOINT_RUNTIME_SOURCE_MISMATCH",
+                )
+            )
         run_payload = stored["provider_run"]
         if run_payload is None:
+            if stored["status_dataset"] is not None:
+                if self._creator_claim_fresh(stored):
+                    return self._status(request, config, stored, state="REQUESTED")
+                return self._terminal(
+                    self._status(
+                        request,
+                        config,
+                        stored,
+                        state="FAIL",
+                        failure="CHECKPOINT_PUSH_RESPONSE_AMBIGUOUS",
+                    )
+                )
+            if not self._creator_claim_fresh(stored):
+                return self._terminal(
+                    self._status(
+                        request,
+                        config,
+                        stored,
+                        state="FAIL",
+                        failure="CHECKPOINT_STATUS_INPUT_RESPONSE_AMBIGUOUS",
+                    )
+                )
             return self._status(request, config, stored, state="REQUESTED")
         run = KaggleKernelRunIdentity.model_validate(run_payload)
         status = self.adapter.read_run_status(run)
@@ -287,7 +379,12 @@ class ControlCheckpointAcceptanceLauncher:
                 )
             )
         runtime_observation = self._runtime_observation(request)
-        if runtime_observation is None or not runtime_observation.terminal_complete:
+        if (
+            stored["source_attestation_state"] != "MATCHED"
+            or runtime_observation is None
+            or runtime_observation.runtime_source_sha256 != run.source_sha256
+            or not runtime_observation.terminal_complete
+        ):
             return self._status(request, config, stored, state="RUNNING")
         with tempfile.TemporaryDirectory(prefix="mdh-checkpoint-acceptance-output-") as raw:
             destination = Path(raw)
@@ -376,6 +473,12 @@ class ControlCheckpointAcceptanceLauncher:
             ),
             claim=claim,
         )
+        lease = status_payload.get("resource_lease")
+        if not isinstance(lease, Mapping):
+            raise ValueError("checkpoint status Dataset lacks its resource lease")
+        self.ledger.release_resource_lease_exact(
+            str(lease["lease_id"]), str(lease["holder_id"]), int(lease["epoch"])
+        )
         return self.ledger.record_checkpoint_acceptance_cleanup(
             request_id=str(request.request_id),
             cleanup_receipt=receipt.model_dump(mode="json"),
@@ -431,6 +534,9 @@ class ControlCheckpointAcceptanceLauncher:
         if isinstance(cleanup, Mapping):
             ProviderEffectReceipt.model_validate(cleanup)
             cleanup_sha = _sha256(canonical_json_bytes(cleanup))
+        lease = value.get("resource_lease")
+        if not isinstance(lease, Mapping):
+            raise ValueError("checkpoint status Dataset lacks its resource lease")
         return CheckpointStatusDatasetObservation(
             provider_ref=value["provider_ref"],
             exact_version_ref=value["exact_version_ref"],
@@ -440,10 +546,25 @@ class ControlCheckpointAcceptanceLauncher:
             status_helper_sha256=value["status_helper_sha256"],
             cleanup_receipt_sha256=cleanup_sha,
             cleaned=cleanup_sha is not None,
+            resource_lease=CheckpointResourceLeaseObservation(
+                **lease,
+                released=cleanup_sha is not None,
+            ),
         )
 
     def _status_dataset_ref(self, request: CheckpointAcceptanceLaunchRequest) -> str:
         return f"{request.provider_owner}/mdh-acc-status-{request.request_id.hex}"
+
+    def _resource_lease_payload(self, request: CheckpointAcceptanceLaunchRequest) -> dict[str, str]:
+        return {
+            "lease_id": str(uuid5(NAMESPACE_URL, f"checkpoint-evidence-lease:{request.operation_id}")),
+            "resource_kind": "kaggle_notebook",
+            "resource_ref": request.evidence_notebook_ref,
+            "holder_id": str(request.task_run_id),
+            "lease_until": (
+                request.started_at + timedelta(seconds=_AUTHORITY_TTL_SECONDS)
+            ).isoformat(),
+        }
 
     def _status_files(self, request: CheckpointAcceptanceLaunchRequest, token: str) -> dict[str, bytes]:
         value = {
@@ -454,7 +575,7 @@ class ControlCheckpointAcceptanceLauncher:
             "notebook": request.evidence_notebook_ref,
             "callback_url": self.deployment.control_base_url,
             "token": token,
-            "resource_leases": [],
+            "resource_leases": [self._resource_lease_payload(request)],
         }
         encoded = canonical_json_bytes(value)
         if len(encoded) > _MAX_STATUS_BYTES:
@@ -574,6 +695,7 @@ class ControlCheckpointAcceptanceLauncher:
             f"TASK_RUN_ID = {str(request.task_run_id)!r}",
             f"ATTEMPT_ID = {str(request.control_identity.attempt_id)!r}",
             f"NOTEBOOK_REF = {request.evidence_notebook_ref!r}",
+            "EXECUTED_SOURCE_SHA256 = hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest()",
             f"status_root = pathlib.Path({status_mount!r})",
             "status_config = status_root / 'kaggle_run.json'",
             "status_helper = status_root / 'kaggle_status_client.py'",
@@ -626,7 +748,8 @@ class ControlCheckpointAcceptanceLauncher:
             "        'run_id': TASK_RUN_ID, 'event': name,",
             "        'event_uid': f'{TASK_RUN_ID}:{name}:{progress.get(\"sequence\", 0)}',",
             "        'phase': phase, 'status': state, 'progress': progress})",
-            "emit('kernel_started', 'bootstrap', 'running', {'sequence': 0, 'completed_steps': 0})",
+            "emit('kernel_started', 'bootstrap', 'running', {'sequence': 0, 'completed_steps': 0,",
+            "     'runtime_source_sha256': EXECUTED_SOURCE_SHA256})",
             "template = pathlib.Path('/kaggle/working/checkpoint-template')",
             f"shutil.copytree(pathlib.Path({template_mount!r}), template, dirs_exist_ok=False)",
         ]
@@ -651,7 +774,7 @@ class ControlCheckpointAcceptanceLauncher:
                     "status_client.emit_donor_envelope({'run_id': TASK_RUN_ID, "
                     "'event': 'resource_acquire', 'event_uid': f'{TASK_RUN_ID}:resource_acquire:0', "
                     "'phase': 'execute', 'status': 'acquired', 'progress': {'sequence': 0}, "
-                    "'resource': {'kind': 'checkpoint_acceptance', 'ref': NOTEBOOK_REF}})"
+                    "'resource': status['resource_leases'][0]})"
                 ),
                 "started = time.monotonic()",
                 (
@@ -682,7 +805,7 @@ class ControlCheckpointAcceptanceLauncher:
                     "'event': 'resource_release', 'event_uid': f'{TASK_RUN_ID}:resource_release:0', "
                     "'phase': 'cleanup', 'status': 'released', "
                     "'progress': {'sequence': 0, 'completed_steps': 3}, "
-                    "'resource': {'kind': 'checkpoint_acceptance', 'ref': NOTEBOOK_REF}})"
+                    "'resource': status['resource_leases'][0]})"
                 ),
                 "emit('terminal', 'complete', 'completed', {'sequence': heartbeat + 2, "
                 "     'heartbeat_count': heartbeat, 'completed_steps': 4, 'result_sha256': result_sha})",

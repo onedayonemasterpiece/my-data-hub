@@ -366,7 +366,6 @@ def create_app(
                 ledger=control_ledger,
                 adapter=provider_adapter,
                 deployment=deployment,
-                control_token_root=master_runtime.settings.runtime_token_root,
             )
             checkpoint_acceptance_catalog = deployment.catalog
         if (
@@ -532,6 +531,7 @@ def create_app(
         master_instance_id: str | None,
         epoch: str | None,
         allowed_states: frozenset[str] = frozenset({"ACTIVE", "DRAINING", "CHECKPOINTING"}),
+        require_acceptance_source_attestation: bool = True,
     ) -> _ProviderOperationAuthority:
         acceptance_request = request.headers.get("X-MDH-Acceptance-Request-ID")
         acceptance_task = request.headers.get("X-MDH-Acceptance-Task-Run-ID")
@@ -557,6 +557,13 @@ def create_app(
             )
             if launch is None or launch["task_run_id"] != exact_task:
                 raise HTTPException(status_code=401, detail={"code": "acceptance_token_invalid"})
+            if (
+                require_acceptance_source_attestation
+                and launch["source_attestation_state"] != "MATCHED"
+            ):
+                raise HTTPException(
+                    status_code=409, detail={"code": "acceptance_source_attestation_required"}
+                )
             return _ProviderOperationAuthority(
                 operation_id=str(launch["operation_id"]),
                 identity={
@@ -618,6 +625,7 @@ def create_app(
             attempt_id=attempt_id,
             master_instance_id=master_instance_id,
             epoch=epoch,
+            require_acceptance_source_attestation=False,
         )
         if authority.acceptance is None:
             raise HTTPException(status_code=403, detail={"code": "acceptance_identity_required"})
@@ -638,6 +646,22 @@ def create_app(
             or event.epoch != 1
         ):
             raise HTTPException(status_code=403, detail={"code": "acceptance_event_binding_mismatch"})
+        if event.event_type is RuntimeEventType.RUNTIME_STARTED:
+            observed_source = event.data.get("progress", {}).get("runtime_source_sha256")
+            if not isinstance(observed_source, str):
+                raise HTTPException(
+                    status_code=422, detail={"code": "acceptance_source_attestation_missing"}
+                )
+            try:
+                launch = control_ledger.attest_checkpoint_acceptance_source(
+                    request_id=exact_request,
+                    attempt_id=exact_attempt,
+                    observed_source_sha256=observed_source,
+                )
+            except (IdempotencyConflict, StaleRuntimeEvent, ValueError) as exc:
+                raise HTTPException(
+                    status_code=409, detail={"code": "acceptance_source_attestation_rejected"}
+                ) from exc
         try:
             receipt = control_ledger.record_checkpoint_acceptance_event(
                 request_id=exact_request,

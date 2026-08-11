@@ -234,6 +234,26 @@ class CheckpointProviderRunOutput(BaseModel):
         return self
 
 
+class CheckpointResourceLeaseObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    lease_id: UUID
+    resource_kind: Literal["kaggle_notebook"]
+    resource_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=300
+    )
+    holder_id: UUID
+    lease_until: datetime
+    epoch: int = Field(ge=1)
+    released: bool
+
+    @model_validator(mode="after")
+    def aware_lease(self) -> CheckpointResourceLeaseObservation:
+        if self.lease_until.tzinfo is None:
+            raise ValueError("checkpoint resource lease deadline must be timezone-aware")
+        return self
+
+
 class CheckpointStatusDatasetObservation(BaseModel):
     """Exact provider-only callback bootstrap and its cleanup proof."""
 
@@ -251,6 +271,7 @@ class CheckpointStatusDatasetObservation(BaseModel):
     status_helper_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     cleanup_receipt_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     cleaned: bool = False
+    resource_lease: CheckpointResourceLeaseObservation
 
     @model_validator(mode="after")
     def exact_observation(self) -> CheckpointStatusDatasetObservation:
@@ -279,6 +300,7 @@ class CheckpointRuntimeObservation(BaseModel):
     event_uids: tuple[str, ...] = Field(min_length=1, max_length=100)
     event_receipt_sha256s: tuple[str, ...] = Field(min_length=1, max_length=100)
     last_local_sequence: int = Field(ge=1)
+    runtime_source_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
     def exact_projection(self) -> CheckpointRuntimeObservation:
@@ -386,9 +408,10 @@ class CheckpointAcceptanceLaunchStatus(BaseModel):
                 raise ValueError("blocked checkpoint status lacks blocker code")
         elif not self.failure_code or self.blocker_code is not None:
             raise ValueError("failed checkpoint status lacks failure code")
-        ambiguous_push = (
-            self.state == "FAIL" and self.failure_code == "CHECKPOINT_PUSH_RESPONSE_AMBIGUOUS"
-        )
+        ambiguous_push = self.state == "FAIL" and self.failure_code in {
+            "CHECKPOINT_PUSH_RESPONSE_AMBIGUOUS",
+            "CHECKPOINT_RUNTIME_SOURCE_MISMATCH",
+        }
         if self.status_input is not None and not self.status_input.cleaned and not ambiguous_push:
             raise ValueError("terminal checkpoint status retains its status Dataset")
         if self.result is not None and self.result.outcome != self.state:
