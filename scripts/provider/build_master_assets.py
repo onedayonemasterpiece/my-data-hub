@@ -8,9 +8,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -55,15 +55,16 @@ def _clean_commit(root: Path) -> str:
 
 
 def _build_wheel(root: Path, destination: Path) -> Path:
+    uv = shutil.which("uv")
+    if uv is None:
+        raise AssetBundleError("uv is required to build the reviewed wheel")
     subprocess.run(
         [
-            sys.executable,
-            "-m",
-            "pip",
-            "wheel",
-            "--no-deps",
-            "--no-build-isolation",
-            "--wheel-dir",
+            uv,
+            "build",
+            "--wheel",
+            "--no-create-gitignore",
+            "--out-dir",
             str(destination),
             str(root),
         ],
