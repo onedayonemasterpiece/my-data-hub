@@ -37,7 +37,13 @@ class CheckpointFile:
         candidate = PurePosixPath(self.path)
         if candidate.is_absolute() or ".." in candidate.parts or not candidate.parts:
             raise ManifestError(f"unsafe checkpoint path: {self.path!r}")
-        if self.kind not in {"physical", "logical", "verification_receipt", "restore_smoke_receipt"}:
+        if self.kind not in {
+            "physical",
+            "postgres_backup_manifest",
+            "logical",
+            "verification_receipt",
+            "restore_smoke_receipt",
+        }:
             raise ManifestError(f"unsupported checkpoint file kind: {self.kind}")
         if self.byte_size < 0 or not _SHA256.fullmatch(self.sha256):
             raise ManifestError(f"invalid size/hash for {self.path}")
@@ -114,10 +120,10 @@ class CheckpointManifest:
         if not re.fullmatch(r"[0-9A-F]+/[0-9A-F]+", self.checkpoint_lsn):
             raise ManifestError("checkpoint LSN is invalid")
         _utc(self.created_at, "created_at")
-        if len(self.files) < 4:
-            raise ManifestError("physical, logical, verification and restore receipts are required")
+        if len(self.files) < 5:
+            raise ManifestError("base, WAL, logical and verification artifacts are required")
         kinds = {item.kind for item in self.files}
-        required = {"physical", "logical", "verification_receipt", "restore_smoke_receipt"}
+        required = {"physical", "postgres_backup_manifest", "logical", "verification_receipt"}
         if not required.issubset(kinds):
             raise ManifestError(f"checkpoint file kinds missing: {sorted(required - kinds)}")
         paths = [item.path for item in self.files]
@@ -125,6 +131,14 @@ class CheckpointManifest:
             raise ManifestError("checkpoint file paths must be unique and sorted")
         for item in self.files:
             item.validate()
+        physical_paths = {item.path for item in self.files if item.kind == "physical"}
+        if physical_paths != {"physical/base.tar.gz", "physical/pg_wal.tar.gz"}:
+            raise ManifestError("manifest must bind exact base and streamed WAL archives")
+        postgres_manifests = {
+            item.path for item in self.files if item.kind == "postgres_backup_manifest"
+        }
+        if postgres_manifests != {"physical/backup_manifest"}:
+            raise ManifestError("manifest must bind the native PostgreSQL backup manifest")
         self.restore_probe.validate()
         expected = digest_payload(self.unsigned_payload())
         if self.manifest_sha256 != expected:

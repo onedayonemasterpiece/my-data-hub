@@ -84,13 +84,19 @@ class ArchiveCreator:
             ],
             timeout_seconds=timeout_seconds,
         )
-        base_candidates = sorted(physical.glob("base.tar*"))
-        if len(base_candidates) != 1 or not base_candidates[0].is_file() or not logical_dump.is_file():
+        physical_candidates = sorted(physical.glob("*.tar.gz"))
+        expected_physical = {physical / "base.tar.gz", physical / "pg_wal.tar.gz"}
+        postgres_manifest = physical / "backup_manifest"
+        if set(physical_candidates) != expected_physical or not all(
+            candidate.is_file() and not candidate.is_symlink() for candidate in physical_candidates
+        ) or not postgres_manifest.is_file() or postgres_manifest.is_symlink() or not logical_dump.is_file():
             raise ArchiveError("physical/logical checkpoint artifacts are incomplete")
-        return {
-            base_candidates[0].relative_to(package).as_posix(): "physical",
-            logical_dump.relative_to(package).as_posix(): "logical",
+        artifacts = {
+            candidate.relative_to(package).as_posix(): "physical" for candidate in physical_candidates
         }
+        artifacts[postgres_manifest.relative_to(package).as_posix()] = "postgres_backup_manifest"
+        artifacts[logical_dump.relative_to(package).as_posix()] = "logical"
+        return artifacts
 
 
 def write_probe_receipt(path: Path, payload: dict[str, object]) -> None:

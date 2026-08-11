@@ -66,9 +66,10 @@ class EpochFence:
                 and current.lease_until > observed
             ):
                 raise FencingError("another master has an unexpired lease")
-            expected = self._highest_epoch + 1
-            if identity.epoch != expected:
-                raise FencingError(f"epoch must advance exactly once: expected={expected}")
+            if identity.epoch <= self._highest_epoch:
+                raise FencingError(
+                    f"control epoch must be newer than restored local epoch {self._highest_epoch}"
+                )
             self._highest_epoch = identity.epoch
             self._lease = Lease(identity, deadline, GateState.CLOSED, "registered")
             return self._lease

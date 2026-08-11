@@ -14,14 +14,23 @@ class PhysicalRestoreError(RuntimeError):
 
 
 def restore_physical_archive(package: Path, manifest: CheckpointManifest, pgdata: Path) -> None:
-    physical = [item for item in manifest.files if item.kind == "physical"]
-    if len(physical) != 1:
-        raise PhysicalRestoreError("checkpoint must contain exactly one physical base archive")
-    archive = package.joinpath(*PurePosixPath(physical[0].path).parts)
+    physical = {PurePosixPath(item.path): item for item in manifest.files if item.kind == "physical"}
+    required = {PurePosixPath("physical/base.tar.gz"), PurePosixPath("physical/pg_wal.tar.gz")}
+    if set(physical) != required:
+        raise PhysicalRestoreError("checkpoint must contain exact base and streamed WAL archives")
+    pgdata.mkdir(parents=True, exist_ok=False, mode=0o700)
+    _extract_archive(package, PurePosixPath("physical/base.tar.gz"), pgdata)
+    wal = pgdata / "pg_wal"
+    wal.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _extract_archive(package, PurePosixPath("physical/pg_wal.tar.gz"), wal)
+    _restrict_modes(pgdata)
+
+
+def _extract_archive(package: Path, relative: PurePosixPath, destination_root: Path) -> None:
+    archive = package.joinpath(*relative.parts)
     if archive.is_symlink() or not archive.is_file():
         raise PhysicalRestoreError("physical archive is not a regular file")
-    pgdata.mkdir(parents=True, exist_ok=False, mode=0o700)
-    root = pgdata.resolve()
+    root = destination_root.resolve()
     try:
         with tarfile.open(archive, mode="r:*") as stream:
             members = stream.getmembers()
@@ -39,6 +48,9 @@ def restore_physical_archive(package: Path, manifest: CheckpointManifest, pgdata
             stream.extractall(root, members=members, filter="data")
     except (tarfile.TarError, OSError) as exc:
         raise PhysicalRestoreError("physical archive extraction failed") from exc
+
+
+def _restrict_modes(root: Path) -> None:
     for current, directories, files in os.walk(root):
         Path(current).chmod(0o700)
         for name in directories:

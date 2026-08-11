@@ -44,7 +44,7 @@ def collect_restore_probe(connection: Any, relations: tuple[str, ...]) -> dict[s
         cursor.execute("SET TRANSACTION READ ONLY")
         cursor.execute("SET LOCAL statement_timeout='30s'")
         cursor.execute("SET LOCAL lock_timeout='3s'")
-        schema_version = int(cursor.execute("SELECT max(revision) FROM migration.schema_migration").fetchone()[0])
+        schema_version = int(cursor.execute("SELECT max(version) FROM hub_meta.schema_migration").fetchone()[0])
         canonical_revision = int(
             cursor.execute(
                 "SELECT canonical_revision FROM hub.canonical_state WHERE singleton=true"

@@ -5,9 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from threading import RLock
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from .manifest import CheckpointManifest
+
+if TYPE_CHECKING:
+    from my_data_hub.control_plane.ledger import ControlLedger
 
 
 class CheckpointStatus(StrEnum):
@@ -32,6 +36,17 @@ class CheckpointHead:
     generation: int = 0
     current: UUID | None = None
     previous: UUID | None = None
+
+
+class CheckpointRegistryContract(Protocol):
+    @property
+    def head(self) -> CheckpointHead: ...
+    def add_candidate(self, manifest: CheckpointManifest) -> object: ...
+    def uploaded(self, checkpoint_id: UUID, exact_version_ref: str) -> object: ...
+    def readback_verified(self, checkpoint_id: UUID) -> object: ...
+    def restore_verified(self, checkpoint_id: UUID) -> object: ...
+    def reject(self, checkpoint_id: UUID, reason: str) -> object: ...
+    def promote(self, checkpoint_id: UUID, *, expected_generation: int) -> CheckpointHead: ...
 
 
 class CheckpointRegistry:
@@ -145,3 +160,84 @@ class CheckpointRegistry:
             )
             self._records[checkpoint_id] = updated
             return updated
+
+
+class ControlLedgerCheckpointRegistry:
+    """Durable checkpoint registry adapter backed by the devstand ControlLedger.
+
+    The adapter deliberately persists every verification gate and delegates HEAD
+    promotion to one SQLite compare-and-swap transaction.  It contains no
+    canonical PostgreSQL data or checkpoint bytes.
+    """
+
+    def __init__(
+        self,
+        ledger: ControlLedger,
+        *,
+        operation_id: str,
+        dataset_ref: str,
+        service_kind: str = "postgres-master",
+    ) -> None:
+        if not operation_id or not dataset_ref or not service_kind:
+            raise ValueError("durable checkpoint registry identity is incomplete")
+        self.ledger = ledger
+        self.operation_id = operation_id
+        self.dataset_ref = dataset_ref
+        self.service_kind = service_kind
+
+    @property
+    def head(self) -> CheckpointHead:
+        durable = self.ledger.checkpoint_head(self.service_kind)
+        if durable is None:
+            return CheckpointHead()
+        return CheckpointHead(
+            generation=durable.generation,
+            current=UUID(durable.current_checkpoint_id) if durable.current_checkpoint_id else None,
+            previous=UUID(durable.previous_checkpoint_id) if durable.previous_checkpoint_id else None,
+        )
+
+    def add_candidate(self, manifest: CheckpointManifest) -> None:
+        manifest.validate()
+        initial = self.head
+        if manifest.parent_checkpoint_id != initial.current:
+            raise ValueError("candidate parent is not current durable HEAD")
+        self.ledger.add_checkpoint_candidate(
+            checkpoint_id=str(manifest.checkpoint_id),
+            service_kind=self.service_kind,
+            operation_id=self.operation_id,
+            dataset_ref=self.dataset_ref,
+            version_ref=None,
+            manifest_sha256=manifest.manifest_sha256,
+            source_checkpoint_id=str(manifest.parent_checkpoint_id) if manifest.parent_checkpoint_id else None,
+            source_head_generation=initial.generation,
+            master_instance_id=str(manifest.master_instance_id),
+            epoch=manifest.epoch,
+        )
+
+    def uploaded(self, checkpoint_id: UUID, exact_version_ref: str) -> None:
+        self.ledger.mark_checkpoint_uploaded(str(checkpoint_id), exact_version_ref)
+
+    def readback_verified(self, checkpoint_id: UUID) -> None:
+        self.ledger.mark_checkpoint_readback_verified(str(checkpoint_id))
+
+    def restore_verified(self, checkpoint_id: UUID) -> None:
+        self.ledger.mark_checkpoint_restore_verified(str(checkpoint_id))
+
+    def reject(self, checkpoint_id: UUID, reason: str) -> None:
+        self.ledger.fail_checkpoint(str(checkpoint_id), reason)
+
+    def promote(self, checkpoint_id: UUID, *, expected_generation: int) -> CheckpointHead:
+        initial = self.head
+        if initial.generation != expected_generation:
+            raise ValueError("checkpoint HEAD generation changed concurrently")
+        durable = self.ledger.promote_checkpoint(
+            self.service_kind,
+            str(checkpoint_id),
+            expected_generation=expected_generation,
+            expected_parent_checkpoint_id=str(initial.current) if initial.current else None,
+        )
+        return CheckpointHead(
+            generation=durable.generation,
+            current=UUID(durable.current_checkpoint_id) if durable.current_checkpoint_id else None,
+            previous=UUID(durable.previous_checkpoint_id) if durable.previous_checkpoint_id else None,
+        )

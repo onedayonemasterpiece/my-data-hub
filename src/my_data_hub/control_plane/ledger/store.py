@@ -1091,43 +1091,137 @@ class ControlLedger:
         self,
         *,
         checkpoint_id: str,
+        service_kind: str = "postgres-master",
         operation_id: str,
         dataset_ref: str,
-        version_ref: str,
+        version_ref: str | None,
         manifest_sha256: str,
         source_checkpoint_id: str | None,
+        source_head_generation: int | None = None,
         master_instance_id: str,
         epoch: int,
     ) -> None:
         if len(manifest_sha256) != 64:
             raise ValueError("manifest_sha256 must be an exact SHA-256")
         with self._transaction() as connection:
-            connection.execute(
-                "INSERT INTO checkpoint_candidates(checkpoint_id,operation_id,dataset_ref,version_ref,manifest_sha256,"
-                "source_checkpoint_id,master_instance_id,epoch,status,created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,'CANDIDATE',?)",
-                (
-                    checkpoint_id,
+            head = connection.execute(
+                "SELECT generation,current_checkpoint_id FROM checkpoint_heads WHERE service_kind=?",
+                (service_kind,),
+            ).fetchone()
+            current_generation = int(head["generation"]) if head else 0
+            current_checkpoint_id = (
+                str(head["current_checkpoint_id"]) if head and head["current_checkpoint_id"] else None
+            )
+            expected_generation = current_generation if source_head_generation is None else source_head_generation
+            if expected_generation != current_generation or source_checkpoint_id != current_checkpoint_id:
+                raise StaleRuntimeEvent("checkpoint candidate source is not current HEAD")
+            values = (
+                checkpoint_id,
+                service_kind,
+                operation_id,
+                dataset_ref,
+                version_ref,
+                manifest_sha256,
+                source_checkpoint_id,
+                expected_generation,
+                master_instance_id,
+                epoch,
+                _format_time(self.clock.now()),
+            )
+            changed = connection.execute(
+                "INSERT INTO checkpoint_candidates(checkpoint_id,service_kind,operation_id,dataset_ref,version_ref,"
+                "manifest_sha256,source_checkpoint_id,source_head_generation,master_instance_id,epoch,status,"
+                "created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,'CANDIDATE',?) ON CONFLICT(checkpoint_id) DO NOTHING",
+                values,
+            ).rowcount
+            if changed == 0:
+                existing = connection.execute(
+                    "SELECT service_kind,operation_id,dataset_ref,manifest_sha256,source_checkpoint_id,"
+                    "source_head_generation,master_instance_id,epoch "
+                    "FROM checkpoint_candidates WHERE checkpoint_id=?",
+                    (checkpoint_id,),
+                ).fetchone()
+                immutable = (
+                    service_kind,
                     operation_id,
                     dataset_ref,
-                    version_ref,
                     manifest_sha256,
                     source_checkpoint_id,
+                    expected_generation,
                     master_instance_id,
                     epoch,
-                    _format_time(self.clock.now()),
-                ),
-            )
+                )
+                if existing is None or tuple(existing) != immutable:
+                    raise StaleRuntimeEvent("checkpoint idempotency identity conflicts with durable candidate")
 
-    def mark_checkpoint_verified(self, checkpoint_id: str) -> None:
+    def mark_checkpoint_uploaded(self, checkpoint_id: str, version_ref: str) -> None:
+        if not version_ref or len(version_ref) > 512:
+            raise ValueError("checkpoint exact version ref is invalid")
         with self._transaction() as connection:
             changed = connection.execute(
-                "UPDATE checkpoint_candidates SET status='VERIFIED',verified_at=? "
-                "WHERE checkpoint_id=? AND status IN ('CANDIDATE','READBACK_VERIFIED')",
-                (_format_time(self.clock.now()), checkpoint_id),
+                "UPDATE checkpoint_candidates SET status='UPLOADED',version_ref=? "
+                "WHERE checkpoint_id=? AND status='CANDIDATE' AND version_ref IS NULL",
+                (version_ref, checkpoint_id),
             ).rowcount
             if changed != 1:
-                raise StaleRuntimeEvent("checkpoint candidate cannot be verified from its current state")
+                row = connection.execute(
+                    "SELECT status,version_ref FROM checkpoint_candidates WHERE checkpoint_id=?", (checkpoint_id,)
+                ).fetchone()
+                if (
+                    row is None
+                    or row["status"] not in {"UPLOADED", "READBACK_VERIFIED", "RESTORE_VERIFIED", "VERIFIED"}
+                    or row["version_ref"] != version_ref
+                ):
+                    raise StaleRuntimeEvent("checkpoint candidate cannot be uploaded from its current state")
+
+    def mark_checkpoint_readback_verified(self, checkpoint_id: str) -> None:
+        self._checkpoint_transition(
+            checkpoint_id,
+            "UPLOADED",
+            "READBACK_VERIFIED",
+            later_statuses={"RESTORE_VERIFIED", "VERIFIED"},
+        )
+
+    def mark_checkpoint_restore_verified(self, checkpoint_id: str) -> None:
+        self._checkpoint_transition(
+            checkpoint_id,
+            "READBACK_VERIFIED",
+            "RESTORE_VERIFIED",
+            later_statuses={"VERIFIED"},
+        )
+
+    def mark_checkpoint_verified(self, checkpoint_id: str) -> None:
+        self._checkpoint_transition(
+            checkpoint_id,
+            "RESTORE_VERIFIED",
+            "VERIFIED",
+            verified_at=_format_time(self.clock.now()),
+        )
+
+    def _checkpoint_transition(
+        self,
+        checkpoint_id: str,
+        expected: str,
+        target: str,
+        *,
+        verified_at: str | None = None,
+        later_statuses: set[str] | None = None,
+    ) -> None:
+        with self._transaction() as connection:
+            changed = connection.execute(
+                "UPDATE checkpoint_candidates SET status=?,verified_at=coalesce(?,verified_at) "
+                "WHERE checkpoint_id=? AND status=?",
+                (target, verified_at, checkpoint_id, expected),
+            ).rowcount
+            if changed != 1:
+                row = connection.execute(
+                    "SELECT status FROM checkpoint_candidates WHERE checkpoint_id=?", (checkpoint_id,)
+                ).fetchone()
+                if row is None or row["status"] not in ({target} | (later_statuses or set())):
+                    raise StaleRuntimeEvent(
+                        f"checkpoint candidate cannot advance {expected}->{target} from its current state"
+                    )
 
     def fail_checkpoint(self, checkpoint_id: str, failure_code: str) -> None:
         with self._transaction() as connection:
@@ -1137,31 +1231,65 @@ class ControlLedger:
                 (failure_code, checkpoint_id),
             )
 
-    def promote_checkpoint(self, service_kind: str, checkpoint_id: str) -> CheckpointHead:
+    def promote_checkpoint(
+        self,
+        service_kind: str,
+        checkpoint_id: str,
+        *,
+        expected_generation: int,
+        expected_parent_checkpoint_id: str | None,
+    ) -> CheckpointHead:
         now = _format_time(self.clock.now())
         with self._transaction() as connection:
             candidate = connection.execute(
-                "SELECT status FROM checkpoint_candidates WHERE checkpoint_id=?", (checkpoint_id,)
+                "SELECT status,service_kind,source_checkpoint_id,source_head_generation "
+                "FROM checkpoint_candidates WHERE checkpoint_id=?", (checkpoint_id,)
             ).fetchone()
-            if candidate is None or candidate["status"] != "VERIFIED":
-                raise StaleRuntimeEvent("only a verified checkpoint can advance HEAD")
+            if candidate is None or candidate["service_kind"] != service_kind:
+                raise StaleRuntimeEvent("checkpoint candidate is absent or belongs to another service")
             current = connection.execute(
-                "SELECT current_checkpoint_id FROM checkpoint_heads WHERE service_kind=?", (service_kind,)
+                "SELECT generation,current_checkpoint_id FROM checkpoint_heads WHERE service_kind=?", (service_kind,)
             ).fetchone()
-            old_current = current[0] if current else None
-            if old_current == checkpoint_id:
+            generation = int(current["generation"]) if current else 0
+            old_current = current["current_checkpoint_id"] if current else None
+            if old_current == checkpoint_id and candidate["status"] == "VERIFIED":
                 row = connection.execute(
                     "SELECT * FROM checkpoint_heads WHERE service_kind=?", (service_kind,)
                 ).fetchone()
                 assert row is not None
                 return self._checkpoint_head_from_row(row)
-            connection.execute(
-                "INSERT INTO checkpoint_heads(service_kind,current_checkpoint_id,previous_checkpoint_id,updated_at) "
-                "VALUES (?,?,?,?) ON CONFLICT(service_kind) DO UPDATE SET "
-                "previous_checkpoint_id=checkpoint_heads.current_checkpoint_id,current_checkpoint_id=excluded.current_checkpoint_id,"
-                "updated_at=excluded.updated_at",
-                (service_kind, checkpoint_id, old_current, now),
-            )
+            if candidate["status"] not in {"RESTORE_VERIFIED", "VERIFIED"}:
+                raise StaleRuntimeEvent("only a restore-verified checkpoint can advance HEAD")
+            if (
+                generation != expected_generation
+                or old_current != expected_parent_checkpoint_id
+                or int(candidate["source_head_generation"]) != expected_generation
+                or candidate["source_checkpoint_id"] != expected_parent_checkpoint_id
+            ):
+                raise StaleRuntimeEvent("checkpoint HEAD generation or parent changed concurrently")
+            if current is None:
+                connection.execute(
+                    "INSERT INTO checkpoint_heads(service_kind,generation,current_checkpoint_id,"
+                    "previous_checkpoint_id,updated_at) VALUES (?,?,?,?,?)",
+                    (service_kind, 1, checkpoint_id, old_current, now),
+                )
+            else:
+                changed = connection.execute(
+                    "UPDATE checkpoint_heads SET generation=generation+1,previous_checkpoint_id=current_checkpoint_id,"
+                    "current_checkpoint_id=?,updated_at=? WHERE service_kind=? AND generation=? "
+                    "AND current_checkpoint_id IS ?",
+                    (checkpoint_id, now, service_kind, expected_generation, expected_parent_checkpoint_id),
+                ).rowcount
+                if changed != 1:
+                    raise StaleRuntimeEvent("checkpoint HEAD compare-and-swap lost")
+            if candidate["status"] == "RESTORE_VERIFIED":
+                verified = connection.execute(
+                    "UPDATE checkpoint_candidates SET status='VERIFIED',verified_at=? "
+                    "WHERE checkpoint_id=? AND status='RESTORE_VERIFIED'",
+                    (now, checkpoint_id),
+                ).rowcount
+                if verified != 1:
+                    raise StaleRuntimeEvent("checkpoint verification state changed during promotion")
             row = connection.execute("SELECT * FROM checkpoint_heads WHERE service_kind=?", (service_kind,)).fetchone()
             assert row is not None
             return self._checkpoint_head_from_row(row)
@@ -1280,6 +1408,7 @@ class ControlLedger:
     def _checkpoint_head_from_row(row: sqlite3.Row) -> CheckpointHead:
         return CheckpointHead(
             service_kind=row["service_kind"],
+            generation=int(row["generation"]),
             current_checkpoint_id=row["current_checkpoint_id"],
             previous_checkpoint_id=row["previous_checkpoint_id"],
             updated_at=_parse_time(row["updated_at"]),

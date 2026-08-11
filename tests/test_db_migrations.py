@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_repository_migrations_are_contiguous() -> None:
     migrations = discover_migrations(ROOT / "sql/migrations")
-    assert [item.version for item in migrations] == list(range(1, 13))
+    assert [item.version for item in migrations] == list(range(1, 14))
     assert all(len(item.sha256) == 64 for item in migrations)
 
 

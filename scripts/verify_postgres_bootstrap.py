@@ -71,7 +71,7 @@ def main() -> int:
         )
         migrations = [(int(row[0]), str(row[1])) for row in cursor.fetchall()]
         evidence["migrations"] = migrations
-        expected_versions = list(range(1, 13))
+        expected_versions = list(range(1, 14))
         if [row[0] for row in migrations] != expected_versions:
             findings.append(f"migration history mismatch: {migrations}")
 
@@ -85,7 +85,7 @@ def main() -> int:
             if state
             else None
         )
-        if state is None or int(state[0]) != 12 or int(state[1]) != 0:
+        if state is None or int(state[0]) != 13 or int(state[1]) != 0:
             findings.append(f"unexpected canonical state: {state}")
 
         cursor.execute(

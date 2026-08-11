@@ -75,6 +75,7 @@ class ServiceRecord:
 @dataclass(frozen=True, slots=True)
 class CheckpointHead:
     service_kind: str
+    generation: int
     current_checkpoint_id: str | None
     previous_checkpoint_id: str | None
     updated_at: datetime

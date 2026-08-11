@@ -10,12 +10,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.resources import as_file, files
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 import psycopg
 
 from my_data_hub.checkpoints import load_and_verify, restore_physical_archive
+from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.db.migrations import migrate
 from my_data_hub.runtime_sdk import RuntimeClient, RuntimeEventType
 
@@ -89,6 +90,22 @@ class NotebookMasterConfig:
         return config
 
 
+class RuntimeCheckpointCoordinator(Protocol):
+    """Generate, upload, exact-readback, restore-verify, and promote one checkpoint."""
+
+    def create_and_publish(
+        self,
+        *,
+        database_url: str,
+        package_directory: Path,
+        identity: MasterIdentity,
+    ) -> PublishReceipt: ...
+
+
+class CheckpointShutdownError(RuntimeError):
+    """The drained master was intentionally left running because durability failed."""
+
+
 def _required(name: str) -> str:
     value = os.environ.get(name, "")
     if not value:
@@ -140,7 +157,11 @@ def _bootstrap_owner(database_url: str) -> None:
         cursor.execute("GRANT CREATE,TEMPORARY ON DATABASE postgres TO mdh_owner")
 
 
-def run_master(config: NotebookMasterConfig) -> int:
+def run_master(
+    config: NotebookMasterConfig,
+    *,
+    checkpoint_coordinator: RuntimeCheckpointCoordinator | None = None,
+) -> int:
     working = Path(os.environ.get("KAGGLE_WORKING_DIR", "/kaggle/working"))
     paths = MasterPaths.under(working)
     identity = MasterIdentity(config.master_instance_id, config.run_id, config.epoch)
@@ -273,6 +294,7 @@ def run_master(config: NotebookMasterConfig) -> int:
     gate.activate(identity)
     deadline = time.monotonic() + config.maximum_runtime_seconds
     current_lease = ready.lease_until
+    active_error: BaseException | None = None
     try:
         while time.monotonic() < deadline:
             time.sleep(30)
@@ -289,14 +311,90 @@ def run_master(config: NotebookMasterConfig) -> int:
                 current_lease = proposed
             if datetime.now(UTC) + timedelta(seconds=15) >= current_lease:
                 raise TimeoutError("callback unavailable; write lease is closing")
-    finally:
-        gate.drain(identity, "runtime_terminal")
-        runtime.emit(RuntimeEventType.RUNTIME_DRAINING, phase="draining", status="closed")
-        tunnel.stop()
-        supervisor.stop(immediate=False)
+    except BaseException as exc:
+        active_error = exc
+
+    _checkpoint_before_stop(
+        gate=gate,
+        runtime=runtime,
+        tunnel=tunnel,
+        supervisor=supervisor,
+        coordinator=checkpoint_coordinator,
+        database_url=database_url,
+        package_directory=paths.checkpoints,
+        identity=identity,
+    )
+    if active_error is not None:
         if gate_connection is not None:
             gate_connection.close()
+        raise active_error
+    if gate_connection is not None:
+        gate_connection.close()
     return 0
+
+
+def _checkpoint_before_stop(
+    *,
+    gate: Any,
+    runtime: Any,
+    tunnel: Any,
+    supervisor: Any,
+    coordinator: RuntimeCheckpointCoordinator | None,
+    database_url: str,
+    package_directory: Path,
+    identity: MasterIdentity,
+) -> PublishReceipt:
+    """Close writes and stop processes only after durable checkpoint success.
+
+    On any candidate failure the gate remains draining, the previous durable
+    HEAD remains authoritative, and no runtime-terminal/stop effect is emitted.
+    """
+
+    gate.drain(identity, "runtime_checkpoint")
+    runtime.emit(RuntimeEventType.RUNTIME_DRAINING, phase="draining", status="closed")
+    runtime.emit(RuntimeEventType.CHECKPOINT_STARTED, phase="checkpointing", status="started")
+    try:
+        if coordinator is None:
+            raise RuntimeError("verified checkpoint coordinator is not configured")
+        receipt = coordinator.create_and_publish(
+            database_url=database_url,
+            package_directory=package_directory,
+            identity=identity,
+        )
+    except Exception as exc:
+        runtime.emit(
+            RuntimeEventType.CHECKPOINT_FAILED,
+            phase="checkpointing",
+            status="checkpoint_failed",
+            data={"failure_code": type(exc).__name__},
+        )
+        raise CheckpointShutdownError(
+            "checkpoint failed; drained master remains nonterminal and old HEAD is preserved"
+        ) from exc
+
+    verified = runtime.emit(
+        RuntimeEventType.CHECKPOINT_VERIFIED,
+        phase="checkpointing",
+        status="verified",
+        data={
+            "checkpoint_id": receipt.checkpoint_id,
+            "manifest_sha256": receipt.manifest_sha256,
+            "current_checkpoint_id": receipt.current_checkpoint_id,
+        },
+    )
+    terminal = runtime.emit(
+        RuntimeEventType.RUNTIME_TERMINAL,
+        phase="stopped",
+        status="succeeded",
+        data={"checkpoint_id": receipt.current_checkpoint_id},
+    )
+    if verified.status != "delivered" or terminal.status != "delivered":
+        raise CheckpointShutdownError(
+            "checkpoint is durable but terminal state was not acknowledged; master remains drained"
+        )
+    tunnel.stop()
+    supervisor.stop(immediate=False)
+    return receipt
 
 
 def main() -> int:

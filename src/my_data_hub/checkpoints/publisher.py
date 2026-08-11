@@ -9,7 +9,7 @@ from time import monotonic
 from typing import Protocol
 
 from .manifest import CheckpointManifest, load_and_verify
-from .registry import CheckpointRegistry
+from .registry import CheckpointRegistryContract
 
 
 class PublishError(RuntimeError):
@@ -43,7 +43,7 @@ class CheckpointPublisher:
     def __init__(
         self,
         *,
-        registry: CheckpointRegistry,
+        registry: CheckpointRegistryContract,
         provider: PrivateCheckpointProvider,
         restore_verifier: IndependentRestoreVerifier,
     ) -> None:
@@ -89,7 +89,7 @@ class CheckpointPublisher:
         except Exception as exc:
             with suppress(ValueError):
                 self.registry.reject(manifest.checkpoint_id, type(exc).__name__)
-            if self.registry.head != initial_head:
+            if self.registry.head.current == manifest.checkpoint_id:
                 raise AssertionError("failed candidate advanced checkpoint HEAD") from exc
             if isinstance(exc, PublishError):
                 raise

@@ -81,7 +81,7 @@ def test_sqlite_pragmas_permissions_and_append_only_logs(tmp_path: Path) -> None
         .execute("SELECT version FROM control_schema_migrations ORDER BY version")
         .fetchall()
     )
-    assert migrations == [(1,), (2,), (3,), (4,), (5,)]
+    assert migrations == [(1,), (2,), (3,), (4,), (5,), (6,)]
 
     operation, _ = ledger.ensure_operation(
         operation_id=str(uuid4()),
@@ -295,14 +295,29 @@ def test_checkpoint_promotion_keeps_previous_and_failed_candidate_cannot_advance
             checkpoint_id=checkpoint_id,
             operation_id=operation.operation_id,
             dataset_ref="private/checkpoints",
-            version_ref=version,
+            version_ref=None,
             manifest_sha256=("a" if version == "v1" else "b") * 64,
             source_checkpoint_id=None if version == "v1" else "cp-1",
             master_instance_id="master-1",
             epoch=1,
         )
-        ledger.mark_checkpoint_verified(checkpoint_id)
-        ledger.promote_checkpoint("postgres-master", checkpoint_id)
+        with pytest.raises(StaleRuntimeEvent):
+            ledger.mark_checkpoint_verified(checkpoint_id)
+        ledger.mark_checkpoint_uploaded(checkpoint_id, f"private/checkpoints/{version}")
+        ledger.mark_checkpoint_readback_verified(checkpoint_id)
+        ledger.mark_checkpoint_restore_verified(checkpoint_id)
+        # Persisted forward stages are replay-safe after a process crash, but
+        # none of the required gates can be skipped.
+        ledger.mark_checkpoint_uploaded(checkpoint_id, f"private/checkpoints/{version}")
+        ledger.mark_checkpoint_readback_verified(checkpoint_id)
+        ledger.mark_checkpoint_restore_verified(checkpoint_id)
+        current = ledger.checkpoint_head("postgres-master")
+        ledger.promote_checkpoint(
+            "postgres-master",
+            checkpoint_id,
+            expected_generation=current.generation if current else 0,
+            expected_parent_checkpoint_id=current.current_checkpoint_id if current else None,
+        )
     head = ledger.checkpoint_head("postgres-master")
     assert head is not None
     assert (head.current_checkpoint_id, head.previous_checkpoint_id) == ("cp-2", "cp-1")
@@ -319,7 +334,12 @@ def test_checkpoint_promotion_keeps_previous_and_failed_candidate_cannot_advance
     )
     ledger.fail_checkpoint("cp-bad", "readback_hash_mismatch")
     with pytest.raises(StaleRuntimeEvent):
-        ledger.promote_checkpoint("postgres-master", "cp-bad")
+        ledger.promote_checkpoint(
+            "postgres-master",
+            "cp-bad",
+            expected_generation=head.generation,
+            expected_parent_checkpoint_id=head.current_checkpoint_id,
+        )
     assert ledger.checkpoint_head("postgres-master") == head
 
 

@@ -38,7 +38,7 @@
     "checkpoint_lsn": {"type": "string", "pattern": "^[0-9A-F]+/[0-9A-F]+$"},
     "files": {
       "type": "array",
-      "minItems": 4,
+      "minItems": 5,
       "uniqueItems": true,
       "items": {
         "type": "object",
@@ -47,7 +47,13 @@
         "properties": {
           "path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"},
           "kind": {
-            "enum": ["physical", "logical", "verification_receipt", "restore_smoke_receipt"]
+            "enum": [
+              "physical",
+              "postgres_backup_manifest",
+              "logical",
+              "verification_receipt",
+              "restore_smoke_receipt"
+            ]
           },
           "byte_size": {"type": "integer", "minimum": 0},
           "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}

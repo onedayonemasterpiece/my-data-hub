@@ -46,15 +46,18 @@ def test_expired_epoch_is_fenced_and_old_credential_never_writes_again() -> None
         fence.renew(A, lease_until=NOW + timedelta(minutes=3), now=NOW + timedelta(seconds=15))
 
 
-def test_unexpired_master_and_non_monotonic_epoch_are_rejected() -> None:
+def test_unexpired_master_and_stale_epoch_are_rejected_but_control_gap_reconciles() -> None:
     fence = EpochFence()
     fence.acquire(A, lease_until=NOW + timedelta(minutes=1), now=NOW)
     with pytest.raises(FencingError, match="unexpired"):
         fence.acquire(B, lease_until=NOW + timedelta(minutes=2), now=NOW)
     fence.fence(A, reason="rotation")
     wrong = MasterIdentity(B.master_instance_id, B.run_id, 3)
-    with pytest.raises(FencingError, match="expected=2"):
-        fence.acquire(wrong, lease_until=NOW + timedelta(minutes=2), now=NOW)
+    assert fence.acquire(wrong, lease_until=NOW + timedelta(minutes=2), now=NOW).identity.epoch == 3
+    fence.fence(wrong, reason="failed_control_attempt_gap")
+    stale = MasterIdentity(UUID("33333333-3333-4333-8333-333333333333"), "stale", 2)
+    with pytest.raises(FencingError, match="newer than restored local epoch 3"):
+        fence.acquire(stale, lease_until=NOW + timedelta(minutes=3), now=NOW)
 
 
 def test_drain_closes_gate_before_checkpoint() -> None:

@@ -116,13 +116,15 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
             old.commit()
         old.rollback()
 
-        b = MasterIdentity(UUID("22222222-2222-4222-8222-222222222222"), "docker-run-b", 2)
+        # Epoch 2 was allocated by the owner-authoritative control ledger to a
+        # failed attempt.  The next restored master must reconcile directly to 3.
+        b = MasterIdentity(UUID("22222222-2222-4222-8222-222222222222"), "docker-run-b", 3)
         with psycopg.connect(admin_url) as admin:
             gate = DatabaseGate(admin)
             gate.acquire(b, now + timedelta(minutes=6))
             gate.activate(b)
             CredentialProvisioner(admin, gate).create(
-                principal="mdh_e2_writer_cafebabe",
+                principal="mdh_e3_writer_cafebabe",
                 password="writer-b-password-long-enough",
                 group="mdh_application",
                 identity=b,
@@ -131,7 +133,7 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
                 now=now,
             )
             CredentialProvisioner(admin, gate).create(
-                principal="mdh_e2_migration_deadbeef",
+                principal="mdh_e3_migration_deadbeef",
                 password="migration-password-long-enough",
                 group="mdh_migration_operator",
                 identity=b,
@@ -150,7 +152,7 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
             old.commit()
         old.close()
 
-        b_url = f"postgresql://mdh_e2_writer_cafebabe:writer-b-password-long-enough@127.0.0.1:{port}/postgres"
+        b_url = f"postgresql://mdh_e3_writer_cafebabe:writer-b-password-long-enough@127.0.0.1:{port}/postgres"
         with psycopg.connect(b_url) as current:
             current.execute("SET ROLE mdh_application")
             current.execute(
@@ -158,7 +160,7 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
             )
             current.commit()
         migration_url = (
-            f"postgresql://mdh_e2_migration_deadbeef:migration-password-long-enough"
+            f"postgresql://mdh_e3_migration_deadbeef:migration-password-long-enough"
             f"@127.0.0.1:{port}/postgres"
         )
         blogger_row = {
@@ -252,10 +254,10 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
             state = admin.execute(
                 "SELECT highest_epoch,current_epoch,gate_state FROM master_control.epoch_state"
             ).fetchone()
-            assert state == (2, 2, "open")
+            assert state == (3, 3, "open")
             assert admin.execute(
                 "SELECT schema_revision FROM hub.canonical_state WHERE singleton"
-            ).fetchone()[0] == 12
+            ).fetchone()[0] == 13
             assert admin.execute(
                 "SELECT canonical_revision FROM hub.canonical_state WHERE singleton"
             ).fetchone()[0] == first_import.canonical_revision
