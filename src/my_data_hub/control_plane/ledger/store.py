@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 
 from my_data_hub.control_plane.clock import Clock, SystemClock
 
-from .errors import EventRejected, IdempotencyConflict, LeaseRejected, StaleRuntimeEvent
+from .errors import EventRejected, IdempotencyConflict, LeaseRejected, MasterAdmissionRejected, StaleRuntimeEvent
 from .migrations import apply_control_migrations, default_migration_directory
 from .models import (
     CheckpointHead,
@@ -242,6 +242,197 @@ class ControlLedger:
             ).fetchone()
             assert row is not None
             return self._operation_from_row(row), created
+
+    def ensure_master_operation(
+        self,
+        *,
+        operation_id: str,
+        idempotency_key: str,
+        intent: Mapping[str, Any],
+        identity: Mapping[str, Any],
+        service_kind: str = "postgres-master",
+    ) -> tuple[OperationRecord, bool]:
+        """Atomically admit one master epoch or replay its exact request.
+
+        Epoch allocation is the admission decision. It shares the same
+        ``BEGIN IMMEDIATE`` transaction with every lifecycle, service and
+        checkpoint check so distinct requests cannot race and fence each
+        other before either provider effect is durable.
+        """
+
+        terminal_states = {"STOPPED", "FAILED", "FENCED", "ORPHANED"}
+        intent_json = _safe_json(intent)
+        intent_hash = hashlib.sha256(intent_json.encode()).hexdigest()
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM operations WHERE idempotency_key=?", (idempotency_key,)
+            ).fetchone()
+            if existing is not None:
+                if existing["intent_hash"] != intent_hash or existing["operation_kind"] != "ensure_master":
+                    raise IdempotencyConflict("idempotency key was reused for a different control intent")
+                return self._operation_from_row(existing), False
+
+            predecessors = connection.execute(
+                "SELECT * FROM operations WHERE operation_kind='ensure_master' ORDER BY created_at,operation_id"
+            ).fetchall()
+            incomplete = next((row for row in predecessors if row["state"] not in terminal_states), None)
+            if incomplete is not None:
+                raise MasterAdmissionRejected(
+                    "master admission rejected: lifecycle operation "
+                    f"{incomplete['operation_id']} is {incomplete['state']}"
+                )
+
+            live_service = connection.execute(
+                "SELECT service_instance_id,state FROM services "
+                "WHERE service_kind=? AND state IN ('ACTIVE','DRAINING') "
+                "ORDER BY epoch DESC LIMIT 1",
+                (service_kind,),
+            ).fetchone()
+            if live_service is not None:
+                raise MasterAdmissionRejected(
+                    "master admission rejected: service "
+                    f"{live_service['service_instance_id']} is {live_service['state']}"
+                )
+
+            epoch_row = connection.execute(
+                "SELECT current_epoch FROM service_epochs WHERE service_kind=?", (service_kind,)
+            ).fetchone()
+            current_epoch = int(epoch_row["current_epoch"]) if epoch_row is not None else 0
+            predecessor: sqlite3.Row | None = None
+            predecessor_identity: dict[str, Any] | None = None
+            predecessor_epoch = 0
+            for row in predecessors:
+                try:
+                    candidate_identity = json.loads(str(row["identity_json"]))
+                    candidate_epoch = int(candidate_identity["epoch"])
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise MasterAdmissionRejected(
+                        "master admission rejected: predecessor epoch identity is invalid"
+                    ) from exc
+                if candidate_epoch > predecessor_epoch:
+                    predecessor = row
+                    predecessor_identity = candidate_identity
+                    predecessor_epoch = candidate_epoch
+            if (predecessor is None and current_epoch != 0) or (
+                predecessor is not None and predecessor_epoch != current_epoch
+            ):
+                raise MasterAdmissionRejected(
+                    "master admission rejected: lifecycle and epoch ledgers are inconsistent"
+                )
+
+            if predecessor is not None and predecessor["state"] == "STOPPED":
+                assert predecessor_identity is not None
+                checkpoint = connection.execute(
+                    "SELECT c.operation_id,c.master_instance_id,c.epoch,c.status "
+                    "FROM checkpoint_heads h JOIN checkpoint_candidates c "
+                    "ON c.checkpoint_id=h.current_checkpoint_id WHERE h.service_kind=?",
+                    (service_kind,),
+                ).fetchone()
+                if (
+                    checkpoint is None
+                    or checkpoint["status"] != "VERIFIED"
+                    or checkpoint["operation_id"] != predecessor["operation_id"]
+                    or checkpoint["master_instance_id"] != predecessor_identity.get("master_instance_id")
+                    or int(checkpoint["epoch"]) != predecessor_epoch
+                ):
+                    raise MasterAdmissionRejected(
+                        "master admission rejected: stopped predecessor lacks its verified checkpoint"
+                    )
+
+            rotation_prefix = "forced-rotation:"
+            if idempotency_key.startswith(rotation_prefix):
+                request_id = idempotency_key.removeprefix(rotation_prefix)
+                rotation = connection.execute(
+                    "SELECT operation_kind,state,identity_json FROM operations WHERE operation_id=?",
+                    (request_id,),
+                ).fetchone()
+                if (
+                    rotation is None
+                    or rotation["operation_kind"] != "forced_master_rotation"
+                    or rotation["state"] != "REQUESTED"
+                ):
+                    raise MasterAdmissionRejected(
+                        "master admission rejected: forced rotation binding is invalid"
+                    )
+                try:
+                    rotation_identity = json.loads(str(rotation["identity_json"]))
+                    expected_epoch = int(rotation_identity["expected_active_epoch"])
+                    expected_generation = int(rotation_identity["head_generation"])
+                    expected_checkpoint = str(rotation_identity["checkpoint_id"])
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise MasterAdmissionRejected(
+                        "master admission rejected: forced rotation binding is invalid"
+                    ) from exc
+                head = connection.execute(
+                    "SELECT generation,current_checkpoint_id FROM checkpoint_heads WHERE service_kind=?",
+                    (service_kind,),
+                ).fetchone()
+                candidate = connection.execute(
+                    "SELECT operation_id,master_instance_id,epoch,status "
+                    "FROM checkpoint_candidates WHERE checkpoint_id=?",
+                    (expected_checkpoint,),
+                ).fetchone()
+                source = (
+                    connection.execute(
+                        "SELECT state,identity_json FROM operations WHERE operation_id=?",
+                        (candidate["operation_id"],),
+                    ).fetchone()
+                    if candidate is not None
+                    else None
+                )
+                if source is None:
+                    raise MasterAdmissionRejected(
+                        "master admission rejected: forced rotation source is invalid"
+                    )
+                try:
+                    source_identity = json.loads(str(source["identity_json"]))
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise MasterAdmissionRejected(
+                        "master admission rejected: forced rotation source is invalid"
+                    ) from exc
+                if (
+                    predecessor is None
+                    or current_epoch != expected_epoch
+                    or head is None
+                    or int(head["generation"]) != expected_generation
+                    or head["current_checkpoint_id"] != expected_checkpoint
+                    or candidate is None
+                    or predecessor["operation_id"] != candidate["operation_id"]
+                    or predecessor["state"] != "STOPPED"
+                    or candidate["status"] != "VERIFIED"
+                    or int(candidate["epoch"]) != expected_epoch
+                    or source["state"] != "STOPPED"
+                    or int(source_identity.get("epoch", 0)) != expected_epoch
+                    or candidate["master_instance_id"] != source_identity.get("master_instance_id")
+                ):
+                    raise MasterAdmissionRejected(
+                        "master admission rejected: forced rotation lacks the exact verified STOPPED handoff"
+                    )
+
+            epoch = current_epoch + 1
+            connection.execute(
+                "INSERT INTO service_epochs(service_kind,current_epoch,updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(service_kind) DO UPDATE SET current_epoch=excluded.current_epoch,"
+                "updated_at=excluded.updated_at",
+                (service_kind, epoch, now),
+            )
+            durable_identity = {**identity, "epoch": epoch}
+            connection.execute(
+                "INSERT INTO operations(operation_id,idempotency_key,operation_kind,intent_hash,state,identity_json,"
+                "created_at,updated_at) VALUES (?,?,'ensure_master',?,'REQUESTED',?,?,?)",
+                (operation_id, idempotency_key, intent_hash, _safe_json(durable_identity), now, now),
+            )
+            connection.execute(
+                "INSERT INTO operation_log(operation_id,from_state,to_state,recorded_at,metadata_json) "
+                "VALUES (?,NULL,'REQUESTED',?,?)",
+                (operation_id, now, _safe_json({"reason": "master_admitted", "epoch": epoch})),
+            )
+            row = connection.execute(
+                "SELECT * FROM operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert row is not None
+            return self._operation_from_row(row), True
 
     def get_operation(self, operation_id: str) -> OperationRecord | None:
         with self._reader() as connection:

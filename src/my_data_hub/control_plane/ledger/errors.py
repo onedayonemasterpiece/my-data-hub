@@ -6,6 +6,10 @@ class IdempotencyConflict(ControlLedgerError):
     pass
 
 
+class MasterAdmissionRejected(ControlLedgerError):
+    """A distinct master request cannot safely allocate the next epoch."""
+
+
 class StaleRuntimeEvent(ControlLedgerError):
     pass
 

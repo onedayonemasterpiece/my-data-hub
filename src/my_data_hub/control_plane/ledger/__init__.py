@@ -5,6 +5,7 @@ from .errors import (
     EventRejected,
     IdempotencyConflict,
     LeaseRejected,
+    MasterAdmissionRejected,
     MigrationError,
     StaleRuntimeEvent,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "EventRejected",
     "IdempotencyConflict",
     "LeaseRejected",
+    "MasterAdmissionRejected",
     "MigrationError",
     "OperationRecord",
     "ResourceLeaseRecord",

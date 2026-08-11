@@ -109,14 +109,12 @@ class MasterCoordinator:
 
     def ensure_master(self, intent: MasterIntent, *, runtime_secret: str) -> MasterHandle:
         identity = self.identity_for(intent.idempotency_key)
-        record, _ = self.ledger.ensure_operation(
+        record, _ = self.ledger.ensure_master_operation(
             operation_id=identity["operation_id"],
             idempotency_key=intent.idempotency_key,
-            operation_kind="ensure_master",
             intent=intent.as_dict(),
-            initial_state=MasterState.REQUESTED.value,
             identity=identity,
-            allocate_epoch_for=MASTER_SERVICE_KIND,
+            service_kind=MASTER_SERVICE_KIND,
         )
         durable = record.identity
         self.ledger.record_attempt(

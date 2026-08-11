@@ -4,6 +4,7 @@ import json
 import os
 import random
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,6 +17,7 @@ from my_data_hub.control_plane.ledger import (
     ControlLedger,
     EventDisposition,
     EventRejected,
+    MasterAdmissionRejected,
     StaleRuntimeEvent,
     discover_control_migrations,
 )
@@ -245,6 +247,343 @@ def test_twenty_concurrent_ensure_requests_collapse_to_one_physical_run(tmp_path
     }
 
 
+def test_distinct_concurrent_ensure_requests_admit_only_one_master(tmp_path: Path) -> None:
+    ledger = ledger_at(tmp_path)
+    fake = FakeKaggleRuntime()
+    coordinator = MasterCoordinator(ledger, fake)
+    barrier = threading.Barrier(2)
+
+    def ensure(key: str):  # type: ignore[no-untyped-def]
+        barrier.wait()
+        return coordinator.ensure_master(intent(key), runtime_secret=SECRET)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(ensure, key) for key in ("distinct-master-a", "distinct-master-b")]
+    successes = []
+    failures = []
+    for future in futures:
+        try:
+            successes.append(future.result())
+        except MasterAdmissionRejected as exc:
+            failures.append(exc)
+
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert "master admission" in str(failures[0]).lower()
+    assert successes[0].epoch == 1
+    assert ledger.current_epoch("postgres-master") == 1
+    assert len(ledger.incomplete_operations("ensure_master")) == 1
+    assert fake.physical_effect_counts == {
+        "ensure_dataset": 1,
+        "push_notebook": 1,
+        "trigger_run": 1,
+    }
+
+
+def test_distinct_ensure_cannot_fence_an_active_master_or_create_attempt(tmp_path: Path) -> None:
+    clock = DeterministicClock(datetime(2026, 8, 10, 18, 0, tzinfo=UTC))
+    ledger = ledger_at(tmp_path, clock)
+    fake = FakeKaggleRuntime()
+    coordinator = MasterCoordinator(ledger, fake)
+    active = coordinator.ensure_master(intent("active-master"), runtime_secret=SECRET)
+    coordinator.accept_runtime_event(
+        runtime_event(
+            active,
+            RuntimeEventType.SERVICE_READY,
+            1,
+            clock.now(),
+            service_kind="postgres-master",
+            endpoint="tunnel://active-master",
+            protocol="postgresql+tls",
+            tls_fingerprint="sha256:" + "a" * 64,
+            capabilities=["sql"],
+            canonical_revision=1,
+            schema_version="15",
+            lease_until=(clock.now() + timedelta(minutes=5)).isoformat(),
+            master_instance_id=active.master_instance_id,
+            epoch=active.epoch,
+        ),
+        header_token=SECRET,
+    )
+    before_attempts = sqlite3.connect(ledger.path).execute("SELECT count(*) FROM run_attempts").fetchone()
+    before_effects = sqlite3.connect(ledger.path).execute("SELECT count(*) FROM effects").fetchone()
+
+    with pytest.raises(MasterAdmissionRejected, match="master admission"):
+        coordinator.ensure_master(intent("replacement-too-early"), runtime_secret=SECRET)
+
+    assert ledger.current_epoch("postgres-master") == active.epoch
+    service = ledger.resolve_service("postgres-master")
+    assert service is not None
+    assert service.service_instance_id == active.service_instance_id
+    assert service.state == MasterState.ACTIVE.value
+    assert sqlite3.connect(ledger.path).execute("SELECT count(*) FROM run_attempts").fetchone() == before_attempts
+    assert sqlite3.connect(ledger.path).execute("SELECT count(*) FROM effects").fetchone() == before_effects
+    assert fake.physical_effect_counts == {
+        "ensure_dataset": 1,
+        "push_notebook": 1,
+        "trigger_run": 1,
+    }
+
+
+def test_stopped_master_requires_its_verified_checkpoint_before_new_epoch(tmp_path: Path) -> None:
+    ledger = ledger_at(tmp_path)
+    fake = FakeKaggleRuntime()
+    coordinator = MasterCoordinator(ledger, fake)
+    stopped = coordinator.ensure_master(intent("stopped-master"), runtime_secret=SECRET)
+    ledger.transition_operation(
+        stopped.operation_id,
+        expected_state=MasterState.REGISTERING.value,
+        new_state=MasterState.STOPPED.value,
+        metadata={"reason": "test-stop-before-checkpoint"},
+    )
+
+    with pytest.raises(MasterAdmissionRejected, match="verified checkpoint"):
+        coordinator.ensure_master(intent("rotation-without-checkpoint"), runtime_secret=SECRET)
+    assert ledger.current_epoch("postgres-master") == stopped.epoch
+
+    checkpoint_id = "stopped-master-checkpoint"
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=checkpoint_id,
+        operation_id=stopped.operation_id,
+        dataset_ref="private/checkpoint-dataset",
+        version_ref=None,
+        manifest_sha256="d" * 64,
+        source_checkpoint_id=None,
+        source_head_generation=0,
+        master_instance_id=stopped.master_instance_id,
+        epoch=stopped.epoch,
+    )
+    ledger.mark_checkpoint_uploaded(checkpoint_id, "private/checkpoint-dataset/1")
+    ledger.mark_checkpoint_readback_verified(checkpoint_id)
+    ledger.mark_checkpoint_restore_verified(checkpoint_id)
+    ledger.promote_checkpoint(
+        "postgres-master",
+        checkpoint_id,
+        expected_generation=0,
+        expected_parent_checkpoint_id=None,
+    )
+
+    replacement = coordinator.ensure_master(intent("rotation-with-checkpoint"), runtime_secret=SECRET)
+    assert replacement.epoch == stopped.epoch + 1
+    assert replacement.state == MasterState.REGISTERING
+
+
+@pytest.mark.parametrize("intermediate_failed_epoch", [False, True])
+def test_forced_rotation_atomically_binds_the_latest_stopped_checkpoint_handoff(
+    tmp_path: Path, intermediate_failed_epoch: bool
+) -> None:
+    ledger = ledger_at(tmp_path)
+    coordinator = MasterCoordinator(ledger, FakeKaggleRuntime())
+    source = coordinator.ensure_master(intent("rotation-source"), runtime_secret=SECRET)
+    ledger.transition_operation(
+        source.operation_id,
+        expected_state=MasterState.REGISTERING.value,
+        new_state=MasterState.STOPPED.value,
+        metadata={"reason": "rotation-source-stopped"},
+    )
+    checkpoint_id = "rotation-source-checkpoint"
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=checkpoint_id,
+        operation_id=source.operation_id,
+        dataset_ref="private/checkpoint-dataset",
+        version_ref=None,
+        manifest_sha256="c" * 64,
+        source_checkpoint_id=None,
+        source_head_generation=0,
+        master_instance_id=source.master_instance_id,
+        epoch=source.epoch,
+    )
+    ledger.mark_checkpoint_uploaded(checkpoint_id, "private/checkpoint-dataset/1")
+    ledger.mark_checkpoint_readback_verified(checkpoint_id)
+    ledger.mark_checkpoint_restore_verified(checkpoint_id)
+    ledger.promote_checkpoint(
+        "postgres-master", checkpoint_id, expected_generation=0, expected_parent_checkpoint_id=None
+    )
+    rotation_request_id = "a" * 64
+    ledger.ensure_operation(
+        operation_id=rotation_request_id,
+        idempotency_key="acceptance-rotation-request",
+        operation_kind="forced_master_rotation",
+        intent={"checkpoint_id": checkpoint_id},
+        initial_state="REQUESTED",
+        identity={
+            "checkpoint_id": checkpoint_id,
+            "expected_active_epoch": source.epoch,
+            "head_generation": 1,
+        },
+    )
+    if intermediate_failed_epoch:
+        intermediate = coordinator.ensure_master(intent("intermediate-failure"), runtime_secret=SECRET)
+        ledger.transition_operation(
+            intermediate.operation_id,
+            expected_state=MasterState.REGISTERING.value,
+            new_state=MasterState.FAILED.value,
+            metadata={"reason": "intermediate-provider-failure"},
+        )
+
+    forced = intent(f"forced-rotation:{rotation_request_id}")
+    if intermediate_failed_epoch:
+        with pytest.raises(MasterAdmissionRejected, match="exact verified STOPPED handoff"):
+            coordinator.ensure_master(forced, runtime_secret=SECRET)
+        assert ledger.current_epoch("postgres-master") == 2
+        assert ledger.get_operation(MasterCoordinator.identity_for(forced.idempotency_key)["operation_id"]) is None
+    else:
+        replacement = coordinator.ensure_master(forced, runtime_secret=SECRET)
+        assert replacement.epoch == source.epoch + 1
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        MasterState.REQUESTED,
+        MasterState.STARTING,
+        MasterState.RESTORING,
+        MasterState.REGISTERING,
+        MasterState.ACTIVE,
+        MasterState.DRAINING,
+        MasterState.CHECKPOINTING,
+        MasterState.CHECKPOINT_FAILED,
+    ],
+)
+def test_every_nonterminal_master_state_blocks_distinct_epoch_allocation(
+    tmp_path: Path, state: MasterState
+) -> None:
+    ledger = ledger_at(tmp_path)
+    first_identity = MasterCoordinator.identity_for(f"blocked-{state.value}")
+    first, created = ledger.ensure_master_operation(
+        operation_id=first_identity["operation_id"],
+        idempotency_key=f"blocked-{state.value}",
+        intent=intent(f"blocked-{state.value}").as_dict(),
+        identity=first_identity,
+    )
+    assert created
+    if state is not MasterState.REQUESTED:
+        first = ledger.transition_operation(
+            first.operation_id,
+            expected_state=MasterState.REQUESTED.value,
+            new_state=state.value,
+            metadata={"reason": "admission-state-test"},
+        )
+    second_identity = MasterCoordinator.identity_for(f"blocked-{state.value}-replacement")
+
+    with pytest.raises(MasterAdmissionRejected, match=state.value):
+        ledger.ensure_master_operation(
+            operation_id=second_identity["operation_id"],
+            idempotency_key=f"blocked-{state.value}-replacement",
+            intent=intent(f"blocked-{state.value}-replacement").as_dict(),
+            identity=second_identity,
+        )
+
+    assert ledger.current_epoch("postgres-master") == 1
+    assert ledger.get_operation(second_identity["operation_id"]) is None
+
+
+@pytest.mark.parametrize("terminal_state", [MasterState.FAILED, MasterState.FENCED, MasterState.ORPHANED])
+def test_failed_fenced_or_orphaned_master_permits_exact_next_epoch(
+    tmp_path: Path, terminal_state: MasterState
+) -> None:
+    ledger = ledger_at(tmp_path)
+    first_identity = MasterCoordinator.identity_for(f"terminal-{terminal_state.value}")
+    first, _created = ledger.ensure_master_operation(
+        operation_id=first_identity["operation_id"],
+        idempotency_key=f"terminal-{terminal_state.value}",
+        intent=intent(f"terminal-{terminal_state.value}").as_dict(),
+        identity=first_identity,
+    )
+    ledger.transition_operation(
+        first.operation_id,
+        expected_state=MasterState.REQUESTED.value,
+        new_state=terminal_state.value,
+        metadata={"reason": "terminal-admission-test"},
+    )
+    second_identity = MasterCoordinator.identity_for(f"after-{terminal_state.value}")
+
+    second, created = ledger.ensure_master_operation(
+        operation_id=second_identity["operation_id"],
+        idempotency_key=f"after-{terminal_state.value}",
+        intent=intent(f"after-{terminal_state.value}").as_dict(),
+        identity=second_identity,
+    )
+
+    assert created
+    assert second.identity["epoch"] == 2
+    assert ledger.current_epoch("postgres-master") == 2
+
+
+def test_checkpoint_verified_operation_still_waits_for_terminal_service_handoff(tmp_path: Path) -> None:
+    clock = DeterministicClock(datetime(2026, 8, 10, 18, 0, tzinfo=UTC))
+    ledger = ledger_at(tmp_path, clock)
+    coordinator = MasterCoordinator(ledger, FakeKaggleRuntime())
+    handle = coordinator.ensure_master(intent("terminal-handoff"), runtime_secret=SECRET)
+    coordinator.accept_runtime_event(
+        runtime_event(
+            handle,
+            RuntimeEventType.SERVICE_READY,
+            1,
+            clock.now(),
+            service_kind="postgres-master",
+            endpoint="tunnel://terminal-handoff",
+            protocol="postgresql+tls",
+            tls_fingerprint="sha256:" + "e" * 64,
+            capabilities=["sql"],
+            canonical_revision=1,
+            schema_version="15",
+            lease_until=(clock.now() + timedelta(minutes=5)).isoformat(),
+            master_instance_id=handle.master_instance_id,
+            epoch=handle.epoch,
+        ),
+        header_token=SECRET,
+    )
+    checkpoint_id = "terminal-handoff-checkpoint"
+    manifest_sha256 = "f" * 64
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=checkpoint_id,
+        operation_id=handle.operation_id,
+        dataset_ref="private/checkpoint-dataset",
+        version_ref=None,
+        manifest_sha256=manifest_sha256,
+        source_checkpoint_id=None,
+        source_head_generation=0,
+        master_instance_id=handle.master_instance_id,
+        epoch=handle.epoch,
+    )
+    ledger.mark_checkpoint_uploaded(checkpoint_id, "private/checkpoint-dataset/1")
+    ledger.mark_checkpoint_readback_verified(checkpoint_id)
+    ledger.mark_checkpoint_restore_verified(checkpoint_id)
+    ledger.promote_checkpoint(
+        "postgres-master", checkpoint_id, expected_generation=0, expected_parent_checkpoint_id=None
+    )
+    shutdown = (
+        (RuntimeEventType.RUNTIME_DRAINING, {}),
+        (RuntimeEventType.CHECKPOINT_STARTED, {}),
+        (
+            RuntimeEventType.CHECKPOINT_VERIFIED,
+            {
+                "checkpoint_id": checkpoint_id,
+                "manifest_sha256": manifest_sha256,
+                "current_checkpoint_id": checkpoint_id,
+            },
+        ),
+    )
+    for sequence, (event_type, data) in enumerate(shutdown, start=2):
+        coordinator.accept_runtime_event(
+            runtime_event(handle, event_type, sequence, clock.now(), **data), header_token=SECRET
+        )
+    operation = ledger.get_operation(handle.operation_id)
+    assert operation is not None and operation.state == MasterState.STOPPED.value
+    replacement_intent = intent("after-terminal-handoff")
+
+    with pytest.raises(MasterAdmissionRejected, match=r"service .* DRAINING"):
+        coordinator.ensure_master(replacement_intent, runtime_secret=SECRET)
+    assert ledger.current_epoch("postgres-master") == handle.epoch
+
+    coordinator.accept_runtime_event(
+        runtime_event(handle, RuntimeEventType.RUNTIME_TERMINAL, 5, clock.now()), header_token=SECRET
+    )
+    replacement = coordinator.ensure_master(replacement_intent, runtime_secret=SECRET)
+    assert replacement.epoch == handle.epoch + 1
+
+
 def test_effect_is_durable_before_provider_is_called(tmp_path: Path) -> None:
     ledger = ledger_at(tmp_path)
 
@@ -338,6 +677,18 @@ def test_callbacks_dedupe_coalesce_size_and_fence_stale_epoch(tmp_path: Path) ->
     with pytest.raises(EventRejected, match="token"):
         coordinator.accept_runtime_event(ready, header_token="wrong-secret-credential")
 
+    # A distinct ensure may advance only after the old lifecycle is terminal.
+    # Keep its runtime token valid so the next assertion still exercises the
+    # stale-epoch disposition rather than token revocation.
+    ledger.project_master_lifecycle(
+        operation_id=handle_a.operation_id,
+        service_instance_id=handle_a.service_instance_id,
+        epoch=handle_a.epoch,
+        expected_operation_state=MasterState.ACTIVE.value,
+        operation_state=MasterState.FENCED.value,
+        service_state=MasterState.FENCED.value,
+        event_id="test-explicit-fence-before-replacement",
+    )
     handle_b = coordinator.ensure_master(intent("master-b"), runtime_secret=SECRET)
     assert handle_b.epoch == 2
     stale = runtime_event(
