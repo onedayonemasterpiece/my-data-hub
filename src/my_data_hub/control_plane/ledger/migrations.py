@@ -17,7 +17,10 @@ class ControlMigration:
 
 
 def default_migration_directory() -> Path:
-    return Path(__file__).resolve().parents[4] / "control_migrations"
+    repository_directory = Path(__file__).resolve().parents[4] / "control_migrations"
+    if repository_directory.is_dir():
+        return repository_directory
+    return Path(__file__).with_name("sql")
 
 
 def discover_control_migrations(directory: Path) -> list[ControlMigration]:

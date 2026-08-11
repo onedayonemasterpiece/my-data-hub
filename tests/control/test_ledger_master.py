@@ -15,7 +15,9 @@ from my_data_hub.control_plane.ledger import (
     EventDisposition,
     EventRejected,
     StaleRuntimeEvent,
+    discover_control_migrations,
 )
+from my_data_hub.control_plane.ledger import migrations as control_migration_module
 from my_data_hub.orchestrator.master import (
     ExactOutput,
     FakeKaggleRuntime,
@@ -94,6 +96,13 @@ def test_sqlite_pragmas_permissions_and_append_only_logs(tmp_path: Path) -> None
         connection.execute("UPDATE operation_log SET to_state='BROKEN'")
     connection.close()
     assert ledger.get_operation(operation.operation_id) is not None
+
+
+def test_packaged_and_repository_control_migrations_are_identical() -> None:
+    root = Path(__file__).resolve().parents[2]
+    repository = discover_control_migrations(root / "control_migrations")
+    packaged = discover_control_migrations(Path(control_migration_module.__file__).with_name("sql"))
+    assert [(item.version, item.sha256) for item in repository] == [(item.version, item.sha256) for item in packaged]
 
 
 def test_twenty_concurrent_ensure_requests_collapse_to_one_physical_run(tmp_path: Path) -> None:
