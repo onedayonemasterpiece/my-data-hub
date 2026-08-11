@@ -161,6 +161,14 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
         "deploy/control-plane/collect_deployment_evidence.py",
         "deploy/control-plane/install.sh",
         "deploy/same-host/install.sh",
+        "deploy/yandex-edge/autossh.service",
+        "deploy/yandex-edge/cloud-init.yaml.tpl",
+        "deploy/yandex-edge/create_tunnel_identity.sh",
+        "deploy/yandex-edge/edge-nginx.conf",
+        "deploy/yandex-edge/fetch-lockbox-key.py",
+        "deploy/yandex-edge/provision.sh",
+        "deploy/yandex-edge/proxy.conf",
+        "deploy/yandex-edge/render_cloud_init.py",
     }
     patterns = (
         re.compile(r"^.*postgresql\.service.*$", re.I | re.M),
