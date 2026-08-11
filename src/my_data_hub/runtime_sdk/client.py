@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -200,6 +201,42 @@ class RuntimeClient:
 
         self.replay_pending(max_events=max_events)
         return not self.spool.pending()
+
+    def durable_event_bodies(
+        self,
+        event_types: tuple[RuntimeEventType, ...],
+    ) -> tuple[dict[str, Any], ...]:
+        """Read the latest exact durable body for each requested type in order."""
+
+        if not event_types or len(set(event_types)) != len(event_types):
+            raise ValueError("durable event body request must contain unique event types")
+        requested = {item.value for item in event_types}
+        selected: dict[str, dict[str, Any]] = {}
+        expected_identity = {
+            "run_id": self.run_id,
+            "attempt_id": self.attempt_id,
+            "service_instance_id": self.service_instance_id,
+            "source_identity": self.source_identity,
+            "source_version": self.source_version,
+            "epoch": self.epoch,
+        }
+        for event in self.spool.events():
+            event_type = event.get("event_type")
+            if event_type not in requested:
+                continue
+            if any(event.get(key) != value for key, value in expected_identity.items()):
+                continue
+            selected[str(event_type)] = event
+        missing = requested - selected.keys()
+        if missing:
+            raise ValueError(f"durable runtime spool lacks terminal event bodies: {sorted(missing)}")
+        result = tuple(selected[item.value] for item in event_types)
+        sequences = tuple(event.get("local_sequence") for event in result)
+        if not all(isinstance(value, int) for value in sequences) or any(
+            left >= right for left, right in pairwise(sequences)
+        ):
+            raise ValueError("durable terminal event bodies are not in local sequence order")
+        return result
 
     def emit_donor_envelope(self, envelope: Mapping[str, Any]) -> DeliveryReceipt:
         """Adapt the proven status-client shape while moving its token to the header."""

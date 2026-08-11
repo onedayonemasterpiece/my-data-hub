@@ -7,22 +7,29 @@ import os
 import secrets
 import time
 import urllib.request
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from importlib.resources import as_file, files
+from itertools import pairwise
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 import psycopg
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from my_data_hub.checkpoints import load_and_verify, restore_physical_archive
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.db.migrations import migrate
 from my_data_hub.runtime_sdk import (
+    CHECKPOINT_ATTEMPT_BUDGET_SECONDS,
+    CHECKPOINT_TRANSITION_GUARD_SECONDS,
     KAGGLE_PROVIDER_TIMEOUT_SECONDS,
+    MIN_CHECKPOINT_RESERVE_SECONDS,
     RuntimeClient,
+    RuntimeEvent,
     RuntimeEventType,
 )
 
@@ -32,6 +39,101 @@ from .credentials import CredentialProvisioner
 from .database_gate import DatabaseGate
 from .postgres import PostgresBinaries, PostgresConfig, PostgresSupervisor
 from .tunnel import ReverseTunnelSpec, TunnelSupervisor
+
+MASTER_TERMINAL_OUTPUT_NAME = "my-data-hub-master-terminal.json"
+MASTER_TERMINAL_SCHEMA_VERSION = "my-data-hub-master-terminal.v1"
+MASTER_TERMINAL_MAX_BYTES = 256 * 1024
+_MASTER_TERMINAL_EVENT_TYPES = (
+    RuntimeEventType.RUNTIME_DRAINING,
+    RuntimeEventType.CHECKPOINT_STARTED,
+    RuntimeEventType.CHECKPOINT_VERIFIED,
+    RuntimeEventType.RUNTIME_TERMINAL,
+)
+
+
+class MasterTerminalCheckpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    checkpoint_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
+    manifest_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    current_checkpoint_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
+
+    @model_validator(mode="after")
+    def checkpoint_is_current(self) -> MasterTerminalCheckpoint:
+        UUID(self.checkpoint_id)
+        UUID(self.current_checkpoint_id)
+        if self.checkpoint_id != self.current_checkpoint_id:
+            raise ValueError("terminal checkpoint must be the exact current checkpoint")
+        return self
+
+
+class MasterTerminalRecord(BaseModel):
+    """Bounded secret-free recovery evidence written after durable promotion."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["my-data-hub-master-terminal.v1"] = MASTER_TERMINAL_SCHEMA_VERSION
+    run_id: str = Field(min_length=1, max_length=200)
+    attempt_id: str = Field(min_length=1, max_length=200)
+    service_instance_id: str = Field(min_length=1, max_length=200)
+    master_instance_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
+    source_identity: str = Field(min_length=1, max_length=500)
+    source_version: str = Field(min_length=1, max_length=200)
+    epoch: int = Field(ge=1)
+    status: Literal["succeeded"] = "succeeded"
+    checkpoint: MasterTerminalCheckpoint
+    events: tuple[dict[str, Any], ...] = Field(min_length=4, max_length=4)
+
+    @model_validator(mode="after")
+    def exact_event_chain(self) -> MasterTerminalRecord:
+        UUID(self.master_instance_id)
+        parsed = tuple(RuntimeEvent.model_validate(body) for body in self.events)
+        if tuple(event.event_type for event in parsed) != _MASTER_TERMINAL_EVENT_TYPES:
+            raise ValueError("master terminal events differ from the exact lifecycle chain")
+        if any(
+            (
+                event.run_id,
+                event.attempt_id,
+                event.service_instance_id,
+                event.source_identity,
+                event.source_version,
+                event.epoch,
+            )
+            != (
+                self.run_id,
+                self.attempt_id,
+                self.service_instance_id,
+                self.source_identity,
+                self.source_version,
+                self.epoch,
+            )
+            for event in parsed
+        ):
+            raise ValueError("master terminal event identity differs from its envelope")
+        sequences = tuple(event.local_sequence for event in parsed)
+        if any(left >= right for left, right in pairwise(sequences)):
+            raise ValueError("master terminal events are not in strictly increasing sequence order")
+        if (
+            (parsed[0].phase, parsed[0].status, parsed[0].data) != ("draining", "closed", {})
+            or (parsed[1].phase, parsed[1].status, parsed[1].data)
+            != ("checkpointing", "started", {})
+            or any(event.artifact_refs or event.metrics for event in parsed)
+        ):
+            raise ValueError("master terminal lifecycle bodies contain unexpected payload data")
+        checkpoint = self.checkpoint.model_dump(mode="json")
+        if (parsed[2].phase, parsed[2].status, parsed[2].data) != (
+            "checkpointing",
+            "verified",
+            checkpoint,
+        ):
+            raise ValueError("checkpoint.verified does not bind the exact terminal checkpoint")
+        if (parsed[3].phase, parsed[3].status, parsed[3].data) != (
+            "stopped",
+            "succeeded",
+            {"checkpoint_id": self.checkpoint.current_checkpoint_id},
+        ):
+            raise ValueError("runtime.terminal does not bind the exact current checkpoint")
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,11 +210,13 @@ class NotebookMasterConfig:
             raise ValueError("master lease must be 60..600 seconds")
         if config.maximum_runtime_seconds < 1_800:
             raise ValueError("maximum runtime must be at least 1800 seconds")
+        if config.checkpoint_reserve_seconds != MIN_CHECKPOINT_RESERVE_SECONDS:
+            raise ValueError("checkpoint reserve must be exactly 10800 seconds")
         if (
-            not 900 <= config.checkpoint_reserve_seconds <= 10_800
-            or config.checkpoint_reserve_seconds >= config.maximum_runtime_seconds
+            config.checkpoint_reserve_seconds + CHECKPOINT_TRANSITION_GUARD_SECONDS
+            >= config.maximum_runtime_seconds
         ):
-            raise ValueError("checkpoint reserve must be 900..10800 seconds and below maximum runtime")
+            raise ValueError("checkpoint reserve and transition guard must be below maximum runtime")
         if config.maximum_runtime_seconds + config.checkpoint_reserve_seconds > KAGGLE_PROVIDER_TIMEOUT_SECONDS:
             raise ValueError(
                 "process runtime plus exit reserve exceeds the declared Kaggle provider timeout"
@@ -154,13 +258,114 @@ class CheckpointShutdownError(RuntimeError):
         self.receipt = receipt
 
 
+class CheckpointAdmissionError(RuntimeError):
+    """A publication attempt was not started because its full budget was absent."""
+
+
 def _runtime_deadlines(config: NotebookMasterConfig, process_started_at: float) -> tuple[float, float]:
     """Return fixed active/session deadlines anchored before all boot work."""
 
     if process_started_at < 0:
         raise ValueError("process monotonic start must be non-negative")
     session_deadline = process_started_at + config.maximum_runtime_seconds
-    return session_deadline - config.checkpoint_reserve_seconds, session_deadline
+    return (
+        session_deadline
+        - config.checkpoint_reserve_seconds
+        - CHECKPOINT_TRANSITION_GUARD_SECONDS,
+        session_deadline,
+    )
+
+
+def _require_active_window(*, active_deadline: float, monotonic: Any = time.monotonic) -> None:
+    """Refuse readiness/write activation once boot consumed the ACTIVE window."""
+
+    if monotonic() >= active_deadline:
+        raise RuntimeError("boot consumed the ACTIVE window reserved before checkpoint admission")
+
+
+def _emit_service_ready(
+    *,
+    runtime: Any,
+    ready: Any,
+    active_deadline: float,
+    monotonic: Any = time.monotonic,
+) -> None:
+    """Check the fixed process deadline before readiness can authorize writes."""
+
+    _require_active_window(active_deadline=active_deadline, monotonic=monotonic)
+    receipt = runtime.emit(
+        RuntimeEventType.SERVICE_READY,
+        phase="registering",
+        status="ready",
+        data=ready.event_payload(),
+    )
+    if receipt.status != "delivered":
+        raise RuntimeError("service.ready was not acknowledged by the control plane")
+
+
+def _write_master_terminal(
+    *,
+    output_path: Path,
+    runtime: Any,
+    identity: MasterIdentity,
+    receipt: PublishReceipt,
+) -> None:
+    """Atomically persist the exact spooled terminal lifecycle for recovery."""
+
+    if output_path.is_symlink() or not output_path.parent.is_dir() or output_path.parent.is_symlink():
+        raise RuntimeError("master terminal output requires a real existing directory")
+    event_bodies = runtime.durable_event_bodies(_MASTER_TERMINAL_EVENT_TYPES)
+    record = MasterTerminalRecord(
+        run_id=runtime.run_id,
+        attempt_id=runtime.attempt_id,
+        service_instance_id=runtime.service_instance_id,
+        master_instance_id=str(identity.master_instance_id),
+        source_identity=runtime.source_identity,
+        source_version=runtime.source_version,
+        epoch=identity.epoch,
+        checkpoint=MasterTerminalCheckpoint(
+            checkpoint_id=receipt.checkpoint_id,
+            manifest_sha256=receipt.manifest_sha256,
+            current_checkpoint_id=receipt.current_checkpoint_id,
+        ),
+        events=event_bodies,
+    )
+    if record.run_id != identity.run_id or runtime.epoch != identity.epoch:
+        raise RuntimeError("master terminal runtime identity differs from the fenced master")
+    encoded = json.dumps(
+        record.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > MASTER_TERMINAL_MAX_BYTES:
+        raise RuntimeError("master terminal output exceeds 256 KiB")
+    lowered = encoded.lower()
+    if any(marker in lowered for marker in (b"postgresql://", b"postgres://", b"password=", b"sslkey=")):
+        raise RuntimeError("master terminal output contains a forbidden database credential marker")
+    temporary = output_path.with_name(f".{output_path.name}.{secrets.token_hex(8)}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, output_path)
+        os.chmod(output_path, 0o600)
+        directory_descriptor = os.open(output_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
 
 
 def _required(name: str) -> str:
@@ -388,14 +593,11 @@ def run_master(
         return schema_version, canonical_revision, hashlib.sha256(tls_certificate.read_bytes()).hexdigest()
 
     def announce(ready) -> None:  # type: ignore[no-untyped-def]
-        receipt = runtime.emit(
-            RuntimeEventType.SERVICE_READY,
-            phase="registering",
-            status="ready",
-            data=ready.event_payload(),
+        _emit_service_ready(
+            runtime=runtime,
+            ready=ready,
+            active_deadline=active_deadline,
         )
-        if receipt.status != "delivered":
-            raise RuntimeError("service.ready was not acknowledged by the control plane")
 
     def endpoint() -> str:
         return f"tunnel://127.0.0.1:{config.tunnel_remote_port}"
@@ -439,10 +641,23 @@ def run_master(
             now=now,
         )
     )
-    _wait_for_activation(_activation_url(callback_url, config.run_id, config.attempt_id), run_secret, identity)
-    assert gate_connection is not None
-    gate = DatabaseGate(gate_connection)
-    gate.activate(identity)
+    try:
+        _wait_for_activation(_activation_url(callback_url, config.run_id, config.attempt_id), run_secret, identity)
+        assert gate_connection is not None
+        gate = DatabaseGate(gate_connection)
+        _require_active_window(active_deadline=active_deadline)
+        gate.activate(identity)
+    except Exception:
+        if gate_connection is not None:
+            with suppress(Exception):
+                DatabaseGate(gate_connection).fence(identity, "activation_window_exhausted")
+            with suppress(Exception):
+                gate_connection.close()
+        with suppress(Exception):
+            tunnel.stop()
+        with suppress(Exception):
+            supervisor.stop(immediate=True)
+        raise
     credential_now = datetime.now(UTC)
     reader_expires_at = min(credential_now + timedelta(minutes=4), ready.lease_until)
     if reader_expires_at <= credential_now + timedelta(seconds=15):
@@ -466,8 +681,13 @@ def run_master(
     current_lease = ready.lease_until
     active_error: BaseException | None = None
     try:
-        while time.monotonic() < active_deadline:
-            time.sleep(30)
+        while True:
+            remaining_active = active_deadline - time.monotonic()
+            if remaining_active <= 0:
+                break
+            time.sleep(min(30.0, remaining_active))
+            if time.monotonic() >= active_deadline:
+                break
             tunnel.poll(now=datetime.now(UTC))
             proposed = datetime.now(UTC) + timedelta(seconds=config.lease_seconds)
             delivery = runtime.emit(
@@ -508,6 +728,7 @@ def run_master(
         package_directory=paths.checkpoints,
         identity=identity,
         deadline=session_deadline,
+        terminal_output_path=paths.working / MASTER_TERMINAL_OUTPUT_NAME,
     )
     if active_error is not None:
         if gate_connection is not None:
@@ -528,6 +749,7 @@ def _checkpoint_before_stop(
     database_url: str,
     package_directory: Path,
     identity: MasterIdentity,
+    terminal_output_path: Path | None = None,
     retry: bool = False,
 ) -> PublishReceipt:
     """Close writes and stop processes only after durable checkpoint success.
@@ -576,6 +798,13 @@ def _checkpoint_before_stop(
         status="succeeded",
         data={"checkpoint_id": receipt.current_checkpoint_id},
     )
+    if terminal_output_path is not None:
+        _write_master_terminal(
+            output_path=terminal_output_path,
+            runtime=runtime,
+            identity=identity,
+            receipt=receipt,
+        )
     if verified.status != "delivered" or terminal.status != "delivered":
         # ``emit(terminal)`` already auto-replays older callbacks.  Check the
         # durable spool rather than trusting the earlier receipt snapshot.
@@ -604,11 +833,20 @@ def _checkpoint_until_deadline(
     package_directory: Path,
     identity: MasterIdentity,
     deadline: float,
+    terminal_output_path: Path | None = None,
+    publication_attempt_seconds: float = CHECKPOINT_ATTEMPT_BUDGET_SECONDS,
     retry_seconds: float = 60.0,
     monotonic: Any = time.monotonic,
     sleep: Any = time.sleep,
 ) -> PublishReceipt:
-    """Retry failed candidates inside the declared provider shutdown reserve."""
+    """Admit only publication attempts whose entire declared allocation remains.
+
+    This is a conservative start/resume gate, not a claim that an already
+    running third-party provider call can be interrupted at ``deadline``.
+    """
+
+    if publication_attempt_seconds <= 0:
+        raise ValueError("checkpoint publication attempt budget must be positive")
 
     retry = False
     terminal_receipt: PublishReceipt | None = None
@@ -624,6 +862,11 @@ def _checkpoint_until_deadline(
                     retry_stage=CheckpointRetryStage.TERMINAL_DELIVERY,
                     receipt=terminal_receipt,
                 )
+            remaining = deadline - monotonic()
+            if remaining < publication_attempt_seconds:
+                raise CheckpointAdmissionError(
+                    "checkpoint publication was not started because its full attempt budget is absent"
+                )
             return _checkpoint_before_stop(
                 gate=gate,
                 runtime=runtime,
@@ -633,6 +876,7 @@ def _checkpoint_until_deadline(
                 database_url=database_url,
                 package_directory=package_directory,
                 identity=identity,
+                terminal_output_path=terminal_output_path,
                 retry=retry,
             )
         except CheckpointShutdownError as exc:
@@ -643,9 +887,13 @@ def _checkpoint_until_deadline(
             elif terminal_receipt is not None:
                 raise AssertionError("checkpoint publication cannot restart after durable promotion") from exc
             remaining = deadline - monotonic()
-            if remaining <= retry_seconds + 30:
+            if exc.retry_stage is CheckpointRetryStage.PUBLICATION:
+                required_after_sleep = publication_attempt_seconds + retry_seconds
+            else:
+                required_after_sleep = retry_seconds + 30
+            if remaining < required_after_sleep:
                 raise
-            sleep(min(retry_seconds, remaining - 30))
+            sleep(retry_seconds)
             retry = True
 
 

@@ -124,6 +124,24 @@ def test_heartbeat_is_coalesced_but_terminal_is_always_durable(tmp_path: Path) -
     assert runtime.emit(RuntimeEventType.RUNTIME_HEARTBEAT).status == "delivered"
 
 
+def test_exact_terminal_event_bodies_remain_available_after_delivery(tmp_path: Path) -> None:
+    clock = DeterministicClock(datetime(2026, 8, 10, tzinfo=UTC))
+    transport = ScriptedTransport([TransportResponse(200)] * 4)
+    runtime = client(tmp_path, transport, clock)
+    expected_types = (
+        RuntimeEventType.RUNTIME_DRAINING,
+        RuntimeEventType.CHECKPOINT_STARTED,
+        RuntimeEventType.CHECKPOINT_VERIFIED,
+        RuntimeEventType.RUNTIME_TERMINAL,
+    )
+    for event_type in expected_types:
+        runtime.emit(event_type, status="succeeded", data={"event": event_type.value})
+    bodies = runtime.durable_event_bodies(expected_types)
+    assert tuple(body["event_type"] for body in bodies) == tuple(item.value for item in expected_types)
+    assert [body["local_sequence"] for body in bodies] == [1, 2, 3, 4]
+    assert bodies == tuple(json.loads(call[1]) for call in transport.calls)
+
+
 def test_retry_backoff_is_deterministic_bounded_and_only_retries_transient_status(tmp_path: Path) -> None:
     policy = RetryPolicy(max_attempts=5, base_seconds=1, max_seconds=3, jitter_ratio=0.2)
     assert policy.delays("same-event") == policy.delays("same-event")

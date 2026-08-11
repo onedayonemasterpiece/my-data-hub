@@ -59,6 +59,19 @@ class JsonlEventSpool:
                 delivered.add(record["event_id"])
         return [event for event_id, event in events.items() if event_id not in delivered]
 
+    def events(self) -> list[dict[str, Any]]:
+        """Return the exact first durable body for every event, including ACKed events."""
+
+        events: dict[str, dict[str, Any]] = {}
+        for record in self.records():
+            if record.get("record") != "event":
+                continue
+            event = record.get("event")
+            if not isinstance(event, dict) or not isinstance(event.get("event_id"), str):
+                raise ValueError("runtime JSONL event record is malformed")
+            events.setdefault(event["event_id"], event)
+        return list(events.values())
+
     def highest_local_sequence(self) -> int:
         highest = 0
         for record in self.records():
