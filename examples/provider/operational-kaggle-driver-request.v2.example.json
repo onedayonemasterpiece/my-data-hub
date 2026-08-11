@@ -1,0 +1,18 @@
+{
+  "schema_version": "my-data-hub-operational-kaggle-driver-request.v2",
+  "phase": "EXECUTE",
+  "matrix_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "ordinal": 1,
+  "requirement_id": "FM01",
+  "scenario": "private-dataset-create-readback-delete",
+  "task_run_id": "11111111-1111-4111-8111-111111111111",
+  "required_assertions": ["private_create", "exact_readback", "claim_bound_delete"],
+  "lifecycle_gates": [],
+  "minimum_soak_seconds": null,
+  "maximum_soak_seconds": null,
+  "result_file": "operational-result.json",
+  "resume_only": false,
+  "evidence_issued_at": "2026-08-11T00:00:00Z",
+  "cleanup": null
+}

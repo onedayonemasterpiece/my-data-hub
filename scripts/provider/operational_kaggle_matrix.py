@@ -326,6 +326,20 @@ class DriverCapabilityCheck(BaseModel):
     detail_code: str = Field(pattern=r"^[A-Z0-9_]+$", max_length=120)
 
 
+class DriverCleanupBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    claim_task_id: UUID
+    claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    provider_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+    provider_run_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$")
+    provider_kernel_id: int = Field(ge=1)
+    source_version: int = Field(ge=1)
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    output_receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    output_file_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    output_tree_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class DriverResult(BaseModel):
     """Bounded locator returned by the external operational driver.
 
@@ -335,8 +349,9 @@ class DriverResult(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal["my-data-hub-operational-kaggle-driver-result.v1"]
-    outcome: Literal["PASS", "FAIL", "BLOCKED"]
+    schema_version: Literal["my-data-hub-operational-kaggle-driver-result.v2"]
+    phase: Literal["EXECUTE", "CLEANUP"]
+    outcome: Literal["READY", "PASS", "FAIL", "BLOCKED"]
     scenario: str
     task_run_id: UUID
     provider_ref: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -349,6 +364,12 @@ class DriverResult(BaseModel):
     mutations_started: int = Field(ge=0)
     capability_checks: tuple[DriverCapabilityCheck, ...]
     observation_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    claim_task_id: UUID | None = None
+    claim_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    output_receipt_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    output_file_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    output_tree_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    cleanup_state: Literal["NOT_REQUIRED", "PENDING", "COMPLETE"]
 
     @model_validator(mode="after")
     def pass_has_exact_provider_locator(self) -> DriverResult:
@@ -359,10 +380,23 @@ class DriverResult(BaseModel):
             self.source_version,
             self.source_sha256,
         )
-        if self.outcome == "PASS" and any(value is None for value in locator):
-            raise ValueError("PASS driver result lacks exact provider run identity")
-        if self.outcome == "PASS" and self.mutations_started < 1:
-            raise ValueError("PASS driver result lacks a real evidence Notebook mutation")
+        cleanup = (
+            self.claim_task_id,
+            self.claim_sha256,
+            self.output_receipt_sha256,
+            self.output_file_sha256,
+            self.output_tree_sha256,
+        )
+        if self.outcome in {"READY", "PASS"} and any(value is None for value in locator):
+            raise ValueError("successful driver result lacks exact provider run identity")
+        if self.outcome in {"READY", "PASS"} and self.mutations_started < 1:
+            raise ValueError("successful driver result lacks a real evidence Notebook mutation")
+        if self.outcome == "READY" and (
+            self.phase != "EXECUTE" or self.cleanup_state != "PENDING" or any(value is None for value in cleanup)
+        ):
+            raise ValueError("READY driver result lacks exact pending cleanup evidence")
+        if self.phase == "CLEANUP" and self.outcome == "PASS" and self.cleanup_state != "COMPLETE":
+            raise ValueError("cleanup PASS requires COMPLETE cleanup evidence")
         if self.outcome == "BLOCKED" and not (self.blocker_code and self.integration_dependency):
             raise ValueError("BLOCKED driver result lacks a concrete integration dependency")
         if self.outcome == "BLOCKED" and self.mutations_started != 0:
@@ -530,7 +564,8 @@ def _write_all_blocked(
 
 def _driver_request(plan: Mapping[str, Any], row: Mapping[str, Any], *, resume_only: bool) -> dict[str, Any]:
     return {
-        "schema_version": "my-data-hub-operational-kaggle-driver-request.v1",
+        "schema_version": "my-data-hub-operational-kaggle-driver-request.v2",
+        "phase": "EXECUTE",
         "matrix_id": plan["matrix_id"],
         "commit_sha": plan["commit_sha"],
         "ordinal": row["ordinal"],
@@ -543,6 +578,19 @@ def _driver_request(plan: Mapping[str, Any], row: Mapping[str, Any], *, resume_o
         "maximum_soak_seconds": MAXIMUM_SOAK_SECONDS if "soak" in row["lifecycle_gates"] else None,
         "result_file": RESULT_FILE,
         "resume_only": resume_only,
+        "evidence_issued_at": plan["created_at"],
+        "cleanup": None,
+    }
+
+
+def _cleanup_request(
+    execute_request: Mapping[str, Any], binding: DriverCleanupBinding
+) -> dict[str, Any]:
+    return {
+        **dict(execute_request),
+        "phase": "CLEANUP",
+        "resume_only": True,
+        "cleanup": binding.model_dump(mode="json"),
     }
 
 
@@ -566,12 +614,12 @@ def _invoke_driver(command: Sequence[str], request: Mapping[str, Any], *, timeou
             raise RuntimeError("driver exit 78 must carry a BLOCKED result")
         if completed.returncode == FAIL and result.outcome != "FAIL":
             raise RuntimeError("driver exit 1 must carry a FAIL result")
-        if completed.returncode == PASS and result.outcome != "PASS":
-            raise RuntimeError("driver exit 0 must carry a PASS result")
+        if completed.returncode == PASS and result.outcome not in {"READY", "PASS"}:
+            raise RuntimeError("driver exit 0 must carry READY or PASS")
         return result
 
 
-def _validated_live_receipt(
+def _reconciled_live_receipt(
     *,
     adapter: KaggleProviderAdapter,
     plan: Mapping[str, Any],
@@ -579,7 +627,7 @@ def _validated_live_receipt(
     locator: DriverResult,
     output_directory: Path,
     started_at: datetime,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], DriverCleanupBinding | None]:
     if locator.scenario != row["name"] or str(locator.task_run_id) != row["planned_task_run_id"]:
         raise RuntimeError("driver result differs from planned scenario identity")
     assert locator.provider_ref and locator.source_sha256 and locator.provider_run_ref
@@ -605,6 +653,12 @@ def _validated_live_receipt(
         max_bytes=MAX_RESULT_BYTES,
     )
     raw = (output_directory / RESULT_FILE).read_bytes()
+    result_sha256 = hashlib.sha256(raw).hexdigest()
+    if locator.outcome == "READY" and (
+        locator.output_file_sha256 != result_sha256
+        or locator.output_tree_sha256 != identity.output_tree_sha256
+    ):
+        raise RuntimeError("outer output reconciliation differs from the durable output-read receipt")
     output = OperationalOutput.model_validate_json(raw)
     expected_assertions = set(row["required_assertions"])
     actual_assertions = {item.name for item in output.assertions}
@@ -618,7 +672,7 @@ def _validated_live_receipt(
         or {item.gate for item in output.lifecycle_events} != set(row["lifecycle_gates"])
     ):
         raise RuntimeError("exact operational output does not satisfy the scenario contract")
-    return {
+    receipt = {
         "schema_version": SCENARIO_SCHEMA,
         "matrix_id": plan["matrix_id"],
         "commit_sha": plan["commit_sha"],
@@ -636,7 +690,7 @@ def _validated_live_receipt(
             "source_sha256": run.source_sha256,
             "provider_status": status.state.value,
             "output_tree_sha256": identity.output_tree_sha256,
-            "result_sha256": hashlib.sha256(raw).hexdigest(),
+            "result_sha256": result_sha256,
         },
         "assertions": [item.model_dump(mode="json") for item in output.assertions],
         "lifecycle_events": [item.model_dump(mode="json") for item in output.lifecycle_events],
@@ -648,6 +702,33 @@ def _validated_live_receipt(
         "started_at": started_at.isoformat(),
         "completed_at": datetime.now(UTC).isoformat(),
     }
+    if locator.outcome != "READY":
+        return receipt, None
+    assert (
+        locator.claim_task_id
+        and locator.claim_sha256
+        and locator.output_receipt_sha256
+        and locator.output_file_sha256
+        and locator.output_tree_sha256
+        and locator.provider_ref
+        and locator.provider_run_ref
+        and locator.provider_kernel_id
+        and locator.source_version
+        and locator.source_sha256
+    )
+    binding = DriverCleanupBinding(
+        claim_task_id=locator.claim_task_id,
+        claim_sha256=locator.claim_sha256,
+        provider_ref=locator.provider_ref,
+        provider_run_ref=locator.provider_run_ref,
+        provider_kernel_id=locator.provider_kernel_id,
+        source_version=locator.source_version,
+        source_sha256=locator.source_sha256,
+        output_receipt_sha256=locator.output_receipt_sha256,
+        output_file_sha256=result_sha256,
+        output_tree_sha256=identity.output_tree_sha256,
+    )
+    return receipt, binding
 
 
 def _aggregate_lifecycle(receipts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -815,14 +896,61 @@ def run_operational_matrix(
             receipts.append(existing)
             continue
         launch_path = scenario_path.with_suffix(".launch.json")
+        reconciliation_path = scenario_path.with_suffix(".reconciled.json")
+        reconciliation_loaded = reconciliation_path.exists()
         resume_only = launch_path.exists()
         request = _driver_request(plan, row, resume_only=resume_only)
         if not resume_only:
             _atomic_write(launch_path, request)
         elif json.loads(launch_path.read_bytes()) != request | {"resume_only": False}:
             raise RuntimeError("durable operational launch fence differs from planned identity")
-        started = datetime.now(UTC)
-        locator = _invoke_driver(driver_command, request, timeout_seconds=driver_timeout_seconds)
+        if reconciliation_path.exists():
+            reconciliation = json.loads(reconciliation_path.read_bytes())
+            reconciliation_payload = {
+                key: value
+                for key, value in reconciliation.items()
+                if key != "reconciliation_sha256"
+            }
+            if (
+                set(reconciliation)
+                != {
+                    "schema_version",
+                    "matrix_id",
+                    "commit_sha",
+                    "planned_task_run_id",
+                    "started_at",
+                    "execute_result",
+                    "cleanup_request",
+                    "validated_receipt",
+                    "reconciliation_sha256",
+                }
+                or reconciliation.get("reconciliation_sha256")
+                != hashlib.sha256(canonical_json_bytes(reconciliation_payload)).hexdigest()
+                or
+                reconciliation.get("schema_version")
+                != "my-data-hub-operational-kaggle-reconciliation.v1"
+                or reconciliation.get("matrix_id") != plan["matrix_id"]
+                or reconciliation.get("commit_sha") != plan["commit_sha"]
+                or reconciliation.get("planned_task_run_id") != row["planned_task_run_id"]
+            ):
+                raise RuntimeError("durable operational reconciliation fence differs from the plan")
+            locator = DriverResult.model_validate(reconciliation.get("execute_result"))
+            cleanup_request = dict(reconciliation.get("cleanup_request", {}))
+            receipt = dict(reconciliation.get("validated_receipt", {}))
+            if (
+                receipt.get("schema_version") != SCENARIO_SCHEMA
+                or receipt.get("matrix_id") != plan["matrix_id"]
+                or receipt.get("commit_sha") != plan["commit_sha"]
+                or receipt.get("planned_task_run_id") != row["planned_task_run_id"]
+                or receipt.get("outcome") != "PASS"
+                or receipt.get("live_evidence") is not True
+            ):
+                raise RuntimeError("durable outer-reconciled receipt differs from the exact plan")
+            started = datetime.fromisoformat(str(reconciliation["started_at"]))
+        else:
+            started = datetime.now(UTC)
+            locator = _invoke_driver(driver_command, request, timeout_seconds=driver_timeout_seconds)
+            cleanup_request = {}
         if locator.scenario != row["name"] or str(locator.task_run_id) != row["planned_task_run_id"]:
             raise RuntimeError("driver returned a different scenario identity")
         if locator.outcome == "BLOCKED":
@@ -847,9 +975,9 @@ def run_operational_matrix(
             receipt["driver_mutations_started"] = locator.mutations_started
             receipt["driver_capability_checks"] = [item.model_dump(mode="json") for item in locator.capability_checks]
             receipt["driver_observation_sha256"] = locator.observation_sha256
-        else:
+        elif locator.outcome == "PASS":
             with tempfile.TemporaryDirectory(prefix="my-data-hub-operational-output-") as folder:
-                receipt = _validated_live_receipt(
+                receipt, cleanup_binding = _reconciled_live_receipt(
                     adapter=adapter,
                     plan=plan,
                     row=row,
@@ -857,6 +985,86 @@ def run_operational_matrix(
                     output_directory=Path(folder),
                     started_at=started,
                 )
+            if cleanup_binding is not None:
+                raise RuntimeError("driver PASS unexpectedly requires pending cleanup")
+        else:
+            if locator.outcome != "READY":
+                raise RuntimeError("driver returned an unsupported execution outcome")
+            if reconciliation_loaded:
+                cleanup_binding = DriverCleanupBinding.model_validate(
+                    cleanup_request.get("cleanup")
+                )
+            else:
+                with tempfile.TemporaryDirectory(prefix="my-data-hub-operational-output-") as folder:
+                    receipt, cleanup_binding = _reconciled_live_receipt(
+                        adapter=adapter,
+                        plan=plan,
+                        row=row,
+                        locator=locator,
+                        output_directory=Path(folder),
+                        started_at=started,
+                    )
+                if cleanup_binding is None:
+                    raise RuntimeError("driver READY lacks a cleanup binding")
+                execute_request = dict(request)
+                execute_request["resume_only"] = False
+                cleanup_request = _cleanup_request(execute_request, cleanup_binding)
+                reconciliation_payload = {
+                    "schema_version": "my-data-hub-operational-kaggle-reconciliation.v1",
+                    "matrix_id": plan["matrix_id"],
+                    "commit_sha": plan["commit_sha"],
+                    "planned_task_run_id": row["planned_task_run_id"],
+                    "started_at": started.isoformat(),
+                    "execute_result": locator.model_dump(mode="json"),
+                    "cleanup_request": cleanup_request,
+                    "validated_receipt": receipt,
+                }
+                _atomic_write(
+                    reconciliation_path,
+                    {
+                        **reconciliation_payload,
+                        "reconciliation_sha256": hashlib.sha256(
+                            canonical_json_bytes(reconciliation_payload)
+                        ).hexdigest(),
+                    },
+                )
+            if reconciliation_loaded:
+                expected_cleanup = _cleanup_request(
+                    {**dict(request), "resume_only": False}, cleanup_binding
+                )
+                if cleanup_request != expected_cleanup:
+                    raise RuntimeError("durable cleanup request differs from outer reconciliation")
+            cleanup_result = _invoke_driver(
+                driver_command, cleanup_request, timeout_seconds=driver_timeout_seconds
+            )
+            if (
+                cleanup_result.phase != "CLEANUP"
+                or cleanup_result.outcome != "PASS"
+                or cleanup_result.cleanup_state != "COMPLETE"
+                or cleanup_result.provider_ref != cleanup_binding.provider_ref
+                or cleanup_result.provider_run_ref != cleanup_binding.provider_run_ref
+                or cleanup_result.claim_task_id != cleanup_binding.claim_task_id
+                or cleanup_result.claim_sha256 != cleanup_binding.claim_sha256
+                or cleanup_result.output_receipt_sha256 != cleanup_binding.output_receipt_sha256
+                or cleanup_result.output_file_sha256 != cleanup_binding.output_file_sha256
+                or cleanup_result.output_tree_sha256 != cleanup_binding.output_tree_sha256
+            ):
+                receipt["outcome"] = "FAIL"
+                receipt["live_evidence"] = False
+                receipt["blocker"] = None
+            receipt["driver_mutations_started"] = cleanup_result.mutations_started
+            receipt["driver_capability_checks"] = [
+                *[item.model_dump(mode="json") for item in locator.capability_checks],
+                *[item.model_dump(mode="json") for item in cleanup_result.capability_checks],
+            ]
+            receipt["driver_observation_sha256"] = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "execute": locator.observation_sha256,
+                        "cleanup": cleanup_result.observation_sha256,
+                    }
+                )
+            ).hexdigest()
         _atomic_write(scenario_path, receipt)
         receipts.append(receipt)
     summary = _summary(plan, receipts)

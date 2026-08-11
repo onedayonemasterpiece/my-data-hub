@@ -1,0 +1,249 @@
+{
+  "$defs": {
+    "CleanupBinding": {
+      "additionalProperties": false,
+      "description": "Exact outer-reconciled evidence required for destructive cleanup.",
+      "properties": {
+        "claim_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Claim Sha256",
+          "type": "string"
+        },
+        "claim_task_id": {
+          "format": "uuid",
+          "title": "Claim Task Id",
+          "type": "string"
+        },
+        "output_file_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Output File Sha256",
+          "type": "string"
+        },
+        "output_receipt_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Output Receipt Sha256",
+          "type": "string"
+        },
+        "output_tree_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Output Tree Sha256",
+          "type": "string"
+        },
+        "provider_kernel_id": {
+          "minimum": 1,
+          "title": "Provider Kernel Id",
+          "type": "integer"
+        },
+        "provider_ref": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Provider Ref",
+          "type": "string"
+        },
+        "provider_run_ref": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Provider Run Ref",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "source_version": {
+          "minimum": 1,
+          "title": "Source Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "claim_task_id",
+        "claim_sha256",
+        "provider_ref",
+        "provider_run_ref",
+        "provider_kernel_id",
+        "source_version",
+        "source_sha256",
+        "output_receipt_sha256",
+        "output_file_sha256",
+        "output_tree_sha256"
+      ],
+      "title": "CleanupBinding",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.my-data-hub.local/provider/operational-kaggle-driver-request.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "phase": {
+            "const": "CLEANUP"
+          }
+        },
+        "required": [
+          "phase"
+        ]
+      },
+      "then": {
+        "properties": {
+          "cleanup": {
+            "$ref": "#/$defs/CleanupBinding"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "phase": {
+            "const": "EXECUTE"
+          }
+        },
+        "required": [
+          "phase"
+        ]
+      },
+      "then": {
+        "properties": {
+          "cleanup": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "cleanup": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CleanupBinding"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "commit_sha": {
+      "pattern": "^[a-f0-9]{40}$",
+      "title": "Commit Sha",
+      "type": "string"
+    },
+    "evidence_issued_at": {
+      "format": "date-time",
+      "title": "Evidence Issued At",
+      "type": "string"
+    },
+    "lifecycle_gates": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Lifecycle Gates",
+      "type": "array"
+    },
+    "matrix_id": {
+      "format": "uuid",
+      "title": "Matrix Id",
+      "type": "string"
+    },
+    "maximum_soak_seconds": {
+      "anyOf": [
+        {
+          "maximum": 5400,
+          "minimum": 5400,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Maximum Soak Seconds"
+    },
+    "minimum_soak_seconds": {
+      "anyOf": [
+        {
+          "maximum": 3600,
+          "minimum": 3600,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Minimum Soak Seconds"
+    },
+    "ordinal": {
+      "maximum": 24,
+      "minimum": 1,
+      "title": "Ordinal",
+      "type": "integer"
+    },
+    "phase": {
+      "enum": [
+        "EXECUTE",
+        "CLEANUP"
+      ],
+      "title": "Phase",
+      "type": "string"
+    },
+    "required_assertions": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 2,
+      "title": "Required Assertions",
+      "type": "array"
+    },
+    "requirement_id": {
+      "pattern": "^FM(0[1-9]|1[0-9]|2[0-4])$",
+      "title": "Requirement Id",
+      "type": "string"
+    },
+    "result_file": {
+      "const": "operational-result.json",
+      "title": "Result File",
+      "type": "string"
+    },
+    "resume_only": {
+      "title": "Resume Only",
+      "type": "boolean"
+    },
+    "scenario": {
+      "maxLength": 100,
+      "pattern": "^[a-z0-9-]+$",
+      "title": "Scenario",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "my-data-hub-operational-kaggle-driver-request.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_run_id": {
+      "format": "uuid",
+      "title": "Task Run Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "phase",
+    "matrix_id",
+    "commit_sha",
+    "ordinal",
+    "requirement_id",
+    "scenario",
+    "task_run_id",
+    "required_assertions",
+    "lifecycle_gates",
+    "result_file",
+    "resume_only",
+    "evidence_issued_at"
+  ],
+  "title": "Operational driver two-phase request v2",
+  "type": "object"
+}

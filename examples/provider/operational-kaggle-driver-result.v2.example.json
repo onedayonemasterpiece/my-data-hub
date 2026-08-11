@@ -1,0 +1,23 @@
+{
+  "schema_version": "my-data-hub-operational-kaggle-driver-result.v2",
+  "phase": "EXECUTE",
+  "outcome": "BLOCKED",
+  "scenario": "private-dataset-create-readback-delete",
+  "task_run_id": "11111111-1111-4111-8111-111111111111",
+  "provider_ref": null,
+  "provider_run_ref": null,
+  "provider_kernel_id": null,
+  "source_version": null,
+  "source_sha256": null,
+  "blocker_code": "FM01_EVIDENCE_PROVIDER_CONFIGURATION_REQUIRED",
+  "integration_dependency": "exact disposable provider owner configuration",
+  "mutations_started": 0,
+  "capability_checks": [],
+  "observation_sha256": null,
+  "claim_task_id": null,
+  "claim_sha256": null,
+  "output_receipt_sha256": null,
+  "output_file_sha256": null,
+  "output_tree_sha256": null,
+  "cleanup_state": "NOT_REQUIRED"
+}

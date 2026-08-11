@@ -1,25 +1,32 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import ValidationError
 
+import scripts.provider.operational_kaggle_matrix as matrix_module
+from my_data_hub.hashing import canonical_json_bytes
+from my_data_hub.providers.kaggle.contracts import KernelState
 from scripts.provider.operational_kaggle_matrix import (
     EXTERNAL_BLOCKED,
     MAXIMUM_SOAK_SECONDS,
     MINIMUM_DISTINCT_PROVIDER_RUNS,
     MINIMUM_SOAK_SECONDS,
     SCENARIOS,
+    DriverResult,
     LifecycleEvent,
     _driver_request,
     _invoke_driver,
     _parse_driver_command,
+    _reconciled_live_receipt,
     _summary,
     build_plan,
     run_operational_matrix,
@@ -240,14 +247,17 @@ def test_typed_driver_fail_exit_is_preserved_as_scenario_failure(tmp_path: Path)
         "result = sys.argv[sys.argv.index('--result') + 1]\n"
         "request = json.load(open(sys.argv[sys.argv.index('--request') + 1]))\n"
         "json.dump({\n"
-        " 'schema_version': 'my-data-hub-operational-kaggle-driver-result.v1',\n"
-        " 'outcome': 'FAIL', 'scenario': request['scenario'],\n"
+        " 'schema_version': 'my-data-hub-operational-kaggle-driver-result.v2',\n"
+        " 'phase': request['phase'], 'outcome': 'FAIL', 'scenario': request['scenario'],\n"
         " 'task_run_id': request['task_run_id'], 'provider_ref': None,\n"
         " 'provider_run_ref': None, 'provider_kernel_id': None,\n"
         " 'source_version': None, 'source_sha256': None,\n"
         " 'blocker_code': None, 'integration_dependency': None,\n"
         " 'mutations_started': 1, 'capability_checks': [],\n"
-        " 'observation_sha256': None}, open(result, 'w'))\n"
+        " 'observation_sha256': None, 'claim_task_id': None,\n"
+        " 'claim_sha256': None, 'output_receipt_sha256': None,\n"
+        " 'output_file_sha256': None, 'output_tree_sha256': None,\n"
+        " 'cleanup_state': 'NOT_REQUIRED'}, open(result, 'w'))\n"
         "raise SystemExit(1)\n"
     )
     plan = _plan()
@@ -261,6 +271,248 @@ def test_typed_driver_fail_exit_is_preserved_as_scenario_failure(tmp_path: Path)
     assert result.mutations_started == 1
 
 
+def test_outer_reconciliation_binds_exact_output_before_cleanup(tmp_path: Path) -> None:
+    plan = _plan()
+    row = plan["scenarios"][1]
+    assert isinstance(row, dict)
+    output = {
+        "schema_version": "my-data-hub-operational-kaggle-output.v1",
+        "matrix_id": plan["matrix_id"],
+        "scenario": row["name"],
+        "task_run_id": row["planned_task_run_id"],
+        "outcome": "PASS",
+        "assertions": [
+            {"name": name, "outcome": "PASS", "evidence_sha256": hashlib.sha256(name.encode()).hexdigest()}
+            for name in row["required_assertions"]
+        ],
+        "lifecycle_events": [],
+        "operation_ids": [],
+        "completed_at": "2026-08-11T00:00:00Z",
+    }
+    raw = canonical_json_bytes(output)
+    output_sha = hashlib.sha256(raw).hexdigest()
+    tree_sha = "f" * 64
+    locator = DriverResult.model_validate(
+        {
+            "schema_version": "my-data-hub-operational-kaggle-driver-result.v2",
+            "phase": "EXECUTE",
+            "outcome": "READY",
+            "scenario": row["name"],
+            "task_run_id": row["planned_task_run_id"],
+            "provider_ref": "owner/evidence",
+            "provider_run_ref": "owner/evidence/7",
+            "provider_kernel_id": 77,
+            "source_version": 3,
+            "source_sha256": "a" * 64,
+            "blocker_code": None,
+            "integration_dependency": None,
+            "mutations_started": 1,
+            "capability_checks": [],
+            "observation_sha256": "b" * 64,
+            "claim_task_id": "11111111-1111-4111-8111-111111111111",
+            "claim_sha256": "c" * 64,
+            "output_receipt_sha256": "d" * 64,
+            "output_file_sha256": output_sha,
+            "output_tree_sha256": tree_sha,
+            "cleanup_state": "PENDING",
+        }
+    )
+    run = SimpleNamespace(
+        task_run_id=locator.task_run_id,
+        provider_ref=locator.provider_ref,
+        provider_run_ref=locator.provider_run_ref,
+        provider_kernel_id=locator.provider_kernel_id,
+        source_version=locator.source_version,
+        source_sha256=locator.source_sha256,
+    )
+
+    class Adapter:
+        def reconcile_private_notebook_run(self, **_: object) -> object:
+            return run
+
+        def read_run_status(self, _run: object) -> object:
+            return SimpleNamespace(state=KernelState.COMPLETE)
+
+        def download_exact_run_output_file(
+            self, _run: object, *, destination: Path, file_name: str, max_bytes: int
+        ) -> object:
+            assert max_bytes >= len(raw)
+            (destination / file_name).write_bytes(raw)
+            return SimpleNamespace(output_tree_sha256=tree_sha, file_count=1)
+
+    receipt, binding = _reconciled_live_receipt(
+        adapter=Adapter(),  # type: ignore[arg-type]
+        plan=plan,
+        row=row,
+        locator=locator,
+        output_directory=tmp_path,
+        started_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+
+    assert receipt["outcome"] == "PASS"
+    assert binding is not None
+    assert binding.output_file_sha256 == output_sha
+    assert binding.output_tree_sha256 == tree_sha
+
+
+def test_reconciliation_fence_resumes_cleanup_after_notebook_was_deleted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    plan = _plan()
+    row = plan["scenarios"][0]
+    assert isinstance(row, dict)
+    output = {
+        "schema_version": "my-data-hub-operational-kaggle-output.v1",
+        "matrix_id": plan["matrix_id"],
+        "scenario": row["name"],
+        "task_run_id": row["planned_task_run_id"],
+        "outcome": "PASS",
+        "assertions": [
+            {"name": name, "outcome": "PASS", "evidence_sha256": hashlib.sha256(name.encode()).hexdigest()}
+            for name in row["required_assertions"]
+        ],
+        "lifecycle_events": [],
+        "operation_ids": [],
+        "completed_at": "2026-08-11T00:00:00Z",
+    }
+    raw = canonical_json_bytes(output)
+    output_sha = hashlib.sha256(raw).hexdigest()
+    tree_sha = "f" * 64
+    ready = DriverResult.model_validate(
+        {
+            "schema_version": "my-data-hub-operational-kaggle-driver-result.v2",
+            "phase": "EXECUTE",
+            "outcome": "READY",
+            "scenario": row["name"],
+            "task_run_id": row["planned_task_run_id"],
+            "provider_ref": "owner/evidence",
+            "provider_run_ref": "owner/evidence/7",
+            "provider_kernel_id": 77,
+            "source_version": 3,
+            "source_sha256": "a" * 64,
+            "blocker_code": None,
+            "integration_dependency": None,
+            "mutations_started": 2,
+            "capability_checks": [],
+            "observation_sha256": "b" * 64,
+            "claim_task_id": "11111111-1111-4111-8111-111111111111",
+            "claim_sha256": "c" * 64,
+            "output_receipt_sha256": "d" * 64,
+            "output_file_sha256": output_sha,
+            "output_tree_sha256": tree_sha,
+            "cleanup_state": "PENDING",
+        }
+    )
+    download_count = 0
+
+    class Adapter:
+        def reconcile_private_notebook_run(self, **_: object) -> object:
+            return SimpleNamespace(
+                task_run_id=ready.task_run_id,
+                provider_ref=ready.provider_ref,
+                provider_run_ref=ready.provider_run_ref,
+                provider_kernel_id=ready.provider_kernel_id,
+                source_version=ready.source_version,
+                source_sha256=ready.source_sha256,
+            )
+
+        def read_run_status(self, _run: object) -> object:
+            return SimpleNamespace(state=KernelState.COMPLETE)
+
+        def download_exact_run_output_file(
+            self, _run: object, *, destination: Path, file_name: str, max_bytes: int
+        ) -> object:
+            nonlocal download_count
+            download_count += 1
+            (destination / file_name).write_bytes(raw)
+            return SimpleNamespace(output_tree_sha256=tree_sha, file_count=1)
+
+    cleanup_attempts = 0
+
+    def invoke(_command: object, request: dict[str, object], *, timeout_seconds: int) -> DriverResult:
+        nonlocal cleanup_attempts
+        assert timeout_seconds == 7200
+        if request["phase"] == "EXECUTE":
+            if request["requirement_id"] == "FM01":
+                return ready
+            return DriverResult.model_validate(
+                {
+                    "schema_version": "my-data-hub-operational-kaggle-driver-result.v2",
+                    "phase": "EXECUTE",
+                    "outcome": "BLOCKED",
+                    "scenario": request["scenario"],
+                    "task_run_id": request["task_run_id"],
+                    "provider_ref": None,
+                    "provider_run_ref": None,
+                    "provider_kernel_id": None,
+                    "source_version": None,
+                    "source_sha256": None,
+                    "blocker_code": "TEST_REMAINDER_BLOCKED",
+                    "integration_dependency": "unit-test remainder",
+                    "mutations_started": 0,
+                    "capability_checks": [],
+                    "observation_sha256": None,
+                    "claim_task_id": None,
+                    "claim_sha256": None,
+                    "output_receipt_sha256": None,
+                    "output_file_sha256": None,
+                    "output_tree_sha256": None,
+                    "cleanup_state": "NOT_REQUIRED",
+                }
+            )
+        cleanup_attempts += 1
+        if cleanup_attempts == 1:
+            raise RuntimeError("cleanup response lost after durable delete")
+        cleanup = dict(request["cleanup"])  # type: ignore[arg-type]
+        return DriverResult.model_validate(
+            {
+                "schema_version": "my-data-hub-operational-kaggle-driver-result.v2",
+                "phase": "CLEANUP",
+                "outcome": "PASS",
+                "scenario": request["scenario"],
+                "task_run_id": request["task_run_id"],
+                "provider_ref": cleanup["provider_ref"],
+                "provider_run_ref": cleanup["provider_run_ref"],
+                "provider_kernel_id": cleanup["provider_kernel_id"],
+                "source_version": cleanup["source_version"],
+                "source_sha256": cleanup["source_sha256"],
+                "blocker_code": None,
+                "integration_dependency": None,
+                "mutations_started": 3,
+                "capability_checks": [],
+                "observation_sha256": "e" * 64,
+                **cleanup,
+                "cleanup_state": "COMPLETE",
+            }
+        )
+
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "unit-test-token")
+    monkeypatch.setattr(matrix_module, "_exact_commit", lambda _root: "a" * 40)
+    monkeypatch.setattr(matrix_module, "_invoke_driver", invoke)
+    monkeypatch.setattr(
+        matrix_module.KaggleProviderAdapter,
+        "from_environment",
+        lambda **_: Adapter(),
+    )
+    kwargs = {
+        "ledger_path": tmp_path / "ledger.sqlite3",
+        "plan_path": tmp_path / "plan.json",
+        "receipt_path": tmp_path / "summary.json",
+        "scenario_directory": tmp_path / "scenarios",
+        "driver_command": ("trusted-driver",),
+        "matrix_id": UUID(str(plan["matrix_id"])),
+    }
+    with pytest.raises(RuntimeError, match="cleanup response lost"):
+        run_operational_matrix(**kwargs)  # type: ignore[arg-type]
+    assert download_count == 1
+
+    assert run_operational_matrix(**kwargs) == EXTERNAL_BLOCKED  # type: ignore[arg-type]
+    assert download_count == 1
+    assert cleanup_attempts == 2
+    fm01 = json.loads((tmp_path / "scenarios/01-private-dataset-create-readback-delete.json").read_text())
+    assert fm01["outcome"] == "PASS"
+
+
 @pytest.mark.parametrize(
     ("schema_name", "example_name"),
     [
@@ -270,6 +522,9 @@ def test_typed_driver_fail_exit_is_preserved_as_scenario_failure(tmp_path: Path)
         ("operational-kaggle-output.v1.schema.json", "operational-kaggle-output.v1.example.json"),
         ("operational-kaggle-driver-result.v1.schema.json", "operational-kaggle-driver-result.v1.example.json"),
         ("operational-kaggle-driver-request.v1.schema.json", "operational-kaggle-driver-request.v1.example.json"),
+        ("operational-kaggle-driver-request.v2.schema.json", "operational-kaggle-driver-request.v2.example.json"),
+        ("operational-kaggle-driver-result.v2.schema.json", "operational-kaggle-driver-result.v2.example.json"),
+        ("operational-kaggle-evidence-driver.v1.schema.json", "operational-kaggle-evidence-driver.v1.example.json"),
         (
             "operational-kaggle-evidence-claims.v1.schema.json",
             "operational-kaggle-evidence-claims.v1.example.json",

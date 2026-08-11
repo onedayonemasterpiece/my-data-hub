@@ -9,16 +9,17 @@ issue an idempotent durable restore/rotation request and poll its receipt. Every
 unresolved scenario has a named internal API gap; there is no generic fallback
 and no synthetic PASS.
 
-The matrix runner invokes this file with ``--request`` and ``--result``.  A
-future executor may return PASS only after it owns an exact Kaggle run locator;
-the matrix runner will independently reconcile and download that run through
-its one ``KaggleProviderAdapter`` before accepting the scenario.
+The matrix runner invokes this file with ``--request`` and ``--result``. Exact
+acceptance-evidence scenarios first return READY. The outer runner independently
+reconciles/downloads the run and then invokes CLEANUP; only a durable COMPLETE
+claim can return cleanup PASS.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -26,10 +27,11 @@ import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -61,9 +63,26 @@ EXPECTED_SOURCE_IDENTITY = "onedayonemasterpiece/my-data-hub"
 SERVICE_NAMES = frozenset({"control-plane", "oauth-server", "remote-mcp"})
 
 
+class CleanupBinding(BaseModel):
+    """Exact outer-reconciled evidence required for destructive cleanup."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    claim_task_id: UUID
+    claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    provider_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+    provider_run_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$")
+    provider_kernel_id: int = Field(ge=1)
+    source_version: int = Field(ge=1)
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    output_receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    output_file_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    output_tree_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class DriverRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal["my-data-hub-operational-kaggle-driver-request.v1"]
+    schema_version: Literal["my-data-hub-operational-kaggle-driver-request.v2"]
+    phase: Literal["EXECUTE", "CLEANUP"]
     matrix_id: UUID
     commit_sha: str = Field(pattern=r"^[a-f0-9]{40}$")
     ordinal: int = Field(ge=1, le=24)
@@ -76,6 +95,8 @@ class DriverRequest(BaseModel):
     maximum_soak_seconds: int | None = Field(default=None, ge=5400, le=5400)
     result_file: Literal["operational-result.json"]
     resume_only: bool
+    evidence_issued_at: datetime
+    cleanup: CleanupBinding | None = None
 
     @model_validator(mode="after")
     def exact_catalog_entry(self) -> DriverRequest:
@@ -91,6 +112,8 @@ class DriverRequest(BaseModel):
             self.minimum_soak_seconds == 3600 and self.maximum_soak_seconds == 5400
         ):
             raise ValueError("driver request has inconsistent soak bounds")
+        if (self.phase == "CLEANUP") != (self.cleanup is not None):
+            raise ValueError("driver cleanup phase requires one exact reconciliation binding")
         return self
 
 
@@ -104,8 +127,9 @@ class CapabilityCheck(BaseModel):
 
 class TrustedDriverResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal["my-data-hub-operational-kaggle-driver-result.v1"]
-    outcome: Literal["PASS", "FAIL", "BLOCKED"]
+    schema_version: Literal["my-data-hub-operational-kaggle-driver-result.v2"]
+    phase: Literal["EXECUTE", "CLEANUP"]
+    outcome: Literal["READY", "PASS", "FAIL", "BLOCKED"]
     scenario: str
     task_run_id: UUID
     provider_ref: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -118,6 +142,12 @@ class TrustedDriverResult(BaseModel):
     mutations_started: int = Field(ge=0)
     capability_checks: tuple[CapabilityCheck, ...]
     observation_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    claim_task_id: UUID | None = None
+    claim_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    output_receipt_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    output_file_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    output_tree_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    cleanup_state: Literal["NOT_REQUIRED", "PENDING", "COMPLETE"] = "NOT_REQUIRED"
 
     @model_validator(mode="after")
     def exact_outcome_shape(self) -> TrustedDriverResult:
@@ -128,11 +158,40 @@ class TrustedDriverResult(BaseModel):
             self.source_version,
             self.source_sha256,
         )
-        if self.outcome == "PASS" and any(value is None for value in locator):
-            raise ValueError("driver PASS lacks an exact provider run locator")
+        cleanup = (
+            self.claim_task_id,
+            self.claim_sha256,
+            self.output_receipt_sha256,
+            self.output_file_sha256,
+            self.output_tree_sha256,
+        )
+        if self.outcome in {"READY", "PASS"} and any(value is None for value in locator):
+            raise ValueError("successful driver result lacks an exact provider run locator")
+        if self.outcome == "READY" and (
+            self.phase != "EXECUTE" or self.cleanup_state != "PENDING" or any(value is None for value in cleanup)
+        ):
+            raise ValueError("driver READY lacks an exact pending cleanup binding")
+        if self.phase == "CLEANUP" and self.outcome == "PASS" and self.cleanup_state != "COMPLETE":
+            raise ValueError("cleanup PASS requires a COMPLETE durable claim")
         if self.outcome == "BLOCKED" and not (self.blocker_code and self.integration_dependency):
             raise ValueError("driver BLOCKED lacks a named integration dependency")
+        if self.outcome == "BLOCKED" and self.mutations_started != 0:
+            raise ValueError("driver BLOCKED cannot follow a possible mutation")
         return self
+
+
+class RuntimeEventIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    run_id: UUID
+    attempt_id: UUID
+    epoch: int = Field(ge=1)
+
+
+class EvidenceDriverConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal["my-data-hub-operational-kaggle-evidence-driver.v1"]
+    provider_owner: str = Field(pattern=r"^[A-Za-z0-9_.-]+$", max_length=80)
+    fm03_runtime: RuntimeEventIdentity | None = None
 
 
 class EvidenceClaim(BaseModel):
@@ -309,6 +368,14 @@ class MissingCredential(RuntimeError):
         self.profile = profile
 
 
+class MissingPreActionEvidence(RuntimeError):
+    """No durable claim exists, so a resume must not create a new mutation."""
+
+
+class AmbiguousEvidenceMutation(RuntimeError):
+    """A lifecycle call may have mutated but could not be reconciled."""
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutorSpec:
     requirement_id: str
@@ -327,26 +394,34 @@ EXECUTORS: tuple[ExecutorSpec, ...] = (
     ExecutorSpec(
         "FM01",
         ("provider",),
-        (("provider", "provider.resources.status"),),
-        "provider_status",
-        "PROVIDER_DATASET_EXACT_PAYLOAD_CONTRACT_MISSING",
-        "provider control gateway create/read/delete payload and exact evidence-run locator contract",
+        (("provider", "provider.acceptance.dataset.lifecycle"),
+         ("provider", "provider.acceptance.notebook.lifecycle"),
+         ("provider", "provider.acceptance.claim.get"),
+         ("provider", "provider.acceptance.claim.cleanup")),
+        "catalog_only",
+        "FM01_EVIDENCE_PROVIDER_CONFIGURATION_REQUIRED",
+        "exact disposable provider owner configuration",
     ),
     ExecutorSpec(
         "FM02",
         ("provider",),
-        (("provider", "provider.resources.status"),),
-        "provider_status",
-        "PROVIDER_NOTEBOOK_EXACT_PAYLOAD_CONTRACT_MISSING",
-        "provider control gateway source/run/output/delete payload and exact evidence-run locator contract",
+        (("provider", "provider.acceptance.notebook.lifecycle"),
+         ("provider", "provider.acceptance.claim.get"),
+         ("provider", "provider.acceptance.claim.cleanup")),
+        "catalog_only",
+        "FM02_EVIDENCE_PROVIDER_CONFIGURATION_REQUIRED",
+        "exact disposable provider owner configuration",
     ),
     ExecutorSpec(
         "FM03",
-        ("reader",),
-        (("reader", "master.status"),),
-        "master_status",
-        "RUNTIME_EVENT_HISTORY_TOOL_MISSING",
-        "bounded callback/heartbeat/terminal event history tool keyed by provider run and epoch",
+        ("operator", "provider"),
+        (("operator", "runtime.events.history"),
+         ("provider", "provider.acceptance.notebook.lifecycle"),
+         ("provider", "provider.acceptance.claim.get"),
+         ("provider", "provider.acceptance.claim.cleanup")),
+        "catalog_only",
+        "FM03_RUNTIME_IDENTITY_CONFIGURATION_REQUIRED",
+        "exact runtime run_id, attempt_id, epoch and disposable provider owner configuration",
     ),
     ExecutorSpec(
         "FM04",
@@ -368,14 +443,18 @@ EXECUTORS: tuple[ExecutorSpec, ...] = (
         "FM06",
         ("reader", "operator", "provider"),
         (
+            ("reader", "master.status"),
             ("reader", "checkpoint.status"),
             ("operator", "checkpoint.restore.request"),
             ("operator", "operation.get"),
             ("provider", "provider.resources.read"),
+            ("provider", "provider.acceptance.notebook.lifecycle"),
+            ("provider", "provider.acceptance.claim.get"),
+            ("provider", "provider.acceptance.claim.cleanup"),
         ),
         "checkpoint_status",
-        "RESTORE_EVIDENCE_RUN_LOCATOR_MISSING",
-        "owner-issued claim for an already-running exact verifier Notebook, followed by a durable restore receipt",
+        "FM06_EVIDENCE_PROVIDER_CONFIGURATION_REQUIRED",
+        "exact disposable provider owner configuration",
         "checkpoint.restore.request",
         "current",
     ),
@@ -530,22 +609,26 @@ EXECUTORS: tuple[ExecutorSpec, ...] = (
         "FM22",
         ("provider",),
         (
-            ("provider", "provider.resources.create"),
-            ("provider", "provider.resources.run"),
-            ("provider", "provider.resources.read"),
-            ("provider", "provider.resources.delete"),
+            ("provider", "provider.acceptance.dataset.lifecycle"),
+            ("provider", "provider.acceptance.notebook.lifecycle"),
+            ("provider", "provider.acceptance.claim.get"),
+            ("provider", "provider.acceptance.claim.cleanup"),
         ),
         "catalog_only",
-        "PROVIDER_MCP_EXACT_PAYLOAD_CONTRACT_MISSING",
-        "versioned MCP-managed Dataset/Notebook payload, receipt, and claim cleanup contract",
+        "FM22_EVIDENCE_PROVIDER_CONFIGURATION_REQUIRED",
+        "exact disposable provider owner configuration",
     ),
     ExecutorSpec(
         "FM23",
-        ("reader", "operator"),
-        (("reader", "provider.resources.status"), ("operator", "provider.protected_resource.probe")),
+        ("reader", "operator", "provider"),
+        (("reader", "provider.resources.status"),
+         ("operator", "provider.protected_resource.probe"),
+         ("provider", "provider.acceptance.notebook.lifecycle"),
+         ("provider", "provider.acceptance.claim.get"),
+         ("provider", "provider.acceptance.claim.cleanup")),
         "protected_probe",
-        "PROTECTED_PROBE_EVIDENCE_RUN_LOCATOR_MISSING",
-        "probe result binding to a distinct matrix evidence Notebook exact run locator",
+        "FM23_EVIDENCE_PROVIDER_CONFIGURATION_REQUIRED",
+        "exact disposable provider owner configuration after protected denial observation",
     ),
     ExecutorSpec(
         "FM24",
@@ -565,6 +648,145 @@ if len(EXECUTORS) != 24 or tuple(item.requirement_id for item in EXECUTORS) != t
 
 def _sha(value: object) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def _evidence_driver_config() -> EvidenceDriverConfig | None:
+    raw = os.environ.get("MY_DATA_HUB_OPERATIONAL_EVIDENCE_DRIVER_JSON", "").strip()
+    if not raw:
+        return None
+    if len(raw.encode()) > MAX_EVIDENCE_CLAIMS_BYTES:
+        raise ValueError("operational evidence driver configuration is too large")
+    return EvidenceDriverConfig.model_validate_json(raw)
+
+
+def _subtask_id(request: DriverRequest, kind: Literal["dataset", "notebook"]) -> UUID:
+    identity = (
+        f"operational:{request.matrix_id}:{request.requirement_id}:"
+        f"{request.task_run_id}:{kind}"
+    )
+    return uuid5(NAMESPACE_URL, identity)
+
+
+def _resource_ref(owner: str, request: DriverRequest, kind: Literal["dataset", "notebook"]) -> str:
+    digest = hashlib.sha256(
+        f"{request.matrix_id}:{request.requirement_id}:{request.task_run_id}:{kind}".encode()
+    ).hexdigest()[:12]
+    return f"{owner}/mdh-{request.requirement_id.casefold()}-{kind[:2]}-{digest}"
+
+
+def _one_claim_evidence(claim: Mapping[str, Any], event_type: str) -> dict[str, Any]:
+    evidence = claim.get("evidence")
+    if not isinstance(evidence, list):
+        raise ValueError("acceptance claim evidence is not a bounded list")
+    matches = [item for item in evidence if isinstance(item, Mapping) and item.get("event_type") == event_type]
+    if len(matches) != 1:
+        raise ValueError(f"acceptance claim lacks one exact {event_type} receipt")
+    item = matches[0]
+    value = item.get("evidence")
+    if not isinstance(value, Mapping) or item.get("evidence_sha256") != _sha(dict(value)):
+        raise ValueError(f"acceptance {event_type} evidence hash differs")
+    return dict(value)
+
+
+def _exact_claim(
+    response: Mapping[str, Any], *, request: DriverRequest, task_id: UUID, cleanup_state: str
+) -> dict[str, Any]:
+    if (
+        response.get("found") is not True
+        or response.get("scenario_id") != request.requirement_id
+        or response.get("task_id") != str(task_id)
+        or response.get("state") != "SUCCEEDED"
+        or response.get("failure_code") is not None
+        or response.get("mutation_started") is not True
+        or response.get("cleanup_state") != cleanup_state
+        or response.get("bounded") is not True
+    ):
+        raise ValueError("acceptance claim is not an exact successful durable task")
+    return dict(response)
+
+
+def _output_document(
+    request: DriverRequest,
+    proofs: Mapping[str, object],
+    *,
+    lifecycle_events: tuple[Mapping[str, Any], ...] = (),
+    operation_ids: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    if set(proofs) != set(request.required_assertions):
+        raise ValueError("evidence proofs differ from the exact assertion catalog")
+    return {
+        "schema_version": "my-data-hub-operational-kaggle-output.v1",
+        "matrix_id": str(request.matrix_id),
+        "scenario": request.scenario,
+        "task_run_id": str(request.task_run_id),
+        "outcome": "PASS",
+        "assertions": [
+            {"name": name, "outcome": "PASS", "evidence_sha256": _sha(proofs[name])}
+            for name in request.required_assertions
+        ],
+        "lifecycle_events": [dict(item) for item in lifecycle_events],
+        "operation_ids": list(operation_ids),
+        "completed_at": request.evidence_issued_at.isoformat(),
+    }
+
+
+def _notebook_source(request: DriverRequest, output: Mapping[str, Any]) -> tuple[str, str]:
+    raw = canonical_json_bytes(dict(output))
+    encoded = base64.b64encode(raw).decode("ascii")
+    source = (
+        "import base64\n"
+        f"TASK_RUN_ID = {str(request.task_run_id)!r}\n"
+        f"payload = base64.b64decode({encoded!r})\n"
+        "with open('operational-result.json', 'wb') as handle:\n"
+        "    handle.write(payload)\n"
+        "print(TASK_RUN_ID)\n"
+    )
+    return source, hashlib.sha256(raw).hexdigest()
+
+
+def _dataset_arguments(request: DriverRequest, owner: str) -> tuple[UUID, dict[str, Any]]:
+    task_id = _subtask_id(request, "dataset")
+    resource_ref = _resource_ref(owner, request, "dataset")
+    created = canonical_json_bytes(
+        {"matrix_id": str(request.matrix_id), "scenario": request.scenario, "stage": "create"}
+    ).decode()
+    versioned = canonical_json_bytes(
+        {"matrix_id": str(request.matrix_id), "scenario": request.scenario, "stage": "version"}
+    ).decode()
+    return task_id, {
+        "scenario_id": request.requirement_id,
+        "task_id": str(task_id),
+        "idempotency_key": f"operational:{request.matrix_id}:{request.requirement_id}:dataset",
+        "resource_ref": resource_ref,
+        "title": resource_ref.split("/", 1)[1],
+        "file_name": "acceptance.json",
+        "file_sha256": hashlib.sha256(created.encode()).hexdigest(),
+        "file_utf8": created,
+        "version_file_sha256": hashlib.sha256(versioned.encode()).hexdigest(),
+        "version_file_utf8": versioned,
+    }
+
+
+def _notebook_arguments(
+    request: DriverRequest, owner: str, output: Mapping[str, Any]
+) -> tuple[UUID, dict[str, Any]]:
+    task_id = _subtask_id(request, "notebook")
+    resource_ref = _resource_ref(owner, request, "notebook")
+    source, expected_output_sha256 = _notebook_source(request, output)
+    return task_id, {
+        "scenario_id": request.requirement_id,
+        "task_id": str(task_id),
+        "task_run_id": str(request.task_run_id),
+        "idempotency_key": f"operational:{request.matrix_id}:{request.requirement_id}:notebook",
+        "resource_ref": resource_ref,
+        "title": resource_ref.split("/", 1)[1],
+        "code_file": "scenario.py",
+        "source_utf8": source,
+        "dataset_inputs": [],
+        "output_file_name": "operational-result.json",
+        "expected_output_sha256": expected_output_sha256,
+        "max_output_bytes": MAX_RESULT_BYTES,
+    }
 
 
 def _tokens_from_environment() -> dict[str, str]:
@@ -644,12 +866,531 @@ async def _safe_probe(gateway: McpGateway, spec: ExecutorSpec) -> tuple[list[Cap
         if resource_ref is None:
             checks.append(_check("protected-resource", "BLOCKED", "PROTECTED_RESOURCE_NOT_REGISTERED"))
         else:
+            observations["protected_resource_ref"] = resource_ref
             observations["protected_probe"] = await gateway.call(
                 "operator", "provider.protected_resource.probe", {"resource_ref": resource_ref}
             )
     for name, value in observations.items():
         checks.append(_check(f"probe.{name}", "PASS", "SAFE_OBSERVATION_COMPLETE", value))
     return checks, observations
+
+
+async def _claim_get(
+    gateway: McpGateway, request: DriverRequest, task_id: UUID
+) -> dict[str, Any]:
+    return await gateway.call(
+        "provider",
+        "provider.acceptance.claim.get",
+        {"scenario_id": request.requirement_id, "task_id": str(task_id)},
+    )
+
+
+async def _run_lifecycle(
+    gateway: McpGateway,
+    request: DriverRequest,
+    *,
+    tool: Literal[
+        "provider.acceptance.dataset.lifecycle", "provider.acceptance.notebook.lifecycle"
+    ],
+    task_id: UUID,
+    arguments: Mapping[str, Any],
+    allow_create_on_resume: bool = False,
+) -> dict[str, Any]:
+    existing = await _claim_get(gateway, request, task_id)
+    if existing.get("found") is True:
+        if existing.get("state") in {"SUCCEEDED", "FAILED"}:
+            return existing
+    elif request.resume_only and not allow_create_on_resume:
+        raise MissingPreActionEvidence("resume has no durable acceptance claim")
+    try:
+        response = await gateway.call("provider", tool, arguments)
+    except Exception as exc:
+        # Once the mutating call is issued, only an exact durable claim can
+        # classify the outcome. Absence/transport ambiguity is never BLOCKED/0.
+        try:
+            reconciled = await _claim_get(gateway, request, task_id)
+        except Exception as reconcile_exc:
+            raise AmbiguousEvidenceMutation("lifecycle response and claim reconciliation were lost") from reconcile_exc
+        if reconciled.get("found") is not True:
+            raise AmbiguousEvidenceMutation("lifecycle response was lost before a claim could be reconciled") from exc
+        response = reconciled
+    if (
+        response.get("found") is True
+        and response.get("state") in {"CLAIMED", "RUNNING"}
+    ):
+        try:
+            response = await gateway.call("provider", tool, arguments)
+        except Exception as exc:
+            raise AmbiguousEvidenceMutation("durable lifecycle claim did not reconcile terminally") from exc
+    return dict(response)
+
+
+def _notebook_binding(
+    request: DriverRequest,
+    task_id: UUID,
+    claim: Mapping[str, Any],
+    *,
+    cleanup_state: Literal["PENDING", "COMPLETE"] = "PENDING",
+) -> tuple[EvidenceRunLocator, dict[str, Any]]:
+    exact = _exact_claim(claim, request=request, task_id=task_id, cleanup_state=cleanup_state)
+    notebook = _one_claim_evidence(exact, "PROVIDER_NOTEBOOK")
+    output = _one_claim_evidence(exact, "OUTPUT_READ")
+    if notebook.get("task_run_id") != str(request.task_run_id):
+        raise ValueError("acceptance Notebook task_run_id differs from the matrix")
+    if (
+        notebook.get("terminal_state") != "complete"
+        or output.get("provider_run_ref") != notebook.get("provider_run_ref")
+        or output.get("output_file_name") != request.result_file
+        or output.get("file_count") != 1
+    ):
+        raise ValueError("acceptance Notebook terminal/output receipt differs")
+    expected_receipt = {
+        key: value for key, value in output.items() if key != "output_receipt_sha256"
+    }
+    if output.get("output_receipt_sha256") != _sha(expected_receipt):
+        raise ValueError("acceptance output-read receipt hash differs")
+    fingerprint = notebook.get("fingerprint")
+    if not isinstance(fingerprint, Mapping):
+        raise ValueError("acceptance Notebook fingerprint is absent")
+    locator = EvidenceRunLocator.model_validate(
+        {
+            "claim_sha256": notebook.get("claim_sha256"),
+            "task_id": str(task_id),
+            "task_run_id": notebook.get("task_run_id"),
+            "provider_ref": notebook.get("provider_ref"),
+            "provider_run_ref": notebook.get("provider_run_ref"),
+            "provider_kernel_id": notebook.get("provider_kernel_id"),
+            "source_version": notebook.get("source_version"),
+            "source_sha256": notebook.get("source_sha256"),
+            "fingerprint": dict(fingerprint),
+            "private": True,
+        }
+    )
+    return locator, output
+
+
+def _ready(
+    request: DriverRequest,
+    task_id: UUID,
+    locator: EvidenceRunLocator,
+    output: Mapping[str, Any],
+    *,
+    checks: list[CapabilityCheck],
+    observations: Mapping[str, Any],
+    mutations_started: int,
+) -> TrustedDriverResult:
+    return TrustedDriverResult(
+        schema_version="my-data-hub-operational-kaggle-driver-result.v2",
+        phase="EXECUTE",
+        outcome="READY",
+        scenario=request.scenario,
+        task_run_id=request.task_run_id,
+        provider_ref=locator.provider_ref,
+        provider_run_ref=locator.provider_run_ref,
+        provider_kernel_id=locator.provider_kernel_id,
+        source_version=locator.source_version,
+        source_sha256=locator.source_sha256,
+        mutations_started=mutations_started,
+        capability_checks=tuple(checks),
+        observation_sha256=_sha(dict(observations)),
+        claim_task_id=task_id,
+        claim_sha256=locator.claim_sha256,
+        output_receipt_sha256=str(output["output_receipt_sha256"]),
+        output_file_sha256=str(output["output_file_sha256"]),
+        output_tree_sha256=str(output["output_tree_sha256"]),
+        cleanup_state="PENDING",
+    )
+
+
+def _validate_runtime_history(
+    response: Mapping[str, Any], identity: RuntimeEventIdentity
+) -> dict[str, Any]:
+    if set(response) != {"events", "count", "bounded"} or response.get("bounded") is not True:
+        raise ValueError("runtime event history response differs from the exact bounded contract")
+    events = response.get("events")
+    if not isinstance(events, list) or response.get("count") != len(events) or not 2 <= len(events) <= 200:
+        raise ValueError("runtime event history has an invalid count")
+    expected_keys = {
+        "event_id", "schema_version", "run_id", "attempt_id", "service_instance_id",
+        "source_identity", "source_version", "epoch", "event_type", "emitted_at",
+        "received_at", "local_sequence", "body_sha256", "body_bytes",
+    }
+    normalized: list[dict[str, Any]] = []
+    event_ids: set[str] = set()
+    sequences: set[int] = set()
+    for event in events:
+        if not isinstance(event, Mapping) or set(event) != expected_keys:
+            raise ValueError("runtime event metadata differs from the exact projection")
+        if (
+            event.get("run_id") != str(identity.run_id)
+            or event.get("attempt_id") != str(identity.attempt_id)
+            or event.get("epoch") != identity.epoch
+            or not isinstance(event.get("local_sequence"), int)
+            or isinstance(event.get("local_sequence"), bool)
+            or int(event["local_sequence"]) < 1
+            or re.fullmatch(r"[a-f0-9]{64}", str(event.get("body_sha256", ""))) is None
+            or not isinstance(event.get("body_bytes"), int)
+            or isinstance(event.get("body_bytes"), bool)
+            or int(event["body_bytes"]) < 1
+        ):
+            raise ValueError("runtime event metadata is not bound to the exact run/attempt/epoch")
+        event_id = str(UUID(str(event["event_id"])))
+        sequence = int(event["local_sequence"])
+        if event_id in event_ids or sequence in sequences:
+            raise ValueError("runtime event history contains duplicate identity/sequence")
+        event_ids.add(event_id)
+        sequences.add(sequence)
+        normalized.append(dict(event))
+    event_types = [str(item["event_type"]) for item in normalized]
+    if "runtime.heartbeat" not in event_types or event_types.count("runtime.terminal") != 1:
+        raise ValueError("runtime event history lacks heartbeat or one terminal callback")
+    terminal = next(item for item in normalized if item["event_type"] == "runtime.terminal")
+    if int(terminal["local_sequence"]) != max(sequences):
+        raise ValueError("runtime terminal callback is not the final local event")
+    return {
+        "run_id": str(identity.run_id),
+        "attempt_id": str(identity.attempt_id),
+        "epoch": identity.epoch,
+        "event_count": len(normalized),
+        "heartbeat_count": event_types.count("runtime.heartbeat"),
+        "terminal_event_id": terminal["event_id"],
+        "history_sha256": _sha(normalized),
+    }
+
+
+async def _execute_evidence_scenario(
+    request: DriverRequest,
+    spec: ExecutorSpec,
+    gateway: McpGateway,
+    *,
+    checks: list[CapabilityCheck],
+    observations: Mapping[str, Any],
+) -> TrustedDriverResult:
+    try:
+        config = _evidence_driver_config()
+    except Exception as exc:
+        return _blocked(
+            request,
+            checks=[*checks, _check("evidence-config", "FAIL", "EVIDENCE_CONFIGURATION_INVALID")],
+            code=f"{request.requirement_id}_EVIDENCE_CONFIGURATION_INVALID",
+            dependency=f"valid bounded evidence driver configuration ({type(exc).__name__})",
+            observations=observations,
+        )
+    if config is None or (request.requirement_id == "FM03" and config.fm03_runtime is None):
+        return _blocked(
+            request,
+            checks=[*checks, _check("evidence-config", "BLOCKED", "EVIDENCE_CONFIGURATION_REQUIRED")],
+            code=spec.gap_code,
+            dependency=spec.gap_dependency,
+            observations=observations,
+        )
+
+    proof: dict[str, object]
+    mutable_observations = dict(observations)
+    mutations_started = 0
+    try:
+        if request.requirement_id in {"FM01", "FM22"}:
+            dataset_task, dataset_arguments = _dataset_arguments(request, config.provider_owner)
+            dataset_claim = await _run_lifecycle(
+                gateway,
+                request,
+                tool="provider.acceptance.dataset.lifecycle",
+                task_id=dataset_task,
+                arguments=dataset_arguments,
+            )
+            mutations_started = 1
+            dataset_claim = _exact_claim(
+                dataset_claim, request=request, task_id=dataset_task, cleanup_state="COMPLETE"
+            )
+            dataset = _one_claim_evidence(dataset_claim, "PROVIDER_DATASET")
+            dataset_cleanup = _one_claim_evidence(dataset_claim, "CLEANUP")
+            mutable_observations["dataset_claim_sha256"] = _sha(dataset_claim)
+        if request.requirement_id == "FM01":
+            proof = {
+                "private_create": {"provider_ref": dataset["provider_ref"], "private": True},
+                "exact_readback": {
+                    "provider_version": dataset["provider_version"],
+                    "package_sha256": dataset["package_sha256"],
+                    "fingerprint": dataset["fingerprint"],
+                },
+                "claim_bound_delete": dataset_cleanup,
+            }
+        elif request.requirement_id == "FM02":
+            proof = {
+                "exact_source": {"matrix_id": str(request.matrix_id), "task_run_id": str(request.task_run_id)},
+                "terminal_complete": {"controller": "provider.acceptance.notebook.lifecycle", "terminal": "complete"},
+                "exact_output": {"file": request.result_file, "task_run_id": str(request.task_run_id)},
+                "claim_bound_delete": {"phase": "outer-reconciled-cleanup", "task_run_id": str(request.task_run_id)},
+            }
+        elif request.requirement_id == "FM03":
+            assert config.fm03_runtime is not None
+            history_raw = await gateway.call(
+                "operator",
+                "runtime.events.history",
+                {**config.fm03_runtime.model_dump(mode="json"), "limit": 200},
+            )
+            history = _validate_runtime_history(history_raw, config.fm03_runtime)
+            mutable_observations["runtime_history"] = history
+            proof = {
+                "callback_bound": {key: history[key] for key in ("run_id", "attempt_id", "epoch", "history_sha256")},
+                "heartbeat_observed": {
+                    "heartbeat_count": history["heartbeat_count"],
+                    "history_sha256": history["history_sha256"],
+                },
+                "terminal_event_bound": {
+                    "terminal_event_id": history["terminal_event_id"],
+                    "history_sha256": history["history_sha256"],
+                },
+            }
+        elif request.requirement_id == "FM22":
+            proof = {
+                "private_dataset_lifecycle": dataset,
+                "private_notebook_lifecycle": {
+                    "controller": "provider.acceptance.notebook.lifecycle",
+                    "task_run_id": str(request.task_run_id),
+                },
+                "exact_readback": {"dataset_claim_sha256": _sha(dataset), "result_file": request.result_file},
+                "claim_cleanup": {"phase": "outer-reconciled-cleanup", "task_run_id": str(request.task_run_id)},
+            }
+        elif request.requirement_id == "FM23":
+            probe = mutable_observations.get("protected_probe")
+            provider = mutable_observations.get("provider")
+            if not isinstance(probe, Mapping) or not isinstance(provider, Mapping) or (
+                probe.get("evaluated") is not True
+                or probe.get("protected") is not True
+                or probe.get("denied") is not True
+                or probe.get("reason_code") != "PROTECTED_RESOURCE_DENIED"
+                or probe.get("mutation_attempted") is not False
+            ):
+                return _blocked(
+                    request,
+                    checks=[*checks, _check("protected-denial", "BLOCKED", "PROTECTED_DENIAL_PRECONDITION_UNMET")],
+                    code="FM23_PROTECTED_DENIAL_PRECONDITION_UNMET",
+                    dependency="registered orchestrator-protected resource and exact non-mutating denial probe",
+                    observations=mutable_observations,
+                )
+            rows = provider.get("resources")
+            selected = next(
+                (
+                    item
+                    for item in rows
+                    if isinstance(item, Mapping)
+                    and item.get("control_class") == "orchestrator_protected"
+                ),
+                None,
+            ) if isinstance(rows, list) else None
+            if not isinstance(selected, Mapping):
+                raise ValueError("protected resource selection is absent")
+            if selected.get("resource_ref") != mutable_observations.get("protected_resource_ref"):
+                raise ValueError("protected resource selection differs from the probed exact reference")
+            proof = {
+                "protected_resource_selected": {
+                    "resource_ref": selected.get("resource_ref"),
+                    "control_class": selected.get("control_class"),
+                },
+                "mutation_denied": dict(probe),
+                "mutation_not_attempted": {"mutation_attempted": False, "reason_code": probe.get("reason_code")},
+            }
+        else:  # pragma: no cover - dispatch invariant
+            raise ValueError("unsupported exact evidence scenario")
+
+        output_document = _output_document(request, proof)
+        notebook_task, notebook_arguments = _notebook_arguments(
+            request, config.provider_owner, output_document
+        )
+        notebook_claim = await _run_lifecycle(
+            gateway,
+            request,
+            tool="provider.acceptance.notebook.lifecycle",
+            task_id=notebook_task,
+            arguments=notebook_arguments,
+        )
+        mutations_started += 1
+        locator, output = _notebook_binding(request, notebook_task, notebook_claim)
+        expected_output_sha256 = notebook_arguments["expected_output_sha256"]
+        if output.get("output_file_sha256") != expected_output_sha256:
+            raise ValueError("durable output receipt differs from the exact generated scenario result")
+        mutable_observations["notebook_claim_sha256"] = _sha(notebook_claim)
+        checks.append(_check("evidence-notebook", "PASS", "EXACT_EVIDENCE_NOTEBOOK_READY", notebook_claim))
+        return _ready(
+            request,
+            notebook_task,
+            locator,
+            output,
+            checks=checks,
+            observations=mutable_observations,
+            mutations_started=mutations_started,
+        )
+    except MissingPreActionEvidence as exc:
+        return _blocked(
+            request,
+            checks=[*checks, _check("evidence-resume", "BLOCKED", "DURABLE_EVIDENCE_CLAIM_MISSING")],
+            code=f"{request.requirement_id}_DURABLE_EVIDENCE_CLAIM_MISSING",
+            dependency=f"existing durable acceptance claim for resume ({type(exc).__name__})",
+            observations=mutable_observations,
+        )
+    except Exception as exc:
+        possible_mutations = (
+            max(mutations_started, 1)
+            if isinstance(exc, AmbiguousEvidenceMutation)
+            else mutations_started
+        )
+        return _failed(
+            request,
+            checks=[*checks, _check("evidence-execution", "FAIL", "EVIDENCE_EXECUTION_OR_RECONCILIATION_FAILED")],
+            observations={**mutable_observations, "failure_type": type(exc).__name__},
+            mutations_started=possible_mutations,
+        )
+
+
+async def _launch_post_action_evidence(
+    request: DriverRequest,
+    gateway: McpGateway,
+    *,
+    owner: str,
+    output_document: Mapping[str, Any],
+    checks: list[CapabilityCheck],
+    observations: Mapping[str, Any],
+    mutations_started: int,
+) -> TrustedDriverResult:
+    notebook_task, notebook_arguments = _notebook_arguments(request, owner, output_document)
+    try:
+        notebook_claim = await _run_lifecycle(
+            gateway,
+            request,
+            tool="provider.acceptance.notebook.lifecycle",
+            task_id=notebook_task,
+            arguments=notebook_arguments,
+            allow_create_on_resume=True,
+        )
+        locator, output = _notebook_binding(request, notebook_task, notebook_claim)
+        if output.get("output_file_sha256") != notebook_arguments["expected_output_sha256"]:
+            raise ValueError("durable output receipt differs from the generated post-action result")
+    except Exception as exc:
+        return _failed(
+            request,
+            checks=[*checks, _check("evidence-notebook", "FAIL", "POST_ACTION_EVIDENCE_RECONCILIATION_FAILED")],
+            observations={**dict(observations), "failure_type": type(exc).__name__},
+            mutations_started=max(mutations_started, 1),
+        )
+    checks.append(_check("evidence-notebook", "PASS", "EXACT_POST_ACTION_EVIDENCE_READY", notebook_claim))
+    return _ready(
+        request,
+        notebook_task,
+        locator,
+        output,
+        checks=checks,
+        observations={**dict(observations), "notebook_claim_sha256": _sha(notebook_claim)},
+        mutations_started=mutations_started + 1,
+    )
+
+
+async def _execute_cleanup(
+    request: DriverRequest, gateway: McpGateway
+) -> TrustedDriverResult:
+    binding = request.cleanup
+    assert binding is not None
+    checks: list[CapabilityCheck] = []
+    try:
+        catalog = await gateway.catalog("provider")
+    except MissingCredential:
+        return _failed(
+            request,
+            checks=[_check("credential.provider", "FAIL", "PROVIDER_MCP_TOKEN_MISSING_AFTER_MUTATION")],
+            observations={"claim_task_id": str(binding.claim_task_id)},
+            mutations_started=1,
+        )
+    except Exception as exc:
+        return _failed(
+            request,
+            checks=[_check("credential.provider", "FAIL", "PROVIDER_MCP_CATALOG_UNAVAILABLE_AFTER_MUTATION")],
+            observations={"failure_type": type(exc).__name__},
+            mutations_started=1,
+        )
+    required = {"provider.acceptance.claim.get", "provider.acceptance.claim.cleanup"}
+    if not required <= catalog:
+        return _failed(
+            request,
+            checks=[_check("catalog.provider", "FAIL", "CLEANUP_MCP_TOOLSET_INCOMPLETE", sorted(catalog))],
+            observations={"missing": sorted(required - catalog)},
+            mutations_started=1,
+        )
+    try:
+        before = await _claim_get(gateway, request, binding.claim_task_id)
+        before_cleanup_state = before.get("cleanup_state")
+        if before_cleanup_state not in {"PENDING", "COMPLETE"}:
+            raise ValueError("durable acceptance claim has no exact cleanup state")
+        locator, output = _notebook_binding(
+            request,
+            binding.claim_task_id,
+            before,
+            cleanup_state=before_cleanup_state,
+        )
+        expected = CleanupBinding(
+            claim_task_id=binding.claim_task_id,
+            claim_sha256=locator.claim_sha256,
+            provider_ref=locator.provider_ref,
+            provider_run_ref=locator.provider_run_ref,
+            provider_kernel_id=locator.provider_kernel_id,
+            source_version=locator.source_version,
+            source_sha256=locator.source_sha256,
+            output_receipt_sha256=str(output["output_receipt_sha256"]),
+            output_file_sha256=str(output["output_file_sha256"]),
+            output_tree_sha256=str(output["output_tree_sha256"]),
+        )
+        if expected != binding:
+            raise ValueError("outer reconciliation binding differs from the durable acceptance claim")
+        cleanup_arguments = {
+            "scenario_id": request.requirement_id,
+            "task_id": str(binding.claim_task_id),
+            "claim_sha256": binding.claim_sha256,
+            "provider_run_ref": binding.provider_run_ref,
+            "output_receipt_sha256": binding.output_receipt_sha256,
+            "idempotency_key": f"operational:{request.matrix_id}:{request.requirement_id}:cleanup",
+        }
+        try:
+            after = await gateway.call(
+                "provider", "provider.acceptance.claim.cleanup", cleanup_arguments
+            )
+        except Exception:
+            # The cleanup effect is deterministic and append-only. A lost
+            # response is accepted only if claim.get independently observes
+            # the exact COMPLETE claim; otherwise the phase is FAIL.
+            after = await _claim_get(gateway, request, binding.claim_task_id)
+        exact = _exact_claim(
+            after, request=request, task_id=binding.claim_task_id, cleanup_state="COMPLETE"
+        )
+        cleanup = _one_claim_evidence(exact, "CLEANUP")
+        if cleanup.get("claim_sha256") != binding.claim_sha256:
+            raise ValueError("cleanup receipt differs from the exact provider claim")
+    except Exception as exc:
+        return _failed(
+            request,
+            checks=[*checks, _check("evidence-cleanup", "FAIL", "EVIDENCE_CLEANUP_RECONCILIATION_FAILED")],
+            observations={"failure_type": type(exc).__name__, "claim_task_id": str(binding.claim_task_id)},
+            mutations_started=2,
+        )
+    return TrustedDriverResult(
+        schema_version="my-data-hub-operational-kaggle-driver-result.v2",
+        phase="CLEANUP",
+        outcome="PASS",
+        scenario=request.scenario,
+        task_run_id=request.task_run_id,
+        provider_ref=binding.provider_ref,
+        provider_run_ref=binding.provider_run_ref,
+        provider_kernel_id=binding.provider_kernel_id,
+        source_version=binding.source_version,
+        source_sha256=binding.source_sha256,
+        mutations_started=2,
+        capability_checks=(_check("evidence-cleanup", "PASS", "EXACT_EVIDENCE_CLEANUP_COMPLETE", after),),
+        observation_sha256=_sha({"claim": _sha(after), "cleanup": cleanup}),
+        claim_task_id=binding.claim_task_id,
+        claim_sha256=binding.claim_sha256,
+        output_receipt_sha256=binding.output_receipt_sha256,
+        output_file_sha256=binding.output_file_sha256,
+        output_tree_sha256=binding.output_tree_sha256,
+        cleanup_state="COMPLETE",
+    )
 
 
 def _evidence_claim_for(requirement_id: str) -> EvidenceClaim | None:
@@ -860,7 +1601,8 @@ def _pass(
     observations: Mapping[str, Any],
 ) -> TrustedDriverResult:
     return TrustedDriverResult(
-        schema_version="my-data-hub-operational-kaggle-driver-result.v1",
+        schema_version="my-data-hub-operational-kaggle-driver-result.v2",
+        phase=request.phase,
         outcome="PASS",
         scenario=request.scenario,
         task_run_id=request.task_run_id,
@@ -883,7 +1625,8 @@ def _failed(
     mutations_started: int,
 ) -> TrustedDriverResult:
     return TrustedDriverResult(
-        schema_version="my-data-hub-operational-kaggle-driver-result.v1",
+        schema_version="my-data-hub-operational-kaggle-driver-result.v2",
+        phase=request.phase,
         outcome="FAIL",
         scenario=request.scenario,
         task_run_id=request.task_run_id,
@@ -901,6 +1644,26 @@ async def _execute_claimed_action(
     checks: list[CapabilityCheck],
     observations: dict[str, Any],
 ) -> TrustedDriverResult:
+    evidence_config: EvidenceDriverConfig | None = None
+    if request.requirement_id == "FM06":
+        try:
+            evidence_config = _evidence_driver_config()
+        except Exception as exc:
+            return _blocked(
+                request,
+                checks=[*checks, _check("evidence-config", "FAIL", "EVIDENCE_CONFIGURATION_INVALID")],
+                code="FM06_EVIDENCE_CONFIGURATION_INVALID",
+                dependency=f"valid bounded evidence driver configuration ({type(exc).__name__})",
+                observations=observations,
+            )
+        if evidence_config is None:
+            return _blocked(
+                request,
+                checks=[*checks, _check("evidence-config", "BLOCKED", "EVIDENCE_CONFIGURATION_REQUIRED")],
+                code="FM06_EVIDENCE_PROVIDER_CONFIGURATION_REQUIRED",
+                dependency="exact disposable provider owner configuration",
+                observations=observations,
+            )
     try:
         claim = _evidence_claim_for(request.requirement_id)
     except Exception as exc:
@@ -1054,6 +1817,79 @@ async def _execute_claimed_action(
             mutations_started=mutations_started,
         )
     checks.append(_check("action-terminal", "PASS", "DURABLE_ACTION_COMPLETE", terminal))
+    if request.requirement_id == "FM06":
+        assert evidence_config is not None
+        try:
+            active = await gateway.call("reader", "master.status", {})
+            provider_run_ref = active.get("provider_run_ref")
+            provider_kernel_id = active.get("provider_kernel_id")
+            checkpoint = _exact_checkpoint(observations)
+            current = checkpoint.get("current")
+            if (
+                not _exact_active_master(active)
+                or re.fullmatch(
+                    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*",
+                    str(provider_run_ref or ""),
+                ) is None
+                or not isinstance(provider_kernel_id, int)
+                or isinstance(provider_kernel_id, bool)
+                or provider_kernel_id < 1
+                or not isinstance(current, Mapping)
+                or active.get("canonical_revision") != current.get("canonical_revision")
+            ):
+                raise ValueError("restored ACTIVE master identity/revision differs from the selected checkpoint")
+            completed_at = terminal.get("updated_at")
+            if not isinstance(completed_at, str):
+                raise ValueError("restore terminal has no exact completion timestamp")
+            lifecycle = ({
+                "gate": "master_boot",
+                "event_id": str(uuid5(NAMESPACE_URL, f"{request.task_run_id}:fm06-master-boot")),
+                "started_at": request.evidence_issued_at.isoformat(),
+                "completed_at": completed_at,
+                "old_provider_run_ref": None,
+                "new_provider_run_ref": provider_run_ref,
+                "old_epoch": None,
+                "new_epoch": active["master_epoch"],
+                "operation_id": expected_operation_id,
+                "before_identity": None,
+                "after_identity": None,
+                "duration_seconds": None,
+                "heartbeat_count": None,
+                "read_query_count": None,
+                "checkpoint_count": None,
+                "recovery_count": None,
+            },)
+            output = _output_document(
+                request,
+                {
+                    "verified_checkpoint_selected": checkpoint,
+                    "cold_restore_complete": {"operation": terminal, "active_master": active},
+                    "revision_equal": {
+                        "checkpoint_revision": current["canonical_revision"],
+                        "active_revision": active["canonical_revision"],
+                    },
+                },
+                lifecycle_events=lifecycle,
+                operation_ids=(expected_operation_id,),
+            )
+        except Exception as exc:
+            return _failed(
+                request,
+                checks=[*checks, _check("restored-master", "FAIL", "RESTORED_MASTER_IDENTITY_INVALID")],
+                observations={**observations, "failure_type": type(exc).__name__},
+                mutations_started=mutations_started,
+            )
+        observations["restored_master"] = active
+        checks.append(_check("restored-master", "PASS", "RESTORED_MASTER_EXACT_IDENTITY_BOUND", active))
+        return await _launch_post_action_evidence(
+            request,
+            gateway,
+            owner=evidence_config.provider_owner,
+            output_document=output,
+            checks=checks,
+            observations=observations,
+            mutations_started=mutations_started,
+        )
     return _pass(request, locator, checks=checks, observations=observations)
 
 
@@ -1272,6 +2108,8 @@ async def _execute_fm20(
 
 
 async def execute(request: DriverRequest, gateway: McpGateway) -> TrustedDriverResult:
+    if request.phase == "CLEANUP":
+        return await _execute_cleanup(request, gateway)
     spec = EXECUTORS[request.ordinal - 1]
     checks: list[CapabilityCheck] = []
     if not modern_token_configured():
@@ -1325,6 +2163,14 @@ async def execute(request: DriverRequest, gateway: McpGateway) -> TrustedDriverR
     checks.extend(probe_checks)
     if request.requirement_id == "FM20":
         return await _execute_fm20(request, spec, gateway, checks=checks)
+    if request.requirement_id in {"FM01", "FM02", "FM03", "FM22", "FM23"}:
+        return await _execute_evidence_scenario(
+            request,
+            spec,
+            gateway,
+            checks=checks,
+            observations=observations,
+        )
     if spec.action_tool is not None:
         return await _execute_claimed_action(
             request,
@@ -1351,7 +2197,8 @@ def _blocked(
     observations: Mapping[str, Any] | None = None,
 ) -> TrustedDriverResult:
     return TrustedDriverResult(
-        schema_version="my-data-hub-operational-kaggle-driver-result.v1",
+        schema_version="my-data-hub-operational-kaggle-driver-result.v2",
+        phase=request.phase,
         outcome="BLOCKED",
         scenario=request.scenario,
         task_run_id=request.task_run_id,

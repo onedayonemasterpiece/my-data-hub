@@ -22,13 +22,16 @@ MY_DATA_HUB_OPERATIONAL_DRIVER_JSON=["python","scripts/provider/operational_kagg
 ```
 
 The value is parsed as a JSON argv array, never as shell text. For each scenario
-the runner passes `--request REQUEST.json --result RESULT.json`. The request is
+the runner passes `--request REQUEST.json --result RESULT.json`. The v2 request is
 non-secret and binds the matrix/commit/scenario/task-run identity, required
-assertions, lifecycle gates, soak bounds, and `resume_only`. The result must
-validate as `my-data-hub-operational-kaggle-driver-result.v1` and either:
+assertions, lifecycle gates, soak bounds, phase, and `resume_only`. The result
+validates as `my-data-hub-operational-kaggle-driver-result.v2` and either:
 
-- locate an already launched exact Kaggle run (`provider_ref`, numeric
-  `provider_run_ref`, `provider_kernel_id`, source version/hash); or
+- return `READY` with an exact run locator plus acceptance task/claim and
+  output-read receipt for outer reconciliation;
+- return `PASS` only for a completed cleanup phase, or for an older scenario
+  whose evidence run was owner-managed and has no acceptance cleanup contract;
+- return `FAIL` after an action may have started but cannot be reconciled; or
 - report `BLOCKED` with an uppercase blocker code and the concrete missing
   integration dependency.
 
@@ -40,10 +43,12 @@ mutation and then returns BLOCKED: every BLOCKED result requires
 `mutations_started: 0`. A mutation that was accepted but cannot be reconciled
 terminally is a typed `FAIL`, not a blocker.
 
-Existing safe production surfaces are wired now: master/checkpoint/provider
-status, stale-epoch denial, blogger accounting/statistics, embedding coverage,
-protected-resource denial, claim-gated durable restore/rotation requests, and
-the FM20 signed-host-evidence cold-start path.
+Existing safe production surfaces are wired now: FM01 Dataset lifecycle,
+FM02 Notebook lifecycle, FM03 bounded runtime history, FM06 durable restore,
+FM22 Dataset plus Notebook lifecycles, FM23 protected-resource denial, master/
+checkpoint/provider status, stale-epoch denial, blogger accounting/statistics,
+embedding coverage, claim-gated rotation, and the FM20 signed-host-evidence
+cold-start path.
 Unresolved mutation/fault interfaces use a
 scenario-specific code such as `CHECKPOINT_CORRUPTION_FAULT_API_MISSING` or
 `E5_WORKER_SUBMISSION_TOOL_MISSING`; the generic
@@ -51,12 +56,52 @@ scenario-specific code such as `CHECKPOINT_CORRUPTION_FAULT_API_MISSING` or
 driver. This remains a blocked operational state, not a readiness claim.
 
 The current internal gaps are explicit in the executor registry. They include
-exact provider create/run/read/delete payload contracts, runtime event history,
 empty-bootstrap selection, checkpoint candidate publication, callback/lease/
 replay fault controls, drain control, YDB batch-to-checkpoint binding, blogger
 logical hash reads, embedding submission tools, a controlled
 business-row fixture, and the accelerated soak controller. Privileged actions
 are not attempted until their terminal exact-run evidence contract exists.
+
+### Evidence-plane scenarios and two-phase cleanup
+
+`MY_DATA_HUB_OPERATIONAL_EVIDENCE_DRIVER_JSON` validates as
+`my-data-hub-operational-kaggle-evidence-driver.v1`. It supplies only the exact
+provider owner and, for FM03, the runtime `(run_id, attempt_id, epoch)` key. It
+contains no credential or provider locator. Missing/invalid configuration is a
+pre-action `BLOCKED` result with `mutations_started: 0`.
+
+FM01 and FM22 derive distinct deterministic Dataset and Notebook subtask UUIDs.
+Their Dataset lifecycle performs private create, version, exact readback, and
+inline claim-bound cleanup. The evidence Notebook uses `dataset_inputs: []`:
+the current provider authority requires an `mcp_managed` input claim to share
+the Notebook task ID, which intentionally conflicts with the distinct subtask
+identity. The matrix therefore proves both lifecycles but does not claim that
+the evidence Notebook consumed the disposable Dataset.
+
+FM03 reads at most 200 metadata-only events and requires every event to match
+the configured run, attempt, and epoch, unique event/sequence identities, at
+least one `runtime.heartbeat`, and exactly one final `runtime.terminal`. FM23
+requires `evaluated=true`, `protected=true`, the exact protected-denial reason,
+and `mutation_attempted=false` before its distinct evidence Notebook launches.
+
+For FM01, FM02, FM03, FM06, FM22, and FM23 the driver returns `READY`, never
+PASS, after the acceptance claim is `SUCCEEDED/PENDING`. The outer matrix then:
+
+1. independently reconciles the exact numeric run with its one real
+   `KaggleProviderAdapter`;
+2. downloads only `operational-result.json` and compares its file and output
+   tree hashes with the durable `OUTPUT_READ` receipt;
+3. appends a mode-0600 reconciliation fence; and
+4. invokes the driver `CLEANUP` phase with the exact task claim, provider run,
+   and output-read receipt.
+
+Only a durable claim with `cleanup_state=COMPLETE` produces cleanup PASS and a
+PASS scenario receipt. A lost cleanup response is re-read through
+`provider.acceptance.claim.get`; any unresolved post-mutation ambiguity is
+FAIL, never BLOCKED. A rerun consumes the append-only reconciliation fence and
+never launches a second logical run. The fence contains the already validated
+receipt draft, so a retry after successful deletion does not attempt to
+download the deleted Notebook again.
 
 ### Claim-gated restore and rotation
 
@@ -76,15 +121,17 @@ previously accepted `operation_id`. The driver first uses `operation.get` to
 bind that exact restore/rotation kind, then re-reads the provider claim; it
 never recomputes the operation from a possibly newer checkpoint HEAD and never
 creates a replacement action. A missing, lost, or mismatched resume identity is
-typed `FAIL`, not BLOCKED. `DURABLE_COMPLETE` may produce a driver locator,
-but the matrix runner still independently reconciles the Kaggle run and
-downloads and validates its exact `operational-result.json`. An accepted action
+typed `FAIL`, not BLOCKED. For FM06, `DURABLE_COMPLETE` is followed by
+`master.status`; the driver requires the exact ACTIVE `provider_run_ref`,
+`provider_kernel_id`, epoch, and canonical revision equal to the selected
+checkpoint before launching its post-action evidence Notebook. It never uses
+the verifier Notebook run as the restored master identity. An accepted action
 that fails, is fenced/orphaned, times out, or loses its receipt produces typed
 `FAIL` with `mutations_started: 1`; it is never rewritten as external BLOCKED.
 
-This closes the client-side restore/rotation request and polling seam only. It
-does not claim a live run: the deployed MCP must expose the exact action schemas
-and consumer, and the owner must supply claims from real pre-launched verifier
+This closes the client-side request, polling, and evidence binding only. It does
+not claim a live run: the deployed MCP must expose the exact action schemas and
+consumer, and the owner must supply claims from real pre-launched verifier
 Notebooks. No such provider evidence is checked in.
 
 ### FM20 signed reboot and remote cold search
@@ -122,8 +169,7 @@ to reach ACTIVE, or malformed/empty search result is FAIL with
 ### Fault/action blockers retained intentionally
 
 - FM08/FM09: callback ingestion accepts exact replay from its per-run bearer,
-  but there is no safe callback-suppression, stale-output injection, or bounded
-  runtime event-history tool for the external driver.
+  but there is no safe callback-suppression or stale-output injection tool.
 - FM12: the master drains itself at its natural lifecycle boundary; there is no
   authenticated clean-drain/checkpoint/stop request or credential revocation
   endpoint.
@@ -137,13 +183,14 @@ to reach ACTIVE, or malformed/empty search result is FAIL with
 
 ## What counts as PASS
 
-A driver-reported PASS is only a locator. The runner constructs exactly one
+A driver-reported READY/PASS is only a locator. The runner constructs exactly one
 `KaggleProviderAdapter` and reuses it for every scenario. It reconciles the
 planned task ID/ref/source hash, compares the exact numeric Kaggle run ref,
 kernel ID and source version, requires terminal `complete`, and downloads the
 exact `operational-result.json` from that run. The Notebook output must contain
 exactly the scenario's required assertions and lifecycle events. Every
-assertion is bound to an evidence SHA-256.
+assertion is bound to an evidence SHA-256. For two-phase scenarios this is
+still insufficient: the exact acceptance cleanup must be durably COMPLETE.
 
 The summary counts unique numeric provider run refs and provider kernel IDs. It
 does **not** count internal task UUIDs. PASS requires all 24 scenario receipts,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -17,8 +18,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
+from my_data_hub.hashing import canonical_json_bytes
 from scripts.provider.operational_kaggle_driver import (
     EXECUTORS,
+    CleanupBinding,
     DriverRequest,
     MissingCredential,
     execute,
@@ -42,6 +45,28 @@ class FakeGateway:
 
     async def call(self, profile: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((profile, tool, dict(arguments)))
+        if tool == "runtime.events.history":
+            events = []
+            for sequence, event_type in ((1, "runtime.heartbeat"), (2, "runtime.terminal")):
+                events.append(
+                    {
+                        "event_id": str(UUID(int=sequence)),
+                        "schema_version": "my-data-hub-runtime-event.v1",
+                        "run_id": arguments["run_id"],
+                        "attempt_id": arguments["attempt_id"],
+                        "service_instance_id": "33333333-3333-4333-8333-333333333333",
+                        "source_identity": "owner/runtime",
+                        "source_version": 1,
+                        "epoch": arguments["epoch"],
+                        "event_type": event_type,
+                        "emitted_at": f"2026-08-11T00:00:0{sequence}Z",
+                        "received_at": f"2026-08-11T00:00:0{sequence}Z",
+                        "local_sequence": sequence,
+                        "body_sha256": str(sequence) * 64,
+                        "body_bytes": 100 + sequence,
+                    }
+                )
+            return {"events": events, "count": 2, "bounded": True}
         if tool == "master.status":
             return {
                 "state": "ACTIVE",
@@ -66,7 +91,13 @@ class FakeGateway:
         if tool == "runtime.stale_epoch.probe":
             return {"evaluated": True, "denied": True, "mutation_attempted": False}
         if tool == "provider.protected_resource.probe":
-            return {"evaluated": True, "denied": True, "mutation_attempted": False}
+            return {
+                "evaluated": True,
+                "protected": True,
+                "denied": True,
+                "reason_code": "PROTECTED_RESOURCE_DENIED",
+                "mutation_attempted": False,
+            }
         if tool == "bloggers.migration.accounting":
             return {"bounded": True, "accounted": True}
         if tool == "bloggers.statistics":
@@ -76,7 +107,119 @@ class FakeGateway:
         raise AssertionError(f"unexpected mutating/unsupported tool call: {tool}")
 
 
-class ClaimedActionGateway(FakeGateway):
+class EvidenceLifecycleGateway(FakeGateway):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.claims: dict[tuple[str, str], dict[str, Any]] = {}
+
+    @staticmethod
+    def _event(sequence: int, event_type: str, evidence: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "sequence": sequence,
+            "event_type": event_type,
+            "evidence": evidence,
+            "evidence_sha256": hashlib.sha256(canonical_json_bytes(evidence)).hexdigest(),
+            "recorded_at": "2026-08-11T00:00:00Z",
+        }
+
+    async def call(self, profile: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((profile, tool, dict(arguments)))
+        if tool == "provider.acceptance.claim.get":
+            return self.claims.get(
+                (str(arguments["scenario_id"]), str(arguments["task_id"])),
+                {"found": False, "scenario_id": arguments["scenario_id"], "task_id": arguments["task_id"]},
+            )
+        if tool == "provider.acceptance.dataset.lifecycle":
+            provider = {
+                "provider_ref": arguments["resource_ref"],
+                "provider_version": 2,
+                "package_sha256": "a" * 64,
+                "fingerprint": {"algorithm": "sha256", "value": "b" * 64},
+                "claim_sha256": "c" * 64,
+                "create_effect_id": "11111111-1111-4111-8111-111111111111",
+                "version_effect_id": "22222222-2222-4222-8222-222222222222",
+            }
+            cleanup = {
+                "provider_ref": arguments["resource_ref"],
+                "claim_sha256": "c" * 64,
+                "cleanup_effect_id": "33333333-3333-4333-8333-333333333333",
+                "cleanup_outcome": "applied",
+            }
+            claim = {
+                "found": True,
+                "scenario_id": arguments["scenario_id"],
+                "task_id": arguments["task_id"],
+                "state": "SUCCEEDED",
+                "failure_code": None,
+                "mutation_started": True,
+                "cleanup_state": "COMPLETE",
+                "evidence": [self._event(1, "PROVIDER_DATASET", provider), self._event(2, "CLEANUP", cleanup)],
+                "bounded": True,
+            }
+            self.claims[(arguments["scenario_id"], arguments["task_id"])] = claim
+            return claim
+        if tool == "provider.acceptance.notebook.lifecycle":
+            provider_ref = str(arguments["resource_ref"])
+            run_ref = f"{provider_ref}/7"
+            notebook = {
+                "provider_ref": provider_ref,
+                "provider_version": 4,
+                "source_version": 4,
+                "source_sha256": hashlib.sha256(str(arguments["source_utf8"]).encode()).hexdigest(),
+                "fingerprint": {"algorithm": "sha256", "value": "e" * 64},
+                "provider_kernel_id": 701,
+                "provider_run_ref": run_ref,
+                "task_run_id": arguments["task_run_id"],
+                "claim_sha256": "d" * 64,
+                "run_effect_id": "44444444-4444-4444-8444-444444444444",
+                "terminal_state": "complete",
+            }
+            output = {
+                "provider_run_ref": run_ref,
+                "output_file_name": "operational-result.json",
+                "output_file_sha256": arguments["expected_output_sha256"],
+                "output_tree_sha256": "f" * 64,
+                "file_count": 1,
+            }
+            output["output_receipt_sha256"] = hashlib.sha256(canonical_json_bytes(output)).hexdigest()
+            claim = {
+                "found": True,
+                "scenario_id": arguments["scenario_id"],
+                "task_id": arguments["task_id"],
+                "state": "SUCCEEDED",
+                "failure_code": None,
+                "mutation_started": True,
+                "cleanup_state": "PENDING",
+                "evidence": [self._event(1, "PROVIDER_NOTEBOOK", notebook), self._event(2, "OUTPUT_READ", output)],
+                "bounded": True,
+            }
+            self.claims[(arguments["scenario_id"], arguments["task_id"])] = claim
+            return claim
+        if tool == "provider.acceptance.claim.cleanup":
+            key = (str(arguments["scenario_id"]), str(arguments["task_id"]))
+            claim = self.claims[key]
+            notebook = next(
+                item["evidence"]
+                for item in claim["evidence"]
+                if item["event_type"] == "PROVIDER_NOTEBOOK"
+            )
+            cleanup = {
+                "provider_ref": notebook["provider_ref"],
+                "claim_sha256": arguments["claim_sha256"],
+                "cleanup_effect_id": "55555555-5555-4555-8555-555555555555",
+                "cleanup_outcome": "applied",
+            }
+            claim = {
+                **claim,
+                "cleanup_state": "COMPLETE",
+                "evidence": [*claim["evidence"], self._event(3, "CLEANUP", cleanup)],
+            }
+            self.claims[key] = claim
+            return claim
+        return await super().call(profile, tool, arguments)
+
+
+class ClaimedActionGateway(EvidenceLifecycleGateway):
     def __init__(self, *, rotation_ready: bool = False, action_state: str = "DURABLE_COMPLETE") -> None:
         super().__init__()
         self.rotation_ready = rotation_ready
@@ -87,8 +230,13 @@ class ClaimedActionGateway(FakeGateway):
         if tool == "master.status":
             return {
                 "master_state": "STOPPED" if self.rotation_ready else "ACTIVE",
+                "instance_id": None if self.rotation_ready else "restored-master",
                 "master_epoch": 2,
                 "canonical_revision": 9,
+                "lease_expires_at": None if self.rotation_ready else "2026-08-11T01:00:00Z",
+                "provider_run_ref": None if self.rotation_ready else "owner/master/8",
+                "provider_kernel_id": None if self.rotation_ready else 808,
+                "capabilities": [] if self.rotation_ready else ["bloggers:read"],
             }
         if tool == "checkpoint.status":
             return {
@@ -225,6 +373,21 @@ def _request(ordinal: int) -> DriverRequest:
     return DriverRequest.model_validate(_driver_request(plan, plan["scenarios"][ordinal - 1], resume_only=False))
 
 
+def _set_evidence_config(monkeypatch: pytest.MonkeyPatch, *, fm03: bool = False) -> None:
+    value: dict[str, Any] = {
+        "schema_version": "my-data-hub-operational-kaggle-evidence-driver.v1",
+        "provider_owner": "evidence-owner",
+        "fm03_runtime": None,
+    }
+    if fm03:
+        value["fm03_runtime"] = {
+            "run_id": "11111111-1111-4111-8111-111111111111",
+            "attempt_id": "22222222-2222-4222-8222-222222222222",
+            "epoch": 7,
+        }
+    monkeypatch.setenv("MY_DATA_HUB_OPERATIONAL_EVIDENCE_DRIVER_JSON", json.dumps(value))
+
+
 def _fm20_environment(request: DriverRequest) -> tuple[str, str]:
     now = datetime.now(UTC)
     image = "sha256:" + "9" * 64
@@ -313,12 +476,17 @@ def _fm20_environment(request: DriverRequest) -> tuple[str, str]:
     return json.dumps(bundle), json.dumps(claims)
 
 
-def test_driver_has_one_named_executor_and_internal_gap_per_scenario() -> None:
+def test_driver_has_one_named_executor_and_only_unclosed_scenarios_retain_missing_gaps() -> None:
     assert len(EXECUTORS) == 24
     assert [item.requirement_id for item in EXECUTORS] == [f"FM{i:02d}" for i in range(1, 25)]
     assert len({item.gap_code for item in EXECUTORS}) == 24
     assert all(item.gap_code != "OPERATIONAL_DRIVER_INTERFACE_MISSING" for item in EXECUTORS)
-    assert all("missing" in item.gap_code.casefold() for item in EXECUTORS)
+    closed = {"FM01", "FM02", "FM03", "FM06", "FM22", "FM23"}
+    assert all(
+        "missing" in item.gap_code.casefold()
+        for item in EXECUTORS
+        if item.requirement_id not in closed | {"FM20"}
+    )
     assert all(item.gap_dependency and len(item.gap_dependency) <= 500 for item in EXECUTORS)
 
 
@@ -374,11 +542,106 @@ def test_missing_profile_is_specific_and_precedes_safe_probe(monkeypatch: pytest
     assert not gateway.calls
 
 
+@pytest.mark.parametrize("ordinal", [1, 2, 3, 22, 23])
+def test_exact_evidence_scenarios_return_ready_not_pass_before_cleanup(
+    ordinal: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    _set_evidence_config(monkeypatch, fm03=ordinal == 3)
+    gateway = EvidenceLifecycleGateway()
+
+    result = asyncio.run(execute(_request(ordinal), gateway))
+
+    assert result.outcome == "READY"
+    assert result.phase == "EXECUTE"
+    assert result.cleanup_state == "PENDING"
+    assert result.mutations_started >= 1
+    assert result.claim_task_id is not None
+    assert result.output_receipt_sha256 is not None
+    assert result.provider_run_ref is not None
+    assert any(tool == "provider.acceptance.notebook.lifecycle" for _profile, tool, _args in gateway.calls)
+    if ordinal in {1, 22}:
+        task_ids = {
+            str(args["task_id"])
+            for _profile, tool, args in gateway.calls
+            if tool in {
+                "provider.acceptance.dataset.lifecycle",
+                "provider.acceptance.notebook.lifecycle",
+            }
+        }
+        assert len(task_ids) == 2
+        notebook = next(
+            args for _profile, tool, args in gateway.calls if tool == "provider.acceptance.notebook.lifecycle"
+        )
+        assert notebook["dataset_inputs"] == []
+    if ordinal == 3:
+        assert any(tool == "runtime.events.history" for _profile, tool, _args in gateway.calls)
+
+
+def test_cleanup_phase_requires_exact_outer_binding_and_only_then_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    _set_evidence_config(monkeypatch)
+    gateway = EvidenceLifecycleGateway()
+    request = _request(2)
+    ready = asyncio.run(execute(request, gateway))
+    assert ready.outcome == "READY"
+    cleanup = {
+        "claim_task_id": str(ready.claim_task_id),
+        "claim_sha256": ready.claim_sha256,
+        "provider_ref": ready.provider_ref,
+        "provider_run_ref": ready.provider_run_ref,
+        "provider_kernel_id": ready.provider_kernel_id,
+        "source_version": ready.source_version,
+        "source_sha256": ready.source_sha256,
+        "output_receipt_sha256": ready.output_receipt_sha256,
+        "output_file_sha256": ready.output_file_sha256,
+        "output_tree_sha256": ready.output_tree_sha256,
+    }
+    cleanup_request = request.model_copy(
+        update={
+            "phase": "CLEANUP",
+            "resume_only": True,
+            "cleanup": CleanupBinding.model_validate(cleanup),
+        }
+    )
+    cleanup_request = DriverRequest.model_validate(cleanup_request.model_dump(mode="json"))
+
+    result = asyncio.run(execute(cleanup_request, gateway))
+
+    assert result.outcome == "PASS"
+    assert result.phase == "CLEANUP"
+    assert result.cleanup_state == "COMPLETE"
+    assert any(tool == "provider.acceptance.claim.cleanup" for _profile, tool, _args in gateway.calls)
+
+
+def test_ambiguous_lifecycle_response_is_fail_never_blocked_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    _set_evidence_config(monkeypatch)
+
+    class AmbiguousGateway(EvidenceLifecycleGateway):
+        async def call(self, profile: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            if tool == "provider.acceptance.notebook.lifecycle":
+                self.calls.append((profile, tool, dict(arguments)))
+                raise ConnectionError("lost after request")
+            return await super().call(profile, tool, arguments)
+
+    result = asyncio.run(execute(_request(2), AmbiguousGateway()))
+
+    assert result.outcome == "FAIL"
+    assert result.mutations_started == 1
+    assert result.blocker_code is None
+
+
 def test_restore_runs_only_after_exact_provider_evidence_claim_and_durable_poll(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request = _request(6)
     monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    _set_evidence_config(monkeypatch)
     monkeypatch.setenv(
         "MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON",
         json.dumps(
@@ -399,9 +662,9 @@ def test_restore_runs_only_after_exact_provider_evidence_claim_and_durable_poll(
 
     result = asyncio.run(execute(request, gateway))
 
-    assert result.outcome == "PASS"
-    assert result.mutations_started == 1
-    assert result.provider_run_ref == "owner/fm06-evidence/7"
+    assert result.outcome == "READY"
+    assert result.mutations_started == 2
+    assert result.provider_run_ref and "mdh-fm06-no-" in result.provider_run_ref
     calls = [tool for _profile, tool, _arguments in gateway.calls]
     assert calls.index("provider.resources.read") < calls.index("checkpoint.restore.request")
     assert "operation.get" in calls
@@ -411,6 +674,7 @@ def test_contradictory_action_acceptance_is_fail_not_zero_mutation_blocker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    _set_evidence_config(monkeypatch)
     monkeypatch.setenv(
         "MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON",
         json.dumps(
@@ -506,6 +770,7 @@ def test_rotation_uses_exact_stopped_checkpoint_binding_and_polls_durable_operat
 
 def test_resume_only_never_creates_a_missing_durable_action(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    _set_evidence_config(monkeypatch)
     monkeypatch.setenv(
         "MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON",
         json.dumps(
@@ -548,6 +813,7 @@ def test_resume_uses_claimed_operation_id_without_recomputing_or_creating(
 ) -> None:
     operation_id = "f" * 64
     monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    _set_evidence_config(monkeypatch)
     monkeypatch.setenv(
         "MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON",
         json.dumps(
@@ -584,8 +850,8 @@ def test_resume_uses_claimed_operation_id_without_recomputing_or_creating(
 
     result = asyncio.run(execute(request, gateway))
 
-    assert result.outcome == "PASS"
-    assert result.mutations_started == 1
+    assert result.outcome == "READY"
+    assert result.mutations_started == 2
     operation_calls = [arguments for _profile, tool, arguments in gateway.calls if tool == "operation.get"]
     assert operation_calls and all(arguments["operation_id"] == operation_id for arguments in operation_calls)
     assert "checkpoint.restore.request" not in {tool for _profile, tool, _arguments in gateway.calls}

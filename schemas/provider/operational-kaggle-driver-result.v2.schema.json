@@ -1,0 +1,435 @@
+{
+  "$defs": {
+    "CapabilityCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "detail_code": {
+          "maxLength": 120,
+          "pattern": "^[A-Z0-9_]+$",
+          "title": "Detail Code",
+          "type": "string"
+        },
+        "evidence_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Sha256"
+        },
+        "name": {
+          "maxLength": 120,
+          "pattern": "^[a-z0-9_.-]+$",
+          "title": "Name",
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "PASS",
+            "BLOCKED",
+            "FAIL"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "outcome",
+        "detail_code"
+      ],
+      "title": "CapabilityCheck",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.my-data-hub.local/provider/operational-kaggle-driver-result.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "enum": [
+              "READY",
+              "PASS"
+            ]
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "mutations_started": {
+            "minimum": 1
+          },
+          "provider_kernel_id": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "provider_ref": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "provider_run_ref": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "source_sha256": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "source_version": {
+            "not": {
+              "type": "null"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "READY"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "claim_sha256": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "claim_task_id": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "cleanup_state": {
+            "const": "PENDING"
+          },
+          "output_file_sha256": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "output_receipt_sha256": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "output_tree_sha256": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "phase": {
+            "const": "EXECUTE"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "PASS"
+          },
+          "phase": {
+            "const": "CLEANUP"
+          }
+        },
+        "required": [
+          "phase",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "cleanup_state": {
+            "const": "COMPLETE"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "BLOCKED"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "blocker_code": {
+            "type": "string"
+          },
+          "integration_dependency": {
+            "type": "string"
+          },
+          "mutations_started": {
+            "const": 0
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "blocker_code": {
+      "anyOf": [
+        {
+          "maxLength": 120,
+          "pattern": "^[A-Z0-9_]+$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Blocker Code"
+    },
+    "capability_checks": {
+      "items": {
+        "$ref": "#/$defs/CapabilityCheck"
+      },
+      "title": "Capability Checks",
+      "type": "array"
+    },
+    "claim_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Claim Sha256"
+    },
+    "claim_task_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Claim Task Id"
+    },
+    "cleanup_state": {
+      "default": "NOT_REQUIRED",
+      "enum": [
+        "NOT_REQUIRED",
+        "PENDING",
+        "COMPLETE"
+      ],
+      "title": "Cleanup State",
+      "type": "string"
+    },
+    "integration_dependency": {
+      "anyOf": [
+        {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Integration Dependency"
+    },
+    "mutations_started": {
+      "minimum": 0,
+      "title": "Mutations Started",
+      "type": "integer"
+    },
+    "observation_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Observation Sha256"
+    },
+    "outcome": {
+      "enum": [
+        "READY",
+        "PASS",
+        "FAIL",
+        "BLOCKED"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "output_file_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Output File Sha256"
+    },
+    "output_receipt_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Output Receipt Sha256"
+    },
+    "output_tree_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Output Tree Sha256"
+    },
+    "phase": {
+      "enum": [
+        "EXECUTE",
+        "CLEANUP"
+      ],
+      "title": "Phase",
+      "type": "string"
+    },
+    "provider_kernel_id": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Kernel Id"
+    },
+    "provider_ref": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Ref"
+    },
+    "provider_run_ref": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Run Ref"
+    },
+    "scenario": {
+      "title": "Scenario",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "my-data-hub-operational-kaggle-driver-result.v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Sha256"
+    },
+    "source_version": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Version"
+    },
+    "task_run_id": {
+      "format": "uuid",
+      "title": "Task Run Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "phase",
+    "outcome",
+    "scenario",
+    "task_run_id",
+    "mutations_started",
+    "capability_checks"
+  ],
+  "title": "Operational driver two-phase result v2",
+  "type": "object"
+}
