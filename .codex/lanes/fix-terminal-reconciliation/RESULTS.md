@@ -75,11 +75,13 @@ commit-then-lost HTTP response replay draining the durable RuntimeClient spool.
   checkpoint/output hashes, and the four event IDs/body hashes. Runtime event bodies are
   not copied into the control ledger. A focused failure-injection test proves the audit
   is durable before the first projection and exact retry does not duplicate it.
-- Persistent callback-outage clean-exit semantics are supplied by the coordinated F3
-  follow-up `c07a17dfac42e72208ca1fe2e48e4b99a8d00c37` on top of `259acdc`: after verified
-  HEAD and revalidation of the fsynced exact artifact, the Notebook stops cleanly and
-  exits successfully while the spool truthfully remains queued/unacknowledged. Invalid
-  or missing terminal evidence still fails.
+- Persistent callback-outage completion is closed by the coordinated F3 final tip
+  `bbceb2faa9d419df05acc30446f3d6ea706cae84` (implementation `114084c`): `run_master`
+  suppresses only the dedicated callback lease-closure exception, and only after helper
+  success plus exact artifact/receipt revalidation. The spool truthfully remains queued
+  and unacknowledged; unrelated active errors still propagate. Run-master-level tests
+  cover both paths, its full suite passes with one skip, and its validator reports
+  2,878 checks with zero errors.
 
 Follow-up validation: focused provider/control tests pass (37 tests); full `pytest -q`
 passes with one remaining opt-in skip when pinned Kaggle 2.2.4 is installed; compileall,
