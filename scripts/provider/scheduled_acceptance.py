@@ -71,7 +71,7 @@ class Outcome(StrEnum):
 
 
 def modern_token_configured() -> bool:
-    """Backward-compatible name for the pinned SDK credential preflight."""
+    """Backward-compatible name for supported automated Kaggle credentials."""
 
     return kaggle_credentials_configured()
 

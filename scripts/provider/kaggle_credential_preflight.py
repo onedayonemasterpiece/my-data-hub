@@ -75,3 +75,17 @@ def kaggle_credentials_configured() -> bool:
         return True
     return _legacy_file_configured(config_dir / "kaggle.json")
 
+
+def kaggle_exact_kernel_read_credentials_configured() -> bool:
+    """Return whether the new exact-kernel source API can be authenticated.
+
+    Kaggle's legacy key remains valid for automated push/status/output, as used
+    by events-bot, but an observed private ``GetKernel`` source read returned
+    HTTP 403 with that credential.  Callers which still depend on provider-side
+    source pull must therefore retain the access-token gate until they migrate
+    to the task-bound runtime source-attestation contract.
+    """
+
+    if os.environ.get("KAGGLE_API_TOKEN", "").strip():
+        return True
+    return _bounded_regular_private_file(_config_directory() / "access_token")

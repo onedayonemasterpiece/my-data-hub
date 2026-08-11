@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from scripts.provider.kaggle_credential_preflight import kaggle_credentials_configured
+from scripts.provider.kaggle_credential_preflight import (
+    kaggle_credentials_configured,
+    kaggle_exact_kernel_read_credentials_configured,
+)
 
 
 def test_preflight_accepts_legacy_file_used_by_official_sdk(
@@ -23,6 +26,7 @@ def test_preflight_accepts_legacy_file_used_by_official_sdk(
     credential.chmod(0o600)
 
     assert kaggle_credentials_configured() is True
+    assert kaggle_exact_kernel_read_credentials_configured() is False
 
 
 def test_preflight_rejects_incomplete_or_unsafe_legacy_file(
@@ -53,4 +57,4 @@ def test_preflight_accepts_complete_legacy_environment(
     monkeypatch.setenv("KAGGLE_USERNAME", "owner")
     monkeypatch.setenv("KAGGLE_KEY", "k" * 32)
     assert kaggle_credentials_configured() is True
-
+    assert kaggle_exact_kernel_read_credentials_configured() is False

@@ -39,9 +39,11 @@ from my_data_hub.providers.kaggle.contracts import KernelState
 from my_data_hub.providers.kaggle.control_journal import ControlLedgerKaggleJournal
 
 try:
-    from scripts.provider.kaggle_credential_preflight import kaggle_credentials_configured
+    from scripts.provider.kaggle_credential_preflight import (
+        kaggle_exact_kernel_read_credentials_configured,
+    )
 except ModuleNotFoundError:  # direct ``python scripts/provider/...`` execution
-    from kaggle_credential_preflight import kaggle_credentials_configured
+    from kaggle_credential_preflight import kaggle_exact_kernel_read_credentials_configured
 
 EXTERNAL_BLOCKED = 78
 FAIL = 1
@@ -451,7 +453,7 @@ class OperationalOutput(BaseModel):
 def modern_token_configured() -> bool:
     """Backward-compatible name for the pinned SDK credential preflight."""
 
-    return kaggle_credentials_configured()
+    return kaggle_exact_kernel_read_credentials_configured()
 
 
 def _exact_commit(root: Path) -> str:

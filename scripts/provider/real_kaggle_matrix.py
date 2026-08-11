@@ -38,9 +38,15 @@ from my_data_hub.providers.kaggle.control_journal import ControlLedgerKaggleJour
 from my_data_hub.providers.models import ControlClass
 
 try:
-    from scripts.provider.kaggle_credential_preflight import kaggle_credentials_configured
+    from scripts.provider.kaggle_credential_preflight import (
+        kaggle_credentials_configured,
+        kaggle_exact_kernel_read_credentials_configured,
+    )
 except ModuleNotFoundError:  # direct ``python scripts/provider/...`` execution
-    from kaggle_credential_preflight import kaggle_credentials_configured
+    from kaggle_credential_preflight import (
+        kaggle_credentials_configured,
+        kaggle_exact_kernel_read_credentials_configured,
+    )
 
 EXTERNAL_BLOCKED = 78
 MATRIX_SCHEMA = "my-data-hub-real-kaggle-matrix.v1"
@@ -103,7 +109,7 @@ class AnonymousDatasetProbe:
 def modern_token_configured() -> bool:
     """Backward-compatible name for the pinned SDK credential preflight."""
 
-    return kaggle_credentials_configured()
+    return kaggle_exact_kernel_read_credentials_configured()
 
 
 def _effect(
@@ -156,7 +162,7 @@ Path("/kaggle/working/smoke-output.json").write_text(
 
 
 def run_dataset_canary(*, ledger_path: Path, receipt_path: Path) -> int:
-    if not modern_token_configured():
+    if not kaggle_credentials_configured():
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
         receipt_path.write_bytes(
             canonical_json_bytes(
