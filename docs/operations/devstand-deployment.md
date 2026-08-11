@@ -11,13 +11,18 @@ The control readiness is healthy at `master_state=ABSENT`; data methods fail clo
 implementation branch adds the durable ledger, one concrete Kaggle adapter, master
 lifecycle coordinator, metadata-only runtime callbacks/checkpoint registry, epoch
 credential handoff, OAuth components and bounded MCP runtime. None of those code paths is
-evidence that the current host is installed or that a public endpoint exists.
+evidence that the current host stack is installed or that the public application routes
+are ready.
 
 The legacy same-host token is permanently disabled. The replacement installer has a new
 explicit token and may enable only `my-data-hub-control-plane.service`; that foreground
 unit reconciles exactly the three containers through the opt-in `remote-mcp` Compose
 profile. It must deploy the reviewed implementation merge commit; this branch has not run
-it. No DNS/VPN/443 change has been made.
+it. A separate Yandex ALB, issued certificate and DNS records now terminate public TLS
+without changing DevCoveer's VPN/Xray listeners. The restricted tunnel reaches the old
+control callback on loopback, but MCP and OAuth remain `502` until the reviewed
+three-process stack is installed; see
+[`yandex-edge-deployment.md`](yandex-edge-deployment.md).
 
 Disposable database work uses root `compose.yaml` only, tmpfs only, and ends with
 `docker compose down -v`.
@@ -76,7 +81,8 @@ Do not install or enable the unit until all of these have evidence:
 2. a modern Kaggle access token passes private Notebook source/status/output readback;
 3. task-owned permanent protected resources and their exact claims exist;
 4. the full real provider/checkpoint/fencing matrix is green;
-5. the edge/OAuth configuration is provisioned without changing the existing VPN;
+5. the edge is provisioned without changing the existing VPN and the owner OAuth
+   configuration is available;
 6. the merge commit passes control process-kill and host-reboot recovery.
 
 The installation command additionally refuses to proceed unless:
