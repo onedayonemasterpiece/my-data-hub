@@ -231,7 +231,7 @@ def create_server(
         title: str,
         code_file: str,
         source_utf8: str,
-        dataset_sources: list[str],
+        dataset_inputs: list[dict[str, Any]],
         output_file_name: str,
         expected_output_sha256: str,
         max_output_bytes: int,

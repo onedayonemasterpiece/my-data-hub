@@ -63,6 +63,19 @@ class DatasetLifecycleRequest(BaseModel):
         return self
 
 
+class NotebookDatasetInput(BaseModel):
+    """An exact registered private Dataset claim attached to an evidence run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    resource_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=300
+    )
+    provider_version: int = Field(ge=1)
+    claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    control_class: Literal["mcp_managed", "mcp_exchange"]
+
+
 class NotebookLifecycleRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -74,7 +87,7 @@ class NotebookLifecycleRequest(BaseModel):
     title: str = Field(min_length=5, max_length=80)
     code_file: str = Field(min_length=1, max_length=200)
     source_utf8: str = Field(max_length=262144)
-    dataset_sources: tuple[str, ...] = Field(default=(), max_length=20)
+    dataset_inputs: tuple[NotebookDatasetInput, ...] = Field(default=(), max_length=16)
     output_file_name: str = Field(min_length=1, max_length=200)
     expected_output_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     max_output_bytes: int = Field(ge=1, le=1048576)
@@ -264,7 +277,9 @@ class AcceptanceEvidenceController:
                             "kernel_type": "script",
                             "language": "python",
                             "source_utf8": request.source_utf8,
-                            "dataset_sources": list(request.dataset_sources),
+                            "dataset_inputs": [
+                                item.model_dump(mode="json") for item in request.dataset_inputs
+                            ],
                             "disposable": True,
                         },
                     ),

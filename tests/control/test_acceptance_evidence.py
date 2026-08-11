@@ -62,7 +62,7 @@ def notebook_request(
         "title": f"{scenario_id.casefold()}-notebook",
         "code_file": "run.py",
         "source_utf8": f"# exact task {task_run_id}\nprint('acceptance')\n",
-        "dataset_sources": [],
+        "dataset_inputs": [],
         "output_file_name": "operational-result.json",
         "expected_output_sha256": hashlib.sha256(output).hexdigest(),
         "max_output_bytes": 4096,
