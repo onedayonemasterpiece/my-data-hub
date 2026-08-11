@@ -13,6 +13,11 @@
 - Exact capability/request/closure schemas and synthetic examples describe the future live interface without claiming it exists.
 - Fake interfaces cover the complete state machine with `live_evidence=false`; generated worker metadata tests bind the exact pinned E5/BGE revisions, primary-source hashes, privacy, and protected control class.
 
+Integration hardening at `a7524eb39b20dfa43c0216641df635fab1d268fe`
+additionally rejects partial FINAL-BLOGGER receipts, non-numeric checkpoint refs,
+wrong checkpoint manifest hashes, and worker provider/source identities that do
+not exactly match `WORKER_ASSETS`. The operator bearer is now environment-only.
+
 ## Evidence boundary / integration request
 
 No provider mutation or live interface call was performed. Current control/MCP lacks the embedding production request/capability interfaces and vector-enabled hybrid search, so the CLI correctly blocks before mutation. Root integration must add those shared master/control/MCP implementations outside this lane; this lane does not edit or weaken them.

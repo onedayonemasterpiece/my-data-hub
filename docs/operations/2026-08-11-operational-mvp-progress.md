@@ -50,10 +50,12 @@ contains only the lightweight control ledger/process and no canonical rows.
   credential-free receipt exits `78` with 14 explicit `BLOCKED` checks; it does
   not turn absent live interfaces or credentials into a pass.
 - Scheduled acceptance now has schema-validated receipts, exact current/previous
-  checkpoint metadata and bounded control-ledger connector coverage.  Safe
-  same-admission-path stale-epoch/protected-resource probes and production
-  restore/rotation consumers remain absent, so those checks stay `BLOCKED` and
-  do not enqueue unconsumed operations.
+  checkpoint metadata, bounded control-ledger connector coverage, production
+  policy/fencing denial probes, and a durable restore/rotation consumer heartbeat.
+  It submits and polls each accepted operation to a terminal state sequentially;
+  verifier timeouts are capped by the remaining request budget and a late return
+  is recorded as `FAILED`, not durable success. No live scheduled receipt is
+  claimed because provider credentials and a deployed consumer are absent.
 - The post-deploy workflow runs only trusted default-branch verifier code and
   evidence-binds an exact approved reachable merge commit without checking out
   or executing that deployed revision. It also requires
@@ -81,10 +83,27 @@ contains only the lightweight control ledger/process and no canonical rows.
   restore verifier Notebook, and advances metadata-only current/previous HEAD by
   compare-and-swap. A later master boots only from that exact verified HEAD.
   These statements describe tested code contracts, not a completed real checkpoint.
+- The FINAL-BLOGGER command now implements the metadata-only external closure and
+  the in-master bounded YDB stage. It requires an acknowledged exact 266-row import
+  receipt before checkpoint publication, then a verified exact-version checkpoint,
+  independent restore, cold rotation, accounting, and bounded MCP projection.
+  Persistent import-receipt callback loss fences/stops the ephemeral master and
+  deliberately preserves the previous HEAD. This path has not been executed live.
+- The FINAL-EMBED command now validates the complete FINAL-BLOGGER receipt and exact
+  pinned generated E5/BGE worker identities before accepting worker/import evidence;
+  bearer input is environment-only. It remains an honest fail-closed scaffold:
+  the production control request/status endpoints and MCP vector capability are not
+  implemented, so even valid external credentials currently produce exit `78`
+  before mutation.
+- The provider-real driver can execute 16 distinct private generated-Notebook
+  platform-smoke runs with exact launch fences and reconciliation. It intentionally
+  emits only `SMOKE_PASS` plus `MANDATORY_OPERATIONAL_SCENARIOS_NOT_EXECUTED` and
+  exit `78`; it is not the required operational master/import/embedding/restore
+  scenario matrix.
 - At pre-documentation integration commit
-  `52749d85cdd8fadf69622fb47fd7f17788c9d125`, local validation reports 2,944
-  repository checks with zero errors and 600 tests pass with only the separately
-  opt-in live PostgreSQL test skipped (601 collected). That disposable PostgreSQL
+  `a7524eb39b20dfa43c0216641df635fab1d268fe`, local validation reports 3,085
+  repository checks with zero errors and 655 tests pass with only the separately
+  opt-in live PostgreSQL test skipped (656 collected). That disposable PostgreSQL
   18 fencing test passes when explicitly enabled. Strict type checks cover the
   high-risk protocol/manifest modules and a reachable-history secret scan passes.
   These results are code and disposable-integration evidence, not real-provider
@@ -129,5 +148,10 @@ reported as complete: permanent master/checkpoint resources; 15 real run IDs;
 full YDB import into the Kaggle primary; E5/BGE 100% coverage; cold restore;
 direct tunnel/broker proof; owner MCP writes; public DNS/TLS/OAuth; host reboot;
 implementation PR merge; and deployment of its merge commit.
+
+In addition to external blockers, two implementation gates remain open: the
+16-run provider driver covers platform smoke only rather than the mandatory
+operational scenario matrix, and production embedding request/status plus vector
+MCP interfaces do not exist yet. Credentials alone cannot close those gates.
 
 Region Talk remains paused and production publication remains disabled.

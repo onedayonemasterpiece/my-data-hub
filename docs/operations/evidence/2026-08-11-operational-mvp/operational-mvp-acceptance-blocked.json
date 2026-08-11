@@ -1,10 +1,10 @@
 {
   "schema_version": "my-data-hub-operational-mvp-acceptance.v1",
   "verdict": "MY_DATA_HUB_OPERATIONAL_MVP_BLOCKED",
-  "evaluated_source_commit": "52749d85cdd8fadf69622fb47fd7f17788c9d125",
+  "evaluated_source_commit": "a7524eb39b20dfa43c0216641df635fab1d268fe",
   "architecture_source_sha256": "c7efb28231223caa6fd02fcc001a38e0f16bcc3fa4c4cd53e744721b2eac0852",
-  "completed_at": "2026-08-11T05:02:00Z",
-  "summary": "Code and disposable integration gates pass, but real Kaggle, import, embedding and deployment acceptance are incomplete.",
+  "completed_at": "2026-08-11T06:47:35Z",
+  "summary": "Code and disposable integration gates pass, but two implementation gates and real Kaggle, import, embedding and deployment acceptance remain incomplete.",
   "counts": {
     "real_kaggle_run_ids": 0,
     "ydb_bloggers_observed": 266,
@@ -13,18 +13,67 @@
     "bge_m3_coverage": 0
   },
   "gate_results": [
-    {"name": "architecture", "outcome": "PASS", "evidence": "Kaggle-only canonical PostgreSQL and DB-free devstand invariants validated"},
-    {"name": "code_and_disposable_integration", "outcome": "PASS", "evidence": "600 tests passed plus separate disposable PostgreSQL fencing proof"},
-    {"name": "readonly_ydb_inventory", "outcome": "PASS", "evidence": "266 distinct records observed; zero-row write denied; no rows persisted on devstand"},
-    {"name": "real_kaggle_run_matrix", "outcome": "BLOCKED", "evidence": "No qualifying Notebook run IDs; legacy credential cannot perform exact private Notebook readback"},
-    {"name": "bounded_blogger_import", "outcome": "BLOCKED", "evidence": "Canonical Kaggle master import/checkpoint/restore not executed"},
-    {"name": "embedding_coverage", "outcome": "BLOCKED", "evidence": "E5 and BGE-M3 real corpus runs not executed"},
-    {"name": "public_mcp_deployment", "outcome": "BLOCKED", "evidence": "DNS, TLS, OAuth issuer, signed host evidence and reboot acceptance absent"}
+    {
+      "name": "architecture",
+      "outcome": "PASS",
+      "evidence": "Kaggle-only canonical PostgreSQL and DB-free devstand invariants validated"
+    },
+    {
+      "name": "code_and_disposable_integration",
+      "outcome": "PASS",
+      "evidence": "655 tests passed with one opt-in disposable PostgreSQL test skipped; repository validator 3085/0"
+    },
+    {
+      "name": "readonly_ydb_inventory",
+      "outcome": "PASS",
+      "evidence": "266 distinct records observed; zero-row write denied; no rows persisted on devstand"
+    },
+    {
+      "name": "real_kaggle_run_matrix",
+      "outcome": "BLOCKED",
+      "evidence": "No qualifying Notebook run IDs; implemented 16-run driver is deliberately platform-smoke-only and exits 78"
+    },
+    {
+      "name": "bounded_blogger_import",
+      "outcome": "BLOCKED",
+      "evidence": "Production command and in-master transaction/checkpoint/restore contract exist; no real import executed"
+    },
+    {
+      "name": "embedding_coverage",
+      "outcome": "BLOCKED",
+      "evidence": "Fail-closed closure command exists, but production control/MCP vector interfaces and real corpus runs are absent"
+    },
+    {
+      "name": "public_mcp_deployment",
+      "outcome": "BLOCKED",
+      "evidence": "DNS, TLS, OAuth issuer, signed host evidence and reboot acceptance absent"
+    }
   ],
   "blockers": [
-    {"code": "KAGGLE_MODERN_API_TOKEN_REQUIRED", "missing": "Modern Kaggle OAuth token required for exact private Notebook source/status/output", "closure_proof": ".venv/bin/kaggle auth login"},
-    {"code": "REAL_KAGGLE_MATRIX_INCOMPLETE", "missing": "At least 15 qualifying real Kaggle Notebook run IDs and scenario receipts", "closure_proof": "UNIMPLEMENTED: no >=15-run matrix driver exists; notebook-canary proves only one run"},
-    {"code": "BLOGGER_IMPORT_NOT_EXECUTED", "missing": "Transactional import of the 266-row bounded YDB snapshot into an ACTIVE master plus verified restore", "closure_proof": "UNIMPLEMENTED: no production bounded-blogger import orchestration command exists"},
-    {"code": "PUBLIC_EDGE_NOT_DEPLOYED", "missing": "Merge-commit control/MCP/OAuth deployment, DNS/TLS, signed host receipt and reboot proof", "closure_proof": "BLOCKED: complete the merge-bound deployment and three-stage procedure in docs/operations/deployment-evidence.md"}
+    {
+      "code": "KAGGLE_MODERN_API_TOKEN_REQUIRED",
+      "missing": "Modern Kaggle OAuth token required for exact private Notebook source/status/output",
+      "closure_proof": "Run .venv/bin/kaggle auth login locally, then the private notebook canary; never commit or paste the token"
+    },
+    {
+      "code": "REAL_KAGGLE_OPERATIONAL_MATRIX_UNIMPLEMENTED",
+      "missing": "Mandatory >=15-run master/callback/checkpoint/import/embedding/fault/soak scenario matrix; current 16-run driver is platform smoke only",
+      "closure_proof": "Implement schema-validated operational scenarios before running scripts/provider/real_kaggle_matrix.py matrix; SMOKE_PASS/78 is not acceptance"
+    },
+    {
+      "code": "BLOGGER_IMPORT_NOT_EXECUTED",
+      "missing": "Transactional import of the 266-row bounded YDB snapshot into an ACTIVE master plus verified restore",
+      "closure_proof": "After modern token and live control/MCP deployment, run scripts/bloggers/run_final_closure.py run with exact project/snapshot/source inputs and require a schema-valid DURABLE_COMPLETE receipt"
+    },
+    {
+      "code": "EMBEDDING_PRODUCTION_INTERFACES_MISSING",
+      "missing": "Production embedding request/status consumer and vector-enabled MCP capability; real E5/BGE corpus execution remains impossible even with credentials",
+      "closure_proof": "Implement the active-master control/MCP interfaces, then run scripts/embeddings/run_final_embedding_closure.py run and require 266/266 coverage for both pinned models plus verified restore"
+    },
+    {
+      "code": "PUBLIC_EDGE_NOT_DEPLOYED",
+      "missing": "Merge-commit control/MCP/OAuth deployment, DNS/TLS, signed host receipt and reboot proof",
+      "closure_proof": "Complete the merge-bound deployment and three-stage procedure in docs/operations/deployment-evidence.md"
+    }
   ]
 }
