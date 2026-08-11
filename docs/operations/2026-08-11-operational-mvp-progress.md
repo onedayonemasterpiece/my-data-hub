@@ -23,6 +23,11 @@ contains only the lightweight control ledger/process and no canonical rows.
   version/hash, denied to an unauthenticated client, and deleted by an exact
   task-created claim.  See
   [the sanitized receipt](evidence/2026-08-11-operational-mvp/kaggle-private-dataset-canary.json).
+- The now-reproducible repository command repeated that real Dataset gate with a
+  second task-owned private resource and exact cleanup. See
+  [the schema-validated second receipt](evidence/2026-08-11-operational-mvp/kaggle-private-dataset-canary-2.json).
+  Dataset canaries are real provider mutations but are not Notebook run IDs and do
+  not reduce the required 15-run minimum.
 - The target YDB table was inventoried with a dedicated database-scoped
   `ydb.viewer` identity. A zero-row UPDATE was denied. The live bounded snapshot
   contained 266 distinct records across 14 batches and 14 source files. No row

@@ -118,6 +118,9 @@ def validate_json_and_schemas(report: Report) -> None:
         ),
         "data-connector-envelope.v1.example.json": "data-connector-envelope.v1.schema.json",
         "kaggle-exchange-manifest.v1.example.json": "kaggle-exchange-manifest.v1.schema.json",
+        "kaggle-real-canary-receipt.v1.example.json": (
+            "kaggle-real-canary-receipt.v1.schema.json"
+        ),
         "workflow-receipt.v1.example.json": "workflow-receipt.v1.schema.json",
     }
     checker = FormatChecker()
@@ -135,6 +138,29 @@ def validate_json_and_schemas(report: Report) -> None:
             not errors,
             f"{path.relative_to(ROOT)} violates {schema_name}: "
             + "; ".join(error.message for error in errors[:5]),
+        )
+
+    evidence_path = (
+        ROOT
+        / "docs"
+        / "operations"
+        / "evidence"
+        / "2026-08-11-operational-mvp"
+        / "kaggle-private-dataset-canary-2.json"
+    )
+    report.check(evidence_path.is_file(), "missing second real Kaggle private Dataset canary receipt")
+    if evidence_path.is_file():
+        evidence_errors = sorted(
+            Draft202012Validator(
+                schemas["kaggle-real-canary-receipt.v1.schema.json"],
+                format_checker=checker,
+            ).iter_errors(load_json(evidence_path)),
+            key=lambda item: list(item.path),
+        )
+        report.check(
+            not evidence_errors,
+            f"{evidence_path.relative_to(ROOT)} violates real Kaggle canary schema: "
+            + "; ".join(error.message for error in evidence_errors[:5]),
         )
 
     # These schemas are generated from runtime models. Drift is a correctness error.

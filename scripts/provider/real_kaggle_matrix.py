@@ -7,8 +7,12 @@ import argparse
 import hashlib
 import json
 import os
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 from my_data_hub.control_plane.ledger import ControlLedger
@@ -23,6 +27,37 @@ from my_data_hub.providers.kaggle.control_journal import ControlLedgerKaggleJour
 from my_data_hub.providers.models import ControlClass
 
 EXTERNAL_BLOCKED = 78
+
+
+class _AnonymousDatasetProbeError(RuntimeError):
+    """Shape an anonymous HTTP denial for the adapter's retry classifier."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"anonymous Kaggle dataset request denied with HTTP {status_code}")
+        self.response = SimpleNamespace(status_code=status_code, headers={})
+
+
+class AnonymousDatasetProbe:
+    """Prove that an exact authenticated dataset version is not public."""
+
+    def read_dataset(self, provider_ref: str, version: int) -> object:
+        owner, slug = provider_ref.split("/", 1)
+        quoted = "/".join(urllib.parse.quote(value, safe="") for value in (owner, slug))
+        url = (
+            f"https://www.kaggle.com/api/v1/datasets/download/{quoted}"
+            f"?datasetVersionNumber={version}"
+        )
+        request = urllib.request.Request(
+            url,
+            headers={"Accept": "application/zip", "User-Agent": "my-data-hub-private-proof/1"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                # A successful response is deliberately not read or persisted.  The
+                # adapter treats any success as a privacy failure.
+                return {"status": response.status}
+        except urllib.error.HTTPError as exc:
+            raise _AnonymousDatasetProbeError(exc.code) from exc
 
 
 def modern_token_configured() -> bool:
@@ -78,6 +113,98 @@ Path("/kaggle/working/smoke-output.json").write_text(
     json.dumps({{"ok": True, "task_run_id": TASK_RUN_ID}}, sort_keys=True), encoding="utf-8"
 )
 '''.encode()
+
+
+def run_dataset_canary(*, ledger_path: Path, receipt_path: Path) -> int:
+    ledger = ControlLedger(ledger_path)
+    adapter = KaggleProviderAdapter.from_environment(journal=ControlLedgerKaggleJournal(ledger))
+    task_id = uuid4()
+    run_id = uuid4()
+    started_at = datetime.now(UTC)
+    slug = f"mdh-private-canary-{str(run_id)[:8]}"
+    ref = f"{adapter.provider_identity().username}/{slug}"
+    content = canonical_json_bytes(
+        {
+            "schema_version": "my-data-hub-provider-canary.v1",
+            "task_id": str(task_id),
+            "run_id": str(run_id),
+        }
+    )
+    content_tree_sha = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "files": [
+                    {
+                        "path": "canary.json",
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                        "byte_size": len(content),
+                    }
+                ]
+            }
+        )
+    ).hexdigest()
+    create = _effect(
+        action=MutationAction.CREATE_DATASET,
+        ref=ref,
+        task_id=task_id,
+        arguments={
+            "content_tree_sha256": content_tree_sha,
+            "control_class": ControlClass.MCP_MANAGED.value,
+            "disposable": True,
+        },
+    )
+    claim = None
+    result = None
+    proof = None
+    cleanup = None
+    try:
+        result = adapter.create_private_dataset(
+            intent=create,
+            files={"canary.json": content},
+            title=slug,
+            control_class=ControlClass.MCP_MANAGED,
+            disposable=True,
+        )
+        claim = result.claim
+        proof = adapter.prove_private_dataset_access(
+            provider_ref=ref,
+            version=result.identity.version,
+            unauthenticated_probe=AnonymousDatasetProbe(),
+        )
+    finally:
+        if claim is not None:
+            delete = _effect(
+                action=MutationAction.DELETE_DATASET,
+                ref=ref,
+                task_id=task_id,
+                arguments={
+                    "claim_sha256": claim.claim_sha256,
+                    "provider_version": claim.provider_version,
+                },
+                expected=claim.fingerprint,
+            )
+            cleanup = adapter.delete_task_created_resource(intent=delete, claim=claim)
+    if result is None or proof is None or cleanup is None:
+        raise RuntimeError("dataset canary has no exact create/privacy/cleanup receipt")
+    receipt = {
+        "schema_version": "my-data-hub-real-kaggle-canary.v1",
+        "scenario": "private_dataset_create_exact_readback_unauthenticated_denial_delete",
+        "task_id": str(task_id),
+        "run_id": str(run_id),
+        "provider_ref": ref,
+        "provider_version": result.identity.version,
+        "package_sha256": result.identity.package_sha256,
+        "claim_sha256": result.claim.claim_sha256,
+        "privacy": result.identity.privacy,
+        "unauthenticated_http_status": proof.unauthenticated_http_status,
+        "denial_class": proof.denial_class,
+        "cleanup": cleanup.detail_code,
+        "started_at": started_at.isoformat(),
+        "completed_at": datetime.now(UTC).isoformat(),
+    }
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_bytes(canonical_json_bytes(receipt))
+    return 0
 
 
 def run_notebook_canary(*, ledger_path: Path, receipt_path: Path) -> int:
@@ -186,7 +313,7 @@ def run_notebook_canary(*, ledger_path: Path, receipt_path: Path) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("preflight", "notebook-canary"))
+    parser.add_argument("command", choices=("preflight", "dataset-canary", "notebook-canary"))
     parser.add_argument(
         "--ledger",
         type=Path,
@@ -195,7 +322,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--receipt",
         type=Path,
-        default=Path(".codex/operational-mvp/evidence/real-kaggle/notebook-canary.json"),
+        default=None,
     )
     return parser.parse_args()
 
@@ -210,7 +337,15 @@ def main() -> int:
         }
         print(json.dumps(payload, sort_keys=True))
         return 0 if payload["private_notebook_exact_read_ready"] else EXTERNAL_BLOCKED
-    return run_notebook_canary(ledger_path=args.ledger, receipt_path=args.receipt)
+    if args.command == "dataset-canary":
+        receipt = args.receipt or Path(
+            ".codex/operational-mvp/evidence/real-kaggle/dataset-canary.json"
+        )
+        return run_dataset_canary(ledger_path=args.ledger, receipt_path=receipt)
+    receipt = args.receipt or Path(
+        ".codex/operational-mvp/evidence/real-kaggle/notebook-canary.json"
+    )
+    return run_notebook_canary(ledger_path=args.ledger, receipt_path=receipt)
 
 
 if __name__ == "__main__":
