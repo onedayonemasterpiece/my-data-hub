@@ -16,11 +16,14 @@ ordinary master runs never access YDB.
 The importer executes **inside the ACTIVE Kaggle master**. `MY_DATA_HUB_YDB_ENDPOINT`,
 `MY_DATA_HUB_YDB_DATABASE`, and the dedicated viewer-only
 `YDB_ACCESS_TOKEN_CREDENTIALS` are supplied through Kaggle User Secrets. No
-PostgreSQL URL is handed to another notebook. The stage creates a four-minute,
+PostgreSQL URL is handed to another notebook. The stage creates a five-minute,
 one-connection `mdh_migration_operator` LOGIN bound to the current epoch, proves
 that a zero-row YDB UPDATE returns the SDK's exact `UNAUTHORIZED` status, streams
 the exact ordered snapshot, requires 266 distinct rows, and commits the importer
-transaction. It drops the LOGIN in all outcomes.
+transaction. YDB denial/read requests are capped at 10/30 seconds and PostgreSQL
+enforces a 180-second transaction timeout; admission requires 300 seconds of
+remaining active runtime and at least 270 seconds on the current lease. It drops
+the LOGIN in all outcomes.
 
 `COMMITTED_PENDING_CHECKPOINT` is not success. The master immediately enters its
 normal drain/checkpoint path. A final receipt is emitted only after exact private

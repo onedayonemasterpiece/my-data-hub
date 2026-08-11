@@ -12,6 +12,8 @@ ZERO_ROW_WRITE_DENIAL_PROBE = (
     "UPDATE `region_talk_external_blogger_evidence` SET blogger_name = blogger_name "
     'WHERE record_id = "__my_data_hub_permission_probe_never_matches__";'
 )
+DENIAL_REQUEST_TIMEOUT_SECONDS = 10
+SNAPSHOT_REQUEST_TIMEOUT_SECONDS = 30
 
 
 class YdbSnapshotError(RuntimeError):
@@ -45,7 +47,9 @@ class YdbBloggerSnapshot:
             with pool.checkout(timeout=self.acquire_timeout_seconds) as session:
                 try:
                     responses = session.transaction(ydb.QuerySerializableReadWrite()).execute(
-                        ZERO_ROW_WRITE_DENIAL_PROBE, commit_tx=True
+                        ZERO_ROW_WRITE_DENIAL_PROBE,
+                        commit_tx=True,
+                        settings=self._request_settings(ydb, DENIAL_REQUEST_TIMEOUT_SECONDS),
                     )
                     # Query Service responses are streaming.  Consume the
                     # iterator so a deferred UNAUTHORIZED cannot be mistaken
@@ -54,9 +58,7 @@ class YdbBloggerSnapshot:
                         pass
                 except ydb.issues.Unauthorized:
                     return
-                raise YdbSnapshotError(
-                    "YDB viewer write-denial probe unexpectedly succeeded"
-                )
+                raise YdbSnapshotError("YDB viewer write-denial probe unexpectedly succeeded")
         finally:
             pool.stop(timeout=5)
 
@@ -70,18 +72,18 @@ class YdbBloggerSnapshot:
         try:
             with pool.checkout(timeout=self.acquire_timeout_seconds) as session:
                 tx = session.transaction(ydb.QuerySnapshotReadOnly())
-                responses = tx.execute(SOURCE_QUERY, commit_tx=True)
+                responses = tx.execute(
+                    SOURCE_QUERY,
+                    commit_tx=True,
+                    settings=self._request_settings(ydb, SNAPSHOT_REQUEST_TIMEOUT_SECONDS),
+                )
                 result_sets = convert.aggregate_result_sets_by_index(responses)
                 if len(result_sets) != 1:
                     raise YdbSnapshotError("blogger query returned an unexpected result-set count")
 
                 def rows() -> Iterator[dict[str, object]]:
                     for raw in result_sets[0].rows:
-                        value = (
-                            raw
-                            if isinstance(raw, dict)
-                            else {name: getattr(raw, name) for name in SOURCE_COLUMNS}
-                        )
+                        value = raw if isinstance(raw, dict) else {name: getattr(raw, name) for name in SOURCE_COLUMNS}
                         if set(value) != set(SOURCE_COLUMNS):
                             raise YdbSnapshotError("YDB result shape differs from exact 27-column contract")
                         yield value
@@ -89,3 +91,12 @@ class YdbBloggerSnapshot:
                 yield rows()
         finally:
             pool.stop(timeout=5)
+
+    @staticmethod
+    def _request_settings(ydb: Any, timeout_seconds: int) -> Any:
+        return (
+            ydb.BaseRequestSettings()
+            .with_timeout(timeout_seconds)
+            .with_operation_timeout(timeout_seconds)
+            .with_cancel_after(timeout_seconds)
+        )

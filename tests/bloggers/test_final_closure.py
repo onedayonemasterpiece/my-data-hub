@@ -456,7 +456,7 @@ def test_in_master_stage_uses_epoch_bound_migration_login_and_drops_it(monkeypat
             identity=MasterIdentity(MASTER, "77777777-7777-4777-8777-777777777777", 7),
             request=request(),
             local_database_url="postgresql://postgres@/postgres?host=%2Fkaggle%2Fworking%2Fsocket&port=5432",
-            lease_until=datetime.now(UTC).replace(microsecond=0) + __import__("datetime").timedelta(minutes=3),
+            lease_until=datetime.now(UTC).replace(microsecond=0) + __import__("datetime").timedelta(minutes=6),
         ),
         owner_connection=object(),
         driver=object(),

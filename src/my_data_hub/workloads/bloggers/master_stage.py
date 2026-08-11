@@ -179,8 +179,8 @@ def execute_blogger_migration_stage(
 
     request = context.request
     observed = (now or datetime.now(UTC)).astimezone(UTC)
-    expiry = min(observed + timedelta(minutes=4), context.lease_until.astimezone(UTC))
-    if expiry <= observed + timedelta(seconds=90):
+    expiry = min(observed + timedelta(minutes=5), context.lease_until.astimezone(UTC))
+    if expiry <= observed + timedelta(seconds=270):
         raise RuntimeError("ACTIVE epoch lease is too short for the bounded blogger stage")
     credential_id = UUID(bytes=secrets.token_bytes(16), version=4)
     principal = f"mdh_e{context.identity.epoch}_migration_{credential_id.hex[:8]}"
@@ -225,6 +225,7 @@ def execute_blogger_migration_stage(
                 cursor.execute("SET statement_timeout='180s'")
                 cursor.execute("SET lock_timeout='5s'")
                 cursor.execute("SET idle_in_transaction_session_timeout='30s'")
+                cursor.execute("SET transaction_timeout='180s'")
             with snapshot.iter_rows() as rows:
                 imported = (importer or BloggerSnapshotImporter()).import_rows(
                     connection,

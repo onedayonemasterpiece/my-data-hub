@@ -780,7 +780,7 @@ def run_master(
                 config=config, callback_url=callback_url, run_secret=run_secret
             )
             if migration_request is not None:
-                if remaining_active < 240:
+                if remaining_active < 300:
                     raise RuntimeError("blogger stage was not admitted without its bounded active-time allocation")
                 try:
                     blogger_receipt = execute_blogger_migration_stage(
