@@ -75,6 +75,7 @@ class CallbackLossDirective:
 
     task_id: UUID
     command_id: UUID
+    command_sha256: str
     operation_id: UUID
     run_id: UUID
     attempt_id: UUID
@@ -90,22 +91,23 @@ class CallbackLossDirective:
 
     def __post_init__(self) -> None:
         receipt_payload = {
+            "schema_version": "my-data-hub-fm08-callback-directive.v1",
             "task_id": str(self.task_id),
             "command_id": str(self.command_id),
-            "operation_id": str(self.operation_id),
+            "command_sha256": self.command_sha256,
             "run_id": str(self.run_id),
             "attempt_id": str(self.attempt_id),
             "master_instance_id": str(self.master_instance_id),
             "epoch": self.epoch,
-            "allowed_event_types": list(self.allowed_event_types),
-            "max_callbacks": self.max_callbacks,
-            "armed_at": self.armed_at.astimezone(UTC).isoformat(),
-            "expires_at": self.expires_at.astimezone(UTC).isoformat(),
+            "event_type": "runtime.heartbeat",
+            "maximum_callbacks": 1,
+            "expires_at": self.expires_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
             "before_boot_id": str(self.before_boot_id),
         }
         expected_receipt = hashlib.sha256(canonical_json_bytes(receipt_payload)).hexdigest()
         if (
             self.epoch < 1
+            or not _SHA_PATTERN.fullmatch(self.command_sha256)
             or self.allowed_event_types != ALLOWED_CALLBACK_EVENT_TYPES
             or self.max_callbacks != 1
             or not self.acknowledged
@@ -122,6 +124,7 @@ class CallbackLossDirective:
         if (
             self.task_id != command.task_id
             or self.command_id != command.command_id
+            or self.command_sha256 != command.command_sha256
             or self.operation_id != binding.operation_id
             or self.run_id != binding.run_id
             or self.attempt_id != binding.attempt_id
@@ -213,6 +216,7 @@ class HostRestartRequest:
     request_id: UUID
     task_id: UUID
     command_id: UUID
+    command_sha256: str
     operation_id: UUID
     run_id: UUID
     attempt_id: UUID
@@ -230,6 +234,7 @@ class HostRestartRequest:
             or self.action != RESTART_ACTION
             or self.request_id != expected_id
             or self.epoch < 1
+            or not _SHA_PATTERN.fullmatch(self.command_sha256)
             or not _SHA_PATTERN.fullmatch(self.directive_receipt_sha256)
             or self.issued_at.tzinfo is None
             or self.expires_at.tzinfo is None
@@ -245,6 +250,7 @@ class HostRestartRequest:
             request_id=uuid5(NAMESPACE_URL, f"my-data-hub:fm08:restart:{directive.command_id}"),
             task_id=directive.task_id,
             command_id=directive.command_id,
+            command_sha256=directive.command_sha256,
             operation_id=directive.operation_id,
             run_id=directive.run_id,
             attempt_id=directive.attempt_id,
@@ -263,6 +269,7 @@ class HostRestartRequest:
             "request_id": str(self.request_id),
             "task_id": str(self.task_id),
             "command_id": str(self.command_id),
+            "command_sha256": self.command_sha256,
             "operation_id": str(self.operation_id),
             "run_id": str(self.run_id),
             "attempt_id": str(self.attempt_id),
@@ -277,7 +284,7 @@ class HostRestartRequest:
     @classmethod
     def parse(cls, payload: Mapping[str, Any]) -> HostRestartRequest:
         expected = {
-            "schema_version", "action", "request_id", "task_id", "command_id", "operation_id",
+            "schema_version", "action", "request_id", "task_id", "command_id", "command_sha256", "operation_id",
             "run_id", "attempt_id", "master_instance_id", "epoch", "before_boot_id",
             "directive_receipt_sha256", "issued_at", "expires_at",
         }
@@ -290,6 +297,7 @@ class HostRestartRequest:
                 request_id=UUID(str(payload["request_id"])),
                 task_id=UUID(str(payload["task_id"])),
                 command_id=UUID(str(payload["command_id"])),
+                command_sha256=str(payload["command_sha256"]),
                 operation_id=UUID(str(payload["operation_id"])),
                 run_id=UUID(str(payload["run_id"])),
                 attempt_id=UUID(str(payload["attempt_id"])),
@@ -813,6 +821,200 @@ class LedgerCallbackLossSupervisor:
             from my_data_hub.acceptance.master_lifecycle import MasterLifecycleAcceptanceError
 
             raise MasterLifecycleAcceptanceError("callback supervisor received a non-FM08 command")
+
+
+@dataclass(frozen=True, slots=True)
+class ControlLedgerCallbackLossPort:
+    """Exact migration-019/020 adapter used by production composition.
+
+    The adapter supplies the operation ID from the already validated command;
+    the runtime-control row itself remains a hash/identity-only journal.
+    """
+
+    ledger: Any
+
+    def arm_callback_loss(
+        self,
+        command: MasterAcceptanceCommand,
+        *,
+        allowed_event_types: tuple[Literal["runtime.heartbeat"], ...],
+        max_callbacks: Literal[1],
+        armed_at: datetime,
+        expires_at: datetime,
+        before_boot_id: UUID,
+    ) -> CallbackLossDirective:
+        if (
+            allowed_event_types != ALLOWED_CALLBACK_EVENT_TYPES
+            or max_callbacks != 1
+            or expires_at > armed_at + timedelta(seconds=DIRECTIVE_TTL_SECONDS)
+        ):
+            raise CallbackSupervisorBlocked("FM08_DIRECTIVE_BOUNDS_INVALID")
+        binding = command.binding
+        row = self.ledger.arm_master_acceptance_callback_loss(
+            task_id=str(command.task_id),
+            command_id=str(command.command_id),
+            command_sha256=command.command_sha256,
+            run_id=str(binding.run_id),
+            attempt_id=str(binding.attempt_id),
+            master_instance_id=str(binding.master_instance_id),
+            epoch=binding.epoch,
+            before_boot_id=str(before_boot_id),
+        )
+        directive = self._directive(command, row)
+        if directive.armed_at < armed_at - timedelta(seconds=1) or directive.expires_at > expires_at:
+            raise CallbackSupervisorBlocked("FM08_DIRECTIVE_CLOCK_BOUNDS_INVALID")
+        return directive
+
+    def callback_loss_directive(
+        self, command: MasterAcceptanceCommand
+    ) -> CallbackLossDirective | None:
+        row = self.ledger.master_acceptance_runtime_control(str(command.task_id))
+        if row is None:
+            return None
+        if row.get("callback_state") in {"ARMED", "CAPTURED"} and row.get("restart_to_id") is None:
+            self.ledger.armed_master_acceptance_callback_loss(
+                run_id=str(command.binding.run_id),
+                attempt_id=str(command.binding.attempt_id),
+                epoch=command.binding.epoch,
+            )
+            row = self.ledger.master_acceptance_runtime_control(str(command.task_id))
+        if row is None or row.get("callback_state") == "DISARMED":
+            return None
+        return self._directive(command, row)
+
+    def captured_callback(
+        self, command: MasterAcceptanceCommand, directive: CallbackLossDirective
+    ) -> CallbackCapture | None:
+        directive.assert_command(command)
+        row = self.ledger.master_acceptance_runtime_control(str(command.task_id))
+        if row is None or row.get("callback_state") not in {"CAPTURED", "REPLAYED"}:
+            return None
+        if row.get("callback_count") != 1:
+            raise CallbackSupervisorBlocked("FM08_CALLBACK_COUNT_INVALID")
+        try:
+            return CallbackCapture(
+                event_id=UUID(str(row["callback_event_id"])),
+                body_sha256=str(row["callback_body_sha256"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CallbackSupervisorBlocked("FM08_CALLBACK_CAPTURE_INVALID") from exc
+
+    def record_control_restart(
+        self,
+        command: MasterAcceptanceCommand,
+        directive: CallbackLossDirective,
+        *,
+        before_boot_id: UUID,
+        after_boot_id: UUID,
+    ) -> None:
+        directive.assert_command(command)
+        if before_boot_id != directive.before_boot_id or after_boot_id == before_boot_id:
+            raise CallbackSupervisorBlocked("FM08_RESTART_RECEIPT_MISMATCH")
+        row = self.ledger.record_master_acceptance_restart(
+            task_id=str(command.task_id),
+            restart_from_id=str(before_boot_id),
+            restart_to_id=str(after_boot_id),
+        )
+        if row.get("restart_from_id") != str(before_boot_id) or row.get("restart_to_id") != str(after_boot_id):
+            raise CallbackSupervisorBlocked("FM08_RESTART_JOURNAL_MISMATCH")
+
+    def replay_disposition(
+        self,
+        command: MasterAcceptanceCommand,
+        directive: CallbackLossDirective,
+        event_id: UUID,
+    ) -> Literal["accepted", "duplicate"] | None:
+        capture = self.captured_callback(command, directive)
+        if capture is None or capture.event_id != event_id:
+            return None
+        row = self.ledger.master_acceptance_runtime_control(str(command.task_id))
+        if row is None or row.get("callback_state") != "REPLAYED":
+            return None
+        return "duplicate"
+
+    def disarm_expired_callback_loss(
+        self, command: MasterAcceptanceCommand, directive: CallbackLossDirective
+    ) -> None:
+        directive.assert_command(command)
+        self.ledger.armed_master_acceptance_callback_loss(
+            run_id=str(command.binding.run_id),
+            attempt_id=str(command.binding.attempt_id),
+            epoch=command.binding.epoch,
+        )
+        row = self.ledger.master_acceptance_runtime_control(str(command.task_id))
+        if row is not None and row.get("callback_state") != "DISARMED":
+            raise CallbackSupervisorBlocked("FM08_DIRECTIVE_NOT_DISARMED")
+
+    def exact_service_active(self, binding: MasterAcceptanceBinding) -> bool:
+        operation = self.ledger.get_operation(str(binding.operation_id))
+        service = self.ledger.resolve_service("postgres-master")
+        return bool(
+            operation is not None
+            and operation.state == "ACTIVE"
+            and service is not None
+            and service.state == "ACTIVE"
+            and service.run_id == str(binding.run_id)
+            and service.attempt_id == str(binding.attempt_id)
+            and service.service_instance_id == binding.service_instance_id
+            and service.master_instance_id == str(binding.master_instance_id)
+            and service.epoch == binding.epoch
+            and self.ledger.current_epoch("postgres-master") == binding.epoch
+        )
+
+    @staticmethod
+    def _directive(
+        command: MasterAcceptanceCommand, row: Mapping[str, Any]
+    ) -> CallbackLossDirective:
+        exact = {
+            "task_id": str(command.task_id),
+            "command_id": str(command.command_id),
+            "command_sha256": command.command_sha256,
+            "scenario_id": "FM08",
+            "run_id": str(command.binding.run_id),
+            "attempt_id": str(command.binding.attempt_id),
+            "master_instance_id": str(command.binding.master_instance_id),
+            "epoch": command.binding.epoch,
+        }
+        if any(str(row.get(key)) != str(value) for key, value in exact.items()):
+            raise CallbackSupervisorBlocked("FM08_DIRECTIVE_BINDING_MISMATCH")
+        try:
+            return CallbackLossDirective(
+                task_id=command.task_id,
+                command_id=command.command_id,
+                command_sha256=command.command_sha256,
+                operation_id=command.binding.operation_id,
+                run_id=command.binding.run_id,
+                attempt_id=command.binding.attempt_id,
+                master_instance_id=command.binding.master_instance_id,
+                epoch=command.binding.epoch,
+                allowed_event_types=ALLOWED_CALLBACK_EVENT_TYPES,
+                max_callbacks=1,
+                armed_at=datetime.fromisoformat(str(row["armed_at"]).replace("Z", "+00:00")),
+                expires_at=datetime.fromisoformat(str(row["expires_at"]).replace("Z", "+00:00")),
+                before_boot_id=UUID(str(row["before_boot_id"])),
+                directive_receipt_sha256=str(row["directive_receipt_sha256"]),
+                acknowledged=True,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CallbackSupervisorBlocked("FM08_DIRECTIVE_RECEIPT_INVALID") from exc
+
+
+def callback_loss_supervisor_from_environment(ledger: Any) -> LedgerCallbackLossSupervisor | None:
+    """Build the private supervisor only when both installer-owned paths exist."""
+
+    socket_value = os.getenv("MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_SOCKET", "").strip()
+    key_value = os.getenv("MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_KEY_FILE", "").strip()
+    if not socket_value and not key_value:
+        return None
+    if not socket_value or not key_value:
+        raise ValueError("acceptance supervisor socket and key must be configured together")
+    socket_path = Path(socket_value)
+    key_path = Path(key_value)
+    return LedgerCallbackLossSupervisor(
+        control=ControlLedgerCallbackLossPort(ledger),
+        host=UnixHostRestartClient(socket_path=socket_path, key_path=key_path),
+        health=HttpControlHealthProbe(),
+    )
 
 
 def _parse_paths(raw: str) -> tuple[Path, ...]:

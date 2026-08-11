@@ -69,21 +69,22 @@ def directive() -> CallbackLossDirective:
     fields = {
         "task_id": str(value.task_id),
         "command_id": str(value.command_id),
-        "operation_id": str(value.binding.operation_id),
+        "command_sha256": value.command_sha256,
         "run_id": str(value.binding.run_id),
         "attempt_id": str(value.binding.attempt_id),
         "master_instance_id": str(value.binding.master_instance_id),
         "epoch": value.binding.epoch,
-        "allowed_event_types": list(ALLOWED_CALLBACK_EVENT_TYPES),
-        "max_callbacks": 1,
-        "armed_at": NOW.isoformat(),
-        "expires_at": (NOW + timedelta(seconds=180)).isoformat(),
+        "event_type": "runtime.heartbeat",
+        "maximum_callbacks": 1,
+        "schema_version": "my-data-hub-fm08-callback-directive.v1",
+        "expires_at": (NOW + timedelta(seconds=180)).isoformat().replace("+00:00", "Z"),
         "before_boot_id": str(BEFORE),
     }
     receipt_hash = hashlib.sha256(canonical_json_bytes(fields)).hexdigest()
     return CallbackLossDirective(
         task_id=value.task_id,
         command_id=value.command_id,
+        command_sha256=value.command_sha256,
         operation_id=value.binding.operation_id,
         run_id=value.binding.run_id,
         attempt_id=value.binding.attempt_id,
