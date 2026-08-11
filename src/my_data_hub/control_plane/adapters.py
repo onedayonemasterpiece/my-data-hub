@@ -191,6 +191,21 @@ class LedgerControlReader(ControlPlaneReader):
             return {"resources": resources, "count": len(resources), "bounded": True}
         if tool == "embedding.coverage":
             return {"e5": {"coverage": 0.0}, "bge_m3": {"coverage": 0.0}, "master_state": "ABSENT"}
+        if tool == "embedding.production.capabilities":
+            from my_data_hub.embeddings.production import WORKER_ASSETS, EmbeddingProductionCapabilities
+
+            return EmbeddingProductionCapabilities(
+                ready=True,
+                execution_location="active_kaggle_master",
+                provider_adapter_package="kaggle",
+                provider_adapter_version="2.2.4",
+                provider_adapter_implementation="my_data_hub.providers.kaggle.KaggleProviderAdapter",
+                single_provider_adapter=True,
+                transactional_import=True,
+                verified_checkpoint_restore=True,
+                mcp_hybrid_search=True,
+                worker_assets=WORKER_ASSETS,
+            ).model_dump(mode="json")
         raise ValueError(f"unsupported bounded control tool: {tool}")
 
     def _checkpoint_projection(self, candidate: dict[str, Any] | None) -> dict[str, Any] | None:

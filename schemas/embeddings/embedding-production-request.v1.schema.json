@@ -231,6 +231,11 @@
       "pattern": "^[a-f0-9]{64}$",
       "title": "Probe Query Sha256",
       "type": "string"
+    },
+    "probe_query": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
     }
   },
   "required": [
@@ -241,6 +246,7 @@
     "blogger_canonical_revision",
     "blogger_checkpoint_id",
     "source_revision",
+    "probe_query",
     "probe_query_sha256"
   ],
   "type": "object"

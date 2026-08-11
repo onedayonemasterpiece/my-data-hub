@@ -51,6 +51,7 @@ _CONTROL_TOOLS = frozenset(
         "provider.protected_resource.probe",
         "checkpoint.restore.request",
         "master.rotation.request",
+        "embedding.production.capabilities",
         "provider.resources.status",
         "provider.resources.read",
         "data.change.status",

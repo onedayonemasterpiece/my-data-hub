@@ -13,6 +13,7 @@ READ_ONLY_TOOLS = {
     "operation.get",
     "checkpoint.status",
     "embedding.coverage",
+    "embedding.production.capabilities",
     "provider.resources.status",
     "bloggers.list",
     "bloggers.get",

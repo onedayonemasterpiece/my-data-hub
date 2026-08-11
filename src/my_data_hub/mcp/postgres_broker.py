@@ -9,6 +9,7 @@ call and connects directly through the loopback reverse tunnel.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qs, urlsplit
 
+from my_data_hub.embeddings.models import BGE_M3, E5_MULTILINGUAL_BASE
 from my_data_hub.embeddings.rrf import (
     RankedRetrieverResult,
     UnavailableRetriever,
@@ -375,34 +377,68 @@ class PostgresMasterSession(MasterSession):
             index_revision = int(index_revision_row["canonical_revision"])
             unavailable: list[UnavailableRetriever] = []
             vector_specs = (
-                ("e5", "e5_query_vector", 768, "embedding_768", "e5_multilingual_base_v1"),
-                ("bge_m3", "bge_m3_query_vector", 1024, "embedding_1024", "bge_m3_dense_v1"),
+                (
+                    "e5", "e5_query_vector", 768, "embedding_768",
+                    "e5_multilingual_base_v1", E5_MULTILINGUAL_BASE,
+                ),
+                (
+                    "bge_m3", "bge_m3_query_vector", 1024, "embedding_1024",
+                    "bge_m3_dense_v1", BGE_M3,
+                ),
             )
-            for name, argument_name, dimensions, table, vector_space in vector_specs:
+            for name, argument_name, dimensions, table, vector_space, model_contract in vector_specs:
                 vector = arguments.get(argument_name)
                 if vector is None:
-                    unavailable.append(
-                        UnavailableRetriever(name=name, reason="exact_query_vector_absent", retryable=False)
-                    )
-                    continue
-                if (
-                    not isinstance(vector, list)
-                    or len(vector) != dimensions
-                    or any(not isinstance(item, (int, float)) or not math.isfinite(float(item)) for item in vector)
-                ):
-                    raise SessionBrokerError(f"{name} query vector violates its exact vector space")
-                norm = math.sqrt(sum(float(item) ** 2 for item in vector))
-                if not 0.999 <= norm <= 1.001:
-                    raise SessionBrokerError(f"{name} query vector is not L2-normalized")
-                halfvec = "[" + ",".join(format(float(item), ".9g") for item in vector) + "]"
+                    query_sha256 = hashlib.sha256(query.encode()).hexdigest()
+                    query_table = table.replace("embedding_", "query_embedding_")
+                    cached = cursor.execute(
+                        f"SELECT q.embedding::text AS embedding,q.created_revision FROM search.{query_table} q "
+                        "JOIN search.embedding_model m ON m.model_id=q.model_id "
+                        "WHERE q.query_sha256=%s AND m.dimensions=%s AND m.provider_model_id=%s "
+                        "AND m.exact_revision=%s AND q.model_revision=m.exact_revision",
+                        (
+                            query_sha256,
+                            dimensions,
+                            model_contract.model_key,
+                            model_contract.revision,
+                        ),
+                    ).fetchone()
+                    if cached is None:
+                        unavailable.append(
+                            UnavailableRetriever(
+                                name=name, reason="exact_query_vector_absent", retryable=False
+                            )
+                        )
+                        continue
+                    halfvec = str(cached["embedding"])
+                else:
+                    if (
+                        not isinstance(vector, list)
+                        or len(vector) != dimensions
+                        or any(
+                            not isinstance(item, (int, float)) or not math.isfinite(float(item))
+                            for item in vector
+                        )
+                    ):
+                        raise SessionBrokerError(f"{name} query vector violates its exact vector space")
+                    norm = math.sqrt(sum(float(item) ** 2 for item in vector))
+                    if not 0.999 <= norm <= 1.001:
+                        raise SessionBrokerError(f"{name} query vector is not L2-normalized")
+                    halfvec = "[" + ",".join(format(float(item), ".9g") for item in vector) + "]"
                 vector_rows = cursor.execute(
                     f"SELECT d.actor_id,m.exact_revision FROM search.{table} e "
                     "JOIN search.document d ON d.search_document_id=e.search_document_id AND d.is_current "
                     "JOIN search.embedding_model m ON m.model_id=e.model_id "
                     "JOIN search.embedding_job j ON j.search_document_id=e.search_document_id "
                     "AND j.model_id=e.model_id AND j.input_hash=e.input_hash AND j.status='succeeded' "
+                    "WHERE m.provider_model_id=%s AND m.exact_revision=%s "
                     "ORDER BY e.embedding <=> %s::halfvec,d.actor_id LIMIT %s",
-                    (halfvec, candidate_limit),
+                    (
+                        model_contract.model_key,
+                        model_contract.revision,
+                        halfvec,
+                        candidate_limit,
+                    ),
                 ).fetchall()
                 rankings.append(
                     RankedRetrieverResult(

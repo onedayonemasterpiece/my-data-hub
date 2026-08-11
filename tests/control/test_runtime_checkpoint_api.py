@@ -10,6 +10,7 @@ from my_data_hub.checkpoints.manifest import RestoreProbe, build_manifest
 from my_data_hub.control_plane.app import ControlPlaneSettings, create_app
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.control_plane.runtime import ControlPlaneMasterRuntime, MasterRuntimeSettings
+from my_data_hub.embeddings.production import embedding_provider_authority
 from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator
 from my_data_hub.providers.kaggle import KaggleMasterLaunchAssets
 from my_data_hub.providers.kaggle.contracts import (
@@ -189,6 +190,7 @@ def test_remote_journal_requires_exact_runtime_identity(tmp_path: Path) -> None:
     fenced = {**headers, "X-MDH-Epoch": "2"}
     assert client.post(path, json={"intent": intent.model_dump(mode="json")}, headers=fenced).status_code == 409
 
+
     ledger.ensure_operation(
         operation_id=str(OPERATION_2),
         idempotency_key="checkpoint-api-operation-2",
@@ -340,3 +342,51 @@ def test_checkpoint_api_promotes_only_after_exact_stages_and_returns_numeric_hea
         },
         "previous": None,
     }
+
+def test_remote_journal_allows_only_exact_claimed_embedding_resources(tmp_path: Path) -> None:
+    app, ledger, headers = _app(tmp_path)
+    request_id = UUID("12121212-1212-4212-8212-121212121212")
+    ledger.ensure_embedding_production_request(
+        request_id=str(request_id),
+        operation_id=str(OPERATION),
+        idempotency_key_sha256="a" * 64,
+        request_sha256="b" * 64,
+        request={"request_id": str(request_id)},
+    )
+    ledger.claim_embedding_production_request(
+        operation_id=str(OPERATION),
+        run_id=str(RUN),
+        attempt_id=str(ATTEMPT),
+        master_instance_id=str(MASTER),
+        epoch=1,
+    )
+    authority = embedding_provider_authority("owner", request_id)
+    provider_ref, task_id = authority["e5_input"]
+    exact = ProviderEffectIntent.create(
+        operation_id=OPERATION,
+        effect_id=UUID("13131313-1313-4313-8313-131313131313"),
+        idempotency_key="embedding-e5-input",
+        task_id=task_id,
+        action=MutationAction.CREATE_DATASET,
+        provider_ref=provider_ref,
+        arguments={"exact": True},
+        requested_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    client = TestClient(app)
+    endpoint = "/internal/provider-journal/intents"
+    assert client.post(
+        endpoint, json={"intent": exact.model_dump(mode="json")}, headers=headers
+    ).status_code == 200
+    wrong = ProviderEffectIntent.create(
+        operation_id=OPERATION,
+        effect_id=UUID("14141414-1414-4414-8414-141414141414"),
+        idempotency_key="embedding-wrong-input",
+        task_id=task_id,
+        action=MutationAction.CREATE_DATASET,
+        provider_ref="owner/mdh-embed-attacker-e5",
+        arguments={"exact": True},
+        requested_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    assert client.post(
+        endpoint, json={"intent": wrong.model_dump(mode="json")}, headers=headers
+    ).status_code == 403

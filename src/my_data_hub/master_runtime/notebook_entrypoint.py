@@ -7,6 +7,7 @@ import os
 import secrets
 import stat
 import time
+import urllib.error
 import urllib.request
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -24,6 +25,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from my_data_hub.checkpoints import load_and_verify, restore_physical_archive
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.db.migrations import migrate
+from my_data_hub.embeddings.master_stage import EmbeddingStageContext, execute_embedding_production_stage
+from my_data_hub.embeddings.production import EmbeddingProductionRequest, EmbeddingProductionStageReceipt
+from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.runtime_sdk import (
     CANONICAL_RUNTIME_CALLBACK_URL,
     CHECKPOINT_ATTEMPT_BUDGET_SECONDS,
@@ -269,6 +273,14 @@ class BloggerReceiptDeliveryError(RuntimeError):
     """Exact metadata delivery was not acknowledged after bounded retries."""
 
 
+class EmbeddingReceiptDeliveryError(RuntimeError):
+    """Committed embedding imports were not acknowledged by control metadata."""
+
+
+class EmbeddingStageExecutionError(RuntimeError):
+    """Gate K failed before an acknowledged complete stage receipt."""
+
+
 class CallbackLeaseClosingError(TimeoutError):
     """The control callback outage closed the write lease as designed."""
 
@@ -437,6 +449,13 @@ def _blogger_migration_url(callback_url: str, run_id: str, attempt_id: str, suff
     return f"{base}/internal/runtime/blogger-migration/{run_id}/{attempt_id}{suffix}"
 
 
+def _embedding_production_url(callback_url: str, run_id: str, attempt_id: str, suffix: str = "") -> str:
+    if callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
+        raise ValueError("callback URL does not match the owner-pinned HTTPS runtime endpoint")
+    base = callback_url.removesuffix("/internal/runtime/events")
+    return f"{base}/internal/runtime/embedding-production/{run_id}/{attempt_id}{suffix}"
+
+
 def _runtime_metadata_headers(config: NotebookMasterConfig, run_secret: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {run_secret}",
@@ -466,6 +485,33 @@ def _claim_blogger_migration(
     if body.get("request_sha256") != migration.request_sha256:
         raise RuntimeError("blogger work request hash differs from its exact body")
     return migration
+
+
+def _claim_embedding_production(
+    *, config: NotebookMasterConfig, callback_url: str, run_secret: str
+) -> EmbeddingProductionRequest | None:
+    request = urllib.request.Request(
+        _embedding_production_url(callback_url, config.run_id, config.attempt_id),
+        headers=_runtime_metadata_headers(config, run_secret),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read(64 * 1024)
+    except urllib.error.HTTPError as exc:
+        if exc.code in {502, 503, 504}:
+            return None
+        raise
+    except OSError:
+        return None
+    body = json.loads(raw)
+    if not isinstance(body, dict):
+        raise RuntimeError("embedding claim response is not an object")
+    if body.get("available") is not True:
+        return None
+    production = EmbeddingProductionRequest.model_validate(body.get("request"))
+    if body.get("request_sha256") != production.request_sha256:
+        raise RuntimeError("embedding work request hash differs from its exact body")
+    return production
 
 
 def _post_blogger_runtime_receipt(
@@ -500,6 +546,38 @@ def _post_blogger_runtime_receipt(
         if attempt + 1 < attempts:
             sleep(min(2**attempt, 2))
     raise BloggerReceiptDeliveryError("control plane did not acknowledge exact blogger runtime metadata")
+
+
+def _post_embedding_runtime_receipt(
+    *,
+    config: NotebookMasterConfig,
+    callback_url: str,
+    run_secret: str,
+    receipt: EmbeddingProductionStageReceipt,
+    attempts: int = 3,
+) -> None:
+    encoded = canonical_json_bytes(receipt.model_dump(mode="json"))
+    if len(encoded) > 256 * 1024:
+        raise RuntimeError("embedding runtime receipt exceeds 256 KiB")
+    for attempt in range(attempts):
+        request = urllib.request.Request(
+            _embedding_production_url(
+                callback_url, config.run_id, config.attempt_id, "/stage-receipt"
+            ),
+            data=encoded,
+            headers=_runtime_metadata_headers(config, run_secret),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                body = json.loads(response.read(16 * 1024))
+            if body.get("accepted") is True and body.get("receipt_sha256") == receipt.receipt_sha256:
+                return
+        except Exception:
+            pass
+        if attempt + 1 < attempts:
+            time.sleep(min(2**attempt, 2))
+    raise EmbeddingReceiptDeliveryError("control plane did not acknowledge exact embedding receipt")
 
 
 def _credential_registration_url(callback_url: str, run_id: str, attempt_id: str) -> str:
@@ -796,6 +874,7 @@ def run_master(
         raise
     current_lease = ready.lease_until
     blogger_receipt: BloggerImportStageReceipt | None = None
+    embedding_receipt: EmbeddingProductionStageReceipt | None = None
     active_error: BaseException | None = None
     try:
         while True:
@@ -839,6 +918,39 @@ def run_master(
                     payload=blogger_receipt.model_dump(mode="json"),
                 )
                 break
+            embedding_request = _claim_embedding_production(
+                config=config, callback_url=callback_url, run_secret=run_secret
+            )
+            if embedding_request is not None:
+                if checkpoint_coordinator is None:
+                    raise RuntimeError("embedding stage requires the production checkpoint/provider coordinator")
+                provider = getattr(checkpoint_coordinator.coordinator.provider, "adapter", None)
+                if provider is None:
+                    raise RuntimeError("embedding stage cannot resolve the single Kaggle adapter")
+                try:
+                    embedding_receipt = execute_embedding_production_stage(
+                        EmbeddingStageContext(
+                            identity=identity,
+                            operation_id=UUID(_required("MY_DATA_HUB_OPERATION_ID")),
+                            request=embedding_request,
+                            database_url=database_url,
+                            wheel_path=Path(_required("MY_DATA_HUB_WHEEL_PATH")),
+                            wheel_sha256=_required("MY_DATA_HUB_WHEEL_SHA256"),
+                            provider_owner=provider.identity.username,
+                            remaining_seconds=remaining_active,
+                        ),
+                        connection=gate_connection,
+                        adapter=provider,
+                    )
+                except Exception as exc:
+                    raise EmbeddingStageExecutionError("embedding stage did not complete") from exc
+                _post_embedding_runtime_receipt(
+                    config=config,
+                    callback_url=callback_url,
+                    run_secret=run_secret,
+                    receipt=embedding_receipt,
+                )
+                break
             time.sleep(min(30.0, remaining_active))
             if time.monotonic() >= active_deadline:
                 break
@@ -878,6 +990,13 @@ def run_master(
         # persistent callback outage therefore loses only this ephemeral
         # attempt; the previous verified HEAD remains authoritative.
         gate.fence(identity, "blogger_import_receipt_unacknowledged")
+        tunnel.stop()
+        supervisor.stop(immediate=True)
+        gate_connection.close()
+        raise active_error
+
+    if isinstance(active_error, (EmbeddingReceiptDeliveryError, EmbeddingStageExecutionError)):
+        gate.fence(identity, "embedding_stage_receipt_unacknowledged")
         tunnel.stop()
         supervisor.stop(immediate=True)
         gate_connection.close()

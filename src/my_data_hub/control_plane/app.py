@@ -25,6 +25,7 @@ from my_data_hub.control_plane.runtime import (
     SessionCredentialRegistrar,
     build_production_runtime,
 )
+from my_data_hub.embeddings.master_stage import execute_embedding_production_stage
 from my_data_hub.embeddings.production import (
     WORKER_ASSETS,
     EmbeddingProductionCapabilities,
@@ -238,7 +239,7 @@ def create_app(
     app.state.master_coordinator = master_runtime.coordinator if master_runtime is not None else None
     app.state.master_provider_status = provider_status
     app.state.session_registrar = session_registrar
-    app.state.embedding_stage_runner = embedding_stage_runner
+    app.state.embedding_stage_runner = embedding_stage_runner or execute_embedding_production_stage
     app.state.reconcile_master_requests = (
         master_runtime.reconcile_requested_once if master_runtime is not None else None
     )
@@ -567,6 +568,16 @@ def create_app(
         record = control_ledger.embedding_production_request(exact_id)
         if record is None:
             raise HTTPException(status_code=404, detail={"code": "embedding_request_not_found"})
+        if record["state"] == "CLAIMED" and master_runtime is not None:
+            source_operation = control_ledger.get_operation(record["operation_id"])
+            if source_operation is not None:
+                with suppress(Exception):
+                    master_runtime.coordinator.reconcile_operation(
+                        source_operation.operation_id,
+                        master_runtime.intent(source_operation.idempotency_key),
+                    )
+            record = control_ledger.reconcile_abandoned_embedding_production_request(exact_id)
+            assert record is not None
         if record["state"] == "STAGE_COMMITTED":
             recovered = control_ledger.verified_checkpoint_for_operation(record["operation_id"])
             if recovered is not None:
@@ -589,7 +600,9 @@ def create_app(
             "state": record["state"], "claimed_run_id": record["claimed_run_id"],
             "claimed_attempt_id": record["claimed_attempt_id"], "claimed_epoch": record["claimed_epoch"],
             "workers": stage.get("workers"), "imports": stage.get("imports"),
-            "coverage": stage.get("coverage"), "canonical_revision": stage.get("canonical_revision"),
+            "coverage": stage.get("coverage"),
+            "query_vector_receipts": stage.get("query_vector_receipts"),
+            "canonical_revision": stage.get("canonical_revision"),
             "checkpoint_receipt": record["checkpoint_receipt"],
             **({"failure_code": record["failure_code"]} if record["failure_code"] else {}),
         }
@@ -631,6 +644,16 @@ def create_app(
             run_id, str(master_instance_id), int(epoch or 0)
         ):
             raise HTTPException(status_code=409, detail={"code": "embedding_receipt_epoch_mismatch"})
+        pending = control_ledger.embedding_production_request(str(receipt.request_id))
+        if (
+            pending is None
+            or pending["request_sha256"] != receipt.request_sha256
+            or any(
+                item.get("query_sha256") != pending["request"]["probe_query_sha256"]
+                for item in receipt.query_vector_receipts.values()
+            )
+        ):
+            raise HTTPException(status_code=409, detail={"code": "embedding_receipt_request_mismatch"})
         stored = control_ledger.record_embedding_stage_receipt(
             request_id=str(receipt.request_id), run_id=run_id, attempt_id=attempt_id,
             receipt=receipt.model_dump(mode="json"),

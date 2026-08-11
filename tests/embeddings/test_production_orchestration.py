@@ -236,6 +236,18 @@ class FakeControl:
             "workers": [_worker(0), _worker(1)],
             "imports": [_import(0), _import(1)],
             "coverage": _coverage(),
+            "query_vector_receipts": {
+                WORKER_ASSETS[0].model.exact_id: {
+                    "query_sha256": self.request.probe_query_sha256,
+                    "vector_sha256": "1" * 64,
+                    "dimensions": 768,
+                },
+                WORKER_ASSETS[1].model.exact_id: {
+                    "query_sha256": self.request.probe_query_sha256,
+                    "vector_sha256": "2" * 64,
+                    "dimensions": 1024,
+                },
+            },
             "canonical_revision": 11,
             "checkpoint_receipt": {
                 "checkpoint_id": str(EMBED_CHECKPOINT),

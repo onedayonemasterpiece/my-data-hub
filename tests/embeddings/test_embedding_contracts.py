@@ -126,6 +126,23 @@ def test_bge_worker_is_dense_only_normalized_and_has_no_e5_prefix() -> None:
     assert manifest.successful_results[0].vector_space == BGE_M3.vector_space
 
 
+def test_query_representation_uses_exact_query_contract_not_document_text() -> None:
+    query_document = SearchDocument(
+        document_id=DOCUMENT_ID,
+        representation_kind="blogger_search_query_v1",
+        actor_kind="search_query",
+        display_name="калининград культура",
+    )
+    job = EmbeddingJob.create(
+        document=query_document, model=E5_MULTILINGUAL_BASE, canonical_revision=7
+    )
+    encoder = FakeEncoder(dimensions=768)
+    EmbeddingWorker(model=E5_MULTILINGUAL_BASE, encoder=encoder).run(
+        run_id=RUN_ID, jobs=(job,), started_at=NOW, completed_at=NOW
+    )
+    assert encoder.calls[0]["texts"] == ("query: калининград культура",)
+
+
 @pytest.mark.parametrize(
     ("vector", "message"),
     [

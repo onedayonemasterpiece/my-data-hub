@@ -370,7 +370,7 @@ def test_runtime_can_register_bounded_reader_credential_without_echoing_secret(t
     assert registrar.credentials[0].database_url == secret_url
 
 
-def test_embedding_capability_is_fail_closed_without_injected_master_runner(tmp_path: Path) -> None:
+def test_embedding_capability_uses_installed_active_master_runner(tmp_path: Path) -> None:
     ledger = ControlLedger(tmp_path / "capability.sqlite3")
     app = create_app(
         ControlPlaneSettings(ledger_path=ledger.path),
@@ -378,11 +378,11 @@ def test_embedding_capability_is_fail_closed_without_injected_master_runner(tmp_
         master_runtime=runtime(ledger, FakeKaggleRuntime()),
     )
     response = TestClient(app).get("/control/v1/embedding-production/capabilities")
-    assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "embedding_production_unavailable"
+    assert response.status_code == 200
+    assert response.json()["ready"] is True
 
 
-def test_embedding_capability_only_appears_with_injected_master_runner(tmp_path: Path) -> None:
+def test_embedding_capability_supports_explicit_injected_master_runner(tmp_path: Path) -> None:
     ledger = ControlLedger(tmp_path / "capability-ready.sqlite3")
     app = create_app(
         ControlPlaneSettings(ledger_path=ledger.path),

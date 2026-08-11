@@ -81,7 +81,17 @@ class EmbeddingWorker:
                 compatible.append(job)
 
         if compatible:
-            texts = [self.model.prepare_text(job.document.compact_text(), query=False) for job in compatible]
+            texts = [
+                self.model.prepare_text(
+                    (
+                        job.document.display_name
+                        if job.document.representation_kind == "blogger_search_query_v1"
+                        else job.document.compact_text()
+                    ),
+                    query=job.document.representation_kind == "blogger_search_query_v1",
+                )
+                for job in compatible
+            ]
             try:
                 raw_vectors = self.encoder.encode(
                     texts,

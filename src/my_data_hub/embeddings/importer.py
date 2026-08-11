@@ -11,7 +11,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from psycopg.types.json import Jsonb
 
@@ -36,6 +36,7 @@ _MODEL_IDS: dict[str, UUID] = {
     BGE_M3.exact_id: UUID("cc441a1c-b88b-564a-bf5e-e80458247367"),
 }
 _TABLE_BY_DIMENSIONS = {768: "search.embedding_768", 1024: "search.embedding_1024"}
+_JOB_NAMESPACE = UUID("4a50fa5d-8ef4-563a-8fea-a0ed50e2323d")
 
 
 class EmbeddingImportConflict(ValueError):
@@ -84,11 +85,30 @@ class PostgresEmbeddingImporter:
         manifest: EmbeddingArtifactManifest | Mapping[str, object],
         expected_run_id: UUID,
         jobs: Sequence[EmbeddingJob | Mapping[str, object]],
+        actor_ids: Mapping[UUID, UUID] | None = None,
+        ephemeral_job_keys: frozenset[str] = frozenset(),
+        ephemeral_query_sha256: str | None = None,
     ) -> EmbeddingImportReceipt:
         validated = _validate_artifact(manifest, expected_run_id=expected_run_id, jobs=jobs)
+        canonical_jobs = tuple(job for job in validated.jobs if job.job_key not in ephemeral_job_keys)
+        if len(canonical_jobs) + len(ephemeral_job_keys) != len(validated.jobs):
+            raise EmbeddingImportConflict("ephemeral job identity is absent from the exact artifact")
+        if any(job.document.representation_kind != "blogger_compact_v1" for job in canonical_jobs):
+            raise EmbeddingImportConflict("canonical embedding import contains a non-blogger representation")
+        query_results = [
+            result for result in validated.manifest.successful_results
+            if result.job_key in ephemeral_job_keys
+        ]
+        if ephemeral_job_keys and (
+            ephemeral_query_sha256 is None
+            or len(ephemeral_query_sha256) != 64
+            or len(query_results) != 1
+        ):
+            raise EmbeddingImportConflict("ephemeral query receipt is incomplete")
         idempotency_key = f"embedding-import-checkpoint:{validated.manifest.artifact_id}"
         try:
             with connection.transaction(), connection.cursor() as cursor:
+                cursor.execute("SET LOCAL ROLE mdh_canonical_committer")
                 replay = cursor.execute(
                     """
                     SELECT outbox_id,required_revision,payload
@@ -100,15 +120,30 @@ class PostgresEmbeddingImporter:
                 if replay is not None:
                     return _replay_receipt(validated, replay)
 
+                if actor_ids is not None:
+                    _ensure_canonical_rows(
+                        cursor,
+                        jobs=canonical_jobs,
+                        actor_ids=actor_ids,
+                        model_id=validated.model_id,
+                    )
                 states = tuple(
                     _load_and_validate_job(cursor, job=job, model_id=validated.model_id)
-                    for job in validated.jobs
+                    for job in canonical_jobs
                 )
                 states_by_key = {item.job.job_key: item for item in states}
                 successes = {
-                    result.job_key: result for result in validated.manifest.successful_results
+                    result.job_key: result
+                    for result in validated.manifest.successful_results
+                    if result.job_key not in ephemeral_job_keys
                 }
-                failures = {failure.job_key: failure for failure in validated.manifest.failures}
+                failures = {
+                    failure.job_key: failure
+                    for failure in validated.manifest.failures
+                    if failure.job_key not in ephemeral_job_keys
+                }
+                if any(failure.job_key in ephemeral_job_keys for failure in validated.manifest.failures):
+                    raise EmbeddingImportConflict("exact query encoder failed")
 
                 accepted: list[tuple[_JobState, EmbeddingVectorResult]] = []
                 stale: list[tuple[_JobState, EmbeddingVectorResult]] = []
@@ -262,6 +297,31 @@ class PostgresEmbeddingImporter:
                         "SELECT hub.advance_canonical_revision(%s)", (previous_revision,)
                     ).fetchone()[0]
                 )
+                if query_results:
+                    query = query_results[0]
+                    query_table = _TABLE_BY_DIMENSIONS[query.dimensions].replace(
+                        "embedding_", "query_embedding_"
+                    )
+                    existing_query = cursor.execute(
+                        f"SELECT vector_sha256 FROM {query_table} WHERE query_sha256=%s "
+                        "AND model_id=%s AND model_revision=%s",
+                        (ephemeral_query_sha256, validated.model_id, query.model_revision),
+                    ).fetchone()
+                    if existing_query is None:
+                        cursor.execute(
+                            f"INSERT INTO {query_table}(query_sha256,model_id,model_revision,vector_sha256,"
+                            "embedding,created_revision) VALUES (%s,%s,%s,%s,%s::halfvec,%s)",
+                            (
+                                ephemeral_query_sha256,
+                                validated.model_id,
+                                query.model_revision,
+                                query.vector_sha256,
+                                _halfvec_text(query.vector),
+                                canonical_revision,
+                            ),
+                        )
+                    elif str(existing_query[0]) != query.vector_sha256:
+                        raise EmbeddingImportConflict("immutable query vector replay conflict")
                 payload = {
                     "artifact_id": str(validated.manifest.artifact_id),
                     "durability_state": "COMMITTED_PENDING_CHECKPOINT",
@@ -373,6 +433,97 @@ def _validate_artifact(
         table=table,
         manifest_sha256=sha256_value(artifact.model_dump(mode="json")),
     )
+
+
+def _ensure_canonical_rows(
+    cursor: Any,
+    *,
+    jobs: Sequence[EmbeddingJob],
+    actor_ids: Mapping[UUID, UUID],
+    model_id: UUID,
+) -> None:
+    """Materialize exact documents/jobs inside the artifact import transaction."""
+
+    for job in jobs:
+        actor_id = actor_ids.get(job.document.document_id)
+        if actor_id is None:
+            raise EmbeddingImportConflict(f"canonical actor binding is missing for {job.job_key}")
+        current = cursor.execute(
+            "SELECT search_document_id,input_hash,document_text,source_revision FROM search.document "
+            "WHERE actor_id=%s AND representation_kind=%s AND is_current FOR UPDATE",
+            (actor_id, job.document.representation_kind),
+        ).fetchone()
+        if current is not None and UUID(str(current[0])) != job.document.document_id:
+            cursor.execute(
+                "UPDATE search.document SET is_current=false WHERE actor_id=%s "
+                "AND representation_kind=%s AND is_current",
+                (actor_id, job.document.representation_kind),
+            )
+            current = None
+        if current is None:
+            prior_revision = cursor.execute(
+                "SELECT coalesce(max(document_revision),0) FROM search.document "
+                "WHERE actor_id=%s AND representation_kind=%s",
+                (actor_id, job.document.representation_kind),
+            ).fetchone()[0]
+            cursor.execute(
+                "INSERT INTO search.document(search_document_id,actor_id,representation_kind,document_text,"
+                "input_hash,document_revision,is_current,source_revision) VALUES (%s,%s,%s,%s,%s,%s,true,%s) "
+                "ON CONFLICT(search_document_id) DO NOTHING",
+                (
+                    job.document.document_id,
+                    actor_id,
+                    job.document.representation_kind,
+                    job.document.compact_text(),
+                    job.document_hash,
+                    int(prior_revision) + 1,
+                    job.canonical_revision,
+                ),
+            )
+            cursor.execute(
+                "UPDATE search.document SET is_current=true WHERE search_document_id=%s AND is_current=false",
+                (job.document.document_id,),
+            )
+            current = cursor.execute(
+                "SELECT search_document_id,input_hash,document_text,source_revision FROM search.document "
+                "WHERE search_document_id=%s FOR UPDATE",
+                (job.document.document_id,),
+            ).fetchone()
+        if current is None or (
+            UUID(str(current[0])), str(current[1]), str(current[2]), int(current[3])
+        ) != (
+            job.document.document_id,
+            job.document_hash,
+            job.document.compact_text(),
+            job.canonical_revision,
+        ):
+            raise EmbeddingImportConflict(f"canonical document replay conflict for {job.job_key}")
+        embedding_job_id = uuid5(_JOB_NAMESPACE, job.job_key)
+        cursor.execute(
+            "INSERT INTO search.embedding_job(embedding_job_id,search_document_id,representation_kind,model_id,"
+            "input_hash,status) VALUES (%s,%s,%s,%s,%s,'pending') ON CONFLICT(embedding_job_id) DO NOTHING",
+            (
+                embedding_job_id,
+                job.document.document_id,
+                job.document.representation_kind,
+                model_id,
+                job.input_hash,
+            ),
+        )
+        stored = cursor.execute(
+            "SELECT search_document_id,representation_kind,model_id,input_hash FROM search.embedding_job "
+            "WHERE embedding_job_id=%s",
+            (embedding_job_id,),
+        ).fetchone()
+        if stored is None or (
+            UUID(str(stored[0])), str(stored[1]), UUID(str(stored[2])), str(stored[3])
+        ) != (
+            job.document.document_id,
+            job.document.representation_kind,
+            model_id,
+            job.input_hash,
+        ):
+            raise EmbeddingImportConflict(f"canonical embedding job replay conflict for {job.job_key}")
 
 
 def _load_and_validate_job(cursor: Any, *, job: EmbeddingJob, model_id: UUID) -> _JobState:

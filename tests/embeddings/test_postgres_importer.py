@@ -67,7 +67,9 @@ class FakeCursor:
         normalized = " ".join(sql.split())
         self.connection.statements.append((normalized, params))
         expected = self.connection.expected_job
-        if "FROM sync.external_outbox" in normalized:
+        if normalized == "SET LOCAL ROLE mdh_canonical_committer":
+            self._row = None
+        elif "FROM sync.external_outbox" in normalized:
             self._row = self.connection.outbox
         elif "FROM search.embedding_job AS job" in normalized:
             self._row = (

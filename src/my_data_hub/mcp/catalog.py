@@ -34,6 +34,7 @@ _READ = (
     ("operation.get", "operation:read"),
     ("checkpoint.status", "checkpoint:read"),
     ("embedding.coverage", "embedding:read"),
+    ("embedding.production.capabilities", "embedding:read"),
     ("provider.resources.status", "provider:read"),
     ("bloggers.list", "bloggers:read"),
     ("bloggers.get", "bloggers:read"),

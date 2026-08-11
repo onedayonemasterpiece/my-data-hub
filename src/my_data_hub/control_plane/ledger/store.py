@@ -2158,6 +2158,37 @@ class ControlLedger:
             ).fetchone()
         return self._embedding_request_from_row(row) if row else None
 
+    def reconcile_abandoned_embedding_production_request(
+        self, request_id: str
+    ) -> dict[str, Any] | None:
+        """Fail a claim only after its exact runtime is durably terminal."""
+
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT e.*,o.state AS operation_state FROM embedding_production_requests e "
+                "JOIN operations o ON o.operation_id=e.operation_id WHERE e.request_id=?",
+                (request_id,),
+            ).fetchone()
+            if (
+                row is not None
+                and row["state"] == "CLAIMED"
+                and row["stage_receipt_json"] is None
+                and row["operation_state"] in {"FAILED", "FENCED", "ORPHANED"}
+            ):
+                connection.execute(
+                    "UPDATE embedding_production_requests SET state='FAILED',failure_code=?,updated_at=? "
+                    "WHERE request_id=? AND state='CLAIMED' AND stage_receipt_json IS NULL",
+                    (
+                        "CLAIMED_RUNTIME_TERMINAL_WITHOUT_STAGE_RECEIPT",
+                        _format_time(self.clock.now()),
+                        request_id,
+                    ),
+                )
+            current = connection.execute(
+                "SELECT * FROM embedding_production_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            return self._embedding_request_from_row(current) if current else None
+
     @staticmethod
     def _embedding_request_from_row(row: sqlite3.Row) -> dict[str, Any]:
         value = dict(row)

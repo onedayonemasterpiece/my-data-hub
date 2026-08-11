@@ -164,6 +164,9 @@ def create_server(
     async def embedding_coverage() -> dict[str, Any]:
         return await service.invoke("embedding.coverage", {})
 
+    async def embedding_production_capabilities() -> dict[str, Any]:
+        return await service.invoke("embedding.production.capabilities", {})
+
     async def provider_status(limit: int = 100) -> dict[str, Any]:
         return await service.invoke("provider.resources.status", {"limit": limit})
 
@@ -280,6 +283,7 @@ def create_server(
         "operation.get": operation_get,
         "checkpoint.status": checkpoint_status,
         "embedding.coverage": embedding_coverage,
+        "embedding.production.capabilities": embedding_production_capabilities,
         "provider.resources.status": provider_status,
         "bloggers.list": bloggers_list,
         "bloggers.get": bloggers_get,

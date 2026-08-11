@@ -109,12 +109,15 @@ class EmbeddingProductionRequest(BaseModel):
     source_revision: str = Field(pattern=r"^[a-f0-9]{40}$")
     expected_documents_per_model: Literal[266] = EXPECTED_BLOGGER_ROWS
     worker_assets: tuple[WorkerAsset, WorkerAsset] = WORKER_ASSETS
+    probe_query: str = Field(min_length=1, max_length=500)
     probe_query_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
     def exact_workers(self) -> EmbeddingProductionRequest:
         if self.worker_assets != WORKER_ASSETS:
             raise ValueError("embedding request worker assets are not exact")
+        if hashlib.sha256(self.probe_query.strip().encode()).hexdigest() != self.probe_query_sha256:
+            raise ValueError("embedding probe query hash differs from its exact text")
         return self
 
     @property
@@ -152,6 +155,7 @@ class EmbeddingProductionStageReceipt(BaseModel):
     workers: tuple[dict[str, Any], dict[str, Any]]
     imports: tuple[dict[str, Any], dict[str, Any]]
     coverage: tuple[dict[str, Any], dict[str, Any]]
+    query_vector_receipts: dict[str, dict[str, Any]]
     canonical_revision: int = Field(ge=1)
 
     @model_validator(mode="after")
@@ -170,6 +174,24 @@ class EmbeddingProductionStageReceipt(BaseModel):
             raise ValueError("embedding coverage expected count differs from imported corpus")
         if any(row.get("completed_documents") != EXPECTED_BLOGGER_ROWS for row in self.coverage):
             raise ValueError("embedding stage is not at 100 percent coverage")
+        expected_vectors = {
+            E5_MULTILINGUAL_BASE.exact_id: E5_MULTILINGUAL_BASE.dimensions,
+            BGE_M3.exact_id: BGE_M3.dimensions,
+        }
+        if set(self.query_vector_receipts) != set(expected_vectors):
+            raise ValueError("embedding query vectors do not cover both exact spaces")
+        for model_id, dimensions in expected_vectors.items():
+            receipt = self.query_vector_receipts[model_id]
+            if set(receipt) != {"query_sha256", "vector_sha256", "dimensions"}:
+                raise ValueError("embedding query receipt fields differ")
+            if (
+                len(str(receipt["query_sha256"])) != 64
+                or len(str(receipt["vector_sha256"])) != 64
+                or any(char not in "0123456789abcdef" for char in str(receipt["query_sha256"]))
+                or any(char not in "0123456789abcdef" for char in str(receipt["vector_sha256"]))
+                or receipt["dimensions"] != dimensions
+            ):
+                raise ValueError("embedding query receipt identity differs")
         return self
 
     @property
@@ -634,6 +656,7 @@ def run_embedding_production_closure(
         blogger_checkpoint_id=blogger_checkpoint_id,
         source_revision=config.source_revision,
         probe_query_sha256=hashlib.sha256(config.probe_query.strip().encode()).hexdigest(),
+        probe_query=config.probe_query.strip(),
     )
     created = control.create_request(request)
     if created.get("request_sha256") != request.request_sha256:
@@ -699,6 +722,9 @@ def run_embedding_production_closure(
         raise EmbeddingProductionError("cold-restored master identity is absent")
     UUID(str(cold_master["instance_id"]))
     mcp_coverage = _validate_mcp_coverage(mcp.call("embedding.coverage", {}), canonical_revision)
+    query_receipts = status.get("query_vector_receipts")
+    if not isinstance(query_receipts, dict):
+        raise EmbeddingProductionError("exact query vector receipts are absent from the embedding stage")
     search = mcp.call("bloggers.search", {"query": config.probe_query.strip(), "limit": 20})
     retrievers = search.get("retrievers")
     if (
