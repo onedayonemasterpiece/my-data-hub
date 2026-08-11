@@ -403,7 +403,7 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
             assert state == (3, 3, "open")
             assert admin.execute(
                 "SELECT schema_revision FROM hub.canonical_state WHERE singleton"
-            ).fetchone()[0] == 16
+            ).fetchone()[0] == 17
             assert admin.execute(
                 "SELECT canonical_revision FROM hub.canonical_state WHERE singleton"
             ).fetchone()[0] == first_import.canonical_revision
@@ -455,9 +455,10 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
                 ),
             )
             revision = operator.execute(
-                "SELECT operator_control.commit_mcp_change(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "SELECT operator_control.commit_mcp_change_v2(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     "f" * 64,
+                    "e" * 64,
                     first_import.canonical_revision,
                     "hub.project",
                     "insert",
@@ -470,6 +471,34 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
             ).fetchone()[0]
             operator.commit()
             assert revision == first_import.canonical_revision + 1
+            reconciled = operator.execute(
+                "SELECT affected_rows,revision_after FROM operator_control.reconcile_mcp_change("
+                "%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    "f" * 64,
+                    "e" * 64,
+                    b.master_instance_id,
+                    b.epoch,
+                    first_import.canonical_revision,
+                    "owner",
+                    "owner-operator",
+                ),
+            ).fetchone()
+            assert reconciled == (1, revision)
+            with pytest.raises(psycopg.Error, match="differs from exact reconciliation request"):
+                operator.execute(
+                    "SELECT * FROM operator_control.reconcile_mcp_change(%s,%s,%s,%s,%s,%s,%s)",
+                    (
+                        "f" * 64,
+                        "d" * 64,
+                        b.master_instance_id,
+                        b.epoch,
+                        first_import.canonical_revision,
+                        "owner",
+                        "owner-operator",
+                    ),
+                )
+            operator.rollback()
 
         with psycopg.connect(admin_url) as admin:
             assert admin.execute(
@@ -490,8 +519,11 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
                 "has_column_privilege('mdh_mcp_editor','hub.project','revision','UPDATE'), "
                 "has_table_privilege('mdh_mcp_editor','hub.canonical_state','UPDATE'), "
                 "has_function_privilege('mdh_mcp_editor',"
+                "'operator_control.commit_mcp_change_v2(text,text,bigint,text,text,integer,text,text,text,text)',"
+                "'EXECUTE'), "
+                "has_function_privilege('mdh_mcp_editor',"
                 "'operator_control.commit_mcp_change(text,bigint,text,text,integer,text,text,text,text)',"
                 "'EXECUTE')"
-            ).fetchone() == (True, False, False, True)
+            ).fetchone() == (True, False, False, True, False)
     finally:
         subprocess.run(["docker", "rm", "--force", name], check=False, capture_output=True)

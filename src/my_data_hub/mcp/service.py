@@ -232,6 +232,24 @@ class HubService:
         if self.control is None:
             raise MasterUnavailableError("control-ledger reader is not configured")
         result = await _await(self.control.invoke_control(tool, arguments, identity))
+        if tool == "data.change.status" and result.get("state") == "APPLYING":
+            snapshot = await self._resolve(identity)
+            if snapshot.state is MasterState.ACTIVE:
+                reconciled = await self._reconcile_pending_write(
+                    identity=identity,
+                    master=snapshot,
+                    operation_id=str(arguments.get("operation_id", "")),
+                    deny_if_absent=False,
+                )
+                if reconciled is not None and reconciled.get("found") is not False:
+                    result = await _await(self.control.invoke_control(tool, arguments, identity))
+                elif reconciled is not None:
+                    result = {
+                        **result,
+                        "retry_allowed": False,
+                        "reconciliation_required": True,
+                        "canonical_receipt_found": False,
+                    }
         return dict(result)
 
     async def _stale_epoch_probe(
@@ -345,6 +363,16 @@ class HubService:
         active = await self._active_or_operation(identity, intent=f"mcp-write:{tool}")
         if isinstance(active, dict):
             return active
+        if tool == "data.change.apply":
+            reconciled = await self._reconcile_pending_write(
+                identity=identity,
+                master=active,
+                arguments=arguments,
+                deny_if_absent=True,
+            )
+            if reconciled is not None:
+                self._require_durable_operation(reconciled)
+                return reconciled
         permit = await self._permit(tool, arguments, identity, active)
         enriched = {**arguments, "_write_permit": self._permit_public(permit)}
         result = await self._execute_session(
@@ -361,6 +389,48 @@ class HubService:
         if tool.endswith(".apply"):
             self._require_durable_operation(result)
         return result
+
+    async def _reconcile_pending_write(
+        self,
+        *,
+        identity: AccessIdentity,
+        master: MasterSnapshot,
+        operation_id: str | None = None,
+        arguments: Mapping[str, Any] | None = None,
+        deny_if_absent: bool,
+    ) -> dict[str, Any] | None:
+        request_builder = getattr(self.write_gate, "reconciliation_request", None)
+        recorder = getattr(self.write_gate, "record_reconciled_write", None)
+        if request_builder is None or recorder is None:
+            return None
+        request = await _await(
+            request_builder(
+                principal=identity,
+                master=master,
+                operation_id=operation_id,
+                arguments=arguments,
+            )
+        )
+        if request is None:
+            return None
+        receipt = await self._execute_session(
+            "data.change.reconcile",
+            request,
+            identity,
+            master,
+            role="operator",
+        )
+        if receipt.get("found") is not True:
+            if deny_if_absent:
+                raise HubPermissionError(
+                    "apply retry remains denied until the exact canonical receipt is reconciled"
+                )
+            return {"found": False}
+        return dict(
+            await _await(
+                recorder(operation_id=str(request["operation_id"]), receipt=receipt)
+            )
+        )
 
     async def _provider_write(
         self, tool: str, arguments: Mapping[str, Any], identity: AccessIdentity

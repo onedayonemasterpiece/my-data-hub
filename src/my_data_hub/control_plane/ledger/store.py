@@ -1781,6 +1781,97 @@ class ControlLedger:
             metadata={"affected_rows": affected_rows, "committed_revision": committed_revision},
         )
 
+    def reconcile_mcp_write_commit(
+        self,
+        operation_id: str,
+        *,
+        request_sha256: str,
+        master_instance_id: str,
+        epoch: int,
+        expected_revision: int,
+        principal_id: str,
+        client_id: str,
+        affected_rows: int,
+        committed_revision: int,
+        committed_at: str,
+    ) -> dict[str, Any]:
+        """Idempotently project one exact canonical PostgreSQL receipt.
+
+        PostgreSQL is authoritative for whether the DML committed.  This one
+        IMMEDIATE SQLite transaction validates every durable intent binding
+        before moving an ambiguous APPLYING projection forward; it never
+        admits another DML execution.
+        """
+
+        if (
+            len(request_sha256) != 64
+            or not master_instance_id
+            or epoch < 1
+            or expected_revision < 0
+            or not principal_id
+            or not client_id
+            or affected_rows < 1
+            or committed_revision != expected_revision + 1
+            or not committed_at
+        ):
+            raise ValueError("canonical MCP reconciliation receipt is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_write_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if row is None:
+                raise StaleRuntimeEvent("MCP reconciliation has no durable preview intent")
+            record = self._mcp_write_from_row(row)
+            expected = {
+                "request_sha256": request_sha256,
+                "master_instance_id": master_instance_id,
+                "epoch": epoch,
+                "expected_revision": expected_revision,
+                "principal_id": principal_id,
+                "client_id": client_id,
+            }
+            if any(record[key] != value for key, value in expected.items()):
+                raise StaleRuntimeEvent("canonical receipt differs from the durable MCP write intent")
+            if record["state"] != "APPLYING":
+                if (
+                    record["state"] in {
+                        "COMMITTED_PENDING_CHECKPOINT",
+                        "CHECKPOINTING",
+                        "CHECKPOINT_VERIFIED",
+                        "DURABLE_COMPLETE",
+                    }
+                    and record["affected_rows"] == affected_rows
+                    and record["committed_revision"] == committed_revision
+                ):
+                    return record
+                raise StaleRuntimeEvent("MCP reconciliation is stale or differs from its projection")
+            connection.execute(
+                "UPDATE mcp_write_operations SET state='COMMITTED_PENDING_CHECKPOINT',"
+                "affected_rows=?,committed_revision=?,committed_at=?,updated_at=? WHERE operation_id=?",
+                (affected_rows, committed_revision, committed_at, now, operation_id),
+            )
+            connection.execute(
+                "INSERT INTO mcp_write_events(operation_id,state,metadata_json,recorded_at) "
+                "VALUES (?,'COMMITTED_PENDING_CHECKPOINT',?,?)",
+                (
+                    operation_id,
+                    _safe_json(
+                        {
+                            "affected_rows": affected_rows,
+                            "committed_revision": committed_revision,
+                            "reconciled_from": "canonical_postgres_receipt",
+                        }
+                    ),
+                    now,
+                ),
+            )
+            current = connection.execute(
+                "SELECT * FROM mcp_write_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert current is not None
+            return self._mcp_write_from_row(current)
+
     def advance_mcp_write_checkpoint(
         self,
         operation_id: str,

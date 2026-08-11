@@ -139,8 +139,12 @@ GRANT INSERT (
     ), DELETE ON hub.content_item TO mdh_mcp_editor;
 GRANT SELECT, INSERT ON operator_control.preview_receipt,
     operator_control.apply_receipt TO mdh_mcp_editor;
-GRANT EXECUTE ON FUNCTION master_control.assert_session_write_epoch(),
+REVOKE EXECUTE ON FUNCTION
     operator_control.commit_mcp_change(text,bigint,text,text,integer,text,text,text,text)
+    FROM mdh_mcp_editor;
+GRANT EXECUTE ON FUNCTION master_control.assert_session_write_epoch(),
+    operator_control.commit_mcp_change_v2(text,text,bigint,text,text,integer,text,text,text,text),
+    operator_control.reconcile_mcp_change(text,text,uuid,bigint,bigint,text,text)
     TO mdh_mcp_editor;
 GRANT USAGE ON SCHEMA migration, hub, region_talk, sync TO mdh_migration_operator;
 GRANT SELECT ON ALL TABLES IN SCHEMA migration TO mdh_migration_operator;

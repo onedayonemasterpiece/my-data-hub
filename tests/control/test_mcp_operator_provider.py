@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,11 +9,12 @@ from uuid import uuid4
 
 import pytest
 
-from my_data_hub.control_plane.adapters import KaggleMCPProviderGateway, LedgerWriteGate
+from my_data_hub.control_plane.adapters import KaggleMCPProviderGateway, LedgerControlReader, LedgerWriteGate
 from my_data_hub.control_plane.clock import DeterministicClock
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.mcp.contracts import MasterSnapshot, MasterState
 from my_data_hub.mcp.oauth import AccessIdentity
+from my_data_hub.mcp.service import HubService
 from my_data_hub.providers.exchange import manifest_sha256
 from my_data_hub.providers.kaggle import ControlLedgerKaggleJournal
 from my_data_hub.providers.kaggle.contracts import (
@@ -35,7 +37,7 @@ def principal(subject: str = "owner") -> AccessIdentity:
     return AccessIdentity(
         subject=subject,
         client_id="owner-operator",
-        scopes=frozenset({"data:write", "provider:write"}),
+        scopes=frozenset({"data:write", "provider:write", "operation:read"}),
         audience="mcp",
         token_id="token",
         expires_at=2_100_000_000,
@@ -151,6 +153,134 @@ def test_write_gate_persists_preview_apply_and_exact_post_checkpoint(tmp_path: P
     status = gate.write_status(preview["operation_id"], principal())
     assert status["state"] == "DURABLE_COMPLETE"
     assert status["pre_change_checkpoint_id"] != status["post_change_checkpoint_id"]
+
+
+@pytest.mark.asyncio
+async def test_postgres_receipt_reconciles_applying_without_reexecuting_dml(tmp_path: Path) -> None:
+    clock = DeterministicClock(datetime(2026, 8, 11, tzinfo=UTC))
+    ledger = ControlLedger(tmp_path / "control.sqlite3", clock=clock)
+    source_operation = str(uuid4())
+    ledger.ensure_operation(
+        operation_id=source_operation,
+        idempotency_key="source-master-operation-reconcile",
+        operation_kind="ensure_master",
+        intent={"kind": "source"},
+        initial_state="ACTIVE",
+        identity={},
+    )
+    master_id = str(uuid4())
+    checkpoint(
+        ledger,
+        checkpoint_id=str(uuid4()),
+        operation_id=source_operation,
+        master_instance_id=master_id,
+        epoch=7,
+        revision=41,
+    )
+    gate = LedgerWriteGate(
+        ledger,
+        signing_secret=b"s" * 32,
+        clock=lambda: clock.now().timestamp(),
+    )
+    before = MasterSnapshot(MasterState.ACTIVE, instance_id=master_id, epoch=7, canonical_revision=41)
+    arguments = {
+        "sql": "UPDATE hub.project SET name=$1 WHERE project_id=$2",
+        "parameters": ["fixed", "project-1"],
+        "expected_revision": 41,
+        "max_affected_rows": 1,
+        "idempotency_key": "operator-crash-after-pg-commit",
+    }
+    preview_permit = gate.authorize_write(
+        principal=principal(), tool="data.change.preview", arguments=arguments, master=before
+    )
+    preview = gate.record_write_result(
+        permit=preview_permit,
+        result={"affected_rows": 1, "master_epoch": 7, "canonical_revision": 41},
+    )
+    apply_arguments = {**arguments, "preview_receipt": preview["preview_receipt"]}
+    gate.authorize_write(
+        principal=principal(), tool="data.change.apply", arguments=apply_arguments, master=before
+    )
+    applying = ledger.mcp_write_operation(preview["operation_id"])
+    assert applying is not None and applying["state"] == "APPLYING"
+
+    canonical_receipt = {
+        "found": True,
+        "operation_id": preview["operation_id"],
+        "request_sha256": applying["request_sha256"],
+        "master_instance_id": master_id,
+        "master_epoch": 7,
+        "expected_revision": 41,
+        "principal_id": principal().subject,
+        "client_id": principal().client_id,
+        "affected_rows": 1,
+        "committed_revision": 42,
+        "committed_at": clock.now().isoformat(),
+        "canonical_revision": 42,
+    }
+
+    class Resolver:
+        async def resolve_master(self, _identity):  # type: ignore[no-untyped-def]
+            return MasterSnapshot(
+                MasterState.ACTIVE, instance_id=master_id, epoch=7, canonical_revision=42
+            )
+
+        async def ensure_master(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("reconciliation must not ensure another master")
+
+    class Session:
+        arguments: dict[str, object] | None = None
+
+        async def execute(self, value):  # type: ignore[no-untyped-def]
+            self.arguments = dict(value)
+            return canonical_receipt
+
+        async def close(self) -> None:
+            return None
+
+    class Broker:
+        def __init__(self) -> None:
+            self.requests = []
+            self.session = Session()
+
+        async def issue_session(self, request):  # type: ignore[no-untyped-def]
+            self.requests.append(request)
+            return self.session
+
+    broker = Broker()
+    service = HubService(
+        Resolver(),
+        broker=broker,  # type: ignore[arg-type]
+        control=LedgerControlReader(ledger, write_gate=gate),
+        write_gate=gate,
+        fallback_identity=principal(),
+        clock=lambda: clock.now().timestamp(),
+    )
+    status = await service.invoke("data.change.status", {"operation_id": preview["operation_id"]})
+    assert status["state"] == "CHECKPOINTING"
+    assert [request.tool for request in broker.requests] == ["data.change.reconcile"]
+    assert broker.session.arguments is not None
+    assert "sql" not in broker.session.arguments and "parameters" not in broker.session.arguments
+    def committed_projection_events() -> int:
+        with sqlite3.connect(ledger.path) as connection:
+            return int(
+                connection.execute(
+                    "SELECT count(*) FROM mcp_write_events WHERE operation_id=? AND state=?",
+                    (preview["operation_id"], "COMMITTED_PENDING_CHECKPOINT"),
+                ).fetchone()[0]
+            )
+
+    assert committed_projection_events() == 1
+
+    with pytest.raises(PermissionError, match="already admitted"):
+        await service.invoke("data.change.apply", apply_arguments)
+    assert [request.tool for request in broker.requests] == ["data.change.reconcile"]
+
+    replay = gate.record_reconciled_write(
+        operation_id=preview["operation_id"], receipt=canonical_receipt
+    )
+    assert replay["status"] == "CHECKPOINTING"
+    assert committed_projection_events() == 1
 
 
 class FakeAdapter:

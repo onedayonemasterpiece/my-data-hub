@@ -29,6 +29,7 @@ from my_data_hub.mcp.contracts import (
     WritePermit,
 )
 from my_data_hub.mcp.oauth import AccessIdentity
+from my_data_hub.mcp.sql_policy import change_request_sha256
 from my_data_hub.orchestrator.master import MasterCoordinator
 from my_data_hub.providers import ProviderPolicy
 from my_data_hub.providers.exchange import (
@@ -225,6 +226,79 @@ class LedgerWriteGate(WriteGate):
             }
         return dict(result)
 
+    def reconciliation_request(
+        self,
+        *,
+        principal: AccessIdentity,
+        master: MasterSnapshot,
+        operation_id: str | None = None,
+        arguments: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the exact metadata-only lookup for an ambiguous apply."""
+
+        if master.state is not MasterState.ACTIVE or master.instance_id is None or master.epoch is None:
+            return None
+        if arguments is not None:
+            preview = self._verify_preview(str(arguments.get("preview_receipt", "")))
+            requested_operation_id = str(preview.get("operation_id", ""))
+        else:
+            requested_operation_id = str(operation_id or "")
+        record = self.ledger.mcp_write_operation(requested_operation_id)
+        if record is None:
+            return None
+        if (
+            record["principal_id"] != principal.subject
+            or record["client_id"] != principal.client_id
+            or record["master_instance_id"] != master.instance_id
+            or record["epoch"] != master.epoch
+        ):
+            raise PermissionError("operator reconciliation differs from the durable write identity")
+        if arguments is not None and record["request_sha256"] != change_request_sha256(arguments):
+            raise PermissionError("operator retry differs from the original exact request")
+        if record["state"] == "PREVIEWED":
+            return None
+        if record["state"] != "APPLYING":
+            raise PermissionError("operator apply was already admitted; use data.change.status")
+        return {
+            "operation_id": requested_operation_id,
+            "request_sha256": record["request_sha256"],
+            "master_instance_id": record["master_instance_id"],
+            "master_epoch": record["epoch"],
+            "expected_revision": record["expected_revision"],
+            "principal_id": record["principal_id"],
+            "client_id": record["client_id"],
+        }
+
+    def record_reconciled_write(
+        self,
+        *,
+        operation_id: str,
+        receipt: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if receipt.get("found") is not True or str(receipt.get("operation_id", "")) != operation_id:
+            raise PermissionError("canonical operator receipt was not found")
+        record = self.ledger.reconcile_mcp_write_commit(
+            operation_id,
+            request_sha256=str(receipt.get("request_sha256", "")),
+            master_instance_id=str(receipt.get("master_instance_id", "")),
+            epoch=int(receipt.get("master_epoch", 0)),
+            expected_revision=int(receipt.get("expected_revision", -1)),
+            principal_id=str(receipt.get("principal_id", "")),
+            client_id=str(receipt.get("client_id", "")),
+            affected_rows=int(receipt.get("affected_rows", -1)),
+            committed_revision=int(receipt.get("committed_revision", -1)),
+            committed_at=str(receipt.get("committed_at", "")),
+        )
+        return {
+            "operation_id": operation_id,
+            "status": record["state"],
+            "affected_rows": record["affected_rows"],
+            "master_epoch": record["epoch"],
+            "canonical_revision": record["committed_revision"],
+            "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
+            "reconciled": True,
+        }
+
     def write_status(self, operation_id: str, principal: AccessIdentity) -> dict[str, Any]:
         record = self.ledger.mcp_write_operation(operation_id)
         if record is None or (
@@ -255,6 +329,8 @@ class LedgerWriteGate(WriteGate):
             "committed_revision": record["committed_revision"],
             "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
             "post_change_checkpoint_id": record["post_change_checkpoint_id"],
+            "retry_allowed": record["state"] in {"REQUESTED", "PREVIEWED"},
+            "reconciliation_required": record["state"] == "APPLYING",
         }
 
     def _verified_checkpoint(self, revision: int) -> dict[str, Any]:
@@ -309,21 +385,7 @@ class LedgerWriteGate(WriteGate):
 
     @staticmethod
     def _change_request_sha(arguments: Mapping[str, Any]) -> str:
-        return hashlib.sha256(
-            canonical_json_bytes(
-                {
-                    key: arguments.get(key)
-                    for key in (
-                        "sql",
-                        "parameters",
-                        "expected_revision",
-                        "max_affected_rows",
-                        "idempotency_key",
-                        "impact_tier",
-                    )
-                }
-            )
-        ).hexdigest()
+        return change_request_sha256(arguments)
 
     @staticmethod
     def _digest(payload: dict[str, Any]) -> str:

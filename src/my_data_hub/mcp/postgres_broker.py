@@ -28,7 +28,7 @@ from my_data_hub.embeddings.rrf import (
 )
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.contracts import MasterSession, MasterSessionBroker, SessionRequest
-from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
+from my_data_hub.mcp.sql_policy import BoundedSQLPolicy, change_request_sha256
 
 
 class SessionBrokerError(RuntimeError):
@@ -288,13 +288,19 @@ class PostgresMasterSession(MasterSession):
             row_factory=dict_row,
         ) as connection, connection.cursor() as cursor:
             is_change = self.request.tool in {"data.change.preview", "data.change.apply"}
+            is_reconciliation = self.request.tool == "data.change.reconcile"
             cursor.execute("SET TRANSACTION READ WRITE" if is_change else "SET TRANSACTION READ ONLY")
             cursor.execute("SET LOCAL statement_timeout = %s", (self.request.limits.timeout_ms,))
             cursor.execute("SET LOCAL lock_timeout = %s", (min(2_000, self.request.limits.timeout_ms),))
             cursor.execute("SET LOCAL idle_in_transaction_session_timeout = %s", (self.request.limits.timeout_ms,))
             cursor.execute("SET LOCAL ROLE " + _ROLE_GROUPS[self.request.role])
             self._assert_restricted_login(cursor)
-            rows = self._dispatch_change(cursor, arguments) if is_change else self._dispatch(cursor, arguments)
+            if is_change:
+                rows = self._dispatch_change(cursor, arguments)
+            elif is_reconciliation:
+                rows = self._dispatch_change_reconciliation(cursor, arguments)
+            else:
+                rows = self._dispatch(cursor, arguments)
             state = cursor.execute(
                 "SELECT c.canonical_revision,e.current_epoch "
                 "FROM hub.canonical_state c CROSS JOIN master_control.epoch_state e "
@@ -374,10 +380,11 @@ class PostgresMasterSession(MasterSession):
                 raise SessionBrokerError("data change apply must affect at least one row")
             parameter_sha256 = hashlib.sha256(canonical_json_bytes(parameters)).hexdigest()
             revision = cursor.execute(
-                "SELECT operator_control.commit_mcp_change("
-                "%s,%s,%s,%s,%s,%s,%s,%s,%s) AS canonical_revision",
+                "SELECT operator_control.commit_mcp_change_v2("
+                "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) AS canonical_revision",
                 (
                     str(permit["permit_id"]),
+                    change_request_sha256(arguments),
                     int(arguments["expected_revision"]),
                     str(classified.target),
                     classified.kind,
@@ -399,6 +406,55 @@ class PostgresMasterSession(MasterSession):
                 if self.request.tool == "data.change.preview"
                 else "COMMITTED_PENDING_CHECKPOINT"
             ),
+        }
+
+    def _dispatch_change_reconciliation(
+        self, cursor: Any, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        if self.request.role != "operator" or set(arguments) != {
+            "operation_id",
+            "request_sha256",
+            "master_instance_id",
+            "master_epoch",
+            "expected_revision",
+            "principal_id",
+            "client_id",
+        }:
+            raise SessionBrokerError("operator reconciliation requires exact bounded identity")
+        if (
+            arguments["master_instance_id"] != self.request.master_instance_id
+            or arguments["master_epoch"] != self.request.epoch
+            or arguments["principal_id"] != self.request.principal.subject
+            or arguments["client_id"] != self.request.principal.client_id
+        ):
+            raise SessionBrokerError("operator reconciliation identity differs from the session")
+        row = cursor.execute(
+            "SELECT affected_rows,revision_after,committed_at "
+            "FROM operator_control.reconcile_mcp_change(%s,%s,%s::uuid,%s,%s,%s,%s)",
+            (
+                arguments["operation_id"],
+                arguments["request_sha256"],
+                arguments["master_instance_id"],
+                arguments["master_epoch"],
+                arguments["expected_revision"],
+                arguments["principal_id"],
+                arguments["client_id"],
+            ),
+        ).fetchone()
+        if row is None:
+            return {"found": False, "operation_id": arguments["operation_id"]}
+        return {
+            "found": True,
+            "operation_id": arguments["operation_id"],
+            "request_sha256": arguments["request_sha256"],
+            "master_instance_id": arguments["master_instance_id"],
+            "master_epoch": arguments["master_epoch"],
+            "expected_revision": arguments["expected_revision"],
+            "principal_id": arguments["principal_id"],
+            "client_id": arguments["client_id"],
+            "affected_rows": int(row["affected_rows"]),
+            "committed_revision": int(row["revision_after"]),
+            "committed_at": row["committed_at"],
         }
 
     def _dispatch(self, cursor: Any, arguments: dict[str, Any]) -> dict[str, Any]:

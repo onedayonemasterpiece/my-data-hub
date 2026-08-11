@@ -5,6 +5,28 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from my_data_hub.hashing import canonical_json_bytes
+
+
+def change_request_sha256(arguments: Mapping[str, Any]) -> str:
+    """Bind the complete bounded operator request across control and PostgreSQL."""
+
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                key: arguments.get(key)
+                for key in (
+                    "sql",
+                    "parameters",
+                    "expected_revision",
+                    "max_affected_rows",
+                    "idempotency_key",
+                    "impact_tier",
+                )
+            }
+        )
+    ).hexdigest()
+
 
 class SQLPolicyError(ValueError):
     """A deliberately non-diagnostic rejection at the MCP SQL boundary."""

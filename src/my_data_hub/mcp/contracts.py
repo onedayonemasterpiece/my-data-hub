@@ -193,3 +193,19 @@ class WriteGate(Protocol):
         permit: WritePermit,
         result: Mapping[str, Any],
     ) -> Mapping[str, Any] | Awaitable[Mapping[str, Any]]: ...
+
+    def reconciliation_request(
+        self,
+        *,
+        principal: AccessIdentity,
+        master: MasterSnapshot,
+        operation_id: str | None = None,
+        arguments: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any] | Awaitable[Mapping[str, Any] | None] | None: ...
+
+    def record_reconciled_write(
+        self,
+        *,
+        operation_id: str,
+        receipt: Mapping[str, Any],
+    ) -> Mapping[str, Any] | Awaitable[Mapping[str, Any]]: ...

@@ -57,3 +57,20 @@ def test_operator_migration_requires_same_transaction_revision_outbox_and_audit(
     assert "UPDATE (\n        content_type, title, summary" in roles
     assert "UPDATE (canonical_revision) ON hub.canonical_state" not in roles
     assert "operator_control.commit_mcp_change" in roles
+
+
+def test_operator_reconciliation_migration_binds_request_epoch_and_revision() -> None:
+    source = (ROOT / "sql/migrations/0017_mcp_operator_commit_reconciliation.sql").read_text()
+    parse_sql(source)
+    assert "operator_control.commit_mcp_change_v2" in source
+    assert "operator_control.reconcile_mcp_change" in source
+    assert "request_sha256" in source
+    assert "master_epoch" in source
+    assert "master_instance_id" in source
+    assert "receipt.revision_before IS DISTINCT FROM requested_previous_revision" in source
+    assert "SET schema_revision = 17" in source
+
+    roles = (ROOT / "sql/admin/role_contract.sql").read_text()
+    assert "REVOKE EXECUTE ON FUNCTION\n    operator_control.commit_mcp_change(" in roles
+    assert "operator_control.commit_mcp_change_v2" in roles
+    assert "operator_control.reconcile_mcp_change" in roles
