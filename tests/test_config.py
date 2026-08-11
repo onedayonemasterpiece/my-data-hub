@@ -129,22 +129,8 @@ def test_production_oauth_requires_separate_revocation_database(
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
-    with pytest.raises(ConfigurationError, match="REVOCATION_DATABASE_URL"):
-        Settings.from_env()
-
-    monkeypatch.setenv(
-        "MY_DATA_HUB_MCP_REVOCATION_DATABASE_URL",
-        "postgresql://authenticator@db/hub",
-    )
-    with pytest.raises(ConfigurationError, match="READER_DATABASE_URL"):
-        Settings.from_env()
-    monkeypatch.setenv(
-        "MY_DATA_HUB_MCP_READER_DATABASE_URL",
-        "postgresql://mcp_reader@db/hub",
-    )
     settings = Settings.from_env()
-    assert settings.mcp_revocation_database_url.endswith("@db/hub")
-    assert settings.mcp_reader_database_url.endswith("@db/hub")
+    assert settings.mcp_oauth_resource.endswith("/mcp")
 
 
 def test_production_settings_allow_per_process_database_url_isolation(

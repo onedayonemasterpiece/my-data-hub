@@ -81,7 +81,7 @@ def test_sqlite_pragmas_permissions_and_append_only_logs(tmp_path: Path) -> None
         .execute("SELECT version FROM control_schema_migrations ORDER BY version")
         .fetchall()
     )
-    assert migrations == [(1,), (2,), (3,)]
+    assert migrations == [(1,), (2,), (3,), (4,), (5,)]
 
     operation, _ = ledger.ensure_operation(
         operation_id=str(uuid4()),

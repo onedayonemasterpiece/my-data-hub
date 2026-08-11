@@ -27,6 +27,9 @@ release="$release_root/releases/$commit"
 current="$release_root/current"
 mkdir -p "$runtime_root" "$release_root/releases" "$HOME/.config/systemd/user"
 chmod 700 "$runtime_root" "$release_root" "$release_root/releases"
+state_dir="$runtime_root/state"
+mkdir -p "$state_dir"
+chmod 700 "$state_dir"
 exec 9>"$runtime_root/install.lock"
 flock -n 9 || { echo "another control-plane install is running" >&2; exit 75; }
 if [[ ! -d "$release" ]]; then
@@ -74,6 +77,9 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 Environment=MY_DATA_HUB_IMAGE_TAG=$commit
+Environment=MY_DATA_HUB_CONTROL_STATE_DIR=$state_dir
+Environment=MY_DATA_HUB_CONTROL_UID=$(id -u)
+Environment=MY_DATA_HUB_CONTROL_GID=$(id -g)
 ExecStart=/usr/bin/docker compose --project-directory $release -f $release/compose.control-plane.yaml up -d --wait control-plane
 ExecStop=/usr/bin/docker compose --project-directory $release -f $release/compose.control-plane.yaml down
 TimeoutStartSec=300

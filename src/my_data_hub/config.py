@@ -91,8 +91,6 @@ class Settings:
     mcp_trusted_proxies: tuple[str, ...] = ()
     mcp_token_max_lifetime_seconds: int = 3600
     mcp_operator_profile_enabled: bool = False
-    mcp_revocation_database_url: str = ""
-    mcp_reader_database_url: str = ""
     application_database_url: str = ""
     connector_intake_database_url: str = ""
     orchestrator_database_url: str = ""
@@ -175,12 +173,6 @@ class Settings:
             mcp_operator_profile_enabled=_bool(
                 "MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED", False
             ),
-            mcp_revocation_database_url=os.getenv(
-                "MY_DATA_HUB_MCP_REVOCATION_DATABASE_URL", ""
-            ).strip(),
-            mcp_reader_database_url=os.getenv(
-                "MY_DATA_HUB_MCP_READER_DATABASE_URL", ""
-            ).strip(),
             application_database_url=os.getenv(
                 "MY_DATA_HUB_APPLICATION_DATABASE_URL", ""
             ).strip(),
@@ -236,8 +228,6 @@ class Settings:
                     self.connector_intake_database_url,
                     self.orchestrator_database_url,
                     self.canonical_committer_database_url,
-                    self.mcp_reader_database_url,
-                    self.mcp_revocation_database_url,
                 )
                 if value
             )
@@ -268,8 +258,6 @@ class Settings:
                 "MY_DATA_HUB_MCP_OAUTH_AUDIENCE": self.mcp_oauth_audience,
                 "MY_DATA_HUB_MCP_OAUTH_RESOURCE": self.mcp_oauth_resource,
                 "MY_DATA_HUB_MCP_OAUTH_JWKS_URL": self.mcp_oauth_jwks_url,
-                "MY_DATA_HUB_MCP_REVOCATION_DATABASE_URL": self.mcp_revocation_database_url,
-                "MY_DATA_HUB_MCP_READER_DATABASE_URL": self.mcp_reader_database_url,
             }
             missing = sorted(name for name, value in oauth_values.items() if not value)
             if missing:

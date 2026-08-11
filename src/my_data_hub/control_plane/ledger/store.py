@@ -825,6 +825,68 @@ class ControlLedger:
                 ),
             )
 
+    def list_provider_resources(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 500:
+            raise ValueError("provider resource limit must be between 1 and 500")
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT provider,resource_ref,resource_kind,source_identity,source_version,control_class,"
+                "private,state,metadata_json,observed_at FROM provider_resources "
+                "ORDER BY observed_at DESC,provider,resource_ref LIMIT ?", (limit,)
+            ).fetchall()
+        return [
+            {
+                "provider": row["provider"],
+                "resource_ref": row["resource_ref"],
+                "resource_kind": row["resource_kind"],
+                "source_identity": row["source_identity"],
+                "source_version": row["source_version"],
+                "control_class": row["control_class"],
+                "private": None if row["private"] is None else bool(row["private"]),
+                "state": row["state"],
+                "metadata": json.loads(row["metadata_json"]),
+                "observed_at": row["observed_at"],
+            }
+            for row in rows
+        ]
+
+    def register_oauth_client(
+        self,
+        *,
+        issuer: str,
+        client_id: str,
+        principal_id: str,
+        allowed_scopes: frozenset[str],
+        profile_kind: str,
+        enabled: bool = True,
+    ) -> None:
+        if profile_kind not in {"reader", "owner_operator"} or not allowed_scopes:
+            raise ValueError("OAuth client profile/scopes are invalid")
+        scopes_json = _safe_json({"scopes": sorted(allowed_scopes)})
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            connection.execute(
+                "INSERT INTO oauth_clients(issuer,client_id,enabled,allowed_scopes_json,principal_id,profile_kind,"
+                "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(issuer,client_id) DO UPDATE SET "
+                "enabled=excluded.enabled,allowed_scopes_json=excluded.allowed_scopes_json,"
+                "principal_id=excluded.principal_id,profile_kind=excluded.profile_kind,updated_at=excluded.updated_at",
+                (issuer, client_id, int(enabled), scopes_json, principal_id, profile_kind, now, now),
+            )
+
+    def oauth_client(self, issuer: str, client_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM oauth_clients WHERE issuer=? AND client_id=?", (issuer, client_id)
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "issuer": row["issuer"], "client_id": row["client_id"],
+            "enabled": bool(row["enabled"]),
+            "allowed_scopes": frozenset(json.loads(row["allowed_scopes_json"])["scopes"]),
+            "principal_id": row["principal_id"], "profile_kind": row["profile_kind"],
+        }
+
     def persist_provider_effect_intent(self, payload: Mapping[str, Any]) -> None:
         """Persist the exact provider intent before any external mutation."""
 
@@ -864,11 +926,9 @@ class ControlLedger:
                 "SELECT 1 FROM provider_effect_intents WHERE effect_id=?", (effect_id,)
             ).fetchone() is None:
                 raise StaleRuntimeEvent("provider receipt has no persist-before-effect intent")
-            rows = connection.execute(
-                "SELECT receipt_sha256 FROM provider_effect_receipts WHERE effect_id=?", (effect_id,)
-            ).fetchall()
-            if rows and all(row["receipt_sha256"] != receipt_sha256 for row in rows):
-                raise IdempotencyConflict("provider effect already has a different receipt")
+            # Receipts form an append-only reconciliation history.  An
+            # UNCERTAIN observation may later become exactly APPLIED/ABSENT;
+            # repeated identical observations collapse by the unique hash.
             connection.execute(
                 "INSERT OR IGNORE INTO provider_effect_receipts(effect_id,receipt_json,receipt_sha256,recorded_at) "
                 "VALUES (?,?,?,?)",
