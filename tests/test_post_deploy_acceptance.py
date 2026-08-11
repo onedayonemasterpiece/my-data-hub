@@ -355,6 +355,88 @@ async def test_http_oauth_and_negative_contracts() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("wrong_host_status", [400, 404, 421])
+async def test_http_accepts_fail_closed_edge_host_denials(wrong_host_status: int) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/.well-known/oauth-protected-resource/mcp":
+            if request.headers.get("host") == "invalid.example":
+                return httpx.Response(wrong_host_status)
+            if request.headers.get("origin") == "https://invalid.example":
+                return httpx.Response(403)
+            return httpx.Response(
+                200,
+                json={
+                    "resource": ENDPOINT.url,
+                    "authorization_servers": [AUTHORIZATION_SERVER],
+                },
+            )
+        if path == "/.well-known/oauth-authorization-server":
+            return httpx.Response(
+                200,
+                json={
+                    "issuer": AUTHORIZATION_SERVER,
+                    "authorization_endpoint": f"{AUTHORIZATION_SERVER}/authorize",
+                    "token_endpoint": f"{AUTHORIZATION_SERVER}/token",
+                    "jwks_uri": f"{AUTHORIZATION_SERVER}/.well-known/jwks.json",
+                },
+            )
+        if path == "/.well-known/jwks.json":
+            return httpx.Response(
+                200,
+                json={"keys": [{"kty": "RSA", "kid": "key-1", "alg": "RS256"}]},
+            )
+        if path == "/mcp":
+            return httpx.Response(401, headers={"www-authenticate": "Bearer"})
+        raise AssertionError(path)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await verify_http_negatives(ENDPOINT, client=client)
+    assert result["wrong_host_rejected"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 302, 500])
+async def test_http_rejects_non_policy_edge_host_outcomes(status: int) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/.well-known/oauth-protected-resource/mcp":
+            if request.headers.get("host") == "invalid.example":
+                return httpx.Response(status)
+            if request.headers.get("origin") == "https://invalid.example":
+                return httpx.Response(403)
+            return httpx.Response(
+                200,
+                json={
+                    "resource": ENDPOINT.url,
+                    "authorization_servers": [AUTHORIZATION_SERVER],
+                },
+            )
+        if path == "/.well-known/oauth-authorization-server":
+            return httpx.Response(
+                200,
+                json={
+                    "issuer": AUTHORIZATION_SERVER,
+                    "authorization_endpoint": f"{AUTHORIZATION_SERVER}/authorize",
+                    "token_endpoint": f"{AUTHORIZATION_SERVER}/token",
+                    "jwks_uri": f"{AUTHORIZATION_SERVER}/.well-known/jwks.json",
+                },
+            )
+        if path == "/.well-known/jwks.json":
+            return httpx.Response(
+                200,
+                json={"keys": [{"kty": "RSA", "kid": "key-1", "alg": "RS256"}]},
+            )
+        if path == "/mcp":
+            return httpx.Response(401, headers={"www-authenticate": "Bearer"})
+        raise AssertionError(path)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(RuntimeError, match="negative checks failed open"):
+            await verify_http_negatives(ENDPOINT, client=client)
+
+
+@pytest.mark.asyncio
 async def test_http_rejects_unapproved_advertised_authorization_server() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/.well-known/oauth-protected-resource/mcp":

@@ -35,6 +35,7 @@ _IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SERVICES = frozenset({"control-plane", "remote-mcp", "oauth-server"})
 _LOOPBACK_PORTS = [8080, 8765, 8780]
 _FORBIDDEN_PUBLIC_PORTS = (5432, 8080, 8765, 8780)
+_EDGE_POLICY_DENIAL_STATUSES = frozenset({400, 403, 404, 421})
 PUBLIC_MCP_URL = "https://mcp-datahub.kenigevents.ru/mcp"
 AUTHORIZATION_SERVER = "https://identity.kenigevents.ru"
 _SECRET_FRAGMENTS = (
@@ -470,8 +471,12 @@ async def _verify_http_with_client(endpoint: PublicEndpoint, client: Any) -> dic
         )
     ):
         raise RuntimeError("OAuth JWKS is not a bounded public RS256 key set")
-    expected = ((wrong_host, 403), (wrong_origin, 403), (missing_auth, 401), (wrong_auth, 401))
-    if any(response.status_code != status for response, status in expected):
+    if (
+        wrong_host.status_code not in _EDGE_POLICY_DENIAL_STATUSES
+        or wrong_origin.status_code not in _EDGE_POLICY_DENIAL_STATUSES
+        or missing_auth.status_code != 401
+        or wrong_auth.status_code != 401
+    ):
         raise RuntimeError("one or more public Host/Origin/auth negative checks failed open")
     if "www-authenticate" not in missing_auth.headers or "www-authenticate" not in wrong_auth.headers:
         raise RuntimeError("unauthenticated MCP rejection omitted its OAuth challenge")
