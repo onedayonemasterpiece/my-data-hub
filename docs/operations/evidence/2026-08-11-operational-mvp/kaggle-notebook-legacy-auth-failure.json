@@ -1,0 +1,17 @@
+{
+  "actual_rewritten_ref": "zigomaro/mdh-runtime-private-canary",
+  "cleanup": {
+    "observed_absent": true,
+    "outcome": "deleted",
+    "transport": "single_official_kaggle_adapter_incident_cleanup"
+  },
+  "completed_at": "2026-08-11T00:31:28.665390+00:00",
+  "expected_source_sha256": "aed181ce371de445b6d1e0c387b5c3e4365fa7b49cdbb58e5744bb5a58d804d4",
+  "kind": "notebook",
+  "provider_ref": "zigomaro/mdh-runtime-canary-20260811002819",
+  "schema_version": "my-data-hub-real-kaggle-canary.v1",
+  "started_at": "2026-08-11T00:28:19.296250+00:00",
+  "task_id": "aaf5419a-50c0-45d4-9ff6-10fff2f30606",
+  "task_run_id": "eff68c2d-06f3-4775-be60-6c9c25158044",
+  "verdict": "EXPECTED_FAIL_PROVIDER_TITLE_REWRITE_CLEANED"
+}

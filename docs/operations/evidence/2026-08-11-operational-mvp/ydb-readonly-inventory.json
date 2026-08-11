@@ -1,0 +1,43 @@
+{
+  "schema_version": "my-data-hub.ydb-readonly-inventory-receipt/v1",
+  "observed_at": "2026-08-10T23:56:36Z",
+  "database_id": "etnkibjidis0o6stn2cq",
+  "database_path": "/ru-central1/b1ghfk15fpug7mn5439l/etnkibjidis0o6stn2cq",
+  "folder_id": "b1g5tck18cgqtjb7rn3s",
+  "table": "region_talk_external_blogger_evidence",
+  "reader_service_account_id": "ajeri3qs6jbijih0bs5d",
+  "effective_role_bindings": {
+    "database": [
+      "ydb.viewer"
+    ],
+    "folder": [],
+    "cloud": []
+  },
+  "write_denial_probe": {
+    "statement_kind": "zero-row UPDATE",
+    "exit_code": 1,
+    "classification": "permission_denied",
+    "no_source_row_matched": true
+  },
+  "live_aggregate": {
+    "row_count": 266,
+    "distinct_record_ids": 266,
+    "batch_count": 14,
+    "source_file_count": 14,
+    "confirmation_status": {
+      "confirmed_external": 202,
+      "needs_externality_review": 64
+    }
+  },
+  "normalized_full_ordered_query_sha256": "25dc6aafe54c0b89097d0604455cbe5f240bc4ad5da0239afeda1db0867b3937",
+  "historical_ordered_csv_sha256": "4e2a98d3e5134bc143a3ed702a6e9ebb61680cbfb3b82ae96df86bd78a2fcf2d",
+  "historical_schema_sha256": "a44855556115f90c0b6353cac0b8c5d1eaebf91485ca594c621cc73f91b2564f",
+  "throttling": {
+    "temporary_rcu_limit": 10,
+    "restored_rcu_limit": 0,
+    "restored_enabled": true
+  },
+  "raw_rows_persisted_on_devstand": false,
+  "secret_material_recorded": false,
+  "status": "READONLY_INVENTORY_PROVEN_FULL_EXTRACTION_PENDING_ACTIVE_MASTER"
+}
