@@ -150,7 +150,7 @@ class DirectoryOperatorConnectionFactory:
                 epoch=binding.epoch,
                 role="operator",
                 tool="acceptance.scenario.request",
-                limits=ExecutionLimits(max_rows=1, timeout_seconds=5, max_result_bytes=16 * 1024),
+                limits=ExecutionLimits(timeout_ms=5_000, max_rows=1, max_bytes=16 * 1024),
             )
         )
         return PostgresOperatorConnectionFactory(credential.database_url).open(binding)

@@ -2685,6 +2685,7 @@ class ControlLedger:
     def arm_master_acceptance_callback_loss(
         self, *, task_id: str, command_id: str, command_sha256: str,
         run_id: str, attempt_id: str, master_instance_id: str, epoch: int,
+        before_boot_id: str,
     ) -> dict[str, Any]:
         """Arm exactly one task-bound FM08 heartbeat response loss."""
 
@@ -2693,6 +2694,7 @@ class ControlLedger:
             scenario_id="FM08", run_id=run_id, attempt_id=attempt_id,
             master_instance_id=master_instance_id, epoch=epoch,
             callback_state="ARMED", renewal_suspended=False,
+            before_boot_id=before_boot_id,
         )
 
     def suspend_master_acceptance_renewal(
@@ -2706,22 +2708,51 @@ class ControlLedger:
             scenario_id="FM10", run_id=run_id, attempt_id=attempt_id,
             master_instance_id=master_instance_id, epoch=epoch,
             callback_state="DISARMED", renewal_suspended=True,
+            before_boot_id=None,
         )
 
     def _ensure_master_acceptance_runtime_control(
         self, *, task_id: str, command_id: str, command_sha256: str,
         scenario_id: str, run_id: str, attempt_id: str,
         master_instance_id: str, epoch: int, callback_state: str,
-        renewal_suspended: bool,
+        renewal_suspended: bool, before_boot_id: str | None,
     ) -> dict[str, Any]:
         try:
             for value in (task_id, command_id, run_id, attempt_id, master_instance_id):
                 UUID(value)
+            if before_boot_id is not None:
+                UUID(before_boot_id)
         except ValueError as exc:
             raise ValueError("acceptance runtime control requires exact UUID identities") from exc
         if len(command_sha256) != 64 or epoch < 1:
             raise ValueError("acceptance runtime control binding is invalid")
         now = _format_time(self.clock.now())
+        armed_at = now if callback_state == "ARMED" else None
+        expires_at = (
+            _format_time(self.clock.now() + timedelta(seconds=120))
+            if callback_state == "ARMED" else None
+        )
+        directive_receipt_sha256 = (
+            hashlib.sha256(
+                _safe_json(
+                    {
+                        "schema_version": "my-data-hub-fm08-callback-directive.v1",
+                        "task_id": task_id,
+                        "command_id": command_id,
+                        "command_sha256": command_sha256,
+                        "run_id": run_id,
+                        "attempt_id": attempt_id,
+                        "master_instance_id": master_instance_id,
+                        "epoch": epoch,
+                        "event_type": "runtime.heartbeat",
+                        "maximum_callbacks": 1,
+                        "before_boot_id": before_boot_id,
+                        "expires_at": expires_at,
+                    }
+                ).encode()
+            ).hexdigest()
+            if callback_state == "ARMED" else None
+        )
         with self._transaction() as connection:
             command = connection.execute(
                 "SELECT c.command_id,c.command_sha256,c.state,c.claim_authority,t.task_id,t.scenario_id,"
@@ -2750,17 +2781,21 @@ class ControlLedger:
                 connection.execute(
                     "INSERT INTO master_acceptance_runtime_controls(task_id,command_id,command_sha256,"
                     "scenario_id,run_id,attempt_id,master_instance_id,epoch,callback_state,renewal_suspended,"
-                    "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    "armed_at,expires_at,before_boot_id,directive_receipt_sha256,updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (task_id, command_id, command_sha256, scenario_id, run_id, attempt_id,
-                     master_instance_id, epoch, callback_state, int(renewal_suspended), now),
+                     master_instance_id, epoch, callback_state, int(renewal_suspended),
+                     armed_at, expires_at, before_boot_id, directive_receipt_sha256, now),
                 )
             else:
                 if any(existing[key] != value for key, value in exact.items()):
                     raise StaleRuntimeEvent("acceptance runtime control identity was reused")
                 if callback_state == "ARMED" and existing["callback_state"] == "DISARMED":
                     connection.execute(
-                        "UPDATE master_acceptance_runtime_controls SET callback_state='ARMED',updated_at=? "
-                        "WHERE task_id=? AND callback_state='DISARMED'", (now, task_id),
+                        "UPDATE master_acceptance_runtime_controls SET callback_state='ARMED',armed_at=?,"
+                        "expires_at=?,before_boot_id=?,directive_receipt_sha256=?,updated_at=? "
+                        "WHERE task_id=? AND callback_state='DISARMED'",
+                        (armed_at, expires_at, before_boot_id, directive_receipt_sha256, now, task_id),
                     )
                 if renewal_suspended and not bool(existing["renewal_suspended"]):
                     connection.execute(
@@ -2808,12 +2843,22 @@ class ControlLedger:
     def armed_master_acceptance_callback_loss(
         self, *, run_id: str, attempt_id: str, epoch: int,
     ) -> dict[str, Any] | None:
-        with self._reader() as connection:
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
             row = connection.execute(
                 "SELECT * FROM master_acceptance_runtime_controls WHERE run_id=? AND attempt_id=? "
-                "AND epoch=? AND scenario_id='FM08' AND callback_state='ARMED'",
+                "AND epoch=? AND scenario_id='FM08' AND callback_state IN ('ARMED','CAPTURED') "
+                "AND restart_to_id IS NULL",
                 (run_id, attempt_id, epoch),
             ).fetchone()
+            if row is not None and (row["expires_at"] is None or str(row["expires_at"]) <= now):
+                connection.execute(
+                    "UPDATE master_acceptance_runtime_controls SET callback_state='DISARMED',"
+                    "armed_at=NULL,expires_at=NULL,before_boot_id=NULL,directive_receipt_sha256=NULL,"
+                    "updated_at=? WHERE task_id=? AND callback_state='ARMED'",
+                    (now, row["task_id"]),
+                )
+                return None
         return dict(row) if row is not None else None
 
     def capture_master_acceptance_callback(
@@ -2823,9 +2868,10 @@ class ControlLedger:
         with self._transaction() as connection:
             connection.execute(
                 "UPDATE master_acceptance_runtime_controls SET callback_state='CAPTURED',"
-                "callback_event_id=?,callback_body_sha256=?,updated_at=? "
-                "WHERE task_id=? AND scenario_id='FM08' AND callback_state='ARMED'",
-                (event_id, body_sha256, now, task_id),
+                "callback_event_id=?,callback_body_sha256=?,callback_count=1,updated_at=? "
+                "WHERE task_id=? AND scenario_id='FM08' AND callback_state='ARMED' "
+                "AND callback_count=0 AND expires_at>?",
+                (event_id, body_sha256, now, task_id, now),
             )
             row = connection.execute(
                 "SELECT * FROM master_acceptance_runtime_controls WHERE task_id=?", (task_id,)
@@ -2861,6 +2907,8 @@ class ControlLedger:
             ).fetchone()
             if row is None or row["callback_state"] not in {"CAPTURED", "REPLAYED"}:
                 raise StaleRuntimeEvent("FM08 restart is not bound to a captured callback")
+            if row["before_boot_id"] != restart_from_id:
+                raise StaleRuntimeEvent("FM08 restart origin differs from its armed process")
             if row["restart_from_id"] not in {None, restart_from_id}:
                 raise StaleRuntimeEvent("FM08 restart origin changed")
             if row["restart_to_id"] not in {None, restart_to_id}:

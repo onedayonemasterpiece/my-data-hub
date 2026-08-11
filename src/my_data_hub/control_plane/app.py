@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import hmac
 import json
 import os
@@ -1280,6 +1281,18 @@ def create_app(
             armed = control_ledger.armed_master_acceptance_callback_loss(
                 run_id=str(event.run_id), attempt_id=str(event.attempt_id), epoch=event.epoch
             )
+            if armed is not None and event.event_type is RuntimeEventType.RUNTIME_HEARTBEAT:
+                observed_hash = hashlib.sha256(raw).hexdigest()
+                if armed["callback_state"] == "CAPTURED":
+                    if (
+                        armed["callback_event_id"] == str(event.event_id)
+                        and hmac.compare_digest(str(armed["callback_body_sha256"]), observed_hash)
+                    ):
+                        raise HTTPException(
+                            status_code=503,
+                            detail={"code": "acceptance_callback_ack_suppressed"},
+                        )
+                    armed = None
             if armed is not None and event.event_type is RuntimeEventType.RUNTIME_HEARTBEAT:
                 # Persist/authenticate/deduplicate the exact body, but
                 # deliberately withhold its lifecycle projection and HTTP ACK.

@@ -487,13 +487,16 @@ def test_runtime_control_directive_is_exact_owner_claim_bound(
         )
         assert ledger.master_acceptance_runtime_control(str(command.task_id))["renewal_acknowledged"] == 1  # type: ignore[index]
     else:
-        control = ledger.arm_master_acceptance_callback_loss(**arguments)
+        before_boot_id = str(uuid4())
+        control = ledger.arm_master_acceptance_callback_loss(
+            **arguments, before_boot_id=before_boot_id
+        )
         assert control["callback_state"] == "ARMED"
         event_id = str(uuid4())
         ledger.capture_master_acceptance_callback(
             task_id=str(command.task_id), event_id=event_id, body_sha256="b" * 64
         )
-        before, after = str(uuid4()), str(uuid4())
+        before, after = before_boot_id, str(uuid4())
         ledger.record_master_acceptance_restart(
             task_id=str(command.task_id), restart_from_id=before, restart_to_id=after
         )
@@ -545,6 +548,7 @@ def test_fm08_app_persists_exact_heartbeat_but_suppresses_projection_and_ack(
         command_sha256=command.command_sha256, run_id=str(command.binding.run_id),
         attempt_id=str(command.binding.attempt_id),
         master_instance_id=str(command.binding.master_instance_id), epoch=command.binding.epoch,
+        before_boot_id=str(uuid4()),
     )
     service_before = ledger.resolve_service("postgres-master")
     assert service_before is not None
@@ -565,7 +569,13 @@ def test_fm08_app_persists_exact_heartbeat_but_suppresses_projection_and_ack(
                 heartbeat.model_dump(mode="json", by_alias=True, exclude_none=True)
             ), headers={"Authorization": f"Bearer {SECRET}"},
         )
+        retry = client.post(
+            "/internal/runtime/events", content=json_body(
+                heartbeat.model_dump(mode="json", by_alias=True, exclude_none=True)
+            ), headers={"Authorization": f"Bearer {SECRET}"},
+        )
     assert response.status_code == 503
+    assert retry.status_code == 503
     assert response.json()["detail"]["code"] == "acceptance_callback_ack_suppressed"
     control = ledger.master_acceptance_runtime_control(str(command.task_id))
     assert control is not None and control["callback_state"] == "CAPTURED"
