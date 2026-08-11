@@ -782,6 +782,7 @@ def test_durable_promotion_writes_exact_terminal_recovery_before_ack_failure(tmp
         "master_instance_id",
         "source_identity",
         "source_version",
+        "executed_source_sha256",
         "epoch",
         "status",
         "checkpoint",
@@ -809,7 +810,10 @@ def test_durable_promotion_writes_exact_terminal_recovery_before_ack_failure(tmp
         assert event["source_version"] == body["source_version"]
         assert event["epoch"] == body["epoch"]
     assert body["events"][2]["data"] == body["checkpoint"]
-    assert body["events"][3]["data"] == {"checkpoint_id": body["checkpoint"]["current_checkpoint_id"]}
+    assert body["events"][3]["data"] == {
+        "checkpoint_id": body["checkpoint"]["current_checkpoint_id"],
+        "executed_source_sha256": body["executed_source_sha256"],
+    }
     encoded = output_path.read_bytes().lower()
     assert b"postgresql://" not in encoded and b"secret" not in encoded and b"token" not in encoded
     assert "tunnel.stop" not in events and "postgres.stop" not in events
@@ -1008,6 +1012,7 @@ def test_run_master_suppresses_only_callback_lease_closure_after_exact_terminal_
     events: list[str] = []
     working = tmp_path / "kaggle" / "working"
     working.mkdir(parents=True)
+    (working / "__script__.py").write_text("print('attested')\n")
     monkeypatch.setenv("KAGGLE_WORKING_DIR", str(working))
     for name, value in {
         "MY_DATA_HUB_CALLBACK_URL": "https://mcp-datahub.kenigevents.ru/internal/runtime/events",
@@ -1150,6 +1155,7 @@ def test_run_master_never_checkpoints_unacknowledged_blogger_import_receipt(
     events: list[str] = []
     working = tmp_path / "kaggle" / "working"
     working.mkdir(parents=True)
+    (working / "__script__.py").write_text("print('attested')\n")
     monkeypatch.setenv("KAGGLE_WORKING_DIR", str(working))
     for name, value in {
         "MY_DATA_HUB_CALLBACK_URL": "https://mcp-datahub.kenigevents.ru/internal/runtime/events",

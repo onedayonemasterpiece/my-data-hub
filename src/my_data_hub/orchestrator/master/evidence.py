@@ -41,6 +41,7 @@ class MasterTerminalOutput:
     master_instance_id: str
     source_identity: str
     source_version: str
+    executed_source_sha256: str
     epoch: int
     status: str
     checkpoint_id: str
@@ -76,6 +77,8 @@ class MasterTerminalOutput:
             raise ValueError("master terminal output checkpoint is not current")
         if not re.fullmatch(r"[a-f0-9]{64}", self.manifest_sha256):
             raise ValueError("master terminal manifest hash is invalid")
+        if not re.fullmatch(r"[a-f0-9]{64}", self.executed_source_sha256):
+            raise ValueError("master terminal executed source hash is invalid")
         if not re.fullmatch(r"[a-f0-9]{64}", self.output_tree_sha256):
             raise ValueError("master terminal output-tree hash is invalid")
         if not re.fullmatch(r"[a-f0-9]{64}", self.output_receipt_sha256):

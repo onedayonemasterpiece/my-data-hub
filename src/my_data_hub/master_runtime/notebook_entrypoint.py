@@ -39,6 +39,7 @@ from my_data_hub.db.migrations import migrate
 from my_data_hub.embeddings.master_stage import EmbeddingStageContext, execute_embedding_production_stage
 from my_data_hub.embeddings.production import EmbeddingProductionRequest, EmbeddingProductionStageReceipt
 from my_data_hub.hashing import canonical_json_bytes
+from my_data_hub.providers.kaggle.source_attestation import observed_kaggle_source_sha256
 from my_data_hub.runtime_sdk import (
     CANONICAL_RUNTIME_CALLBACK_URL,
     CHECKPOINT_ATTEMPT_BUDGET_SECONDS,
@@ -104,6 +105,7 @@ class MasterTerminalRecord(BaseModel):
     master_instance_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
     source_identity: str = Field(min_length=1, max_length=500)
     source_version: str = Field(min_length=1, max_length=200)
+    executed_source_sha256: str = Field(default="0" * 64, pattern=r"^[a-f0-9]{64}$")
     epoch: int = Field(ge=1)
     status: Literal["succeeded"] = "succeeded"
     checkpoint: MasterTerminalCheckpoint
@@ -152,10 +154,23 @@ class MasterTerminalRecord(BaseModel):
             checkpoint,
         ):
             raise ValueError("checkpoint.verified does not bind the exact terminal checkpoint")
-        if (parsed[3].phase, parsed[3].status, parsed[3].data) != (
+        expected_terminal_data = {
+            "checkpoint_id": self.checkpoint.current_checkpoint_id,
+            "executed_source_sha256": self.executed_source_sha256,
+        }
+        observed_terminal = (parsed[3].phase, parsed[3].status, parsed[3].data)
+        expected_terminal = (
+            "stopped",
+            "succeeded",
+            expected_terminal_data,
+        )
+        legacy_terminal = (
             "stopped",
             "succeeded",
             {"checkpoint_id": self.checkpoint.current_checkpoint_id},
+        )
+        if observed_terminal != expected_terminal and not (
+            self.executed_source_sha256 == "0" * 64 and observed_terminal == legacy_terminal
         ):
             raise ValueError("runtime.terminal does not bind the exact current checkpoint")
         return self
@@ -461,6 +476,7 @@ def _emit_service_ready(
     runtime: Any,
     ready: Any,
     active_deadline: float,
+    executed_source_sha256: str = "0" * 64,
     monotonic: Any = time.monotonic,
 ) -> None:
     """Check the fixed process deadline before readiness can authorize writes."""
@@ -470,7 +486,7 @@ def _emit_service_ready(
         RuntimeEventType.SERVICE_READY,
         phase="registering",
         status="ready",
-        data=ready.event_payload(),
+        data={**ready.event_payload(), "executed_source_sha256": executed_source_sha256},
     )
     if receipt.status != "delivered":
         raise RuntimeError("service.ready was not acknowledged by the control plane")
@@ -482,6 +498,7 @@ def _write_master_terminal(
     runtime: Any,
     identity: MasterIdentity,
     receipt: PublishReceipt,
+    executed_source_sha256: str = "0" * 64,
     blogger_import_receipt: BloggerImportStageReceipt | None = None,
 ) -> None:
     """Atomically persist the exact spooled terminal lifecycle for recovery."""
@@ -496,6 +513,7 @@ def _write_master_terminal(
         master_instance_id=str(identity.master_instance_id),
         source_identity=runtime.source_identity,
         source_version=runtime.source_version,
+        executed_source_sha256=executed_source_sha256,
         epoch=identity.epoch,
         checkpoint=MasterTerminalCheckpoint(
             checkpoint_id=receipt.checkpoint_id,
@@ -1341,6 +1359,7 @@ def run_master(
         process_started_at = time.monotonic()
     active_deadline, session_deadline = _runtime_deadlines(config, process_started_at)
     working = Path(os.environ.get("KAGGLE_WORKING_DIR", "/kaggle/working"))
+    executed_source_sha256 = observed_kaggle_source_sha256(working)
     paths = MasterPaths.under(working)
     identity = MasterIdentity(config.master_instance_id, config.run_id, config.epoch)
     now = datetime.now(UTC)
@@ -1490,6 +1509,7 @@ def run_master(
             runtime=runtime,
             ready=ready,
             active_deadline=active_deadline,
+            executed_source_sha256=executed_source_sha256,
         )
 
     def endpoint() -> str:
@@ -1891,6 +1911,7 @@ def run_master(
         deadline=session_deadline,
         terminal_output_path=terminal_output_path,
         blogger_import_receipt=blogger_receipt,
+        executed_source_sha256=executed_source_sha256,
     )
     if blogger_receipt is not None:
         checkpoint_payload = {
@@ -1935,6 +1956,7 @@ def _checkpoint_before_stop(
     database_url: str,
     package_directory: Path,
     identity: MasterIdentity,
+    executed_source_sha256: str = "0" * 64,
     terminal_output_path: Path | None = None,
     blogger_import_receipt: BloggerImportStageReceipt | None = None,
     retry: bool = False,
@@ -1983,7 +2005,10 @@ def _checkpoint_before_stop(
         RuntimeEventType.RUNTIME_TERMINAL,
         phase="stopped",
         status="succeeded",
-        data={"checkpoint_id": receipt.current_checkpoint_id},
+        data={
+            "checkpoint_id": receipt.current_checkpoint_id,
+            "executed_source_sha256": executed_source_sha256,
+        },
     )
     if terminal_output_path is not None:
         _write_master_terminal(
@@ -1991,6 +2016,7 @@ def _checkpoint_before_stop(
             runtime=runtime,
             identity=identity,
             receipt=receipt,
+            executed_source_sha256=executed_source_sha256,
             blogger_import_receipt=blogger_import_receipt,
         )
     if verified.status != "delivered" or terminal.status != "delivered":
@@ -2021,6 +2047,7 @@ def _checkpoint_until_deadline(
     package_directory: Path,
     identity: MasterIdentity,
     deadline: float,
+    executed_source_sha256: str = "0" * 64,
     terminal_output_path: Path | None = None,
     blogger_import_receipt: BloggerImportStageReceipt | None = None,
     publication_attempt_seconds: float = CHECKPOINT_ATTEMPT_BUDGET_SECONDS,
@@ -2065,6 +2092,7 @@ def _checkpoint_until_deadline(
                 database_url=database_url,
                 package_directory=package_directory,
                 identity=identity,
+                executed_source_sha256=executed_source_sha256,
                 terminal_output_path=terminal_output_path,
                 blogger_import_receipt=blogger_import_receipt,
                 retry=retry,

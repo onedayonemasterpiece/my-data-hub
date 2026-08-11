@@ -161,6 +161,7 @@ def _activate_ledger(
             "lease_until": (ledger.clock.now() + timedelta(minutes=5)).isoformat(),
             "master_instance_id": handle.master_instance_id,
             "epoch": handle.epoch,
+            **({"executed_source_sha256": "f" * 64} if exact_run_identity else {}),
         },
     )
     coordinator.accept_runtime_event(

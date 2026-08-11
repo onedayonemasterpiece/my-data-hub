@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -315,7 +316,8 @@ class MasterCoordinator:
             or terminal.phase != "stopped"
             or terminal.status != "succeeded"
             or terminal.data.get("checkpoint_id") != output.current_checkpoint_id
-            or set(terminal.data) != {"checkpoint_id"}
+            or terminal.data.get("executed_source_sha256") != output.executed_source_sha256
+            or set(terminal.data) != {"checkpoint_id", "executed_source_sha256"}
         ):
             raise ValueError("recovered terminal events disagree with exact checkpoint output")
         self.ledger.record_master_terminal_recovery_evidence(
@@ -446,6 +448,7 @@ class MasterCoordinator:
             # it without writing a second projection.
             return receipt
         operation = self._operation_for_attempt(event.run_id, event.attempt_id)
+        expected_source_sha256 = self._expected_executed_source_sha256(operation.operation_id)
         if event.event_type == RuntimeEventType.SERVICE_READY:
             if operation.state != MasterState.REGISTERING.value:
                 return receipt
@@ -466,6 +469,11 @@ class MasterCoordinator:
                 raise ValueError("service.ready is missing required master announcement fields")
             if data["service_kind"] != MASTER_SERVICE_KIND or int(data["epoch"]) != event.epoch:
                 raise ValueError("service.ready identity disagrees with its envelope")
+            observed_source_sha256 = str(data.get("executed_source_sha256", ""))
+            if expected_source_sha256 is not None and not hmac.compare_digest(
+                expected_source_sha256, observed_source_sha256
+            ):
+                raise ValueError("service.ready executed source differs from exact provider push")
             self.ledger.activate_service_operation(
                 operation_id=operation.operation_id,
                 expected_state=MasterState.REGISTERING.value,
@@ -557,6 +565,11 @@ class MasterCoordinator:
                 event_id=event.event_id,
             )
         elif event.event_type == RuntimeEventType.RUNTIME_TERMINAL:
+            observed_source_sha256 = str(event.data.get("executed_source_sha256", ""))
+            if expected_source_sha256 is not None and not hmac.compare_digest(
+                expected_source_sha256, observed_source_sha256
+            ):
+                raise ValueError("runtime.terminal executed source differs from exact provider push")
             self._deactivate_tunnel_authority(operation.identity, "runtime_terminal")
             self.ledger.project_master_lifecycle(
                 operation_id=operation.operation_id,
@@ -569,6 +582,25 @@ class MasterCoordinator:
             )
             self.ledger.revoke_runtime_token(event.run_id, event.attempt_id)
         return receipt
+
+    def _expected_executed_source_sha256(self, operation_id: str) -> str | None:
+        """Return the exact push response digest for an official Kaggle run.
+
+        Legacy deterministic test providers predate source identities; only
+        the official adapter is admitted to production and must always carry
+        its exact push response through the trigger receipt.
+        """
+
+        trigger = self.ledger.get_effect_by_idempotency_key(f"{operation_id}:trigger_run")
+        if trigger is None or trigger.receipt is None:
+            raise ValueError("runtime callback has no durable trigger receipt")
+        identity = trigger.receipt.get("exact_identity")
+        expected = identity.get("source_sha256") if isinstance(identity, dict) else None
+        if isinstance(expected, str) and len(expected) == 64 and set(expected) <= set("0123456789abcdef"):
+            return expected
+        if trigger.receipt.get("provider") == "kaggle":
+            raise ValueError("official Kaggle trigger lacks exact source attestation")
+        return None
 
     def _apply_effect(
         self,

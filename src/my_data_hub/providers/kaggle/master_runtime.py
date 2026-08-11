@@ -41,6 +41,7 @@ from .contracts import (
     NotebookMutationResult,
     ProviderEffectIntent,
 )
+from .source_attestation import executable_source_sha256
 
 MASTER_TERMINAL_OUTPUT_NAME = "my-data-hub-master-terminal.json"
 MAX_MASTER_TERMINAL_OUTPUT_BYTES = 256 * 1024
@@ -276,7 +277,9 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
                 self.assets.notebook_ref,
                 {
                     "task_run_id": str(effect.exact_identity["run_id"]),
-                    "source_sha256": hashlib.sha256(self._canonical_source(source)).hexdigest(),
+                    "source_sha256": executable_source_sha256(
+                        source, kernel_type=self.assets.notebook_kernel_type
+                    ),
                     "dataset_sources": (self.assets.dataset_ref,),
                     "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
                     "disposable": False,
@@ -322,7 +325,9 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             run = reconciler(
                 task_run_id=UUID(str(effect.exact_identity["run_id"])),
                 provider_ref=self.assets.notebook_ref,
-                expected_source_sha256=hashlib.sha256(self._canonical_source(source)).hexdigest(),
+                expected_source_sha256=executable_source_sha256(
+                    source, kernel_type=self.assets.notebook_kernel_type
+                ),
             )
             if run is None:
                 return EffectReconciliation(ReconciliationStatus.ABSENT)
@@ -384,6 +389,8 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
         )
         if actual != expected:
             raise MasterLaunchContractError("terminal output differs from the exact master attempt")
+        if not hmac.compare_digest(output.executed_source_sha256, run.source_sha256):
+            raise MasterLaunchContractError("terminal output source differs from the exact provider push")
         return MasterTerminalEvidence(platform_status, output)
 
     def _validate_terminal_query(self, query: MasterTerminalQuery) -> None:
@@ -414,6 +421,7 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             "master_instance_id",
             "source_identity",
             "source_version",
+            "executed_source_sha256",
             "epoch",
             "status",
             "checkpoint",
@@ -447,6 +455,7 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             "master_instance_id",
             "source_identity",
             "source_version",
+            "executed_source_sha256",
             "status",
         )
         if (
@@ -477,6 +486,7 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
                 master_instance_id=raw["master_instance_id"],
                 source_identity=raw["source_identity"],
                 source_version=raw["source_version"],
+                executed_source_sha256=raw["executed_source_sha256"],
                 epoch=raw["epoch"],
                 status=raw["status"],
                 checkpoint_id=checkpoint["checkpoint_id"],
@@ -512,16 +522,11 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
         )
 
     def _canonical_source(self, source: bytes) -> bytes:
-        if self.assets.notebook_kernel_type != "notebook":
-            return source
-        body = json.loads(source)
-        for cell in body.get("cells", []):
-            if isinstance(cell, dict):
-                if cell.get("cell_type") == "code" and "outputs" in cell:
-                    cell["outputs"] = []
-                if isinstance(cell.get("source"), list):
-                    cell["source"] = "".join(str(item) for item in cell["source"])
-        return json.dumps(body).encode()
+        # Retained for callers that need canonical bytes; source identity is
+        # the digest of this executable-only representation.
+        from .source_attestation import canonical_executable_source
+
+        return canonical_executable_source(source, kernel_type=self.assets.notebook_kernel_type)
 
     @staticmethod
     def _mapping_sha(files: Mapping[str, bytes]) -> str:

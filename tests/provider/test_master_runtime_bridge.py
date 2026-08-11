@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 from collections import Counter
@@ -20,6 +19,7 @@ from my_data_hub.providers.kaggle import (
     KaggleMasterRuntimeProvider,
     MasterLaunchContractError,
 )
+from my_data_hub.providers.kaggle.source_attestation import executable_source_sha256
 from my_data_hub.runtime_sdk import (
     KAGGLE_HARD_CAP_SECONDS,
     KAGGLE_PROVIDER_TIMEOUT_SECONDS,
@@ -55,13 +55,7 @@ class FakeKaggleAdapter:
         self.calls["notebook_run"] += 1
         self.last_notebook_kwargs = kwargs
         source = kwargs["source"]
-        body = __import__("json").loads(source)
-        for cell in body["cells"]:
-            if cell.get("cell_type") == "code":
-                cell["outputs"] = []
-            if isinstance(cell.get("source"), list):
-                cell["source"] = "".join(cell["source"])
-        source_sha = hashlib.sha256(__import__("json").dumps(body).encode()).hexdigest()
+        source_sha = executable_source_sha256(source, kernel_type="notebook")
         self.run = KaggleKernelRunIdentity(
             task_run_id=kwargs["task_run_id"],
             provider_ref=kwargs["intent"].provider_ref,
@@ -190,6 +184,8 @@ def _active_master_with_terminal_output(tmp_path: Path):  # type: ignore[no-unty
         notebook_ref=launch.notebook_ref,
     )
     handle = coordinator.ensure_master(request, runtime_secret=SECRET)
+    assert adapter.run is not None
+    source_sha256 = adapter.run.source_sha256
     ready = _runtime_event(
         handle,
         launch,
@@ -206,6 +202,7 @@ def _active_master_with_terminal_output(tmp_path: Path):  # type: ignore[no-unty
             "lease_until": "2099-01-01T00:00:00+00:00",
             "master_instance_id": handle.master_instance_id,
             "epoch": handle.epoch,
+            "executed_source_sha256": source_sha256,
         },
     )
     coordinator.accept_runtime_event(ready.model_dump_json(exclude_none=True).encode(), header_token=SECRET)
@@ -269,7 +266,10 @@ def _active_master_with_terminal_output(tmp_path: Path):  # type: ignore[no-unty
             5,
             phase="stopped",
             status="succeeded",
-            data={"checkpoint_id": checkpoint_id},
+            data={
+                "checkpoint_id": checkpoint_id,
+                "executed_source_sha256": source_sha256,
+            },
         ),
     ]
     adapter.status_state = "complete"
@@ -281,6 +281,7 @@ def _active_master_with_terminal_output(tmp_path: Path):  # type: ignore[no-unty
         "master_instance_id": handle.master_instance_id,
         "source_identity": launch.source_identity,
         "source_version": launch.source_version,
+        "executed_source_sha256": source_sha256,
         "epoch": handle.epoch,
         "status": "succeeded",
         "checkpoint": {
@@ -291,6 +292,65 @@ def _active_master_with_terminal_output(tmp_path: Path):  # type: ignore[no-unty
         "events": [event.model_dump(mode="json", exclude_none=True) for event in events],
     }
     return launch, adapter, ledger, coordinator, request, handle
+
+
+def test_service_ready_requires_runtime_computed_exact_push_source_and_replays_loss(
+    tmp_path: Path,
+) -> None:
+    launch = _launch()
+    adapter = FakeKaggleAdapter()
+    ledger = ControlLedger(tmp_path / "source-attestation.sqlite3")
+    coordinator = MasterCoordinator(ledger, KaggleMasterRuntimeProvider(adapter, launch))  # type: ignore[arg-type]
+    request = MasterIntent(
+        idempotency_key="source-attestation",
+        source_identity=launch.source_identity,
+        source_version=launch.source_version,
+        checkpoint_ref=launch.checkpoint_ref,
+        dataset_ref=launch.dataset_ref,
+        notebook_ref=launch.notebook_ref,
+    )
+    handle = coordinator.ensure_master(request, runtime_secret=SECRET)
+    assert adapter.run is not None
+    common = {
+        "service_kind": "postgres-master",
+        "endpoint": "tunnel://source-attestation",
+        "protocol": "postgresql+tls",
+        "tls_fingerprint": "sha256:" + "a" * 64,
+        "capabilities": ["sql"],
+        "canonical_revision": 1,
+        "schema_version": "13",
+        "lease_until": "2099-01-01T00:00:00+00:00",
+        "master_instance_id": handle.master_instance_id,
+        "epoch": handle.epoch,
+    }
+    mismatch = _runtime_event(
+        handle,
+        launch,
+        RuntimeEventType.SERVICE_READY,
+        1,
+        data={**common, "executed_source_sha256": "0" * 64},
+    )
+    with pytest.raises(ValueError, match="exact provider push"):
+        coordinator.accept_runtime_event(
+            mismatch.model_dump_json(exclude_none=True).encode(), header_token=SECRET
+        )
+    operation = ledger.get_operation(handle.operation_id)
+    assert operation is not None and operation.state == MasterState.REGISTERING.value
+    assert ledger.resolve_service("postgres-master") is None
+
+    ready = _runtime_event(
+        handle,
+        launch,
+        RuntimeEventType.SERVICE_READY,
+        2,
+        data={**common, "executed_source_sha256": adapter.run.source_sha256},
+    )
+    body = ready.model_dump_json(exclude_none=True).encode()
+    accepted = coordinator.accept_runtime_event(body, header_token=SECRET)
+    replayed = coordinator.accept_runtime_event(body, header_token=SECRET)
+    assert accepted.disposition.value == "accepted"
+    assert replayed.disposition.value == "duplicate"
+    assert ledger.resolve_service("postgres-master") is not None
 
 
 def test_exact_terminal_output_recovers_callbacks_lost_through_process_exit(tmp_path: Path) -> None:
