@@ -110,11 +110,13 @@ contains only the lightweight control ledger/process and no canonical rows.
   recovered that path. MCP and OAuth still return `502` because the reviewed
   three-process application and owner secrets are not installed. This is
   edge/tunnel evidence, not endpoint acceptance.
-- At implementation commit `84303d5`, the repository validator reports 3,181
-  checks with zero errors and focused embedding/control/post-deploy suites pass.
-  Full exact-head tests, type/lint/secret checks and disposable PostgreSQL evidence
-  are rerun after this evidence update. These remain code and disposable-integration
-  evidence, not real-provider or deployment acceptance.
+- At implementation/evidence commit `87921d6709eb0fe480db1b79ce1f2b030e48d0fe`,
+  the repository validator reports 3,181 checks with zero errors; 728 tests pass
+  with one explicitly opt-in disposable PostgreSQL test skipped. That PostgreSQL
+  18 tmpfs-only fencing/migration/quarantine test passes when separately enabled.
+  Compileall, notebook drift, reachable-history secret scan, Ruff and the configured
+  strict mypy target pass. These remain code and disposable-integration evidence,
+  not real-provider or deployment acceptance.
 
 ## Exact external blocker
 
