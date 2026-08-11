@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -56,6 +57,24 @@ class KaggleTerminalFailure(KaggleProviderError):
 
 class KagglePollingTimeout(KaggleProviderError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class BrokeredBlobGrant:
+    """One opaque SDK upload grant; capabilities are absent from its repr."""
+
+    blob_token: str = field(repr=False)
+    create_url: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class BrokeredDatasetFile:
+    """One already-uploaded blob authorized for a Dataset finalization."""
+
+    name: str
+    total_bytes: int
+    description: str
+    blob_token: str = field(repr=False)
 
 
 class RetryClass(StrEnum):
@@ -427,6 +446,15 @@ class KaggleApiProtocol(Protocol):
     ) -> Any: ...
 
     def dataset_status(self, dataset: str, format: str | None = None) -> str: ...
+
+    def dataset_list_files(
+        self,
+        dataset: str,
+        page_token: str | None = None,
+        page_size: int = 20,
+    ) -> Any: ...
+
+    def build_kaggle_client(self) -> Any: ...
 
     def dataset_create_new(
         self,

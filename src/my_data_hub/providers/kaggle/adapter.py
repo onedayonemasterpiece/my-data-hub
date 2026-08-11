@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from my_data_hub.hashing import canonical_json_bytes, sha256_file, sha256_value
@@ -27,6 +28,8 @@ from .contracts import (
     KAGGLE_API_PACKAGE,
     KAGGLE_API_VERSION,
     RUN_RECEIPT_NAME,
+    BrokeredBlobGrant,
+    BrokeredDatasetFile,
     DatasetMutationResult,
     EffectOutcome,
     KaggleAmbiguousMutation,
@@ -61,6 +64,10 @@ from .contracts import (
 from .retry import BoundedRetry, RetryPolicy, classify_failure
 
 MAX_EXACT_OUTPUT_PROVIDER_LOG_BYTES = 1024 * 1024
+MAX_BROKERED_BLOB_BYTES = 10 * 1024**3
+MAX_BROKERED_FILES = 100
+_SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
+_BROKERED_FILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.\-/]+$")
 
 _CONTROLLED_CLASSES = {
     ControlClass.ORCHESTRATOR_PROTECTED,
@@ -269,6 +276,29 @@ def _canonical_notebook_source(source: bytes, *, kernel_type: str) -> bytes:
     return json.dumps(body).encode("utf-8")
 
 
+def _brokered_sdk_types() -> tuple[Any, Any, Any, Any, Any, Any]:
+    """Load only types shipped with the pinned official Kaggle SDK."""
+
+    try:
+        from kagglesdk.blobs.types.blob_api_service import ApiBlobType, ApiStartBlobUploadRequest
+        from kagglesdk.datasets.types.dataset_api_service import (
+            ApiCreateDatasetRequest,
+            ApiCreateDatasetVersionRequest,
+            ApiCreateDatasetVersionRequestBody,
+            ApiDatasetNewFile,
+        )
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise KaggleDependencyError("the official kaggle==2.2.4 SDK types are required") from exc
+    return (
+        ApiBlobType,
+        ApiStartBlobUploadRequest,
+        ApiCreateDatasetRequest,
+        ApiCreateDatasetVersionRequest,
+        ApiCreateDatasetVersionRequestBody,
+        ApiDatasetNewFile,
+    )
+
+
 class KaggleProviderAdapter:
     """The repository's only concrete Kaggle transport adapter.
 
@@ -357,6 +387,211 @@ class KaggleProviderAdapter:
 
     def provider_identity(self) -> KaggleProviderIdentity:
         return self.identity
+
+    def start_brokered_dataset_blob(
+        self,
+        *,
+        file_name: str,
+        content_length: int,
+        content_type: str,
+        last_modified_epoch_seconds: int,
+    ) -> BrokeredBlobGrant:
+        """Start one Dataset blob upload without relaying the blob through this process.
+
+        This mutation is deliberately invoked exactly once and never passed
+        through either retry layer. A lost response is ambiguous because the
+        opaque blob token cannot be recovered from Dataset metadata.
+        """
+
+        self._validate_brokered_blob_metadata(
+            file_name=file_name,
+            content_length=content_length,
+            content_type=content_type,
+            last_modified_epoch_seconds=last_modified_epoch_seconds,
+        )
+        ApiBlobType, ApiStartBlobUploadRequest, *_unused = _brokered_sdk_types()
+        request = ApiStartBlobUploadRequest()
+        request.type = ApiBlobType.DATASET
+        request.name = file_name
+        request.content_length = content_length
+        request.content_type = content_type
+        request.last_modified_epoch_seconds = last_modified_epoch_seconds
+        try:
+            with self.api.build_kaggle_client() as kaggle:
+                response = kaggle.blobs.blob_api_client.start_blob_upload(request)
+        except Exception:
+            raise KaggleAmbiguousMutation("Kaggle Dataset blob start outcome is ambiguous") from None
+        blob_token = str(_field(response, "token") or "")
+        create_url = str(_field(response, "create_url", "createUrl") or "")
+        if not blob_token or len(blob_token) > 8192 or any(ord(char) < 32 for char in blob_token):
+            raise KaggleAmbiguousMutation("Kaggle Dataset blob start returned an invalid opaque grant")
+        parsed_url = urlsplit(create_url)
+        try:
+            parsed_port = parsed_url.port
+        except ValueError:
+            raise KaggleAmbiguousMutation("Kaggle Dataset blob start returned an invalid opaque grant") from None
+        if (
+            len(create_url) > 8192
+            or parsed_url.scheme != "https"
+            or not parsed_url.hostname
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+            or parsed_url.fragment
+            or parsed_port not in {None, 443}
+        ):
+            raise KaggleAmbiguousMutation("Kaggle Dataset blob start returned an invalid opaque grant")
+        return BrokeredBlobGrant(blob_token=blob_token, create_url=create_url)
+
+    def finalize_brokered_checkpoint_dataset(
+        self,
+        *,
+        provider_ref: str,
+        title: str,
+        files: tuple[BrokeredDatasetFile, ...],
+        version_notes: str,
+        expected_previous_version: int | None,
+    ) -> int:
+        """Finalize already-uploaded blobs once, then resolve by exact metadata."""
+
+        ref = self._validate_brokered_finalize(
+            provider_ref=provider_ref,
+            title=title,
+            files=files,
+            version_notes=version_notes,
+            expected_previous_version=expected_previous_version,
+        )
+        expected_version = 1 if expected_previous_version is None else expected_previous_version + 1
+        expected_files = tuple((item.name, item.total_bytes, item.description) for item in files)
+        current = self.current_private_dataset_version(provider_ref=ref)
+        if current == expected_version:
+            if self.reconcile_brokered_checkpoint_dataset(
+                provider_ref=ref,
+                version=expected_version,
+                expected_files=expected_files,
+            ):
+                return expected_version
+            raise KaggleAmbiguousMutation("Kaggle Dataset finalization conflicts with exact file metadata")
+        if current != expected_previous_version:
+            raise KaggleAmbiguousMutation("Kaggle Dataset current version violates the finalization precondition")
+
+        (
+            _ApiBlobType,
+            _ApiStartBlobUploadRequest,
+            ApiCreateDatasetRequest,
+            ApiCreateDatasetVersionRequest,
+            ApiCreateDatasetVersionRequestBody,
+            ApiDatasetNewFile,
+        ) = _brokered_sdk_types()
+        new_files: list[Any] = []
+        for item in files:
+            new_file = ApiDatasetNewFile()
+            new_file.token = item.blob_token
+            new_file.description = item.description
+            new_files.append(new_file)
+
+        try:
+            with self.api.build_kaggle_client() as kaggle:
+                if expected_previous_version is None:
+                    owner_slug, dataset_slug = ref.split("/", 1)
+                    request = ApiCreateDatasetRequest()
+                    request.owner_slug = owner_slug
+                    request.slug = dataset_slug
+                    request.title = title
+                    request.license_name = "CC0-1.0"
+                    request.is_private = True
+                    request.files = new_files
+                    kaggle.datasets.dataset_api_client.create_dataset(request)
+                else:
+                    owner_slug, dataset_slug = ref.split("/", 1)
+                    body = ApiCreateDatasetVersionRequestBody()
+                    body.version_notes = version_notes
+                    body.delete_old_versions = False
+                    body.files = new_files
+                    request = ApiCreateDatasetVersionRequest()
+                    request.owner_slug = owner_slug
+                    request.dataset_slug = dataset_slug
+                    request.body = body
+                    kaggle.datasets.dataset_api_client.create_dataset_version(request)
+        except Exception:
+            # Do not propagate provider exceptions: they may render the request
+            # body and therefore caller-owned blob tokens.
+            pass
+
+        for poll in range(24):
+            try:
+                if self.reconcile_brokered_checkpoint_dataset(
+                    provider_ref=ref,
+                    version=expected_version,
+                    expected_files=expected_files,
+                ):
+                    return expected_version
+                observed = self.current_private_dataset_version(provider_ref=ref)
+                if observed is not None and observed > expected_version:
+                    break
+            except Exception:
+                # Metadata reads are safe to repeat. Their details are never
+                # incorporated into the public ambiguity error below.
+                pass
+            if poll < 23:
+                self.sleep(5.0)
+        raise KaggleAmbiguousMutation("Kaggle Dataset finalization is not exactly reconcilable") from None
+
+    def reconcile_brokered_checkpoint_dataset(
+        self,
+        *,
+        provider_ref: str,
+        version: int,
+        expected_files: tuple[tuple[str, int, str], ...],
+    ) -> bool:
+        """Compare one exact numeric Dataset version using metadata only."""
+
+        ref = _normalized_ref(provider_ref)
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", ref):
+            raise KaggleContractError("brokered Dataset provider ref is invalid")
+        if ref.split("/", 1)[0] != self.identity.username:
+            raise KagglePolicyError("brokered Dataset target is not owned by the authenticated identity")
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            raise KaggleContractError("brokered Dataset version must be positive")
+        normalized_expected = self._validate_brokered_expected_files(expected_files)
+        if self.current_private_dataset_version(provider_ref=ref) != version:
+            return False
+
+        observed: list[tuple[str, int, str]] = []
+        cursor: str | None = None
+        seen: set[str] = set()
+        for _ in range(100):
+            response, _attempts = self.retry.call(
+                "dataset_list_files_exact",
+                lambda cursor=cursor: self.api.dataset_list_files(
+                    f"{ref}/{version}",
+                    page_token=cursor,
+                    page_size=100,
+                ),
+            )
+            if str(_field(response, "error_message", "errorMessage") or "").strip():
+                raise KaggleContractError("Kaggle exact Dataset file metadata was unavailable")
+            rows = _field(response, "files", "dataset_files", "datasetFiles") or []
+            for row in rows:
+                name = str(_field(row, "name") or "")
+                raw_size = _field(row, "total_bytes", "totalBytes", "size")
+                if isinstance(raw_size, bool):
+                    raise KaggleIdentityError("Kaggle Dataset file size metadata is invalid")
+                try:
+                    total_bytes = int(raw_size)
+                except (TypeError, ValueError):
+                    raise KaggleIdentityError("Kaggle Dataset file size metadata is invalid") from None
+                description = str(_field(row, "description") or "")
+                observed.append((name, total_bytes, description))
+            next_cursor = str(_field(response, "next_page_token", "nextPageToken") or "").strip() or None
+            if next_cursor is None:
+                break
+            if next_cursor in seen:
+                raise KaggleContractError("Kaggle Dataset file listing repeated a cursor")
+            seen.add(next_cursor)
+            cursor = next_cursor
+        else:
+            raise KaggleContractError("Kaggle Dataset file metadata exceeded its page bound")
+        return tuple(sorted(observed)) == normalized_expected
 
     def list_resources(self, *, kind: ProviderKind, cursor: str | None, limit: int) -> InventoryPage:
         if not 1 <= limit <= 100:
@@ -1959,6 +2194,165 @@ class KaggleProviderAdapter:
     def _write_dataset_metadata(self, folder: Path, provider_ref: str, title: str) -> None:
         metadata = {"title": title, "id": provider_ref, "licenses": [{"name": "CC0-1.0"}]}
         (folder / "dataset-metadata.json").write_bytes(canonical_json_bytes(metadata))
+
+    @staticmethod
+    def _validate_brokered_blob_metadata(
+        *,
+        file_name: str,
+        content_length: int,
+        content_type: str,
+        last_modified_epoch_seconds: int,
+    ) -> None:
+        _validate_relative_path(file_name)
+        if len(file_name) > 200 or not _BROKERED_FILE_NAME_PATTERN.fullmatch(file_name):
+            raise KaggleContractError("brokered Dataset file name exceeds its bound")
+        if (
+            isinstance(content_length, bool)
+            or not isinstance(content_length, int)
+            or not 1 <= content_length <= MAX_BROKERED_BLOB_BYTES
+        ):
+            raise KaggleContractError("brokered Dataset blob size is outside its bound")
+        if (
+            not content_type
+            or len(content_type) > 255
+            or content_type != content_type.strip()
+            or any(ord(char) < 32 for char in content_type)
+        ):
+            raise KaggleContractError("brokered Dataset content type is invalid")
+        if (
+            isinstance(last_modified_epoch_seconds, bool)
+            or not isinstance(last_modified_epoch_seconds, int)
+            or not 0 <= last_modified_epoch_seconds <= 2**63 - 1
+        ):
+            raise KaggleContractError("brokered Dataset modification time is invalid")
+
+    def _validate_brokered_finalize(
+        self,
+        *,
+        provider_ref: str,
+        title: str,
+        files: tuple[BrokeredDatasetFile, ...],
+        version_notes: str,
+        expected_previous_version: int | None,
+    ) -> str:
+        ref = _normalized_ref(provider_ref)
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", ref):
+            raise KaggleContractError("brokered Dataset provider ref is invalid")
+        owner, slug = ref.split("/", 1)
+        if owner != self.identity.username:
+            raise KagglePolicyError("brokered Dataset target is not owned by the authenticated identity")
+        if not 6 <= len(slug) <= 50 or not 6 <= len(title) <= 50:
+            raise KaggleContractError("Kaggle Dataset title and slug must contain 6 to 50 characters")
+        if not version_notes.strip() or len(version_notes) > 1000:
+            raise KaggleContractError("brokered Dataset version notes must be bounded and non-empty")
+        if expected_previous_version is not None and (
+            isinstance(expected_previous_version, bool)
+            or not isinstance(expected_previous_version, int)
+            or expected_previous_version < 1
+        ):
+            raise KaggleContractError("expected previous Dataset version must be positive")
+        if not isinstance(files, tuple) or not 1 <= len(files) <= MAX_BROKERED_FILES:
+            raise KaggleContractError("brokered Dataset file set is outside its bound")
+        tokens: set[str] = set()
+        expected: list[tuple[str, int, str]] = []
+        for item in files:
+            if not isinstance(item, BrokeredDatasetFile):
+                raise KaggleContractError("brokered Dataset files must use the exact contract type")
+            if (
+                not item.blob_token
+                or len(item.blob_token) > 8192
+                or any(ord(char) < 32 for char in item.blob_token)
+                or item.blob_token in tokens
+            ):
+                raise KaggleContractError("brokered Dataset blob token is invalid or duplicated")
+            tokens.add(item.blob_token)
+            expected.append((item.name, item.total_bytes, item.description))
+        self._validate_brokered_expected_files(tuple(expected))
+        return ref
+
+    @staticmethod
+    def _validate_brokered_expected_files(
+        expected_files: tuple[tuple[str, int, str], ...],
+    ) -> tuple[tuple[str, int, str], ...]:
+        if not isinstance(expected_files, tuple) or not 1 <= len(expected_files) <= MAX_BROKERED_FILES:
+            raise KaggleContractError("brokered Dataset expected file set is outside its bound")
+        normalized: list[tuple[str, int, str]] = []
+        names: set[str] = set()
+        required_description_keys = {
+            "operation_id",
+            "master_run_ref",
+            "epoch",
+            "manifest_sha256",
+            "file_sha256",
+            "total_bytes",
+        }
+        dataset_binding: tuple[str, str, int, str] | None = None
+        for item in expected_files:
+            if not isinstance(item, tuple) or len(item) != 3:
+                raise KaggleContractError("brokered Dataset expected files must be metadata triples")
+            name, total_bytes, description = item
+            if not isinstance(name, str):
+                raise KaggleContractError("brokered Dataset file name is invalid")
+            _validate_relative_path(name)
+            if len(name) > 200 or name in names or not _BROKERED_FILE_NAME_PATTERN.fullmatch(name):
+                raise KaggleContractError("brokered Dataset file name is invalid or duplicated")
+            names.add(name)
+            if (
+                isinstance(total_bytes, bool)
+                or not isinstance(total_bytes, int)
+                or not 1 <= total_bytes <= MAX_BROKERED_BLOB_BYTES
+            ):
+                raise KaggleContractError("brokered Dataset file size is outside its bound")
+            if not isinstance(description, str) or not description or len(description.encode("utf-8")) > 4000:
+                raise KaggleContractError("brokered Dataset file description is outside its bound")
+            try:
+                binding = json.loads(description)
+            except (UnicodeError, json.JSONDecodeError):
+                raise KaggleContractError("brokered Dataset file description is not canonical JSON") from None
+            if not isinstance(binding, dict) or set(binding) != required_description_keys:
+                raise KaggleContractError("brokered Dataset file description has an invalid binding shape")
+            try:
+                canonical_description = canonical_json_bytes(binding).decode("utf-8")
+            except (TypeError, ValueError):
+                raise KaggleContractError("brokered Dataset file description is not canonical JSON") from None
+            if canonical_description != description:
+                raise KaggleContractError("brokered Dataset file description is not canonical JSON")
+            operation_id = binding["operation_id"]
+            master_run_ref = binding["master_run_ref"]
+            epoch = binding["epoch"]
+            if (
+                not isinstance(operation_id, str)
+                or not 1 <= len(operation_id) <= 300
+                or operation_id != operation_id.strip()
+                or not isinstance(master_run_ref, str)
+                or not 1 <= len(master_run_ref) <= 300
+                or master_run_ref != master_run_ref.strip()
+                or isinstance(epoch, bool)
+                or not isinstance(epoch, int)
+                or epoch < 1
+            ):
+                raise KaggleContractError("brokered Dataset file description authority is invalid")
+            current_binding = (
+                operation_id,
+                master_run_ref,
+                epoch,
+                binding["manifest_sha256"],
+            )
+            if dataset_binding is None:
+                dataset_binding = current_binding
+            elif current_binding != dataset_binding:
+                raise KaggleContractError("brokered Dataset files do not share one authority binding")
+            if (
+                not isinstance(binding["manifest_sha256"], str)
+                or not _SHA256_PATTERN.fullmatch(binding["manifest_sha256"])
+                or not isinstance(binding["file_sha256"], str)
+                or not _SHA256_PATTERN.fullmatch(binding["file_sha256"])
+                or binding["total_bytes"] != total_bytes
+                or isinstance(binding["total_bytes"], bool)
+            ):
+                raise KaggleContractError("brokered Dataset file description digest or size is invalid")
+            normalized.append((name, total_bytes, description))
+        return tuple(sorted(normalized))
 
     def _expected_directory_package_sha256(
         self,
