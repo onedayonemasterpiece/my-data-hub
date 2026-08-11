@@ -28,6 +28,7 @@ from my_data_hub.embeddings.rrf import (
 )
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.contracts import MasterSession, MasterSessionBroker, SessionRequest
+from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
 
 
 class SessionBrokerError(RuntimeError):
@@ -172,7 +173,59 @@ class DirectoryEpochCredentialSource:
         temporary.write_bytes(canonical_json_bytes(payload) + b"\n")
         temporary.chmod(0o600)
         temporary.replace(path)
+        self.prune(
+            now=datetime.now(UTC),
+            active_master_instance_id=credential.master_instance_id,
+            active_epoch=credential.epoch,
+        )
         return path
+
+    def prune(
+        self,
+        *,
+        now: datetime,
+        active_master_instance_id: str | None = None,
+        active_epoch: int | None = None,
+        max_files: int = 1_000,
+    ) -> int:
+        """Remove expired or superseded plaintext credential envelopes."""
+
+        if not self.root.exists():
+            return 0
+        if self.root.is_symlink() or not self.root.is_dir() or self.root.stat().st_mode & 0o077:
+            raise SessionBrokerError("master session secret directory must be a private regular directory")
+        removed = 0
+        for index, path in enumerate(sorted(self.root.iterdir())):
+            if index >= max_files:
+                raise SessionBrokerError("master session secret directory exceeds the cleanup bound")
+            if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
+                continue
+            delete = False
+            try:
+                if path.stat().st_size > 16 * 1024:
+                    delete = True
+                else:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    expires_at = datetime.fromisoformat(
+                        str(payload["expires_at"]).replace("Z", "+00:00")
+                    )
+                    delete = expires_at.tzinfo is None or expires_at.astimezone(UTC) <= now.astimezone(UTC)
+                    if (
+                        not delete
+                        and active_master_instance_id is not None
+                        and active_epoch is not None
+                        and (
+                            str(payload.get("master_instance_id")) != active_master_instance_id
+                            or int(payload.get("epoch", 0)) != active_epoch
+                        )
+                    ):
+                        delete = True
+            except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
+                delete = True
+            if delete:
+                path.unlink(missing_ok=True)
+                removed += 1
+        return removed
 
 
 _ROLE_GROUPS = {
@@ -184,21 +237,34 @@ _ROLE_GROUPS = {
 
 
 class PostgresMasterSessionBroker(MasterSessionBroker):
-    def __init__(self, source: EpochCredentialSource) -> None:
+    def __init__(
+        self,
+        source: EpochCredentialSource,
+        *,
+        sql_policy: BoundedSQLPolicy | None = None,
+    ) -> None:
         self.source = source
+        self.sql_policy = sql_policy or BoundedSQLPolicy()
 
     def issue_session(self, request: SessionRequest) -> MasterSession:
         if request.role not in _ROLE_GROUPS:
             raise SessionBrokerError("requested MCP role is not brokerable")
         credential = self.source.load(request)
         credential.validate(request, now=datetime.now(UTC))
-        return PostgresMasterSession(request, credential)
+        return PostgresMasterSession(request, credential, sql_policy=self.sql_policy)
 
 
 class PostgresMasterSession(MasterSession):
-    def __init__(self, request: SessionRequest, credential: EpochDatabaseCredential) -> None:
+    def __init__(
+        self,
+        request: SessionRequest,
+        credential: EpochDatabaseCredential,
+        *,
+        sql_policy: BoundedSQLPolicy | None = None,
+    ) -> None:
         self.request = request
         self.credential = credential
+        self.sql_policy = sql_policy or BoundedSQLPolicy()
         self._closed = False
 
     async def execute(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -221,18 +287,23 @@ class PostgresMasterSession(MasterSession):
             connect_timeout=3,
             row_factory=dict_row,
         ) as connection, connection.cursor() as cursor:
-            cursor.execute("SET TRANSACTION READ ONLY")
+            is_change = self.request.tool in {"data.change.preview", "data.change.apply"}
+            cursor.execute("SET TRANSACTION READ WRITE" if is_change else "SET TRANSACTION READ ONLY")
             cursor.execute("SET LOCAL statement_timeout = %s", (self.request.limits.timeout_ms,))
             cursor.execute("SET LOCAL lock_timeout = %s", (min(2_000, self.request.limits.timeout_ms),))
             cursor.execute("SET LOCAL idle_in_transaction_session_timeout = %s", (self.request.limits.timeout_ms,))
             cursor.execute("SET LOCAL ROLE " + _ROLE_GROUPS[self.request.role])
-            rows = self._dispatch(cursor, arguments)
+            self._assert_restricted_login(cursor)
+            rows = self._dispatch_change(cursor, arguments) if is_change else self._dispatch(cursor, arguments)
             state = cursor.execute(
                 "SELECT c.canonical_revision,e.current_epoch "
                 "FROM hub.canonical_state c CROSS JOIN master_control.epoch_state e "
                 "WHERE c.singleton=true AND e.singleton=true"
             ).fetchone()
-            connection.rollback()
+            if self.request.tool == "data.change.apply":
+                connection.commit()
+            else:
+                connection.rollback()
         if state is None or int(state["current_epoch"] or 0) != self.request.epoch:
             raise SessionBrokerError("master epoch changed during the MCP session")
         result = {
@@ -244,6 +315,70 @@ class PostgresMasterSession(MasterSession):
         if len(encoded) > self.request.limits.max_bytes:
             raise SessionBrokerError("master response exceeds the broker byte cap")
         return _jsonable(result)
+
+    def _assert_restricted_login(self, cursor: Any) -> None:
+        row = cursor.execute(
+            "SELECT r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolreplication,r.rolbypassrls,"
+            "pg_has_role(session_user,%s,'member') AS requested_member,"
+            "pg_has_role(session_user,'mdh_owner','member') AS owner_member,"
+            "pg_has_role(session_user,'mdh_role_admin','member') AS role_admin_member "
+            "FROM pg_roles r WHERE r.rolname=session_user",
+            (_ROLE_GROUPS[self.request.role],),
+        ).fetchone()
+        if (
+            row is None
+            or any(bool(row[name]) for name in (
+                "rolsuper", "rolcreatedb", "rolcreaterole", "rolreplication", "rolbypassrls",
+                "owner_member", "role_admin_member",
+            ))
+            or not bool(row["requested_member"])
+        ):
+            raise SessionBrokerError("master credential is not an exact restricted role login")
+
+    def _dispatch_change(self, cursor: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self.request.role != "operator":
+            raise SessionBrokerError("data changes require the restricted operator credential")
+        permit = arguments.get("_write_permit")
+        if not isinstance(permit, dict) or set(permit) != {
+            "permit_id", "tool", "master_epoch", "canonical_revision", "expires_at"
+        }:
+            raise SessionBrokerError("data change lacks an exact write permit")
+        if (
+            permit["tool"] != self.request.tool
+            or permit["master_epoch"] != self.request.epoch
+            or permit["canonical_revision"] != arguments.get("expected_revision")
+            or not isinstance(permit["expires_at"], int)
+            or permit["expires_at"] <= int(datetime.now(UTC).timestamp())
+        ):
+            raise SessionBrokerError("data change permit is stale or mismatched")
+        parameters = arguments.get("parameters", [])
+        if not isinstance(parameters, list):
+            raise SessionBrokerError("data change parameters must be an array")
+        classified = self.sql_policy.classify_change(str(arguments.get("sql", "")), parameters)
+        from my_data_hub.db_operator import compile_psycopg_parameters
+
+        query, bound = compile_psycopg_parameters(str(arguments["sql"]), parameters)
+        cursor.execute("SELECT master_control.assert_session_write_epoch()")
+        state = cursor.execute(
+            "SELECT canonical_revision FROM hub.canonical_state WHERE singleton=true FOR SHARE"
+        ).fetchone()
+        if state is None or int(state["canonical_revision"]) != int(arguments["expected_revision"]):
+            raise SessionBrokerError("canonical revision changed after operator preview")
+        cursor.execute(query, bound)
+        affected = int(cursor.rowcount)
+        maximum = int(arguments.get("max_affected_rows", 0))
+        if not 0 <= affected <= maximum <= 1_000:
+            raise SessionBrokerError("data change affected rows outside the permitted bound")
+        return {
+            "operation_id": str(permit["permit_id"]),
+            "affected_rows": affected,
+            "target": classified.target,
+            "status": (
+                "PREVIEW_EXECUTED_ROLLED_BACK"
+                if self.request.tool == "data.change.preview"
+                else "COMMITTED_PENDING_CHECKPOINT"
+            ),
+        }
 
     def _dispatch(self, cursor: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         tool = self.request.tool

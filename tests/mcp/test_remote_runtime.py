@@ -16,6 +16,7 @@ from mcp.client.streamable_http import streamable_http_client
 from my_data_hub.control_plane.app import DATABASE_ENVIRONMENT_NAMES
 from my_data_hub.mcp.oauth import TokenValidationError
 from my_data_hub.mcp.runtime import build_remote_runtime
+from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
 
 RESOURCE = "https://mcp-datahub.kenigevents.ru/mcp"
 ISSUER = "https://identity.kenigevents.ru"
@@ -194,3 +195,27 @@ def test_remote_runtime_rejects_any_database_environment(
     monkeypatch.setenv("PGSSLKEY", "/secret/client.key")
     with pytest.raises(Exception, match="must not receive master database credentials"):
         build_remote_runtime(decoder=lambda _token: _claims())
+
+
+def test_remote_operator_runtime_requires_and_accepts_only_injected_dependencies(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED", "true")
+    monkeypatch.setenv(
+        "MY_DATA_HUB_MCP_SCOPES",
+        ",".join(sorted(READER_SCOPES | {"data:write", "provider:write"})),
+    )
+    with pytest.raises(Exception, match="require injected gate"):
+        build_remote_runtime(decoder=lambda _token: _claims())
+
+    runtime = build_remote_runtime(
+        decoder=lambda _token: _claims(),
+        write_gate=object(),  # type: ignore[arg-type]
+        provider_adapter=object(),  # type: ignore[arg-type]
+        sql_policy=BoundedSQLPolicy(change_targets=frozenset({"hub.project"})),
+    )
+
+    assert runtime.settings.mcp_write_enabled is True
+    assert runtime.settings.mcp_operator_profile_enabled is True

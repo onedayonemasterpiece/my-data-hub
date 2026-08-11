@@ -18,6 +18,7 @@ from my_data_hub.mcp.contracts import (
 )
 from my_data_hub.mcp.oauth import AccessIdentity, OAuthBearerValidator
 from my_data_hub.mcp.service import HubService
+from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
 from my_data_hub.mcp.transport import ToolSecurityMetadataMiddleware
 
 
@@ -37,6 +38,7 @@ class MCPDependencies:
     control: ControlPlaneReader | None = None
     write_gate: WriteGate | None = None
     audit: MCPAuditSink | None = None
+    sql_policy: BoundedSQLPolicy | None = None
 
 
 def _local_identity(settings: Settings) -> AccessIdentity | None:
@@ -129,6 +131,7 @@ def create_server(
         control=deps.control,
         write_gate=deps.write_gate,
         audit=deps.audit,
+        sql_policy=deps.sql_policy,
         fallback_identity=fallback,
     )
     mcp = IdentityAwareMCPServer(
@@ -160,6 +163,36 @@ def create_server(
 
     async def checkpoint_status() -> dict[str, Any]:
         return await service.invoke("checkpoint.status", {})
+
+    async def checkpoint_restore_request(
+        target: str,
+        checkpoint_id: str,
+        exact_version_ref: str,
+        timeout_seconds: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return await service.invoke("checkpoint.restore.request", locals())
+
+    async def master_rotation_request(
+        checkpoint_id: str,
+        exact_version_ref: str,
+        expected_active_epoch: int,
+        expected_canonical_revision: int,
+        timeout_seconds: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return await service.invoke("master.rotation.request", locals())
+
+    async def connector_coverage() -> dict[str, Any]:
+        return await service.invoke("connector.coverage", {})
+
+    async def runtime_stale_epoch_probe(
+        expected_active_epoch: int, submitted_epoch: int
+    ) -> dict[str, Any]:
+        return await service.invoke("runtime.stale_epoch.probe", locals())
+
+    async def provider_protected_resource_probe(resource_ref: str) -> dict[str, Any]:
+        return await service.invoke("provider.protected_resource.probe", locals())
 
     async def embedding_coverage() -> dict[str, Any]:
         return await service.invoke("embedding.coverage", {})
@@ -282,6 +315,11 @@ def create_server(
         "master.ensure": master_ensure,
         "operation.get": operation_get,
         "checkpoint.status": checkpoint_status,
+        "checkpoint.restore.request": checkpoint_restore_request,
+        "master.rotation.request": master_rotation_request,
+        "connector.coverage": connector_coverage,
+        "runtime.stale_epoch.probe": runtime_stale_epoch_probe,
+        "provider.protected_resource.probe": provider_protected_resource_probe,
         "embedding.coverage": embedding_coverage,
         "embedding.production.capabilities": embedding_production_capabilities,
         "provider.resources.status": provider_status,

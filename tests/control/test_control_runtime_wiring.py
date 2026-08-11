@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,6 +14,7 @@ from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.control_plane.runtime import (
     ControlPlaneMasterRuntime,
     MasterRuntimeSettings,
+    TunnelCertificate,
     build_production_runtime,
 )
 from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator
@@ -137,7 +139,29 @@ def test_runtime_callback_reaches_active_through_production_app_wiring(tmp_path:
     path = tmp_path / "control.sqlite3"
     ledger = ControlLedger(path)
     wired = runtime(ledger, FakeKaggleRuntime())
-    app = create_app(ControlPlaneSettings(ledger_path=path), ledger=ledger, master_runtime=wired)
+    class CertificateBroker:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def issue_public_key(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls.append(kwargs)
+            return TunnelCertificate(
+                certificate="ssh-ed25519-cert-v01@openssh.com " + base64.b64encode(b"certificate").decode(),
+                serial=17,
+                principal="mdh-master-tunnel",
+                valid_before=kwargs["valid_before"],
+                listen_host="127.0.0.1",
+                listen_port=25432,
+            )
+
+    certificate_broker = CertificateBroker()
+    app = create_app(
+        ControlPlaneSettings(ledger_path=path),
+        ledger=ledger,
+        master_runtime=wired,
+        operator_credential_enabled=True,
+        tunnel_certificate_broker=certificate_broker,
+    )
     response = TestClient(app).post(
         "/control/v1/master/ensure",
         json={"idempotency_key": "callback-master", "intent": "test"},
@@ -179,6 +203,36 @@ def test_runtime_callback_reaches_active_through_production_app_wiring(tmp_path:
     )
     assert callback.status_code == 200
     assert TestClient(app).get("/health/ready").json()["master_state"] == "ACTIVE"
+    activation = TestClient(app).get(
+        f"/internal/runtime/activation/{identity['run_id']}/{identity['attempt_id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert activation.status_code == 200
+    assert activation.json()["credential_roles"] == ["reader", "operator"]
+
+    key_blob = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20" + b"k" * 32
+    public_key = "ssh-ed25519 " + base64.b64encode(key_blob).decode()
+    valid_before = datetime.now(UTC) + timedelta(minutes=2)
+    certificate = TestClient(app).post(
+        f"/internal/runtime/tunnel-certificates/{identity['run_id']}/{identity['attempt_id']}",
+        json={
+            "master_instance_id": identity["master_instance_id"],
+            "epoch": identity["epoch"],
+            "public_key": public_key,
+            "valid_before": valid_before.isoformat(),
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert certificate.status_code == 200
+    assert certificate.json()["listen_host"] == "127.0.0.1"
+    assert certificate.json()["listen_port"] == 25432
+    assert "private" not in certificate.text.casefold()
+    call = certificate_broker.calls[0]
+    assert call["run_id"] == str(identity["run_id"])
+    assert call["attempt_id"] == str(identity["attempt_id"])
+    assert call["master_instance_id"] == str(identity["master_instance_id"])
+    assert call["epoch"] == int(identity["epoch"])
+    assert call["public_key"] == public_key
 
 
 def test_active_runtime_claims_only_its_exact_blogger_request(tmp_path: Path) -> None:
@@ -368,9 +422,26 @@ def test_runtime_can_register_bounded_reader_credential_without_echoing_secret(t
     assert response.json() == {"registered": 1, "credential_refs": ["reader-1.json"]}
     assert secret_url not in response.text
     assert registrar.credentials[0].database_url == secret_url
+    unauthorized_operator = TestClient(app).post(
+        f"/internal/runtime/session-credentials/{identity['run_id']}/{identity['attempt_id']}",
+        json={
+            "master_instance_id": identity["master_instance_id"],
+            "epoch": identity["epoch"],
+            "credentials": [
+                {
+                    "role": "operator",
+                    "database_url": secret_url.replace("reader:", "operator:"),
+                    "expires_at": (datetime.now(UTC) + timedelta(minutes=2)).isoformat(),
+                }
+            ],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert unauthorized_operator.status_code == 422
+    assert unauthorized_operator.json()["detail"]["code"] == "credential_roles_not_authorized"
 
 
-def test_embedding_capability_uses_installed_active_master_runner(tmp_path: Path) -> None:
+def test_embedding_capability_does_not_claim_ready_without_active_observed_evidence(tmp_path: Path) -> None:
     ledger = ControlLedger(tmp_path / "capability.sqlite3")
     app = create_app(
         ControlPlaneSettings(ledger_path=ledger.path),
@@ -378,11 +449,11 @@ def test_embedding_capability_uses_installed_active_master_runner(tmp_path: Path
         master_runtime=runtime(ledger, FakeKaggleRuntime()),
     )
     response = TestClient(app).get("/control/v1/embedding-production/capabilities")
-    assert response.status_code == 200
-    assert response.json()["ready"] is True
+    assert response.status_code == 503
+    assert response.json() == {"detail": {"code": "embedding_production_unavailable"}}
 
 
-def test_embedding_capability_supports_explicit_injected_master_runner(tmp_path: Path) -> None:
+def test_injected_runner_alone_cannot_claim_embedding_readiness(tmp_path: Path) -> None:
     ledger = ControlLedger(tmp_path / "capability-ready.sqlite3")
     app = create_app(
         ControlPlaneSettings(ledger_path=ledger.path),
@@ -391,5 +462,5 @@ def test_embedding_capability_supports_explicit_injected_master_runner(tmp_path:
         embedding_stage_runner=object(),
     )
     response = TestClient(app).get("/control/v1/embedding-production/capabilities")
-    assert response.status_code == 200
-    assert response.json()["ready"] is True
+    assert response.status_code == 503
+    assert response.json() == {"detail": {"code": "embedding_production_unavailable"}}

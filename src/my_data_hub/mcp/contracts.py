@@ -175,3 +175,10 @@ class WriteGate(Protocol):
         arguments: Mapping[str, Any],
         master: MasterSnapshot,
     ) -> WritePermit | Awaitable[WritePermit]: ...
+
+    def record_write_result(
+        self,
+        *,
+        permit: WritePermit,
+        result: Mapping[str, Any],
+    ) -> Mapping[str, Any] | Awaitable[Mapping[str, Any]]: ...

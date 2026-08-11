@@ -61,13 +61,13 @@ _WRITES = (
     ToolContract(
         "bloggers.import.apply", "migration:operate", False, destructive=True, role="migration_operator"
     ),
-    ToolContract("provider.resources.create", "provider:manage", False, open_world=True, role="provider_operator"),
-    ToolContract("provider.resources.version", "provider:manage", False, open_world=True, role="provider_operator"),
-    ToolContract("provider.resources.run", "provider:manage", False, open_world=True, role="provider_operator"),
-    ToolContract("provider.resources.read", "provider:manage", True, open_world=True, role="provider_operator"),
+    ToolContract("provider.resources.create", "provider:write", False, open_world=True, role="provider_operator"),
+    ToolContract("provider.resources.version", "provider:write", False, open_world=True, role="provider_operator"),
+    ToolContract("provider.resources.run", "provider:write", False, open_world=True, role="provider_operator"),
+    ToolContract("provider.resources.read", "provider:write", True, open_world=True, role="provider_operator"),
     ToolContract(
         "provider.resources.delete",
-        "provider:manage",
+        "provider:write",
         False,
         destructive=True,
         open_world=True,

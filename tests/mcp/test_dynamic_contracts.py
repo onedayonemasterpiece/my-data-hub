@@ -127,6 +127,10 @@ class Gate:
     async def authorize_write(self, **_kwargs):  # type: ignore[no-untyped-def]
         return self.permit
 
+    async def record_write_result(self, *, permit, result):  # type: ignore[no-untyped-def]
+        assert permit == self.permit
+        return result
+
 
 def active() -> MasterSnapshot:
     return MasterSnapshot(
@@ -198,6 +202,25 @@ async def test_data_cold_start_returns_durable_operation_id_without_opening_sess
     assert result["operation_id"] == "op-cold-start-01"
     assert result["master_state"] == "REQUESTED"
     assert resolver.ensures == [("reader", "mcp-read:bloggers.search")]
+
+
+@pytest.mark.asyncio
+async def test_provider_resource_read_uses_control_gateway_without_master_resolution() -> None:
+    resolver = Resolver(MasterSnapshot(MasterState.ABSENT))
+    control = Control()
+    service = HubService(resolver, control=control, fallback_identity=OWNER)
+    arguments = {
+        "resource_ref": "owner/notebook",
+        "control_class": "mcp_managed",
+        "private": True,
+        "payload": {"kind": "notebook", "claim_sha256": "a" * 64},
+    }
+
+    result = await service.invoke("provider.resources.read", arguments)
+
+    assert result["tool"] == "provider.resources.read"
+    assert resolver.ensures == []
+    assert control.calls == [("provider.resources.read", arguments, OWNER.subject)]
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ import tempfile
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
@@ -117,6 +118,42 @@ class KaggleAcceptanceOperationExecutor:
 
 class SessionCredentialRegistrar(Protocol):
     def store(self, credential: SessionCredential) -> Path: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TunnelCertificate:
+    certificate: str
+    serial: int
+    principal: str
+    valid_before: datetime
+    listen_host: str
+    listen_port: int
+
+    def __post_init__(self) -> None:
+        if (
+            not self.certificate.startswith("ssh-ed25519-cert-v01@openssh.com ")
+            or "\n" in self.certificate
+            or self.serial < 1
+            or not self.principal
+            or self.valid_before.tzinfo is None
+            or self.listen_host != "127.0.0.1"
+            or not 1 <= self.listen_port <= 65535
+        ):
+            raise ValueError("tunnel certificate result violates the public contract")
+
+
+class TunnelCertificateBroker(Protocol):
+    def issue_public_key(
+        self,
+        *,
+        master_instance_id: str,
+        run_id: str,
+        attempt_id: str,
+        epoch: int,
+        public_key: str,
+        valid_before: datetime,
+        now: datetime,
+    ) -> TunnelCertificate: ...
 
 
 @dataclass(frozen=True, slots=True)

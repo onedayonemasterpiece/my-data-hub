@@ -349,6 +349,10 @@ class HubService:
             active,
             role=TOOL_CONTRACTS[tool].role,
         )
+        recorder = getattr(self.write_gate, "record_write_result", None)
+        if recorder is None:
+            raise HubPermissionError("write gate cannot durably record the write result")
+        result = dict(await _await(recorder(permit=permit, result=result)))
         if tool.endswith(".apply"):
             self._require_durable_operation(result)
         return result

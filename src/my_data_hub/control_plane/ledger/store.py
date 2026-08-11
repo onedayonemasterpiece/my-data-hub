@@ -1379,6 +1379,218 @@ class ControlLedger:
                 if row is None or row["intent_json"] != intent_json:
                     raise IdempotencyConflict("provider effect identity was reused for a different intent") from None
 
+    def ensure_mcp_write_operation(
+        self,
+        *,
+        operation_id: str,
+        idempotency_key: str,
+        principal_id: str,
+        client_id: str,
+        master_instance_id: str,
+        epoch: int,
+        expected_revision: int,
+        request_sha256: str,
+        pre_change_checkpoint_id: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist the exact preview intent before an operator session is opened."""
+
+        if (
+            not operation_id
+            or not 8 <= len(idempotency_key) <= 300
+            or not principal_id
+            or not client_id
+            or not master_instance_id
+            or epoch < 1
+            or expected_revision < 0
+            or len(request_sha256) != 64
+        ):
+            raise ValueError("MCP write identity is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_write_operations WHERE operation_id=? OR "
+                "(principal_id=? AND client_id=? AND idempotency_key=?)",
+                (operation_id, principal_id, client_id, idempotency_key),
+            ).fetchone()
+            if row is not None:
+                existing = self._mcp_write_from_row(row)
+                expected = {
+                    "operation_id": operation_id,
+                    "idempotency_key": idempotency_key,
+                    "principal_id": principal_id,
+                    "client_id": client_id,
+                    "master_instance_id": master_instance_id,
+                    "epoch": epoch,
+                    "expected_revision": expected_revision,
+                    "request_sha256": request_sha256,
+                    "pre_change_checkpoint_id": pre_change_checkpoint_id,
+                }
+                if any(existing[key] != value for key, value in expected.items()):
+                    raise IdempotencyConflict("MCP write identity was reused for different intent")
+                return existing, False
+            connection.execute(
+                "INSERT INTO mcp_write_operations(operation_id,idempotency_key,tool,principal_id,client_id,"
+                "master_instance_id,epoch,expected_revision,request_sha256,state,pre_change_checkpoint_id,"
+                "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,'REQUESTED',?,?,?)",
+                (
+                    operation_id,
+                    idempotency_key,
+                    "data.change.preview",
+                    principal_id,
+                    client_id,
+                    master_instance_id,
+                    epoch,
+                    expected_revision,
+                    request_sha256,
+                    pre_change_checkpoint_id,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO mcp_write_events(operation_id,state,metadata_json,recorded_at) "
+                "VALUES (?,'REQUESTED',?,?)",
+                (operation_id, _safe_json({"request_sha256": request_sha256}), now),
+            )
+            row = connection.execute(
+                "SELECT * FROM mcp_write_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert row is not None
+            return self._mcp_write_from_row(row), True
+
+    def record_mcp_write_preview(
+        self,
+        operation_id: str,
+        *,
+        preview_receipt: str,
+        affected_rows: int,
+    ) -> dict[str, Any]:
+        if not preview_receipt or affected_rows < 0:
+            raise ValueError("MCP preview result is invalid")
+        return self._transition_mcp_write(
+            operation_id,
+            expected_states={"REQUESTED", "PREVIEWED"},
+            new_state="PREVIEWED",
+            updates={"preview_receipt": preview_receipt, "affected_rows": affected_rows},
+            metadata={"affected_rows": affected_rows},
+        )
+
+    def begin_mcp_write_apply(self, operation_id: str, *, preview_receipt: str) -> dict[str, Any]:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT preview_receipt FROM mcp_write_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+        if row is None or not hmac.compare_digest(str(row["preview_receipt"] or ""), preview_receipt):
+            raise PermissionError("apply does not bind the durable preview receipt")
+        return self._transition_mcp_write(
+            operation_id,
+            # APPLYING is deliberately not retryable.  A lost post-commit
+            # acknowledgement is ambiguous and must be reconciled instead of
+            # executing the DML twice.
+            expected_states={"PREVIEWED"},
+            new_state="APPLYING",
+            updates={},
+            metadata={},
+        )
+
+    def record_mcp_write_commit(
+        self,
+        operation_id: str,
+        *,
+        affected_rows: int,
+        committed_revision: int,
+    ) -> dict[str, Any]:
+        if affected_rows < 0 or committed_revision < 0:
+            raise ValueError("MCP commit result is invalid")
+        return self._transition_mcp_write(
+            operation_id,
+            expected_states={"APPLYING", "COMMITTED_PENDING_CHECKPOINT"},
+            new_state="COMMITTED_PENDING_CHECKPOINT",
+            updates={
+                "affected_rows": affected_rows,
+                "committed_revision": committed_revision,
+                "committed_at": _format_time(self.clock.now()),
+            },
+            metadata={"affected_rows": affected_rows, "committed_revision": committed_revision},
+        )
+
+    def advance_mcp_write_checkpoint(
+        self,
+        operation_id: str,
+        *,
+        state: str,
+        post_change_checkpoint_id: str | None = None,
+    ) -> dict[str, Any]:
+        allowed = {
+            "CHECKPOINTING": {"COMMITTED_PENDING_CHECKPOINT", "CHECKPOINTING"},
+            "CHECKPOINT_VERIFIED": {"CHECKPOINTING", "CHECKPOINT_VERIFIED"},
+            "DURABLE_COMPLETE": {"CHECKPOINT_VERIFIED", "DURABLE_COMPLETE"},
+        }
+        if state not in allowed or (state != "CHECKPOINTING" and not post_change_checkpoint_id):
+            raise ValueError("MCP checkpoint transition is invalid")
+        updates: dict[str, Any] = {}
+        if post_change_checkpoint_id is not None:
+            updates["post_change_checkpoint_id"] = post_change_checkpoint_id
+        return self._transition_mcp_write(
+            operation_id,
+            expected_states=allowed[state],
+            new_state=state,
+            updates=updates,
+            metadata={"post_change_checkpoint_id": post_change_checkpoint_id},
+        )
+
+    def mcp_write_operation(self, operation_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_write_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+        return self._mcp_write_from_row(row) if row else None
+
+    def _transition_mcp_write(
+        self,
+        operation_id: str,
+        *,
+        expected_states: set[str],
+        new_state: str,
+        updates: Mapping[str, Any],
+        metadata: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        now = _format_time(self.clock.now())
+        allowed_columns = {
+            "preview_receipt",
+            "affected_rows",
+            "committed_revision",
+            "committed_at",
+            "post_change_checkpoint_id",
+        }
+        if not set(updates) <= allowed_columns:
+            raise ValueError("unsupported MCP write projection update")
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_write_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if row is None or str(row["state"]) not in expected_states:
+                raise StaleRuntimeEvent("MCP write lifecycle transition is stale")
+            assignments = ["state=?", "updated_at=?", *(f"{column}=?" for column in updates)]
+            values = [new_state, now, *updates.values(), operation_id]
+            connection.execute(
+                f"UPDATE mcp_write_operations SET {','.join(assignments)} WHERE operation_id=?",
+                values,
+            )
+            connection.execute(
+                "INSERT INTO mcp_write_events(operation_id,state,metadata_json,recorded_at) VALUES (?,?,?,?)",
+                (operation_id, new_state, _safe_json(metadata), now),
+            )
+            current = connection.execute(
+                "SELECT * FROM mcp_write_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert current is not None
+            return self._mcp_write_from_row(current)
+
+    @staticmethod
+    def _mcp_write_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        return dict(zip(row.keys(), row, strict=True))
+
     def persist_provider_effect_receipt(self, effect_id: str, payload: Mapping[str, Any]) -> None:
         receipt_json = _safe_json(payload)
         receipt_sha256 = hashlib.sha256(receipt_json.encode()).hexdigest()
@@ -1489,6 +1701,31 @@ class ControlLedger:
                 (provider_ref, resource_kind, control_class),
             ).fetchone()
         return json.loads(str(row["claim_json"])) if row else None
+
+    def provider_resource_claim(self, claim_sha256: str) -> dict[str, Any] | None:
+        if len(claim_sha256) != 64:
+            return None
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT claim_json FROM provider_resource_claims WHERE claim_sha256=?",
+                (claim_sha256,),
+            ).fetchone()
+        return json.loads(str(row["claim_json"])) if row else None
+
+    def provider_resource(self, provider_ref: str, source_version: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT provider,resource_ref,resource_kind,source_identity,source_version,control_class,"
+                "private,state,metadata_json,observed_at FROM provider_resources "
+                "WHERE resource_ref=? AND source_version=? ORDER BY observed_at DESC LIMIT 1",
+                (provider_ref, source_version),
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["private"] = None if value["private"] is None else bool(value["private"])
+        value["metadata"] = json.loads(str(value.pop("metadata_json")))
+        return value
 
     def acquire_resource_lease(
         self,

@@ -136,6 +136,7 @@ def test_runtime_activation_requires_exact_nonrevoked_per_run_token(tmp_path) ->
         "state": "REGISTERING",
         "master_instance_id": "master-activation",
         "epoch": 1,
+        "credential_roles": ["reader"],
     }
     ledger.revoke_runtime_token("run-activation", "attempt-activation")
     assert client.get(path, headers={"Authorization": "Bearer opaque-run-secret"}).status_code == 401

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -82,6 +83,73 @@ def test_epoch_credential_rejects_expiry_non_tls_and_non_loopback(tmp_path) -> N
     path.chmod(0o600)
     with pytest.raises(SessionBrokerError, match="loopback"):
         source.load(request())
+
+
+def test_credential_store_prunes_expired_and_superseded_envelopes(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    root = tmp_path / "sessions"
+    source = DirectoryEpochCredentialSource(root)
+    old_instance = replace(
+        credential(),
+        master_instance_id="22222222-2222-4222-8222-222222222222",
+        epoch=6,
+    )
+    source.store(old_instance)
+    expired = root / "expired.json"
+    expired.write_text(json.dumps({"expires_at": "2020-01-01T00:00:00Z"}))
+    expired.chmod(0o600)
+
+    current = credential()
+    current_path = source.store(current)
+
+    assert sorted(path.name for path in root.iterdir()) == [current_path.name]
+    assert source.load(request()).epoch == 7
+
+
+def test_credential_cleanup_is_bounded(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    root = tmp_path / "sessions"
+    source = DirectoryEpochCredentialSource(root)
+    source.store(credential())
+    extra = root / "malformed.json"
+    extra.write_text("not-json")
+    extra.chmod(0o600)
+
+    with pytest.raises(SessionBrokerError, match="exceeds the cleanup bound"):
+        source.prune(now=datetime.now(UTC), max_files=1)
+
+
+def test_restricted_login_rejects_superuser_or_wrong_group() -> None:
+    operator_request = replace(request(), role="operator", tool="data.change.preview")
+    session = PostgresMasterSession(
+        operator_request,
+        replace(credential(), role="operator"),
+    )
+
+    class Cursor:
+        def __init__(self, row):  # type: ignore[no-untyped-def]
+            self.row = row
+
+        def execute(self, _statement, parameters=()):  # type: ignore[no-untyped-def]
+            assert parameters == ("mdh_mcp_editor",)
+            return self
+
+        def fetchone(self):  # type: ignore[no-untyped-def]
+            return self.row
+
+    safe = {
+        "rolsuper": False,
+        "rolcreatedb": False,
+        "rolcreaterole": False,
+        "rolreplication": False,
+        "rolbypassrls": False,
+        "requested_member": True,
+        "owner_member": False,
+        "role_admin_member": False,
+    }
+    session._assert_restricted_login(Cursor(safe))
+    with pytest.raises(SessionBrokerError, match="restricted role login"):
+        session._assert_restricted_login(Cursor({**safe, "rolsuper": True}))
+    with pytest.raises(SessionBrokerError, match="restricted role login"):
+        session._assert_restricted_login(Cursor({**safe, "requested_member": False}))
 
 
 @pytest.mark.asyncio

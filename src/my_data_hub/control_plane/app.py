@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import tempfile
@@ -23,6 +24,8 @@ from my_data_hub.control_plane.runtime import (
     MasterRuntimeSettings,
     SessionCredential,
     SessionCredentialRegistrar,
+    TunnelCertificate,
+    TunnelCertificateBroker,
     build_production_runtime,
 )
 from my_data_hub.embeddings.master_stage import execute_embedding_production_stage
@@ -77,6 +80,20 @@ class ControlPlaneConfigurationError(RuntimeError):
     """Raised when the lightweight devstand profile would acquire data-plane state."""
 
 
+def assert_no_database_environment() -> None:
+    """Reject static/libpq credentials in lightweight control or MCP processes."""
+
+    candidates = set(DATABASE_ENVIRONMENT_NAMES)
+    candidates.update(name for name in os.environ if name.endswith("_DATABASE_URL"))
+    candidates.update(name for name in os.environ if name.startswith("PG"))
+    leaked = sorted(name for name in candidates if os.getenv(name, "").strip())
+    if leaked:
+        raise ControlPlaneConfigurationError(
+            "lightweight control plane must not receive master database credentials: "
+            + ", ".join(leaked)
+        )
+
+
 def _session_credential(
     item: object,
     identity: dict[str, Any],
@@ -86,7 +103,8 @@ def _session_credential(
 ) -> SessionCredential:
     if not isinstance(item, dict) or set(item) != {"role", "database_url", "expires_at"}:
         raise HTTPException(status_code=422, detail={"code": "invalid_credential"})
-    if item.get("role") != "reader":
+    role = str(item.get("role", ""))
+    if role not in {"reader", "operator"}:
         raise HTTPException(status_code=422, detail={"code": "credential_role_not_allowed"})
     try:
         expires_at = datetime.fromisoformat(str(item["expires_at"]).replace("Z", "+00:00")).astimezone(UTC)
@@ -110,7 +128,7 @@ def _session_credential(
     return SessionCredential(
         master_instance_id=str(identity["master_instance_id"]),
         epoch=int(identity["epoch"]),
-        role="reader",
+        role=role,
         database_url=database_url,
         expires_at=expires_at,
     )
@@ -143,14 +161,7 @@ class ControlPlaneSettings:
 
     @classmethod
     def from_env(cls) -> ControlPlaneSettings:
-        candidates = set(DATABASE_ENVIRONMENT_NAMES)
-        candidates.update(name for name in os.environ if name.endswith("_DATABASE_URL"))
-        candidates.update(name for name in os.environ if name.startswith("PG"))
-        leaked = sorted(name for name in candidates if os.getenv(name, "").strip())
-        if leaked:
-            raise ControlPlaneConfigurationError(
-                "lightweight control plane must not receive master database credentials: " + ", ".join(leaked)
-            )
+        assert_no_database_environment()
         try:
             port = int(os.getenv("MY_DATA_HUB_CONTROL_PORT", "8080"))
         except ValueError as exc:
@@ -179,6 +190,8 @@ def create_app(
     master_runtime: ControlPlaneMasterRuntime | None = None,
     session_registrar: SessionCredentialRegistrar | None = None,
     embedding_stage_runner: object | None = None,
+    operator_credential_enabled: bool = False,
+    tunnel_certificate_broker: TunnelCertificateBroker | None = None,
 ) -> FastAPI:
     runtime = settings or ControlPlaneSettings.from_env()
     ledger_path = runtime.ledger_path or Path(tempfile.mkdtemp(prefix="mdh-control-")) / "control.sqlite3"
@@ -239,6 +252,7 @@ def create_app(
     app.state.master_coordinator = master_runtime.coordinator if master_runtime is not None else None
     app.state.master_provider_status = provider_status
     app.state.session_registrar = session_registrar
+    app.state.tunnel_certificate_broker = tunnel_certificate_broker
     app.state.embedding_stage_runner = embedding_stage_runner or execute_embedding_production_stage
     app.state.reconcile_master_requests = (
         master_runtime.reconcile_requested_once if master_runtime is not None else None
@@ -502,7 +516,34 @@ def create_app(
 
     @app.get("/control/v1/embedding-production/capabilities")
     def embedding_production_capabilities() -> dict[str, Any]:
-        if app.state.embedding_stage_runner is None:
+        service = control_ledger.resolve_service("postgres-master")
+        operation = (
+            control_ledger.operation_for_attempt(service.run_id, service.attempt_id)
+            if service is not None
+            else None
+        )
+        record = (
+            control_ledger.embedding_production_request_for_operation(operation.operation_id)
+            if operation is not None
+            else None
+        )
+        receipt = record.get("stage_receipt") if record else None
+        coverage = receipt.get("coverage") if isinstance(receipt, dict) else None
+        evidence_ready = bool(
+            app.state.embedding_stage_runner is not None
+            and service is not None
+            and operation is not None
+            and operation.state == "ACTIVE"
+            and record is not None
+            and record.get("state") == "CHECKPOINT_VERIFIED"
+            and isinstance(coverage, list)
+            and len(coverage) == 2
+            and all(
+                isinstance(row, dict) and int(row.get("completed_documents", 0)) > 0
+                for row in coverage
+            )
+        )
+        if not evidence_ready:
             raise HTTPException(status_code=503, detail={"code": "embedding_production_unavailable"})
         return EmbeddingProductionCapabilities(
             ready=True,
@@ -880,6 +921,7 @@ def create_app(
             "state": operation.state,
             "master_instance_id": identity.get("master_instance_id"),
             "epoch": int(identity.get("epoch", 0)),
+            "credential_roles": ["reader", "operator"] if active and operator_credential_enabled else ["reader"],
         }
 
     @app.post("/internal/runtime/session-credentials/{run_id}/{attempt_id}")
@@ -933,11 +975,133 @@ def create_app(
         credentials = [
             _session_credential(item, identity, now=now, latest_expiry=latest_expiry) for item in body["credentials"]
         ]
+        expected_roles = (
+            ["reader", "operator"]
+            if operation.state == "ACTIVE" and operator_credential_enabled
+            else ["reader"]
+        )
+        if [credential.role for credential in credentials] != expected_roles:
+            raise HTTPException(status_code=422, detail={"code": "credential_roles_not_authorized"})
         references: list[str] = []
         for credential in credentials:
             reference = registrar.store(credential)
             references.append(Path(reference).name)
         return {"registered": len(references), "credential_refs": references}
+
+    @app.post("/internal/runtime/tunnel-certificates/{run_id}/{attempt_id}")
+    async def runtime_tunnel_certificate(
+        run_id: str,
+        attempt_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        broker = app.state.tunnel_certificate_broker
+        if broker is None:
+            raise HTTPException(status_code=503, detail={"code": "tunnel_certificate_broker_unavailable"})
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail={"code": "runtime_token_required"})
+        token = authorization.removeprefix("Bearer ").strip()
+        if not control_ledger.runtime_token_valid(run_id, attempt_id, token):
+            raise HTTPException(status_code=401, detail={"code": "runtime_token_invalid"})
+        raw = await request.body()
+        if len(raw) > 16 * 1024:
+            raise HTTPException(status_code=413, detail={"code": "tunnel_certificate_request_too_large"})
+        try:
+            body = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail={"code": "invalid_json"}) from exc
+        if not isinstance(body, dict) or set(body) != {
+            "master_instance_id", "epoch", "public_key", "valid_before"
+        }:
+            raise HTTPException(status_code=422, detail={"code": "tunnel_certificate_contract_invalid"})
+        operation = control_ledger.operation_for_attempt(run_id, attempt_id)
+        if operation is None or operation.state not in {"REGISTERING", "ACTIVE"}:
+            raise HTTPException(status_code=409, detail={"code": "runtime_not_certificate_eligible"})
+        identity = operation.identity
+        try:
+            exact_epoch = int(body["epoch"])
+            valid_before = datetime.fromisoformat(str(body["valid_before"]).replace("Z", "+00:00")).astimezone(UTC)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail={"code": "tunnel_certificate_contract_invalid"}) from exc
+        if (
+            str(identity.get("run_id")) != run_id
+            or str(identity.get("attempt_id")) != attempt_id
+            or str(identity.get("master_instance_id")) != str(body["master_instance_id"])
+            or int(identity.get("epoch", 0)) != exact_epoch
+            or exact_epoch < 1
+        ):
+            raise HTTPException(status_code=409, detail={"code": "runtime_epoch_fenced"})
+        public_key = str(body["public_key"])
+        parts = public_key.split(" ")
+        try:
+            decoded_key = base64.b64decode(parts[1], validate=True) if len(parts) == 2 else b""
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail={"code": "tunnel_public_key_invalid"}) from exc
+        if (
+            len(public_key) > 1_000
+            or "\n" in public_key
+            or parts[0] != "ssh-ed25519"
+            or len(decoded_key) != 51
+            or not decoded_key.startswith(b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20")
+        ):
+            raise HTTPException(status_code=422, detail={"code": "tunnel_public_key_invalid"})
+        now = control_ledger.clock.now().astimezone(UTC)
+        latest_expiry = now + timedelta(minutes=5)
+        if operation.state == "ACTIVE":
+            service = control_ledger.resolve_service("postgres-master", now=now)
+            if (
+                service is None
+                or service.run_id != run_id
+                or service.attempt_id != attempt_id
+                or service.master_instance_id != str(body["master_instance_id"])
+                or service.epoch != exact_epoch
+            ):
+                raise HTTPException(status_code=409, detail={"code": "runtime_epoch_fenced"})
+            latest_expiry = min(latest_expiry, service.lease_until.astimezone(UTC))
+        lease_value = identity.get("lease_until")
+        if operation.state == "REGISTERING" and lease_value:
+            try:
+                latest_expiry = min(
+                    latest_expiry,
+                    datetime.fromisoformat(str(lease_value).replace("Z", "+00:00")).astimezone(UTC),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail={"code": "runtime_lease_invalid"}) from exc
+        if valid_before <= now or valid_before > latest_expiry:
+            raise HTTPException(status_code=422, detail={"code": "tunnel_certificate_expiry_invalid"})
+        try:
+            issued = broker.issue_public_key(
+                master_instance_id=str(body["master_instance_id"]),
+                run_id=run_id,
+                attempt_id=attempt_id,
+                epoch=exact_epoch,
+                public_key=public_key,
+                valid_before=valid_before,
+                now=now,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail={"code": "tunnel_certificate_issue_failed"}) from exc
+        try:
+            certificate = TunnelCertificate(
+                certificate=str(issued.certificate),
+                serial=int(issued.serial),
+                principal=str(issued.principal),
+                valid_before=issued.valid_before,
+                listen_host=str(issued.listen_host),
+                listen_port=int(issued.listen_port),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=503, detail={"code": "tunnel_certificate_result_invalid"}) from exc
+        if certificate.valid_before != valid_before:
+            raise HTTPException(status_code=503, detail={"code": "tunnel_certificate_result_invalid"})
+        return {
+            "certificate": certificate.certificate,
+            "serial": certificate.serial,
+            "principal": certificate.principal,
+            "valid_before": certificate.valid_before.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "listen_host": certificate.listen_host,
+            "listen_port": certificate.listen_port,
+        }
 
     @app.post("/internal/runtime/connector-coverage/{run_id}/{attempt_id}")
     async def runtime_connector_coverage(
