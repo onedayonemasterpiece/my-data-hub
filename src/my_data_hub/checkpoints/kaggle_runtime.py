@@ -1006,6 +1006,7 @@ class RuntimeCheckpointCoordinator:
         self._pending_created_at = self._pending_created_at or self.clock()
         package = package_directory / str(checkpoint_id)
         readback = package_directory / f"readback-{checkpoint_id}"
+        provider_started = package_directory / f".provider-started-{checkpoint_id}"
         try:
             manifest_path = package / CHECKPOINT_MANIFEST_NAME
             if head.current == checkpoint_id:
@@ -1020,18 +1021,26 @@ class RuntimeCheckpointCoordinator:
                 self._pending_checkpoint_id = None
                 self._pending_created_at = None
                 return recovered
-            if package.exists():
-                manifest = load_and_verify(manifest_path, package)
-                if (
-                    manifest.checkpoint_id != checkpoint_id
-                    or manifest.parent_checkpoint_id != head.current
-                    or manifest.master_instance_id != UUID(str(identity.master_instance_id))
-                    or manifest.epoch != int(identity.epoch)
-                    or manifest.source_run_id != str(identity.run_id)
-                    or manifest.source_identity != self.source_identity
-                ):
-                    raise CheckpointRuntimeError("pending checkpoint package identity changed across retry")
-            else:
+            manifest: CheckpointManifest | None = None
+            if package.exists() or package.is_symlink():
+                if package.is_symlink() or not package.is_dir():
+                    raise CheckpointRuntimeError("pending checkpoint package is not a real directory")
+                try:
+                    manifest = load_and_verify(manifest_path, package)
+                except Exception as invalid_package:
+                    if provider_started.exists() or provider_started.is_symlink():
+                        raise CheckpointRuntimeError(
+                            "provider-started checkpoint package is invalid and cannot be rebuilt"
+                        ) from invalid_package
+                    # No provider effect was allowed to start for this local
+                    # candidate.  A failed ArchiveCreator/build may therefore
+                    # be retried under the same deterministic identity.
+                    shutil.rmtree(package)
+            elif provider_started.exists() or provider_started.is_symlink():
+                raise CheckpointRuntimeError(
+                    "provider-started checkpoint package is absent and cannot be rebuilt"
+                )
+            if manifest is None:
                 with self.connect(database_url, connect_timeout=15) as connection:
                     postgres_version, pgvector_version, checkpoint_lsn = _postgres_checkpoint_identity(connection)
                     build_identity = CheckpointBuildIdentity(
@@ -1047,13 +1056,26 @@ class RuntimeCheckpointCoordinator:
                         checkpoint_lsn=checkpoint_lsn,
                         probe_relations=self.probe_relations,
                     )
-                    _package, manifest_path, _manifest = self.builder.build(
+                    built_package, built_manifest_path, _built_manifest = self.builder.build(
                         database_url=database_url,
                         connection=connection,
                         package_directory=package,
                         identity=build_identity,
                         timeout_seconds=self.timeout_seconds,
                     )
+                    if built_package != package or built_manifest_path != manifest_path:
+                        raise CheckpointRuntimeError("checkpoint builder returned a different package identity")
+                    manifest = load_and_verify(manifest_path, package)
+            if (
+                manifest.checkpoint_id != checkpoint_id
+                or manifest.parent_checkpoint_id != head.current
+                or manifest.master_instance_id != UUID(str(identity.master_instance_id))
+                or manifest.epoch != int(identity.epoch)
+                or manifest.source_run_id != str(identity.run_id)
+                or manifest.source_identity != self.source_identity
+            ):
+                raise CheckpointRuntimeError("pending checkpoint package identity changed across retry")
+            _mark_provider_started(provider_started)
             receipt = self.coordinator.publish(
                 package=package,
                 manifest_path=manifest_path,
@@ -1255,6 +1277,23 @@ def _assert_kaggle_working_path(path: Path) -> None:
     root = _KAGGLE_WORKING_ROOT.resolve()
     if resolved == root or root not in resolved.parents:
         raise CheckpointRuntimeError("checkpoint bytes may exist only below /kaggle/working")
+
+
+def _mark_provider_started(path: Path) -> None:
+    """Create a fail-closed local fence before any provider mutation may run."""
+
+    _assert_kaggle_working_path(path)
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise CheckpointRuntimeError("checkpoint provider-started fence is unsafe")
+    if path.exists():
+        return
+    try:
+        with path.open("xb"):
+            pass
+    except FileExistsError:
+        if path.is_symlink() or not path.is_file():
+            raise CheckpointRuntimeError("checkpoint provider-started fence raced unsafely") from None
+    path.chmod(0o600)
 
 
 def _render_verifier_source(

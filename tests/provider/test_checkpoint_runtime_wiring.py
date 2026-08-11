@@ -550,10 +550,8 @@ def test_runtime_composite_matches_master_create_and_publish_protocol(
             package = kwargs["package_directory"]
             assert isinstance(package, Path)
             package.mkdir(parents=True)
-            manifest = SimpleNamespace(checkpoint_id=CHECKPOINT_ID)
-            manifest_path = package / "checkpoint-manifest.json"
-            manifest_path.write_text("{}")
-            return package, manifest_path, manifest
+            manifest = _manifest(package)
+            return package, package / "checkpoint-manifest.json", manifest
 
     expected = PublishReceipt(
         checkpoint_id=str(CHECKPOINT_ID),
@@ -596,6 +594,115 @@ def test_runtime_composite_matches_master_create_and_publish_protocol(
     assert build_identity.postgres_version == "18.1"  # type: ignore[union-attr]
     assert build_identity.pgvector_version == "0.8.1"  # type: ignore[union-attr]
     assert build_identity.checkpoint_lsn == "0/16B6C50"  # type: ignore[union-attr]
+
+
+def test_runtime_retry_rebuilds_partial_package_before_provider_effect(
+    kaggle_working: Path,
+) -> None:
+    class Cursor:
+        query = ""
+
+        def __enter__(self) -> Cursor:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, query: str) -> Cursor:
+            self.query = query
+            return self
+
+        def fetchone(self) -> tuple[str] | None:
+            if self.query == "SHOW server_version":
+                return ("18.1",)
+            if "extversion" in self.query:
+                return ("0.8.1",)
+            if "pg_current_wal_lsn" in self.query:
+                return ("0/16B6C50",)
+            return None
+
+    class Connection:
+        def __enter__(self) -> Connection:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+    class Builder:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.packages: list[Path] = []
+
+        def build(self, **kwargs: object):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            package = kwargs["package_directory"]
+            assert isinstance(package, Path)
+            self.packages.append(package)
+            package.mkdir(parents=True)
+            if self.calls == 1:
+                (package / "partial-archive.tar.gz").write_bytes(b"partial")
+                raise RuntimeError("simulated archive creator crash")
+            assert not (package / "partial-archive.tar.gz").exists()
+            manifest = _manifest(package)
+            return package, package / "checkpoint-manifest.json", manifest
+
+    expected = PublishReceipt(
+        checkpoint_id=str(CHECKPOINT_ID),
+        exact_version_ref="owner/private-checkpoints/1",
+        manifest_sha256="a" * 64,
+        current_checkpoint_id=str(CHECKPOINT_ID),
+        previous_checkpoint_id=None,
+        upload_seconds=1,
+        readback_seconds=2,
+        restore_seconds=3,
+        package_bytes=4,
+        restore_receipt={"ok": True},
+    )
+
+    class Publisher:
+        registry = SimpleNamespace(head=CheckpointHead())
+        provider = SimpleNamespace(claim=None, dataset_ref="owner/private-checkpoints")
+        calls = 0
+
+        def publish(self, **kwargs: object) -> PublishReceipt:
+            self.calls += 1
+            package = kwargs["package"]
+            assert isinstance(package, Path)
+            assert (package.parent / f".provider-started-{CHECKPOINT_ID}").is_file()
+            return expected
+
+    builder = Builder()
+    publisher = Publisher()
+    coordinator = RuntimeCheckpointCoordinator(
+        builder=builder,  # type: ignore[arg-type]
+        coordinator=publisher,  # type: ignore[arg-type]
+        probe_relations=("hub.canonical_state",),
+        source_identity="owner/postgres-master/3",
+        connect=lambda *_args, **_kwargs: Connection(),
+        clock=lambda: NOW,
+        checkpoint_id_factory=lambda: CHECKPOINT_ID,
+    )
+    call = {
+        "database_url": "postgresql:///postgres",
+        "package_directory": kaggle_working / "checkpoints",
+        "identity": SimpleNamespace(master_instance_id=MASTER_ID, run_id=str(RUN_ID), epoch=9),
+    }
+
+    with pytest.raises(RuntimeError, match="archive creator crash"):
+        coordinator.create_and_publish(**call)
+    partial_package = kaggle_working / "checkpoints" / str(CHECKPOINT_ID)
+    assert (partial_package / "partial-archive.tar.gz").is_file()
+    assert not (partial_package.parent / f".provider-started-{CHECKPOINT_ID}").exists()
+
+    receipt = coordinator.create_and_publish(**call)
+
+    assert receipt == expected
+    assert builder.calls == 2
+    assert builder.packages[0] == builder.packages[1] == partial_package
+    assert publisher.calls == 1
 
 
 def test_runtime_retry_reuses_package_and_refreshes_exact_durable_claim(
