@@ -58,3 +58,22 @@ def test_preflight_accepts_complete_legacy_environment(
     monkeypatch.setenv("KAGGLE_KEY", "k" * 32)
     assert kaggle_credentials_configured() is True
     assert kaggle_exact_kernel_read_credentials_configured() is False
+
+
+def test_preflight_requires_bounded_private_access_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
+    monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
+    monkeypatch.delenv("KAGGLE_KEY", raising=False)
+    monkeypatch.setenv("KAGGLE_CONFIG_DIR", str(tmp_path))
+    token = tmp_path / "access_token"
+    token.write_text("short", encoding="utf-8")
+    token.chmod(0o600)
+    assert kaggle_credentials_configured() is False
+    token.write_text("t" * 32, encoding="utf-8")
+    token.chmod(0o644)
+    assert kaggle_credentials_configured() is False
+    token.chmod(0o600)
+    assert kaggle_credentials_configured() is True
+    assert kaggle_exact_kernel_read_credentials_configured() is True

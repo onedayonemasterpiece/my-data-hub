@@ -197,7 +197,7 @@ reject_environment_keys "$provider_env" "provider environment" \
 reject_environment_keys "$mcp_env" "remote MCP environment" \
   'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT|MY_DATA_HUB_OAUTH_SIGNING_KEY'
 reject_environment_keys "$oauth_env" "OAuth environment" \
-  'KAGGLE_API_TOKEN|MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT|MY_DATA_HUB_KAGGLE_[A-Z0-9_]+'
+  'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT|MY_DATA_HUB_KAGGLE_[A-Z0-9_]+'
 
 operator_override=""
 operator_compose_arg=""

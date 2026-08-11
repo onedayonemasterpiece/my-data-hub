@@ -14,6 +14,8 @@ def test_secret_scan_detects_strong_tokens_and_private_keys() -> None:
 def test_secret_scan_detects_nonplaceholder_sensitive_assignment() -> None:
     assignment = "KAGGLE_API_" + "TOKEN=" + "sensitive-value-123456789"
     assert findings(assignment) == ["credential-assignment"]
+    legacy_assignment = "KAGGLE_" + "KEY=sensitive-value-123456789"
+    assert findings(legacy_assignment) == ["credential-assignment"]
 
 
 def test_secret_scan_allows_ci_and_documentation_placeholders() -> None:

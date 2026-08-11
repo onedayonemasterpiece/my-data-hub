@@ -22,7 +22,7 @@ _STRONG_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 _ASSIGNMENT = re.compile(
     r"(?m)^[ \t]*(?:export[ \t]+)?"
-    r"(?:KAGGLE_API_TOKEN|[A-Z0-9_]*(?:PASSWORD|SECRET|ACCESS_TOKEN|REFRESH_TOKEN|PRIVATE_KEY))"
+    r"(?:KAGGLE_API_TOKEN|KAGGLE_KEY|[A-Z0-9_]*(?:PASSWORD|SECRET|ACCESS_TOKEN|REFRESH_TOKEN|PRIVATE_KEY))"
     r"[ \t]*[=:][ \t]*['\"]?([^\s'\"#]+)"
 )
 _SAFE_ASSIGNMENT_FRAGMENTS = (

@@ -29,7 +29,7 @@ def _bounded_regular_private_file(path: Path) -> bool:
         stat.S_ISREG(metadata.st_mode)
         and not path.is_symlink()
         and metadata.st_uid == os.geteuid()
-        and 0 < metadata.st_size <= _MAX_CONFIG_BYTES
+        and _MIN_SECRET_LENGTH < metadata.st_size <= _MAX_CONFIG_BYTES
         and metadata.st_mode & 0o077 == 0
     )
 
