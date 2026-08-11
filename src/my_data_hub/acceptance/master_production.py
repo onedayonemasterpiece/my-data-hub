@@ -932,15 +932,26 @@ class ProductionControlAcceptanceContext:
     h1_denial: H1ExpiredLeaseDenialPort | None = None
     soak_sessions: SoakSessionPort | None = None
     session_directory: Path | None = None
+    acceptance_state_directory: Path | None = None
 
     def build(self, runtime: ControlPlaneMasterRuntime) -> ControlMasterAcceptanceExecutor:
         h1_denial = self.h1_denial
         if h1_denial is None and self.session_directory is not None:
-            h1_denial = PostgresH1ExpiredLeaseDenialProbe(
-                connections=DirectoryOperatorConnectionFactory(
-                    DirectoryEpochCredentialSource(self.session_directory)
-                ),
+            from .lease_expiry_denial import (
+                AtomicLeaseExpiryCompletionJournal,
+                BrokeredH1ExpiredLeaseDenial,
+                DirectoryAcceptanceObserverConnectionFactory,
+            )
+
+            source = DirectoryEpochCredentialSource(self.session_directory)
+            state_root = self.acceptance_state_directory or (
+                self.session_directory.parent / "acceptance-completions"
+            )
+            h1_denial = BrokeredH1ExpiredLeaseDenial(
+                operator_connections=DirectoryOperatorConnectionFactory(source),
+                observer_connections=DirectoryAcceptanceObserverConnectionFactory(source),
                 renewal=ControlLedgerLeaseExpiryRenewal(runtime),
+                journal=AtomicLeaseExpiryCompletionJournal(state_root / "fm10"),
             )
         return ControlMasterAcceptanceExecutor(
             runtime=runtime,

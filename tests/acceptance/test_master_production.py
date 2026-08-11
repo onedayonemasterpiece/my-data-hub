@@ -489,3 +489,16 @@ def test_control_context_factory_installs_owner_claim_cas() -> None:
     executor = ProductionControlAcceptanceContext().build(runtime)  # type: ignore[arg-type]
     assert executor.runtime is runtime
     assert executor.host_claims is not None and executor.host_effects is not None
+
+
+def test_control_context_composes_brokered_fm10_adapter(tmp_path: Path) -> None:
+    from my_data_hub.acceptance.lease_expiry_denial import BrokeredH1ExpiredLeaseDenial
+
+    runtime = SimpleNamespace(ledger=object())
+    executor = ProductionControlAcceptanceContext(
+        session_directory=tmp_path / "sessions",
+        acceptance_state_directory=tmp_path / "acceptance",
+    ).build(runtime)  # type: ignore[arg-type]
+    assert executor.host_effects is not None
+    assert isinstance(executor.host_effects.h1_denial, BrokeredH1ExpiredLeaseDenial)
+    assert executor.host_effects.h1_denial.journal.root == tmp_path / "acceptance" / "fm10"
