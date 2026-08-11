@@ -3,9 +3,15 @@
     "PUBLIC_EDGE_BACKEND_502",
     "CONTROL_COMPOSE_INCOMPLETE",
     "CONTROL_PROVIDER_CREDENTIALS_ABSENT",
-    "GITHUB_DEPLOYMENT_SECRETS_ABSENT"
+    "GITHUB_DEPLOYMENT_SECRETS_ABSENT",
+    "YC_CLI_OWNER_REAUTH_REQUIRED"
   ],
   "conclusion": "DEVSTAND_NOT_DEPLOYED_OR_PROVISIONED_FOR_PROVIDER_CONTROL",
+  "deployment_access_observation": {
+    "direct_devstand_ssh_profile_present": false,
+    "github_deploy_workflow_present": false,
+    "yandex_cli": "interactive_owner_reauthentication_required"
+  },
   "github_configuration": {
     "devstand_branch_policy": [
       "main"
@@ -17,7 +23,8 @@
   "kaggle_control_comparison": {
     "automated_legacy_credentials_work_from_owner_runtime": true,
     "real_private_dataset_canary": "kaggle-private-dataset-canary-4.json",
-    "real_runtime_attestation_canary": "kaggle-runtime-attestation-canary.json"
+    "real_runtime_attestation_canary": "kaggle-runtime-attestation-canary.json",
+    "second_real_runtime_attestation_canary": "kaggle-runtime-attestation-canary-2.json"
   },
   "local_control_observation": {
     "compose_services_observed": [
@@ -31,7 +38,7 @@
     "loopback_health_http_status": 503,
     "provider_environment_mounted": false
   },
-  "observed_at": "2026-08-11T17:43:45.705375+00:00",
+  "observed_at": "2026-08-11T18:17:00+00:00",
   "public_endpoints": {
     "edge_server": "ycalb",
     "mcp_healthz_http_status": 502,
