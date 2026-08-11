@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,6 +11,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
+from my_data_hub.control_plane.adapters import LedgerControlReader
 from my_data_hub.control_plane.app import ControlPlaneSettings, create_app
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.control_plane.runtime import (
@@ -18,8 +20,14 @@ from my_data_hub.control_plane.runtime import (
     TunnelCertificate,
     build_production_runtime,
 )
+from my_data_hub.embeddings.production import EmbeddingProductionRequest
 from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator
-from my_data_hub.providers.kaggle import KaggleMasterLaunchAssets, KaggleMasterRuntimeProvider, derive_runtime_secret
+from my_data_hub.providers.kaggle import (
+    KaggleMasterLaunchAssets,
+    KaggleMasterRuntimeProvider,
+    KaggleProviderAdapter,
+    derive_runtime_secret,
+)
 from my_data_hub.runtime_sdk import RuntimeEvent, RuntimeEventType
 from my_data_hub.workloads.bloggers.master_stage import (
     BloggerImportStageReceipt,
@@ -480,3 +488,108 @@ def test_injected_runner_alone_cannot_claim_embedding_readiness(tmp_path: Path) 
     response = TestClient(app).get("/control/v1/embedding-production/capabilities")
     assert response.status_code == 503
     assert response.json() == {"detail": {"code": "embedding_production_unavailable"}}
+
+
+def test_embedding_admission_accepts_first_request_and_replays_without_completion(tmp_path: Path) -> None:
+    path = tmp_path / "embedding-admission.sqlite3"
+    ledger = ControlLedger(path)
+    wired = runtime(ledger, FakeKaggleRuntime())
+    app = create_app(ControlPlaneSettings(ledger_path=path), ledger=ledger, master_runtime=wired)
+    client = TestClient(app)
+    ensured = client.post("/control/v1/master/ensure", json={"idempotency_key": "embedding-admission"})
+    operation = ledger.get_operation(ensured.json()["operation_id"])
+    assert operation is not None
+    identity = operation.identity
+    now = datetime.now(UTC)
+    token = derive_runtime_secret(ROOT, str(identity["run_id"]), str(identity["attempt_id"]))
+    ready = RuntimeEvent(
+        event_id=str(uuid4()),
+        run_id=str(identity["run_id"]),
+        attempt_id=str(identity["attempt_id"]),
+        service_instance_id=str(identity["service_instance_id"]),
+        source_identity=assets().source_identity,
+        source_version=assets().source_version,
+        event_type=RuntimeEventType.SERVICE_READY,
+        emitted_at=now,
+        local_sequence=1,
+        epoch=int(identity["epoch"]),
+        data={
+            "service_kind": "postgres-master",
+            "endpoint": "tunnel://127.0.0.1:55432",
+            "protocol": "postgresql+tls",
+            "tls_fingerprint": "sha256:" + "a" * 64,
+            "capabilities": ["sql", "fts", "pgvector"],
+            "canonical_revision": 9,
+            "schema_version": "1",
+            "lease_until": (now + timedelta(minutes=4)).isoformat(),
+            "master_instance_id": str(identity["master_instance_id"]),
+            "epoch": int(identity["epoch"]),
+        },
+    )
+    accepted = client.post(
+        "/internal/runtime/events",
+        content=ready.model_dump_json(by_alias=True, exclude_none=True).encode(),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert accepted.status_code == 200
+    checkpoint_id = str(uuid4())
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=checkpoint_id,
+        operation_id=operation.operation_id,
+        dataset_ref="owner/checkpoints",
+        version_ref=None,
+        manifest_sha256="e" * 64,
+        source_checkpoint_id=None,
+        source_head_generation=0,
+        master_instance_id=str(identity["master_instance_id"]),
+        epoch=int(identity["epoch"]),
+        manifest_payload={"canonical_revision": 9},
+    )
+    ledger.mark_checkpoint_uploaded(checkpoint_id, "owner/checkpoints/1")
+    ledger.mark_checkpoint_readback_verified(checkpoint_id)
+    ledger.mark_checkpoint_restore_verified(checkpoint_id)
+    ledger.mark_checkpoint_verified(checkpoint_id)
+    ledger.promote_checkpoint(
+        "postgres-master", checkpoint_id, expected_generation=0, expected_parent_checkpoint_id=None
+    )
+    probe_query = "admission probe"
+    request = EmbeddingProductionRequest(
+        request_id=uuid4(),
+        idempotency_key_sha256="a" * 64,
+        blogger_receipt_id=uuid4(),
+        blogger_receipt_sha256="b" * 64,
+        blogger_canonical_revision=9,
+        blogger_checkpoint_id=checkpoint_id,
+        source_revision="c" * 40,
+        probe_query=probe_query,
+        probe_query_sha256=hashlib.sha256(probe_query.encode()).hexdigest(),
+    )
+    blocked = client.post(
+        "/control/v1/embedding-production/requests", json=request.model_dump(mode="json")
+    )
+    assert blocked.status_code == 409
+    assert ledger.embedding_production_request(str(request.request_id)) is None
+
+    adapter = object.__new__(KaggleProviderAdapter)
+    wired.coordinator.provider = KaggleMasterRuntimeProvider(adapter, assets())
+
+    capability = client.get("/control/v1/embedding-production/capabilities")
+    assert capability.status_code == 200
+    assert capability.json()["admission_ready"] is True
+    assert capability.json()["binding"]["blogger_checkpoint_id"] == checkpoint_id
+    assert "verified_checkpoint_restore" not in capability.json()
+    assert "mcp_hybrid_search" not in capability.json()
+    observed = LedgerControlReader(ledger).invoke_control(
+        "embedding.production.capabilities", {}, object()  # type: ignore[arg-type]
+    )
+    assert observed["interface"] == "mcp_observer"
+    assert observed["binding"] == capability.json()["binding"]
+    assert "runner_implementation" not in observed
+    assert "provider_adapter_implementation" not in observed
+
+    first = client.post("/control/v1/embedding-production/requests", json=request.model_dump(mode="json"))
+    replay = client.post("/control/v1/embedding-production/requests", json=request.model_dump(mode="json"))
+    assert first.status_code == replay.status_code == 200
+    assert first.json()["created"] is True
+    assert replay.json()["created"] is False
+    assert first.json()["state"] == replay.json()["state"] == "REQUESTED"

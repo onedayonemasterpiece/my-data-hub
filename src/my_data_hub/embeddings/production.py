@@ -31,7 +31,7 @@ from my_data_hub.workloads.bloggers.master_stage import (
 )
 
 EXTERNAL_BLOCKED = 78
-CAPABILITY_SCHEMA = "my-data-hub-embedding-production-capabilities.v1"
+CAPABILITY_SCHEMA = "my-data-hub-embedding-production-capabilities.v2"
 REQUEST_SCHEMA = "my-data-hub-embedding-production-request.v1"
 RECEIPT_SCHEMA = "my-data-hub-embedding-production-closure.v1"
 MAX_METADATA_BYTES = 256 * 1024
@@ -72,27 +72,62 @@ WORKER_ASSETS: tuple[WorkerAsset, ...] = (
 )
 
 
-class EmbeddingProductionCapabilities(BaseModel):
+class EmbeddingProductionAdmissionBinding(BaseModel):
+    """Exact prerequisite and ACTIVE-master identity observed during admission."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["my-data-hub-embedding-production-capabilities.v1"] = CAPABILITY_SCHEMA
-    ready: Literal[True]
+    master_instance_id: UUID
+    run_id: UUID
+    attempt_id: UUID
+    epoch: int = Field(ge=1)
+    canonical_revision: int = Field(ge=1)
+    blogger_checkpoint_id: UUID
+
+
+class EmbeddingProductionCapabilities(BaseModel):
+    """Read-only admission evidence, never evidence that the stage completed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["my-data-hub-embedding-production-capabilities.v2"] = CAPABILITY_SCHEMA
+    interface: Literal["control_executor", "mcp_observer"]
+    admission_ready: Literal[True]
+    binding: EmbeddingProductionAdmissionBinding
     execution_location: Literal["active_kaggle_master"]
-    provider_adapter_package: Literal["kaggle"]
-    provider_adapter_version: Literal["2.2.4"]
-    provider_adapter_implementation: Literal["my_data_hub.providers.kaggle.KaggleProviderAdapter"]
-    single_provider_adapter: Literal[True]
-    transactional_import: Literal[True]
-    verified_checkpoint_restore: Literal[True]
-    mcp_hybrid_search: Literal[True]
+    request_acceptance: Literal["durable_idempotent_ledger.v1"]
+    stage_contract: Literal["transactional_import_then_checkpoint.v1"]
+    completion_evidence: Literal["terminal_request_status_and_closure_receipt_only"]
+    runner_implementation: (
+        Literal["my_data_hub.embeddings.master_stage.execute_embedding_production_stage"] | None
+    ) = None
+    provider_adapter_package: Literal["kaggle"] | None = None
+    provider_adapter_version: Literal["2.2.4"] | None = None
+    provider_adapter_implementation: Literal["my_data_hub.providers.kaggle.KaggleProviderAdapter"] | None = None
+    single_provider_adapter: Literal[True] | None = None
     worker_assets: tuple[WorkerAsset, WorkerAsset]
 
     @model_validator(mode="after")
     def exact_production_boundary(self) -> EmbeddingProductionCapabilities:
         if self.worker_assets != WORKER_ASSETS:
             raise ValueError("live interface worker assets differ from the generated pinned contracts")
-        if self.provider_adapter_package != KAGGLE_API_PACKAGE or self.provider_adapter_version != KAGGLE_API_VERSION:
-            raise ValueError("live interface does not use the repository's pinned Kaggle adapter")
+        executor_fields = (
+            self.runner_implementation,
+            self.provider_adapter_package,
+            self.provider_adapter_version,
+            self.provider_adapter_implementation,
+            self.single_provider_adapter,
+        )
+        if self.interface == "control_executor":
+            if any(value is None for value in executor_fields):
+                raise ValueError("control admission does not prove an executable runner and safe adapter")
+            if (
+                self.provider_adapter_package != KAGGLE_API_PACKAGE
+                or self.provider_adapter_version != KAGGLE_API_VERSION
+            ):
+                raise ValueError("live interface does not use the repository's pinned Kaggle adapter")
+        elif any(value is not None for value in executor_fields):
+            raise ValueError("MCP observer must not claim execution-runner or provider-adapter availability")
         return self
 
 
@@ -406,7 +441,11 @@ def _validated_blogger_prerequisite(value: dict[str, Any]) -> tuple[BloggerImpor
 
 
 def _preflight_interfaces(
-    control: EmbeddingProductionControl, mcp: EmbeddingProductionMcp
+    control: EmbeddingProductionControl,
+    mcp: EmbeddingProductionMcp,
+    *,
+    expected_canonical_revision: int,
+    expected_checkpoint_id: UUID,
 ) -> EmbeddingProductionCapabilities:
     try:
         control_capabilities = EmbeddingProductionCapabilities.model_validate(control.capabilities())
@@ -419,8 +458,21 @@ def _preflight_interfaces(
         raise EmbeddingInterfacesUnavailable(
             "required embedding master/MCP live interfaces are unavailable or mismatched"
         ) from exc
-    if control_capabilities != mcp_capabilities:
-        raise EmbeddingInterfacesUnavailable("control and MCP embedding capabilities differ")
+    if (
+        control_capabilities.interface != "control_executor"
+        or mcp_capabilities.interface != "mcp_observer"
+        or control_capabilities.binding != mcp_capabilities.binding
+        or control_capabilities.worker_assets != mcp_capabilities.worker_assets
+        or control_capabilities.request_acceptance != mcp_capabilities.request_acceptance
+        or control_capabilities.stage_contract != mcp_capabilities.stage_contract
+        or control_capabilities.completion_evidence != mcp_capabilities.completion_evidence
+    ):
+        raise EmbeddingInterfacesUnavailable("control and MCP embedding admission bindings differ")
+    if (
+        control_capabilities.binding.canonical_revision != expected_canonical_revision
+        or control_capabilities.binding.blogger_checkpoint_id != expected_checkpoint_id
+    ):
+        raise EmbeddingInterfacesUnavailable("embedding admission does not match the exact blogger prerequisite")
     return control_capabilities
 
 
@@ -643,7 +695,12 @@ def run_embedding_production_closure(
     if live_evidence and not isinstance(control, LocalEmbeddingProductionControl):
         raise ValueError("live evidence requires the production loopback control client")
     imported, blogger_sha, blogger_checkpoint_id = _validated_blogger_prerequisite(blogger_receipt)
-    capabilities = _preflight_interfaces(control, mcp)  # no mutation before this line succeeds
+    capabilities = _preflight_interfaces(
+        control,
+        mcp,
+        expected_canonical_revision=imported.canonical_revision,
+        expected_checkpoint_id=blogger_checkpoint_id,
+    )  # no mutation before this line succeeds
     started_at = now()
     deadline = time.monotonic() + config.timeout_seconds
     request_id = uuid5(_NAMESPACE, config.idempotency_key)

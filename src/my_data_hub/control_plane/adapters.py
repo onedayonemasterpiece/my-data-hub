@@ -913,45 +913,45 @@ class LedgerControlReader(ControlPlaneReader):
                 if service is not None
                 else None
             )
-            record = (
-                self.ledger.embedding_production_request_for_operation(operation.operation_id)
-                if operation is not None
-                else None
-            )
-            receipt = record.get("stage_receipt") if record else None
-            coverage = receipt.get("coverage") if isinstance(receipt, dict) else None
+            head = self.ledger.checkpoint_head("postgres-master")
             if (
                 service is None
+                or service.state != "ACTIVE"
+                or service.master_instance_id is None
+                or service.canonical_revision is None
                 or operation is None
                 or operation.state != "ACTIVE"
-                or record is None
-                or record.get("state") != "CHECKPOINT_VERIFIED"
-                or not isinstance(coverage, list)
-                or len(coverage) != 2
-                or not all(
-                    isinstance(row, dict) and int(row.get("completed_documents", 0)) > 0
-                    for row in coverage
-                )
+                or head is None
+                or head.current_checkpoint_id is None
             ):
                 return {
-                    "ready": False,
+                    "admission_ready": False,
                     "master_state": "ACTIVE" if service is not None else "ABSENT",
-                    "blocker_code": "EMBEDDING_PRODUCTION_EVIDENCE_ABSENT",
+                    "blocker_code": "EMBEDDING_PRODUCTION_PREREQUISITE_ABSENT",
                 }
-            from my_data_hub.embeddings.production import WORKER_ASSETS, EmbeddingProductionCapabilities
+            from my_data_hub.embeddings.production import (
+                WORKER_ASSETS,
+                EmbeddingProductionAdmissionBinding,
+                EmbeddingProductionCapabilities,
+            )
 
             return EmbeddingProductionCapabilities(
-                ready=True,
+                interface="mcp_observer",
+                admission_ready=True,
+                binding=EmbeddingProductionAdmissionBinding(
+                    master_instance_id=service.master_instance_id,
+                    run_id=service.run_id,
+                    attempt_id=service.attempt_id,
+                    epoch=service.epoch,
+                    canonical_revision=service.canonical_revision,
+                    blogger_checkpoint_id=head.current_checkpoint_id,
+                ),
                 execution_location="active_kaggle_master",
-                provider_adapter_package="kaggle",
-                provider_adapter_version="2.2.4",
-                provider_adapter_implementation="my_data_hub.providers.kaggle.KaggleProviderAdapter",
-                single_provider_adapter=True,
-                transactional_import=True,
-                verified_checkpoint_restore=True,
-                mcp_hybrid_search=True,
+                request_acceptance="durable_idempotent_ledger.v1",
+                stage_contract="transactional_import_then_checkpoint.v1",
+                completion_evidence="terminal_request_status_and_closure_receipt_only",
                 worker_assets=WORKER_ASSETS,
-            ).model_dump(mode="json")
+            ).model_dump(mode="json", exclude_none=True)
         raise ValueError(f"unsupported bounded control tool: {tool}")
 
     def _checkpoint_projection(self, candidate: dict[str, Any] | None) -> dict[str, Any] | None:

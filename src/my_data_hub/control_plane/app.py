@@ -31,12 +31,17 @@ from my_data_hub.control_plane.runtime import (
 from my_data_hub.embeddings.master_stage import execute_embedding_production_stage
 from my_data_hub.embeddings.production import (
     WORKER_ASSETS,
+    EmbeddingProductionAdmissionBinding,
     EmbeddingProductionCapabilities,
     EmbeddingProductionRequest,
     EmbeddingProductionStageReceipt,
     embedding_provider_authority,
 )
-from my_data_hub.providers.kaggle import ControlLedgerKaggleJournal
+from my_data_hub.providers.kaggle import (
+    ControlLedgerKaggleJournal,
+    KaggleMasterRuntimeProvider,
+    KaggleProviderAdapter,
+)
 from my_data_hub.providers.kaggle.contracts import (
     MutationAction,
     ProviderEffectIntent,
@@ -546,47 +551,60 @@ def create_app(
 
     @app.get("/control/v1/embedding-production/capabilities")
     def embedding_production_capabilities() -> dict[str, Any]:
+        binding = _embedding_admission_binding()
+        if binding is None:
+            raise HTTPException(status_code=503, detail={"code": "embedding_production_unavailable"})
+        return EmbeddingProductionCapabilities(
+            interface="control_executor",
+            admission_ready=True,
+            binding=binding,
+            execution_location="active_kaggle_master",
+            request_acceptance="durable_idempotent_ledger.v1",
+            stage_contract="transactional_import_then_checkpoint.v1",
+            completion_evidence="terminal_request_status_and_closure_receipt_only",
+            runner_implementation="my_data_hub.embeddings.master_stage.execute_embedding_production_stage",
+            provider_adapter_package="kaggle",
+            provider_adapter_version="2.2.4",
+            provider_adapter_implementation="my_data_hub.providers.kaggle.KaggleProviderAdapter",
+            single_provider_adapter=True,
+            worker_assets=WORKER_ASSETS,
+        ).model_dump(mode="json", exclude_none=True)
+
+    def _embedding_admission_binding() -> EmbeddingProductionAdmissionBinding | None:
         service = control_ledger.resolve_service("postgres-master")
         operation = (
             control_ledger.operation_for_attempt(service.run_id, service.attempt_id)
             if service is not None
             else None
         )
-        record = (
-            control_ledger.embedding_production_request_for_operation(operation.operation_id)
-            if operation is not None
-            else None
-        )
-        receipt = record.get("stage_receipt") if record else None
-        coverage = receipt.get("coverage") if isinstance(receipt, dict) else None
-        evidence_ready = bool(
-            app.state.embedding_stage_runner is not None
-            and service is not None
-            and operation is not None
-            and operation.state == "ACTIVE"
-            and record is not None
-            and record.get("state") == "CHECKPOINT_VERIFIED"
-            and isinstance(coverage, list)
-            and len(coverage) == 2
-            and all(
-                isinstance(row, dict) and int(row.get("completed_documents", 0)) > 0
-                for row in coverage
+        head = control_ledger.checkpoint_head("postgres-master")
+        provider = master_runtime.coordinator.provider if master_runtime is not None else None
+        adapter = provider.adapter if isinstance(provider, KaggleMasterRuntimeProvider) else None
+        if (
+            app.state.embedding_stage_runner is not execute_embedding_production_stage
+            or app.state.master_provider_status != "available"
+            or not isinstance(adapter, KaggleProviderAdapter)
+            or service is None
+            or service.state != "ACTIVE"
+            or service.master_instance_id is None
+            or service.canonical_revision is None
+            or operation is None
+            or operation.state != "ACTIVE"
+            or head is None
+            or head.current_checkpoint_id is None
+        ):
+            return None
+        try:
+            return EmbeddingProductionAdmissionBinding(
+                master_instance_id=service.master_instance_id,
+                run_id=service.run_id,
+                attempt_id=service.attempt_id,
+                epoch=service.epoch,
+                canonical_revision=service.canonical_revision,
+                blogger_checkpoint_id=head.current_checkpoint_id,
             )
-        )
-        if not evidence_ready:
-            raise HTTPException(status_code=503, detail={"code": "embedding_production_unavailable"})
-        return EmbeddingProductionCapabilities(
-            ready=True,
-            execution_location="active_kaggle_master",
-            provider_adapter_package="kaggle",
-            provider_adapter_version="2.2.4",
-            provider_adapter_implementation="my_data_hub.providers.kaggle.KaggleProviderAdapter",
-            single_provider_adapter=True,
-            transactional_import=True,
-            verified_checkpoint_restore=True,
-            mcp_hybrid_search=True,
-            worker_assets=WORKER_ASSETS,
-        ).model_dump(mode="json")
+        except ValueError:
+            return None
 
     @app.post("/control/v1/embedding-production/requests")
     async def request_embedding_production(request: Request) -> dict[str, Any]:
@@ -603,6 +621,7 @@ def create_app(
                 "request_id": existing["request_id"], "request_sha256": existing["request_sha256"],
                 "state": existing["state"], "created": False,
             }
+        admission = _embedding_admission_binding()
         service = control_ledger.resolve_service("postgres-master")
         operation = (
             control_ledger.operation_for_attempt(service.run_id, service.attempt_id) if service else None
@@ -610,8 +629,11 @@ def create_app(
         head = control_ledger.checkpoint_head("postgres-master")
         if (
             service is None
+            or admission is None
             or service.state != "ACTIVE"
             or service.canonical_revision != embedding.blogger_canonical_revision
+            or admission.canonical_revision != embedding.blogger_canonical_revision
+            or admission.blogger_checkpoint_id != embedding.blogger_checkpoint_id
             or operation is None
             or operation.state != "ACTIVE"
             or head is None
@@ -623,7 +645,11 @@ def create_app(
             operation_id=operation.operation_id,
             idempotency_key_sha256=embedding.idempotency_key_sha256,
             request_sha256=embedding.request_sha256,
-            request=embedding.model_dump(mode="json"),
+            # Worker model contracts contain the harmless field ``max_tokens``;
+            # the metadata ledger deliberately rejects any token-shaped key.
+            # Omit the immutable defaults and let strict request validation
+            # restore them inside the ACTIVE master without weakening the hash.
+            request=embedding.model_dump(mode="json", exclude={"worker_assets"}),
         )
         return {
             "request_id": record["request_id"], "request_sha256": record["request_sha256"],

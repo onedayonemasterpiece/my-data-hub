@@ -14,6 +14,7 @@ from my_data_hub.embeddings.production import (
     EXTERNAL_BLOCKED,
     WORKER_ASSETS,
     EmbeddingInterfacesUnavailable,
+    EmbeddingProductionAdmissionBinding,
     EmbeddingProductionCapabilities,
     EmbeddingProductionConfig,
     EmbeddingProductionError,
@@ -124,19 +125,37 @@ def _blogger_receipt() -> dict[str, object]:
     }
 
 
-def _capabilities() -> dict[str, object]:
+def _capabilities(interface: str = "control_executor") -> dict[str, object]:
     return EmbeddingProductionCapabilities(
-        ready=True,
+        interface=interface,
+        admission_ready=True,
+        binding=EmbeddingProductionAdmissionBinding(
+            master_instance_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            run_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            attempt_id="dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            epoch=8,
+            canonical_revision=9,
+            blogger_checkpoint_id=BLOGGER_CHECKPOINT,
+        ),
         execution_location="active_kaggle_master",
-        provider_adapter_package="kaggle",
-        provider_adapter_version="2.2.4",
-        provider_adapter_implementation="my_data_hub.providers.kaggle.KaggleProviderAdapter",
-        single_provider_adapter=True,
-        transactional_import=True,
-        verified_checkpoint_restore=True,
-        mcp_hybrid_search=True,
+        request_acceptance="durable_idempotent_ledger.v1",
+        stage_contract="transactional_import_then_checkpoint.v1",
+        completion_evidence="terminal_request_status_and_closure_receipt_only",
+        runner_implementation=(
+            "my_data_hub.embeddings.master_stage.execute_embedding_production_stage"
+            if interface == "control_executor"
+            else None
+        ),
+        provider_adapter_package="kaggle" if interface == "control_executor" else None,
+        provider_adapter_version="2.2.4" if interface == "control_executor" else None,
+        provider_adapter_implementation=(
+            "my_data_hub.providers.kaggle.KaggleProviderAdapter"
+            if interface == "control_executor"
+            else None
+        ),
+        single_provider_adapter=True if interface == "control_executor" else None,
         worker_assets=WORKER_ASSETS,
-    ).model_dump(mode="json")
+    ).model_dump(mode="json", exclude_none=True)
 
 
 def test_embedding_provider_authority_is_exact_and_distinct() -> None:
@@ -150,6 +169,13 @@ def test_embedding_provider_authority_is_exact_and_distinct() -> None:
         f"owner/{asset.notebook_slug}" for asset in WORKER_ASSETS
     }
     assert all(ref.startswith("owner/mdh-embed-") for key, (ref, _task) in first.items() if key.endswith("_input"))
+
+
+def test_mcp_observer_cannot_claim_executor_or_adapter_availability() -> None:
+    value = _capabilities("mcp_observer")
+    value["provider_adapter_package"] = "kaggle"
+    with pytest.raises(ValueError, match="must not claim"):
+        EmbeddingProductionCapabilities.model_validate(value)
 
 
 def _worker(asset_index: int) -> dict[str, object]:
@@ -267,7 +293,7 @@ class FakeMcp:
     def call(self, tool: str, arguments: dict[str, object]) -> dict[str, object]:
         self.calls.append(tool)
         if tool == "embedding.production.capabilities":
-            return _capabilities()
+            return _capabilities("mcp_observer")
         if tool == "checkpoint.status":
             return {
                 "current_checkpoint_id": str(EMBED_CHECKPOINT),
@@ -326,6 +352,25 @@ def test_absent_live_interface_blocks_before_mutation() -> None:
     control = FakeControl(available=False)
     with pytest.raises(EmbeddingInterfacesUnavailable):
         run_embedding_production_closure(_config(), blogger_receipt=_blogger_receipt(), control=control, mcp=FakeMcp())
+    assert control.created == 0
+
+
+def test_stale_admission_binding_blocks_before_request_mutation() -> None:
+    control = FakeControl()
+    original = control.capabilities
+
+    def stale() -> dict[str, object]:
+        value = original()
+        binding = value["binding"]
+        assert isinstance(binding, dict)
+        binding["blogger_checkpoint_id"] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        return value
+
+    control.capabilities = stale  # type: ignore[method-assign]
+    with pytest.raises(EmbeddingInterfacesUnavailable, match="admission bindings differ"):
+        run_embedding_production_closure(
+            _config(), blogger_receipt=_blogger_receipt(), control=control, mcp=FakeMcp()
+        )
     assert control.created == 0
 
 
@@ -486,6 +531,7 @@ def test_cli_rejects_bearer_token_in_process_arguments(monkeypatch: pytest.Monke
     "stem",
     [
         "embedding-production-capabilities.v1",
+        "embedding-production-capabilities.v2",
         "embedding-production-request.v1",
         "embedding-production-closure.v1",
     ],
