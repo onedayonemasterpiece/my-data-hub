@@ -53,6 +53,11 @@ their production secrets have not been installed on DevCoveer. Therefore public 
 OAuth, ChatGPT, process-recovery and reboot acceptance remain blocked and must not be
 reported as successful.
 
+The private edge VM was then restarted through Compute Cloud. The ALB-to-nginx-to-tunnel
+path recovered automatically and returned the same bounded control-plane response on the
+fifth 5-second probe. This proves edge/tunnel reboot recovery only; it is not the required
+DevCoveer three-process/systemd reboot receipt.
+
 The initial clean-image diagnostic also proved an ordering constraint: cloud-init
 `write_files` runs before a user declared in the same cloud-config is guaranteed to exist.
 The public DevCoveer host pin is consequently written `root:root`/`0644`; using the future
