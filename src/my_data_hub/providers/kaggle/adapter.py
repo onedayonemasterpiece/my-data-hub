@@ -520,6 +520,10 @@ class KaggleProviderAdapter:
             raise KaggleContractError("unsupported Kaggle kernel language")
         if not 5 <= len(title) <= 80:
             raise KaggleContractError("Kaggle notebook title must contain 5 to 80 characters")
+        if title != intent.provider_ref.split("/", 1)[1]:
+            raise KaggleContractError(
+                "Kaggle notebook title must equal the exact requested slug to prevent provider-side identity rewrite"
+            )
         canonical_source = _canonical_notebook_source(source, kernel_type=kernel_type)
         if str(task_run_id).encode("ascii") not in canonical_source:
             raise KaggleContractError("notebook source must embed the exact task_run_id")
@@ -633,21 +637,7 @@ class KaggleProviderAdapter:
         expected_source_sha256: str | None = None,
     ) -> KaggleKernelSourceIdentity:
         ref = _normalized_ref(provider_ref)
-        observed, current_version, _provider_id = self._find_resource(ref, ProviderKind.NOTEBOOK)
-        if observed.private is not True:
-            raise KagglePolicyError("notebook privacy was not explicitly proven private")
-        if current_version is not None and source_version > current_version:
-            raise KaggleNotFound("requested notebook source version is unavailable")
-        with tempfile.TemporaryDirectory(prefix="my-data-hub-kaggle-source-") as temporary:
-            folder = Path(temporary)
-            pulled, _ = self.retry.call(
-                "kernels_pull",
-                lambda: self.api.kernels_pull(f"{ref}/{source_version}", path=str(folder), metadata=False, quiet=True),
-            )
-            source_path = Path(str(pulled))
-            if not source_path.is_file() or folder not in source_path.parents:
-                raise KaggleContractError("Kaggle source pull did not return a bounded local file")
-            source_sha = sha256_file(source_path)
+        source_sha, _provider_id = self._pull_private_notebook_source(ref, source_version)
         if expected_source_sha256 is not None and source_sha != expected_source_sha256:
             raise KaggleIdentityError("Kaggle source readback differs from the exact pushed bytes")
         fingerprint = ProviderFingerprint(
@@ -668,6 +658,38 @@ class KaggleProviderAdapter:
             fingerprint=fingerprint,
             observed_at=self.clock(),
         )
+
+    def _pull_private_notebook_source(self, ref: str, source_version: int | None) -> tuple[str, int]:
+        with tempfile.TemporaryDirectory(prefix="my-data-hub-kaggle-source-") as temporary:
+            folder = Path(temporary)
+            pulled, _ = self.retry.call(
+                "kernels_pull",
+                lambda: self.api.kernels_pull(
+                    f"{ref}/{source_version}" if source_version is not None else ref,
+                    path=str(folder),
+                    metadata=True,
+                    quiet=True,
+                ),
+            )
+            pulled_root = Path(str(pulled))
+            if pulled_root.resolve() != folder.resolve():
+                raise KaggleContractError("Kaggle source pull escaped the bounded target directory")
+            metadata_path = folder / "kernel-metadata.json"
+            if not metadata_path.is_file():
+                raise KaggleIdentityError("Kaggle source readback omitted exact kernel metadata")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata.get("id") != ref or metadata.get("is_private") is not True:
+                raise KagglePolicyError("notebook exact identity/privacy was not proven")
+            provider_id = _version(metadata.get("id_no"))
+            if provider_id is None:
+                raise KaggleIdentityError("Kaggle source metadata omitted the numeric kernel identity")
+            code_file = str(metadata.get("code_file") or "")
+            _validate_relative_path(code_file)
+            source_path = folder.joinpath(*code_file.split("/"))
+            if not source_path.is_file() or folder not in source_path.parents:
+                raise KaggleContractError("Kaggle source pull did not return a bounded local file")
+            source_sha = sha256_file(source_path)
+        return source_sha, provider_id
 
     def read_run_status(self, run: KaggleKernelRunIdentity) -> KaggleKernelStatus:
         self._assert_current_run(run)
@@ -959,9 +981,9 @@ class KaggleProviderAdapter:
         raise KaggleNotFound(f"Kaggle {kind.value} {ref} was not found in owned inventory")
 
     def _assert_current_run(self, run: KaggleKernelRunIdentity) -> None:
-        _observed, current_version, provider_kernel_id = self._find_resource(run.provider_ref, ProviderKind.NOTEBOOK)
-        if current_version != run.source_version:
-            raise KaggleIdentityError("Kaggle status/output is latest-by-slug and no longer binds this run version")
+        current_sha, provider_kernel_id = self._pull_private_notebook_source(run.provider_ref, None)
+        if current_sha != run.source_sha256:
+            raise KaggleIdentityError("Kaggle status/output is latest-by-slug and source has advanced")
         if provider_kernel_id != run.provider_kernel_id:
             raise KaggleIdentityError("Kaggle status/output belongs to a different provider kernel id")
         self.read_private_notebook_source(

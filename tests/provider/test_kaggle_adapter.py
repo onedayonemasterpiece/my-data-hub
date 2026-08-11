@@ -181,9 +181,26 @@ class FakeKaggleApi:
         return SimpleNamespace(ref=ref, kernelId=1000, versionNumber=version, error="")
 
     def kernels_pull(self, kernel: str, path: str, metadata: bool = False, quiet: bool = True) -> str:
-        owner, slug, version = kernel.split("/")
+        parts = kernel.split("/")
+        owner, slug = parts[:2]
+        version = int(parts[2]) if len(parts) == 3 else max(self.kernels[f"{owner}/{slug}"])
         target = Path(path) / "source.py"
-        target.write_bytes(self.kernels[f"{owner}/{slug}"][int(version)])
+        target.write_bytes(self.kernels[f"{owner}/{slug}"][version])
+        if metadata:
+            (Path(path) / "kernel-metadata.json").write_text(
+                json.dumps(
+                    {
+                        "id": f"{owner}/{slug}",
+                        "id_no": 1000,
+                        "title": slug,
+                        "code_file": "source.py",
+                        "language": "python",
+                        "kernel_type": "script",
+                        "is_private": True,
+                    }
+                )
+            )
+            return str(path)
         return str(target)
 
     def kernels_status(self, kernel: str):
@@ -345,7 +362,7 @@ def test_notebook_source_run_and_output_are_bound_to_exact_version() -> None:
         intent=push,
         task_run_id=run_id,
         source=source,
-        title="Private kernel",
+            title="private-kernel",
         code_file="run.py",
         kernel_type="script",
         language="python",
@@ -393,7 +410,7 @@ def test_output_rejects_stale_run_receipt() -> None:
         ),
         task_run_id=run_id,
         source=source,
-        title="Stale kernel",
+        title="stale-kernel",
         code_file="run.py",
         kernel_type="script",
         language="python",
