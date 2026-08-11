@@ -5,26 +5,539 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema_version", "verdict", "evaluated_source_commit", "architecture_source_sha256",
-    "completed_at", "summary", "counts", "gate_results", "blockers"
+    "schema_version",
+    "receipt_scope",
+    "verdict",
+    "completion_criteria_met",
+    "evaluated_source_commit",
+    "implementation_identity",
+    "architecture_source_sha256",
+    "completed_at",
+    "summary",
+    "counts",
+    "operational_matrix",
+    "gate_results",
+    "evidence",
+    "required_evidence",
+    "blockers"
   ],
+  "$defs": {
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "evidence_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]{2,99}$"
+    },
+    "provider_run_ref": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$"
+    },
+    "evidence_ref_array": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/evidence_id"
+      }
+    },
+    "gate_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "outcome",
+        "evidence",
+        "evidence_refs"
+      ],
+      "properties": {
+        "gate_id": {
+          "enum": [
+            "A",
+            "B",
+            "C",
+            "D",
+            "E",
+            "F",
+            "G",
+            "H",
+            "I",
+            "J",
+            "K",
+            "L",
+            "M",
+            "N"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9_.-]{1,100}$"
+        },
+        "outcome": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "BLOCKED"
+          ]
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidence_ref_array"
+        }
+      }
+    },
+    "blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "blocker_class",
+        "affected_gates",
+        "affected_scenarios",
+        "missing",
+        "closure_proof",
+        "evidence_refs"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z0-9_]{3,100}$"
+        },
+        "blocker_class": {
+          "enum": [
+            "INTERNAL",
+            "EXTERNAL"
+          ]
+        },
+        "affected_gates": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "A",
+              "B",
+              "C",
+              "D",
+              "E",
+              "F",
+              "G",
+              "H",
+              "I",
+              "J",
+              "K",
+              "L",
+              "M",
+              "N"
+            ]
+          }
+        },
+        "affected_scenarios": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^FM(0[1-9]|1[0-9]|2[0-4])$"
+          }
+        },
+        "missing": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "closure_proof": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidence_ref_array"
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "affected_gates": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "affected_scenarios": {
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "artifact_kind",
+        "storage",
+        "locator",
+        "sha256",
+        "source_commit",
+        "observed_at",
+        "live_evidence"
+      ],
+      "properties": {
+        "evidence_id": {
+          "$ref": "#/$defs/evidence_id"
+        },
+        "artifact_kind": {
+          "enum": [
+            "IMPLEMENTATION_REVIEW",
+            "DEPLOYMENT",
+            "POST_DEPLOY",
+            "SECURITY_AUDIT",
+            "DATA_INTEGRITY_AUDIT",
+            "REAL_KAGGLE_MATRIX",
+            "GATE_EVIDENCE"
+          ]
+        },
+        "storage": {
+          "enum": [
+            "REPOSITORY_FILE",
+            "EXTERNAL_ARTIFACT"
+          ]
+        },
+        "locator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "live_evidence": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "storage": {
+                "const": "REPOSITORY_FILE"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "locator": {
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9_.@+/-]+$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "storage": {
+                "const": "EXTERNAL_ARTIFACT"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "locator": {
+                "pattern": "^https://[^\\s]+$"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
   "properties": {
-    "schema_version": {"const": "my-data-hub-operational-mvp-acceptance.v1"},
-    "verdict": {"enum": ["MY_DATA_HUB_OPERATIONAL_MVP_BLOCKED", "MY_DATA_HUB_OPERATIONAL_MVP_COMPLETE"]},
-    "evaluated_source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-    "architecture_source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "completed_at": {"type": "string", "format": "date-time"},
-    "summary": {"type": "string", "minLength": 1, "maxLength": 500},
+    "schema_version": {
+      "const": "my-data-hub-operational-mvp-acceptance.v1"
+    },
+    "receipt_scope": {
+      "enum": [
+        "SYNTHETIC_EXAMPLE",
+        "OBSERVED_OPERATIONAL"
+      ]
+    },
+    "verdict": {
+      "enum": [
+        "MY_DATA_HUB_OPERATIONAL_MVP_BLOCKED",
+        "MY_DATA_HUB_OPERATIONAL_MVP_COMPLETE"
+      ]
+    },
+    "completion_criteria_met": {
+      "type": "boolean"
+    },
+    "evaluated_source_commit": {
+      "$ref": "#/$defs/commit"
+    },
+    "implementation_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewed_head_commit",
+        "merge_commit",
+        "deployed_commit",
+        "post_deploy_verified_commit",
+        "deployment_tree_state"
+      ],
+      "properties": {
+        "reviewed_head_commit": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/commit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "merge_commit": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/commit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deployed_commit": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/commit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "post_deploy_verified_commit": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/commit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deployment_tree_state": {
+          "enum": [
+            "UNKNOWN",
+            "CLEAN",
+            "DIRTY"
+          ]
+        }
+      }
+    },
+    "architecture_source_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
     "counts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["real_kaggle_run_ids", "ydb_bloggers_observed", "bloggers_imported", "e5_coverage", "bge_m3_coverage"],
+      "required": [
+        "real_kaggle_run_ids",
+        "real_kaggle_kernel_ids",
+        "operational_scenarios_passed",
+        "ydb_bloggers_observed",
+        "bloggers_imported",
+        "undispositioned_rows",
+        "quarantined_rows",
+        "e5_coverage",
+        "bge_m3_coverage"
+      ],
       "properties": {
-        "real_kaggle_run_ids": {"type": "integer", "minimum": 0},
-        "ydb_bloggers_observed": {"type": "integer", "minimum": 0},
-        "bloggers_imported": {"type": "integer", "minimum": 0},
-        "e5_coverage": {"type": "number", "minimum": 0, "maximum": 1},
-        "bge_m3_coverage": {"type": "number", "minimum": 0, "maximum": 1}
+        "real_kaggle_run_ids": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "real_kaggle_kernel_ids": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "operational_scenarios_passed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 24
+        },
+        "ydb_bloggers_observed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bloggers_imported": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "undispositioned_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "quarantined_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "e5_coverage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "bge_m3_coverage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "operational_matrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt_evidence_id",
+        "planned_scenarios",
+        "passed_scenarios",
+        "failed_scenarios",
+        "blocked_scenarios",
+        "distinct_provider_run_refs",
+        "distinct_provider_kernel_ids",
+        "lifecycle_gates"
+      ],
+      "properties": {
+        "receipt_evidence_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/evidence_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "planned_scenarios": {
+          "const": 24
+        },
+        "passed_scenarios": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 24
+        },
+        "failed_scenarios": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 24
+        },
+        "blocked_scenarios": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 24
+        },
+        "distinct_provider_run_refs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/provider_run_ref"
+          }
+        },
+        "distinct_provider_kernel_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "lifecycle_gates": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "master_boots",
+            "clean_rotations",
+            "abrupt_master_terminations",
+            "control_plane_restarts",
+            "host_reboots",
+            "soak_runs",
+            "soak_duration_seconds",
+            "soak_heartbeats",
+            "soak_read_queries",
+            "soak_checkpoints",
+            "soak_recoveries"
+          ],
+          "properties": {
+            "master_boots": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "clean_rotations": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "abrupt_master_terminations": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "control_plane_restarts": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "host_reboots": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "soak_runs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "soak_duration_seconds": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "soak_heartbeats": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "soak_read_queries": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "soak_checkpoints": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "soak_recoveries": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
       }
     },
     "gate_results": {
@@ -32,13 +545,45 @@
       "minItems": 1,
       "maxItems": 64,
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["name", "outcome", "evidence"],
-        "properties": {
-          "name": {"type": "string", "pattern": "^[a-z0-9_.-]{1,100}$"},
-          "outcome": {"enum": ["PASS", "FAIL", "BLOCKED"]},
-          "evidence": {"type": "string", "minLength": 1, "maxLength": 500}
+        "$ref": "#/$defs/gate_result"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
+    },
+    "required_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "implementation_review",
+        "deployment",
+        "post_deploy",
+        "security_audit",
+        "data_integrity_audit",
+        "operational_matrix"
+      ],
+      "properties": {
+        "implementation_review": {
+          "$ref": "#/$defs/evidence_ref_array"
+        },
+        "deployment": {
+          "$ref": "#/$defs/evidence_ref_array"
+        },
+        "post_deploy": {
+          "$ref": "#/$defs/evidence_ref_array"
+        },
+        "security_audit": {
+          "$ref": "#/$defs/evidence_ref_array"
+        },
+        "data_integrity_audit": {
+          "$ref": "#/$defs/evidence_ref_array"
+        },
+        "operational_matrix": {
+          "$ref": "#/$defs/evidence_ref_array"
         }
       }
     },
@@ -46,15 +591,492 @@
       "type": "array",
       "maxItems": 64,
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["code", "missing", "closure_proof"],
+        "$ref": "#/$defs/blocker"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
         "properties": {
-          "code": {"type": "string", "pattern": "^[A-Z0-9_]{3,100}$"},
-          "missing": {"type": "string", "minLength": 1, "maxLength": 500},
-          "closure_proof": {"type": "string", "minLength": 1, "maxLength": 500}
+          "verdict": {
+            "const": "MY_DATA_HUB_OPERATIONAL_MVP_COMPLETE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "receipt_scope": {
+            "const": "OBSERVED_OPERATIONAL"
+          },
+          "completion_criteria_met": {
+            "const": true
+          },
+          "implementation_identity": {
+            "properties": {
+              "reviewed_head_commit": {
+                "$ref": "#/$defs/commit"
+              },
+              "merge_commit": {
+                "$ref": "#/$defs/commit"
+              },
+              "deployed_commit": {
+                "$ref": "#/$defs/commit"
+              },
+              "post_deploy_verified_commit": {
+                "$ref": "#/$defs/commit"
+              },
+              "deployment_tree_state": {
+                "const": "CLEAN"
+              }
+            }
+          },
+          "counts": {
+            "properties": {
+              "real_kaggle_run_ids": {
+                "minimum": 15
+              },
+              "real_kaggle_kernel_ids": {
+                "minimum": 15
+              },
+              "operational_scenarios_passed": {
+                "const": 24
+              },
+              "ydb_bloggers_observed": {
+                "minimum": 1
+              },
+              "bloggers_imported": {
+                "minimum": 1
+              },
+              "undispositioned_rows": {
+                "const": 0
+              },
+              "quarantined_rows": {
+                "const": 0
+              },
+              "e5_coverage": {
+                "const": 1
+              },
+              "bge_m3_coverage": {
+                "const": 1
+              }
+            }
+          },
+          "operational_matrix": {
+            "properties": {
+              "receipt_evidence_id": {
+                "$ref": "#/$defs/evidence_id"
+              },
+              "passed_scenarios": {
+                "const": 24
+              },
+              "failed_scenarios": {
+                "const": 0
+              },
+              "blocked_scenarios": {
+                "const": 0
+              },
+              "distinct_provider_run_refs": {
+                "minItems": 15
+              },
+              "distinct_provider_kernel_ids": {
+                "minItems": 15
+              },
+              "lifecycle_gates": {
+                "properties": {
+                  "master_boots": {
+                    "minimum": 3
+                  },
+                  "clean_rotations": {
+                    "minimum": 2
+                  },
+                  "abrupt_master_terminations": {
+                    "minimum": 1
+                  },
+                  "control_plane_restarts": {
+                    "minimum": 1
+                  },
+                  "host_reboots": {
+                    "minimum": 1
+                  },
+                  "soak_runs": {
+                    "minimum": 1
+                  },
+                  "soak_duration_seconds": {
+                    "minimum": 3600,
+                    "maximum": 5400
+                  },
+                  "soak_heartbeats": {
+                    "minimum": 1
+                  },
+                  "soak_read_queries": {
+                    "minimum": 1
+                  },
+                  "soak_checkpoints": {
+                    "minimum": 1
+                  },
+                  "soak_recoveries": {
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          },
+          "gate_results": {
+            "minItems": 14,
+            "maxItems": 14,
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/gate_result"
+                },
+                {
+                  "required": [
+                    "gate_id"
+                  ],
+                  "properties": {
+                    "outcome": {
+                      "const": "PASS"
+                    },
+                    "evidence_refs": {
+                      "minItems": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "allOf": [
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "gate_id",
+                    "name"
+                  ],
+                  "properties": {
+                    "gate_id": {
+                      "const": "A"
+                    },
+                    "name": {
+                      "const": "donor_compatibility"
+                    }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "gate_id",
+                    "name"
+                  ],
+                  "properties": {
+                    "gate_id": {
+                      "const": "B"
+                    },
+                    "name": {
+                      "const": "control_ledger_and_orchestrator"
+                    }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "gate_id",
+                    "name"
+                  ],
+                  "properties": {
+                    "gate_id": {
+                      "const": "C"
+                    },
+                    "name": {
+                      "const": "notebook_runtime_sdk"
+                    }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "gate_id",
+                    "name"
+                  ],
+                  "properties": {
+                    "gate_id": {
+                      "const": "D"
+                    },
+                    "name": {
+                      "const": "kaggle_provider_adapter"
+                    }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "gate_id",
+                    "name"
+                  ],
+                  "properties": {
+                    "gate_id": {
+                      "const": "E"
+                    },
+                    "name": {
+                      "const": "deterministic_notebooks"
+                    }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "gate_id",
+                    "name"
+                  ],
+                  "properties": {
+                    "gate_id": {
+                      "const": "F"
+                    },
+                    "name": {
+                      "const": "postgresql_master"
+                    }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "gate_id",
+                    "name"
+                  ],
+                  "properties": {
+                    "gate_id": {
+                      "const": "G"
+                    },
+                    "name": {
+                      "const": "direct_data_plane"
+                    }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "gate_id",
+                    "name"
+                  ],
+                  "properties": {
+                    "gate_id": {
+                      "const": "H"
+                    },
+                    "name": {
+                      "const": "verified_checkpoints_and_recovery"
+                    }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "gate_id",
+                    "name"
+                  ],
+                  "properties": {
+                    "gate_id": {
+                      "const": "I"
+                    },
+                    "name": {
+                      "const": "remote_mcp_and_oauth"
+                    }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "gate_id",
+                    "name"
+                  ],
+                  "properties": {
+                    "gate_id": {
+                      "const": "J"
+                    },
+                    "name": {
+                      "const": "ydb_blogger_import"
+                    }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "gate_id",
+                    "name"
+                  ],
+                  "properties": {
+                    "gate_id": {
+                      "const": "K"
+                    },
+                    "name": {
+                      "const": "e5_and_bge_m3_embeddings"
+                    }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "gate_id",
+                    "name"
+                  ],
+                  "properties": {
+                    "gate_id": {
+                      "const": "L"
+                    },
+                    "name": {
+                      "const": "data_connector_plane"
+                    }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "gate_id",
+                    "name"
+                  ],
+                  "properties": {
+                    "gate_id": {
+                      "const": "M"
+                    },
+                    "name": {
+                      "const": "devstand_deployment"
+                    }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "type": "object",
+                  "required": [
+                    "gate_id",
+                    "name"
+                  ],
+                  "properties": {
+                    "gate_id": {
+                      "const": "N"
+                    },
+                    "name": {
+                      "const": "ci_scheduled_checks_and_receipts"
+                    }
+                  }
+                },
+                "minContains": 1,
+                "maxContains": 1
+              }
+            ]
+          },
+          "evidence": {
+            "minItems": 6,
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/evidence"
+                },
+                {
+                  "properties": {
+                    "live_evidence": {
+                      "const": true
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "required_evidence": {
+            "properties": {
+              "implementation_review": {
+                "minItems": 1
+              },
+              "deployment": {
+                "minItems": 1
+              },
+              "post_deploy": {
+                "minItems": 1
+              },
+              "security_audit": {
+                "minItems": 1
+              },
+              "data_integrity_audit": {
+                "minItems": 1
+              },
+              "operational_matrix": {
+                "minItems": 1
+              }
+            }
+          },
+          "blockers": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "verdict": {
+            "const": "MY_DATA_HUB_OPERATIONAL_MVP_BLOCKED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "completion_criteria_met": {
+            "const": false
+          },
+          "blockers": {
+            "minItems": 1
+          }
         }
       }
     }
-  }
+  ]
 }

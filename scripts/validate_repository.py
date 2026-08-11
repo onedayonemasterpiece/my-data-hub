@@ -297,6 +297,375 @@ def validate_kaggle_transport(report: Report) -> None:
         implementation_files == {central},
         f"direct Kaggle transport implementation inventory drifted: {sorted(implementation_files)}",
     )
+OPERATIONAL_MVP_COMPLETE = "MY_DATA_HUB_OPERATIONAL_MVP_COMPLETE"
+OPERATIONAL_MVP_BLOCKED = "MY_DATA_HUB_OPERATIONAL_MVP_BLOCKED"
+OPERATIONAL_MVP_GATE_IDS = tuple("ABCDEFGHIJKLMN")
+OPERATIONAL_MVP_REQUIRED_EVIDENCE_KINDS = {
+    "implementation_review": "IMPLEMENTATION_REVIEW",
+    "deployment": "DEPLOYMENT",
+    "post_deploy": "POST_DEPLOY",
+    "security_audit": "SECURITY_AUDIT",
+    "data_integrity_audit": "DATA_INTEGRITY_AUDIT",
+    "operational_matrix": "REAL_KAGGLE_MATRIX",
+}
+
+
+def repository_head_commit(root: Path) -> str | None:
+    """Return the exact checkout commit without accepting a symbolic label."""
+
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    commit = result.stdout.strip()
+    if result.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        return None
+    return commit
+
+
+def validate_operational_mvp_receipt_semantics(
+    receipt: dict[str, Any],
+    *,
+    root: Path,
+    expected_source_commit: str | None,
+    allow_complete: bool,
+) -> list[str]:
+    """Validate cross-field and referenced-evidence acceptance invariants.
+
+    JSON Schema enforces the shape and conditional thresholds. This function
+    binds identifiers to exact artifacts and to the checkout being evaluated.
+    """
+
+    errors: list[str] = []
+    verdict = receipt.get("verdict")
+    complete = verdict == OPERATIONAL_MVP_COMPLETE
+    if complete and not allow_complete:
+        errors.append("synthetic/example receipts may not use the COMPLETE verdict")
+
+    evidence_items = receipt.get("evidence", [])
+    evidence_by_id: dict[str, dict[str, Any]] = {}
+    for item in evidence_items if isinstance(evidence_items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        evidence_id = item.get("evidence_id")
+        if not isinstance(evidence_id, str):
+            continue
+        if evidence_id in evidence_by_id:
+            errors.append(f"duplicate evidence_id: {evidence_id}")
+            continue
+        evidence_by_id[evidence_id] = item
+
+        locator = item.get("locator")
+        if item.get("storage") == "REPOSITORY_FILE" and isinstance(locator, str):
+            relative = Path(locator)
+            if relative.is_absolute() or ".." in relative.parts:
+                errors.append(f"unsafe repository evidence locator for {evidence_id}: {locator}")
+                continue
+            evidence_path = root / relative
+            if not evidence_path.is_file():
+                errors.append(f"repository evidence does not exist for {evidence_id}: {locator}")
+                continue
+            observed_hash = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+            if observed_hash != item.get("sha256"):
+                errors.append(
+                    f"repository evidence hash mismatch for {evidence_id}: "
+                    f"declared {item.get('sha256')}, observed {observed_hash}"
+                )
+
+    referenced_ids: set[str] = set()
+    for gate in receipt.get("gate_results", []):
+        if isinstance(gate, dict):
+            referenced_ids.update(gate.get("evidence_refs", []))
+    for blocker in receipt.get("blockers", []):
+        if isinstance(blocker, dict):
+            referenced_ids.update(blocker.get("evidence_refs", []))
+    required_evidence = receipt.get("required_evidence", {})
+    if isinstance(required_evidence, dict):
+        for refs in required_evidence.values():
+            if isinstance(refs, list):
+                referenced_ids.update(refs)
+    operational_matrix = receipt.get("operational_matrix", {})
+    if isinstance(operational_matrix, dict):
+        matrix_evidence_id = operational_matrix.get("receipt_evidence_id")
+        if isinstance(matrix_evidence_id, str):
+            referenced_ids.add(matrix_evidence_id)
+    for evidence_id in sorted(referenced_ids - set(evidence_by_id)):
+        errors.append(f"receipt references unknown evidence_id: {evidence_id}")
+
+    if isinstance(required_evidence, dict):
+        for section, required_kind in OPERATIONAL_MVP_REQUIRED_EVIDENCE_KINDS.items():
+            refs = required_evidence.get(section, [])
+            if not isinstance(refs, list):
+                continue
+            for evidence_id in refs:
+                evidence = evidence_by_id.get(evidence_id)
+                if evidence is not None and evidence.get("artifact_kind") != required_kind:
+                    errors.append(
+                        f"required_evidence.{section} references {evidence_id} with kind "
+                        f"{evidence.get('artifact_kind')!r}, expected {required_kind!r}"
+                    )
+
+    counts = receipt.get("counts", {})
+    matrix = operational_matrix if isinstance(operational_matrix, dict) else {}
+    run_refs = matrix.get("distinct_provider_run_refs", [])
+    kernel_ids = matrix.get("distinct_provider_kernel_ids", [])
+    if isinstance(counts, dict):
+        if isinstance(run_refs, list) and counts.get("real_kaggle_run_ids") != len(run_refs):
+            errors.append("counts.real_kaggle_run_ids does not match distinct provider run refs")
+        if isinstance(kernel_ids, list) and counts.get("real_kaggle_kernel_ids") != len(kernel_ids):
+            errors.append("counts.real_kaggle_kernel_ids does not match distinct provider kernel IDs")
+        if counts.get("operational_scenarios_passed") != matrix.get("passed_scenarios"):
+            errors.append("counts.operational_scenarios_passed does not match matrix PASS count")
+    scenario_total = sum(
+        value
+        for value in (
+            matrix.get("passed_scenarios"),
+            matrix.get("failed_scenarios"),
+            matrix.get("blocked_scenarios"),
+        )
+        if isinstance(value, int) and not isinstance(value, bool)
+    )
+    if scenario_total != matrix.get("planned_scenarios"):
+        errors.append("operational matrix PASS/FAIL/BLOCKED counts do not total 24")
+
+    if complete:
+        evaluated_commit = receipt.get("evaluated_source_commit")
+        if expected_source_commit is None:
+            errors.append("COMPLETE receipt cannot bind the evaluated checkout commit")
+        elif evaluated_commit != expected_source_commit:
+            errors.append(
+                "COMPLETE receipt evaluated_source_commit is stale: "
+                f"expected {expected_source_commit}, received {evaluated_commit}"
+            )
+
+        identity = receipt.get("implementation_identity", {})
+        if isinstance(identity, dict):
+            for field in ("merge_commit", "deployed_commit", "post_deploy_verified_commit"):
+                if identity.get(field) != evaluated_commit:
+                    errors.append(
+                        f"COMPLETE receipt {field} must equal evaluated_source_commit"
+                    )
+
+        gate_results = receipt.get("gate_results", [])
+        gate_ids = [
+            gate.get("gate_id")
+            for gate in gate_results
+            if isinstance(gate, dict) and isinstance(gate.get("gate_id"), str)
+        ]
+        if sorted(gate_ids) != list(OPERATIONAL_MVP_GATE_IDS):
+            errors.append("COMPLETE receipt must contain each Gate A-N exactly once")
+
+        for evidence_id, item in evidence_by_id.items():
+            if item.get("live_evidence") is not True:
+                errors.append(f"COMPLETE evidence is not live: {evidence_id}")
+            if item.get("source_commit") != evaluated_commit:
+                errors.append(
+                    f"COMPLETE evidence source commit differs from evaluated commit: {evidence_id}"
+                )
+            locator = str(item.get("locator", "")).lower()
+            if "examples/" in locator or "synthetic" in locator:
+                errors.append(f"COMPLETE receipt cites synthetic/example evidence: {evidence_id}")
+
+        required_ids = {
+            evidence_id
+            for refs in required_evidence.values()
+            if isinstance(refs, list)
+            for evidence_id in refs
+        } if isinstance(required_evidence, dict) else set()
+        for evidence_id in sorted(required_ids):
+            item = evidence_by_id.get(evidence_id)
+            if item is not None and item.get("storage") != "REPOSITORY_FILE":
+                errors.append(
+                    f"required COMPLETE evidence must be locally hash-verifiable: {evidence_id}"
+                )
+
+        if isinstance(counts, dict) and counts.get("bloggers_imported") != counts.get(
+            "ydb_bloggers_observed"
+        ):
+            errors.append("COMPLETE receipt blogger import count differs from YDB inventory")
+
+        matrix_evidence_id = matrix.get("receipt_evidence_id")
+        matrix_evidence = evidence_by_id.get(matrix_evidence_id)
+        if matrix_evidence is None:
+            errors.append("COMPLETE receipt has no resolvable operational matrix evidence")
+        elif matrix_evidence.get("artifact_kind") != "REAL_KAGGLE_MATRIX":
+            errors.append("operational matrix receipt evidence has the wrong artifact kind")
+        elif matrix_evidence.get("storage") == "REPOSITORY_FILE":
+            matrix_path = root / str(matrix_evidence.get("locator"))
+            if matrix_path.is_file():
+                try:
+                    matrix_receipt = load_json(matrix_path)
+                except (OSError, json.JSONDecodeError) as exc:
+                    errors.append(f"cannot read operational matrix receipt: {exc}")
+                else:
+                    if not isinstance(matrix_receipt, dict):
+                        errors.append("operational matrix evidence must be a JSON object")
+                        matrix_receipt = {}
+                    matrix_schema_path = (
+                        root
+                        / "schemas"
+                        / "provider"
+                        / "operational-kaggle-matrix-receipt.v1.schema.json"
+                    )
+                    scenario_schema_path = (
+                        root
+                        / "schemas"
+                        / "provider"
+                        / "operational-kaggle-scenario-receipt.v1.schema.json"
+                    )
+                    matrix_schema_errors: list[Any] = []
+                    if not matrix_schema_path.is_file() or not scenario_schema_path.is_file():
+                        errors.append("operational matrix evidence schemas are absent")
+                    else:
+                        matrix_schema = load_json(matrix_schema_path)
+                        matrix_schema_errors = sorted(
+                            Draft202012Validator(
+                                matrix_schema,
+                                format_checker=FormatChecker(),
+                            ).iter_errors(matrix_receipt),
+                            key=lambda item: list(item.path),
+                        )
+                        if matrix_schema_errors:
+                            errors.append(
+                                "operational matrix evidence violates its schema: "
+                                + "; ".join(
+                                    error.message for error in matrix_schema_errors[:5]
+                                )
+                            )
+                    comparisons = {
+                        "commit_sha": evaluated_commit,
+                        "outcome": "PASS",
+                        "live_evidence": True,
+                        "planned_scenarios": 24,
+                        "passed_scenarios": matrix.get("passed_scenarios"),
+                        "failed_scenarios": matrix.get("failed_scenarios"),
+                        "blocked_scenarios": matrix.get("blocked_scenarios"),
+                        "distinct_provider_run_refs": run_refs,
+                        "distinct_provider_kernel_ids": kernel_ids,
+                    }
+                    for field, expected in comparisons.items():
+                        if matrix_receipt.get(field) != expected:
+                            errors.append(
+                                f"operational matrix evidence {field} does not match final receipt"
+                            )
+                    matrix_lifecycle = matrix_receipt.get("lifecycle_gates", {})
+                    final_lifecycle = matrix.get("lifecycle_gates", {})
+                    for field in (
+                        "master_boots",
+                        "clean_rotations",
+                        "abrupt_master_terminations",
+                        "control_plane_restarts",
+                        "host_reboots",
+                        "soak_runs",
+                        "soak_duration_seconds",
+                    ):
+                        if matrix_lifecycle.get(field) != final_lifecycle.get(field):
+                            errors.append(
+                                f"operational matrix lifecycle field {field} does not match"
+                            )
+                    if scenario_schema_path.is_file() and not matrix_schema_errors:
+                        scenario_schema = load_json(scenario_schema_path)
+                        scenario_run_refs: set[str] = set()
+                        scenario_kernel_ids: set[int] = set()
+                        for summary in matrix_receipt.get("scenario_receipts", []):
+                            if not isinstance(summary, dict):
+                                continue
+                            receipt_name = summary.get("receipt")
+                            if not isinstance(receipt_name, str):
+                                continue
+                            scenario_path = matrix_path.parent / receipt_name
+                            if not scenario_path.is_file():
+                                errors.append(
+                                    f"operational scenario evidence is absent: {receipt_name}"
+                                )
+                                continue
+                            try:
+                                scenario_receipt = load_json(scenario_path)
+                            except (OSError, json.JSONDecodeError) as exc:
+                                errors.append(
+                                    f"cannot read operational scenario evidence {receipt_name}: {exc}"
+                                )
+                                continue
+                            scenario_schema_errors = sorted(
+                                Draft202012Validator(
+                                    scenario_schema,
+                                    format_checker=FormatChecker(),
+                                ).iter_errors(scenario_receipt),
+                                key=lambda item: list(item.path),
+                            )
+                            if scenario_schema_errors:
+                                errors.append(
+                                    f"operational scenario evidence {receipt_name} violates its schema: "
+                                    + "; ".join(
+                                        error.message for error in scenario_schema_errors[:3]
+                                    )
+                                )
+                                continue
+                            expected_scenario = {
+                                "ordinal": summary.get("ordinal"),
+                                "requirement_id": summary.get("requirement_id"),
+                                "scenario": summary.get("scenario"),
+                                "outcome": "PASS",
+                                "live_evidence": True,
+                                "commit_sha": evaluated_commit,
+                            }
+                            for field, expected in expected_scenario.items():
+                                if scenario_receipt.get(field) != expected:
+                                    errors.append(
+                                        f"operational scenario evidence {receipt_name} "
+                                        f"has inconsistent {field}"
+                                    )
+                            real_identity = scenario_receipt.get("real_run_identity")
+                            if isinstance(real_identity, dict):
+                                provider_run_ref = real_identity.get("provider_run_ref")
+                                provider_kernel_id = real_identity.get("provider_kernel_id")
+                                if isinstance(provider_run_ref, str):
+                                    scenario_run_refs.add(provider_run_ref)
+                                if isinstance(provider_kernel_id, int):
+                                    scenario_kernel_ids.add(provider_kernel_id)
+                        if scenario_run_refs != set(run_refs):
+                            errors.append(
+                                "operational scenario run identities do not match matrix summary"
+                            )
+                        if scenario_kernel_ids != set(kernel_ids):
+                            errors.append(
+                                "operational scenario kernel IDs do not match matrix summary"
+                            )
+
+    elif verdict == OPERATIONAL_MVP_BLOCKED:
+        gate_results = receipt.get("gate_results", [])
+        complete_gate_ids = {
+            gate.get("gate_id")
+            for gate in gate_results
+            if isinstance(gate, dict) and gate.get("outcome") == "PASS"
+        }
+        all_required_refs_present = isinstance(required_evidence, dict) and all(
+            bool(required_evidence.get(section))
+            for section in OPERATIONAL_MVP_REQUIRED_EVIDENCE_KINDS
+        )
+        matrix_qualifies = (
+            matrix.get("passed_scenarios") == 24
+            and matrix.get("failed_scenarios") == 0
+            and matrix.get("blocked_scenarios") == 0
+            and isinstance(run_refs, list)
+            and len(run_refs) >= 15
+            and isinstance(kernel_ids, list)
+            and len(kernel_ids) >= 15
+        )
+        if (
+            complete_gate_ids == set(OPERATIONAL_MVP_GATE_IDS)
+            and all_required_refs_present
+            and matrix_qualifies
+        ):
+            errors.append(
+                "BLOCKED receipt presents all completion gates/evidence as complete; "
+                "a blocker must correspond to an actually incomplete criterion"
+            )
+
+    return errors
 
 
 def validate_json_and_schemas(report: Report) -> None:
@@ -359,6 +728,18 @@ def validate_json_and_schemas(report: Report) -> None:
             f"{path.relative_to(ROOT)} violates {schema_name}: "
             + "; ".join(error.message for error in errors[:5]),
         )
+        if example_name == "operational-mvp-acceptance-receipt.v1.example.json" and not errors:
+            semantic_errors = validate_operational_mvp_receipt_semantics(
+                raw,
+                root=ROOT,
+                expected_source_commit=repository_head_commit(ROOT),
+                allow_complete=False,
+            )
+            report.check(
+                not semantic_errors,
+                "synthetic operational MVP receipt is semantically invalid: "
+                + "; ".join(semantic_errors[:5]),
+            )
 
     blocked_receipt = (
         ROOT
@@ -381,10 +762,18 @@ def validate_json_and_schemas(report: Report) -> None:
             "final blocked operational MVP receipt violates its schema: "
             + "; ".join(error.message for error in errors[:5]),
         )
-        report.check(
-            raw.get("verdict") == "MY_DATA_HUB_OPERATIONAL_MVP_BLOCKED",
-            "final operational MVP receipt must remain BLOCKED until every live gate passes",
-        )
+        if not errors:
+            semantic_errors = validate_operational_mvp_receipt_semantics(
+                raw,
+                root=ROOT,
+                expected_source_commit=repository_head_commit(ROOT),
+                allow_complete=True,
+            )
+            report.check(
+                not semantic_errors,
+                "final operational MVP receipt is semantically invalid: "
+                + "; ".join(semantic_errors[:5]),
+            )
 
     evidence_path = (
         ROOT
