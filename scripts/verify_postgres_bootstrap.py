@@ -69,7 +69,7 @@ def main() -> int:
         )
         migrations = [(int(row[0]), str(row[1])) for row in cursor.fetchall()]
         evidence["migrations"] = migrations
-        expected_versions = list(range(1, 11))
+        expected_versions = list(range(1, 12))
         if [row[0] for row in migrations] != expected_versions:
             findings.append(f"migration history mismatch: {migrations}")
 

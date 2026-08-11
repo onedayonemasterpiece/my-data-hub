@@ -9,7 +9,7 @@ BEGIN
         'mdh_owner', 'mdh_migrator', 'mdh_application', 'mdh_orchestrator',
         'mdh_connector_intake', 'mdh_mcp_reader', 'mdh_mcp_editor',
         'mdh_migration_operator', 'mdh_canonical_committer', 'mdh_backup', 'mdh_monitoring',
-        'mdh_authenticator'
+        'mdh_authenticator', 'mdh_master_controller', 'mdh_checkpoint'
     ] LOOP
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
             EXECUTE format('CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS', role_name);
@@ -29,7 +29,7 @@ GRANT mdh_owner TO mdh_migrator;
 DO $$
 BEGIN
     EXECUTE format('REVOKE ALL ON DATABASE %I FROM PUBLIC', current_database());
-    EXECUTE format('GRANT CONNECT ON DATABASE %I TO mdh_migrator, mdh_application, mdh_orchestrator, mdh_connector_intake, mdh_mcp_reader, mdh_mcp_editor, mdh_migration_operator, mdh_canonical_committer, mdh_backup, mdh_monitoring, mdh_authenticator', current_database());
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO mdh_migrator, mdh_application, mdh_orchestrator, mdh_connector_intake, mdh_mcp_reader, mdh_mcp_editor, mdh_migration_operator, mdh_canonical_committer, mdh_backup, mdh_monitoring, mdh_authenticator, mdh_master_controller, mdh_checkpoint', current_database());
     EXECUTE format('GRANT CREATE, TEMPORARY ON DATABASE %I TO mdh_migrator', current_database());
     EXECUTE format('GRANT TEMPORARY ON DATABASE %I TO mdh_application, mdh_orchestrator', current_database());
 END
@@ -134,6 +134,37 @@ GRANT SELECT ON hub.canonical_state, orchestration.queue_health,
     integration.connector, integration.data_product, integration.batch,
     integration.daily_statistic, integration.quarantine,
     integration.provider_resource, recovery.evidence, sync.external_outbox TO mdh_monitoring;
+
+-- The controller is a local-only, non-login capability.  It can move the epoch
+-- state machine and bind/revoke ephemeral logins, but cannot read canonical rows.
+GRANT USAGE ON SCHEMA master_control TO mdh_master_controller, mdh_checkpoint;
+GRANT EXECUTE ON FUNCTION master_control.begin_epoch(uuid,text,bigint,timestamptz),
+    master_control.open_write_gate(uuid,bigint),
+    master_control.renew_epoch(uuid,bigint,timestamptz),
+    master_control.close_write_gate(uuid,bigint,text,text),
+    master_control.bind_epoch_credential(uuid,name,uuid,bigint,timestamptz),
+    master_control.revoke_epoch_credential(uuid,text)
+    TO mdh_master_controller;
+GRANT SELECT ON master_control.epoch_state TO mdh_checkpoint;
+
+-- Group defaults are defense in depth.  The broker repeats the same settings on
+-- every LOGIN principal because ALTER ROLE settings are evaluated at login.
+ALTER ROLE mdh_application SET statement_timeout = '30s';
+ALTER ROLE mdh_application SET lock_timeout = '5s';
+ALTER ROLE mdh_application SET idle_in_transaction_session_timeout = '30s';
+ALTER ROLE mdh_orchestrator SET statement_timeout = '30s';
+ALTER ROLE mdh_orchestrator SET lock_timeout = '5s';
+ALTER ROLE mdh_connector_intake SET statement_timeout = '30s';
+ALTER ROLE mdh_mcp_reader SET default_transaction_read_only = on;
+ALTER ROLE mdh_mcp_reader SET statement_timeout = '15s';
+ALTER ROLE mdh_mcp_reader SET lock_timeout = '3s';
+ALTER ROLE mdh_mcp_editor SET statement_timeout = '30s';
+ALTER ROLE mdh_mcp_editor SET lock_timeout = '5s';
+ALTER ROLE mdh_mcp_editor SET idle_in_transaction_session_timeout = '30s';
+ALTER ROLE mdh_migration_operator SET statement_timeout = '2min';
+ALTER ROLE mdh_migration_operator SET lock_timeout = '10s';
+ALTER ROLE mdh_canonical_committer SET statement_timeout = '2min';
+ALTER ROLE mdh_canonical_committer SET lock_timeout = '10s';
 
 -- New objects fail closed. Re-running this explicit contract after a migration is required
 -- before a new object is visible to any service role.

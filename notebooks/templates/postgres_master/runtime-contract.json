@@ -1,0 +1,18 @@
+{
+  "capabilities": ["sql", "fts", "pgvector"],
+  "checkpoint_contract": "my-data-hub-checkpoint-manifest.v1",
+  "control_class": "orchestrator_protected",
+  "database": {
+    "engine": "PostgreSQL",
+    "major": 18,
+    "pgvector": "0.8.1"
+  },
+  "network": {
+    "database_listener": "127.0.0.1",
+    "protocol": "postgresql+tls",
+    "reverse_bind": "127.0.0.1"
+  },
+  "privacy": "private",
+  "runtime_contract": "my-data-hub-postgres-master.v1",
+  "working_directory": "/kaggle/working"
+}
