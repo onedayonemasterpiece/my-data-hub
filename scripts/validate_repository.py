@@ -682,7 +682,11 @@ def validate_deployment(report: Report) -> None:
     postgres = disposable_services.get("postgres", {})
     report.check(postgres.get("restart") == "no", "disposable PostgreSQL restart policy must be disabled")
     report.check("volumes" not in postgres, "disposable PostgreSQL must not declare bind/anonymous volumes")
-    report.check(postgres.get("tmpfs") == ["/var/lib/postgresql:size=1g,mode=0700"], "disposable PostgreSQL must use exact tmpfs PGDATA parent")
+    report.check(
+        postgres.get("tmpfs")
+        == ["/var/lib/postgresql:size=1g,mode=0700,uid=999,gid=999"],
+        "disposable PostgreSQL must use exact postgres-owned tmpfs PGDATA parent",
+    )
     postgres_image = "pgvector/pgvector:0.8.6-pg18-bookworm"
     report.check(postgres.get("image") == postgres_image, "disposable PostgreSQL image is not pinned")
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")

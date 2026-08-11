@@ -253,7 +253,9 @@ def test_disposable_postgres_has_no_persistent_volume() -> None:
             assert name == "postgres"
     postgres = compose["services"]["postgres"]
     assert postgres["restart"] == "no"
-    assert postgres["tmpfs"] == ["/var/lib/postgresql:size=1g,mode=0700"]
+    assert postgres["tmpfs"] == [
+        "/var/lib/postgresql:size=1g,mode=0700,uid=999,gid=999"
+    ]
     makefile = (ROOT / "Makefile").read_text()
     assert "docker compose down -v --remove-orphans" in makefile
     ci = load_yaml(".github/workflows/ci.yml")

@@ -19,7 +19,9 @@ from my_data_hub.db.migrations import migrate
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS = ROOT / "sql/migrations"
 PREVIOUS_RELEASE_REVISION = 9
-CURRENT_RELEASE_REVISION = 10
+CURRENT_RELEASE_REVISION = max(
+    int(path.name.split("_", 1)[0]) for path in MIGRATIONS.glob("*.sql")
+)
 
 
 def _database_url(base_url: str, database: str) -> str:
@@ -67,7 +69,8 @@ def main() -> int:
                 {
                     "ok": (
                         len(previous_applied) == PREVIOUS_RELEASE_REVISION
-                        and len(current_applied) == 1
+                        and len(current_applied)
+                        == CURRENT_RELEASE_REVISION - PREVIOUS_RELEASE_REVISION
                         and not repeated_applied
                         and int(schema_revision) == CURRENT_RELEASE_REVISION
                         and int(canonical_revision) == 0

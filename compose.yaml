@@ -15,7 +15,7 @@ services:
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     tmpfs:
-      - /var/lib/postgresql:size=1g,mode=0700
+      - /var/lib/postgresql:size=1g,mode=0700,uid=999,gid=999
     shm_size: 512mb
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
@@ -57,5 +57,7 @@ services:
     networks: [integration]
 
 networks:
-  integration:
-    internal: true
+  # Host-side integration probes connect through the loopback-only published
+  # port. Docker's `internal: true` isolates even that path on this engine, so
+  # confidentiality is enforced by the explicit 127.0.0.1 bindings instead.
+  integration: {}
