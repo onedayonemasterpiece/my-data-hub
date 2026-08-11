@@ -59,8 +59,34 @@ class BloggerExportAccumulator:
         self._dispositions[projection.disposition.value] += 1
         self._row_count += 1
 
-    def finish(self, *, expected_row_count: int) -> BloggerExportReceipt:
-        if self._row_count != expected_row_count:
+    def add_evidence(
+        self,
+        *,
+        record_id: str,
+        canonical_bytes: bytes,
+        disposition: BloggerDisposition,
+        source_file_sha256: str | None = None,
+    ) -> None:
+        """Account for a bounded raw observation which could not be typed.
+
+        Invalid source rows still have an immutable landing record and terminal
+        disposition.  Their synthetic identity is deliberately included in the
+        same logical hash as typed rows, so an exact retry produces the same
+        blocked receipt rather than silently forgetting the bad input.
+        """
+
+        self._ids.add(record_id)
+        if source_file_sha256:
+            self._source_files.add(source_file_sha256)
+        self._logical.update(len(canonical_bytes).to_bytes(8, "big"))
+        self._logical.update(canonical_bytes)
+        self._dispositions[disposition.value] += 1
+        self._row_count += 1
+
+    def finish(
+        self, *, expected_row_count: int, allow_incomplete: bool = False
+    ) -> BloggerExportReceipt:
+        if self._row_count != expected_row_count and not allow_incomplete:
             raise ValueError(f"source row count mismatch: expected {expected_row_count}, observed {self._row_count}")
         id_digest = hashlib.sha256()
         for record_id in sorted(self._ids):

@@ -235,6 +235,11 @@ def execute_blogger_migration_stage(
                     rows=rows,
                     source_code_revision=request.source_revision,
                 )
+                if not imported.accounting_complete:
+                    raise RuntimeError(
+                        "blogger migration evidence was durably quarantined; "
+                        "canonical completion and checkpoint publication are blocked"
+                    )
         return _to_receipt(context, imported)
     finally:
         if owns_driver:

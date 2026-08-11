@@ -219,6 +219,28 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
             assert replay.replayed_count == 1
             assert replay.canonical_revision == first_import.canonical_revision
 
+            conflicting_replay_row = {**blogger_row, "blogger_name": "Подменённое имя"}
+            conflict = BloggerSnapshotImporter().import_rows(
+                migration,
+                project_id=project_id,
+                snapshot_at=datetime(2026, 8, 11, tzinfo=UTC),
+                expected_row_count=1,
+                rows=[conflicting_replay_row],
+                source_code_revision="fixture",
+            )
+            assert not conflict.accounting_complete
+            assert conflict.durability_state == "BLOCKED_QUARANTINE"
+            assert conflict.export.dispositions["quarantined"] == 1
+            conflict_replay = BloggerSnapshotImporter().import_rows(
+                migration,
+                project_id=project_id,
+                snapshot_at=datetime(2026, 8, 11, tzinfo=UTC),
+                expected_row_count=1,
+                rows=[conflicting_replay_row],
+                source_code_revision="fixture",
+            )
+            assert conflict_replay == conflict
+
             duplicate_row = {
                 **blogger_row,
                 "record_id": "live-test-duplicate",
@@ -226,18 +248,62 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
                 "blogger_name": "Другой тестовый автор",
                 "evidence_url": "https://example.test/evidence/live-test-duplicate",
             }
-            with pytest.raises(ValueError, match="duplicate decision"):
-                BloggerSnapshotImporter().import_rows(
-                    migration,
-                    project_id=project_id,
-                    snapshot_at=datetime(2026, 8, 11, 0, 0, 1, tzinfo=UTC),
-                    expected_row_count=1,
-                    rows=[duplicate_row],
-                    source_code_revision="fixture",
-                )
+            duplicate = BloggerSnapshotImporter().import_rows(
+                migration,
+                project_id=project_id,
+                snapshot_at=datetime(2026, 8, 11, 0, 0, 1, tzinfo=UTC),
+                expected_row_count=1,
+                rows=[duplicate_row],
+                source_code_revision="fixture",
+            )
+            assert not duplicate.accounting_complete
+            assert duplicate.duplicate_group_count == 1
+
+            malformed_row = {**blogger_row, "unknown_source_column": "x" * 200_000}
+            malformed = BloggerSnapshotImporter().import_rows(
+                migration,
+                project_id=project_id,
+                snapshot_at=datetime(2026, 8, 11, 0, 0, 2, tzinfo=UTC),
+                expected_row_count=1,
+                rows=[malformed_row],
+                source_code_revision="fixture",
+            )
+            assert not malformed.accounting_complete
+            assert malformed.export.dispositions["quarantined"] == 1
+            malformed_replay = BloggerSnapshotImporter().import_rows(
+                migration,
+                project_id=project_id,
+                snapshot_at=datetime(2026, 8, 11, 0, 0, 2, tzinfo=UTC),
+                expected_row_count=1,
+                rows=[malformed_row],
+                source_code_revision="fixture",
+            )
+            assert malformed_replay == malformed
+
+            oversized = BloggerSnapshotImporter().import_rows(
+                migration,
+                project_id=project_id,
+                snapshot_at=datetime(2026, 8, 11, 0, 0, 3, tzinfo=UTC),
+                expected_row_count=1,
+                rows=[{**blogger_row, "blogger_name": "я" * 20_000}],
+                source_code_revision="fixture",
+            )
+            assert not oversized.accounting_complete
+            assert oversized.export.dispositions["quarantined"] == 1
+
+            missing = BloggerSnapshotImporter().import_rows(
+                migration,
+                project_id=project_id,
+                snapshot_at=datetime(2026, 8, 11, 0, 0, 4, tzinfo=UTC),
+                expected_row_count=1,
+                rows=[],
+                source_code_revision="fixture",
+            )
+            assert not missing.accounting_complete
+            assert missing.export.row_count == 0
         with psycopg.connect(admin_url) as admin:
-            # The rejected duplicate batch rolls back canonical rows, accounting
-            # evidence, its revision advance, and its required checkpoint effect.
+            # Faults preserve terminal raw evidence but never advance canonical
+            # state or create a second required checkpoint effect.
             assert admin.execute("SELECT count(*) FROM sync.audit_event").fetchone()[0] == 3
             assert admin.execute("SELECT count(*) FROM region_talk.bloggers_ru_v1").fetchone()[0] == 1
             assert admin.execute(
@@ -247,10 +313,46 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
             assert admin.execute(
                 "SELECT count(*) FROM migration.export_batch "
                 "WHERE source_scope='region-talk-bloggers-v1'"
-            ).fetchone()[0] == 1
+            ).fetchone()[0] == 5
             assert admin.execute(
                 "SELECT count(*) FROM migration.duplicate_group"
+            ).fetchone()[0] == 1
+            assert admin.execute(
+                "SELECT decision_status FROM migration.duplicate_group"
+            ).fetchone()[0] == "quarantined"
+            assert admin.execute("SELECT count(*) FROM migration.raw_record").fetchone()[0] == 5
+            assert admin.execute(
+                "SELECT count(*) FROM migration.raw_record raw "
+                "JOIN migration.row_disposition disposition USING(raw_record_id)"
+            ).fetchone()[0] == 5
+            assert admin.execute(
+                "SELECT count(*) FROM migration.row_disposition WHERE disposition='quarantined'"
+            ).fetchone()[0] == 3
+            assert admin.execute(
+                "SELECT count(*) FROM migration.row_disposition "
+                "WHERE disposition='quarantined' "
+                "AND reason_code='same_source_key_different_payload'"
+            ).fetchone()[0] == 1
+            assert admin.execute(
+                "SELECT payload->>'blogger_name' FROM migration.raw_record "
+                "WHERE source_pk='live-test-001'"
+            ).fetchone()[0] == "Тестовый автор"
+            assert admin.execute(
+                "SELECT array_agg(reason_code ORDER BY reason_code) "
+                "FROM migration.row_disposition WHERE disposition='quarantined'"
+            ).fetchone()[0] == [
+                "oversized_source_value",
+                "same_source_key_different_payload",
+                "unknown_source_value",
+            ]
+            assert admin.execute(
+                "SELECT count(*) FROM migration.batch_accounting "
+                "WHERE undispositioned_count <> 0"
             ).fetchone()[0] == 0
+            assert admin.execute(
+                "SELECT max(pg_column_size(payload)) FROM migration.raw_record "
+                "WHERE payload->>'schema_version'='region-talk-blogger-quarantine-evidence.v1'"
+            ).fetchone()[0] < 128 * 1024
             state = admin.execute(
                 "SELECT highest_epoch,current_epoch,gate_state FROM master_control.epoch_state"
             ).fetchone()

@@ -46,6 +46,92 @@ class PostgresBloggerWriter:
 
     mapping_version = "region-talk-bloggers.v1"
 
+    def raw_state(
+        self, cursor: Any, *, export_batch_id: UUID, source_pk: str
+    ) -> tuple[UUID, str, BloggerDisposition | None] | None:
+        raw_record_id = _id("raw", f"{export_batch_id}:{SOURCE_TABLE}:{source_pk}")
+        existing = cursor.execute(
+            """
+            SELECT raw.payload_sha256, disposition.disposition
+            FROM migration.raw_record raw
+            LEFT JOIN migration.row_disposition disposition
+              ON disposition.raw_record_id=raw.raw_record_id
+            WHERE raw.raw_record_id=%s
+            """,
+            (raw_record_id,),
+        ).fetchone()
+        if existing is None:
+            return None
+        return (
+            raw_record_id,
+            existing[0],
+            BloggerDisposition(existing[1]) if existing[1] is not None else None,
+        )
+
+    def retain_observation(
+        self,
+        cursor: Any,
+        *,
+        export_batch_id: UUID,
+        source_pk: str,
+        payload: dict[str, Any],
+        payload_sha256: str,
+        disposition: BloggerDisposition,
+        reason_code: str,
+        source_updated_at: Any = None,
+        target_refs: list[dict[str, str]] | None = None,
+    ) -> tuple[UUID, bool]:
+        """Append one bounded raw observation and its terminal disposition.
+
+        This path never writes canonical tables.  It is used for malformed
+        source values, accounting failures and immutable-key conflicts.
+        """
+
+        if disposition not in {BloggerDisposition.RETAINED_RAW, BloggerDisposition.QUARANTINED}:
+            raise ValueError("raw-only observation requires a non-canonical disposition")
+        raw_record_id = _id("raw", f"{export_batch_id}:{SOURCE_TABLE}:{source_pk}")
+        existing = self.raw_state(cursor, export_batch_id=export_batch_id, source_pk=source_pk)
+        if existing is not None:
+            if existing[1] != payload_sha256:
+                raise BloggerReplayConflict("raw evidence identity has different immutable payload")
+            if existing[2] is None:
+                raise BloggerReplayConflict("raw evidence lacks terminal disposition")
+            return raw_record_id, True
+        cursor.execute(
+            """
+            INSERT INTO migration.raw_record(
+                raw_record_id,export_batch_id,source_table,source_pk,row_kind,
+                source_updated_at,payload,payload_sha256
+            ) VALUES (%s,%s,%s,%s,'region_talk_external_blogger_evidence',%s,%s,%s)
+            """,
+            (
+                raw_record_id,
+                export_batch_id,
+                SOURCE_TABLE,
+                source_pk,
+                source_updated_at,
+                Jsonb(payload),
+                payload_sha256,
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO migration.row_disposition(
+                raw_record_id,mapping_version,disposition,target_refs,reason_code,
+                transformer_sha256
+            ) VALUES (%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                raw_record_id,
+                self.mapping_version,
+                disposition.value,
+                Jsonb(target_refs or []),
+                reason_code,
+                hashlib.sha256(self.mapping_version.encode()).hexdigest(),
+            ),
+        )
+        return raw_record_id, False
+
     def write_row(
         self,
         cursor: Any,
@@ -58,10 +144,8 @@ class PostgresBloggerWriter:
         if row.record_id != projection.record_id:
             raise ValueError("source/projection identity mismatch")
         raw_record_id = _id("raw", f"{export_batch_id}:{SOURCE_TABLE}:{row.record_id}")
-        existing = cursor.execute(
-            "SELECT payload_sha256 FROM migration.raw_record WHERE raw_record_id=%s",
-            (raw_record_id,),
-        ).fetchone()
+        state = self.raw_state(cursor, export_batch_id=export_batch_id, source_pk=row.record_id)
+        existing = None if state is None else (state[1],)
         if existing is not None:
             if existing[0] != row.payload_sha256:
                 raise BloggerReplayConflict("same raw_record_id has different payload hash")

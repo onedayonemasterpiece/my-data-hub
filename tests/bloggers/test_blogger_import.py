@@ -6,6 +6,7 @@ from uuid import UUID
 import pytest
 
 from my_data_hub.workloads.bloggers.accounting import BloggerExportAccumulator
+from my_data_hub.workloads.bloggers.importer import _observe
 from my_data_hub.workloads.bloggers.schema import (
     SOURCE_COLUMNS,
     SOURCE_QUERY,
@@ -76,6 +77,26 @@ def test_unknown_or_missing_source_field_is_not_silently_discarded() -> None:
     missing.pop("segment")
     with pytest.raises(BloggerSourceError, match="missing"):
         BloggerSourceRow.from_mapping(missing)
+
+
+def test_invalid_source_values_produce_bounded_terminal_quarantine_evidence() -> None:
+    unknown = _observe(source_row(extra_secret="x" * 200_000), 0)
+    assert unknown.row is None
+    assert unknown.reason_code == "unknown_source_value"
+    assert len(unknown.payload_bytes) <= BloggerSourceRow.MAX_SERIALIZED_BYTES
+    assert unknown.payload["schema_version"] == "region-talk-blogger-quarantine-evidence.v1"
+
+    oversized = _observe(source_row(blogger_name="я" * 20_000), 1)
+    assert oversized.row is None
+    assert oversized.reason_code == "oversized_source_value"
+    assert len(oversized.payload_bytes) <= BloggerSourceRow.MAX_SERIALIZED_BYTES
+
+    missing = source_row()
+    missing.pop("record_id")
+    missing_observation = _observe(missing, 2)
+    assert missing_observation.row is None
+    assert missing_observation.reason_code == "missing_source_value"
+    assert missing_observation.source_pk.startswith("invalid:2:")
 
 
 def test_transform_is_deterministic_preserves_unknown_actor_kind_and_normalizes_accounts() -> None:

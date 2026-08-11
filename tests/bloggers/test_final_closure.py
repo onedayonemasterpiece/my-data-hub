@@ -503,3 +503,46 @@ def test_in_master_stage_uses_epoch_bound_migration_login_and_drops_it(monkeypat
         < events.index("postgres.import")
         < events.index("credential.drop")
     )
+
+    blocked_export = BloggerExportReceipt(
+        export_batch_id=BATCH,
+        exported_at=datetime(2026, 8, 9, tzinfo=UTC),
+        query_sha256=SOURCE_QUERY_SHA256,
+        row_count=266,
+        distinct_record_ids=266,
+        record_id_set_sha256=SHA,
+        logical_sha256="d" * 64,
+        dispositions={"retained_raw": 265, "quarantined": 1},
+        undispositioned=0,
+        source_file_count=14,
+    )
+    blocked = ImportReceipt(
+        export=blocked_export,
+        canonical_outcome_sha256="e" * 64,
+        actor_count=0,
+        account_count=0,
+        duplicate_group_count=0,
+        replayed_count=0,
+        canonical_revision=9,
+        durability_state="BLOCKED_QUARANTINE",
+    )
+
+    class BlockedImporter:
+        def import_rows(self, connection, **kwargs):
+            return blocked
+
+    with pytest.raises(RuntimeError, match="durably quarantined"):
+        execute_blogger_migration_stage(
+            BloggerStageContext(
+                identity=MasterIdentity(MASTER, "77777777-7777-4777-8777-777777777777", 7),
+                request=request(),
+                local_database_url=(
+                    "postgresql://postgres@/postgres?host=%2Fkaggle%2Fworking%2Fsocket&port=5432"
+                ),
+                lease_until=datetime.now(UTC).replace(microsecond=0)
+                + __import__("datetime").timedelta(minutes=6),
+            ),
+            owner_connection=object(),
+            driver=object(),
+            importer=BlockedImporter(),
+        )
