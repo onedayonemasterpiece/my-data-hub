@@ -11,14 +11,19 @@ permissions:
 jobs:
   deterministic-control-plane:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
+    env:
+      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+      MY_DATA_HUB_MCP_CANARY_ENDPOINT: ${{ vars.MY_DATA_HUB_MCP_CANARY_ENDPOINT || 'https://mcp-datahub.kenigevents.ru/mcp' }}
+      MY_DATA_HUB_MCP_CANARY_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_CANARY_TOKEN }}
+      MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT: ${{ vars.MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT || github.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-      - run: python -m pip install -e '.[dev]'
+      - run: python -m pip install -e '.[dev,kaggle]'
       - name: Validate architecture and generated notebooks
         run: |
           python scripts/validate_repository.py
@@ -50,5 +55,19 @@ jobs:
         with:
           name: nightly-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/nightly.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Run live nightly scheduled acceptance
+        run: >-
+          python scripts/provider/scheduled_acceptance.py run
+          --mode nightly
+          --ledger artifacts/scheduled-provider-effects.sqlite3
+          --receipt artifacts/scheduled-nightly.json
+      - name: Upload sanitized scheduled receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduled-nightly-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/scheduled-nightly.json
           if-no-files-found: error
           retention-days: 30

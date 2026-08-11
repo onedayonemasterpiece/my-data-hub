@@ -2,6 +2,15 @@ name: provider-real
 
 on:
   workflow_dispatch:
+    inputs:
+      acceptance_mode:
+        description: Scheduled acceptance scenario
+        required: true
+        default: weekly
+        type: choice
+        options:
+          - weekly
+          - manual
   schedule:
     - cron: '17 3 * * 2'
 
@@ -15,7 +24,7 @@ concurrency:
 jobs:
   private-notebook-canary:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     env:
       KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
     steps:
@@ -37,6 +46,20 @@ jobs:
           python scripts/provider/real_kaggle_matrix.py notebook-canary
           --ledger artifacts/provider-effects.sqlite3
           --receipt artifacts/notebook-canary.json
+      - name: Run weekly/manual scheduled acceptance
+        if: always()
+        env:
+          MY_DATA_HUB_MCP_CANARY_ENDPOINT: ${{ vars.MY_DATA_HUB_MCP_CANARY_ENDPOINT || 'https://mcp-datahub.kenigevents.ru/mcp' }}
+          MY_DATA_HUB_MCP_CANARY_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_CANARY_TOKEN }}
+          MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT: ${{ vars.MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT || github.sha }}
+          ACCEPTANCE_MODE: ${{ github.event_name == 'schedule' && 'weekly' || inputs.acceptance_mode }}
+        run: >-
+          python scripts/provider/scheduled_acceptance.py run
+          --mode "$ACCEPTANCE_MODE"
+          --ledger artifacts/scheduled-provider-effects.sqlite3
+          --dataset-lifecycle-receipt artifacts/dataset-canary.json
+          --notebook-lifecycle-receipt artifacts/notebook-canary.json
+          --receipt artifacts/scheduled-provider-real.json
       - name: Upload non-secret exact-run receipt
         if: always()
         uses: actions/upload-artifact@v4
@@ -45,5 +68,6 @@ jobs:
           path: |
             artifacts/dataset-canary.json
             artifacts/notebook-canary.json
+            artifacts/scheduled-provider-real.json
           if-no-files-found: error
           retention-days: 30
