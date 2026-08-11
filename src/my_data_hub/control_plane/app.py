@@ -30,7 +30,7 @@ from my_data_hub.providers.kaggle.contracts import (
     ProviderEffectReceipt,
     TaskResourceClaim,
 )
-from my_data_hub.providers.models import ControlClass
+from my_data_hub.providers.models import ControlClass, ProviderKind
 
 DATABASE_ENVIRONMENT_NAMES = (
     "MY_DATA_HUB_DATABASE_URL",
@@ -648,6 +648,41 @@ def create_app(
         except PermissionError:
             return {"authorized": False}
         return {"authorized": True}
+
+    @app.post("/internal/provider-journal/resource-claims/current")
+    async def provider_journal_current_claim(
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            allowed_states=frozenset({"REGISTERING", "ACTIVE", "DRAINING", "CHECKPOINTING"}),
+        )
+        body = await _bounded_json(request)
+        configured_master = runtime.master_runtime or (
+            master_runtime.settings if master_runtime is not None else None
+        )
+        expected_ref = configured_master.assets.checkpoint_ref if configured_master else None
+        if body != {
+            "provider_ref": expected_ref,
+            "kind": ProviderKind.DATASET.value,
+            "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
+        }:
+            raise HTTPException(status_code=403, detail={"code": "provider_claim_lookup_forbidden"})
+        claim = control_ledger.latest_provider_resource_claim(
+            provider_ref=str(expected_ref),
+            resource_kind=ProviderKind.DATASET.value,
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
+        )
+        return {"claim": claim}
 
     @app.get("/internal/checkpoints/{service_kind}/head")
     def checkpoint_head(

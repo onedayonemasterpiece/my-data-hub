@@ -1280,6 +1280,23 @@ class ControlLedger:
             return None
         return {key: str(value) for key, value in dict(row).items()}
 
+    def latest_provider_resource_claim(
+        self,
+        *,
+        provider_ref: str,
+        resource_kind: str,
+        control_class: str,
+    ) -> dict[str, Any] | None:
+        """Resolve the exact highest-version durable claim for a protected resource."""
+
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT claim_json FROM provider_resource_claims WHERE provider_ref=? "
+                "AND resource_kind=? AND control_class=? ORDER BY provider_version DESC LIMIT 1",
+                (provider_ref, resource_kind, control_class),
+            ).fetchone()
+        return json.loads(str(row["claim_json"])) if row else None
+
     def acquire_resource_lease(
         self,
         *,

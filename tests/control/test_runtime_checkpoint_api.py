@@ -12,7 +12,12 @@ from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.control_plane.runtime import ControlPlaneMasterRuntime, MasterRuntimeSettings
 from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator
 from my_data_hub.providers.kaggle import KaggleMasterLaunchAssets
-from my_data_hub.providers.kaggle.contracts import MutationAction, ProviderEffectIntent
+from my_data_hub.providers.kaggle.contracts import (
+    MutationAction,
+    ProviderEffectIntent,
+    TaskResourceClaim,
+)
+from my_data_hub.providers.models import ControlClass, ProviderFingerprint, ProviderKind
 
 RUN = UUID("11111111-1111-4111-8111-111111111111")
 ATTEMPT = UUID("22222222-2222-4222-8222-222222222222")
@@ -146,6 +151,34 @@ def test_remote_journal_requires_exact_runtime_identity(tmp_path: Path) -> None:
         "provider_ref": "owner/checkpoints",
         "action": "create_dataset",
     }
+    claim = TaskResourceClaim.create(
+        task_id=RUN,
+        effect_id=intent.effect_id,
+        provider_ref="owner/checkpoints",
+        kind=ProviderKind.DATASET,
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=False,
+        fingerprint=ProviderFingerprint(value="a" * 64),
+        provider_version=1,
+        registered_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    persisted = client.post(
+        "/internal/provider-journal/resource-claims",
+        json={"claim": claim.model_dump(mode="json")},
+        headers=headers,
+    )
+    assert persisted.status_code == 200, persisted.text
+    current = client.post(
+        "/internal/provider-journal/resource-claims/current",
+        json={
+            "provider_ref": "owner/checkpoints",
+            "kind": "dataset",
+            "control_class": "orchestrator_protected",
+        },
+        headers=headers,
+    )
+    assert current.status_code == 200
+    assert current.json() == {"claim": claim.model_dump(mode="json")}
     fenced = {**headers, "X-MDH-Epoch": "2"}
     assert client.post(path, json={"intent": intent.model_dump(mode="json")}, headers=fenced).status_code == 409
 
