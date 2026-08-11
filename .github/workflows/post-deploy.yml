@@ -1,0 +1,57 @@
+name: post-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      endpoint:
+        description: Exact public MCP resource URL
+        required: true
+        default: https://mcp-datahub.kenigevents.ru/mcp
+      expected_commit:
+        description: Exact deployed merge commit
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  remote-read-only-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MY_DATA_HUB_MCP_CANARY_ENDPOINT: ${{ inputs.endpoint }}
+      MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT: ${{ inputs.expected_commit }}
+      MY_DATA_HUB_MCP_CANARY_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_READER_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e '.[dev]'
+      - name: Require exact deploy identity and reader token
+        shell: bash
+        run: |
+          test -n "$MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT"
+          test -n "$MY_DATA_HUB_MCP_CANARY_TOKEN"
+          test "${#MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT}" -eq 40
+      - name: Verify remote OAuth/MCP read-only contract
+        run: python scripts/verify_remote_mcp.py
+      - name: Write post-deploy receipt
+        if: always()
+        run: >-
+          python scripts/write_workflow_receipt.py
+          --workflow post-deploy --environment devstand
+          --outcome "${{ job.status == 'success' && 'PASS' || 'FAIL' }}"
+          --observed "remote read-only MCP verification for exact requested deployment"
+          --resource endpoint="$MY_DATA_HUB_MCP_CANARY_ENDPOINT"
+          --resource expected_commit="$MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT"
+          --output artifacts/post-deploy.json
+      - name: Upload receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-deploy-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/post-deploy.json
+          if-no-files-found: error
+          retention-days: 30

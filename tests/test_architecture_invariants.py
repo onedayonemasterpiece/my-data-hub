@@ -123,7 +123,7 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
         path.name
         for path in workflow_directory.iterdir()
         if path.is_file() and path.suffix.lower() in {".yml", ".yaml"}
-    } == {"ci.yml"}
+    } == {"ci.yml", "nightly.yml", "post-deploy.yml", "provider-real.yml"}
     for path in repository_files:
         if path.suffix.lower() not in {".yml", ".yaml"}:
             continue

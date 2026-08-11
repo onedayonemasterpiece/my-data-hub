@@ -698,7 +698,30 @@ def validate_deployment(report: Report) -> None:
         for path in workflow_directory.iterdir()
         if path.is_file() and path.suffix.lower() in {".yml", ".yaml"}
     }
-    report.check(workflows == {"ci.yml"}, "deferred deployment/provider workflows remain enabled")
+    report.check(
+        workflows == {"ci.yml", "nightly.yml", "post-deploy.yml", "provider-real.yml"},
+        "workflow inventory drifted or gained an unclassified execution path",
+    )
+    expected_scheduled_jobs = {
+        "nightly.yml": {"deterministic-control-plane"},
+        "post-deploy.yml": {"remote-read-only-contract"},
+        "provider-real.yml": {"private-notebook-canary"},
+    }
+    for workflow_name, expected_jobs in expected_scheduled_jobs.items():
+        workflow = yaml.safe_load((workflow_directory / workflow_name).read_text(encoding="utf-8"))
+        report.check(
+            set(workflow.get("jobs", {})) == expected_jobs,
+            f"{workflow_name} job inventory drifted",
+        )
+        for job_name, job in workflow.get("jobs", {}).items():
+            report.check(
+                job.get("runs-on") == "ubuntu-latest",
+                f"{workflow_name}:{job_name} is not GitHub-hosted and bounded",
+            )
+            report.check(
+                not job.get("services") and "container" not in job,
+                f"{workflow_name}:{job_name} declares an unclassified persistent runtime",
+            )
     ci_path = workflow_directory / "ci.yml"
     ci = ci_path.read_text(encoding="utf-8")
     ci_yaml = yaml.safe_load(ci)

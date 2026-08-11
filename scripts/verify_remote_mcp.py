@@ -10,17 +10,19 @@ import os
 from urllib.parse import urlsplit
 
 READ_ONLY_TOOLS = {
-    "hub.health",
-    "hub.project.list",
-    "hub.content.search",
-    "hub.content.get",
-    "hub.trace.get",
-    "region_talk.queue.summary",
-    "region_talk.plan.preview",
-    "region_talk.migration.status",
-    "region_talk.migration.accounting",
-    "connector.status.list",
-    "provider.resource.status",
+    "platform.status",
+    "master.status",
+    "operation.get",
+    "checkpoint.status",
+    "embedding.coverage",
+    "provider.resources.status",
+    "bloggers.list",
+    "bloggers.get",
+    "bloggers.search",
+    "bloggers.provenance",
+    "bloggers.statistics",
+    "data.query",
+    "data.change.status",
 }
 FORBIDDEN_FRAGMENTS = ("write", "enqueue", "submit", "delete", "create", "update", "operator")
 
@@ -54,9 +56,9 @@ async def verify(endpoint: str, token: str) -> dict[str, object]:
                     "remote MCP catalog is not the exact R1 read-only catalog: "
                     f"missing={sorted(READ_ONLY_TOOLS - names)}, forbidden={forbidden}"
                 )
-            result = await session.call_tool("hub.health", {})
+            result = await session.call_tool("platform.status", {})
             if result.isError:
-                raise RuntimeError("remote hub.health returned an MCP error")
+                raise RuntimeError("remote platform.status returned an MCP error")
             return {
                 "ok": True,
                 "endpoint": endpoint,

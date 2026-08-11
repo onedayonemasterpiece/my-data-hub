@@ -1,0 +1,42 @@
+name: provider-real
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 2'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: my-data-hub-real-kaggle
+  cancel-in-progress: false
+
+jobs:
+  private-notebook-canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e '.[dev,kaggle]'
+      - name: Require modern Kaggle token
+        run: python scripts/provider/real_kaggle_matrix.py preflight
+      - name: Run private exact-source notebook canary
+        run: >-
+          python scripts/provider/real_kaggle_matrix.py notebook-canary
+          --ledger artifacts/provider-effects.sqlite3
+          --receipt artifacts/notebook-canary.json
+      - name: Upload non-secret exact-run receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-real-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/notebook-canary.json
+          if-no-files-found: error
+          retention-days: 30
