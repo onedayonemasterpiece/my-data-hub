@@ -222,6 +222,13 @@ def test_remote_journal_requires_exact_runtime_identity(tmp_path: Path) -> None:
         "X-MDH-Master-Instance-ID": str(MASTER_2),
         "X-MDH-Epoch": "2",
     }
+    prior_authority = client.post(
+        "/internal/provider-journal/resource-claims/assert",
+        json={"claim": claim.model_dump(mode="json")},
+        headers=headers_2,
+    )
+    assert prior_authority.status_code == 200
+    assert prior_authority.json() == {"authorized": True}
     version_intent = ProviderEffectIntent.create(
         operation_id=OPERATION_2,
         effect_id=UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),

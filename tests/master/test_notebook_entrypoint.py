@@ -15,6 +15,7 @@ from my_data_hub.master_runtime.notebook_entrypoint import (
     NotebookMasterConfig,
     _activation_url,
     _checkpoint_before_stop,
+    _checkpoint_until_deadline,
     _credential_registration_url,
     _register_reader_credential,
     main,
@@ -242,7 +243,7 @@ def test_checkpoint_failure_leaves_drained_master_nonterminal_and_running(tmp_pa
     events: list[str] = []
     coordinator = None if failure == "missing" else _Coordinator(events, fail=failure == "publish")
     runtime = _Runtime(events, terminal_status="queued" if failure == "terminal" else "delivered")
-    with pytest.raises(CheckpointShutdownError, match="remains"):
+    with pytest.raises(CheckpointShutdownError, match=r"remains|retry"):
         _checkpoint_before_stop(
             gate=_Gate(events),
             runtime=runtime,
@@ -257,6 +258,40 @@ def test_checkpoint_failure_leaves_drained_master_nonterminal_and_running(tmp_pa
     if failure in {"publish", "missing"}:
         assert "runtime.terminal" not in events
         assert events[-1] == "checkpoint.failed"
+
+
+def test_checkpoint_retry_uses_reserved_time_and_does_not_reopen_writes(tmp_path: Path) -> None:
+    events: list[str] = []
+
+    class RetryCoordinator(_Coordinator):
+        def create_and_publish(self, **kwargs):  # type: ignore[no-untyped-def]
+            if self.fail:
+                self.events.append("checkpoint.publish")
+                self.fail = False
+                raise RuntimeError("transient provider failure")
+            return super().create_and_publish(**kwargs)
+
+    sleeps: list[float] = []
+    receipt = _checkpoint_until_deadline(
+        gate=_Gate(events),
+        runtime=_Runtime(events),
+        tunnel=_Process(events, "tunnel"),
+        supervisor=_Process(events, "postgres"),
+        coordinator=RetryCoordinator(events, fail=True),
+        database_url="postgresql:///postgres",
+        package_directory=tmp_path,
+        identity=IDENTITY,
+        deadline=200,
+        retry_seconds=60,
+        monotonic=lambda: 0,
+        sleep=sleeps.append,
+    )
+    assert receipt.current_checkpoint_id == receipt.checkpoint_id
+    assert sleeps == [60]
+    assert events.count("gate.drain") == 1
+    assert events.count("runtime.draining") == 1
+    assert events.count("checkpoint.started") == 2
+    assert events.count("checkpoint.failed") == 1
 
 
 @pytest.mark.parametrize("has_head", [False, True])

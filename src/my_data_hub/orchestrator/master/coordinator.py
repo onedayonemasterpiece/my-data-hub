@@ -205,11 +205,16 @@ class MasterCoordinator:
                 event_id=event.event_id,
             )
         elif event.event_type == RuntimeEventType.CHECKPOINT_STARTED:
+            expected_state = (
+                MasterState.CHECKPOINT_FAILED.value
+                if operation.state == MasterState.CHECKPOINT_FAILED.value
+                else MasterState.DRAINING.value
+            )
             self.ledger.project_master_lifecycle(
                 operation_id=operation.operation_id,
                 service_instance_id=event.service_instance_id,
                 epoch=event.epoch,
-                expected_operation_state=MasterState.DRAINING.value,
+                expected_operation_state=expected_state,
                 operation_state=MasterState.CHECKPOINTING.value,
                 service_state=MasterState.DRAINING.value,
                 event_id=event.event_id,
@@ -286,9 +291,7 @@ class MasterCoordinator:
             "checkpoint_ref": intent.checkpoint_ref,
         }
         if effect_kind == "trigger_run":
-            source_effect = self.ledger.get_effect_by_idempotency_key(
-                f"{operation_id}:push_notebook"
-            )
+            source_effect = self.ledger.get_effect_by_idempotency_key(f"{operation_id}:push_notebook")
             if source_effect is None or source_effect.state != EffectState.APPLIED:
                 return None
             assert source_effect.receipt is not None

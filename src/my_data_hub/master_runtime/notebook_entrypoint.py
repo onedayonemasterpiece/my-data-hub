@@ -425,7 +425,8 @@ def run_master(
     # The provider hard-stop applies to the whole Notebook, not only the active
     # service loop.  Reserve a declared, testable window for drain, basebackup,
     # exact readback, independent restore and durable HEAD promotion.
-    deadline = time.monotonic() + (config.maximum_runtime_seconds - config.checkpoint_reserve_seconds)
+    session_deadline = time.monotonic() + config.maximum_runtime_seconds
+    deadline = session_deadline - config.checkpoint_reserve_seconds
     current_lease = ready.lease_until
     active_error: BaseException | None = None
     try:
@@ -461,7 +462,7 @@ def run_master(
     except BaseException as exc:
         active_error = exc
 
-    _checkpoint_before_stop(
+    _checkpoint_until_deadline(
         gate=gate,
         runtime=runtime,
         tunnel=tunnel,
@@ -470,6 +471,7 @@ def run_master(
         database_url=database_url,
         package_directory=paths.checkpoints,
         identity=identity,
+        deadline=session_deadline,
     )
     if active_error is not None:
         if gate_connection is not None:
@@ -490,6 +492,7 @@ def _checkpoint_before_stop(
     database_url: str,
     package_directory: Path,
     identity: MasterIdentity,
+    retry: bool = False,
 ) -> PublishReceipt:
     """Close writes and stop processes only after durable checkpoint success.
 
@@ -497,8 +500,9 @@ def _checkpoint_before_stop(
     HEAD remains authoritative, and no runtime-terminal/stop effect is emitted.
     """
 
-    gate.drain(identity, "runtime_checkpoint")
-    runtime.emit(RuntimeEventType.RUNTIME_DRAINING, phase="draining", status="closed")
+    if not retry:
+        gate.drain(identity, "runtime_checkpoint")
+        runtime.emit(RuntimeEventType.RUNTIME_DRAINING, phase="draining", status="closed")
     runtime.emit(RuntimeEventType.CHECKPOINT_STARTED, phase="checkpointing", status="started")
     try:
         if coordinator is None:
@@ -516,7 +520,7 @@ def _checkpoint_before_stop(
             data={"failure_code": type(exc).__name__},
         )
         raise CheckpointShutdownError(
-            "checkpoint failed; drained master remains nonterminal and old HEAD is preserved"
+            "checkpoint failed; old HEAD is preserved and the drained master requires retry"
         ) from exc
 
     verified = runtime.emit(
@@ -542,6 +546,45 @@ def _checkpoint_before_stop(
     tunnel.stop()
     supervisor.stop(immediate=False)
     return receipt
+
+
+def _checkpoint_until_deadline(
+    *,
+    gate: Any,
+    runtime: Any,
+    tunnel: Any,
+    supervisor: Any,
+    coordinator: RuntimeCheckpointCoordinator | None,
+    database_url: str,
+    package_directory: Path,
+    identity: MasterIdentity,
+    deadline: float,
+    retry_seconds: float = 60.0,
+    monotonic: Any = time.monotonic,
+    sleep: Any = time.sleep,
+) -> PublishReceipt:
+    """Retry failed candidates inside the declared provider shutdown reserve."""
+
+    retry = False
+    while True:
+        try:
+            return _checkpoint_before_stop(
+                gate=gate,
+                runtime=runtime,
+                tunnel=tunnel,
+                supervisor=supervisor,
+                coordinator=coordinator,
+                database_url=database_url,
+                package_directory=package_directory,
+                identity=identity,
+                retry=retry,
+            )
+        except CheckpointShutdownError:
+            remaining = deadline - monotonic()
+            if remaining <= retry_seconds + 30:
+                raise
+            sleep(min(retry_seconds, remaining - 30))
+            retry = True
 
 
 def main() -> int:
