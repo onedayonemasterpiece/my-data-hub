@@ -38,8 +38,12 @@ from my_data_hub.workloads.bloggers.master_stage import (
     BLOGGER_REPLAY_STAGE_SCHEMA,
     BloggerDuplicateDecision,
     BloggerDuplicateResolutionEnvelope,
+    BloggerDuplicateReviewGroup,
+    BloggerDuplicateReviewInputs,
+    BloggerDuplicateReviewMember,
     BloggerImportStageReceipt,
     BloggerMigrationRequest,
+    BloggerQuarantineReceipt,
 )
 
 ROOT = "runtime-root-secret-long-enough-for-tests"
@@ -53,6 +57,7 @@ def test_duplicate_replay_requires_terminal_quarantine_and_exact_source_authoriz
     )
     authorized_at = datetime(2026, 8, 11, tzinfo=UTC)
     authorizer = "owner-review:test"
+    canonical_actor_id = uuid4()
     envelope = BloggerDuplicateResolutionEnvelope(
         authorization_id=uuid4(), authorized_by=authorizer, authorized_at=authorized_at,
         source_request_id=source.request_id, source_operation_id=source.operation_id,
@@ -60,7 +65,7 @@ def test_duplicate_replay_requires_terminal_quarantine_and_exact_source_authoriz
         export_batch_id=batch_identity(snapshot_at, 266), project_id=source.project_id,
         snapshot_at=snapshot_at, source_revision=source.source_revision,
         decisions=(BloggerDuplicateDecision(
-            identity_sha256="b" * 64, canonical_record_id="record-1", canonical_actor_id=uuid4(),
+            identity_sha256="b" * 64, canonical_record_id="record-1", canonical_actor_id=canonical_actor_id,
             member_record_ids=("record-1", "record-2"), decided_by=authorizer,
             reason="The exact reviewed evidence establishes one person.",
         ),),
@@ -70,10 +75,45 @@ def test_duplicate_replay_requires_terminal_quarantine_and_exact_source_authoriz
         project_id=source.project_id, snapshot_at=snapshot_at, source_revision=source.source_revision,
         replay_of_request_id=source.request_id, duplicate_resolution=envelope,
     )
+    quarantine = BloggerQuarantineReceipt(
+        request_id=source.request_id,
+        operation_id=source.operation_id,
+        request_sha256=source.request_sha256,
+        master_instance_id=uuid4(),
+        run_id="run-1",
+        attempt_id="attempt-1",
+        epoch=1,
+        export_batch_id=batch_identity(snapshot_at, 266),
+        row_count=266,
+        raw_count=266,
+        dispositioned_count=266,
+        undispositioned_count=0,
+        quarantined_count=2,
+        logical_sha256="d" * 64,
+        record_id_set_sha256="e" * 64,
+        canonical_outcome_sha256="f" * 64,
+        duplicate_group_count=1,
+        duplicate_groups_pending=1,
+        duplicate_review_inputs=BloggerDuplicateReviewInputs(
+            groups=(
+                BloggerDuplicateReviewGroup(
+                    identity_sha256="b" * 64,
+                    members=(
+                        BloggerDuplicateReviewMember(
+                            record_id="record-1", projected_actor_id=canonical_actor_id
+                        ),
+                        BloggerDuplicateReviewMember(record_id="record-2", projected_actor_id=uuid4()),
+                    ),
+                ),
+            )
+        ),
+    )
     record = {
         "request_id": str(source.request_id), "operation_id": str(source.operation_id),
         "request_sha256": source.request_sha256, "request": source.model_dump(mode="json"),
         "state": "FAILED", "failure_code": "BloggerMigrationQuarantined",
+        "quarantine_receipt": quarantine.model_dump(mode="json"),
+        "quarantine_receipt_sha256": quarantine.receipt_sha256,
         "created_at": "2026-08-10T00:00:00Z", "updated_at": "2026-08-10T00:01:00Z",
     }
     assert _validate_blogger_replay_source(replay, record, now=authorized_at) is None
@@ -85,6 +125,17 @@ def test_duplicate_replay_requires_terminal_quarantine_and_exact_source_authoriz
     ) == "blogger_replay_source_invalid"
     assert _validate_blogger_replay_source(
         replay, {**record, "updated_at": "2026-08-12T00:00:00Z"}, now=authorized_at
+    ) == "blogger_replay_binding_invalid"
+    tampered_envelope = envelope.model_copy(
+        update={
+            "decisions": (
+                envelope.decisions[0].model_copy(update={"canonical_actor_id": uuid4()}),
+            )
+        }
+    )
+    tampered_replay = replay.model_copy(update={"duplicate_resolution": tampered_envelope})
+    assert _validate_blogger_replay_source(
+        tampered_replay, record, now=authorized_at
     ) == "blogger_replay_binding_invalid"
 
 
@@ -454,6 +505,137 @@ def test_active_runtime_claims_only_its_exact_blogger_request(tmp_path: Path) ->
     coverage = ledger.connector_coverage_metadata()
     assert coverage[0]["connector_kind"] == "region-talk-ydb-bloggers-v1"
     assert coverage[0]["state"] == "COMPLETE"
+
+
+def test_quarantine_callback_is_durable_public_and_alteration_denied(tmp_path: Path) -> None:
+    path = tmp_path / "quarantine-control.sqlite3"
+    ledger = ControlLedger(path)
+    wired = runtime(ledger, FakeKaggleRuntime())
+    client = TestClient(
+        create_app(ControlPlaneSettings(ledger_path=path), ledger=ledger, master_runtime=wired)
+    )
+    ensured = client.post(
+        "/control/v1/master/ensure", json={"idempotency_key": "blogger-quarantine-master"}
+    )
+    operation = ledger.get_operation(ensured.json()["operation_id"])
+    assert operation is not None
+    identity = operation.identity
+    now = datetime.now(UTC)
+    ready = RuntimeEvent(
+        event_id=str(uuid4()),
+        run_id=str(identity["run_id"]),
+        attempt_id=str(identity["attempt_id"]),
+        service_instance_id=str(identity["service_instance_id"]),
+        source_identity=assets().source_identity,
+        source_version=assets().source_version,
+        event_type=RuntimeEventType.SERVICE_READY,
+        emitted_at=now,
+        local_sequence=1,
+        epoch=int(identity["epoch"]),
+        data={
+            "service_kind": "postgres-master",
+            "endpoint": "tunnel://127.0.0.1:55432",
+            "protocol": "postgresql+tls",
+            "tls_fingerprint": "sha256:" + "a" * 64,
+            "capabilities": ["sql", "fts", "pgvector"],
+            "canonical_revision": 1,
+            "schema_version": "1",
+            "lease_until": (now + timedelta(minutes=4)).isoformat(),
+            "master_instance_id": str(identity["master_instance_id"]),
+            "epoch": int(identity["epoch"]),
+        },
+    )
+    token = derive_runtime_secret(ROOT, str(identity["run_id"]), str(identity["attempt_id"]))
+    assert client.post(
+        "/internal/runtime/events",
+        content=ready.model_dump_json(by_alias=True, exclude_none=True).encode(),
+        headers={"Authorization": f"Bearer {token}"},
+    ).status_code == 200
+    migration = BloggerMigrationRequest(
+        request_id=uuid4(),
+        operation_id=operation.operation_id,
+        project_id=uuid4(),
+        snapshot_at=now,
+        source_revision="a" * 40,
+    )
+    assert client.post(
+        "/control/v1/blogger-closure/requests", json=migration.model_dump(mode="json")
+    ).status_code == 200
+    runtime_headers = {
+        "Authorization": f"Bearer {token}",
+        "X-MDH-Master-Instance-ID": str(identity["master_instance_id"]),
+        "X-MDH-Epoch": str(identity["epoch"]),
+    }
+    claim = client.get(
+        f"/internal/runtime/blogger-migration/{identity['run_id']}/{identity['attempt_id']}",
+        headers=runtime_headers,
+    )
+    assert claim.status_code == 200 and claim.json()["available"] is True
+    actor_one, actor_two = uuid4(), uuid4()
+    receipt = BloggerQuarantineReceipt(
+        request_id=migration.request_id,
+        operation_id=operation.operation_id,
+        request_sha256=migration.request_sha256,
+        master_instance_id=identity["master_instance_id"],
+        run_id=identity["run_id"],
+        attempt_id=identity["attempt_id"],
+        epoch=identity["epoch"],
+        export_batch_id=batch_identity(migration.snapshot_at, 266),
+        row_count=266,
+        raw_count=266,
+        dispositioned_count=266,
+        undispositioned_count=0,
+        quarantined_count=2,
+        logical_sha256="b" * 64,
+        record_id_set_sha256="c" * 64,
+        canonical_outcome_sha256="d" * 64,
+        duplicate_group_count=1,
+        duplicate_groups_pending=1,
+        duplicate_review_inputs=BloggerDuplicateReviewInputs(
+            groups=(
+                BloggerDuplicateReviewGroup(
+                    identity_sha256="e" * 64,
+                    members=(
+                        BloggerDuplicateReviewMember(
+                            record_id="record-1", projected_actor_id=actor_one
+                        ),
+                        BloggerDuplicateReviewMember(
+                            record_id="record-2", projected_actor_id=actor_two
+                        ),
+                    ),
+                ),
+            )
+        ),
+    )
+    callback = f"/internal/runtime/blogger-migration/{identity['run_id']}/{identity['attempt_id']}/failed"
+    payload = {
+        "request_id": str(migration.request_id),
+        "failure_code": receipt.failure_code,
+        "quarantine_receipt": receipt.model_dump(mode="json"),
+        "receipt_sha256": receipt.receipt_sha256,
+    }
+    first = client.post(callback, json=payload, headers=runtime_headers)
+    assert first.status_code == 200
+    assert client.post(callback, json=payload, headers=runtime_headers).json() == first.json()
+    altered = receipt.model_copy(update={"logical_sha256": "9" * 64})
+    conflict = client.post(
+        callback,
+        json={
+            **payload,
+            "quarantine_receipt": altered.model_dump(mode="json"),
+            "receipt_sha256": altered.receipt_sha256,
+        },
+        headers=runtime_headers,
+    )
+    assert conflict.status_code == 409
+    status = client.get(f"/control/v1/blogger-closure/requests/{migration.request_id}")
+    assert status.status_code == 200
+    value = status.json()
+    assert value["state"] == "FAILED"
+    assert value["quarantine_evidence"]["request_sha256"] == migration.request_sha256
+    assert value["duplicate_review"]["duplicate_group_count"] == 1
+    assert value["duplicate_review_inputs"]["groups"][0]["identity_sha256"] == "e" * 64
+    assert "quarantine_receipt" not in value
 
 
 class RecordingRegistrar:

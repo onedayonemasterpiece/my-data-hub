@@ -107,6 +107,13 @@ def test_duplicate_quarantine_explicit_resolution_and_exact_replay_are_lossless(
             assert not blocked.accounting_complete
             assert blocked.duplicate_group_count == blocked.duplicate_groups_pending == 1
             assert blocked.export.dispositions["quarantined"] == 2
+            assert tuple(group.identity_sha256 for group in blocked.duplicate_review_groups) == (
+                identity_hash,
+            )
+            assert blocked.duplicate_review_groups[0].member_record_ids == (
+                "blogger-001",
+                "blogger-002",
+            )
 
             stale = DuplicateResolution(
                 identity_sha256="f" * 64,
@@ -180,7 +187,7 @@ def test_duplicate_quarantine_explicit_resolution_and_exact_replay_are_lossless(
             ).fetchone()[0] == 1
             assert connection.execute(
                 "SELECT schema_revision,canonical_revision FROM hub.canonical_state WHERE singleton"
-            ).fetchone() == (15, 1)
+                ).fetchone() == (16, 1)
             connection.execute("SET ROLE mdh_migration_operator")
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 connection.execute(

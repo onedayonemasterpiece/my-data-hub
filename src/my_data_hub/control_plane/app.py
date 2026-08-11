@@ -19,7 +19,14 @@ from my_data_hub.acceptance.master_lifecycle import MasterAcceptanceReceipt
 from my_data_hub.checkpoints import CheckpointManifest, ControlLedgerCheckpointRegistry
 from my_data_hub.checkpoints.manifest import ManifestError
 from my_data_hub.control_plane.adapters import LedgerMasterResolver
-from my_data_hub.control_plane.ledger import ControlLedger, ControlLedgerError, EventRejected, StaleRuntimeEvent
+from my_data_hub.control_plane.ledger import (
+    ControlLedger,
+    ControlLedgerError,
+    EventRejected,
+    IdempotencyConflict,
+    MasterAdmissionRejected,
+    StaleRuntimeEvent,
+)
 from my_data_hub.control_plane.runtime import (
     ControlPlaneMasterRuntime,
     MasterRuntimeSettings,
@@ -58,6 +65,8 @@ from my_data_hub.workloads.bloggers.master_stage import (
     MAX_REQUEST_BYTES,
     BloggerImportStageReceipt,
     BloggerMigrationRequest,
+    BloggerQuarantineReceipt,
+    resolution_matches_quarantine,
 )
 
 DATABASE_ENVIRONMENT_NAMES = (
@@ -114,6 +123,7 @@ def _validate_blogger_replay_source(
         return "blogger_replay_source_invalid"
     try:
         source_request = BloggerMigrationRequest.model_validate(source["request"])
+        receipt = BloggerQuarantineReceipt.model_validate(source["quarantine_receipt"])
         quarantined_at = datetime.fromisoformat(source["updated_at"].replace("Z", "+00:00")).astimezone(UTC)
     except Exception:
         return "blogger_replay_source_invalid"
@@ -125,6 +135,8 @@ def _validate_blogger_replay_source(
         or source_request.source_query_sha256 != migration.source_query_sha256
         or envelope.authorized_at.astimezone(UTC) < quarantined_at
         or envelope.authorized_at.astimezone(UTC) > now.astimezone(UTC) + timedelta(minutes=5)
+        or source.get("quarantine_receipt_sha256") != receipt.receipt_sha256
+        or not resolution_matches_quarantine(envelope, receipt)
     ):
         return "blogger_replay_binding_invalid"
     return None
@@ -525,21 +537,8 @@ def create_app(
             raise HTTPException(status_code=422, detail={"code": "blogger_request_invalid"}) from exc
         if len(canonical_json_bytes(migration.metadata_payload)) > MAX_REQUEST_BYTES:
             raise HTTPException(status_code=413, detail={"code": "blogger_request_too_large"})
-        operation = control_ledger.get_operation(str(migration.operation_id))
-        if operation is None or operation.operation_kind != "ensure_master":
-            raise HTTPException(status_code=409, detail={"code": "master_operation_invalid"})
-        identity = operation.identity
-        service = control_ledger.resolve_service("postgres-master")
-        if (
-            operation.state != "ACTIVE"
-            or service is None
-            or control_ledger.current_epoch("postgres-master") != int(identity["epoch"])
-            or service.epoch != int(identity["epoch"])
-            or service.run_id != str(identity["run_id"])
-            or service.attempt_id != str(identity["attempt_id"])
-            or service.master_instance_id != str(identity["master_instance_id"])
-        ):
-            raise HTTPException(status_code=409, detail={"code": "master_not_active"})
+        replay_source_id: str | None = None
+        replay_receipt_sha256: str | None = None
         if migration.schema_version == BLOGGER_REPLAY_STAGE_SCHEMA:
             source = control_ledger.blogger_migration_request(str(migration.replay_of_request_id))
             replay_error = _validate_blogger_replay_source(
@@ -547,20 +546,22 @@ def create_app(
             )
             if replay_error is not None:
                 raise HTTPException(status_code=409, detail={"code": replay_error})
-            assert migration.duplicate_resolution is not None
-            if control_ledger.verified_checkpoint_for_operation(
-                str(migration.duplicate_resolution.source_operation_id)
-            ) is None:
-                raise HTTPException(
-                    status_code=409,
-                    detail={"code": "blogger_replay_source_checkpoint_absent"},
-                )
-        record, created = control_ledger.ensure_blogger_migration_request(
-            request_id=str(migration.request_id),
-            operation_id=str(migration.operation_id),
-            request_sha256=migration.request_sha256,
-            request=migration.metadata_payload,
-        )
+            assert source is not None
+            replay_source_id = source["request_id"]
+            replay_receipt_sha256 = source["quarantine_receipt_sha256"]
+        try:
+            record, created = control_ledger.admit_blogger_migration_request(
+                request_id=str(migration.request_id),
+                operation_id=str(migration.operation_id),
+                request_sha256=migration.request_sha256,
+                request=migration.metadata_payload,
+                replay_source_request_id=replay_source_id,
+                replay_source_receipt_sha256=replay_receipt_sha256,
+            )
+        except IdempotencyConflict as exc:
+            raise HTTPException(status_code=409, detail={"code": "blogger_request_conflict"}) from exc
+        except MasterAdmissionRejected as exc:
+            raise HTTPException(status_code=409, detail={"code": "master_not_active"}) from exc
         return {
             "request_id": record["request_id"],
             "request_sha256": record["request_sha256"],
@@ -577,7 +578,7 @@ def create_app(
         record = control_ledger.blogger_migration_request(exact_id)
         if record is None:
             raise HTTPException(status_code=404, detail={"code": "blogger_request_not_found"})
-        if record["state"] in {"CLAIMED", "IMPORT_COMMITTED"} and master_runtime is not None:
+        if record["state"] in {"REQUESTED", "CLAIMED", "IMPORT_COMMITTED"} and master_runtime is not None:
             source_operation = control_ledger.get_operation(record["operation_id"])
             if source_operation is not None:
                 with suppress(Exception):
@@ -608,7 +609,23 @@ def create_app(
                     state="COMPLETE",
                     observed_at=control_ledger.clock.now(),
                 )
-        return {key: value for key, value in record.items() if key not in {"failure_code"} or value is not None}
+        public = {
+            key: value
+            for key, value in record.items()
+            if key not in {"quarantine_receipt", "quarantine_receipt_sha256"}
+            and (key != "failure_code" or value is not None)
+        }
+        if record.get("quarantine_receipt") is not None:
+            receipt = BloggerQuarantineReceipt.model_validate(record["quarantine_receipt"])
+            public.update(
+                {
+                    "quarantine_receipt_sha256": receipt.receipt_sha256,
+                    "quarantine_evidence": receipt.quarantine_evidence,
+                    "duplicate_review": receipt.duplicate_review,
+                    "duplicate_review_inputs": receipt.duplicate_review_inputs.model_dump(mode="json"),
+                }
+            )
+        return public
 
     @app.get("/control/v1/embedding-production/capabilities")
     def embedding_production_capabilities() -> dict[str, Any]:
@@ -676,42 +693,42 @@ def create_app(
             raise HTTPException(status_code=422, detail={"code": "embedding_request_invalid"}) from exc
         existing = control_ledger.embedding_production_request(str(embedding.request_id))
         if existing is not None:
-            if existing["request_sha256"] != embedding.request_sha256:
+            if (
+                existing["request_sha256"] != embedding.request_sha256
+                or existing["idempotency_key_sha256"] != embedding.idempotency_key_sha256
+            ):
                 raise HTTPException(status_code=409, detail={"code": "embedding_request_conflict"})
             return {
-                "request_id": existing["request_id"], "request_sha256": existing["request_sha256"],
-                "state": existing["state"], "created": False,
+                "request_id": existing["request_id"],
+                "request_sha256": existing["request_sha256"],
+                "state": existing["state"],
+                "created": False,
             }
-        admission = _embedding_admission_binding()
-        service = control_ledger.resolve_service("postgres-master")
-        operation = (
-            control_ledger.operation_for_attempt(service.run_id, service.attempt_id) if service else None
-        )
-        head = control_ledger.checkpoint_head("postgres-master")
+        provider = master_runtime.coordinator.provider if master_runtime is not None else None
         if (
-            service is None
-            or admission is None
-            or service.state != "ACTIVE"
-            or service.canonical_revision != embedding.blogger_canonical_revision
-            or admission.canonical_revision != embedding.blogger_canonical_revision
-            or admission.blogger_checkpoint_id != embedding.blogger_checkpoint_id
-            or operation is None
-            or operation.state != "ACTIVE"
-            or head is None
-            or head.current_checkpoint_id != str(embedding.blogger_checkpoint_id)
+            app.state.embedding_stage_runner is not execute_embedding_production_stage
+            or app.state.master_provider_status != "available"
+            or not isinstance(provider, KaggleMasterRuntimeProvider)
+            or not isinstance(provider.adapter, KaggleProviderAdapter)
         ):
             raise HTTPException(status_code=409, detail={"code": "embedding_prerequisite_not_active"})
-        record, created = control_ledger.ensure_embedding_production_request(
-            request_id=str(embedding.request_id),
-            operation_id=operation.operation_id,
-            idempotency_key_sha256=embedding.idempotency_key_sha256,
-            request_sha256=embedding.request_sha256,
-            # Worker model contracts contain the harmless field ``max_tokens``;
-            # the metadata ledger deliberately rejects any token-shaped key.
-            # Omit the immutable defaults and let strict request validation
-            # restore them inside the ACTIVE master without weakening the hash.
-            request=embedding.model_dump(mode="json", exclude={"worker_assets"}),
-        )
+        try:
+            record, created = control_ledger.admit_embedding_production_request(
+                request_id=str(embedding.request_id),
+                idempotency_key_sha256=embedding.idempotency_key_sha256,
+                request_sha256=embedding.request_sha256,
+                # Worker model contracts contain the harmless field ``max_tokens``;
+                # the metadata ledger deliberately rejects any token-shaped key.
+                request=embedding.model_dump(mode="json", exclude={"worker_assets"}),
+                canonical_revision=embedding.blogger_canonical_revision,
+                checkpoint_id=str(embedding.blogger_checkpoint_id),
+            )
+        except IdempotencyConflict as exc:
+            raise HTTPException(status_code=409, detail={"code": "embedding_request_conflict"}) from exc
+        except MasterAdmissionRejected as exc:
+            raise HTTPException(
+                status_code=409, detail={"code": "embedding_prerequisite_not_active"}
+            ) from exc
         return {
             "request_id": record["request_id"], "request_sha256": record["request_sha256"],
             "state": record["state"], "created": created,
@@ -726,7 +743,7 @@ def create_app(
         record = control_ledger.embedding_production_request(exact_id)
         if record is None:
             raise HTTPException(status_code=404, detail={"code": "embedding_request_not_found"})
-        if record["state"] == "CLAIMED" and master_runtime is not None:
+        if record["state"] in {"REQUESTED", "CLAIMED"} and master_runtime is not None:
             source_operation = control_ledger.get_operation(record["operation_id"])
             if source_operation is not None:
                 with suppress(Exception):
@@ -912,7 +929,7 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, Any]:
-        _runtime_authority(
+        operation = _runtime_authority(
             authorization=authorization,
             run_id=run_id,
             attempt_id=attempt_id,
@@ -921,7 +938,60 @@ def create_app(
             allowed_states=frozenset({"ACTIVE"}),
         )
         body = await _bounded_json(request)
-        if set(body) != {"request_id", "failure_code"}:
+        if set(body) == {"request_id", "failure_code", "quarantine_receipt", "receipt_sha256"}:
+            try:
+                receipt = BloggerQuarantineReceipt.model_validate(body["quarantine_receipt"])
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=422, detail={"code": "blogger_quarantine_receipt_invalid"}
+                ) from exc
+            pending = control_ledger.blogger_migration_request(str(receipt.request_id))
+            if pending is None:
+                raise HTTPException(
+                    status_code=409, detail={"code": "blogger_quarantine_receipt_mismatch"}
+                )
+            exact_request = BloggerMigrationRequest.model_validate(pending["request"])
+            if (
+                body["request_id"] != str(receipt.request_id)
+                or body["failure_code"] != receipt.failure_code
+                or body["receipt_sha256"] != receipt.receipt_sha256
+                or receipt.operation_id != exact_request.operation_id
+                or str(receipt.operation_id) != operation.operation_id
+                or receipt.request_sha256 != pending["request_sha256"]
+                or receipt.export_batch_id
+                != batch_identity(exact_request.snapshot_at, exact_request.expected_rows)
+                or receipt.run_id != run_id
+                or receipt.attempt_id != attempt_id
+                or str(receipt.master_instance_id) != str(master_instance_id)
+                or receipt.epoch != int(epoch or 0)
+                or pending["claimed_run_id"] != run_id
+                or pending["claimed_attempt_id"] != attempt_id
+                or pending["claimed_master_instance_id"] != str(master_instance_id)
+                or pending["claimed_epoch"] != int(epoch or 0)
+            ):
+                raise HTTPException(
+                    status_code=409, detail={"code": "blogger_quarantine_receipt_mismatch"}
+                )
+            try:
+                stored = control_ledger.record_blogger_quarantine_receipt(
+                    request_id=str(receipt.request_id),
+                    run_id=run_id,
+                    attempt_id=attempt_id,
+                    receipt=receipt.model_dump(mode="json"),
+                    receipt_sha256=receipt.receipt_sha256,
+                )
+            except StaleRuntimeEvent as exc:
+                raise HTTPException(
+                    status_code=409, detail={"code": "blogger_quarantine_receipt_conflict"}
+                ) from exc
+            return {
+                "accepted": True,
+                "state": stored["state"],
+                "receipt_sha256": receipt.receipt_sha256,
+            }
+        if set(body) != {"request_id", "failure_code"} or body.get(
+            "failure_code"
+        ) == "BloggerMigrationQuarantined":
             raise HTTPException(status_code=422, detail={"code": "blogger_failure_invalid"})
         try:
             control_ledger.fail_blogger_migration_request(

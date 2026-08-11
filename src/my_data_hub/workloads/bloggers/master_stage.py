@@ -24,6 +24,7 @@ from my_data_hub.master_runtime.credentials import CredentialProvisioner, LoginP
 from .importer import (
     BloggerSnapshotImporter,
     DuplicateResolution,
+    DuplicateReviewGroup,
     ImportReceipt,
     batch_identity,
 )
@@ -38,6 +39,69 @@ BLOGGER_IMPORT_RECEIPT_SCHEMA = "region-talk-ydb-bloggers-import-receipt.v2"
 BLOGGER_IMPORT_RECEIPT_SCHEMA_V3 = "region-talk-ydb-bloggers-import-receipt.v3"
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_RECEIPT_BYTES = 64 * 1024
+
+
+class BloggerDuplicateReviewMember(BaseModel):
+    """One metadata-only member projection; source values never enter control."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    record_id: str = Field(min_length=1, max_length=4096)
+    projected_actor_id: UUID
+
+
+class BloggerDuplicateReviewGroup(BaseModel):
+    """Deterministic facts needed by an owner to resolve one duplicate group."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    identity_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    members: tuple[BloggerDuplicateReviewMember, ...] = Field(min_length=2, max_length=266)
+    existing_actor_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def exact_members(self) -> BloggerDuplicateReviewGroup:
+        ids = tuple(member.record_id for member in self.members)
+        if tuple(sorted(set(ids))) != ids:
+            raise ValueError("duplicate review members must be sorted and unique")
+        return self
+
+    @property
+    def member_record_id_set_sha256(self) -> str:
+        ids = tuple(member.record_id for member in self.members)
+        return hashlib.sha256(canonical_json_bytes(ids)).hexdigest()
+
+
+class BloggerDuplicateReviewInputs(BaseModel):
+    """Bounded, row-free owner review projection persisted after quarantine."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    groups: tuple[BloggerDuplicateReviewGroup, ...] = Field(min_length=1, max_length=1330)
+
+    @model_validator(mode="after")
+    def exact_groups(self) -> BloggerDuplicateReviewInputs:
+        identities = tuple(group.identity_sha256 for group in self.groups)
+        if tuple(sorted(set(identities))) != identities:
+            raise ValueError("duplicate review groups must be sorted and unique")
+        return self
+
+    @property
+    def identity_set_sha256(self) -> str:
+        return hashlib.sha256(
+            canonical_json_bytes(tuple(group.identity_sha256 for group in self.groups))
+        ).hexdigest()
+
+    @property
+    def member_record_id_set_sha256(self) -> str:
+        members = tuple(
+            sorted(member.record_id for group in self.groups for member in group.members)
+        )
+        return hashlib.sha256(canonical_json_bytes(members)).hexdigest()
+
+    @property
+    def review_projection_sha256(self) -> str:
+        return hashlib.sha256(canonical_json_bytes(self.model_dump(mode="json"))).hexdigest()
 
 
 class BloggerDuplicateDecision(BaseModel):
@@ -178,8 +242,121 @@ class BloggerMigrationRequest(BaseModel):
         return self.duplicate_resolution.importer_resolutions if self.duplicate_resolution else ()
 
 
+class BloggerQuarantineReceipt(BaseModel):
+    """Durable metadata proof that a rejected import is awaiting owner review."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["region-talk-ydb-bloggers-quarantine-receipt.v1"] = (
+        "region-talk-ydb-bloggers-quarantine-receipt.v1"
+    )
+    request_id: UUID
+    operation_id: UUID
+    request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    master_instance_id: UUID
+    run_id: str = Field(min_length=1, max_length=200)
+    attempt_id: str = Field(min_length=1, max_length=200)
+    epoch: int = Field(ge=1)
+    export_batch_id: UUID
+    failure_code: Literal["BloggerMigrationQuarantined"] = "BloggerMigrationQuarantined"
+    row_count: Literal[266]
+    raw_count: Literal[266]
+    dispositioned_count: Literal[266]
+    undispositioned_count: Literal[0]
+    quarantined_count: int = Field(ge=1, le=266)
+    logical_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    record_id_set_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_outcome_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    duplicate_group_count: int = Field(ge=1, le=1330)
+    duplicate_groups_pending: int = Field(ge=1, le=1330)
+    duplicate_review_inputs: BloggerDuplicateReviewInputs
+    transaction_committed: Literal[True] = True
+    durability_state: Literal["BLOCKED_QUARANTINE"] = "BLOCKED_QUARANTINE"
+
+    @model_validator(mode="after")
+    def exact_accounting(self) -> BloggerQuarantineReceipt:
+        if self.duplicate_group_count != self.duplicate_groups_pending:
+            raise ValueError("all quarantined duplicate groups must remain pending")
+        if self.duplicate_group_count != len(self.duplicate_review_inputs.groups):
+            raise ValueError("quarantine review group count differs from durable accounting")
+        return self
+
+    @property
+    def receipt_sha256(self) -> str:
+        return hashlib.sha256(canonical_json_bytes(self.model_dump(mode="json"))).hexdigest()
+
+    @property
+    def quarantine_evidence(self) -> dict[str, Any]:
+        return {
+            "request_id": str(self.request_id),
+            "request_sha256": self.request_sha256,
+            "operation_id": str(self.operation_id),
+            "export_batch_id": str(self.export_batch_id),
+            "failure_code": self.failure_code,
+            "row_count": self.row_count,
+            "raw_count": self.raw_count,
+            "dispositioned_count": self.dispositioned_count,
+            "undispositioned_count": self.undispositioned_count,
+            "quarantined_count": self.quarantined_count,
+            "logical_sha256": self.logical_sha256,
+            "record_id_set_sha256": self.record_id_set_sha256,
+            "canonical_outcome_sha256": self.canonical_outcome_sha256,
+            "duplicate_group_count": self.duplicate_group_count,
+            "duplicate_groups_pending": self.duplicate_groups_pending,
+        }
+
+    @property
+    def duplicate_review(self) -> dict[str, Any]:
+        inputs = self.duplicate_review_inputs
+        return {
+            "export_batch_id": str(self.export_batch_id),
+            "source_request_id": str(self.request_id),
+            "source_operation_id": str(self.operation_id),
+            "source_request_sha256": self.request_sha256,
+            "duplicate_group_count": self.duplicate_group_count,
+            "duplicate_groups_pending": self.duplicate_groups_pending,
+            "identity_set_sha256": inputs.identity_set_sha256,
+            "member_record_id_set_sha256": inputs.member_record_id_set_sha256,
+            "review_projection_sha256": inputs.review_projection_sha256,
+        }
+
+
 class BloggerMigrationQuarantined(RuntimeError):
     """The exact batch is durable but explicit duplicate authorization is required."""
+
+    def __init__(self, receipt: BloggerQuarantineReceipt) -> None:
+        super().__init__(
+            "blogger migration evidence was durably quarantined; "
+            "canonical completion and checkpoint publication are blocked"
+        )
+        self.receipt = receipt
+
+
+def resolution_matches_quarantine(
+    envelope: BloggerDuplicateResolutionEnvelope,
+    receipt: BloggerQuarantineReceipt,
+) -> bool:
+    """Verify owner decisions cover exactly the persisted review facts."""
+
+    if (
+        envelope.source_request_id != receipt.request_id
+        or envelope.source_operation_id != receipt.operation_id
+        or envelope.source_request_sha256 != receipt.request_sha256
+        or envelope.export_batch_id != receipt.export_batch_id
+    ):
+        return False
+    groups = {group.identity_sha256: group for group in receipt.duplicate_review_inputs.groups}
+    if tuple(item.identity_sha256 for item in envelope.decisions) != tuple(sorted(groups)):
+        return False
+    for decision in envelope.decisions:
+        group = groups[decision.identity_sha256]
+        projected = {member.record_id: member.projected_actor_id for member in group.members}
+        if decision.member_record_ids != tuple(projected):
+            return False
+        expected_actor = group.existing_actor_id or projected[decision.canonical_record_id]
+        if decision.canonical_actor_id != expected_actor:
+            return False
+    return True
 
 
 class BloggerImportStageReceipt(BaseModel):
@@ -250,6 +427,7 @@ class BloggerStageContext:
     request: BloggerMigrationRequest
     local_database_url: str
     lease_until: datetime
+    attempt_id: str
 
 
 def _migration_url(base_url: str, principal: str, password: str) -> str:
@@ -301,6 +479,54 @@ def _to_receipt(
         transaction_committed=True,
         ydb_write_denial_verified=True,
     )
+
+
+def _review_group(group: DuplicateReviewGroup) -> BloggerDuplicateReviewGroup:
+    return BloggerDuplicateReviewGroup(
+        identity_sha256=group.identity_sha256,
+        members=tuple(
+            BloggerDuplicateReviewMember(
+                record_id=member.record_id,
+                projected_actor_id=member.projected_actor_id,
+            )
+            for member in group.members
+        ),
+        existing_actor_id=group.existing_actor_id,
+    )
+
+
+def _to_quarantine_receipt(
+    context: BloggerStageContext,
+    imported: ImportReceipt,
+) -> BloggerQuarantineReceipt:
+    export = imported.export
+    inputs = BloggerDuplicateReviewInputs(
+        groups=tuple(_review_group(group) for group in imported.duplicate_review_groups)
+    )
+    receipt = BloggerQuarantineReceipt(
+        request_id=context.request.request_id,
+        operation_id=context.request.operation_id,
+        request_sha256=context.request.request_sha256,
+        master_instance_id=context.identity.master_instance_id,
+        run_id=context.identity.run_id,
+        attempt_id=context.attempt_id,
+        epoch=context.identity.epoch,
+        export_batch_id=export.export_batch_id,
+        row_count=export.row_count,
+        raw_count=export.row_count,
+        dispositioned_count=sum(export.dispositions.values()),
+        undispositioned_count=export.undispositioned,
+        quarantined_count=export.dispositions.get("quarantined", 0),
+        logical_sha256=export.logical_sha256,
+        record_id_set_sha256=export.record_id_set_sha256,
+        canonical_outcome_sha256=imported.canonical_outcome_sha256,
+        duplicate_group_count=imported.duplicate_group_count,
+        duplicate_groups_pending=imported.duplicate_groups_pending,
+        duplicate_review_inputs=inputs,
+    )
+    if len(canonical_json_bytes(receipt.model_dump(mode="json"))) > MAX_REQUEST_BYTES:
+        raise RuntimeError("bounded blogger quarantine receipt exceeds the control payload limit")
+    return receipt
 
 
 def execute_blogger_migration_stage(
@@ -385,10 +611,7 @@ def execute_blogger_migration_stage(
                     duplicate_resolutions=bound_resolutions,
                 )
                 if not imported.accounting_complete:
-                    raise BloggerMigrationQuarantined(
-                        "blogger migration evidence was durably quarantined; "
-                        "canonical completion and checkpoint publication are blocked"
-                    )
+                    raise BloggerMigrationQuarantined(_to_quarantine_receipt(context, imported))
         return _to_receipt(context, imported)
     finally:
         if owns_driver:

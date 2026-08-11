@@ -1014,19 +1014,23 @@ class BloggerSnapshotImporter:
         except Exception:
             connection.rollback()
             raise
-        review_groups = tuple(
-            DuplicateReviewGroup(
-                identity_sha256=identity_hash,
-                members=tuple(
-                    DuplicateReviewMember(
-                        record_id=member.logical_id,
-                        projected_actor_id=member.projection.actor_id,  # type: ignore[union-attr]
-                    )
-                    for member in claim.members
-                ),
-                existing_actor_id=claim.existing_actor_id,
+        review_groups = (
+            tuple(
+                DuplicateReviewGroup(
+                    identity_sha256=identity_hash,
+                    members=tuple(
+                        DuplicateReviewMember(
+                            record_id=member.logical_id,
+                            projected_actor_id=member.projection.actor_id,  # type: ignore[union-attr]
+                        )
+                        for member in sorted(claim.members, key=lambda item: item.logical_id)
+                    ),
+                    existing_actor_id=claim.existing_actor_id,
+                )
+                for identity_hash, claim in sorted(duplicate_groups.items())
             )
-            for identity_hash, claim in sorted(duplicate_groups.items())
+            if durability_state == "BLOCKED_QUARANTINE"
+            else ()
         )
         return ImportReceipt(
             export=export,

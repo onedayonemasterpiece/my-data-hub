@@ -61,9 +61,12 @@ the master stores a durable duplicate group plus immutable member evidence. A
 replay may proceed only with a complete
 `region-talk-blogger-duplicate-resolution-envelope.v1`. The first request becomes
 terminal `FAILED` with the exact code `BloggerMigrationQuarantined`; its rejected
-PostgreSQL batch is nevertheless published through the normal verified-checkpoint
-shutdown path. A replay is not admitted until that exact source operation owns the
-current verified HEAD.
+PostgreSQL batch yields a bounded metadata-only
+`region-talk-ydb-bloggers-quarantine-receipt.v1`, not a successful checkpoint.
+The callback persists that receipt and SHA-256 against the exact request, run,
+attempt, master instance and epoch before status exposes sanitized
+`quarantine_evidence`, `duplicate_review`, and `duplicate_review_inputs`. Raw YDB
+rows never cross the control plane.
 
 The mode-0600 envelope contains decisions and provenance metadata, never YDB row
 payloads. It binds `authorization_id`, authorizer and authorization time to the
@@ -71,8 +74,11 @@ source request/operation/request SHA-256, deterministic export batch, project,
 snapshot, source revision and pinned query hash. Each sorted decision binds the
 exact identity hash and member-record-id set to one reviewed canonical source row
 and actor UUID. The control plane accepts it only on a **new ACTIVE ensure
-operation**, after the source request is terminally quarantined and its checkpoint
-is current. The v2 migration request SHA-256 covers the complete envelope; the
+operation**, after the source request is terminally quarantined and its receipt is
+immutable. Every decision must cover exactly one persisted identity group and its
+complete sorted member set; the canonical actor must be the existing actor when
+present, otherwise the deterministic projection for the chosen member. The v2
+migration request SHA-256 covers the complete envelope; the
 import receipt covers that request hash. Partial, stale, inconsistent,
 wrong-authorizer, future-dated, changed-source, or changed-account decisions fail
 closed and leave prior quarantine evidence effective.
@@ -93,8 +99,8 @@ python3 scripts/bloggers/run_final_closure.py run \
 Use
 `examples/bloggers/region-talk-blogger-duplicate-resolution-envelope.v1.example.json`
 only as a shape reference. Copy exact source bindings from the loopback request
-status; inspect durable duplicate evidence through the bounded operator profile.
-Never copy raw export rows into the envelope or the control ledger.
+status. These facts support human review but never synthesize an owner decision;
+inspect durable duplicate evidence through the bounded operator profile. Never copy raw export rows into the envelope or the control ledger.
 
 A valid exact replay writes one append-only batch replay, one append-only
 resolution per group, and one append-only effective disposition per raw row in
@@ -106,7 +112,16 @@ second checkpoint request or canonical revision is created.
 
 If the import-receipt response is lost, the master fences and discards that
 unacknowledged ephemeral attempt instead of promoting it. Re-running the same
-authorized resolution against the prior verified quarantine HEAD deterministically
+authorized resolution against the immutable quarantine receipt deterministically
 recreates the same append-only resolution. If the receipt was acknowledged but
 the response was lost, the runtime endpoint returns the exact stored receipt on
 retry; it cannot downgrade `IMPORT_COMMITTED` to `FAILED`.
+
+
+Both blogger and embedding request admission use one SQLite `BEGIN IMMEDIATE`
+compare-and-set transaction for ACTIVE operation/service identity, current epoch,
+unexpired lease, and insertion. Embedding additionally binds the exact VERIFIED
+checkpoint HEAD and canonical revision. An exact existing request remains
+replayable after drain; a new request racing drain/rotation is rejected, and a
+request admitted immediately before terminal drain is reconciled to
+`ADMISSION_RUNTIME_TERMINAL_BEFORE_CLAIM` rather than remaining stranded.

@@ -313,6 +313,19 @@ def test_receipts_validate_against_strict_schemas() -> None:
     Draft202012Validator(final_schema, resolver=resolver).validate(receipt)
 
 
+def test_quarantine_receipt_example_validates_against_schema() -> None:
+    schema = json.loads(
+        Path("schemas/region-talk-ydb-bloggers-quarantine-receipt.v1.schema.json").read_text()
+    )
+    example = json.loads(
+        Path(
+            "examples/bloggers/region-talk-ydb-bloggers-quarantine-receipt.v1.example.json"
+        ).read_text()
+    )
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator(schema).validate(example)
+
+
 def test_accounting_mismatch_never_emits_durable_complete() -> None:
     mcp = FakeMcp()
     original = mcp.call
@@ -440,8 +453,13 @@ def test_in_master_stage_uses_epoch_bound_migration_login_and_drops_it(monkeypat
 
     from my_data_hub.master_runtime.contracts import MasterIdentity
     from my_data_hub.workloads.bloggers.accounting import BloggerExportReceipt
-    from my_data_hub.workloads.bloggers.importer import ImportReceipt
+    from my_data_hub.workloads.bloggers.importer import (
+        DuplicateReviewGroup,
+        DuplicateReviewMember,
+        ImportReceipt,
+    )
     from my_data_hub.workloads.bloggers.master_stage import (
+        BloggerMigrationQuarantined,
         BloggerStageContext,
         execute_blogger_migration_stage,
     )
@@ -538,6 +556,7 @@ def test_in_master_stage_uses_epoch_bound_migration_login_and_drops_it(monkeypat
             request=request(),
             local_database_url="postgresql://postgres@/postgres?host=%2Fkaggle%2Fworking%2Fsocket&port=5432",
             lease_until=datetime.now(UTC).replace(microsecond=0) + __import__("datetime").timedelta(minutes=6),
+            attempt_id="attempt-1",
         ),
         owner_connection=object(),
         driver=object(),
@@ -568,6 +587,7 @@ def test_in_master_stage_uses_epoch_bound_migration_login_and_drops_it(monkeypat
             local_database_url="postgresql://postgres@/postgres?host=%2Fkaggle%2Fworking%2Fsocket&port=5432",
             lease_until=datetime.now(UTC).replace(microsecond=0)
             + __import__("datetime").timedelta(minutes=6),
+            attempt_id="attempt-1",
         ),
         owner_connection=object(), driver=object(), importer=ReplayImporter(),
     )
@@ -589,17 +609,28 @@ def test_in_master_stage_uses_epoch_bound_migration_login_and_drops_it(monkeypat
         canonical_outcome_sha256="e" * 64,
         actor_count=0,
         account_count=0,
-        duplicate_group_count=0,
+        duplicate_group_count=1,
         replayed_count=0,
         canonical_revision=9,
+        duplicate_groups_pending=1,
         durability_state="BLOCKED_QUARANTINE",
+        duplicate_review_groups=(
+            DuplicateReviewGroup(
+                identity_sha256="f" * 64,
+                members=(
+                    DuplicateReviewMember("record-1", UUID("77777777-7777-4777-8777-777777777771")),
+                    DuplicateReviewMember("record-2", UUID("77777777-7777-4777-8777-777777777772")),
+                ),
+                existing_actor_id=None,
+            ),
+        ),
     )
 
     class BlockedImporter:
         def import_rows(self, connection, **kwargs):
             return blocked
 
-    with pytest.raises(RuntimeError, match="durably quarantined"):
+    with pytest.raises(BloggerMigrationQuarantined, match="durably quarantined") as captured:
         execute_blogger_migration_stage(
             BloggerStageContext(
                 identity=MasterIdentity(MASTER, "77777777-7777-4777-8777-777777777777", 7),
@@ -609,8 +640,14 @@ def test_in_master_stage_uses_epoch_bound_migration_login_and_drops_it(monkeypat
                 ),
                 lease_until=datetime.now(UTC).replace(microsecond=0)
                 + __import__("datetime").timedelta(minutes=6),
+                attempt_id="attempt-1",
             ),
             owner_connection=object(),
             driver=object(),
             importer=BlockedImporter(),
         )
+    quarantine = captured.value.receipt
+    assert quarantine.attempt_id == "attempt-1"
+    assert quarantine.transaction_committed is True
+    assert quarantine.duplicate_group_count == quarantine.duplicate_groups_pending == 1
+    assert quarantine.duplicate_review_inputs.groups[0].identity_sha256 == "f" * 64

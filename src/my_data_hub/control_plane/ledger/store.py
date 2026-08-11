@@ -3113,6 +3113,89 @@ class ControlLedger:
                 raise IdempotencyConflict("blogger request identity was reused for different metadata")
             return self._blogger_request_from_row(row), bool(changed)
 
+    def admit_blogger_migration_request(
+        self,
+        *,
+        request_id: str,
+        operation_id: str,
+        request_sha256: str,
+        request: Mapping[str, Any],
+        replay_source_request_id: str | None = None,
+        replay_source_receipt_sha256: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """CAS ACTIVE authority and insertion in one ``BEGIN IMMEDIATE``.
+
+        An exact existing request is replayable after drain.  A distinct request
+        can be inserted only while its operation, runtime, epoch and lease still
+        describe the same ACTIVE master.  Replay additionally binds the immutable
+        quarantine receipt observed by the owner.
+        """
+
+        if len(request_sha256) != 64:
+            raise ValueError("blogger request hash must be an exact SHA-256")
+        request_json = _safe_json(request)
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM blogger_migration_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if existing is not None:
+                if (existing["operation_id"], existing["request_sha256"], existing["request_json"]) != (
+                    operation_id,
+                    request_sha256,
+                    request_json,
+                ):
+                    raise IdempotencyConflict("blogger request identity was reused for different metadata")
+                return self._blogger_request_from_row(existing), False
+            authority = connection.execute(
+                "SELECT o.operation_kind,o.state AS operation_state,o.identity_json,s.run_id,s.attempt_id,"
+                "s.master_instance_id,s.epoch,s.state AS service_state,s.lease_until,e.current_epoch "
+                "FROM operations o JOIN run_attempts r ON r.operation_id=o.operation_id "
+                "JOIN services s ON s.run_id=r.run_id AND s.attempt_id=r.attempt_id "
+                "JOIN service_epochs e ON e.service_kind=s.service_kind "
+                "WHERE o.operation_id=? AND s.service_kind='postgres-master'",
+                (operation_id,),
+            ).fetchone()
+            if authority is None:
+                raise MasterAdmissionRejected("master operation invalid")
+            identity = json.loads(authority["identity_json"])
+            if (
+                authority["operation_kind"] != "ensure_master"
+                or authority["operation_state"] != "ACTIVE"
+                or authority["service_state"] != "ACTIVE"
+                or int(authority["epoch"]) != int(authority["current_epoch"])
+                or authority["lease_until"] <= now
+                or str(identity.get("run_id")) != authority["run_id"]
+                or str(identity.get("attempt_id")) != authority["attempt_id"]
+                or str(identity.get("master_instance_id")) != authority["master_instance_id"]
+                or int(identity.get("epoch", 0)) != int(authority["epoch"])
+            ):
+                raise MasterAdmissionRejected("master not active at blogger admission CAS")
+            if replay_source_request_id is not None:
+                source = connection.execute(
+                    "SELECT request_id,state,failure_code,quarantine_receipt_sha256 "
+                    "FROM blogger_migration_requests WHERE request_id=?",
+                    (replay_source_request_id,),
+                ).fetchone()
+                if (
+                    source is None
+                    or source["state"] != "FAILED"
+                    or source["failure_code"] != "BloggerMigrationQuarantined"
+                    or replay_source_receipt_sha256 is None
+                    or source["quarantine_receipt_sha256"] != replay_source_receipt_sha256
+                ):
+                    raise MasterAdmissionRejected("blogger replay quarantine evidence changed")
+            connection.execute(
+                "INSERT INTO blogger_migration_requests(request_id,operation_id,request_sha256,request_json,state,"
+                "created_at,updated_at) VALUES (?,?,?,?,'REQUESTED',?,?)",
+                (request_id, operation_id, request_sha256, request_json, now, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM blogger_migration_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            assert row is not None
+            return self._blogger_request_from_row(row), True
+
     def claim_blogger_migration_request(
         self, *, operation_id: str, run_id: str, attempt_id: str, master_instance_id: str, epoch: int
     ) -> dict[str, Any] | None:
@@ -3207,6 +3290,55 @@ class ControlLedger:
             ):
                 raise StaleRuntimeEvent("committed blogger import cannot be downgraded to failed")
 
+    def record_blogger_quarantine_receipt(
+        self,
+        *,
+        request_id: str,
+        run_id: str,
+        attempt_id: str,
+        receipt: Mapping[str, Any],
+        receipt_sha256: str,
+    ) -> dict[str, Any]:
+        """Persist the immutable durable-quarantine projection, exactly once."""
+
+        if len(receipt_sha256) != 64:
+            raise ValueError("blogger quarantine receipt hash must be an exact SHA-256")
+        receipt_json = _safe_json(receipt, max_bytes=256 * 1024)
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            changed = connection.execute(
+                "UPDATE blogger_migration_requests SET state='FAILED',failure_code=?,"
+                "quarantine_receipt_json=?,quarantine_receipt_sha256=?,updated_at=? "
+                "WHERE request_id=? AND claimed_run_id=? AND claimed_attempt_id=? "
+                "AND state='CLAIMED' AND import_receipt_json IS NULL "
+                "AND quarantine_receipt_json IS NULL",
+                (
+                    "BloggerMigrationQuarantined",
+                    receipt_json,
+                    receipt_sha256,
+                    now,
+                    request_id,
+                    run_id,
+                    attempt_id,
+                ),
+            ).rowcount
+            row = connection.execute(
+                "SELECT * FROM blogger_migration_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if row is None or (
+                changed != 1
+                and (
+                    row["state"] != "FAILED"
+                    or row["failure_code"] != "BloggerMigrationQuarantined"
+                    or row["claimed_run_id"] != run_id
+                    or row["claimed_attempt_id"] != attempt_id
+                    or row["quarantine_receipt_json"] != receipt_json
+                    or row["quarantine_receipt_sha256"] != receipt_sha256
+                )
+            ):
+                raise StaleRuntimeEvent("blogger quarantine evidence differs from the durable receipt")
+            return self._blogger_request_from_row(row)
+
     def reconcile_abandoned_blogger_migration_request(self, request_id: str) -> dict[str, Any] | None:
         """Terminalize a claim only after its exact master ended without import evidence."""
 
@@ -3220,6 +3352,15 @@ class ControlLedger:
             if row is None:
                 return None
             if (
+                row["state"] == "REQUESTED"
+                and row["operation_state"] in {"STOPPED", "FAILED", "FENCED", "ORPHANED"}
+            ):
+                connection.execute(
+                    "UPDATE blogger_migration_requests SET state='FAILED',failure_code=?,updated_at=? "
+                    "WHERE request_id=? AND state='REQUESTED'",
+                    ("ADMISSION_RUNTIME_TERMINAL_BEFORE_CLAIM", now, request_id),
+                )
+            elif (
                 row["state"] == "CLAIMED"
                 and row["import_receipt_json"] is None
                 and row["operation_state"] in {"FAILED", "FENCED", "ORPHANED"}
@@ -3277,8 +3418,12 @@ class ControlLedger:
         value["request"] = json.loads(value.pop("request_json"))
         import_receipt_json = value.pop("import_receipt_json")
         checkpoint_receipt_json = value.pop("checkpoint_receipt_json")
+        quarantine_receipt_json = value.pop("quarantine_receipt_json")
         value["import_receipt"] = json.loads(import_receipt_json) if import_receipt_json else None
         value["checkpoint_receipt"] = json.loads(checkpoint_receipt_json) if checkpoint_receipt_json else None
+        value["quarantine_receipt"] = (
+            json.loads(quarantine_receipt_json) if quarantine_receipt_json else None
+        )
         if value["claimed_epoch"] is not None:
             value["claimed_epoch"] = int(value["claimed_epoch"])
         return value
@@ -3313,6 +3458,82 @@ class ControlLedger:
             ) != (operation_id, idempotency_key_sha256, request_sha256, request_json):
                 raise IdempotencyConflict("embedding request identity was reused for different metadata")
             return self._embedding_request_from_row(row), bool(changed)
+
+    def admit_embedding_production_request(
+        self,
+        *,
+        request_id: str,
+        idempotency_key_sha256: str,
+        request_sha256: str,
+        request: Mapping[str, Any],
+        canonical_revision: int,
+        checkpoint_id: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically bind an embedding request to ACTIVE master + exact HEAD."""
+
+        request_json = _safe_json(request)
+        if any(len(value) != 64 for value in (idempotency_key_sha256, request_sha256)):
+            raise ValueError("embedding request hashes must be exact SHA-256 values")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM embedding_production_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["idempotency_key_sha256"],
+                    existing["request_sha256"],
+                    existing["request_json"],
+                ) != (idempotency_key_sha256, request_sha256, request_json):
+                    raise IdempotencyConflict("embedding request identity was reused for different metadata")
+                return self._embedding_request_from_row(existing), False
+            authority = connection.execute(
+                "SELECT o.operation_id,o.operation_kind,o.state AS operation_state,o.identity_json,"
+                "s.run_id,s.attempt_id,s.master_instance_id,s.epoch,s.state AS service_state,"
+                "s.lease_until,s.canonical_revision,e.current_epoch,h.current_checkpoint_id,c.status "
+                "FROM services s JOIN service_epochs e USING(service_kind) "
+                "JOIN run_attempts r ON r.run_id=s.run_id AND r.attempt_id=s.attempt_id "
+                "JOIN operations o ON o.operation_id=r.operation_id "
+                "JOIN checkpoint_heads h ON h.service_kind=s.service_kind "
+                "LEFT JOIN checkpoint_candidates c ON c.checkpoint_id=h.current_checkpoint_id "
+                "WHERE s.service_kind='postgres-master' AND s.epoch=e.current_epoch",
+            ).fetchone()
+            if authority is None:
+                raise MasterAdmissionRejected("embedding prerequisite not active")
+            identity = json.loads(authority["identity_json"])
+            if (
+                authority["operation_kind"] != "ensure_master"
+                or authority["operation_state"] != "ACTIVE"
+                or authority["service_state"] != "ACTIVE"
+                or authority["lease_until"] <= now
+                or int(authority["epoch"]) != int(authority["current_epoch"])
+                or int(authority["canonical_revision"] or -1) != canonical_revision
+                or authority["current_checkpoint_id"] != checkpoint_id
+                or authority["status"] != "VERIFIED"
+                or str(identity.get("run_id")) != authority["run_id"]
+                or str(identity.get("attempt_id")) != authority["attempt_id"]
+                or str(identity.get("master_instance_id")) != authority["master_instance_id"]
+                or int(identity.get("epoch", 0)) != int(authority["epoch"])
+            ):
+                raise MasterAdmissionRejected("embedding prerequisite changed during admission CAS")
+            connection.execute(
+                "INSERT INTO embedding_production_requests(request_id,operation_id,idempotency_key_sha256,"
+                "request_sha256,request_json,state,created_at,updated_at) VALUES (?,?,?,?,?,'REQUESTED',?,?)",
+                (
+                    request_id,
+                    authority["operation_id"],
+                    idempotency_key_sha256,
+                    request_sha256,
+                    request_json,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM embedding_production_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            assert row is not None
+            return self._embedding_request_from_row(row), True
 
     def claim_embedding_production_request(
         self, *, operation_id: str, run_id: str, attempt_id: str, master_instance_id: str, epoch: int
@@ -3423,6 +3644,20 @@ class ControlLedger:
                 (request_id,),
             ).fetchone()
             if (
+                row is not None
+                and row["state"] == "REQUESTED"
+                and row["operation_state"] in {"STOPPED", "FAILED", "FENCED", "ORPHANED"}
+            ):
+                connection.execute(
+                    "UPDATE embedding_production_requests SET state='FAILED',failure_code=?,updated_at=? "
+                    "WHERE request_id=? AND state='REQUESTED'",
+                    (
+                        "ADMISSION_RUNTIME_TERMINAL_BEFORE_CLAIM",
+                        _format_time(self.clock.now()),
+                        request_id,
+                    ),
+                )
+            elif (
                 row is not None
                 and row["state"] == "CLAIMED"
                 and row["stage_receipt_json"] is None

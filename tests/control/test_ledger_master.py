@@ -63,6 +63,79 @@ def ledger_at(tmp_path: Path, clock: DeterministicClock | None = None) -> Contro
     return ControlLedger(tmp_path / "private-control" / "ledger.sqlite3", clock=clock)
 
 
+def active_admission_ledger(tmp_path: Path) -> tuple[ControlLedger, str, str]:
+    now = datetime(2026, 8, 11, 12, tzinfo=UTC)
+    ledger = ledger_at(tmp_path, DeterministicClock(now))
+    operation_id = "admission-operation"
+    master_id = "33333333-3333-4333-8333-333333333333"
+    identity = {
+        "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "service_instance_id": "service-1",
+        "master_instance_id": master_id,
+        "epoch": 1,
+    }
+    ledger.ensure_operation(
+        operation_id=operation_id,
+        idempotency_key="atomic-admission",
+        operation_kind="ensure_master",
+        intent={"source": "test"},
+        initial_state="READY",
+        identity=identity,
+    )
+    ledger.record_attempt(
+        attempt_id="attempt-1",
+        run_id="run-1",
+        operation_id=operation_id,
+        source_identity="source",
+        source_version="git:" + "a" * 40,
+        service_instance_id="service-1",
+        master_instance_id=master_id,
+        epoch=1,
+        state="RUNNING",
+    )
+    assert ledger.allocate_epoch("postgres-master") == 1
+    ledger.activate_service_operation(
+        operation_id=operation_id,
+        expected_state="READY",
+        service_instance_id="service-1",
+        service_kind="postgres-master",
+        run_id="run-1",
+        attempt_id="attempt-1",
+        master_instance_id=master_id,
+        epoch=1,
+        endpoint="tunnel://127.0.0.1:5432",
+        protocol="postgresql+tls",
+        tls_fingerprint="sha256:" + "b" * 64,
+        capabilities=("sql",),
+        canonical_revision=12,
+        schema_version="1",
+        lease_until=now + timedelta(minutes=10),
+        latest_event_id="event-1",
+    )
+    checkpoint_id = "55555555-5555-4555-8555-555555555555"
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=checkpoint_id,
+        operation_id=operation_id,
+        dataset_ref="owner/checkpoints",
+        version_ref=None,
+        manifest_sha256="c" * 64,
+        source_checkpoint_id=None,
+        master_instance_id=master_id,
+        epoch=1,
+    )
+    ledger.mark_checkpoint_uploaded(checkpoint_id, "owner/checkpoints:17")
+    ledger.mark_checkpoint_readback_verified(checkpoint_id)
+    ledger.mark_checkpoint_restore_verified(checkpoint_id)
+    ledger.promote_checkpoint(
+        "postgres-master",
+        checkpoint_id,
+        expected_generation=0,
+        expected_parent_checkpoint_id=None,
+    )
+    return ledger, operation_id, checkpoint_id
+
+
 def runtime_event(handle, event_type: RuntimeEventType, sequence: int, now: datetime, **data):  # type: ignore[no-untyped-def]
     return (
         RuntimeEvent(
@@ -93,9 +166,7 @@ def test_sqlite_pragmas_permissions_and_append_only_logs(tmp_path: Path) -> None
         .execute("SELECT version FROM control_schema_migrations ORDER BY version")
         .fetchall()
     )
-    assert migrations == [
-        (1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,), (13,), (14,), (15,), (16,)
-    ]
+    assert migrations == [(version,) for version in range(1, 18)]
 
     operation, _ = ledger.ensure_operation(
         operation_id=str(uuid4()),
@@ -183,6 +254,121 @@ def test_packaged_and_repository_control_migrations_are_identical() -> None:
     repository = discover_control_migrations(root / "control_migrations")
     packaged = discover_control_migrations(Path(control_migration_module.__file__).with_name("sql"))
     assert [(item.version, item.sha256) for item in repository] == [(item.version, item.sha256) for item in packaged]
+
+
+def test_atomic_data_admission_rejects_drain_without_stranding_requests(tmp_path: Path) -> None:
+    ledger, operation_id, checkpoint_id = active_admission_ledger(tmp_path)
+    blogger, created = ledger.admit_blogger_migration_request(
+        request_id="blogger-request",
+        operation_id=operation_id,
+        request_sha256="d" * 64,
+        request={"schema_version": "blogger-test"},
+    )
+    assert created and blogger["state"] == "REQUESTED"
+    embedding, created = ledger.admit_embedding_production_request(
+        request_id="embedding-request",
+        idempotency_key_sha256="e" * 64,
+        request_sha256="f" * 64,
+        request={"schema_version": "embedding-test"},
+        canonical_revision=12,
+        checkpoint_id=checkpoint_id,
+    )
+    assert created and embedding["operation_id"] == operation_id
+
+    ledger.transition_operation(
+        operation_id,
+        expected_state="ACTIVE",
+        new_state="STOPPED",
+        metadata={"reason": "drain_won_after_admission"},
+    )
+    assert ledger.reconcile_abandoned_blogger_migration_request("blogger-request")["failure_code"] == (
+        "ADMISSION_RUNTIME_TERMINAL_BEFORE_CLAIM"
+    )
+    assert ledger.reconcile_abandoned_embedding_production_request("embedding-request")[
+        "failure_code"
+    ] == "ADMISSION_RUNTIME_TERMINAL_BEFORE_CLAIM"
+
+    replay, created = ledger.admit_blogger_migration_request(
+        request_id="blogger-request",
+        operation_id=operation_id,
+        request_sha256="d" * 64,
+        request={"schema_version": "blogger-test"},
+    )
+    assert not created and replay["state"] == "FAILED"
+    replay, created = ledger.admit_embedding_production_request(
+        request_id="embedding-request",
+        idempotency_key_sha256="e" * 64,
+        request_sha256="f" * 64,
+        request={"schema_version": "embedding-test"},
+        canonical_revision=12,
+        checkpoint_id=checkpoint_id,
+    )
+    assert not created and replay["state"] == "FAILED"
+    with pytest.raises(MasterAdmissionRejected, match="not active"):
+        ledger.admit_blogger_migration_request(
+            request_id="new-after-drain",
+            operation_id=operation_id,
+            request_sha256="1" * 64,
+            request={"schema_version": "blogger-test"},
+        )
+    with pytest.raises(MasterAdmissionRejected, match=r"not active|admission CAS"):
+        ledger.admit_embedding_production_request(
+            request_id="new-embedding-after-drain",
+            idempotency_key_sha256="2" * 64,
+            request_sha256="3" * 64,
+            request={"schema_version": "embedding-test"},
+            canonical_revision=12,
+            checkpoint_id=checkpoint_id,
+        )
+
+
+def test_quarantine_receipt_is_idempotent_and_cannot_be_altered(tmp_path: Path) -> None:
+    ledger = ledger_at(tmp_path)
+    operation, _ = ledger.ensure_operation(
+        operation_id="quarantine-operation",
+        idempotency_key="quarantine-operation",
+        operation_kind="ensure_master",
+        intent={"source": "test"},
+        initial_state="ACTIVE",
+        identity={"run_id": "run-1", "attempt_id": "attempt-1"},
+    )
+    ledger.ensure_blogger_migration_request(
+        request_id="quarantine-request",
+        operation_id=operation.operation_id,
+        request_sha256="a" * 64,
+        request={"schema_version": "test"},
+    )
+    ledger.claim_blogger_migration_request(
+        operation_id=operation.operation_id,
+        run_id="run-1",
+        attempt_id="attempt-1",
+        master_instance_id="master-1",
+        epoch=1,
+    )
+    receipt = {"schema_version": "quarantine-test", "request_id": "quarantine-request"}
+    first = ledger.record_blogger_quarantine_receipt(
+        request_id="quarantine-request",
+        run_id="run-1",
+        attempt_id="attempt-1",
+        receipt=receipt,
+        receipt_sha256="b" * 64,
+    )
+    replay = ledger.record_blogger_quarantine_receipt(
+        request_id="quarantine-request",
+        run_id="run-1",
+        attempt_id="attempt-1",
+        receipt=receipt,
+        receipt_sha256="b" * 64,
+    )
+    assert replay == first
+    with pytest.raises(StaleRuntimeEvent, match="differs"):
+        ledger.record_blogger_quarantine_receipt(
+            request_id="quarantine-request",
+            run_id="run-1",
+            attempt_id="attempt-1",
+            receipt={**receipt, "request_id": "altered"},
+            receipt_sha256="c" * 64,
+        )
 
 
 def test_import_commit_without_verified_checkpoint_terminalizes_after_provider_failure(tmp_path: Path) -> None:

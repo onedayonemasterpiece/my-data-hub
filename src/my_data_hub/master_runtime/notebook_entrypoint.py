@@ -51,6 +51,7 @@ from my_data_hub.runtime_sdk import (
 from my_data_hub.workloads.bloggers.master_stage import (
     MAX_REQUEST_BYTES,
     BloggerImportStageReceipt,
+    BloggerMigrationQuarantined,
     BloggerMigrationRequest,
     BloggerStageContext,
     execute_blogger_migration_stage,
@@ -896,8 +897,8 @@ def _post_blogger_runtime_receipt(
     sleep: Any = time.sleep,
 ) -> None:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    if len(encoded) > 64 * 1024:
-        raise RuntimeError("blogger runtime metadata receipt exceeds 64 KiB")
+    if len(encoded) > MAX_REQUEST_BYTES:
+        raise RuntimeError("blogger runtime metadata receipt exceeds 256 KiB")
     if not 1 <= attempts <= 5:
         raise ValueError("blogger receipt delivery attempts must be 1..5")
     for attempt in range(attempts):
@@ -1513,9 +1514,25 @@ def run_master(
                             request=migration_request,
                             local_database_url=database_url,
                             lease_until=current_lease,
+                            attempt_id=config.attempt_id,
                         ),
                         owner_connection=gate_connection,
                     )
+                except BloggerMigrationQuarantined as exc:
+                    with suppress(Exception):
+                        _post_blogger_runtime_receipt(
+                            config=config,
+                            callback_url=callback_url,
+                            run_secret=run_secret,
+                            suffix="/failed",
+                            payload={
+                                "request_id": str(migration_request.request_id),
+                                "failure_code": type(exc).__name__,
+                                "quarantine_receipt": exc.receipt.model_dump(mode="json"),
+                                "receipt_sha256": exc.receipt.receipt_sha256,
+                            },
+                        )
+                    raise
                 except Exception as exc:
                     with suppress(Exception):
                         _post_blogger_runtime_receipt(
