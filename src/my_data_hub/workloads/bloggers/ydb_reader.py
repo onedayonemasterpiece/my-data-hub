@@ -44,9 +44,14 @@ class YdbBloggerSnapshot:
         try:
             with pool.checkout(timeout=self.acquire_timeout_seconds) as session:
                 try:
-                    session.transaction(ydb.QuerySerializableReadWrite()).execute(
+                    responses = session.transaction(ydb.QuerySerializableReadWrite()).execute(
                         ZERO_ROW_WRITE_DENIAL_PROBE, commit_tx=True
                     )
+                    # Query Service responses are streaming.  Consume the
+                    # iterator so a deferred UNAUTHORIZED cannot be mistaken
+                    # for a successful denial probe.
+                    for _response in responses:
+                        pass
                 except ydb.issues.Unauthorized:
                     return
                 raise YdbSnapshotError(

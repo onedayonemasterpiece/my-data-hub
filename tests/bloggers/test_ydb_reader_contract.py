@@ -24,7 +24,10 @@ def test_write_denial_probe_accepts_only_exact_unauthorized(monkeypatch) -> None
         def execute(self, query: str, *, commit_tx: bool):
             assert query == ZERO_ROW_WRITE_DENIAL_PROBE
             assert commit_tx is True
-            raise Unauthorized("denied")
+            def responses():
+                raise Unauthorized("denied")
+                yield None
+            return responses()
 
     class Session:
         def __enter__(self): return self
