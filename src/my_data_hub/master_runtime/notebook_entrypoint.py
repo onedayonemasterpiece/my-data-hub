@@ -24,12 +24,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from my_data_hub.checkpoints import load_and_verify, restore_physical_archive
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.db.migrations import migrate
-from my_data_hub.workloads.bloggers.master_stage import (
-    BloggerImportStageReceipt,
-    BloggerMigrationRequest,
-    BloggerStageContext,
-    execute_blogger_migration_stage,
-)
 from my_data_hub.runtime_sdk import (
     CHECKPOINT_ATTEMPT_BUDGET_SECONDS,
     CHECKPOINT_TRANSITION_GUARD_SECONDS,
@@ -38,6 +32,12 @@ from my_data_hub.runtime_sdk import (
     RuntimeClient,
     RuntimeEvent,
     RuntimeEventType,
+)
+from my_data_hub.workloads.bloggers.master_stage import (
+    BloggerImportStageReceipt,
+    BloggerMigrationRequest,
+    BloggerStageContext,
+    execute_blogger_migration_stage,
 )
 
 from .bootstrap import BootstrapRequest, MasterBootstrap
@@ -122,8 +122,7 @@ class MasterTerminalRecord(BaseModel):
             raise ValueError("master terminal events are not in strictly increasing sequence order")
         if (
             (parsed[0].phase, parsed[0].status, parsed[0].data) != ("draining", "closed", {})
-            or (parsed[1].phase, parsed[1].status, parsed[1].data)
-            != ("checkpointing", "started", {})
+            or (parsed[1].phase, parsed[1].status, parsed[1].data) != ("checkpointing", "started", {})
             or any(event.artifact_refs or event.metrics for event in parsed)
         ):
             raise ValueError("master terminal lifecycle bodies contain unexpected payload data")
@@ -219,15 +218,10 @@ class NotebookMasterConfig:
             raise ValueError("maximum runtime must be at least 1800 seconds")
         if config.checkpoint_reserve_seconds != MIN_CHECKPOINT_RESERVE_SECONDS:
             raise ValueError("checkpoint reserve must be exactly 10800 seconds")
-        if (
-            config.checkpoint_reserve_seconds + CHECKPOINT_TRANSITION_GUARD_SECONDS
-            >= config.maximum_runtime_seconds
-        ):
+        if config.checkpoint_reserve_seconds + CHECKPOINT_TRANSITION_GUARD_SECONDS >= config.maximum_runtime_seconds:
             raise ValueError("checkpoint reserve and transition guard must be below maximum runtime")
         if config.maximum_runtime_seconds + config.checkpoint_reserve_seconds > KAGGLE_PROVIDER_TIMEOUT_SECONDS:
-            raise ValueError(
-                "process runtime plus exit reserve exceeds the declared Kaggle provider timeout"
-            )
+            raise ValueError("process runtime plus exit reserve exceeds the declared Kaggle provider timeout")
         if (source is BootSource.EMPTY_BASELINE) != (checkpoint is None):
             raise ValueError("checkpoint source/config mismatch")
         return config
@@ -280,9 +274,7 @@ def _runtime_deadlines(config: NotebookMasterConfig, process_started_at: float) 
         raise ValueError("process monotonic start must be non-negative")
     session_deadline = process_started_at + config.maximum_runtime_seconds
     return (
-        session_deadline
-        - config.checkpoint_reserve_seconds
-        - CHECKPOINT_TRANSITION_GUARD_SECONDS,
+        session_deadline - config.checkpoint_reserve_seconds - CHECKPOINT_TRANSITION_GUARD_SECONDS,
         session_deadline,
     )
 
@@ -476,7 +468,9 @@ def _post_blogger_runtime_receipt(
         raise RuntimeError("blogger runtime metadata receipt exceeds 64 KiB")
     request = urllib.request.Request(
         _blogger_migration_url(callback_url, config.run_id, config.attempt_id, suffix),
-        data=encoded, headers=_runtime_metadata_headers(config, run_secret), method="POST",
+        data=encoded,
+        headers=_runtime_metadata_headers(config, run_secret),
+        method="POST",
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         body = json.loads(response.read(16 * 1024))
@@ -791,19 +785,26 @@ def run_master(
                 try:
                     blogger_receipt = execute_blogger_migration_stage(
                         BloggerStageContext(
-                            identity=identity, request=migration_request,
-                            local_database_url=database_url, lease_until=current_lease,
+                            identity=identity,
+                            request=migration_request,
+                            local_database_url=database_url,
+                            lease_until=current_lease,
                         ),
                         owner_connection=gate_connection,
                     )
                     _post_blogger_runtime_receipt(
-                        config=config, callback_url=callback_url, run_secret=run_secret,
-                        suffix="/import-receipt", payload=blogger_receipt.model_dump(mode="json"),
+                        config=config,
+                        callback_url=callback_url,
+                        run_secret=run_secret,
+                        suffix="/import-receipt",
+                        payload=blogger_receipt.model_dump(mode="json"),
                     )
                 except Exception as exc:
                     with suppress(Exception):
                         _post_blogger_runtime_receipt(
-                            config=config, callback_url=callback_url, run_secret=run_secret,
+                            config=config,
+                            callback_url=callback_url,
+                            run_secret=run_secret,
                             suffix="/failed",
                             payload={
                                 "request_id": str(migration_request.request_id),
@@ -871,8 +872,11 @@ def run_master(
             # recoverable COMPLETE provider run into FAILED; the command can
             # reconcile the exact operation/checkpoint from ledger metadata.
             _post_blogger_runtime_receipt(
-                config=config, callback_url=callback_url, run_secret=run_secret,
-                suffix="/checkpoint-receipt", payload=checkpoint_payload,
+                config=config,
+                callback_url=callback_url,
+                run_secret=run_secret,
+                suffix="/checkpoint-receipt",
+                payload=checkpoint_payload,
             )
 
     if active_error is not None:

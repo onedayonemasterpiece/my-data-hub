@@ -514,8 +514,7 @@ class ControlLedger:
             return False
         with self._reader() as connection:
             row = connection.execute(
-                "SELECT token_sha256,revoked_at FROM runtime_token_hashes "
-                "WHERE run_id=? AND attempt_id=?",
+                "SELECT token_sha256,revoked_at FROM runtime_token_hashes WHERE run_id=? AND attempt_id=?",
                 (run_id, attempt_id),
             ).fetchone()
         if row is None or row["revoked_at"] is not None:
@@ -830,8 +829,7 @@ class ControlLedger:
                 (operation_state, now, operation_id, expected_operation_state),
             )
             connection.execute(
-                "UPDATE services SET state=?,latest_event_id=?,updated_at=? "
-                "WHERE service_instance_id=? AND epoch=?",
+                "UPDATE services SET state=?,latest_event_id=?,updated_at=? WHERE service_instance_id=? AND epoch=?",
                 (service_state, event_id, now, service_instance_id, epoch),
             )
             connection.execute(
@@ -924,7 +922,8 @@ class ControlLedger:
             rows = connection.execute(
                 "SELECT provider,resource_ref,resource_kind,source_identity,source_version,control_class,"
                 "private,state,metadata_json,observed_at FROM provider_resources "
-                "ORDER BY observed_at DESC,provider,resource_ref LIMIT ?", (limit,)
+                "ORDER BY observed_at DESC,provider,resource_ref LIMIT ?",
+                (limit,),
             ).fetchall()
         return [
             {
@@ -1049,10 +1048,12 @@ class ControlLedger:
         if row is None:
             return None
         return {
-            "issuer": row["issuer"], "client_id": row["client_id"],
+            "issuer": row["issuer"],
+            "client_id": row["client_id"],
             "enabled": bool(row["enabled"]),
             "allowed_scopes": frozenset(json.loads(row["allowed_scopes_json"])["scopes"]),
-            "principal_id": row["principal_id"], "profile_kind": row["profile_kind"],
+            "principal_id": row["principal_id"],
+            "profile_kind": row["profile_kind"],
         }
 
     def request_master(
@@ -1082,9 +1083,7 @@ class ControlLedger:
                 "attempts,claim_until,created_at,updated_at) VALUES (?,?,?,?,?,'PENDING',0,NULL,?,?)",
                 (request_id, idempotency_key, requested_by, intent, operation_id, now, now),
             )
-            row = connection.execute(
-                "SELECT * FROM master_requests WHERE request_id=?", (request_id,)
-            ).fetchone()
+            row = connection.execute("SELECT * FROM master_requests WHERE request_id=?", (request_id,)).fetchone()
             assert row is not None
             return dict(row), True
 
@@ -1153,9 +1152,16 @@ class ControlLedger:
                     "resource,scopes_json,subject,nonce,authenticated_at,expires_at,created_at) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (
-                        grant["code_digest"], grant["code_challenge"], grant["client_id"],
-                        grant["redirect_uri"], grant["resource"], scopes_json, grant["subject"],
-                        grant.get("nonce"), int(grant["authenticated_at"]), int(grant["expires_at"]),
+                        grant["code_digest"],
+                        grant["code_challenge"],
+                        grant["client_id"],
+                        grant["redirect_uri"],
+                        grant["resource"],
+                        scopes_json,
+                        grant["subject"],
+                        grant.get("nonce"),
+                        int(grant["authenticated_at"]),
+                        int(grant["expires_at"]),
                         _format_time(self.clock.now()),
                     ),
                 )
@@ -1163,26 +1169,25 @@ class ControlLedger:
                 return False
         return True
 
-    def consume_oauth_authorization_grant(
-        self, code_digest: str, *, now: int
-    ) -> dict[str, Any] | None:
+    def consume_oauth_authorization_grant(self, code_digest: str, *, now: int) -> dict[str, Any] | None:
         with self._transaction() as connection:
             row = connection.execute(
                 "SELECT * FROM oauth_authorization_grants WHERE code_digest=?", (code_digest,)
             ).fetchone()
             if row is None:
                 return None
-            connection.execute(
-                "DELETE FROM oauth_authorization_grants WHERE code_digest=?", (code_digest,)
-            )
+            connection.execute("DELETE FROM oauth_authorization_grants WHERE code_digest=?", (code_digest,))
             if int(row["expires_at"]) <= now:
                 return None
             return {
-                "code_digest": row["code_digest"], "code_challenge": row["code_challenge"],
-                "client_id": row["client_id"], "redirect_uri": row["redirect_uri"],
+                "code_digest": row["code_digest"],
+                "code_challenge": row["code_challenge"],
+                "client_id": row["client_id"],
+                "redirect_uri": row["redirect_uri"],
                 "resource": row["resource"],
                 "scopes": tuple(json.loads(row["scopes_json"])["scopes"]),
-                "subject": row["subject"], "nonce": row["nonce"],
+                "subject": row["subject"],
+                "nonce": row["nonce"],
                 "authenticated_at": int(row["authenticated_at"]),
                 "expires_at": int(row["expires_at"]),
             }
@@ -1196,9 +1201,16 @@ class ControlLedger:
                     "subject,authenticated_at,expires_at,consumed_at,revoked_at,created_at) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (
-                        grant["credential_digest"], grant["family_id"], grant["client_id"],
-                        grant["resource"], scopes_json, grant["subject"], int(grant["authenticated_at"]),
-                        int(grant["expires_at"]), grant.get("consumed_at"), grant.get("revoked_at"),
+                        grant["credential_digest"],
+                        grant["family_id"],
+                        grant["client_id"],
+                        grant["resource"],
+                        scopes_json,
+                        grant["subject"],
+                        int(grant["authenticated_at"]),
+                        int(grant["expires_at"]),
+                        grant.get("consumed_at"),
+                        grant.get("revoked_at"),
                         _format_time(self.clock.now()),
                     ),
                 )
@@ -1253,22 +1265,31 @@ class ControlLedger:
                 "subject,authenticated_at,expires_at,consumed_at,revoked_at,created_at) "
                 "VALUES (?,?,?,?,?,?,?,?,NULL,NULL,?)",
                 (
-                    successor_digest, row["family_id"], row["client_id"], row["resource"],
-                    _safe_json({"scopes": list(successor_scopes)}), row["subject"],
-                    int(row["authenticated_at"]), expires_at, _format_time(self.clock.now()),
+                    successor_digest,
+                    row["family_id"],
+                    row["client_id"],
+                    row["resource"],
+                    _safe_json({"scopes": list(successor_scopes)}),
+                    row["subject"],
+                    int(row["authenticated_at"]),
+                    expires_at,
+                    _format_time(self.clock.now()),
                 ),
             )
             return "rotated", {
-                "credential_digest": successor_digest, "family_id": row["family_id"],
-                "client_id": row["client_id"], "resource": row["resource"],
-                "scopes": successor_scopes, "subject": row["subject"],
-                "authenticated_at": int(row["authenticated_at"]), "expires_at": expires_at,
-                "consumed_at": None, "revoked_at": None,
+                "credential_digest": successor_digest,
+                "family_id": row["family_id"],
+                "client_id": row["client_id"],
+                "resource": row["resource"],
+                "scopes": successor_scopes,
+                "subject": row["subject"],
+                "authenticated_at": int(row["authenticated_at"]),
+                "expires_at": expires_at,
+                "consumed_at": None,
+                "revoked_at": None,
             }
 
-    def revoke_oauth_refresh_grant(
-        self, credential_digest: str, *, client_id: str, now: int
-    ) -> None:
+    def revoke_oauth_refresh_grant(self, credential_digest: str, *, client_id: str, now: int) -> None:
         with self._transaction() as connection:
             row = connection.execute(
                 "SELECT family_id,client_id FROM oauth_refresh_grants WHERE credential_digest=?",
@@ -1285,8 +1306,13 @@ class ControlLedger:
 
         intent_json = _safe_json(payload)
         required = {
-            "effect_id", "operation_id", "idempotency_key", "task_id",
-            "action", "provider_ref", "request_sha256",
+            "effect_id",
+            "operation_id",
+            "idempotency_key",
+            "task_id",
+            "action",
+            "provider_ref",
+            "request_sha256",
         }
         if not required.issubset(payload):
             raise ValueError("provider effect intent is missing durable identity fields")
@@ -1296,10 +1322,14 @@ class ControlLedger:
                     "INSERT INTO provider_effect_intents(effect_id,operation_id,idempotency_key,task_id,action,"
                     "provider_ref,request_sha256,intent_json,recorded_at) VALUES (?,?,?,?,?,?,?,?,?)",
                     (
-                        str(payload["effect_id"]), str(payload["operation_id"]),
-                        str(payload["idempotency_key"]), str(payload["task_id"]),
-                        str(payload["action"]), str(payload["provider_ref"]),
-                        str(payload["request_sha256"]), intent_json,
+                        str(payload["effect_id"]),
+                        str(payload["operation_id"]),
+                        str(payload["idempotency_key"]),
+                        str(payload["task_id"]),
+                        str(payload["action"]),
+                        str(payload["provider_ref"]),
+                        str(payload["request_sha256"]),
+                        intent_json,
                         _format_time(self.clock.now()),
                     ),
                 )
@@ -1315,9 +1345,10 @@ class ControlLedger:
         receipt_json = _safe_json(payload)
         receipt_sha256 = hashlib.sha256(receipt_json.encode()).hexdigest()
         with self._transaction() as connection:
-            if connection.execute(
-                "SELECT 1 FROM provider_effect_intents WHERE effect_id=?", (effect_id,)
-            ).fetchone() is None:
+            if (
+                connection.execute("SELECT 1 FROM provider_effect_intents WHERE effect_id=?", (effect_id,)).fetchone()
+                is None
+            ):
                 raise StaleRuntimeEvent("provider receipt has no persist-before-effect intent")
             # Receipts form an append-only reconciliation history.  An
             # UNCERTAIN observation may later become exactly APPLIED/ABSENT;
@@ -1331,8 +1362,14 @@ class ControlLedger:
     def persist_provider_resource_claim(self, payload: Mapping[str, Any]) -> None:
         claim_json = _safe_json(payload)
         required = {
-            "claim_sha256", "task_id", "effect_id", "provider_ref", "kind",
-            "control_class", "disposable", "provider_version",
+            "claim_sha256",
+            "task_id",
+            "effect_id",
+            "provider_ref",
+            "kind",
+            "control_class",
+            "disposable",
+            "provider_version",
         }
         if not required.issubset(payload):
             raise ValueError("provider resource claim is missing durable identity fields")
@@ -1350,17 +1387,21 @@ class ControlLedger:
             if existing:
                 if any(hmac.compare_digest(str(row["claim_json"]), claim_json) for row in existing):
                     return
-                raise IdempotencyConflict(
-                    "provider effect/resource version already has different claim authority"
-                )
+                raise IdempotencyConflict("provider effect/resource version already has different claim authority")
             try:
                 connection.execute(
                     "INSERT INTO provider_resource_claims(claim_sha256,task_id,effect_id,provider_ref,resource_kind,"
                     "control_class,disposable,provider_version,claim_json,recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (
-                        str(payload["claim_sha256"]), str(payload["task_id"]), str(payload["effect_id"]),
-                        str(payload["provider_ref"]), str(payload["kind"]), str(payload["control_class"]),
-                        int(bool(payload["disposable"])), int(payload["provider_version"]), claim_json,
+                        str(payload["claim_sha256"]),
+                        str(payload["task_id"]),
+                        str(payload["effect_id"]),
+                        str(payload["provider_ref"]),
+                        str(payload["kind"]),
+                        str(payload["control_class"]),
+                        int(bool(payload["disposable"])),
+                        int(payload["provider_version"]),
+                        claim_json,
                         _format_time(self.clock.now()),
                     ),
                 )
@@ -1679,7 +1720,8 @@ class ControlLedger:
         with self._transaction() as connection:
             candidate = connection.execute(
                 "SELECT status,service_kind,source_checkpoint_id,source_head_generation "
-                "FROM checkpoint_candidates WHERE checkpoint_id=?", (checkpoint_id,)
+                "FROM checkpoint_candidates WHERE checkpoint_id=?",
+                (checkpoint_id,),
             ).fetchone()
             if candidate is None or candidate["service_kind"] != service_kind:
                 raise StaleRuntimeEvent("checkpoint candidate is absent or belongs to another service")
@@ -1773,7 +1815,9 @@ class ControlLedger:
                 "SELECT * FROM blogger_migration_requests WHERE request_id=?", (request_id,)
             ).fetchone()
             if row is None or (row["operation_id"], row["request_sha256"], row["request_json"]) != (
-                operation_id, request_sha256, request_json
+                operation_id,
+                request_sha256,
+                request_json,
             ):
                 raise IdempotencyConflict("blogger request identity was reused for different metadata")
             return self._blogger_request_from_row(row), bool(changed)
@@ -1793,14 +1837,20 @@ class ControlLedger:
             if row["state"] == "REQUESTED":
                 connection.execute(
                     "UPDATE blogger_migration_requests SET state='CLAIMED',claimed_run_id=?,claimed_attempt_id=?,"
-                    "claimed_master_instance_id=?,claimed_epoch=?,updated_at=? WHERE request_id=? AND state='REQUESTED'",
+                    "claimed_master_instance_id=?,claimed_epoch=?,updated_at=? WHERE request_id=? "
+                    "AND state='REQUESTED'",
                     (run_id, attempt_id, master_instance_id, epoch, now, row["request_id"]),
                 )
                 row = connection.execute(
                     "SELECT * FROM blogger_migration_requests WHERE request_id=?", (row["request_id"],)
                 ).fetchone()
             assert row is not None
-            claimed = (row["claimed_run_id"], row["claimed_attempt_id"], row["claimed_master_instance_id"], row["claimed_epoch"])
+            claimed = (
+                row["claimed_run_id"],
+                row["claimed_attempt_id"],
+                row["claimed_master_instance_id"],
+                row["claimed_epoch"],
+            )
             if claimed != (run_id, attempt_id, master_instance_id, epoch):
                 raise StaleRuntimeEvent("blogger migration request belongs to another runtime epoch")
             return self._blogger_request_from_row(row)
@@ -1830,7 +1880,8 @@ class ControlLedger:
         now = _format_time(self.clock.now())
         with self._transaction() as connection:
             changed = connection.execute(
-                "UPDATE blogger_migration_requests SET state='CHECKPOINT_VERIFIED',checkpoint_receipt_json=?,updated_at=? "
+                "UPDATE blogger_migration_requests SET state='CHECKPOINT_VERIFIED',"
+                "checkpoint_receipt_json=?,updated_at=? "
                 "WHERE request_id=? AND state='IMPORT_COMMITTED' AND claimed_run_id=? AND claimed_attempt_id=?",
                 (receipt_json, now, request_id, run_id, attempt_id),
             ).rowcount
@@ -1881,9 +1932,7 @@ class ControlLedger:
         import_receipt_json = value.pop("import_receipt_json")
         checkpoint_receipt_json = value.pop("checkpoint_receipt_json")
         value["import_receipt"] = json.loads(import_receipt_json) if import_receipt_json else None
-        value["checkpoint_receipt"] = (
-            json.loads(checkpoint_receipt_json) if checkpoint_receipt_json else None
-        )
+        value["checkpoint_receipt"] = json.loads(checkpoint_receipt_json) if checkpoint_receipt_json else None
         if value["claimed_epoch"] is not None:
             value["claimed_epoch"] = int(value["claimed_epoch"])
         return value

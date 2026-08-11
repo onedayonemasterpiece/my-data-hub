@@ -7,7 +7,6 @@ primary.  Source rows never cross the control plane or touch a local artifact.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import secrets
 from dataclasses import dataclass
@@ -48,7 +47,7 @@ class BloggerMigrationRequest(BaseModel):
     source_query_sha256: Literal[SOURCE_QUERY_SHA256] = SOURCE_QUERY_SHA256
 
     @model_validator(mode="after")
-    def exact_snapshot(self) -> "BloggerMigrationRequest":
+    def exact_snapshot(self) -> BloggerMigrationRequest:
         if self.snapshot_at.tzinfo is None:
             raise ValueError("blogger snapshot timestamp must be timezone-aware")
         return self
@@ -92,7 +91,7 @@ class BloggerImportStageReceipt(BaseModel):
     durability_state: Literal["COMMITTED_PENDING_CHECKPOINT"] = "COMMITTED_PENDING_CHECKPOINT"
 
     @model_validator(mode="after")
-    def lossless_accounting(self) -> "BloggerImportStageReceipt":
+    def lossless_accounting(self) -> BloggerImportStageReceipt:
         if sum(self.dispositions.values()) != EXPECTED_BLOGGER_ROWS:
             raise ValueError("blogger dispositions do not account for all 266 rows")
         if any(not isinstance(key, str) or value < 0 for key, value in self.dispositions.items()):
@@ -218,7 +217,9 @@ def execute_blogger_migration_stage(
     try:
         snapshot = YdbBloggerSnapshot(driver)
         snapshot.assert_write_denied()
-        with psycopg.connect(_migration_url(context.local_database_url, principal, password), connect_timeout=5) as connection:
+        with psycopg.connect(
+            _migration_url(context.local_database_url, principal, password), connect_timeout=5
+        ) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("SET ROLE mdh_migration_operator")
                 cursor.execute("SET statement_timeout='180s'")

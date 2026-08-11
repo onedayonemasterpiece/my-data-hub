@@ -17,6 +17,7 @@ from my_data_hub.control_plane.runtime import (
 from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator
 from my_data_hub.providers.kaggle import KaggleMasterLaunchAssets, KaggleMasterRuntimeProvider, derive_runtime_secret
 from my_data_hub.runtime_sdk import RuntimeEvent, RuntimeEventType
+from my_data_hub.workloads.bloggers.master_stage import BloggerMigrationRequest
 
 ROOT = "runtime-root-secret-long-enough-for-tests"
 
@@ -153,6 +154,69 @@ def test_runtime_callback_reaches_active_through_production_app_wiring(tmp_path:
     )
     assert callback.status_code == 200
     assert TestClient(app).get("/health/ready").json()["master_state"] == "ACTIVE"
+
+
+def test_active_runtime_claims_only_its_exact_blogger_request(tmp_path: Path) -> None:
+    path = tmp_path / "control.sqlite3"
+    ledger = ControlLedger(path)
+    wired = runtime(ledger, FakeKaggleRuntime())
+    client = TestClient(create_app(ControlPlaneSettings(ledger_path=path), ledger=ledger, master_runtime=wired))
+    ensured = client.post("/control/v1/master/ensure", json={"idempotency_key": "blogger-claim-master"})
+    operation = ledger.get_operation(ensured.json()["operation_id"])
+    assert operation is not None
+    identity = operation.identity
+    now = datetime.now(UTC)
+    ready = RuntimeEvent(
+        event_id=str(uuid4()),
+        run_id=str(identity["run_id"]),
+        attempt_id=str(identity["attempt_id"]),
+        service_instance_id=str(identity["service_instance_id"]),
+        source_identity=assets().source_identity,
+        source_version=assets().source_version,
+        event_type=RuntimeEventType.SERVICE_READY,
+        emitted_at=now,
+        local_sequence=1,
+        epoch=int(identity["epoch"]),
+        data={
+            "service_kind": "postgres-master",
+            "endpoint": "tunnel://127.0.0.1:55432",
+            "protocol": "postgresql+tls",
+            "tls_fingerprint": "sha256:" + "a" * 64,
+            "capabilities": ["sql", "fts", "pgvector"],
+            "canonical_revision": 1,
+            "schema_version": "1",
+            "lease_until": (now + timedelta(minutes=4)).isoformat(),
+            "master_instance_id": str(identity["master_instance_id"]),
+            "epoch": int(identity["epoch"]),
+        },
+    )
+    token = derive_runtime_secret(ROOT, str(identity["run_id"]), str(identity["attempt_id"]))
+    accepted = client.post(
+        "/internal/runtime/events",
+        content=ready.model_dump_json(by_alias=True, exclude_none=True).encode(),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert accepted.status_code == 200
+    request = BloggerMigrationRequest(
+        request_id=uuid4(),
+        operation_id=operation.operation_id,
+        project_id=uuid4(),
+        snapshot_at=now,
+        source_revision="a" * 40,
+    )
+    created = client.post("/control/v1/blogger-closure/requests", json=request.model_dump(mode="json"))
+    assert created.status_code == 200
+    claim = client.get(
+        f"/internal/runtime/blogger-migration/{identity['run_id']}/{identity['attempt_id']}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-MDH-Master-Instance-ID": str(identity["master_instance_id"]),
+            "X-MDH-Epoch": str(identity["epoch"]),
+        },
+    )
+    assert claim.status_code == 200
+    assert claim.json()["available"] is True
+    assert claim.json()["request_sha256"] == request.request_sha256
 
 
 class RecordingRegistrar:

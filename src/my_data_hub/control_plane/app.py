@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
 from contextlib import asynccontextmanager, suppress
@@ -234,9 +235,7 @@ def create_app(
     )
 
     def _configured_master_assets():  # type: ignore[no-untyped-def]
-        configured = runtime.master_runtime or (
-            master_runtime.settings if master_runtime is not None else None
-        )
+        configured = runtime.master_runtime or (master_runtime.settings if master_runtime is not None else None)
         return configured.assets if configured else None
 
     def _current_checkpoint_claim(provider_ref: str) -> TaskResourceClaim | None:
@@ -454,7 +453,8 @@ def create_app(
             recovered = control_ledger.verified_checkpoint_for_operation(record["operation_id"])
             if recovered is not None:
                 record = control_ledger.record_blogger_checkpoint_receipt(
-                    request_id=exact_id, run_id=str(record["claimed_run_id"]),
+                    request_id=exact_id,
+                    run_id=str(record["claimed_run_id"]),
                     attempt_id=str(record["claimed_attempt_id"]),
                     receipt={
                         "request_id": exact_id,
@@ -464,10 +464,7 @@ def create_app(
                         "canonical_revision": record["import_receipt"]["canonical_revision"],
                     },
                 )
-        return {
-            key: value for key, value in record.items()
-            if key not in {"failure_code"} or value is not None
-        }
+        return {key: value for key, value in record.items() if key not in {"failure_code"} or value is not None}
 
     @app.get("/internal/runtime/blogger-migration/{run_id}/{attempt_id}")
     def claim_blogger_migration(
@@ -478,33 +475,46 @@ def create_app(
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, Any]:
         operation = _runtime_authority(
-            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
-            master_instance_id=master_instance_id, epoch=epoch,
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
             allowed_states=frozenset({"ACTIVE"}),
         )
         record = control_ledger.claim_blogger_migration_request(
             operation_id=operation.operation_id,
-            run_id=run_id, attempt_id=attempt_id,
+            run_id=run_id,
+            attempt_id=attempt_id,
             master_instance_id=str(operation.identity["master_instance_id"]),
             epoch=int(operation.identity["epoch"]),
         )
-        return {"available": False} if record is None or record["state"] != "CLAIMED" else {
-            "available": True,
-            "request": record["request"],
-            "request_sha256": record["request_sha256"],
-            "state": record["state"],
-        }
+        return (
+            {"available": False}
+            if record is None or record["state"] != "CLAIMED"
+            else {
+                "available": True,
+                "request": record["request"],
+                "request_sha256": record["request_sha256"],
+                "state": record["state"],
+            }
+        )
 
     @app.post("/internal/runtime/blogger-migration/{run_id}/{attempt_id}/import-receipt")
     async def blogger_import_receipt(
-        run_id: str, attempt_id: str, request: Request,
+        run_id: str,
+        attempt_id: str,
+        request: Request,
         authorization: str | None = Header(default=None),
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, Any]:
         _runtime_authority(
-            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
-            master_instance_id=master_instance_id, epoch=epoch,
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
             allowed_states=frozenset({"ACTIVE"}),
         )
         body = await _bounded_json(request)
@@ -513,46 +523,62 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=422, detail={"code": "blogger_receipt_invalid"}) from exc
         if (str(receipt.run_id), receipt.epoch, str(receipt.master_instance_id)) != (
-            run_id, int(epoch or 0), str(master_instance_id)
+            run_id,
+            int(epoch or 0),
+            str(master_instance_id),
         ):
             raise HTTPException(status_code=409, detail={"code": "blogger_receipt_epoch_mismatch"})
         record = control_ledger.record_blogger_import_receipt(
-            request_id=str(receipt.request_id), run_id=run_id, attempt_id=attempt_id,
+            request_id=str(receipt.request_id),
+            run_id=run_id,
+            attempt_id=attempt_id,
             receipt=receipt.model_dump(mode="json"),
         )
         return {"accepted": True, "state": record["state"], "receipt_sha256": receipt.receipt_sha256}
 
     @app.post("/internal/runtime/blogger-migration/{run_id}/{attempt_id}/failed")
     async def blogger_migration_failed(
-        run_id: str, attempt_id: str, request: Request,
+        run_id: str,
+        attempt_id: str,
+        request: Request,
         authorization: str | None = Header(default=None),
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, Any]:
         _runtime_authority(
-            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
-            master_instance_id=master_instance_id, epoch=epoch,
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
             allowed_states=frozenset({"ACTIVE"}),
         )
         body = await _bounded_json(request)
         if set(body) != {"request_id", "failure_code"}:
             raise HTTPException(status_code=422, detail={"code": "blogger_failure_invalid"})
         control_ledger.fail_blogger_migration_request(
-            request_id=str(body["request_id"]), run_id=run_id, attempt_id=attempt_id,
+            request_id=str(body["request_id"]),
+            run_id=run_id,
+            attempt_id=attempt_id,
             failure_code=str(body["failure_code"]),
         )
         return {"accepted": True, "state": "FAILED"}
 
     @app.post("/internal/runtime/blogger-migration/{run_id}/{attempt_id}/checkpoint-receipt")
     async def blogger_checkpoint_receipt(
-        run_id: str, attempt_id: str, request: Request,
+        run_id: str,
+        attempt_id: str,
+        request: Request,
         authorization: str | None = Header(default=None),
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, Any]:
         _runtime_authority(
-            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
-            master_instance_id=master_instance_id, epoch=epoch,
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
             allowed_states=frozenset({"DRAINING", "CHECKPOINTING", "STOPPED"}),
         )
         body = await _bounded_json(request)
@@ -564,9 +590,14 @@ def create_app(
             raise HTTPException(status_code=409, detail={"code": "blogger_checkpoint_revision_mismatch"})
         head = control_ledger.checkpoint_head("postgres-master")
         candidate = control_ledger.checkpoint_candidate(str(body["checkpoint_id"]))
-        if (head is None or head.current_checkpoint_id != body["checkpoint_id"] or candidate is None
-                or candidate["status"] != "VERIFIED" or candidate["manifest_sha256"] != body["manifest_sha256"]
-                or body["current_checkpoint_id"] != body["checkpoint_id"]):
+        if (
+            head is None
+            or head.current_checkpoint_id != body["checkpoint_id"]
+            or candidate is None
+            or candidate["status"] != "VERIFIED"
+            or candidate["manifest_sha256"] != body["manifest_sha256"]
+            or body["current_checkpoint_id"] != body["checkpoint_id"]
+        ):
             raise HTTPException(status_code=409, detail={"code": "blogger_checkpoint_not_verified"})
         stored = control_ledger.record_blogger_checkpoint_receipt(
             request_id=str(body["request_id"]), run_id=run_id, attempt_id=attempt_id, receipt=body
@@ -707,7 +738,9 @@ def create_app(
 
     @app.post("/internal/runtime/connector-coverage/{run_id}/{attempt_id}")
     async def runtime_connector_coverage(
-        run_id: str, attempt_id: str, request: Request,
+        run_id: str,
+        attempt_id: str,
+        request: Request,
         authorization: str | None = Header(default=None),
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
@@ -723,9 +756,12 @@ def create_app(
             raise HTTPException(status_code=400, detail={"code": "connector_heartbeat_invalid"}) from exc
         if not isinstance(body, dict) or set(body) != {"connector_kind", "contract_version", "state", "observed_at"}:
             raise HTTPException(status_code=422, detail={"code": "connector_heartbeat_invalid"})
-        operation = _runtime_authority(
-            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
-            master_instance_id=master_instance_id, epoch=epoch,
+        _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
             allowed_states=frozenset({"ACTIVE"}),
         )
         connector_kind = str(body["connector_kind"])
@@ -736,18 +772,28 @@ def create_app(
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail={"code": "connector_heartbeat_time_invalid"}) from exc
         now = datetime.now(UTC)
-        if (not 3 <= len(connector_kind) <= 100 or not 1 <= len(contract_version) <= 100
-                or state not in {"PENDING", "COMPLETE", "FAILED"}
-                or observed_at < now - timedelta(days=1) or observed_at > now + timedelta(minutes=1)):
+        if (
+            not 3 <= len(connector_kind) <= 100
+            or not 1 <= len(contract_version) <= 100
+            or state not in {"PENDING", "COMPLETE", "FAILED"}
+            or observed_at < now - timedelta(days=1)
+            or observed_at > now + timedelta(minutes=1)
+        ):
             raise HTTPException(status_code=422, detail={"code": "connector_heartbeat_invalid"})
         token = authorization.removeprefix("Bearer ").strip() if authorization else ""
         master_runtime.record_connector_heartbeat(
-            run_id=run_id, attempt_id=attempt_id, runtime_token=token,
-            connector_kind=connector_kind, contract_version=contract_version,
-            state=state, observed_at=observed_at,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            runtime_token=token,
+            connector_kind=connector_kind,
+            contract_version=contract_version,
+            state=state,
+            observed_at=observed_at,
         )
         return {
-            "accepted": True, "connector_kind": connector_kind, "state": state,
+            "accepted": True,
+            "connector_kind": connector_kind,
+            "state": state,
             "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
         }
 
@@ -782,10 +828,7 @@ def create_app(
         if assets is not None and intent.action is MutationAction.CREATE_DATASET:
             authorized = intent.provider_ref == assets.checkpoint_ref and str(intent.task_id) == current_run
         elif assets is not None and intent.action is MutationAction.PUSH_NOTEBOOK:
-            authorized = (
-                intent.provider_ref == assets.checkpoint_verifier_ref
-                and str(intent.task_id) == current_run
-            )
+            authorized = intent.provider_ref == assets.checkpoint_verifier_ref and str(intent.task_id) == current_run
         elif assets is not None and intent.action is MutationAction.VERSION_DATASET:
             prior = _current_checkpoint_claim(intent.provider_ref)
             authorized = bool(
@@ -881,7 +924,9 @@ def create_app(
             )
         expected_kind = (
             ProviderKind.DATASET.value
-            if authority and authority["action"] in {
+            if authority
+            and authority["action"]
+            in {
                 MutationAction.CREATE_DATASET.value,
                 MutationAction.VERSION_DATASET.value,
             }
@@ -928,9 +973,7 @@ def create_app(
         assets = _configured_master_assets()
         current_checkpoint_claim = _current_checkpoint_claim(claim.provider_ref)
         is_current_checkpoint_authority = bool(
-            assets is not None
-            and claim.provider_ref == assets.checkpoint_ref
-            and current_checkpoint_claim == claim
+            assets is not None and claim.provider_ref == assets.checkpoint_ref and current_checkpoint_claim == claim
         )
         is_current_operation_authority = bool(
             authority is not None
@@ -1089,7 +1132,8 @@ def create_app(
 
     @app.post("/internal/checkpoints/{checkpoint_id}/package-identity")
     async def checkpoint_package_identity(
-        checkpoint_id: str, request: Request,
+        checkpoint_id: str,
+        request: Request,
         authorization: str | None = Header(default=None),
         run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
         attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
@@ -1097,8 +1141,11 @@ def create_app(
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, str]:
         operation = _runtime_authority(
-            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
-            master_instance_id=master_instance_id, epoch=epoch,
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
         )
         body = await _checkpoint_transition_body(request)
         package_sha256 = str(body.get("package_sha256", ""))
