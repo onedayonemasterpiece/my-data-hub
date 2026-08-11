@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
 import jsonschema
 import pytest
+from pydantic import ValidationError
 
 from my_data_hub.control_plane.clock import DeterministicClock
 from my_data_hub.runtime_sdk import (
     AcceptanceCallbackIdentity,
+    ArtifactRef,
+    DurableResourceLease,
     RetryPolicy,
     RuntimeClient,
     RuntimeEventType,
@@ -74,6 +77,73 @@ def test_header_only_secret_and_sanitized_jsonl(tmp_path: Path) -> None:
     assert b"must-not-survive" not in spool_bytes
     assert runtime.spool.path.stat().st_mode & 0o777 == 0o600
     assert runtime.spool.path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_adversarial_secrets_are_redacted_from_every_serialized_string_surface(tmp_path: Path) -> None:
+    secret = "this-is-private-callback-value"
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZWNyZXQifQ.deadbeefdeadbeef"
+    clock = DeterministicClock(datetime(2026, 8, 10, tzinfo=UTC))
+    transport = ScriptedTransport([TransportResponse(200)])
+    runtime = RuntimeClient(
+        callback_url="https://control.example/internal/runtime/events",
+        run_secret=secret,
+        run_id=f"run:{secret}",
+        attempt_id=f"attempt:{secret}",
+        service_instance_id=f"service:{secret}",
+        source_identity=f"owner/{secret}",
+        source_version=f"git:{secret}",
+        epoch=1,
+        spool_path=tmp_path / "runtime-private" / "events.jsonl",
+        transport=transport,
+        retry_policy=RetryPolicy(max_attempts=1),
+        now=clock.now,
+    )
+    runtime.emit(
+        RuntimeEventType.RUNTIME_PROGRESS,
+        phase=f"download:{secret}",
+        status=f"Bearer {secret}",
+        data={
+            "apiKey": "different-api-key-must-not-survive",
+            f"diagnostic-{secret}": f"password=different-password {jwt}",
+            "nested": {"Set-Cookie": "session=must-not-survive", "safe": "kept"},
+        },
+        artifact_refs=(
+            ArtifactRef(
+                kind=f"receipt-{secret}",
+                locator=(
+                        f"https://user:{secret}@artifacts.example/result.json?"
+                        "download=1&access_token=different-query-token#refresh_token=different-fragment-token"
+                ),
+                sha256="a" * 64,
+                size_bytes=7,
+            ),
+        ),
+        metrics={f"metric-{secret}": f"client_secret=different-client-secret {jwt}"},
+    )
+
+    body = transport.calls[0][1]
+    spool = runtime.spool.path.read_bytes()
+    for forbidden in (
+        secret,
+        "different-api-key-must-not-survive",
+        "different-password",
+        "must-not-survive",
+        "different-query-token",
+        "different-fragment-token",
+        "different-client-secret",
+        jwt,
+    ):
+        assert forbidden.encode() not in body
+        assert forbidden.encode() not in spool
+    event = json.loads(body)
+    assert event["run_id"] == "run:[REDACTED]"
+    assert event["phase"] == "download:[REDACTED]"
+    assert event["status"] == "Bearer [REDACTED]"
+    assert event["data"]["nested"]["safe"] == "kept"
+    assert event["data"]["redacted_fields"] == 1
+    assert event["data"]["nested"]["redacted_fields"] == 1
+    assert event["artifact_refs"][0]["sha256"] == "a" * 64
+    assert event["artifact_refs"][0]["locator"].startswith("https://[REDACTED]@artifacts.example/")
 
 
 def test_acceptance_callback_adds_only_fixed_task_identity_headers(tmp_path: Path) -> None:
@@ -305,3 +375,56 @@ def test_donor_custom_runtime_states_keep_typed_event_semantics(
         }
     )
     assert json.loads(transport.calls[0][1])["event_type"] == runtime_event
+
+
+def test_resource_helpers_emit_exact_durable_owner_task_lease_contract(tmp_path: Path) -> None:
+    clock = DeterministicClock(datetime(2026, 8, 10, tzinfo=UTC))
+    transport = ScriptedTransport([TransportResponse(200)] * 3)
+    runtime = client(tmp_path, transport, clock)
+    lease = DurableResourceLease(
+        lease_id="11111111-1111-4111-8111-111111111111",
+        resource_kind="kaggle_notebook",
+        resource_ref="owner/private-master",
+        holder_id="run-1",
+        lease_until=clock.now() + timedelta(minutes=5),
+        epoch=7,
+    )
+    renewed_until = clock.now() + timedelta(minutes=10)
+
+    runtime.acquire_resource(lease)
+    runtime.renew_resource(lease, renewed_until)
+    runtime.release_resource(lease)
+
+    bodies = [json.loads(call[1]) for call in transport.calls]
+    exact_resource = lease.model_dump(mode="json")
+    assert [body["event_type"] for body in bodies] == [
+        "resource.acquire",
+        "resource.renew",
+        "resource.release",
+    ]
+    assert [body["data"]["resource"] for body in bodies] == [exact_resource] * 3
+    assert bodies[0]["data"] == {"resource": exact_resource}
+    assert bodies[1]["data"] == {
+        "resource": exact_resource,
+        "lease_until": renewed_until.isoformat(),
+    }
+    assert bodies[2]["data"] == {"resource": exact_resource}
+
+
+def test_resource_helpers_reject_incomplete_cross_task_and_naive_lease_payloads(tmp_path: Path) -> None:
+    clock = DeterministicClock(datetime(2026, 8, 10, tzinfo=UTC))
+    runtime = client(tmp_path, ScriptedTransport([]), clock)
+    complete = {
+        "lease_id": "lease-1",
+        "resource_kind": "kaggle_notebook",
+        "resource_ref": "owner/private-master",
+        "holder_id": "run-1",
+        "lease_until": (clock.now() + timedelta(minutes=5)).isoformat(),
+        "epoch": 1,
+    }
+    with pytest.raises(ValidationError, match="lease_id"):
+        runtime.acquire_resource({key: value for key, value in complete.items() if key != "lease_id"})
+    with pytest.raises(ValueError, match="holder"):
+        runtime.release_resource({**complete, "holder_id": "other-run"})
+    with pytest.raises(ValueError, match="timezone-aware"):
+        runtime.renew_resource(complete, datetime(2026, 8, 10, 1, 0))

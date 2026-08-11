@@ -12,9 +12,31 @@
   "language": "python",
   "model_sources": [],
   "my_data_hub": {
+    "activation_prerequisites_satisfied": false,
     "activation_requires_real_receipt": true,
     "canonical_write_allowed": false,
     "contracts": {},
+    "execution_pin_contract": {
+      "cleanup_retention_policy": {
+        "cleanup_receipt_required": true,
+        "notebook_resource": "orchestrator_protected_until_owner_supersedes",
+        "run_outputs": "retain_until_terminal_receipt_then_control_policy",
+        "task_owned_inputs": "claim_bound_delete_after_terminal_or_expiry"
+      },
+      "immutable_assets": [
+        "my_data_hub_wheel_sha256",
+        "primary_source_sha256"
+      ],
+      "input_dataset_versions": "required-exact-numeric-private-refs-at-launch",
+      "kaggle_runtime_image_identity": "required-immutable-sha256-at-launch",
+      "model": null,
+      "notebook": "01-platform-runtime-smoke",
+      "output_contract": "my-data-hub-platform-runtime-smoke.v1",
+      "privacy": "private",
+      "resource_class": "orchestrator_protected",
+      "schema": "my-data-hub-notebook-execution-pins/v1",
+      "supported_python_series": "3.12"
+    },
     "external_side_effects_allowed": true,
     "model_id": null,
     "model_revision": null,

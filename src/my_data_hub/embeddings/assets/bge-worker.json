@@ -12,7 +12,7 @@
    "id": "install-exact-wheel",
    "metadata": {},
    "outputs": [],
-   "source": "from __future__ import annotations\n\nimport hashlib\nimport os\nimport subprocess\nimport sys\nfrom pathlib import Path\n\nEXPECTED_SOURCE_SHA256 = '10e26e7da6bad0e65d048debce89f25c2b8dea715e058b788e9fd5b79a654682'\nRUNTIME_CONTRACT = 'my-data-hub-blogger-embedding-artifact.v1'\nwheel = Path(os.environ.get('MY_DATA_HUB_WHEEL_PATH', ''))\nif not wheel.is_file() or wheel.suffix != '.whl':\n    raise RuntimeError('exact private my-data-hub wheel input is required')\nexpected_wheel_sha = os.environ.get('MY_DATA_HUB_WHEEL_SHA256', '')\nif (len(expected_wheel_sha) != 64 or \n        hashlib.sha256(wheel.read_bytes()).hexdigest() != expected_wheel_sha):\n    raise RuntimeError('my-data-hub wheel hash mismatch')\nsubprocess.run(\n    [sys.executable, '-m', 'pip', 'install', '--no-deps', '--disable-pip-version-check', str(wheel)],\n    check=True,\n)"
+   "source": "from __future__ import annotations\n\nimport hashlib\nimport json\nimport os\nimport platform\nimport re\nimport subprocess\nimport sys\nfrom pathlib import Path\n\nEXPECTED_SOURCE_SHA256 = '10e26e7da6bad0e65d048debce89f25c2b8dea715e058b788e9fd5b79a654682'\nRUNTIME_CONTRACT = 'my-data-hub-blogger-embedding-artifact.v1'\nPIN_CONTRACT = {'schema': 'my-data-hub-notebook-execution-pins/v1', 'notebook': '06-bge-m3-blogger-embedding-worker', 'supported_python_series': '3.12', 'kaggle_runtime_image_identity': 'required-immutable-sha256-at-launch', 'input_dataset_versions': 'required-exact-numeric-private-refs-at-launch', 'immutable_assets': ['my_data_hub_wheel_sha256', 'primary_source_sha256'], 'output_contract': 'my-data-hub-blogger-embedding-artifact.v1', 'model': {'id': 'BAAI/bge-m3', 'revision': '5617a9f61b028005a4858fdac845db406aefb181'}, 'privacy': 'private', 'resource_class': 'orchestrator_protected', 'cleanup_retention_policy': {'cleanup_receipt_required': True, 'notebook_resource': 'orchestrator_protected_until_owner_supersedes', 'run_outputs': 'retain_until_terminal_receipt_then_control_policy', 'task_owned_inputs': 'claim_bound_delete_after_terminal_or_expiry'}}\npin_path = Path(os.environ.get('MY_DATA_HUB_EXECUTION_PINS_PATH', ''))\nexpected_pin_sha = os.environ.get('MY_DATA_HUB_EXECUTION_PINS_SHA256', '')\nif not pin_path.is_file() or not re.fullmatch(r'[a-f0-9]{64}', expected_pin_sha):\n    raise RuntimeError('hashed execution pins manifest is required')\npin_bytes = pin_path.read_bytes()\nif hashlib.sha256(pin_bytes).hexdigest() != expected_pin_sha:\n    raise RuntimeError('execution pins manifest hash mismatch')\npins = json.loads(pin_bytes)\nrequired_pin_keys = {\n    'schema', 'notebook', 'python_version', 'kaggle_runtime_image_identity',\n    'input_dataset_versions', 'immutable_asset_sha256s', 'output_contract',\n    'model', 'privacy', 'resource_class', 'cleanup_retention_policy',\n}\nif not isinstance(pins, dict) or set(pins) != required_pin_keys:\n    raise RuntimeError('execution pins manifest keys differ from the exact contract')\nif pins['schema'] != PIN_CONTRACT['schema'] or pins['notebook'] != PIN_CONTRACT['notebook']:\n    raise RuntimeError('execution pins manifest targets a different notebook contract')\npython_version = platform.python_version()\nif (pins['python_version'] != python_version or\n        not python_version.startswith(PIN_CONTRACT['supported_python_series'] + '.')):\n    raise RuntimeError('CPython patch version differs from execution pins')\nimage_identity = os.environ.get('MY_DATA_HUB_KAGGLE_RUNTIME_IMAGE_IDENTITY', '')\nif (pins['kaggle_runtime_image_identity'] != image_identity or\n        not re.fullmatch(r'[^@\\s]+@sha256:[a-f0-9]{64}', image_identity)):\n    raise RuntimeError('immutable Kaggle runtime image identity is required')\ndataset_versions = pins['input_dataset_versions']\nif (not isinstance(dataset_versions, list) or not dataset_versions or\n        any(not isinstance(ref, str) or not re.fullmatch(\n            r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*', ref\n        ) for ref in dataset_versions) or\n        len(dataset_versions) != len(set(dataset_versions))):\n    raise RuntimeError('exact numeric input Dataset versions are required')\ntry:\n    observed_dataset_versions = json.loads(\n        os.environ.get('MY_DATA_HUB_INPUT_DATASET_VERSIONS_JSON', '')\n    )\nexcept json.JSONDecodeError as exc:\n    raise RuntimeError('observed input Dataset versions are required') from exc\nif observed_dataset_versions != dataset_versions:\n    raise RuntimeError('attached input Dataset versions differ from execution pins')\nif os.environ.get('MY_DATA_HUB_NOTEBOOK_IS_PRIVATE') != 'true':\n    raise RuntimeError('operational notebook must be provider-confirmed private')\nfor key in ('output_contract', 'model', 'privacy', 'resource_class', 'cleanup_retention_policy'):\n    if pins[key] != PIN_CONTRACT[key]:\n        raise RuntimeError(f'execution pins {key} differs from the generated contract')\nwheel = Path(os.environ.get('MY_DATA_HUB_WHEEL_PATH', ''))\nif not wheel.is_file() or wheel.suffix != '.whl':\n    raise RuntimeError('exact private my-data-hub wheel input is required')\nexpected_wheel_sha = os.environ.get('MY_DATA_HUB_WHEEL_SHA256', '')\nif (len(expected_wheel_sha) != 64 or \n        hashlib.sha256(wheel.read_bytes()).hexdigest() != expected_wheel_sha):\n    raise RuntimeError('my-data-hub wheel hash mismatch')\nexpected_assets = {\n    'my_data_hub_wheel_sha256': expected_wheel_sha,\n    'primary_source_sha256': EXPECTED_SOURCE_SHA256,\n}\nif pins['immutable_asset_sha256s'] != expected_assets:\n    raise RuntimeError('immutable dependency/source asset hashes differ from execution pins')\nsubprocess.run(\n    [sys.executable, '-m', 'pip', 'install', '--no-deps', '--disable-pip-version-check', str(wheel)],\n    check=True,\n)"
   },
   {
    "cell_type": "code",
@@ -42,10 +42,35 @@
    "version": "3.12"
   },
   "my_data_hub": {
+   "activation_prerequisites_satisfied": false,
    "canonical_database_location": "kaggle-notebook-only",
    "canonical_write_allowed": false,
    "contracts": {},
    "embedded_secrets": false,
+   "execution_pin_contract": {
+    "cleanup_retention_policy": {
+     "cleanup_receipt_required": true,
+     "notebook_resource": "orchestrator_protected_until_owner_supersedes",
+     "run_outputs": "retain_until_terminal_receipt_then_control_policy",
+     "task_owned_inputs": "claim_bound_delete_after_terminal_or_expiry"
+    },
+    "immutable_assets": [
+     "my_data_hub_wheel_sha256",
+     "primary_source_sha256"
+    ],
+    "input_dataset_versions": "required-exact-numeric-private-refs-at-launch",
+    "kaggle_runtime_image_identity": "required-immutable-sha256-at-launch",
+    "model": {
+     "id": "BAAI/bge-m3",
+     "revision": "5617a9f61b028005a4858fdac845db406aefb181"
+    },
+    "notebook": "06-bge-m3-blogger-embedding-worker",
+    "output_contract": "my-data-hub-blogger-embedding-artifact.v1",
+    "privacy": "private",
+    "resource_class": "orchestrator_protected",
+    "schema": "my-data-hub-notebook-execution-pins/v1",
+    "supported_python_series": "3.12"
+   },
    "external_side_effects_allowed": true,
    "model_id": "BAAI/bge-m3",
    "model_revision": "5617a9f61b028005a4858fdac845db406aefb181",

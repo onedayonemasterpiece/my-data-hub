@@ -15,8 +15,8 @@ from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
-from .events import ArtifactRef, RuntimeEvent, RuntimeEventType
-from .sanitize import sanitize
+from .events import ArtifactRef, DurableResourceLease, RuntimeEvent, RuntimeEventType
+from .sanitize import sanitize, sanitize_text
 from .spool import JsonlEventSpool
 from .transport import CallbackTransport, UrllibCallbackTransport, json_body
 
@@ -108,11 +108,14 @@ class RuntimeClient:
             raise ValueError("automatic replay limit must be 1..1000")
         self.callback_url = callback_url
         self._run_secret = run_secret
-        self.run_id = run_id
-        self.attempt_id = attempt_id
-        self.service_instance_id = service_instance_id
-        self.source_identity = source_identity
-        self.source_version = source_version
+        # Identities are serialized into every event.  Redact them at the
+        # construction boundary so replay, filtering and live delivery all use
+        # the same secret-free wire identity.
+        self.run_id = sanitize_text(run_id, secrets=(run_secret,))
+        self.attempt_id = sanitize_text(attempt_id, secrets=(run_secret,))
+        self.service_instance_id = sanitize_text(service_instance_id, secrets=(run_secret,))
+        self.source_identity = sanitize_text(source_identity, secrets=(run_secret,))
+        self.source_version = sanitize_text(source_version, secrets=(run_secret,))
         self.epoch = epoch
         self.transport = transport or UrllibCallbackTransport()
         self.retry_policy = retry_policy or RetryPolicy()
@@ -178,6 +181,15 @@ class RuntimeClient:
             self._sequence += 1
             sanitized_data = sanitize(dict(data or {}), secrets=(self._run_secret,))
             sanitized_metrics = sanitize(dict(metrics or {}), secrets=(self._run_secret,))
+            sanitized_artifacts = tuple(
+                ArtifactRef(
+                    kind=sanitize_text(item.kind, secrets=(self._run_secret,)),
+                    locator=sanitize_text(item.locator, secrets=(self._run_secret,)),
+                    sha256=item.sha256,
+                    size_bytes=item.size_bytes,
+                )
+                for item in artifact_refs
+            )
             try:
                 event = RuntimeEvent(
                     event_id=str(uuid4()),
@@ -190,10 +202,10 @@ class RuntimeClient:
                     emitted_at=now,
                     local_sequence=self._sequence,
                     epoch=self.epoch,
-                    phase=phase,
-                    status=status,
+                    phase=sanitize_text(phase, secrets=(self._run_secret,)) if phase is not None else None,
+                    status=sanitize_text(status, secrets=(self._run_secret,)) if status is not None else None,
                     data=sanitized_data,
-                    artifact_refs=artifact_refs,
+                    artifact_refs=sanitized_artifacts,
                     metrics=sanitized_metrics,
                 )
             except ValidationError:
@@ -271,7 +283,7 @@ class RuntimeClient:
         """
 
         donor_run_id = envelope.get("run_id")
-        if donor_run_id is not None and str(donor_run_id) != self.run_id:
+        if donor_run_id is not None and sanitize_text(str(donor_run_id), secrets=(self._run_secret,)) != self.run_id:
             raise ValueError("donor envelope run_id does not match this exact runtime")
         donor_event = str(envelope.get("event", "progress")).lower()
         donor_event_uid = envelope.get("event_uid")
@@ -341,22 +353,37 @@ class RuntimeClient:
                 metrics=None,
             )
 
-    def acquire_resource(self, resource_kind: str, resource_ref: str, lease_until: datetime) -> DeliveryReceipt:
+    def _exact_resource(self, lease: DurableResourceLease | Mapping[str, Any]) -> dict[str, Any]:
+        exact = DurableResourceLease.model_validate(lease)
+        wire = DurableResourceLease.model_validate(
+            sanitize(exact.model_dump(mode="json"), secrets=(self._run_secret,))
+        )
+        if wire.holder_id != self.run_id:
+            raise ValueError("resource lease holder must equal this runtime run_id")
+        return wire.model_dump(mode="json")
+
+    def acquire_resource(self, lease: DurableResourceLease | Mapping[str, Any]) -> DeliveryReceipt:
         return self.emit(
             RuntimeEventType.RESOURCE_ACQUIRE,
-            data={"resource_kind": resource_kind, "resource_ref": resource_ref, "lease_until": lease_until.isoformat()},
+            data={"resource": self._exact_resource(lease)},
         )
 
-    def renew_resource(self, resource_kind: str, resource_ref: str, lease_until: datetime) -> DeliveryReceipt:
+    def renew_resource(
+        self,
+        lease: DurableResourceLease | Mapping[str, Any],
+        lease_until: datetime,
+    ) -> DeliveryReceipt:
+        if lease_until.tzinfo is None:
+            raise ValueError("resource renewal deadline must be timezone-aware")
         return self.emit(
             RuntimeEventType.RESOURCE_RENEW,
-            data={"resource_kind": resource_kind, "resource_ref": resource_ref, "lease_until": lease_until.isoformat()},
+            data={"resource": self._exact_resource(lease), "lease_until": lease_until.astimezone(UTC).isoformat()},
         )
 
-    def release_resource(self, resource_kind: str, resource_ref: str) -> DeliveryReceipt:
+    def release_resource(self, lease: DurableResourceLease | Mapping[str, Any]) -> DeliveryReceipt:
         return self.emit(
             RuntimeEventType.RESOURCE_RELEASE,
-            data={"resource_kind": resource_kind, "resource_ref": resource_ref},
+            data={"resource": self._exact_resource(lease)},
         )
 
     def start_heartbeat(

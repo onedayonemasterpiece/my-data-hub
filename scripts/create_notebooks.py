@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ import nbformat
 ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK_ROOT = ROOT / "notebooks"
 TEMPLATE_ROOT = NOTEBOOK_ROOT / "templates"
+EMBEDDING_ASSET_ROOT = ROOT / "src" / "my_data_hub" / "embeddings" / "assets"
 
 NOTEBOOK_README = """# Notebook workers
 
@@ -38,6 +40,15 @@ plumbing; their `process_item()` adapters intentionally fail with
 `PROCESSOR_ADAPTER_NOT_PORTED` until code is adapted from an exact donor revision and covered
 by golden fixtures. A placeholder notebook therefore cannot be mistaken for a working
 production stage.
+
+Every operational notebook also fails before installing or executing code unless a hashed
+`my-data-hub-notebook-execution-pins/v1` manifest binds the exact CPython patch version,
+immutable Kaggle image digest, numeric private Dataset versions, task wheel and embedded source
+hashes, output contract, model revision (when applicable), resource class, and cleanup/retention
+policy. Launch-time values are used because Dataset versions and the Kaggle image are provider
+observations, not values this repository may invent. The checked-in metadata declares the full
+contract and remains private and `production_ready=false` until the control plane supplies and
+attests those exact values.
 
 ## Activation gate
 
@@ -79,6 +90,16 @@ class OperationalNotebookSpec:
     timeout_seconds: int = 1_800
     canonical_write_allowed: bool = False
     external_side_effects_allowed: bool = True
+
+
+OPERATIONAL_CLEANUP_RETENTION_POLICY = {
+    "cleanup_receipt_required": True,
+    "notebook_resource": "orchestrator_protected_until_owner_supersedes",
+    "run_outputs": "retain_until_terminal_receipt_then_control_policy",
+    "task_owned_inputs": "claim_bound_delete_after_terminal_or_expiry",
+}
+EXECUTION_PINS_SCHEMA = "my-data-hub-notebook-execution-pins/v1"
+SUPPORTED_PYTHON_SERIES = "3.12"
 
 
 OPERATIONAL_SPECS: tuple[OperationalNotebookSpec, ...] = (
@@ -481,7 +502,24 @@ def _operational_source(spec: OperationalNotebookSpec) -> str:
 
 def build_operational_notebook(spec: OperationalNotebookSpec):  # type: ignore[no-untyped-def]
     source = _operational_source(spec)
-    source_sha256 = __import__("hashlib").sha256(source.encode()).hexdigest()
+    source_sha256 = hashlib.sha256(source.encode()).hexdigest()
+    pin_contract = {
+        "schema": EXECUTION_PINS_SCHEMA,
+        "notebook": spec.directory,
+        "supported_python_series": SUPPORTED_PYTHON_SERIES,
+        "kaggle_runtime_image_identity": "required-immutable-sha256-at-launch",
+        "input_dataset_versions": "required-exact-numeric-private-refs-at-launch",
+        "immutable_assets": ["my_data_hub_wheel_sha256", "primary_source_sha256"],
+        "output_contract": spec.runtime_contract,
+        "model": (
+            {"id": spec.model_id, "revision": spec.model_revision}
+            if spec.model_id is not None
+            else None
+        ),
+        "privacy": "private",
+        "resource_class": spec.resource_class,
+        "cleanup_retention_policy": OPERATIONAL_CLEANUP_RETENTION_POLICY,
+    }
     nb = nbformat.v4.new_notebook()
     nb.nbformat = 4
     nb.nbformat_minor = 5
@@ -502,6 +540,8 @@ def build_operational_notebook(spec: OperationalNotebookSpec):  # type: ignore[n
             "timeout_seconds": spec.timeout_seconds,
             "model_id": spec.model_id,
             "model_revision": spec.model_revision,
+            "execution_pin_contract": pin_contract,
+            "activation_prerequisites_satisfied": False,
         },
     }
     nb.cells = [
@@ -517,12 +557,61 @@ def build_operational_notebook(spec: OperationalNotebookSpec):  # type: ignore[n
             "code",
             "from __future__ import annotations\n\n"
             "import hashlib\n"
+            "import json\n"
             "import os\n"
+            "import platform\n"
+            "import re\n"
             "import subprocess\n"
             "import sys\n"
             "from pathlib import Path\n\n"
             f"EXPECTED_SOURCE_SHA256 = {source_sha256!r}\n"
             f"RUNTIME_CONTRACT = {spec.runtime_contract!r}\n"
+            f"PIN_CONTRACT = {pin_contract!r}\n"
+            "pin_path = Path(os.environ.get('MY_DATA_HUB_EXECUTION_PINS_PATH', ''))\n"
+            "expected_pin_sha = os.environ.get('MY_DATA_HUB_EXECUTION_PINS_SHA256', '')\n"
+            "if not pin_path.is_file() or not re.fullmatch(r'[a-f0-9]{64}', expected_pin_sha):\n"
+            "    raise RuntimeError('hashed execution pins manifest is required')\n"
+            "pin_bytes = pin_path.read_bytes()\n"
+            "if hashlib.sha256(pin_bytes).hexdigest() != expected_pin_sha:\n"
+            "    raise RuntimeError('execution pins manifest hash mismatch')\n"
+            "pins = json.loads(pin_bytes)\n"
+            "required_pin_keys = {\n"
+            "    'schema', 'notebook', 'python_version', 'kaggle_runtime_image_identity',\n"
+            "    'input_dataset_versions', 'immutable_asset_sha256s', 'output_contract',\n"
+            "    'model', 'privacy', 'resource_class', 'cleanup_retention_policy',\n"
+            "}\n"
+            "if not isinstance(pins, dict) or set(pins) != required_pin_keys:\n"
+            "    raise RuntimeError('execution pins manifest keys differ from the exact contract')\n"
+            "if pins['schema'] != PIN_CONTRACT['schema'] or pins['notebook'] != PIN_CONTRACT['notebook']:\n"
+            "    raise RuntimeError('execution pins manifest targets a different notebook contract')\n"
+            "python_version = platform.python_version()\n"
+            "if (pins['python_version'] != python_version or\n"
+            "        not python_version.startswith(PIN_CONTRACT['supported_python_series'] + '.')):\n"
+            "    raise RuntimeError('CPython patch version differs from execution pins')\n"
+            "image_identity = os.environ.get('MY_DATA_HUB_KAGGLE_RUNTIME_IMAGE_IDENTITY', '')\n"
+            "if (pins['kaggle_runtime_image_identity'] != image_identity or\n"
+            "        not re.fullmatch(r'[^@\\s]+@sha256:[a-f0-9]{64}', image_identity)):\n"
+            "    raise RuntimeError('immutable Kaggle runtime image identity is required')\n"
+            "dataset_versions = pins['input_dataset_versions']\n"
+            "if (not isinstance(dataset_versions, list) or not dataset_versions or\n"
+            "        any(not isinstance(ref, str) or not re.fullmatch(\n"
+            "            r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*', ref\n"
+            "        ) for ref in dataset_versions) or\n"
+            "        len(dataset_versions) != len(set(dataset_versions))):\n"
+            "    raise RuntimeError('exact numeric input Dataset versions are required')\n"
+            "try:\n"
+            "    observed_dataset_versions = json.loads(\n"
+            "        os.environ.get('MY_DATA_HUB_INPUT_DATASET_VERSIONS_JSON', '')\n"
+            "    )\n"
+            "except json.JSONDecodeError as exc:\n"
+            "    raise RuntimeError('observed input Dataset versions are required') from exc\n"
+            "if observed_dataset_versions != dataset_versions:\n"
+            "    raise RuntimeError('attached input Dataset versions differ from execution pins')\n"
+            "if os.environ.get('MY_DATA_HUB_NOTEBOOK_IS_PRIVATE') != 'true':\n"
+            "    raise RuntimeError('operational notebook must be provider-confirmed private')\n"
+            "for key in ('output_contract', 'model', 'privacy', 'resource_class', 'cleanup_retention_policy'):\n"
+            "    if pins[key] != PIN_CONTRACT[key]:\n"
+            "        raise RuntimeError(f'execution pins {key} differs from the generated contract')\n"
             "wheel = Path(os.environ.get('MY_DATA_HUB_WHEEL_PATH', ''))\n"
             "if not wheel.is_file() or wheel.suffix != '.whl':\n"
             "    raise RuntimeError('exact private my-data-hub wheel input is required')\n"
@@ -530,6 +619,12 @@ def build_operational_notebook(spec: OperationalNotebookSpec):  # type: ignore[n
             "if (len(expected_wheel_sha) != 64 or \n"
             "        hashlib.sha256(wheel.read_bytes()).hexdigest() != expected_wheel_sha):\n"
             "    raise RuntimeError('my-data-hub wheel hash mismatch')\n"
+            "expected_assets = {\n"
+            "    'my_data_hub_wheel_sha256': expected_wheel_sha,\n"
+            "    'primary_source_sha256': EXPECTED_SOURCE_SHA256,\n"
+            "}\n"
+            "if pins['immutable_asset_sha256s'] != expected_assets:\n"
+            "    raise RuntimeError('immutable dependency/source asset hashes differ from execution pins')\n"
             "subprocess.run(\n"
             "    [sys.executable, '-m', 'pip', 'install', '--no-deps', "
             "'--disable-pip-version-check', str(wheel)],\n"
@@ -553,6 +648,24 @@ def build_operational_notebook(spec: OperationalNotebookSpec):  # type: ignore[n
 
 def operational_kernel_metadata(spec: OperationalNotebookSpec) -> str:
     source = _operational_source(spec)
+    source_sha256 = hashlib.sha256(source.encode()).hexdigest()
+    pin_contract = {
+        "schema": EXECUTION_PINS_SCHEMA,
+        "notebook": spec.directory,
+        "supported_python_series": SUPPORTED_PYTHON_SERIES,
+        "kaggle_runtime_image_identity": "required-immutable-sha256-at-launch",
+        "input_dataset_versions": "required-exact-numeric-private-refs-at-launch",
+        "immutable_assets": ["my_data_hub_wheel_sha256", "primary_source_sha256"],
+        "output_contract": spec.runtime_contract,
+        "model": (
+            {"id": spec.model_id, "revision": spec.model_revision}
+            if spec.model_id is not None
+            else None
+        ),
+        "privacy": "private",
+        "resource_class": spec.resource_class,
+        "cleanup_retention_policy": OPERATIONAL_CLEANUP_RETENTION_POLICY,
+    }
     payload = {
         "id": f"OWNER/{spec.directory}",
         # The real provider adapter replaces OWNER and requires title == slug,
@@ -573,7 +686,7 @@ def operational_kernel_metadata(spec: OperationalNotebookSpec) -> str:
             "contracts": {},
             "runtime_contract": spec.runtime_contract,
             "primary_source": spec.template,
-            "primary_source_sha256": __import__("hashlib").sha256(source.encode()).hexdigest(),
+            "primary_source_sha256": source_sha256,
             "resource_class": spec.resource_class,
             "privacy": "private",
             "timeout_seconds": spec.timeout_seconds,
@@ -583,6 +696,8 @@ def operational_kernel_metadata(spec: OperationalNotebookSpec) -> str:
             "activation_requires_real_receipt": True,
             "canonical_write_allowed": spec.canonical_write_allowed,
             "external_side_effects_allowed": spec.external_side_effects_allowed,
+            "execution_pin_contract": pin_contract,
+            "activation_prerequisites_satisfied": False,
         },
     }
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
@@ -592,7 +707,12 @@ def expected_files() -> dict[Path, str]:
     files = {NOTEBOOK_ROOT / "README.md": NOTEBOOK_README}
     for spec in OPERATIONAL_SPECS:
         directory = NOTEBOOK_ROOT / spec.directory
-        files[directory / "worker.ipynb"] = serialize_notebook(build_operational_notebook(spec))
+        serialized = serialize_notebook(build_operational_notebook(spec))
+        files[directory / "worker.ipynb"] = serialized
+        if spec.directory == "05-e5-blogger-embedding-worker":
+            files[EMBEDDING_ASSET_ROOT / "e5-worker.json"] = serialized
+        elif spec.directory == "06-bge-m3-blogger-embedding-worker":
+            files[EMBEDDING_ASSET_ROOT / "bge-worker.json"] = serialized
         files[directory / "kernel-metadata.example.json"] = operational_kernel_metadata(spec)
     for spec in SPECS:
         directory = NOTEBOOK_ROOT / spec.directory

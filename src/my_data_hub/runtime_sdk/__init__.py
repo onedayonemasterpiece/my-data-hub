@@ -1,7 +1,7 @@
 """Generic, secret-safe runtime callback SDK for ephemeral notebooks."""
 
 from .client import AcceptanceCallbackIdentity, DeliveryReceipt, RetryPolicy, RuntimeClient
-from .events import ArtifactRef, RuntimeEvent, RuntimeEventType
+from .events import ArtifactRef, DurableResourceLease, RuntimeEvent, RuntimeEventType
 from .lifetime import (
     CANONICAL_RUNTIME_CALLBACK_URL,
     CHECKPOINT_ARCHIVE_COMMAND_COUNT,
@@ -38,6 +38,7 @@ __all__ = [
     "ArtifactRef",
     "CallbackTransport",
     "DeliveryReceipt",
+    "DurableResourceLease",
     "JsonlEventSpool",
     "RetryPolicy",
     "RuntimeClient",

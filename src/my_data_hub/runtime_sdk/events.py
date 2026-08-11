@@ -42,6 +42,26 @@ class ArtifactRef(BaseModel):
     size_bytes: int = Field(ge=0)
 
 
+class DurableResourceLease(BaseModel):
+    """Exact owner-task lease identity copied from the durable status authority."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    lease_id: str = Field(min_length=1, max_length=200)
+    resource_kind: str = Field(min_length=1, max_length=100)
+    resource_ref: str = Field(min_length=1, max_length=500)
+    holder_id: str = Field(min_length=1, max_length=200)
+    lease_until: datetime
+    epoch: int = Field(ge=1)
+
+    @field_validator("lease_until")
+    @classmethod
+    def lease_deadline_is_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("resource lease deadline must be timezone-aware")
+        return value
+
+
 class RuntimeEvent(BaseModel):
     """Secret-free callback body. Authentication is carried only in an HTTP header."""
 
