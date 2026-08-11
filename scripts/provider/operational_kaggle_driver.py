@@ -43,7 +43,13 @@ from my_data_hub.acceptance.data_production import (
     ProductionDataWorkloadConfig,
     ProductionDataWorkloadReceipt,
 )
-from my_data_hub.acceptance.data_workloads import DataPhase, DataWorkloadPlan
+from my_data_hub.acceptance.data_workloads import (
+    BGE_EXACT_ID,
+    E5_EXACT_ID,
+    DataPhase,
+    DataWorkloadPlan,
+    DataWorkloadState,
+)
 from my_data_hub.hashing import canonical_json_bytes
 
 if not __package__:
@@ -843,7 +849,9 @@ def _invoke_data_workload_entrypoint(prepared: PreparedDataWorkload) -> Producti
 
 
 def _data_requirement_proof(
-    request: DriverRequest, receipt: ProductionDataWorkloadReceipt
+    request: DriverRequest,
+    receipt: ProductionDataWorkloadReceipt,
+    state: DataWorkloadState,
 ) -> tuple[dict[str, object], tuple[str, ...], str]:
     evidence = receipt.evidence
     if (
@@ -863,6 +871,36 @@ def _data_requirement_proof(
         or fm18.operation_ids[1] == fm19.operation_ids[1]
     ):
         raise ValueError("FM18/FM19 do not split one exact two-model request")
+    if (
+        state.quarantine is None
+        or state.blogger_terminal is None
+        or requirements["FM16"].operation_ids
+        != (str(state.quarantine.operation_id), str(state.blogger_terminal.operation_id))
+        or state.restore_operation_id is None
+        or requirements["FM17"].operation_ids != (state.restore_operation_id,)
+        or state.embedding_request_id is None
+        or state.embedding_terminal is None
+        or fm18.operation_ids[0] != str(state.embedding_request_id)
+    ):
+        raise ValueError("data evidence operation IDs differ from the durable production state")
+    model_task_ids = {
+        item.model_exact_id: str(item.task_run_id) for item in state.embedding_terminal.models
+    }
+    if (
+        fm18.operation_ids[1] != model_task_ids.get(E5_EXACT_ID)
+        or fm19.operation_ids[1] != model_task_ids.get(BGE_EXACT_ID)
+        or state.insert_status is None
+        or state.delete_status is None
+        or state.final_zero_preview is None
+        or requirements["FM21"].operation_ids
+        != (state.insert_status.operation_id, state.delete_status.operation_id)
+        or state.final_zero_preview.action != "delete"
+        or state.final_zero_preview.affected_rows != 0
+        or state.delete_status.post_change_checkpoint is None
+        or state.final_zero_preview.pre_change_checkpoint_id
+        != state.delete_status.post_change_checkpoint.checkpoint_id
+    ):
+        raise ValueError("split worker or fixed FM21 evidence differs from durable production state")
     selected = next(
         item for item in evidence.requirements if item.requirement_id == request.requirement_id
     )
@@ -1614,7 +1652,7 @@ async def _execute_data_workload_scenario(
             mutations_started=max(after.mutations_started, 1),
         )
     try:
-        proofs, operation_ids, bundle_sha256 = _data_requirement_proof(request, receipt)
+        proofs, operation_ids, bundle_sha256 = _data_requirement_proof(request, receipt, after)
         output = _output_document(request, proofs, operation_ids=operation_ids)
     except Exception as exc:
         return _failed(

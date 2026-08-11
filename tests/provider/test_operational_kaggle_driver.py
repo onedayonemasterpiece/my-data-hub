@@ -717,6 +717,18 @@ def test_data_workload_live_terminal_launches_distinct_reconciled_evidence_noteb
     _set_data_config(monkeypatch)
     monkeypatch.setattr(driver_module, "_prepare_data_workload", lambda *_args: prepared)
     monkeypatch.setattr(driver_module, "_invoke_data_workload_entrypoint", lambda _prepared: receipt)
+    selected = next(
+        item for item in receipt.evidence.requirements if item.requirement_id == request.requirement_id  # type: ignore[union-attr]
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "_data_requirement_proof",
+        lambda *_args: (
+            {name: {"production_evidence_sha256": value} for name, value in selected.assertion_evidence_sha256.items()},
+            selected.operation_ids,
+            receipt.evidence.bundle_sha256,  # type: ignore[union-attr]
+        ),
+    )
     gateway = EvidenceLifecycleGateway()
 
     result = asyncio.run(execute(request, gateway))
@@ -733,6 +745,13 @@ def test_data_workload_live_terminal_launches_distinct_reconciled_evidence_noteb
     assert len(lifecycle) == 1
     assert lifecycle[0]["scenario_id"] == request.requirement_id
     assert lifecycle[0]["task_run_id"] == str(request.task_run_id)
+
+
+def test_data_bundle_cannot_pass_without_exact_durable_operation_and_fixture_state() -> None:
+    request = _request(21)
+    _plan, state, receipt = _data_evidence(request)
+    with pytest.raises(ValueError, match="durable production state"):
+        driver_module._data_requirement_proof(request, receipt, state)
 
 
 def test_fm16_owner_authorization_pause_is_reconciled_blocked_zero_and_resumable(
