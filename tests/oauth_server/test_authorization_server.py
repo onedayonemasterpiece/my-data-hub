@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -14,10 +16,12 @@ from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
 
 from my_data_hub.auth.control import OAuthAuditEvent, OAuthClientRecord, OAuthRevocationQuery
+from my_data_hub.mcp.admission import AdmissionLimits
 from my_data_hub.oauth_server import (
     AuthorizationServerSettings,
     AuthorizationService,
     MemoryOAuthGrantStore,
+    OAuthHTTPPolicy,
     OwnerAuthenticationChallenge,
     OwnerIdentity,
     StaticClient,
@@ -162,6 +166,50 @@ def test_rfc8414_oidc_discovery_and_public_jwks(harness: Harness) -> None:
     assert jwks["keys"][0]["kid"] == "key-1"
     assert jwks["keys"][0]["alg"] == "RS256"
     assert "d" not in jwks["keys"][0]
+
+
+def test_jwks_rotation_publishes_bounded_overlap_but_signs_only_with_active_key(
+    harness: Harness,
+) -> None:
+    retired_private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    retired_public = RSAAlgorithm.to_jwk(retired_private.public_key(), as_dict=True)
+    retired_public.update({"kid": "retired-key", "use": "sig", "alg": "RS256"})
+    settings = replace(
+        harness.service.settings,
+        overlap_public_jwks=(retired_public,),
+    )
+    service = AuthorizationService(
+        settings=settings,
+        control_ledger=harness.ledger,
+        grant_store=harness.store,
+        clock=lambda: NOW,
+    )
+    jwks = service.jwt.jwks()["keys"]
+    assert [key["kid"] for key in jwks] == ["key-1", "retired-key"]
+    token, _ = service.jwt.issue_access_token(
+        subject="owner-1",
+        client_id=CLIENT_ID,
+        scopes=("data:read",),
+        token_id="token-rotation-test",
+        now=NOW,
+    )
+    assert jwt.get_unverified_header(token)["kid"] == "key-1"
+    assert all("d" not in key for key in jwks)
+
+    with pytest.raises(ValueError, match="overlap"):
+        AuthorizationService(
+            settings=replace(settings, overlap_public_jwks=({**retired_public, "kid": "key-1"},)),
+            control_ledger=harness.ledger,
+            grant_store=harness.store,
+        )
+    private_jwk = RSAAlgorithm.to_jwk(retired_private, as_dict=True)
+    private_jwk.update({"kid": "private-key", "use": "sig", "alg": "RS256"})
+    with pytest.raises(ValueError, match="public"):
+        AuthorizationService(
+            settings=replace(settings, overlap_public_jwks=(private_jwk,)),
+            control_ledger=harness.ledger,
+            grant_store=harness.store,
+        )
 
 
 @pytest.mark.parametrize(
@@ -438,3 +486,163 @@ def test_authenticated_non_owner_cannot_receive_a_code(harness: Harness) -> None
     )
     assert response.status_code == 401
     assert response.json() == {"error": "access_denied"}
+
+
+def test_authorization_server_rejects_untrusted_host_and_origin(harness: Harness) -> None:
+    wrong_host = harness.client.get(
+        "/.well-known/oauth-authorization-server", headers={"host": "attacker.example"}
+    )
+    wrong_origin = harness.client.get(
+        "/.well-known/oauth-authorization-server", headers={"origin": "https://attacker.example"}
+    )
+    assert wrong_host.status_code == 403
+    assert wrong_host.json() == {"error": "host_not_allowed"}
+    assert wrong_origin.status_code == 403
+    assert wrong_origin.json() == {"error": "origin_not_allowed"}
+
+
+def test_owner_login_return_to_is_rebuilt_from_validated_public_contract(harness: Harness) -> None:
+    class Capture:
+        return_to = ""
+
+        def authenticate_owner(
+            self, request: object, *, return_to: str
+        ) -> OwnerAuthenticationChallenge:
+            self.return_to = return_to
+            return OwnerAuthenticationChallenge("https://login.example/passkey")
+
+    owner = Capture()
+    app = create_authorization_app(service=harness.service, owner_authenticator=owner)
+    response = TestClient(app, base_url="http://identity.example").get(
+        "/authorize",
+        params={**harness.authorization_parameters(), "ignored_attacker_value": "https://attacker.example"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    parsed = urlsplit(owner.return_to)
+    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == f"{ISSUER}/authorize"
+    assert "ignored_attacker_value" not in parse_qs(parsed.query)
+    assert parse_qs(parsed.query)["redirect_uri"] == [REDIRECT_URI]
+
+
+def test_request_body_and_authorization_query_are_bounded(harness: Harness) -> None:
+    oversized_body = harness.client.post(
+        "/token",
+        content=b"x" * 16_385,
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    oversized_query = harness.client.get(
+        "/authorize",
+        params={**harness.authorization_parameters(), "padding": "x" * 8192},
+        follow_redirects=False,
+    )
+    assert oversized_body.status_code == 413
+    assert oversized_body.json() == {"error": "request_too_large"}
+    assert oversized_query.status_code == 414
+    assert oversized_query.json() == {"error": "invalid_request"}
+
+
+def test_oauth_peer_rate_and_request_time_are_bounded(harness: Harness) -> None:
+    rate_policy = OAuthHTTPPolicy(
+        allowed_hosts=("identity.example",),
+        allowed_origins=(ISSUER,),
+        limits=AdmissionLimits(requests_per_window=1),
+    )
+    rate_app = create_authorization_app(
+        service=harness.service,
+        owner_authenticator=Owner(),
+        http_policy=rate_policy,
+    )
+    rate_client = TestClient(rate_app, base_url=ISSUER)
+    assert rate_client.get("/.well-known/oauth-authorization-server").status_code == 200
+    limited = rate_client.get("/.well-known/oauth-authorization-server")
+    assert limited.status_code == 429
+    assert limited.json() == {"error": "rate_limited"}
+
+    class SlowOwner:
+        async def authenticate_owner(self, request: object, *, return_to: str) -> OwnerIdentity:
+            await asyncio.sleep(0.2)
+            return OwnerIdentity("owner-1", NOW)
+
+    timeout_policy = OAuthHTTPPolicy(
+        allowed_hosts=("identity.example",),
+        allowed_origins=(ISSUER,),
+        limits=AdmissionLimits(request_timeout_seconds=0.1),
+    )
+    timeout_app = create_authorization_app(
+        service=harness.service,
+        owner_authenticator=SlowOwner(),
+        http_policy=timeout_policy,
+    )
+    timed_out = TestClient(timeout_app, base_url=ISSUER).get(
+        "/authorize", params=harness.authorization_parameters(), follow_redirects=False
+    )
+    assert timed_out.status_code == 504
+    assert timed_out.json() == {"error": "request_timeout"}
+
+    class SlowLedger(ControlLedger):
+        def get_client(self, issuer: str, client_id: str) -> OAuthClientRecord | None:
+            time.sleep(0.2)
+            return super().get_client(issuer, client_id)
+
+    ledger_timeout_service = AuthorizationService(
+        settings=harness.service.settings,
+        control_ledger=SlowLedger(),
+        grant_store=MemoryOAuthGrantStore(),
+        clock=lambda: NOW,
+    )
+    ledger_timeout_app = create_authorization_app(
+        service=ledger_timeout_service,
+        owner_authenticator=Owner(),
+        http_policy=timeout_policy,
+    )
+    ledger_timed_out = TestClient(ledger_timeout_app, base_url=ISSUER).get(
+        "/authorize", params=harness.authorization_parameters(), follow_redirects=False
+    )
+    assert ledger_timed_out.status_code == 504
+    assert ledger_timed_out.json() == {"error": "request_timeout"}
+
+
+def test_oauth_concurrency_queue_is_bounded(harness: Harness) -> None:
+    async def scenario() -> tuple[httpx.Response, httpx.Response]:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class BlockingOwner:
+            async def authenticate_owner(
+                self, request: object, *, return_to: str
+            ) -> OwnerIdentity:
+                started.set()
+                await release.wait()
+                return OwnerIdentity("owner-1", NOW)
+
+        policy = OAuthHTTPPolicy(
+            allowed_hosts=("identity.example",),
+            allowed_origins=(ISSUER,),
+            limits=AdmissionLimits(
+                max_concurrency=1,
+                queue_timeout_seconds=0.01,
+                request_timeout_seconds=1,
+            ),
+        )
+        app = create_authorization_app(
+            service=harness.service,
+            owner_authenticator=BlockingOwner(),
+            http_policy=policy,
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=ISSUER
+        ) as client:
+            first_task = asyncio.create_task(
+                client.get("/authorize", params=harness.authorization_parameters())
+            )
+            await asyncio.wait_for(started.wait(), timeout=1)
+            queued = await client.get("/authorize", params=harness.authorization_parameters())
+            release.set()
+            first = await first_task
+            return first, queued
+
+    first, queued = asyncio.run(scenario())
+    assert first.status_code == 303
+    assert queued.status_code == 503
+    assert queued.json() == {"error": "server_busy"}

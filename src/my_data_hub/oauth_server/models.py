@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlsplit
 
@@ -78,6 +79,7 @@ class AuthorizationServerSettings:
     clients: tuple[StaticClient, ...]
     signing_key_pem: bytes
     signing_key_id: str
+    overlap_public_jwks: tuple[Mapping[str, object], ...] = ()
     access_token_ttl_seconds: int = 300
     authorization_code_ttl_seconds: int = 180
     refresh_token_ttl_seconds: int = 2_592_000
@@ -92,6 +94,8 @@ class AuthorizationServerSettings:
             raise ValueError("static clients must be non-empty and unique")
         if not self.signing_key_pem or not self.signing_key_id or len(self.signing_key_id) > 128:
             raise ValueError("an RSA signing key and bounded key id are required")
+        if len(self.overlap_public_jwks) > 4:
+            raise ValueError("at most four overlap public JWKs are supported")
         if not 30 <= self.access_token_ttl_seconds <= 600:
             raise ValueError("access tokens must live between 30 and 600 seconds")
         if not 30 <= self.authorization_code_ttl_seconds <= 300:

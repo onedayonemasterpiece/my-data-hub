@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import inspect
@@ -7,6 +8,7 @@ import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlencode
 
 from my_data_hub.auth.control import OAuthClientRecord, OAuthControlLedger
 from my_data_hub.oauth_server.models import (
@@ -46,8 +48,14 @@ class ValidatedAuthorizationRequest:
     code_challenge: str
 
 
-async def _resolve(value: Any) -> Any:
-    return await value if inspect.isawaitable(value) else value
+async def _invoke(function: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Run synchronous control-ledger calls outside the ASGI event loop."""
+
+    if inspect.iscoroutinefunction(function):
+        result = function(*args, **kwargs)
+    else:
+        result = await asyncio.to_thread(function, *args, **kwargs)
+    return await result if inspect.isawaitable(result) else result
 
 
 def _digest(credential: str) -> str:
@@ -88,6 +96,7 @@ class AuthorizationService:
             private_key_pem=settings.signing_key_pem,
             key_id=settings.signing_key_id,
             access_token_ttl_seconds=settings.access_token_ttl_seconds,
+            overlap_public_jwks=settings.overlap_public_jwks,
         )
 
     def authorization_server_metadata(self) -> dict[str, object]:
@@ -119,7 +128,7 @@ class AuthorizationService:
         if configured is None:
             raise OAuthProtocolError("invalid_client", status_code=401)
         try:
-            record = await _resolve(self.control_ledger.get_client(self.settings.issuer, client_id))
+            record = await _invoke(self.control_ledger.get_client, self.settings.issuer, client_id)
         except Exception as exc:
             raise OAuthProtocolError("temporarily_unavailable", status_code=503) from exc
         if (
@@ -175,6 +184,24 @@ class AuthorizationService:
             code_challenge=challenge,
         )
 
+    def owner_login_return_to(self, request: ValidatedAuthorizationRequest) -> str:
+        """Rebuild the owner-login return URL only from validated public policy."""
+
+        parameters = [
+            ("response_type", "code"),
+            ("client_id", request.client.client_id),
+            ("redirect_uri", request.redirect_uri),
+            ("resource", request.resource),
+            ("scope", " ".join(request.scopes)),
+            ("code_challenge", request.code_challenge),
+            ("code_challenge_method", "S256"),
+        ]
+        if request.state is not None:
+            parameters.append(("state", request.state))
+        if request.nonce is not None:
+            parameters.append(("nonce", request.nonce))
+        return f"{self.settings.issuer}/authorize?{urlencode(parameters)}"
+
     async def complete_authorization(
         self, request: ValidatedAuthorizationRequest, owner: OwnerIdentity
     ) -> str:
@@ -183,20 +210,19 @@ class AuthorizationService:
         now = int(self.clock())
         for _ in range(3):
             code = _credential()
-            created = await _resolve(
-                self.grant_store.create_authorization_grant(
-                    AuthorizationGrant(
-                        code_digest=_digest(code),
-                        code_challenge=request.code_challenge,
-                        client_id=request.client.client_id,
-                        redirect_uri=request.redirect_uri,
-                        resource=request.resource,
-                        scopes=request.scopes,
-                        subject=owner.subject,
-                        nonce=request.nonce,
-                        authenticated_at=owner.authenticated_at,
-                        expires_at=now + self.settings.authorization_code_ttl_seconds,
-                    )
+            created = await _invoke(
+                self.grant_store.create_authorization_grant,
+                AuthorizationGrant(
+                    code_digest=_digest(code),
+                    code_challenge=request.code_challenge,
+                    client_id=request.client.client_id,
+                    redirect_uri=request.redirect_uri,
+                    resource=request.resource,
+                    scopes=request.scopes,
+                    subject=owner.subject,
+                    nonce=request.nonce,
+                    authenticated_at=owner.authenticated_at,
+                    expires_at=now + self.settings.authorization_code_ttl_seconds,
                 )
             )
             if created:
@@ -217,7 +243,11 @@ class AuthorizationService:
         if "audience" in parameters and parameters["audience"] != self.settings.audience:
             raise OAuthProtocolError("invalid_target")
         now = int(self.clock())
-        grant = await _resolve(self.grant_store.consume_authorization_grant(_digest(code), now=now))
+        grant = await _invoke(
+            self.grant_store.consume_authorization_grant,
+            _digest(code),
+            now=now,
+        )
         if grant is None:
             raise OAuthProtocolError("invalid_grant")
         computed = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode()
@@ -271,7 +301,7 @@ class AuthorizationService:
                 authenticated_at=grant.authenticated_at,
                 expires_at=now + self.settings.refresh_token_ttl_seconds,
             )
-            if await _resolve(self.grant_store.create_refresh_grant(refresh)):
+            if await _invoke(self.grant_store.create_refresh_grant, refresh):
                 return raw, refresh
         raise OAuthProtocolError("temporarily_unavailable", status_code=503)
 
@@ -316,17 +346,16 @@ class AuthorizationService:
                 raise OAuthProtocolError("invalid_scope")
         successor = _credential()
         now = int(self.clock())
-        rotation = await _resolve(
-            self.grant_store.rotate_refresh_grant(
-                RefreshRotationRequest(
-                    presented_digest=_digest(presented),
-                    successor_digest=_digest(successor),
-                    client_id=parameters["client_id"],
-                    resource=parameters["resource"],
-                    requested_scopes=requested_scopes,
-                    successor_expires_at=now + self.settings.refresh_token_ttl_seconds,
-                    now=now,
-                )
+        rotation = await _invoke(
+            self.grant_store.rotate_refresh_grant,
+            RefreshRotationRequest(
+                presented_digest=_digest(presented),
+                successor_digest=_digest(successor),
+                client_id=parameters["client_id"],
+                resource=parameters["resource"],
+                requested_scopes=requested_scopes,
+                successor_expires_at=now + self.settings.refresh_token_ttl_seconds,
+                now=now,
             )
         )
         if rotation.status is not RefreshRotationStatus.ROTATED or rotation.grant is None:
@@ -349,6 +378,9 @@ class AuthorizationService:
             await self._enabled_client(client_id)
         except OAuthProtocolError:
             return
-        await _resolve(
-            self.grant_store.revoke_refresh_grant(_digest(token), client_id=client_id, now=int(self.clock()))
+        await _invoke(
+            self.grant_store.revoke_refresh_grant,
+            _digest(token),
+            client_id=client_id,
+            now=int(self.clock()),
         )

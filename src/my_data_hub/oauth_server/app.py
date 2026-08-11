@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Mapping
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
+from my_data_hub.mcp.admission import AdmissionLimits, ASGIApp, HTTPAdmissionSecurity
 from my_data_hub.oauth_server.models import OwnerAuthenticationChallenge, OwnerIdentity
 from my_data_hub.oauth_server.service import AuthorizationService, OAuthProtocolError
 
@@ -23,6 +25,42 @@ class OwnerAuthenticator(Protocol):
     def authenticate_owner(
         self, request: Request, *, return_to: str
     ) -> OwnerIdentity | OwnerAuthenticationChallenge | Awaitable[OwnerIdentity | OwnerAuthenticationChallenge]: ...
+
+
+def _oauth_admission_limits() -> AdmissionLimits:
+    return AdmissionLimits(
+        max_header_bytes=16_384,
+        max_request_bytes=16_384,
+        max_response_bytes=262_144,
+        max_concurrency=16,
+        requests_per_window=120,
+        rate_window_seconds=60,
+        queue_timeout_seconds=0.25,
+        request_timeout_seconds=10,
+        max_rate_keys=4096,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthHTTPPolicy:
+    """Exact transport admission and resource bounds for the public issuer."""
+
+    allowed_hosts: tuple[str, ...]
+    allowed_origins: tuple[str, ...]
+    trusted_proxy_ips: tuple[str, ...] = ()
+    limits: AdmissionLimits = field(default_factory=_oauth_admission_limits)
+    max_authorization_query_bytes: int = 8192
+
+    def __post_init__(self) -> None:
+        if not self.allowed_hosts or not self.allowed_origins:
+            raise ValueError("OAuth admission requires exact Host and Origin allowlists")
+        if not 1024 <= self.max_authorization_query_bytes <= 32_768:
+            raise ValueError("OAuth authorization query bound must be between 1 and 32 KiB")
+
+    @classmethod
+    def for_issuer(cls, issuer: str) -> OAuthHTTPPolicy:
+        parsed = urlsplit(issuer)
+        return cls(allowed_hosts=(parsed.netloc,), allowed_origins=(issuer,))
 
 
 def _no_store(headers: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -78,14 +116,18 @@ def _authorization_redirect(redirect_uri: str, *, code: str, state: str | None) 
 
 
 def create_authorization_app(
-    *, service: AuthorizationService, owner_authenticator: OwnerAuthenticator
-) -> FastAPI:
+    *,
+    service: AuthorizationService,
+    owner_authenticator: OwnerAuthenticator,
+    http_policy: OAuthHTTPPolicy | None = None,
+) -> ASGIApp:
     """Build the explicit authorization-server ASGI surface.
 
     No default/bootstrap password authenticator or in-memory store is installed;
     deployment wiring must provide both the owner-auth and durable store seams.
     """
 
+    policy = http_policy or OAuthHTTPPolicy.for_issuer(service.settings.issuer)
     app = FastAPI(title="my-data-hub owner authorization server", docs_url=None, redoc_url=None)
 
     @app.get("/.well-known/oauth-authorization-server")
@@ -103,12 +145,18 @@ def create_authorization_app(
     @app.get("/authorize")
     async def authorize(request: Request) -> Response:
         try:
+            query = request.scope.get("query_string", b"")
+            if not isinstance(query, bytes) or len(query) > policy.max_authorization_query_bytes:
+                raise OAuthProtocolError("invalid_request", status_code=414)
             parameters = _unique_pairs(list(request.query_params.multi_items()))
             validated = await service.validate_authorization_request(parameters)
         except OAuthProtocolError as exc:
             return _error(exc)
         try:
-            result = owner_authenticator.authenticate_owner(request, return_to=str(request.url))
+            result = owner_authenticator.authenticate_owner(
+                request,
+                return_to=service.owner_login_return_to(validated),
+            )
             owner = await result if inspect.isawaitable(result) else result
         except Exception:
             return _error(OAuthProtocolError("access_denied", status_code=401))
@@ -157,4 +205,10 @@ def create_authorization_app(
             pass
         return Response(status_code=200, headers=_no_store())
 
-    return app
+    return HTTPAdmissionSecurity(
+        app,
+        allowed_hosts=policy.allowed_hosts,
+        allowed_origins=policy.allowed_origins,
+        trusted_proxy_ips=policy.trusted_proxy_ips,
+        limits=policy.limits,
+    )

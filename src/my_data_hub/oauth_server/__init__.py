@@ -1,6 +1,10 @@
 """Narrow OAuth 2.1/OIDC authorization service for the remote MCP surface."""
 
-from my_data_hub.oauth_server.app import OwnerAuthenticator, create_authorization_app
+from my_data_hub.oauth_server.app import (
+    OAuthHTTPPolicy,
+    OwnerAuthenticator,
+    create_authorization_app,
+)
 from my_data_hub.oauth_server.control_store import ControlLedgerOAuthGrantStore
 from my_data_hub.oauth_server.models import (
     AuthorizationServerSettings,
@@ -18,6 +22,7 @@ __all__ = [
     "ControlLedgerOAuthGrantStore",
     "MemoryOAuthGrantStore",
     "OAuthGrantStore",
+    "OAuthHTTPPolicy",
     "OIDCSessionOwnerAuthenticator",
     "OwnerAuthenticationChallenge",
     "OwnerAuthenticator",
