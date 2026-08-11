@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,7 +25,9 @@ def test_control_plane_is_ready_while_master_is_absent(
     settings = ControlPlaneSettings.from_env()
     response = TestClient(create_app(settings)).get("/health/ready")
     assert response.status_code == 200
-    assert response.json() == {
+    payload = response.json()
+    assert UUID(payload.pop("control_boot_id"))
+    assert payload == {
         "ok": True,
         "control_plane_ready": True,
         "data_plane_ready": False,
