@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import stat
 import time
 import urllib.request
 from contextlib import suppress
@@ -366,6 +367,36 @@ def _write_master_terminal(
             os.close(descriptor)
         with suppress(OSError):
             temporary.unlink(missing_ok=True)
+
+
+def _master_terminal_supports_output_recovery(
+    output_path: Path,
+    receipt: PublishReceipt,
+) -> bool:
+    """Revalidate the exact durable artifact before allowing a clean provider exit."""
+
+    try:
+        if output_path.is_symlink() or not output_path.is_file():
+            return False
+        metadata = output_path.stat()
+        if stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_size > MASTER_TERMINAL_MAX_BYTES:
+            return False
+        encoded = output_path.read_bytes()
+        record = MasterTerminalRecord.model_validate_json(encoded)
+        canonical = json.dumps(
+            record.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return (
+            encoded == canonical
+            and record.checkpoint.checkpoint_id == receipt.checkpoint_id
+            and record.checkpoint.manifest_sha256 == receipt.manifest_sha256
+            and record.checkpoint.current_checkpoint_id == receipt.current_checkpoint_id
+        )
+    except (OSError, ValueError):
+        return False
 
 
 def _required(name: str) -> str:
@@ -892,6 +923,19 @@ def _checkpoint_until_deadline(
             else:
                 required_after_sleep = retry_seconds + 30
             if remaining < required_after_sleep:
+                if (
+                    exc.retry_stage is CheckpointRetryStage.TERMINAL_DELIVERY
+                    and exc.receipt is not None
+                    and terminal_output_path is not None
+                    and _master_terminal_supports_output_recovery(terminal_output_path, exc.receipt)
+                ):
+                    # Callback delivery remains unacknowledged and the local
+                    # spool remains queued.  A clean provider exit makes the
+                    # exact private output artifact available to the recovery
+                    # projector; it does not convert those callbacks to ACKed.
+                    tunnel.stop()
+                    supervisor.stop(immediate=False)
+                    return exc.receipt
                 raise
             sleep(retry_seconds)
             retry = True

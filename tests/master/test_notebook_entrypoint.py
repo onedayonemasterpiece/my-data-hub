@@ -33,6 +33,8 @@ from my_data_hub.runtime_sdk import (
     CHECKPOINT_VERIFIER_TIMEOUT_SECONDS,
     KAGGLE_PROVIDER_TIMEOUT_SECONDS,
     MIN_CHECKPOINT_RESERVE_SECONDS,
+    RetryPolicy,
+    RuntimeClient,
     RuntimeEventType,
 )
 
@@ -545,6 +547,91 @@ def test_terminal_ack_loss_replays_callbacks_without_creating_second_checkpoint(
     assert events.count("checkpoint.started") == 1
     assert events.count("runtime.flush") == 2
     assert events[-2:] == ["tunnel.stop", "postgres.stop"]
+
+
+def test_persistent_terminal_callback_outage_keeps_spool_and_exits_cleanly_for_output_recovery(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class OfflineTransport:
+        @staticmethod
+        def post(url: str, body: bytes, headers: dict[str, str], timeout_seconds: float):  # type: ignore[no-untyped-def]
+            raise ConnectionError("persistent callback outage")
+
+    runtime = RuntimeClient(
+        callback_url="https://control.example/internal/runtime/events",
+        run_secret="terminal-outage-secret-long-enough",
+        run_id="run-1",
+        attempt_id="attempt-1",
+        service_instance_id="service-1",
+        source_identity="owner/postgres-master",
+        source_version="1",
+        epoch=1,
+        spool_path=tmp_path / "runtime" / "events.jsonl",
+        transport=OfflineTransport(),
+        retry_policy=RetryPolicy(max_attempts=1),
+        sleep=lambda _seconds: None,
+        now=lambda: datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    observed = iter([0.0, 0.0, 111.0])
+    output_path = tmp_path / "my-data-hub-master-terminal.json"
+    receipt = _checkpoint_until_deadline(
+        gate=_Gate(events),
+        runtime=runtime,
+        tunnel=_Process(events, "tunnel"),
+        supervisor=_Process(events, "postgres"),
+        coordinator=_Coordinator(events),
+        database_url="postgresql:///postgres",
+        package_directory=tmp_path / "checkpoints",
+        identity=IDENTITY,
+        deadline=200.0,
+        terminal_output_path=output_path,
+        publication_attempt_seconds=100.0,
+        retry_seconds=60.0,
+        monotonic=lambda: next(observed),
+        sleep=lambda seconds: events.append(f"sleep:{seconds}"),
+    )
+    assert receipt.current_checkpoint_id == receipt.checkpoint_id
+    assert output_path.is_file()
+    assert [event["event_type"] for event in json.loads(output_path.read_bytes())["events"]] == [
+        "runtime.draining",
+        "checkpoint.started",
+        "checkpoint.verified",
+        "runtime.terminal",
+    ]
+    assert [event["event_type"] for event in runtime.spool.pending()] == [
+        "runtime.draining",
+        "checkpoint.started",
+        "checkpoint.verified",
+        "runtime.terminal",
+    ]
+    assert not any(record["record"] == "delivered" for record in runtime.spool.records())
+    assert events.count("checkpoint.publish") == 1
+    assert events[-2:] == ["tunnel.stop", "postgres.stop"]
+
+
+def test_persistent_terminal_outage_without_exact_output_still_fails_closed(tmp_path: Path) -> None:
+    events: list[str] = []
+    observed = iter([0.0, 0.0, 111.0])
+    with pytest.raises(CheckpointShutdownError, match="queued"):
+        _checkpoint_until_deadline(
+            gate=_Gate(events),
+            runtime=_Runtime(events, terminal_status="queued", flush_results=[False, False]),
+            tunnel=_Process(events, "tunnel"),
+            supervisor=_Process(events, "postgres"),
+            coordinator=_Coordinator(events),
+            database_url="postgresql:///postgres",
+            package_directory=tmp_path / "checkpoints",
+            identity=IDENTITY,
+            deadline=200.0,
+            publication_attempt_seconds=100.0,
+            retry_seconds=60.0,
+            monotonic=lambda: next(observed),
+            sleep=lambda _seconds: None,
+        )
+    assert events.count("checkpoint.publish") == 1
+    assert "tunnel.stop" not in events and "postgres.stop" not in events
 
 
 def test_first_checkpoint_attempt_requires_its_conservative_admission_without_overrun_claim(
