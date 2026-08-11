@@ -1,0 +1,244 @@
+{
+  "$defs": {
+    "LeaseExpiryEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "bounded_operator_dml_denied": {
+          "const": true,
+          "title": "Bounded Operator Dml Denied",
+          "type": "boolean"
+        },
+        "canonical_revision_after": {
+          "minimum": 0,
+          "title": "Canonical Revision After",
+          "type": "integer"
+        },
+        "canonical_revision_before": {
+          "minimum": 0,
+          "title": "Canonical Revision Before",
+          "type": "integer"
+        },
+        "denial_code": {
+          "const": "MDH_EPOCH_LEASE_EXPIRED",
+          "title": "Denial Code",
+          "type": "string"
+        },
+        "kind": {
+          "const": "LEASE_EXPIRY_DENIAL",
+          "title": "Kind",
+          "type": "string"
+        },
+        "lease_expired": {
+          "const": true,
+          "title": "Lease Expired",
+          "type": "boolean"
+        },
+        "observed_wait_seconds": {
+          "maximum": 900,
+          "minimum": 60,
+          "title": "Observed Wait Seconds",
+          "type": "integer"
+        },
+        "operator_operation_id": {
+          "format": "uuid",
+          "title": "Operator Operation Id",
+          "type": "string"
+        },
+        "operator_receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Operator Receipt Sha256",
+          "type": "string"
+        },
+        "transaction_state": {
+          "const": "rollback_only",
+          "title": "Transaction State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "observed_wait_seconds",
+        "lease_expired",
+        "bounded_operator_dml_denied",
+        "transaction_state",
+        "operator_operation_id",
+        "operator_receipt_sha256",
+        "denial_code",
+        "canonical_revision_before",
+        "canonical_revision_after"
+      ],
+      "title": "LeaseExpiryEvidence",
+      "type": "object"
+    },
+    "LeaseExpiryStateFingerprint": {
+      "additionalProperties": false,
+      "description": "Aggregate-only proof; no canonical row or payload leaves PostgreSQL.",
+      "properties": {
+        "audit_rows": {
+          "minimum": 0,
+          "title": "Audit Rows",
+          "type": "integer"
+        },
+        "canonical_revision": {
+          "minimum": 0,
+          "title": "Canonical Revision",
+          "type": "integer"
+        },
+        "content_item_rows": {
+          "minimum": 0,
+          "title": "Content Item Rows",
+          "type": "integer"
+        },
+        "outbox_rows": {
+          "minimum": 0,
+          "title": "Outbox Rows",
+          "type": "integer"
+        },
+        "project_rows": {
+          "minimum": 0,
+          "title": "Project Rows",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "canonical_revision",
+        "project_rows",
+        "content_item_rows",
+        "outbox_rows",
+        "audit_rows"
+      ],
+      "title": "LeaseExpiryStateFingerprint",
+      "type": "object"
+    },
+    "MasterAcceptanceBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "format": "uuid",
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "epoch": {
+          "minimum": 1,
+          "title": "Epoch",
+          "type": "integer"
+        },
+        "master_instance_id": {
+          "format": "uuid",
+          "title": "Master Instance Id",
+          "type": "string"
+        },
+        "operation_id": {
+          "format": "uuid",
+          "title": "Operation Id",
+          "type": "string"
+        },
+        "run_id": {
+          "format": "uuid",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "service_instance_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Service Instance Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "run_id",
+        "attempt_id",
+        "service_instance_id",
+        "master_instance_id",
+        "epoch"
+      ],
+      "title": "MasterAcceptanceBinding",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Durable, metadata-only completion used for response-loss reconciliation.",
+  "properties": {
+    "binding": {
+      "$ref": "#/$defs/MasterAcceptanceBinding"
+    },
+    "command_id": {
+      "format": "uuid",
+      "title": "Command Id",
+      "type": "string"
+    },
+    "command_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Command Sha256",
+      "type": "string"
+    },
+    "deferred_guard_sqlstate": {
+      "const": "55000",
+      "title": "Deferred Guard Sqlstate",
+      "type": "string"
+    },
+    "deferred_transaction_state": {
+      "const": "rollback_only",
+      "title": "Deferred Transaction State",
+      "type": "string"
+    },
+    "evidence": {
+      "$ref": "#/$defs/LeaseExpiryEvidence"
+    },
+    "immediate_guard_sqlstate": {
+      "const": "55000",
+      "title": "Immediate Guard Sqlstate",
+      "type": "string"
+    },
+    "immediate_transaction_state": {
+      "const": "rollback_only",
+      "title": "Immediate Transaction State",
+      "type": "string"
+    },
+    "operation_receipt_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Operation Receipt Sha256",
+      "type": "string"
+    },
+    "operator_operation_id": {
+      "format": "uuid",
+      "title": "Operator Operation Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "my-data-hub-fm10-lease-expiry-completion.v1",
+      "default": "my-data-hub-fm10-lease-expiry-completion.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "state_after": {
+      "$ref": "#/$defs/LeaseExpiryStateFingerprint"
+    },
+    "state_before": {
+      "$ref": "#/$defs/LeaseExpiryStateFingerprint"
+    },
+    "task_id": {
+      "format": "uuid",
+      "title": "Task Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "command_id",
+    "command_sha256",
+    "task_id",
+    "binding",
+    "operator_operation_id",
+    "operation_receipt_sha256",
+    "deferred_guard_sqlstate",
+    "deferred_transaction_state",
+    "immediate_guard_sqlstate",
+    "immediate_transaction_state",
+    "state_before",
+    "state_after",
+    "evidence"
+  ],
+  "title": "LeaseExpiryDenialCompletion",
+  "type": "object"
+}
