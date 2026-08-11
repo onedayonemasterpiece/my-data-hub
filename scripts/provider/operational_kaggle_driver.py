@@ -35,6 +35,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from my_data_hub.hashing import canonical_json_bytes
 
+if not __package__:
+    # Direct execution starts with scripts/provider on sys.path. Add the exact
+    # repository root so the shared signed-evidence verifier is still imported
+    # from this trusted checkout rather than reimplemented here.
+    sys.path.insert(1, str(Path(__file__).resolve().parents[2]))
+
+from scripts.verify_post_deploy import validate_deployment_evidence_v2
+
 if __package__:
     from scripts.provider.operational_kaggle_matrix import EXTERNAL_BLOCKED, SCENARIOS, modern_token_configured
 else:  # Direct repository script execution places this directory on sys.path.
@@ -47,6 +55,10 @@ DEFAULT_ENDPOINT = "https://mcp-datahub.kenigevents.ru/mcp"
 MAX_EVIDENCE_CLAIMS_BYTES = 64 * 1024
 ACTION_POLL_SECONDS = 5.0
 ACTION_TERMINAL_STATES = frozenset({"DURABLE_COMPLETE", "FAILED", "FENCED", "ORPHANED"})
+FM20_MASTER_TIMEOUT_SECONDS = 1800
+FM20_MASTER_POLL_SECONDS = 5.0
+EXPECTED_SOURCE_IDENTITY = "onedayonemasterpiece/my-data-hub"
+SERVICE_NAMES = frozenset({"control-plane", "oauth-server", "remote-mcp"})
 
 
 class DriverRequest(BaseModel):
@@ -132,22 +144,53 @@ class EvidenceClaim(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    requirement_id: str = Field(pattern=r"^FM(06|13)$")
+    requirement_id: str = Field(pattern=r"^FM(06|13|20)$")
     task_id: UUID
     resource_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=300)
     claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    operation_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    operation_id: str | None = Field(
+        default=None,
+        pattern=r"^(?:[a-f0-9]{64}|[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})$",
+    )
 
 
 class EvidenceClaimsDocument(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     schema_version: Literal["my-data-hub-operational-kaggle-evidence-claims.v1"]
-    claims: dict[Literal["FM06", "FM13"], EvidenceClaim] = Field(max_length=2)
+    claims: dict[Literal["FM06", "FM13", "FM20"], EvidenceClaim] = Field(max_length=3)
+    fm20_evidence: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def keyed_requirements_match(self) -> EvidenceClaimsDocument:
         if any(key != claim.requirement_id for key, claim in self.claims.items()):
             raise ValueError("evidence claim key differs from requirement_id")
+        return self
+
+
+class FM20EvidenceBundle(BaseModel):
+    """Owner-supplied signed host receipt and exact cold-search policy."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal["my-data-hub-operational-kaggle-fm20-evidence.v1"]
+    deployment_evidence: dict[str, Any]
+    public_key_pem: str = Field(min_length=1, max_length=8192)
+    expected_key_id: str = Field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")
+    expected_source_identity: Literal["onedayonemasterpiece/my-data-hub"]
+    expected_source_tree_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expected_service_image_ids: dict[
+        Literal["control-plane", "oauth-server", "remote-mcp"], str
+    ] = Field(min_length=3, max_length=3)
+    blogger_query: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def exact_policy(self) -> FM20EvidenceBundle:
+        if set(self.expected_service_image_ids) != SERVICE_NAMES or any(
+            re.fullmatch(r"sha256:[a-f0-9]{64}", value) is None
+            for value in self.expected_service_image_ids.values()
+        ):
+            raise ValueError("FM20 expected image identities differ from policy")
+        if self.blogger_query != self.blogger_query.strip():
+            raise ValueError("FM20 blogger query must not contain surrounding whitespace")
         return self
 
 
@@ -458,11 +501,17 @@ EXECUTORS: tuple[ExecutorSpec, ...] = (
     ),
     ExecutorSpec(
         "FM20",
-        ("reader",),
-        (("reader", "master.status"), ("reader", "bloggers.search")),
-        "master_status",
-        "HOST_REBOOT_CONTROL_AND_BOOT_IDENTITY_API_MISSING",
-        "trusted host reboot controller plus before/after boot identity exposed to the driver",
+        ("reader", "operator", "provider"),
+        (
+            ("reader", "master.status"),
+            ("reader", "bloggers.search"),
+            ("operator", "master.ensure"),
+            ("operator", "operation.get"),
+            ("provider", "provider.resources.read"),
+        ),
+        "catalog_only",
+        "FM20_SIGNED_HOST_OR_EVIDENCE_NOTEBOOK_MISSING",
+        "fresh signed v2 host reboot receipt plus an exact already-running FM20 evidence Notebook claim",
     ),
     ExecutorSpec(
         "FM21",
@@ -604,13 +653,17 @@ async def _safe_probe(gateway: McpGateway, spec: ExecutorSpec) -> tuple[list[Cap
 
 
 def _evidence_claim_for(requirement_id: str) -> EvidenceClaim | None:
+    document = _evidence_claims_document()
+    return document.claims.get(requirement_id) if document is not None else None  # type: ignore[arg-type]
+
+
+def _evidence_claims_document() -> EvidenceClaimsDocument | None:
     raw = os.environ.get("MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON", "").strip()
     if not raw:
         return None
     if len(raw.encode()) > MAX_EVIDENCE_CLAIMS_BYTES:
         raise ValueError("operational evidence claims document is too large")
-    document = EvidenceClaimsDocument.model_validate_json(raw)
-    return document.claims.get(requirement_id)  # type: ignore[arg-type]
+    return EvidenceClaimsDocument.model_validate_json(raw)
 
 
 def _evidence_read_arguments(claim: EvidenceClaim) -> dict[str, Any]:
@@ -634,6 +687,75 @@ def _evidence_locator(
     ):
         raise ValueError("provider evidence identity differs from the exact matrix claim")
     return locator
+
+
+def _fm20_evidence_bundle() -> FM20EvidenceBundle | None:
+    document = _evidence_claims_document()
+    if document is None or document.fm20_evidence is None:
+        return None
+    return FM20EvidenceBundle.model_validate(document.fm20_evidence)
+
+
+def _verify_fm20_host_evidence(
+    request: DriverRequest, bundle: FM20EvidenceBundle
+) -> dict[str, object]:
+    return validate_deployment_evidence_v2(
+        json.dumps(bundle.deployment_evidence, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        bundle.public_key_pem,
+        expected_commit=request.commit_sha,
+        expected_source_identity=EXPECTED_SOURCE_IDENTITY,
+        expected_key_id=bundle.expected_key_id,
+        expected_source_tree_sha256=bundle.expected_source_tree_sha256,
+        expected_service_image_ids=bundle.expected_service_image_ids,
+    )
+
+
+def _exact_absent_master(status: Mapping[str, Any]) -> bool:
+    return (
+        status.get("master_state") == "ABSENT"
+        and status.get("operation_id") is None
+        and status.get("instance_id") is None
+        and status.get("master_epoch") is None
+        and status.get("canonical_revision") is None
+        and status.get("lease_expires_at") is None
+        and status.get("capabilities") == []
+    )
+
+
+def _exact_active_master(status: Mapping[str, Any]) -> bool:
+    epoch = status.get("master_epoch")
+    revision = status.get("canonical_revision")
+    return (
+        status.get("master_state") == "ACTIVE"
+        and isinstance(status.get("instance_id"), str)
+        and 1 <= len(status["instance_id"]) <= 300
+        and isinstance(epoch, int)
+        and not isinstance(epoch, bool)
+        and epoch >= 1
+        and isinstance(revision, int)
+        and not isinstance(revision, bool)
+        and revision >= 0
+        and isinstance(status.get("capabilities"), list)
+    )
+
+
+async def _poll_fm20_master(
+    gateway: McpGateway, operation_id: str
+) -> dict[str, Any]:
+    deadline = asyncio.get_running_loop().time() + FM20_MASTER_TIMEOUT_SECONDS
+    while True:
+        status = await gateway.call("reader", "master.status", {})
+        if _exact_active_master(status):
+            return status
+        if (
+            status.get("master_state") not in {"REQUESTED", "STARTING", "RESTORING", "REGISTERING"}
+            or status.get("operation_id") != operation_id
+        ):
+            raise ValueError("FM20 master status is not bound to the accepted ensure operation")
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError("FM20 master did not become ACTIVE within the bound")
+        await asyncio.sleep(min(FM20_MASTER_POLL_SECONDS, remaining))
 
 
 def _exact_checkpoint(observations: Mapping[str, Any]) -> dict[str, Any]:
@@ -935,6 +1057,220 @@ async def _execute_claimed_action(
     return _pass(request, locator, checks=checks, observations=observations)
 
 
+async def _execute_fm20(
+    request: DriverRequest,
+    spec: ExecutorSpec,
+    gateway: McpGateway,
+    *,
+    checks: list[CapabilityCheck],
+) -> TrustedDriverResult:
+    observations: dict[str, Any] = {}
+    mutations_started = 0
+    try:
+        claim = _evidence_claim_for("FM20")
+    except Exception as exc:
+        return _blocked(
+            request,
+            checks=[*checks, _check("evidence-claim", "FAIL", "EVIDENCE_CLAIMS_INVALID")],
+            code="FM20_EVIDENCE_CLAIM_INVALID",
+            dependency=f"valid bounded FM20 evidence Notebook claim ({type(exc).__name__})",
+        )
+    if claim is None:
+        return _blocked(
+            request,
+            checks=[*checks, _check("evidence-claim", "BLOCKED", "EVIDENCE_NOTEBOOK_CLAIM_MISSING")],
+            code=spec.gap_code,
+            dependency=spec.gap_dependency,
+        )
+
+    operation_id = claim.operation_id
+    if not request.resume_only and operation_id is not None:
+        return _failed(
+            request,
+            checks=[*checks, _check("master-ensure", "FAIL", "UNEXPECTED_PRIOR_ACTION_IDENTITY")],
+            observations=observations,
+            mutations_started=0,
+        )
+    if request.resume_only:
+        if operation_id is None:
+            return _failed(
+                request,
+                checks=[*checks, _check("ensure-resume", "FAIL", "DURABLE_ACTION_IDENTITY_MISSING")],
+                observations=observations,
+                mutations_started=0,
+            )
+        try:
+            resume = await gateway.call("operator", "operation.get", {"operation_id": operation_id})
+        except Exception as exc:
+            return _failed(
+                request,
+                checks=[*checks, _check("ensure-resume", "FAIL", "DURABLE_ACTION_OBSERVATION_FAILED")],
+                observations={"failure_type": type(exc).__name__},
+                mutations_started=0,
+            )
+        if (
+            resume.get("found") is not True
+            or resume.get("operation_id") != operation_id
+            or resume.get("operation_kind") != "ensure_master"
+        ):
+            return _failed(
+                request,
+                checks=[*checks, _check("ensure-resume", "FAIL", "DURABLE_ACTION_IDENTITY_NOT_FOUND")],
+                observations={"ensure_resume": resume},
+                mutations_started=0,
+            )
+        mutations_started = 1
+        observations["ensure_resume"] = resume
+        if resume.get("state") not in {"REQUESTED", "STARTING", "RESTORING", "REGISTERING", "ACTIVE"}:
+            return _failed(
+                request,
+                checks=[*checks, _check("ensure-resume", "FAIL", "ENSURE_OPERATION_NOT_ACTIVE")],
+                observations=observations,
+                mutations_started=1,
+            )
+        checks.append(_check("ensure-resume", "PASS", "DURABLE_ENSURE_IDENTITY_RECONCILED", resume))
+
+    try:
+        bundle = _fm20_evidence_bundle()
+        if bundle is None:
+            raise LookupError("FM20 signed evidence document is absent")
+        host_evidence = _verify_fm20_host_evidence(request, bundle)
+        provider_observation = await gateway.call(
+            "provider", "provider.resources.read", _evidence_read_arguments(claim)
+        )
+        locator = _evidence_locator(request, claim, provider_observation)
+    except Exception as exc:
+        failure_observations = {**observations, "failure_type": type(exc).__name__}
+        if mutations_started:
+            return _failed(
+                request,
+                checks=[*checks, _check("fm20-evidence", "FAIL", "EVIDENCE_RECONCILIATION_FAILED")],
+                observations=failure_observations,
+                mutations_started=1,
+            )
+        return _blocked(
+            request,
+            checks=[*checks, _check("fm20-evidence", "FAIL", "SIGNED_FM20_EVIDENCE_INVALID")],
+            code=spec.gap_code,
+            dependency=f"fresh signed v2 host receipt and exact FM20 Notebook claim ({type(exc).__name__})",
+            observations=failure_observations,
+        )
+    observations["host_evidence"] = host_evidence
+    observations["evidence_locator"] = locator.model_dump(mode="json")
+    checks.extend(
+        (
+            _check("host-evidence", "PASS", "SIGNED_HOST_REBOOT_EVIDENCE_VERIFIED", host_evidence),
+            _check("evidence-locator", "PASS", "EXACT_EVIDENCE_NOTEBOOK_RECONCILED", provider_observation),
+        )
+    )
+
+    if request.resume_only:
+        assert operation_id is not None
+    else:
+        try:
+            initial_master = await gateway.call("reader", "master.status", {})
+        except Exception as exc:
+            return _blocked(
+                request,
+                checks=[*checks, _check("master-initial", "FAIL", "INITIAL_MASTER_OBSERVATION_FAILED")],
+                code="FM20_INITIAL_MASTER_OBSERVATION_UNAVAILABLE",
+                dependency=f"exact reader master.status ABSENT observation ({type(exc).__name__})",
+                observations=observations,
+            )
+        observations["master_initial"] = initial_master
+        if not _exact_absent_master(initial_master):
+            return _blocked(
+                request,
+                checks=[*checks, _check("master-initial", "FAIL", "MASTER_NOT_EXACTLY_ABSENT")],
+                code="FM20_MASTER_NOT_INITIALLY_ABSENT",
+                dependency="post-reboot reader master.status with exact ABSENT state",
+                observations=observations,
+            )
+        checks.append(_check("master-initial", "PASS", "MASTER_INITIALLY_ABSENT", initial_master))
+        try:
+            ensure = await gateway.call("operator", "master.ensure", {})
+        except Exception as exc:
+            return _failed(
+                request,
+                checks=[*checks, _check("master-ensure", "FAIL", "ENSURE_ACCEPTANCE_AMBIGUOUS")],
+                observations={**observations, "failure_type": type(exc).__name__},
+                mutations_started=1,
+            )
+        observations["master_ensure"] = ensure
+        raw_operation_id = ensure.get("operation_id")
+        try:
+            parsed_operation_id = UUID(str(raw_operation_id))
+        except (TypeError, ValueError, AttributeError):
+            parsed_operation_id = None
+        if (
+            parsed_operation_id is None
+            or str(parsed_operation_id) != raw_operation_id
+            or ensure.get("master_state") != "REQUESTED"
+            or ensure.get("duplicate") is not False
+            or ensure.get("intent") != "explicit-mcp-request"
+            or ensure.get("terminal") is not False
+        ):
+            return _failed(
+                request,
+                checks=[*checks, _check("master-ensure", "FAIL", "ENSURE_ACCEPTANCE_AMBIGUOUS", ensure)],
+                observations=observations,
+                mutations_started=1,
+            )
+        operation_id = raw_operation_id
+        mutations_started = 1
+        checks.append(_check("master-ensure", "PASS", "MASTER_ENSURE_ACCEPTED", ensure))
+
+    assert operation_id is not None
+    try:
+        active_master = await _poll_fm20_master(gateway, operation_id)
+    except Exception as exc:
+        return _failed(
+            request,
+            checks=[*checks, _check("master-active", "FAIL", "ENSURED_MASTER_NOT_ACTIVE")],
+            observations={**observations, "failure_type": type(exc).__name__},
+            mutations_started=mutations_started or 1,
+        )
+    observations["master_active"] = active_master
+    checks.append(_check("master-active", "PASS", "ENSURED_MASTER_ACTIVE", active_master))
+
+    try:
+        search = await gateway.call(
+            "reader",
+            "bloggers.search",
+            {"query": bundle.blogger_query, "cursor": None, "limit": 1},
+        )
+    except Exception as exc:
+        return _failed(
+            request,
+            checks=[*checks, _check("blogger-search", "FAIL", "BOUNDED_BLOGGER_SEARCH_FAILED")],
+            observations={**observations, "failure_type": type(exc).__name__},
+            mutations_started=mutations_started,
+        )
+    items = search.get("items")
+    if (
+        not isinstance(items, list)
+        or len(items) != 1
+        or search.get("cursor") is not None
+        or search.get("master_epoch") != active_master.get("master_epoch")
+        or search.get("canonical_revision") != active_master.get("canonical_revision")
+    ):
+        return _failed(
+            request,
+            checks=[*checks, _check("blogger-search", "FAIL", "BOUNDED_BLOGGER_RESULT_INVALID", search)],
+            observations={**observations, "search_response_sha256": _sha(search)},
+            mutations_started=mutations_started,
+        )
+    search_summary = {
+        "item_count": 1,
+        "master_epoch": search["master_epoch"],
+        "canonical_revision": search["canonical_revision"],
+        "response_sha256": _sha(search),
+    }
+    observations["search"] = search_summary
+    checks.append(_check("blogger-search", "PASS", "BOUNDED_BLOGGER_SEARCH_COMPLETE", search_summary))
+    return _pass(request, locator, checks=checks, observations=observations)
+
+
 async def execute(request: DriverRequest, gateway: McpGateway) -> TrustedDriverResult:
     spec = EXECUTORS[request.ordinal - 1]
     checks: list[CapabilityCheck] = []
@@ -987,6 +1323,8 @@ async def execute(request: DriverRequest, gateway: McpGateway) -> TrustedDriverR
             dependency=f"bounded {spec.probe} production observation ({type(exc).__name__})",
         )
     checks.extend(probe_checks)
+    if request.requirement_id == "FM20":
+        return await _execute_fm20(request, spec, gateway, checks=checks)
     if spec.action_tool is not None:
         return await _execute_claimed_action(
             request,

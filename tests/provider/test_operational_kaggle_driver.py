@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from jsonschema import Draft202012Validator, FormatChecker
+from referencing import Registry, Resource
 
 from scripts.provider.operational_kaggle_driver import (
     EXECUTORS,
@@ -141,6 +145,77 @@ class ClaimedActionGateway(FakeGateway):
         return await super().call(profile, tool, arguments)
 
 
+class FM20Gateway(FakeGateway):
+    def __init__(self, *, ensure_response: dict[str, Any] | None = None, empty_search: bool = False) -> None:
+        super().__init__()
+        self.ensure_response = ensure_response
+        self.empty_search = empty_search
+        self.ensure_started = False
+
+    async def call(self, profile: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((profile, tool, dict(arguments)))
+        if tool == "provider.resources.read":
+            return {
+                "claim_sha256": "c" * 64,
+                "task_id": "22222222-2222-4222-8222-222222222222",
+                "task_run_id": str(_request(20).task_run_id),
+                "provider_ref": "owner/fm20-evidence",
+                "provider_run_ref": "owner/fm20-evidence/7",
+                "provider_kernel_id": 702,
+                "source_version": 5,
+                "source_sha256": "d" * 64,
+                "fingerprint": {"algorithm": "sha256", "value": "e" * 64},
+                "private": True,
+            }
+        if tool == "master.status":
+            if not self.ensure_started:
+                return {
+                    "master_state": "ABSENT",
+                    "operation_id": None,
+                    "instance_id": None,
+                    "master_epoch": None,
+                    "canonical_revision": None,
+                    "lease_expires_at": None,
+                    "capabilities": [],
+                }
+            return {
+                "master_state": "ACTIVE",
+                "operation_id": None,
+                "instance_id": "fm20-master-instance",
+                "master_epoch": 8,
+                "canonical_revision": 41,
+                "lease_expires_at": "2026-08-11T06:00:00Z",
+                "capabilities": ["bloggers:read"],
+            }
+        if tool == "master.ensure":
+            self.ensure_started = True
+            return self.ensure_response or {
+                "operation_id": "11111111-1111-4111-8111-111111111111",
+                "master_state": "REQUESTED",
+                "duplicate": False,
+                "intent": "explicit-mcp-request",
+                "terminal": False,
+            }
+        if tool == "operation.get":
+            self.ensure_started = True
+            return {
+                "found": True,
+                "operation_id": arguments["operation_id"],
+                "operation_kind": "ensure_master",
+                "state": "ACTIVE",
+                "updated_at": "2026-08-11T05:00:00Z",
+            }
+        if tool == "bloggers.search":
+            return {
+                "items": [] if self.empty_search else [{"blogger_id": "bounded-result"}],
+                "cursor": None,
+                "master_epoch": 8,
+                "canonical_revision": 41,
+                "complete": True,
+            }
+        raise AssertionError(f"unexpected FM20 tool call: {tool}")
+
+
 def _request(ordinal: int) -> DriverRequest:
     plan = build_plan(
         matrix_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
@@ -148,6 +223,94 @@ def _request(ordinal: int) -> DriverRequest:
         created_at=datetime(2026, 8, 11, tzinfo=UTC),
     )
     return DriverRequest.model_validate(_driver_request(plan, plan["scenarios"][ordinal - 1], resume_only=False))
+
+
+def _fm20_environment(request: DriverRequest) -> tuple[str, str]:
+    now = datetime.now(UTC)
+    image = "sha256:" + "9" * 64
+    receipt: dict[str, Any] = {
+        "schema_version": "my-data-hub-deployment-evidence.v2",
+        "source_identity": "onedayonemasterpiece/my-data-hub",
+        "deployed_commit": request.commit_sha,
+        "source_tree_sha256": "8" * 64,
+        "installed_release_tree_sha256": "8" * 64,
+        "host_id_sha256": "1" * 64,
+        "issued_at": (now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+        "expires_at": (now + timedelta(minutes=30)).isoformat().replace("+00:00", "Z"),
+        "checks": {
+            "services": {
+                "control-plane": "running",
+                "oauth-server": "running",
+                "remote-mcp": "running",
+            },
+            "service_image_ids": {
+                "control-plane": image,
+                "oauth-server": image,
+                "remote-mcp": image,
+            },
+            "database_process_present": False,
+            "pgdata_present": False,
+            "database_environment_present": False,
+            "my_data_hub_public_listener_ports": [],
+            "my_data_hub_loopback_listener_ports": [8080, 8765, 8780],
+            "process_kill": {
+                "target_service": "remote-mcp",
+                "killed_at": (now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                "recovered_at": (now - timedelta(minutes=4)).isoformat().replace("+00:00", "Z"),
+                "before_process_sha256": "2" * 64,
+                "after_process_sha256": "3" * 64,
+                "recovered": True,
+            },
+            "reboot_autostart": {
+                "rebooted_at": (now - timedelta(minutes=3)).isoformat().replace("+00:00", "Z"),
+                "verified_at": (now - timedelta(minutes=2)).isoformat().replace("+00:00", "Z"),
+                "before_boot_id_sha256": "4" * 64,
+                "after_boot_id_sha256": "5" * 64,
+                "systemd_unit": "my-data-hub-control-plane.service",
+                "unit_enabled": True,
+                "linger_enabled": True,
+                "autostart_services": ["control-plane", "oauth-server", "remote-mcp"],
+            },
+        },
+    }
+    private = Ed25519PrivateKey.generate()
+    canonical = json.dumps(receipt, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    receipt["signature"] = {
+        "algorithm": "Ed25519",
+        "key_id": "fm20-test-key",
+        "value": base64.urlsafe_b64encode(private.sign(canonical)).rstrip(b"=").decode(),
+    }
+    public_pem = private.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
+    bundle = {
+        "schema_version": "my-data-hub-operational-kaggle-fm20-evidence.v1",
+        "deployment_evidence": receipt,
+        "public_key_pem": public_pem,
+        "expected_key_id": "fm20-test-key",
+        "expected_source_identity": "onedayonemasterpiece/my-data-hub",
+        "expected_source_tree_sha256": "8" * 64,
+        "expected_service_image_ids": {
+            "control-plane": image,
+            "oauth-server": image,
+            "remote-mcp": image,
+        },
+        "blogger_query": "Калининград",
+    }
+    claims = {
+        "schema_version": "my-data-hub-operational-kaggle-evidence-claims.v1",
+        "claims": {
+            "FM20": {
+                "requirement_id": "FM20",
+                "task_id": "22222222-2222-4222-8222-222222222222",
+                "resource_ref": "owner/fm20-evidence",
+                "claim_sha256": "c" * 64,
+            }
+        },
+        "fm20_evidence": bundle,
+    }
+    return json.dumps(bundle), json.dumps(claims)
 
 
 def test_driver_has_one_named_executor_and_internal_gap_per_scenario() -> None:
@@ -428,6 +591,114 @@ def test_resume_uses_claimed_operation_id_without_recomputing_or_creating(
     assert "checkpoint.restore.request" not in {tool for _profile, tool, _arguments in gateway.calls}
 
 
+def test_fm20_requires_signed_host_and_notebook_evidence_before_ensure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(20)
+    _bundle, claims = _fm20_environment(request)
+    claims_document = json.loads(claims)
+    claims_document.pop("fm20_evidence")
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    monkeypatch.setenv("MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON", json.dumps(claims_document))
+    gateway = FM20Gateway()
+
+    result = asyncio.run(execute(request, gateway))
+
+    assert result.outcome == "BLOCKED"
+    assert result.mutations_started == 0
+    assert result.blocker_code == "FM20_SIGNED_HOST_OR_EVIDENCE_NOTEBOOK_MISSING"
+    assert "master.ensure" not in {tool for _profile, tool, _arguments in gateway.calls}
+
+
+def test_fm20_verifies_reboot_then_ensures_and_binds_bounded_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(20)
+    _bundle, claims = _fm20_environment(request)
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    monkeypatch.setenv("MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON", claims)
+    gateway = FM20Gateway()
+
+    result = asyncio.run(execute(request, gateway))
+
+    assert result.outcome == "PASS"
+    assert result.mutations_started == 1
+    assert result.provider_run_ref == "owner/fm20-evidence/7"
+    tools = [tool for _profile, tool, _arguments in gateway.calls]
+    assert tools.index("provider.resources.read") < tools.index("master.status")
+    assert tools.index("master.status") < tools.index("master.ensure")
+    assert tools.index("master.ensure") < tools.index("bloggers.search")
+    search_arguments = next(arguments for _profile, tool, arguments in gateway.calls if tool == "bloggers.search")
+    assert search_arguments == {"query": "Калининград", "cursor": None, "limit": 1}
+
+
+def test_fm20_ambiguous_ensure_or_invalid_search_fails_after_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(20)
+    _bundle, claims = _fm20_environment(request)
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    monkeypatch.setenv("MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON", claims)
+    ambiguous = FM20Gateway(
+        ensure_response={
+            "operation_id": None,
+            "master_state": "REQUESTED",
+            "duplicate": False,
+            "intent": "explicit-mcp-request",
+            "terminal": False,
+        }
+    )
+
+    result = asyncio.run(execute(request, ambiguous))
+
+    assert result.outcome == "FAIL"
+    assert result.mutations_started == 1
+
+    empty = FM20Gateway(empty_search=True)
+    result = asyncio.run(execute(request, empty))
+    assert result.outcome == "FAIL"
+    assert result.mutations_started == 1
+
+
+def test_fm20_resume_reconciles_claimed_ensure_without_creating_another(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(20).model_copy(update={"resume_only": True})
+    _bundle, claims_raw = _fm20_environment(request)
+    claims = json.loads(claims_raw)
+    claims["claims"]["FM20"]["operation_id"] = "11111111-1111-4111-8111-111111111111"
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    monkeypatch.setenv("MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON", json.dumps(claims))
+    gateway = FM20Gateway()
+
+    result = asyncio.run(execute(request, gateway))
+
+    assert result.outcome == "PASS"
+    assert result.mutations_started == 1
+    tools = [tool for _profile, tool, _arguments in gateway.calls]
+    assert "operation.get" in tools
+    assert "master.ensure" not in tools
+
+
+def test_fm20_evidence_bundle_schema_and_runtime_validate() -> None:
+    root = Path(__file__).resolve().parents[2]
+    schema = json.loads(
+        (root / "schemas/provider/operational-kaggle-fm20-evidence.v1.schema.json").read_text()
+    )
+    example = json.loads(
+        (root / "examples/provider/operational-kaggle-fm20-evidence.v1.example.json").read_text()
+    )
+    deployment_schema = json.loads((root / "schemas/deployment-evidence.v2.schema.json").read_text())
+    registry = Registry().with_resource(
+        deployment_schema["$id"], Resource.from_contents(deployment_schema)
+    )
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator(schema, format_checker=FormatChecker(), registry=registry).validate(example)
+    from scripts.provider.operational_kaggle_driver import FM20EvidenceBundle
+
+    FM20EvidenceBundle.model_validate(example)
+
+
 def test_missing_catalog_tool_is_scenario_specific(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
     gateway = FakeGateway(missing_tool="provider.protected_resource.probe")
@@ -484,6 +755,21 @@ def test_evidence_claim_schema_and_runtime_share_keyed_requirement_identity() ->
 
     with pytest.raises(ValueError, match="key differs"):
         EvidenceClaimsDocument.model_validate(payload)
+
+    claims_example = json.loads(
+        (root / "examples/provider/operational-kaggle-evidence-claims.v1.example.json").read_text()
+    )
+    fm20_schema = json.loads(
+        (root / "schemas/provider/operational-kaggle-fm20-evidence.v1.schema.json").read_text()
+    )
+    deployment_schema = json.loads((root / "schemas/deployment-evidence.v2.schema.json").read_text())
+    registry = (
+        Registry()
+        .with_resource(fm20_schema["$id"], Resource.from_contents(fm20_schema))
+        .with_resource(deployment_schema["$id"], Resource.from_contents(deployment_schema))
+    )
+    Draft202012Validator(schema, format_checker=FormatChecker(), registry=registry).validate(claims_example)
+    EvidenceClaimsDocument.model_validate(claims_example)
 
 
 def test_provider_workflow_selects_trusted_repository_driver_by_default() -> None:

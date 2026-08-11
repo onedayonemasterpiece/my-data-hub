@@ -42,7 +42,8 @@ terminally is a typed `FAIL`, not a blocker.
 
 Existing safe production surfaces are wired now: master/checkpoint/provider
 status, stale-epoch denial, blogger accounting/statistics, embedding coverage,
-protected-resource denial, and claim-gated durable restore/rotation requests.
+protected-resource denial, claim-gated durable restore/rotation requests, and
+the FM20 signed-host-evidence cold-start path.
 Unresolved mutation/fault interfaces use a
 scenario-specific code such as `CHECKPOINT_CORRUPTION_FAULT_API_MISSING` or
 `E5_WORKER_SUBMISSION_TOOL_MISSING`; the generic
@@ -53,7 +54,7 @@ The current internal gaps are explicit in the executor registry. They include
 exact provider create/run/read/delete payload contracts, runtime event history,
 empty-bootstrap selection, checkpoint candidate publication, callback/lease/
 replay fault controls, drain control, YDB batch-to-checkpoint binding, blogger
-logical hash reads, embedding submission tools, host boot identity, a controlled
+logical hash reads, embedding submission tools, a controlled
 business-row fixture, and the accelerated soak controller. Privileged actions
 are not attempted until their terminal exact-run evidence contract exists.
 
@@ -85,6 +86,38 @@ This closes the client-side restore/rotation request and polling seam only. It
 does not claim a live run: the deployed MCP must expose the exact action schemas
 and consumer, and the owner must supply claims from real pre-launched verifier
 Notebooks. No such provider evidence is checked in.
+
+### FM20 signed reboot and remote cold search
+
+FM20 never initiates a reboot through MCP. An owner first runs the documented
+three-stage deployment evidence collector, performs the separately authorized
+host reboot, and supplies its fresh Ed25519-signed
+`my-data-hub-deployment-evidence.v2` receipt inside the existing
+`MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON` document. The keyed document must
+also contain an FM20 claim for an already-running exact evidence Notebook.
+
+The nested `fm20_evidence` object validates against
+`operational-kaggle-fm20-evidence.v1`. It binds the trusted public key/key ID,
+owner source identity, independently reviewed source-tree SHA-256, exact
+per-service immutable image IDs, and one bounded blogger query. The shared
+post-deploy verifier checks the signature, freshness, source/release equality,
+expected hashes/images, distinct signed before/after boot IDs, systemd unit,
+linger and the exact recovered service set before any MCP mutation.
+
+Only after `provider.resources.read` reconciles the FM20 Notebook locator does
+the reader have to report an exact `ABSENT` master. The driver then calls the
+existing operator `master.ensure`, requires an unambiguous durable UUID receipt,
+waits boundedly for an exact ACTIVE epoch/revision, and performs
+`bloggers.search` with `limit: 1`. PASS requires one item and search epoch and
+revision equal to the ACTIVE status. Search rows and the query are not emitted
+in the driver result; only bounded hashes/counts are retained.
+
+On `resume_only`, the FM20 claim must carry the previously accepted ensure UUID.
+The driver first reconciles it with `operation.get` as `ensure_master` and never
+calls `master.ensure` again. Missing evidence before action is BLOCKED with zero
+mutations. Any ambiguous ensure response, lost post-action observation, failure
+to reach ACTIVE, or malformed/empty search result is FAIL with
+`mutations_started: 1`.
 
 ### Fault/action blockers retained intentionally
 
@@ -155,7 +188,7 @@ credentials, or provider output are never copied into the driver receipt.
 | FM17 | post-import cold restore equality | counts/logical-hash query |
 | FM18 | E5 worker and transactional import | exact E5 worker/import status |
 | FM19 | BGE-M3 worker and transactional import | exact BGE-M3 worker/import status |
-| FM20 | remote MCP cold-start blogger search | reader MCP + host reboot |
+| FM20 | remote MCP cold-start blogger search | signed v2 host evidence + provider claim + reader/operator MCP |
 | FM21 | owner preview/apply/post-checkpoint receipt | controlled row + owner MCP |
 | FM22 | MCP-managed Dataset/Notebook lifecycle | provider-operator MCP |
 | FM23 | protected resource mutation denial | protected-resource probe |

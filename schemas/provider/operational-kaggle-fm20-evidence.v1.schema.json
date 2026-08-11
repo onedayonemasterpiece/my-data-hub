@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/provider/operational-kaggle-fm20-evidence.v1.schema.json",
+  "title": "FM20 signed host and cold-search evidence configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "deployment_evidence",
+    "public_key_pem",
+    "expected_key_id",
+    "expected_source_identity",
+    "expected_source_tree_sha256",
+    "expected_service_image_ids",
+    "blogger_query"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-operational-kaggle-fm20-evidence.v1"
+    },
+    "deployment_evidence": {
+      "$ref": "https://my-data-hub.invalid/schemas/deployment-evidence.v2.schema.json"
+    },
+    "public_key_pem": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192
+    },
+    "expected_key_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+    },
+    "expected_source_identity": {
+      "const": "onedayonemasterpiece/my-data-hub"
+    },
+    "expected_service_image_ids": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control-plane",
+        "oauth-server",
+        "remote-mcp"
+      ],
+      "properties": {
+        "control-plane": {
+          "$ref": "#/$defs/image_id"
+        },
+        "oauth-server": {
+          "$ref": "#/$defs/image_id"
+        },
+        "remote-mcp": {
+          "$ref": "#/$defs/image_id"
+        }
+      }
+    },
+    "blogger_query": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "expected_source_tree_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "$defs": {
+    "image_id": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    }
+  }
+}
