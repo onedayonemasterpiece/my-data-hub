@@ -143,6 +143,59 @@ async def test_operator_collection_sequences_and_awaits_each_durable_action() ->
     ]
 
 
+@pytest.mark.asyncio
+async def test_operator_collection_performs_final_status_read_at_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DeadlineSession(TerminalOperatorSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.status_reads = 0
+
+        async def call_tool(self, name: str, arguments: dict[str, object]) -> object:
+            if name != "operation.get":
+                return await super().call_tool(name, arguments)
+            self.calls.append((name, arguments))
+            self.status_reads += 1
+            return SnakeCaseMCPResult(
+                {
+                    "found": True,
+                    "operation_id": arguments["operation_id"],
+                    "state": "REQUESTED" if self.status_reads == 1 else "DURABLE_COMPLETE",
+                }
+            )
+
+    observed = iter([0.0, 0.0, 1201.0, 1201.0])
+
+    class Loop:
+        @staticmethod
+        def time() -> float:
+            return next(observed)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(acceptance.asyncio, "get_running_loop", lambda: Loop())
+    monkeypatch.setattr(acceptance.asyncio, "sleep", no_sleep)
+    session = DeadlineSession()
+    values = await acceptance._collect_operator_session(
+        session,
+        mode=acceptance.Mode.NIGHTLY,
+        snapshot={
+            "master": {"master_epoch": 1},
+            "checkpoint": {
+                "current_checkpoint_id": "cp-current",
+                "current_exact_version_ref": "owner/checkpoints/8",
+            },
+            "provider": {"resources": []},
+        },
+        workflow_run_id="workflow-deadline",
+    )
+
+    assert session.status_reads == 2
+    assert values["current_restore"]["state"] == "DURABLE_COMPLETE"
+
+
 def complete_observations() -> acceptance.Observations:
     return acceptance.Observations(
         live_resources=[

@@ -781,6 +781,7 @@ async def _collect_operator_session(
         timeout_seconds = int(arguments["timeout_seconds"])
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         terminal = dict(initial)
+        terminal_states = {"DURABLE_COMPLETE", "FAILED", "FENCED", "ORPHANED"}
         while asyncio.get_running_loop().time() < deadline:
             status_result = await session.call_tool(  # type: ignore[attr-defined]
                 "operation.get", {"operation_id": operation_id}
@@ -791,11 +792,24 @@ async def _collect_operator_session(
             if status.get("found") is not True:
                 raise RuntimeError("MCP operation.get lost an accepted durable operation")
             terminal["state"] = status.get("state")
-            if terminal["state"] in {"DURABLE_COMPLETE", "FAILED", "FENCED", "ORPHANED"}:
+            if terminal["state"] in terminal_states:
                 break
             await asyncio.sleep(
                 min(5.0, max(0.0, deadline - asyncio.get_running_loop().time()))
             )
+        if terminal.get("state") not in terminal_states:
+            # A consumer can commit during the last sleep. One final bounded
+            # read avoids a false pending result without extending the action
+            # or creating another operation.
+            final_result = await session.call_tool(  # type: ignore[attr-defined]
+                "operation.get", {"operation_id": operation_id}
+            )
+            if _result_is_error(final_result):
+                raise RuntimeError("MCP operation.get returned an error")
+            final_status = _structured_result(final_result)
+            if final_status.get("found") is not True:
+                raise RuntimeError("MCP operation.get lost an accepted durable operation")
+            terminal["state"] = final_status.get("state")
         results[key] = terminal
     return results
 
