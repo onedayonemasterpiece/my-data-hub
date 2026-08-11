@@ -54,13 +54,10 @@ class FakeJournal:
             self.fail_claims -= 1
             raise RuntimeError("simulated lost claim response")
         for existing in self.claims.values():
-            if (
-                existing.effect_id == claim.effect_id
-                or (
-                    existing.provider_ref == claim.provider_ref
-                    and existing.kind == claim.kind
-                    and existing.provider_version == claim.provider_version
-                )
+            if existing.effect_id == claim.effect_id or (
+                existing.provider_ref == claim.provider_ref
+                and existing.kind == claim.kind
+                and existing.provider_version == claim.provider_version
             ):
                 if existing != claim:
                     raise KagglePolicyError("claim effect/version already has different authority")
@@ -88,6 +85,8 @@ class FakeKaggleApi:
         self.output_file_patterns: list[str | None] = []
         self.ignore_output_file_pattern = False
         self.output_logs: dict[str, bytes] = {}
+        self.status_requests: list[str] = []
+        self.status_after_output: str | None = None
 
     def authenticate(self) -> None:
         self.calls.append(("authenticate",))
@@ -96,8 +95,13 @@ class FakeKaggleApi:
         return "owner" if name == self.CONFIG_NAME_USER else None
 
     def dataset_list_with_response(
-        self, *, mine: bool, page_size: int, page_token: str | None,
-        search: str | None = None, sort_by: str | None = None
+        self,
+        *,
+        mine: bool,
+        page_size: int,
+        page_token: str | None,
+        search: str | None = None,
+        sort_by: str | None = None,
     ):
         assert mine is True
         rows = [
@@ -114,8 +118,7 @@ class FakeKaggleApi:
         return SimpleNamespace(datasets=rows[:page_size], next_page_token=None)
 
     def kernels_list_with_response(
-        self, *, mine: bool, page_size: int, page_token: str | None,
-        search: str | None = None
+        self, *, mine: bool, page_size: int, page_token: str | None, search: str | None = None
     ):
         assert mine is True
         rows = [
@@ -238,6 +241,7 @@ class FakeKaggleApi:
     def kernels_status(self, kernel: str):
         if kernel not in self.kernels:
             raise HttpFailure(404)
+        self.status_requests.append(kernel)
         return SimpleNamespace(status=self.statuses[kernel], failure_message=None)
 
     def kernels_output(
@@ -258,9 +262,13 @@ class FakeKaggleApi:
         if file_pattern is not None and not self.ignore_output_file_pattern:
             outputs = {name: body for name, body in outputs.items() if re.fullmatch(file_pattern, name)}
         write_tree(Path(path), outputs)
+        # kaggle==2.2.4 applies file_pattern only to response.files. A supplied
+        # response.log is written independently of that anchored filter.
         provider_log = self.output_logs.get(kernel)
         if provider_log:
             (Path(path) / f"{kernel.split('/', 1)[1]}.log").write_bytes(provider_log)
+        if self.status_after_output is not None:
+            self.statuses[kernel] = self.status_after_output
         return [str(Path(path) / name) for name in outputs], ""
 
     def kernels_delete(self, kernel: str, no_confirm: bool = False) -> None:
@@ -366,10 +374,7 @@ def test_official_224_calls_are_private_and_exact(tmp_path: Path) -> None:
     )
     assert downloaded.version == 1
     assert (destination / "payload/value.txt").read_bytes() == b"exact bytes"
-    assert any(
-        call[:2] == ("dataset_download_files", "owner/private-canary/1")
-        for call in api.calls
-    )
+    assert any(call[:2] == ("dataset_download_files", "owner/private-canary/1") for call in api.calls)
 
     replacement = {"payload/value.txt": b"version two"}
     version_intent = effect(
@@ -525,7 +530,7 @@ def test_notebook_source_run_and_output_are_bound_to_exact_version() -> None:
         intent=push,
         task_run_id=run_id,
         source=source,
-            title="private-kernel",
+        title="private-kernel",
         code_file="run.py",
         kernel_type="script",
         language="python",
@@ -700,6 +705,169 @@ def test_exact_single_output_file_fails_closed_when_missing_or_api_ignores_patte
             destination=destination,
             file_name="my-data-hub-master-terminal.json",
             max_bytes=256 * 1024,
+        )
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("provider_status", ["failed", "error"])
+def test_exact_failed_output_is_status_fenced_typed_and_selective(tmp_path: Path, provider_status: str) -> None:
+    client, api, _journal = adapter()
+    run_id = uuid4()
+    source = f'RUN_ID = "{run_id}"\n'.encode()
+    pushed = client.push_private_notebook(
+        intent=effect(
+            MutationAction.PUSH_NOTEBOOK,
+            "owner/fm15-failed-output",
+            task_id=run_id,
+            arguments={
+                "task_run_id": str(run_id),
+                "source_sha256": hashlib.sha256(source).hexdigest(),
+                "dataset_sources": (),
+                "control_class": "mcp_managed",
+                "disposable": True,
+            },
+        ),
+        task_run_id=run_id,
+        source=source,
+        title="fm15-failed-output",
+        code_file="run.py",
+        kernel_type="script",
+        language="python",
+        control_class=ControlClass.MCP_MANAGED,
+        disposable=True,
+    )
+    receipt_name = "checkpoint-acceptance-fm15-failure.json"
+    receipt_bytes = b'{"detail_code":"FORCED_DISPOSABLE_RESTORE_FAILURE"}'
+    api.statuses[pushed.run.provider_ref] = provider_status
+    api.outputs[pushed.run.provider_ref] = {
+        receipt_name: receipt_bytes,
+        "private-business-export.json": b"must not be downloaded",
+    }
+    api.output_logs[pushed.run.provider_ref] = b"bounded provider failure log"
+
+    result = client.download_exact_failed_run_output_file(
+        pushed.run,
+        destination=tmp_path / "failed-output",
+        file_name=receipt_name,
+        max_bytes=64 * 1024,
+    )
+
+    assert result.terminal_state is KernelState.FAILED
+    assert result.provider_status == provider_status
+    assert result.receipt_sha256 == hashlib.sha256(receipt_bytes).hexdigest()
+    assert api.output_file_patterns[-1] == r"^checkpoint\-acceptance\-fm15\-failure\.json$"
+    assert api.status_requests[-2:] == [pushed.run.provider_ref, pushed.run.provider_ref]
+    assert [path.name for path in (tmp_path / "failed-output").iterdir()] == [receipt_name]
+
+    api.output_logs[pushed.run.provider_ref] = b"x" * (1024 * 1024 + 1)
+    oversized_log = tmp_path / "failed-output-log-overrun"
+    with pytest.raises(KaggleContractError, match="failed provider output log exceeds"):
+        client.download_exact_failed_run_output_file(
+            pushed.run,
+            destination=oversized_log,
+            file_name=receipt_name,
+            max_bytes=64 * 1024,
+        )
+    assert not oversized_log.exists()
+
+    api.output_logs[pushed.run.provider_ref] = b""
+    api.ignore_output_file_pattern = True
+    ignored_pattern = tmp_path / "failed-output-pattern-ignored"
+    with pytest.raises(KaggleIdentityError, match="missing or extra"):
+        client.download_exact_failed_run_output_file(
+            pushed.run,
+            destination=ignored_pattern,
+            file_name=receipt_name,
+            max_bytes=64 * 1024,
+        )
+    assert not ignored_pattern.exists()
+
+    api.ignore_output_file_pattern = False
+    api.outputs[pushed.run.provider_ref] = {receipt_name: b"x" * (64 * 1024 + 1)}
+    oversized_receipt = tmp_path / "failed-output-receipt-overrun"
+    with pytest.raises(KaggleContractError, match="receipt exceeds"):
+        client.download_exact_failed_run_output_file(
+            pushed.run,
+            destination=oversized_receipt,
+            file_name=receipt_name,
+            max_bytes=64 * 1024,
+        )
+    assert not oversized_receipt.exists()
+
+
+@pytest.mark.parametrize("provider_status", ["complete", "failure", "cancelled", "canceled"])
+def test_exact_failed_output_rejects_non_failed_error_status(tmp_path: Path, provider_status: str) -> None:
+    client, api, _journal = adapter()
+    run_id = uuid4()
+    source = f'RUN_ID = "{run_id}"\n'.encode()
+    pushed = client.push_private_notebook(
+        intent=effect(
+            MutationAction.PUSH_NOTEBOOK,
+            "owner/fm15-status-denial",
+            task_id=run_id,
+            arguments={
+                "task_run_id": str(run_id),
+                "source_sha256": hashlib.sha256(source).hexdigest(),
+                "dataset_sources": (),
+                "control_class": "mcp_managed",
+                "disposable": True,
+            },
+        ),
+        task_run_id=run_id,
+        source=source,
+        title="fm15-status-denial",
+        code_file="run.py",
+        kernel_type="script",
+        language="python",
+        control_class=ControlClass.MCP_MANAGED,
+        disposable=True,
+    )
+    api.statuses[pushed.run.provider_ref] = provider_status
+    with pytest.raises(KaggleContractError, match="FAILED or ERROR"):
+        client.download_exact_failed_run_output_file(
+            pushed.run,
+            destination=tmp_path / provider_status,
+            file_name="checkpoint-acceptance-fm15-failure.json",
+            max_bytes=64 * 1024,
+        )
+
+
+def test_exact_failed_output_rejects_status_change_and_cleans_destination(tmp_path: Path) -> None:
+    client, api, _journal = adapter()
+    run_id = uuid4()
+    source = f'RUN_ID = "{run_id}"\n'.encode()
+    pushed = client.push_private_notebook(
+        intent=effect(
+            MutationAction.PUSH_NOTEBOOK,
+            "owner/fm15-status-race",
+            task_id=run_id,
+            arguments={
+                "task_run_id": str(run_id),
+                "source_sha256": hashlib.sha256(source).hexdigest(),
+                "dataset_sources": (),
+                "control_class": "mcp_managed",
+                "disposable": True,
+            },
+        ),
+        task_run_id=run_id,
+        source=source,
+        title="fm15-status-race",
+        code_file="run.py",
+        kernel_type="script",
+        language="python",
+        control_class=ControlClass.MCP_MANAGED,
+        disposable=True,
+    )
+    api.statuses[pushed.run.provider_ref] = "failed"
+    api.status_after_output = "complete"
+    api.outputs[pushed.run.provider_ref] = {"checkpoint-acceptance-fm15-failure.json": b"{}"}
+    destination = tmp_path / "status-race"
+    with pytest.raises(KaggleIdentityError, match="status changed"):
+        client.download_exact_failed_run_output_file(
+            pushed.run,
+            destination=destination,
+            file_name="checkpoint-acceptance-fm15-failure.json",
+            max_bytes=64 * 1024,
         )
     assert not destination.exists()
 

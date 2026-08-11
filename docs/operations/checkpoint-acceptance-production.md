@@ -54,16 +54,15 @@ terminal failure, and final receipt from the ledger alone.
   task-owned disposable Dataset through a persisted provider effect, download
   exact version 1, prove manifest hash differs from the read byte hash, reject
   the registry candidate, and never call promotion.
-- **FM15:** the production operation is fail-closed before candidate/registry
-  mutation today. The existing adapter refuses output reads for failed runs, so
-  a generic terminal `failed` status cannot prove the fixed restore-smoke fault
-  rather than an unrelated infrastructure failure. The exact blocker is
-  `KAGGLE_FAILED_RUN_EXACT_OUTPUT_UNAVAILABLE`. The minimal missing seam is a
-  bounded `download_exact_failed_run_output_file` on the single adapter that
-  fences the exact numeric run before and after the official output call. Once
-  present, the implemented continuation requires the strict
-  `checkpoint-acceptance-fm15-failure.v1` receipt, rejects the disposable
-  candidate, and never calls promotion.
+- **FM15:** upload and exactly read back the disposable candidate, then run the
+  fixed restore-failure verifier. `download_exact_failed_run_output_file`
+  accepts only raw provider status `failed` or `error`, fences the exact source
+  and status before and after the official SDK output call, and admits only the
+  strict `checkpoint-acceptance-fm15-failure.v1` receipt. That receipt binds
+  run, candidate, exact Dataset version, source commit, manifest hash, content
+  hash and fixed failure code. Missing/mismatched receipts and cancellation or
+  unrelated failure statuses remain failed acceptance attempts; only the exact
+  receipt permits candidate rejection. Promotion is never called.
 
 Dataset and Notebook mutations call the adapter's reconcile operation before a
 create/push. Provider effect IDs and request hashes are deterministic and the
@@ -84,3 +83,10 @@ The FM15 failed-verifier metadata contract is defined by
 `schemas/checkpoint-acceptance-fm15-failure.v1.schema.json` with a sanitized
 example under `examples/contracts/`. It contains identities and hashes/status
 only, never checkpoint or business bytes.
+
+The pinned `kaggle==2.2.4` SDK applies `file_pattern` to output files but writes
+a supplied response log as `<kernel-slug>.log` independently of that anchored
+pattern. This creates an unavoidable post-download residual of the receipt (at
+most 64 KiB) plus that log (at most 1 MiB). The adapter rejects an oversized log
+and any third path, removes the log before return, and deletes the entire
+destination on failure. It never requests or accepts a broad output tree.

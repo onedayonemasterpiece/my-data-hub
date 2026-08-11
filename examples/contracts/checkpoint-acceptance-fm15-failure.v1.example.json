@@ -4,6 +4,9 @@
   "candidate_checkpoint_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
   "exact_version_ref": "owner/fm15-evidence/1",
   "source_revision": "2222222222222222222222222222222222222222",
+  "manifest_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "expected_content_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
   "detail_code": "FORCED_DISPOSABLE_RESTORE_FAILURE",
+  "failure_code": "MY_DATA_HUB_FIXED_FM15_RESTORE_FAILURE",
   "restore_ok": false
 }

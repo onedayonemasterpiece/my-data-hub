@@ -10,7 +10,10 @@
     "candidate_checkpoint_id",
     "exact_version_ref",
     "source_revision",
+    "manifest_sha256",
+    "expected_content_sha256",
     "detail_code",
+    "failure_code",
     "restore_ok"
   ],
   "properties": {
@@ -34,8 +37,19 @@
       "type": "string",
       "pattern": "^[0-9a-f]{40}$"
     },
+    "manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "expected_content_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "detail_code": {
       "const": "FORCED_DISPOSABLE_RESTORE_FAILURE"
+    },
+    "failure_code": {
+      "const": "MY_DATA_HUB_FIXED_FM15_RESTORE_FAILURE"
     },
     "restore_ok": {
       "const": false

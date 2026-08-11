@@ -35,6 +35,7 @@ from .contracts import (
     KaggleDatasetIdentity,
     KaggleDependencyError,
     KaggleIdentityError,
+    KaggleKernelFailureOutputIdentity,
     KaggleKernelOutputIdentity,
     KaggleKernelOutputTreeIdentity,
     KaggleKernelRunIdentity,
@@ -689,9 +690,7 @@ class KaggleProviderAdapter:
         self._validate_intent(intent, arguments=arguments)
         current_version = self.current_private_dataset_version(provider_ref=intent.provider_ref)
         if current_version != expected_version:
-            raise KaggleAmbiguousMutation(
-                "provider current dataset version differs from the exact reconciled version"
-            )
+            raise KaggleAmbiguousMutation("provider current dataset version differs from the exact reconciled version")
         expected_package_sha = self._expected_directory_package_sha256(
             source_directory,
             intent=intent,
@@ -1250,6 +1249,88 @@ class KaggleProviderAdapter:
             run=run,
             terminal_state=KernelState.COMPLETE,
             output_tree_sha256=output_sha,
+            file_count=1,
+            observed_at=self.clock(),
+        )
+
+    def download_exact_failed_run_output_file(
+        self,
+        run: KaggleKernelRunIdentity,
+        *,
+        destination: Path,
+        file_name: str,
+        max_bytes: int,
+    ) -> KaggleKernelFailureOutputIdentity:
+        """Read one bounded receipt from an exact terminal failed run.
+
+        ``kaggle==2.2.4`` applies ``file_pattern`` to ordinary outputs but
+        writes a supplied response log to ``<kernel-slug>.log`` independently
+        of that pattern. The official SDK call therefore has a bounded
+        post-download residual: at most the requested 64-KiB receipt plus a
+        1-MiB provider log. The log is size-checked and deleted before return;
+        any other file or pattern violation fails closed and removes the
+        destination.
+        """
+
+        if not file_name or Path(file_name).name != file_name or "/" in file_name or "\\" in file_name:
+            raise KaggleContractError("failed output receipt name must be one top-level basename")
+        _validate_relative_path(file_name)
+        provider_log_name = f"{run.provider_ref.split('/', 1)[1]}.log"
+        if file_name == provider_log_name:
+            raise KaggleContractError("failed output receipt cannot alias the SDK provider log")
+        if not 1 <= max_bytes <= 64 * 1024:
+            raise KaggleContractError("failed output receipt bound must be between 1 and 64 KiB")
+        before = self.read_run_status(run)
+        if before.state != KernelState.FAILED or before.provider_status not in {"failed", "error"}:
+            raise KaggleContractError("failed output requires exact provider status FAILED or ERROR")
+        _prepare_destination(destination)
+        pattern = rf"^{re.escape(file_name)}$"
+        try:
+            self.retry.call(
+                "kernels_output_failed_receipt",
+                lambda: self.api.kernels_output(
+                    run.provider_run_ref,
+                    path=str(destination),
+                    file_pattern=pattern,
+                    force=True,
+                    quiet=True,
+                    page_token=None,
+                    page_size=100,
+                ),
+            )
+            entries = _tree_entries(destination)
+            paths = {str(entry["path"]) for entry in entries}
+            if file_name not in paths or paths - {file_name, provider_log_name}:
+                raise KaggleIdentityError("failed exact output returned a missing or extra file")
+            receipt_entry = next(entry for entry in entries if entry["path"] == file_name)
+            if int(receipt_entry["byte_size"]) > max_bytes:
+                raise KaggleContractError("failed output receipt exceeds its bounded size")
+            receipt_sha = str(receipt_entry["sha256"])
+            if provider_log_name in paths:
+                log_entry = next(entry for entry in entries if entry["path"] == provider_log_name)
+                if int(log_entry["byte_size"]) > MAX_EXACT_OUTPUT_PROVIDER_LOG_BYTES:
+                    raise KaggleContractError("failed provider output log exceeds its bounded size")
+                (destination / provider_log_name).unlink()
+            remaining = _tree_entries(destination)
+            if len(remaining) != 1 or remaining[0]["path"] != file_name:
+                raise KaggleIdentityError("failed output destination retained an unexpected file")
+            output_sha = sha256_value({"files": remaining})
+            after = self.read_run_status(run)
+            if (
+                after.state != KernelState.FAILED
+                or after.provider_status not in {"failed", "error"}
+                or after.provider_status != before.provider_status
+            ):
+                raise KaggleIdentityError("failed run status changed across exact output read")
+        except Exception:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
+        return KaggleKernelFailureOutputIdentity(
+            run=run,
+            terminal_state=KernelState.FAILED,
+            provider_status=after.provider_status,
+            output_tree_sha256=output_sha,
+            receipt_sha256=receipt_sha,
             file_count=1,
             observed_at=self.clock(),
         )

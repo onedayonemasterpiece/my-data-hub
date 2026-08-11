@@ -666,15 +666,23 @@ class KaggleTaskOwnedCheckpointEffects:
         self, intent: CheckpointAcceptanceIntent
     ) -> CheckpointAcceptanceStageReceipt:
         self._assert_intent(intent, "FM15")
+        manifest, package = self._ensure_candidate(intent, corrupt=False)
+        expected_content_sha256 = directory_sha256(package)
         exact_ref = self._exact_ref(intent)
         run_id = uuid5(_EFFECT_NAMESPACE, f"fm15-verifier:{intent.operation_id}:{intent.task_run_id}")
-        source = self._fm15_source(intent, run_id, exact_ref)
+        source = self._fm15_source(
+            intent,
+            run_id,
+            exact_ref,
+            manifest_sha256=manifest.manifest_sha256,
+            expected_content_sha256=expected_content_sha256,
+        )
         source_sha = hashlib.sha256(_canonical_notebook_source(source, kernel_type="script")).hexdigest()
         arguments = {
             "task_run_id": str(run_id),
             "source_sha256": source_sha,
             "dataset_sources": (exact_ref,),
-            "control_class": ControlClass.MCP_EXCHANGE.value,
+            "control_class": ControlClass.MCP_MANAGED.value,
             "disposable": True,
         }
         effect = ProviderEffectIntent.create(
@@ -693,7 +701,7 @@ class KaggleTaskOwnedCheckpointEffects:
                 task_run_id=run_id,
                 expected_source_sha256=source_sha,
                 dataset_sources=(exact_ref,),
-                control_class=ControlClass.MCP_EXCHANGE,
+                control_class=ControlClass.MCP_MANAGED,
                 disposable=True,
             )
         )
@@ -707,7 +715,7 @@ class KaggleTaskOwnedCheckpointEffects:
                     code_file="worker.py",
                     kernel_type="script",
                     language="python",
-                    control_class=ControlClass.MCP_EXCHANGE,
+                    control_class=ControlClass.MCP_MANAGED,
                     disposable=True,
                     dataset_sources=(exact_ref,),
                     enable_internet=False,
@@ -720,9 +728,8 @@ class KaggleTaskOwnedCheckpointEffects:
             destination = self.binding.working_directory / f"fm15-failure-{run_id}"
             if destination.exists():
                 shutil.rmtree(destination)
-            failed_output = self.adapter.download_exact_failed_run_output_file  # type: ignore[attr-defined]
-            self._provider_call(
-                lambda: failed_output(
+            failed_identity = self._provider_call(
+                lambda: self.adapter.download_exact_failed_run_output_file(
                     launched.run,
                     destination=destination,
                     file_name=_FM15_RECEIPT_NAME,
@@ -734,6 +741,8 @@ class KaggleTaskOwnedCheckpointEffects:
                 intent=intent,
                 run_id=run_id,
                 exact_ref=exact_ref,
+                manifest_sha256=manifest.manifest_sha256,
+                expected_content_sha256=expected_content_sha256,
             )
             self.registry.reject(intent.candidate_checkpoint_id, "FM15_FORCED_RESTORE_SMOKE_FAILURE")
         else:
@@ -744,6 +753,7 @@ class KaggleTaskOwnedCheckpointEffects:
             "source_sha256": launched.run.source_sha256,
             "effect_receipt": launched.effect.model_dump(mode="json"),
             "failure_receipt_sha256": _metadata_sha256(failure_receipt),
+            "failed_output_identity": failed_identity.model_dump(mode="json"),
         }
         return self._stage(
             intent,
@@ -920,7 +930,15 @@ class KaggleTaskOwnedCheckpointEffects:
         observed = sha256_file(package / _FIXED_CORRUPTION_PATH)
         return expected, observed
 
-    def _fm15_source(self, intent: CheckpointAcceptanceIntent, run_id: UUID, exact_ref: str) -> bytes:
+    def _fm15_source(
+        self,
+        intent: CheckpointAcceptanceIntent,
+        run_id: UUID,
+        exact_ref: str,
+        *,
+        manifest_sha256: str,
+        expected_content_sha256: str,
+    ) -> bytes:
         prefix = (
             f"# fixed FM15 isolated restore-smoke fixture\n"
             "import os as _mdh_os\n"
@@ -929,6 +947,8 @@ class KaggleTaskOwnedCheckpointEffects:
             f"    'MY_DATA_HUB_FM15_CANDIDATE_ID': {str(intent.candidate_checkpoint_id)!r},\n"
             f"    'MY_DATA_HUB_FM15_EXACT_DATASET': {exact_ref!r},\n"
             f"    'MY_DATA_HUB_FM15_SOURCE_REVISION': {intent.source_revision!r},\n"
+            f"    'MY_DATA_HUB_FM15_MANIFEST_SHA256': {manifest_sha256!r},\n"
+            f"    'MY_DATA_HUB_FM15_EXPECTED_CONTENT_SHA256': {expected_content_sha256!r},\n"
             f"    'MY_DATA_HUB_FM15_RECEIPT_NAME': {_FM15_RECEIPT_NAME!r},\n"
             "})\n"
         ).encode()
@@ -945,6 +965,8 @@ class KaggleTaskOwnedCheckpointEffects:
         intent: CheckpointAcceptanceIntent,
         run_id: UUID,
         exact_ref: str,
+        manifest_sha256: str,
+        expected_content_sha256: str,
     ) -> dict[str, object]:
         if not path.is_file() or path.is_symlink() or path.stat().st_size > 64 * 1024:
             raise CheckpointAcceptanceError("FM15 failed verifier lacks its bounded exact receipt")
@@ -958,7 +980,10 @@ class KaggleTaskOwnedCheckpointEffects:
             "candidate_checkpoint_id": str(intent.candidate_checkpoint_id),
             "exact_version_ref": exact_ref,
             "source_revision": intent.source_revision,
+            "manifest_sha256": manifest_sha256,
+            "expected_content_sha256": expected_content_sha256,
             "detail_code": "FORCED_DISPOSABLE_RESTORE_FAILURE",
+            "failure_code": "MY_DATA_HUB_FIXED_FM15_RESTORE_FAILURE",
             "restore_ok": False,
         }
         if not isinstance(value, dict) or value != expected:

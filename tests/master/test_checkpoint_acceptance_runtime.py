@@ -231,3 +231,45 @@ def test_fm15_failed_verifier_example_validates() -> None:
     schema = json.loads((root / "schemas/checkpoint-acceptance-fm15-failure.v1.schema.json").read_text())
     example = json.loads((root / "examples/contracts/checkpoint-acceptance-fm15-failure.v1.example.json").read_text())
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(example)
+
+
+def test_fm15_failure_receipt_binds_exact_fixture_identity(tmp_path: Path) -> None:
+    intent = _intent("FM15")
+    run_id = UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+    receipt = {
+        "schema_version": "my-data-hub-checkpoint-acceptance-fm15-failure.v1",
+        "task_run_id": str(run_id),
+        "candidate_checkpoint_id": str(intent.candidate_checkpoint_id),
+        "exact_version_ref": "owner/fm15-evidence/1",
+        "source_revision": intent.source_revision,
+        "manifest_sha256": "3" * 64,
+        "expected_content_sha256": "4" * 64,
+        "detail_code": "FORCED_DISPOSABLE_RESTORE_FAILURE",
+        "failure_code": "MY_DATA_HUB_FIXED_FM15_RESTORE_FAILURE",
+        "restore_ok": False,
+    }
+    path = tmp_path / "checkpoint-acceptance-fm15-failure.json"
+    path.write_text(json.dumps(receipt))
+    assert (
+        KaggleTaskOwnedCheckpointEffects._load_fm15_failure_receipt(
+            path,
+            intent=intent,
+            run_id=run_id,
+            exact_ref="owner/fm15-evidence/1",
+            manifest_sha256="3" * 64,
+            expected_content_sha256="4" * 64,
+        )
+        == receipt
+    )
+
+    unrelated = {**receipt, "failure_code": "INFRASTRUCTURE_TIMEOUT"}
+    path.write_text(json.dumps(unrelated))
+    with pytest.raises(CheckpointAcceptanceError, match="differs from the fixed identity"):
+        KaggleTaskOwnedCheckpointEffects._load_fm15_failure_receipt(
+            path,
+            intent=intent,
+            run_id=run_id,
+            exact_ref="owner/fm15-evidence/1",
+            manifest_sha256="3" * 64,
+            expected_content_sha256="4" * 64,
+        )

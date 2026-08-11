@@ -348,6 +348,20 @@ class KaggleKernelOutputTreeIdentity(BaseModel):
     observed_at: datetime
 
 
+class KaggleKernelFailureOutputIdentity(BaseModel):
+    """One bounded receipt read from an exact terminal failed Kaggle run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run: KaggleKernelRunIdentity
+    terminal_state: Literal[KernelState.FAILED]
+    provider_status: Literal["failed", "error"]
+    output_tree_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    file_count: Literal[1] = 1
+    observed_at: datetime
+
+
 class DatasetMutationResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
