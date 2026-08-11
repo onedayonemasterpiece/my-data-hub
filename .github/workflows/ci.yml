@@ -102,6 +102,8 @@ jobs:
           SQL
       - name: Prove PostgreSQL positive and adversarial role probes
         run: python scripts/verify_postgres_roles.py
+      - name: Prove a real old transaction is fenced across an epoch rotation
+        run: python -m pytest -q tests/master/test_live_postgres.py
       - name: Prove verified recovery checkpoint opens only the restricted operator read gate
         run: |
           python -m my_data_hub.recovery_record \
