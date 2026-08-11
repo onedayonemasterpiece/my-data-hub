@@ -36,5 +36,7 @@ therefore prove only config/result, classification, and entrypoint contracts.
 - `mypy`: PASS, 5 source files.
 - `pytest`: PASS, 907 passed / 2 skipped.
 
-Disposable PostgreSQL validation is pending as a follow-up gate; this lane has
-no PostgreSQL migration or database-runtime changes.
+- Disposable PostgreSQL 18.4 CI-equivalent bootstrap: PASS through role
+  bootstrap, migrations 0001..0017, bootstrap verification, idempotent migrate,
+  and `db verify`; canonical revision remained zero. The container, network and
+  volumes were removed afterwards.
