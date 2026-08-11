@@ -20,7 +20,8 @@ services:
       MY_DATA_HUB_ENVIRONMENT: production
       MY_DATA_HUB_CONTROL_HOST: 0.0.0.0
       MY_DATA_HUB_CONTROL_PORT: 8080
-      MY_DATA_HUB_CONTROL_LEDGER_PATH: /state/control.sqlite3
+      MY_DATA_HUB_CONTROL_LEDGER_PATH: /ledger/control.sqlite3
+      MY_DATA_HUB_MASTER_SESSION_DIR: /sessions
       MY_DATA_HUB_SCHEDULER_ENABLED: "false"
       MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED: "false"
       MY_DATA_HUB_MCP_REMOTE_ENABLED: "false"
@@ -28,7 +29,8 @@ services:
     ports:
       - "127.0.0.1:${MY_DATA_HUB_CONTROL_PORT:-8080}:8080"
     volumes:
-      - "${MY_DATA_HUB_CONTROL_STATE_DIR:-./.state/control-plane}:/state"
+      - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:-./.state/control-ledger}:/ledger"
+      - "${MY_DATA_HUB_MASTER_SESSION_DIR:-./.state/master-sessions}:/sessions"
       - "${MY_DATA_HUB_MASTER_ASSET_DIR:-./.state/master-assets}:/master-assets:ro"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=3).read()"]
@@ -52,7 +54,7 @@ services:
       - "${MY_DATA_HUB_MCP_ENV_FILE:-./.state/control-plane/mcp-reader.env}"
     environment:
       MY_DATA_HUB_ENVIRONMENT: production
-      MY_DATA_HUB_CONTROL_LEDGER_PATH: /state/control.sqlite3
+      MY_DATA_HUB_CONTROL_LEDGER_PATH: /ledger/control.sqlite3
       MY_DATA_HUB_SCHEDULER_ENABLED: "false"
       MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED: "false"
       MY_DATA_HUB_MCP_REMOTE_ENABLED: "true"
@@ -60,11 +62,13 @@ services:
       MY_DATA_HUB_MCP_AUTH_MODE: oauth
       MY_DATA_HUB_MCP_HOST: 0.0.0.0
       MY_DATA_HUB_MCP_PORT: 8765
-      MY_DATA_HUB_MASTER_SESSION_DIRECTORY: /state/master-sessions
+      MY_DATA_HUB_MASTER_SESSION_DIRECTORY: /sessions
     ports:
       - "127.0.0.1:${MY_DATA_HUB_MCP_PORT:-8765}:8765"
     volumes:
-      - "${MY_DATA_HUB_CONTROL_STATE_DIR:-./.state/control-plane}:/state"
+      - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:-./.state/control-ledger}:/ledger"
+      - "${MY_DATA_HUB_MASTER_SESSION_DIR:-./.state/master-sessions}:/sessions:ro"
+      - "${MY_DATA_HUB_MASTER_TLS_CA_FILE:-./.state/master-tls/ca.pem}:/state/master-tls/ca.pem:ro"
     healthcheck:
       test:
         - CMD
@@ -75,6 +79,45 @@ services:
           r=urllib.request.Request('http://127.0.0.1:8765/.well-known/oauth-protected-resource/mcp',
           headers={'Host':'mcp-datahub.kenigevents.ru'});
           urllib.request.urlopen(r,timeout=3).read()
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  oauth-server:
+    profiles: ["remote-mcp"]
+    image: my-data-hub-control-plane:${MY_DATA_HUB_IMAGE_TAG:-architecture-reset}
+    build:
+      context: .
+      dockerfile: deploy/control-plane/Dockerfile
+    restart: unless-stopped
+    # SQLite WAL is intentionally shared only among the three bounded control
+    # processes; signing keys and epoch credentials remain separately mounted.
+    user: "${MY_DATA_HUB_CONTROL_UID:-1000}:${MY_DATA_HUB_CONTROL_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    entrypoint: ["python", "-m", "my_data_hub.oauth_server.runtime"]
+    env_file:
+      - "${MY_DATA_HUB_OAUTH_ENV_FILE:-./.state/oauth/oauth.env}"
+    environment:
+      MY_DATA_HUB_CONTROL_LEDGER_PATH: /ledger/control.sqlite3
+      MY_DATA_HUB_OAUTH_HOST: 0.0.0.0
+      MY_DATA_HUB_OAUTH_PORT: 8780
+      MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE: /run/secrets/oauth-signing-key.pem
+    ports:
+      - "127.0.0.1:${MY_DATA_HUB_OAUTH_PORT:-8780}:8780"
+    volumes:
+      - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:-./.state/control-ledger}:/ledger"
+      - "${MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE:-./.state/oauth/oauth-signing-key.pem}:/run/secrets/oauth-signing-key.pem:ro"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8780/.well-known/oauth-authorization-server',
+          timeout=3).read()
       interval: 15s
       timeout: 5s
       retries: 10

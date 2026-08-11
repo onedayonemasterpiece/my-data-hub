@@ -903,6 +903,142 @@ class ControlLedger:
             "principal_id": row["principal_id"], "profile_kind": row["profile_kind"],
         }
 
+    def create_oauth_authorization_grant(self, grant: Mapping[str, Any]) -> bool:
+        scopes_json = _safe_json({"scopes": list(grant["scopes"])})
+        with self._transaction() as connection:
+            try:
+                connection.execute(
+                    "INSERT INTO oauth_authorization_grants(code_digest,code_challenge,client_id,redirect_uri,"
+                    "resource,scopes_json,subject,nonce,authenticated_at,expires_at,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        grant["code_digest"], grant["code_challenge"], grant["client_id"],
+                        grant["redirect_uri"], grant["resource"], scopes_json, grant["subject"],
+                        grant.get("nonce"), int(grant["authenticated_at"]), int(grant["expires_at"]),
+                        _format_time(self.clock.now()),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                return False
+        return True
+
+    def consume_oauth_authorization_grant(
+        self, code_digest: str, *, now: int
+    ) -> dict[str, Any] | None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM oauth_authorization_grants WHERE code_digest=?", (code_digest,)
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "DELETE FROM oauth_authorization_grants WHERE code_digest=?", (code_digest,)
+            )
+            if int(row["expires_at"]) <= now:
+                return None
+            return {
+                "code_digest": row["code_digest"], "code_challenge": row["code_challenge"],
+                "client_id": row["client_id"], "redirect_uri": row["redirect_uri"],
+                "resource": row["resource"],
+                "scopes": tuple(json.loads(row["scopes_json"])["scopes"]),
+                "subject": row["subject"], "nonce": row["nonce"],
+                "authenticated_at": int(row["authenticated_at"]),
+                "expires_at": int(row["expires_at"]),
+            }
+
+    def create_oauth_refresh_grant(self, grant: Mapping[str, Any]) -> bool:
+        scopes_json = _safe_json({"scopes": list(grant["scopes"])})
+        with self._transaction() as connection:
+            try:
+                connection.execute(
+                    "INSERT INTO oauth_refresh_grants(credential_digest,family_id,client_id,resource,scopes_json,"
+                    "subject,authenticated_at,expires_at,consumed_at,revoked_at,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        grant["credential_digest"], grant["family_id"], grant["client_id"],
+                        grant["resource"], scopes_json, grant["subject"], int(grant["authenticated_at"]),
+                        int(grant["expires_at"]), grant.get("consumed_at"), grant.get("revoked_at"),
+                        _format_time(self.clock.now()),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                return False
+        return True
+
+    def rotate_oauth_refresh_grant(
+        self,
+        *,
+        presented_digest: str,
+        successor_digest: str,
+        client_id: str,
+        resource: str,
+        requested_scopes: tuple[str, ...] | None,
+        successor_expires_at: int,
+        now: int,
+    ) -> tuple[str, dict[str, Any] | None]:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM oauth_refresh_grants WHERE credential_digest=?", (presented_digest,)
+            ).fetchone()
+            if row is None:
+                return "invalid", None
+            if row["consumed_at"] is not None:
+                connection.execute(
+                    "UPDATE oauth_refresh_grants SET revoked_at=coalesce(revoked_at,?) WHERE family_id=?",
+                    (now, row["family_id"]),
+                )
+                return "replayed", None
+            current_scopes = tuple(json.loads(row["scopes_json"])["scopes"])
+            successor_scopes = current_scopes if requested_scopes is None else requested_scopes
+            conflict = connection.execute(
+                "SELECT 1 FROM oauth_refresh_grants WHERE credential_digest=?", (successor_digest,)
+            ).fetchone()
+            if (
+                row["revoked_at"] is not None
+                or int(row["expires_at"]) <= now
+                or row["client_id"] != client_id
+                or row["resource"] != resource
+                or not set(successor_scopes).issubset(current_scopes)
+                or conflict is not None
+            ):
+                return "invalid", None
+            connection.execute(
+                "UPDATE oauth_refresh_grants SET consumed_at=? WHERE credential_digest=? AND consumed_at IS NULL",
+                (now, presented_digest),
+            )
+            expires_at = min(int(row["expires_at"]), successor_expires_at)
+            connection.execute(
+                "INSERT INTO oauth_refresh_grants(credential_digest,family_id,client_id,resource,scopes_json,"
+                "subject,authenticated_at,expires_at,consumed_at,revoked_at,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,NULL,NULL,?)",
+                (
+                    successor_digest, row["family_id"], row["client_id"], row["resource"],
+                    _safe_json({"scopes": list(successor_scopes)}), row["subject"],
+                    int(row["authenticated_at"]), expires_at, _format_time(self.clock.now()),
+                ),
+            )
+            return "rotated", {
+                "credential_digest": successor_digest, "family_id": row["family_id"],
+                "client_id": row["client_id"], "resource": row["resource"],
+                "scopes": successor_scopes, "subject": row["subject"],
+                "authenticated_at": int(row["authenticated_at"]), "expires_at": expires_at,
+                "consumed_at": None, "revoked_at": None,
+            }
+
+    def revoke_oauth_refresh_grant(
+        self, credential_digest: str, *, client_id: str, now: int
+    ) -> None:
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT family_id,client_id FROM oauth_refresh_grants WHERE credential_digest=?",
+                (credential_digest,),
+            ).fetchone()
+            if row is not None and row["client_id"] == client_id:
+                connection.execute(
+                    "UPDATE oauth_refresh_grants SET revoked_at=coalesce(revoked_at,?) WHERE family_id=?",
+                    (now, row["family_id"]),
+                )
+
     def persist_provider_effect_intent(self, payload: Mapping[str, Any]) -> None:
         """Persist the exact provider intent before any external mutation."""
 
