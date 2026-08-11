@@ -37,6 +37,7 @@ from my_data_hub.embeddings.production import (
     EmbeddingProductionStageReceipt,
     embedding_provider_authority,
 )
+from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.providers.kaggle import (
     ControlLedgerKaggleJournal,
     KaggleMasterRuntimeProvider,
@@ -50,7 +51,10 @@ from my_data_hub.providers.kaggle.contracts import (
 )
 from my_data_hub.providers.models import ControlClass, ProviderKind
 from my_data_hub.tunnel_broker_ipc import TunnelBrokerClient
+from my_data_hub.workloads.bloggers.importer import batch_identity
 from my_data_hub.workloads.bloggers.master_stage import (
+    BLOGGER_REPLAY_STAGE_SCHEMA,
+    MAX_REQUEST_BYTES,
     BloggerImportStageReceipt,
     BloggerMigrationRequest,
 )
@@ -84,6 +88,45 @@ DATABASE_ENVIRONMENT_NAMES = (
 
 class ControlPlaneConfigurationError(RuntimeError):
     """Raised when the lightweight devstand profile would acquire data-plane state."""
+
+
+def _validate_blogger_replay_source(
+    migration: BloggerMigrationRequest,
+    source: dict[str, Any] | None,
+    *,
+    now: datetime,
+) -> str | None:
+    """Return a stable failure code, without ever inspecting source row bytes."""
+
+    envelope = migration.duplicate_resolution
+    if envelope is None or migration.replay_of_request_id is None:
+        return "blogger_replay_source_invalid"
+    if (
+        source is None
+        or source["state"] != "FAILED"
+        or source["failure_code"] != "BloggerMigrationQuarantined"
+        or source["operation_id"] == str(migration.operation_id)
+        or source["operation_id"] != str(envelope.source_operation_id)
+        or source["request_id"] != str(envelope.source_request_id)
+        or source["request_sha256"] != envelope.source_request_sha256
+    ):
+        return "blogger_replay_source_invalid"
+    try:
+        source_request = BloggerMigrationRequest.model_validate(source["request"])
+        quarantined_at = datetime.fromisoformat(source["updated_at"].replace("Z", "+00:00")).astimezone(UTC)
+    except Exception:
+        return "blogger_replay_source_invalid"
+    if (
+        source_request.project_id != migration.project_id
+        or source_request.snapshot_at.astimezone(UTC) != migration.snapshot_at.astimezone(UTC)
+        or source_request.expected_rows != migration.expected_rows
+        or source_request.source_revision != migration.source_revision
+        or source_request.source_query_sha256 != migration.source_query_sha256
+        or envelope.authorized_at.astimezone(UTC) < quarantined_at
+        or envelope.authorized_at.astimezone(UTC) > now.astimezone(UTC) + timedelta(minutes=5)
+    ):
+        return "blogger_replay_binding_invalid"
+    return None
 
 
 def assert_no_database_environment() -> None:
@@ -479,6 +522,8 @@ def create_app(
             migration = BloggerMigrationRequest.model_validate(body)
         except Exception as exc:
             raise HTTPException(status_code=422, detail={"code": "blogger_request_invalid"}) from exc
+        if len(canonical_json_bytes(migration.metadata_payload)) > MAX_REQUEST_BYTES:
+            raise HTTPException(status_code=413, detail={"code": "blogger_request_too_large"})
         operation = control_ledger.get_operation(str(migration.operation_id))
         if operation is None or operation.operation_kind != "ensure_master":
             raise HTTPException(status_code=409, detail={"code": "master_operation_invalid"})
@@ -494,11 +539,26 @@ def create_app(
             or service.master_instance_id != str(identity["master_instance_id"])
         ):
             raise HTTPException(status_code=409, detail={"code": "master_not_active"})
+        if migration.schema_version == BLOGGER_REPLAY_STAGE_SCHEMA:
+            source = control_ledger.blogger_migration_request(str(migration.replay_of_request_id))
+            replay_error = _validate_blogger_replay_source(
+                migration, source, now=control_ledger.clock.now()
+            )
+            if replay_error is not None:
+                raise HTTPException(status_code=409, detail={"code": replay_error})
+            assert migration.duplicate_resolution is not None
+            if control_ledger.verified_checkpoint_for_operation(
+                str(migration.duplicate_resolution.source_operation_id)
+            ) is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "blogger_replay_source_checkpoint_absent"},
+                )
         record, created = control_ledger.ensure_blogger_migration_request(
             request_id=str(migration.request_id),
             operation_id=str(migration.operation_id),
             request_sha256=migration.request_sha256,
-            request=migration.model_dump(mode="json"),
+            request=migration.metadata_payload,
         )
         return {
             "request_id": record["request_id"],
@@ -819,6 +879,21 @@ def create_app(
             str(master_instance_id),
         ):
             raise HTTPException(status_code=409, detail={"code": "blogger_receipt_epoch_mismatch"})
+        pending = control_ledger.blogger_migration_request(str(receipt.request_id))
+        if pending is None:
+            raise HTTPException(status_code=409, detail={"code": "blogger_receipt_request_mismatch"})
+        exact_request = BloggerMigrationRequest.model_validate(pending["request"])
+        if (
+            receipt.operation_id != exact_request.operation_id
+            or receipt.request_sha256 != pending["request_sha256"]
+            or receipt.export_batch_id
+            != batch_identity(exact_request.snapshot_at, exact_request.expected_rows)
+            or pending["claimed_run_id"] != run_id
+            or pending["claimed_attempt_id"] != attempt_id
+            or pending["claimed_master_instance_id"] != str(master_instance_id)
+            or pending["claimed_epoch"] != int(epoch or 0)
+        ):
+            raise HTTPException(status_code=409, detail={"code": "blogger_receipt_request_mismatch"})
         record = control_ledger.record_blogger_import_receipt(
             request_id=str(receipt.request_id),
             run_id=run_id,

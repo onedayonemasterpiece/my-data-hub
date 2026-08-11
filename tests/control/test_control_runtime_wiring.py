@@ -12,7 +12,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from my_data_hub.control_plane.adapters import LedgerControlReader
-from my_data_hub.control_plane.app import ControlPlaneSettings, create_app
+from my_data_hub.control_plane.app import (
+    ControlPlaneSettings,
+    _validate_blogger_replay_source,
+    create_app,
+)
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.control_plane.runtime import (
     ControlPlaneMasterRuntime,
@@ -29,12 +33,59 @@ from my_data_hub.providers.kaggle import (
     derive_runtime_secret,
 )
 from my_data_hub.runtime_sdk import RuntimeEvent, RuntimeEventType
+from my_data_hub.workloads.bloggers.importer import batch_identity
 from my_data_hub.workloads.bloggers.master_stage import (
+    BLOGGER_REPLAY_STAGE_SCHEMA,
+    BloggerDuplicateDecision,
+    BloggerDuplicateResolutionEnvelope,
     BloggerImportStageReceipt,
     BloggerMigrationRequest,
 )
 
 ROOT = "runtime-root-secret-long-enough-for-tests"
+
+
+def test_duplicate_replay_requires_terminal_quarantine_and_exact_source_authorization() -> None:
+    snapshot_at = datetime(2026, 8, 9, tzinfo=UTC)
+    source = BloggerMigrationRequest(
+        request_id=uuid4(), operation_id=uuid4(), project_id=uuid4(),
+        snapshot_at=snapshot_at, source_revision="a" * 40,
+    )
+    authorized_at = datetime(2026, 8, 11, tzinfo=UTC)
+    authorizer = "owner-review:test"
+    envelope = BloggerDuplicateResolutionEnvelope(
+        authorization_id=uuid4(), authorized_by=authorizer, authorized_at=authorized_at,
+        source_request_id=source.request_id, source_operation_id=source.operation_id,
+        source_request_sha256=source.request_sha256,
+        export_batch_id=batch_identity(snapshot_at, 266), project_id=source.project_id,
+        snapshot_at=snapshot_at, source_revision=source.source_revision,
+        decisions=(BloggerDuplicateDecision(
+            identity_sha256="b" * 64, canonical_record_id="record-1", canonical_actor_id=uuid4(),
+            member_record_ids=("record-1", "record-2"), decided_by=authorizer,
+            reason="The exact reviewed evidence establishes one person.",
+        ),),
+    )
+    replay = BloggerMigrationRequest(
+        schema_version=BLOGGER_REPLAY_STAGE_SCHEMA, request_id=uuid4(), operation_id=uuid4(),
+        project_id=source.project_id, snapshot_at=snapshot_at, source_revision=source.source_revision,
+        replay_of_request_id=source.request_id, duplicate_resolution=envelope,
+    )
+    record = {
+        "request_id": str(source.request_id), "operation_id": str(source.operation_id),
+        "request_sha256": source.request_sha256, "request": source.model_dump(mode="json"),
+        "state": "FAILED", "failure_code": "BloggerMigrationQuarantined",
+        "created_at": "2026-08-10T00:00:00Z", "updated_at": "2026-08-10T00:01:00Z",
+    }
+    assert _validate_blogger_replay_source(replay, record, now=authorized_at) is None
+    assert _validate_blogger_replay_source(
+        replay, {**record, "failure_code": "RuntimeError"}, now=authorized_at
+    ) == "blogger_replay_source_invalid"
+    assert _validate_blogger_replay_source(
+        replay, {**record, "request_sha256": "c" * 64}, now=authorized_at
+    ) == "blogger_replay_source_invalid"
+    assert _validate_blogger_replay_source(
+        replay, {**record, "updated_at": "2026-08-12T00:00:00Z"}, now=authorized_at
+    ) == "blogger_replay_binding_invalid"
 
 
 def test_production_runtime_rejects_an_attacker_callback_audience(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -328,7 +379,7 @@ def test_active_runtime_claims_only_its_exact_blogger_request(tmp_path: Path) ->
         run_id=identity["run_id"],
         epoch=identity["epoch"],
         request_sha256=request.request_sha256,
-        export_batch_id=uuid4(),
+        export_batch_id=batch_identity(request.snapshot_at, request.expected_rows),
         row_count=266,
         distinct_record_ids=266,
         source_file_count=14,
@@ -342,6 +393,17 @@ def test_active_runtime_claims_only_its_exact_blogger_request(tmp_path: Path) ->
         replayed_count=0,
         canonical_revision=9,
     )
+    mismatched = client.post(
+        f"/internal/runtime/blogger-migration/{identity['run_id']}/{identity['attempt_id']}/import-receipt",
+        json=import_receipt.model_copy(update={"request_sha256": "e" * 64}).model_dump(mode="json"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-MDH-Master-Instance-ID": str(identity["master_instance_id"]),
+            "X-MDH-Epoch": str(identity["epoch"]),
+        },
+    )
+    assert mismatched.status_code == 409
+    assert mismatched.json()["detail"]["code"] == "blogger_receipt_request_mismatch"
     imported = client.post(
         f"/internal/runtime/blogger-migration/{identity['run_id']}/{identity['attempt_id']}/import-receipt",
         json=import_receipt.model_dump(mode="json"),

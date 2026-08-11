@@ -59,11 +59,42 @@ Shared normalized account identities never merge during the first import. The
 whole batch remains non-canonical, every claimant is terminally quarantined, and
 the master stores a durable duplicate group plus immutable member evidence. A
 replay may proceed only with a complete
-`region-talk-blogger-duplicate-resolution-set.v1` supplied inside the ACTIVE
-master. Each decision binds the exact identity hash and member record-id set to
-one reviewed canonical source row and actor UUID. Partial, stale, inconsistent,
-or changed-account decisions are ignored for canonicalization and the prior
-quarantine remains effective.
+`region-talk-blogger-duplicate-resolution-envelope.v1`. The first request becomes
+terminal `FAILED` with the exact code `BloggerMigrationQuarantined`; its rejected
+PostgreSQL batch is nevertheless published through the normal verified-checkpoint
+shutdown path. A replay is not admitted until that exact source operation owns the
+current verified HEAD.
+
+The mode-0600 envelope contains decisions and provenance metadata, never YDB row
+payloads. It binds `authorization_id`, authorizer and authorization time to the
+source request/operation/request SHA-256, deterministic export batch, project,
+snapshot, source revision and pinned query hash. Each sorted decision binds the
+exact identity hash and member-record-id set to one reviewed canonical source row
+and actor UUID. The control plane accepts it only on a **new ACTIVE ensure
+operation**, after the source request is terminally quarantined and its checkpoint
+is current. The v2 migration request SHA-256 covers the complete envelope; the
+import receipt covers that request hash. Partial, stale, inconsistent,
+wrong-authorizer, future-dated, changed-source, or changed-account decisions fail
+closed and leave prior quarantine evidence effective.
+
+Run the replay with a fresh idempotency key:
+
+```bash
+chmod 600 /run/my-data-hub/blogger-duplicate-resolution-envelope.json
+python3 scripts/bloggers/run_final_closure.py run \
+  --idempotency-key final-blogger-resolve-20260811-01 \
+  --project-id "$PROJECT_ID" \
+  --snapshot-at 2026-08-09T00:00:00Z \
+  --source-revision "$SOURCE_COMMIT_SHA" \
+  --duplicate-resolution-envelope /run/my-data-hub/blogger-duplicate-resolution-envelope.json \
+  --receipt /run/my-data-hub/final-blogger-closure.json
+```
+
+Use
+`examples/bloggers/region-talk-blogger-duplicate-resolution-envelope.v1.example.json`
+only as a shape reference. Copy exact source bindings from the loopback request
+status; inspect durable duplicate evidence through the bounded operator profile.
+Never copy raw export rows into the envelope or the control ledger.
 
 A valid exact replay writes one append-only batch replay, one append-only
 resolution per group, and one append-only effective disposition per raw row in
@@ -72,3 +103,10 @@ rows explicitly targeting that actor are `deduplicated`. Raw payloads and their
 first quarantine dispositions are never updated. Exact later retries reuse the
 stored revision, hashes, actor/account counts, and effective dispositions, so no
 second checkpoint request or canonical revision is created.
+
+If the import-receipt response is lost, the master fences and discards that
+unacknowledged ephemeral attempt instead of promoting it. Re-running the same
+authorized resolution against the prior verified quarantine HEAD deterministically
+recreates the same append-only resolution. If the receipt was acknowledged but
+the response was lost, the runtime endpoint returns the exact stored receipt on
+retry; it cannot downgrade `IMPORT_COMMITTED` to `FAILED`.

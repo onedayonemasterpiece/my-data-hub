@@ -21,6 +21,7 @@ from my_data_hub.workloads.bloggers.closure import (
     run_blogger_closure,
 )
 from my_data_hub.workloads.bloggers.master_stage import (
+    BloggerDuplicateResolutionEnvelope,
     BloggerImportStageReceipt,
     BloggerMigrationRequest,
 )
@@ -279,6 +280,25 @@ def test_final_closure_reaches_durable_complete_only_after_restore_and_mcp() -> 
     ]
 
 
+def test_final_closure_transports_exact_duplicate_envelope_in_v2_request() -> None:
+    envelope = BloggerDuplicateResolutionEnvelope.model_validate_json(
+        Path("examples/bloggers/region-talk-blogger-duplicate-resolution-envelope.v1.example.json").read_bytes()
+    )
+    replay_config = ClosureConfig(
+        control_url=LOCAL_CONTROL_URL, idempotency_key="final-blogger-replay-test",
+        project_id=envelope.project_id, snapshot_at=envelope.snapshot_at,
+        source_revision=envelope.source_revision, duplicate_resolution=envelope,
+        timeout_seconds=600, poll_seconds=1,
+    )
+    control = FakeControl()
+    receipt = run_blogger_closure(replay_config, control=control, mcp=FakeMcp())
+    assert receipt["status"] == "DURABLE_COMPLETE"
+    assert control.created is not None
+    assert control.created.schema_version == "my-data-hub-blogger-migration-request.v2"
+    assert control.created.duplicate_resolution == envelope
+    assert control.created.replay_of_request_id == envelope.source_request_id
+
+
 def test_receipts_validate_against_strict_schemas() -> None:
     receipt = run_blogger_closure(config(), control=FakeControl(), mcp=FakeMcp())
     root = Path("schemas")
@@ -352,6 +372,33 @@ def test_control_ledger_claims_one_exact_runtime_and_preserves_metadata_only(tmp
             attempt_id="attempt",
             master_instance_id=str(MASTER),
             epoch=7,
+        )
+
+
+def test_import_receipt_response_loss_replay_returns_exact_commit_and_cannot_downgrade(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    ledger = ControlLedger(tmp_path / "control.sqlite3")
+    value = request()
+    ledger.ensure_blogger_migration_request(
+        request_id=str(value.request_id), operation_id=str(value.operation_id),
+        request_sha256=value.request_sha256, request=value.model_dump(mode="json"),
+    )
+    ledger.claim_blogger_migration_request(
+        operation_id=str(value.operation_id), run_id="run", attempt_id="attempt",
+        master_instance_id=str(MASTER), epoch=7,
+    )
+    payload = imported().model_dump(mode="json")
+    first = ledger.record_blogger_import_receipt(
+        request_id=str(value.request_id), run_id="run", attempt_id="attempt", receipt=payload,
+    )
+    replay = ledger.record_blogger_import_receipt(
+        request_id=str(value.request_id), run_id="run", attempt_id="attempt", receipt=payload,
+    )
+    assert first["state"] == replay["state"] == "IMPORT_COMMITTED"
+    assert first["import_receipt"] == replay["import_receipt"] == payload
+    with pytest.raises(Exception, match="cannot be downgraded"):
+        ledger.fail_blogger_migration_request(
+            request_id=str(value.request_id), run_id="run", attempt_id="attempt",
+            failure_code="lost_response",
         )
 
 
@@ -478,6 +525,7 @@ def test_in_master_stage_uses_epoch_bound_migration_login_and_drops_it(monkeypat
             events.append("postgres.import")
             assert kwargs["expected_row_count"] == 266
             assert kwargs["source_code_revision"] == "b" * 40
+            assert kwargs["duplicate_resolutions"] == ()
             return result
 
     monkeypatch.setitem(sys.modules, "ydb", SimpleNamespace())
@@ -502,6 +550,26 @@ def test_in_master_stage_uses_epoch_bound_migration_login_and_drops_it(monkeypat
         < events.index("ydb.denied")
         < events.index("postgres.import")
         < events.index("credential.drop")
+    )
+
+    replay_request = BloggerMigrationRequest.model_validate_json(
+        Path("examples/bloggers/blogger-migration-request.v2.example.json").read_bytes()
+    )
+
+    class ReplayImporter:
+        def import_rows(self, connection, **kwargs):
+            assert kwargs["duplicate_resolutions"] == replay_request.duplicate_resolutions
+            return result
+
+    execute_blogger_migration_stage(
+        BloggerStageContext(
+            identity=MasterIdentity(MASTER, "77777777-7777-4777-8777-777777777777", 7),
+            request=replay_request,
+            local_database_url="postgresql://postgres@/postgres?host=%2Fkaggle%2Fworking%2Fsocket&port=5432",
+            lease_until=datetime.now(UTC).replace(microsecond=0)
+            + __import__("datetime").timedelta(minutes=6),
+        ),
+        owner_connection=object(), driver=object(), importer=ReplayImporter(),
     )
 
     blocked_export = BloggerExportReceipt(

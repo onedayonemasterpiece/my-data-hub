@@ -11,7 +11,7 @@ import os
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 from uuid import UUID
 
@@ -21,16 +21,106 @@ from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.master_runtime.contracts import MasterIdentity
 from my_data_hub.master_runtime.credentials import CredentialProvisioner, LoginPolicy
 
-from .importer import BloggerSnapshotImporter, DuplicateResolution, ImportReceipt
+from .importer import (
+    BloggerSnapshotImporter,
+    DuplicateResolution,
+    ImportReceipt,
+    batch_identity,
+)
 from .schema import SOURCE_QUERY_SHA256
 from .ydb_reader import YdbBloggerSnapshot
 
 EXPECTED_BLOGGER_ROWS = 266
 BLOGGER_STAGE_SCHEMA = "my-data-hub-blogger-migration-request.v1"
+BLOGGER_REPLAY_STAGE_SCHEMA = "my-data-hub-blogger-migration-request.v2"
+BLOGGER_RESOLUTION_ENVELOPE_SCHEMA = "region-talk-blogger-duplicate-resolution-envelope.v1"
 BLOGGER_IMPORT_RECEIPT_SCHEMA = "region-talk-ydb-bloggers-import-receipt.v2"
 BLOGGER_IMPORT_RECEIPT_SCHEMA_V3 = "region-talk-ydb-bloggers-import-receipt.v3"
-MAX_REQUEST_BYTES = 16 * 1024
+MAX_REQUEST_BYTES = 256 * 1024
 MAX_RECEIPT_BYTES = 64 * 1024
+
+
+class BloggerDuplicateDecision(BaseModel):
+    """One bounded decision record; it contains no source payload fields."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    identity_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_record_id: str = Field(min_length=1, max_length=4096)
+    canonical_actor_id: UUID
+    member_record_ids: tuple[
+        Annotated[str, Field(min_length=1, max_length=4096)], ...
+    ] = Field(min_length=1, max_length=266)
+    decided_by: str = Field(min_length=1, max_length=512)
+    reason: str = Field(min_length=1, max_length=4096)
+
+    @model_validator(mode="after")
+    def exact_members(self) -> BloggerDuplicateDecision:
+        if tuple(sorted(set(self.member_record_ids))) != self.member_record_ids:
+            raise ValueError("duplicate member record ids must be sorted and unique")
+        if self.canonical_record_id not in self.member_record_ids:
+            raise ValueError("duplicate canonical record must be an explicit member")
+        return self
+
+    def to_importer_resolution(self) -> DuplicateResolution:
+        return DuplicateResolution(
+            identity_sha256=self.identity_sha256,
+            canonical_record_id=self.canonical_record_id,
+            canonical_actor_id=self.canonical_actor_id,
+            member_record_ids=self.member_record_ids,
+            decided_by=self.decided_by,
+            reason=self.reason,
+        )
+
+    @property
+    def decision_sha256(self) -> str:
+        return self.to_importer_resolution().resolution_sha256
+
+
+class BloggerDuplicateResolutionEnvelope(BaseModel):
+    """Owner-authorized metadata binding decisions to one quarantined source request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[
+        "region-talk-blogger-duplicate-resolution-envelope.v1"
+    ] = BLOGGER_RESOLUTION_ENVELOPE_SCHEMA
+    authorization_id: UUID
+    authorized_by: str = Field(min_length=1, max_length=512)
+    authorized_at: datetime
+    source_request_id: UUID
+    source_operation_id: UUID
+    source_request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    export_batch_id: UUID
+    project_id: UUID
+    snapshot_at: datetime
+    expected_rows: Literal[266] = EXPECTED_BLOGGER_ROWS
+    source_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
+    source_query_sha256: Literal[SOURCE_QUERY_SHA256] = SOURCE_QUERY_SHA256
+    decisions: tuple[BloggerDuplicateDecision, ...] = Field(min_length=1, max_length=1330)
+
+    @model_validator(mode="after")
+    def exact_binding(self) -> BloggerDuplicateResolutionEnvelope:
+        if self.authorized_at.tzinfo is None or self.snapshot_at.tzinfo is None:
+            raise ValueError("duplicate authorization and snapshot timestamps must be timezone-aware")
+        if self.export_batch_id != batch_identity(self.snapshot_at, self.expected_rows):
+            raise ValueError("duplicate envelope export batch does not match the exact snapshot")
+        identities = tuple(item.identity_sha256 for item in self.decisions)
+        if tuple(sorted(set(identities))) != identities:
+            raise ValueError("duplicate decisions must be sorted by unique identity hash")
+        if any(item.decided_by != self.authorized_by for item in self.decisions):
+            raise ValueError("every duplicate decision must bind the exact authorizer")
+        for item in self.decisions:
+            item.to_importer_resolution()
+        return self
+
+    @property
+    def envelope_sha256(self) -> str:
+        return hashlib.sha256(canonical_json_bytes(self.model_dump(mode="json"))).hexdigest()
+
+    @property
+    def importer_resolutions(self) -> tuple[DuplicateResolution, ...]:
+        return tuple(item.to_importer_resolution() for item in self.decisions)
 
 
 class BloggerMigrationRequest(BaseModel):
@@ -38,7 +128,10 @@ class BloggerMigrationRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["my-data-hub-blogger-migration-request.v1"] = BLOGGER_STAGE_SCHEMA
+    schema_version: Literal[
+        "my-data-hub-blogger-migration-request.v1",
+        "my-data-hub-blogger-migration-request.v2",
+    ] = BLOGGER_STAGE_SCHEMA
     request_id: UUID
     operation_id: UUID
     project_id: UUID
@@ -46,16 +139,47 @@ class BloggerMigrationRequest(BaseModel):
     expected_rows: Literal[266] = EXPECTED_BLOGGER_ROWS
     source_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
     source_query_sha256: Literal[SOURCE_QUERY_SHA256] = SOURCE_QUERY_SHA256
+    replay_of_request_id: UUID | None = None
+    duplicate_resolution: BloggerDuplicateResolutionEnvelope | None = None
 
     @model_validator(mode="after")
     def exact_snapshot(self) -> BloggerMigrationRequest:
         if self.snapshot_at.tzinfo is None:
             raise ValueError("blogger snapshot timestamp must be timezone-aware")
+        if self.schema_version == BLOGGER_STAGE_SCHEMA:
+            if self.replay_of_request_id is not None or self.duplicate_resolution is not None:
+                raise ValueError("v1 blogger request cannot carry duplicate decisions")
+        else:
+            envelope = self.duplicate_resolution
+            if envelope is None or self.replay_of_request_id != envelope.source_request_id:
+                raise ValueError("v2 blogger request requires one exact replay envelope")
+            if (
+                envelope.project_id != self.project_id
+                or envelope.snapshot_at.astimezone(UTC) != self.snapshot_at.astimezone(UTC)
+                or envelope.expected_rows != self.expected_rows
+                or envelope.source_revision != self.source_revision
+                or envelope.source_query_sha256 != self.source_query_sha256
+            ):
+                raise ValueError("duplicate replay envelope differs from the requested source snapshot")
         return self
 
     @property
     def request_sha256(self) -> str:
-        return hashlib.sha256(canonical_json_bytes(self.model_dump(mode="json"))).hexdigest()
+        return hashlib.sha256(canonical_json_bytes(self.metadata_payload)).hexdigest()
+
+    @property
+    def metadata_payload(self) -> dict[str, Any]:
+        """Canonical control payload; v1 remains byte/hash compatible."""
+
+        return self.model_dump(mode="json", exclude_none=True)
+
+    @property
+    def duplicate_resolutions(self) -> tuple[DuplicateResolution, ...]:
+        return self.duplicate_resolution.importer_resolutions if self.duplicate_resolution else ()
+
+
+class BloggerMigrationQuarantined(RuntimeError):
+    """The exact batch is durable but explicit duplicate authorization is required."""
 
 
 class BloggerImportStageReceipt(BaseModel):
@@ -185,7 +309,7 @@ def execute_blogger_migration_stage(
     owner_connection: Any,
     driver: Any | None = None,
     importer: BloggerSnapshotImporter | None = None,
-    duplicate_resolutions: tuple[DuplicateResolution, ...] = (),
+    duplicate_resolutions: tuple[DuplicateResolution, ...] | None = None,
     now: datetime | None = None,
 ) -> BloggerImportStageReceipt:
     """Execute denial probe + exact 266-row import under one epoch-bound login.
@@ -199,6 +323,9 @@ def execute_blogger_migration_stage(
     import ydb
 
     request = context.request
+    bound_resolutions = request.duplicate_resolutions
+    if duplicate_resolutions is not None and duplicate_resolutions != bound_resolutions:
+        raise ValueError("blogger duplicate decisions differ from the hashed request")
     observed = (now or datetime.now(UTC)).astimezone(UTC)
     expiry = min(observed + timedelta(minutes=5), context.lease_until.astimezone(UTC))
     if expiry <= observed + timedelta(seconds=270):
@@ -255,10 +382,10 @@ def execute_blogger_migration_stage(
                     expected_row_count=EXPECTED_BLOGGER_ROWS,
                     rows=rows,
                     source_code_revision=request.source_revision,
-                    duplicate_resolutions=duplicate_resolutions,
+                    duplicate_resolutions=bound_resolutions,
                 )
                 if not imported.accounting_complete:
-                    raise RuntimeError(
+                    raise BloggerMigrationQuarantined(
                         "blogger migration evidence was durably quarantined; "
                         "canonical completion and checkpoint publication are blocked"
                     )

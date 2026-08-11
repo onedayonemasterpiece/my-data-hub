@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
 import pytest
 from jsonschema import Draft202012Validator
 
+from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.workloads.bloggers.importer import (
     DuplicateResolution,
     DuplicateResolutionConflict,
@@ -15,7 +17,12 @@ from my_data_hub.workloads.bloggers.importer import (
     _DuplicateClaim,
     _observe,
 )
-from my_data_hub.workloads.bloggers.master_stage import BloggerImportStageReceipt
+from my_data_hub.workloads.bloggers.master_stage import (
+    BLOGGER_REPLAY_STAGE_SCHEMA,
+    BloggerDuplicateResolutionEnvelope,
+    BloggerImportStageReceipt,
+    BloggerMigrationRequest,
+)
 from my_data_hub.workloads.bloggers.schema import SOURCE_QUERY_SHA256
 
 
@@ -141,6 +148,14 @@ def test_duplicate_resolution_and_resolved_receipt_examples_validate() -> None:
     root = Path(__file__).resolve().parents[2]
     pairs = (
         (
+            "schemas/region-talk-blogger-duplicate-resolution-envelope.v1.schema.json",
+            "examples/bloggers/region-talk-blogger-duplicate-resolution-envelope.v1.example.json",
+        ),
+        (
+            "schemas/blogger-migration-request.v2.schema.json",
+            "examples/bloggers/blogger-migration-request.v2.example.json",
+        ),
+        (
             "schemas/region-talk-blogger-duplicate-resolution-set.v1.schema.json",
             "examples/bloggers/region-talk-blogger-duplicate-resolution-set.v1.example.json",
         ),
@@ -153,6 +168,68 @@ def test_duplicate_resolution_and_resolved_receipt_examples_validate() -> None:
         schema = json.loads((root / schema_path).read_text())
         example = json.loads((root / example_path).read_text())
         Draft202012Validator(schema).validate(example)
+
+
+def test_replay_request_hash_binds_authorization_source_and_sorted_decisions() -> None:
+    root = Path(__file__).resolve().parents[2]
+    raw = json.loads(
+        (root / "examples/bloggers/region-talk-blogger-duplicate-resolution-envelope.v1.example.json").read_text()
+    )
+    envelope = BloggerDuplicateResolutionEnvelope.model_validate(raw)
+    source = BloggerMigrationRequest(
+        request_id=envelope.source_request_id,
+        operation_id=envelope.source_operation_id,
+        project_id=envelope.project_id,
+        snapshot_at=envelope.snapshot_at,
+        source_revision=envelope.source_revision,
+    )
+    assert source.request_sha256 == envelope.source_request_sha256
+    request = BloggerMigrationRequest(
+        schema_version=BLOGGER_REPLAY_STAGE_SCHEMA,
+        request_id=UUID("66666666-6666-4666-8666-666666666666"),
+        operation_id=UUID("77777777-7777-4777-8777-777777777777"),
+        project_id=envelope.project_id,
+        snapshot_at=envelope.snapshot_at,
+        source_revision=envelope.source_revision,
+        replay_of_request_id=envelope.source_request_id,
+        duplicate_resolution=envelope,
+    )
+    assert len(envelope.envelope_sha256) == 64
+    assert len(request.request_sha256) == 64
+    assert request.duplicate_resolutions[0].resolution_sha256 == envelope.decisions[0].decision_sha256
+
+    with pytest.raises(ValueError, match="exact authorizer"):
+        BloggerDuplicateResolutionEnvelope.model_validate(
+            {**raw, "decisions": [{**raw["decisions"][0], "decided_by": "another-owner"}]}
+        )
+    with pytest.raises(ValueError, match="exact snapshot"):
+        BloggerDuplicateResolutionEnvelope.model_validate(
+            {**raw, "snapshot_at": datetime(2026, 8, 10, tzinfo=UTC).isoformat()}
+        )
+    with pytest.raises(ValueError, match="requires one exact replay envelope"):
+        BloggerMigrationRequest(
+            schema_version=BLOGGER_REPLAY_STAGE_SCHEMA,
+            request_id=UUID("88888888-8888-4888-8888-888888888888"),
+            operation_id=UUID("99999999-9999-4999-8999-999999999999"),
+            project_id=envelope.project_id,
+            snapshot_at=envelope.snapshot_at,
+            source_revision=envelope.source_revision,
+        )
+
+
+def test_v1_request_payload_and_hash_remain_backward_compatible() -> None:
+    request = BloggerMigrationRequest(
+        request_id=UUID("11111111-1111-4111-8111-111111111111"),
+        operation_id=UUID("22222222-2222-4222-8222-222222222222"),
+        project_id=UUID("33333333-3333-4333-8333-333333333333"),
+        snapshot_at=datetime(2026, 8, 9, tzinfo=UTC),
+        source_revision="b" * 40,
+    )
+    assert "replay_of_request_id" not in request.metadata_payload
+    assert "duplicate_resolution" not in request.metadata_payload
+    assert request.request_sha256 == hashlib.sha256(
+        canonical_json_bytes(request.metadata_payload)
+    ).hexdigest()
 
 
 def test_migration_keeps_original_evidence_immutable_and_exposes_only_bounded_accounting() -> None:

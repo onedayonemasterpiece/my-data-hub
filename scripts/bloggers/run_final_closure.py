@@ -20,6 +20,10 @@ from my_data_hub.workloads.bloggers.closure import (
     modern_kaggle_token_configured,
     run_blogger_closure,
 )
+from my_data_hub.workloads.bloggers.master_stage import (
+    MAX_REQUEST_BYTES,
+    BloggerDuplicateResolutionEnvelope,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,6 +35,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project-id", type=UUID, required=True)
     parser.add_argument("--snapshot-at", required=True)
     parser.add_argument("--source-revision", required=True)
+    parser.add_argument(
+        "--duplicate-resolution-envelope",
+        type=Path,
+        help="owner-reviewed, mode-0600 metadata envelope for an exact quarantined replay",
+    )
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--timeout-seconds", type=int, default=43_000)
     return parser.parse_args()
@@ -42,12 +51,22 @@ def main() -> int:
     # particular, no control request, ledger file, or receipt is created first.
     if not modern_kaggle_token_configured():
         return EXTERNAL_BLOCKED
+    duplicate_resolution = None
+    if args.duplicate_resolution_envelope is not None:
+        path = args.duplicate_resolution_envelope
+        if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
+            raise SystemExit("duplicate resolution envelope must be a regular mode-0600 file")
+        raw = path.read_bytes()
+        if len(raw) > MAX_REQUEST_BYTES:
+            raise SystemExit("duplicate resolution envelope exceeds 256 KiB")
+        duplicate_resolution = BloggerDuplicateResolutionEnvelope.model_validate_json(raw)
     config = ClosureConfig(
         control_url=args.control_url,
         idempotency_key=args.idempotency_key,
         project_id=args.project_id,
         snapshot_at=datetime.fromisoformat(args.snapshot_at.replace("Z", "+00:00")),
         source_revision=args.source_revision,
+        duplicate_resolution=duplicate_resolution,
         timeout_seconds=args.timeout_seconds,
     )
     mcp = StreamableHttpClosureMcp(args.mcp_url, os.getenv("MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN", ""))

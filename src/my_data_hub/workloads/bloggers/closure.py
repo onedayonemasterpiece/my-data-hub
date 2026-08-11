@@ -23,7 +23,10 @@ from uuid import UUID, uuid5
 from my_data_hub.hashing import canonical_json_bytes
 
 from .master_stage import (
+    BLOGGER_REPLAY_STAGE_SCHEMA,
     EXPECTED_BLOGGER_ROWS,
+    MAX_REQUEST_BYTES,
+    BloggerDuplicateResolutionEnvelope,
     BloggerImportStageReceipt,
     BloggerMigrationRequest,
 )
@@ -66,6 +69,7 @@ class ClosureConfig:
     project_id: UUID
     snapshot_at: datetime
     source_revision: str
+    duplicate_resolution: BloggerDuplicateResolutionEnvelope | None = None
     timeout_seconds: int = 43_000
     poll_seconds: float = 10.0
 
@@ -89,6 +93,14 @@ class ClosureConfig:
             raise ValueError("blogger closure snapshot timestamp must be timezone-aware")
         if len(self.source_revision) != 40 or any(c not in "0123456789abcdef" for c in self.source_revision):
             raise ValueError("source revision must be an exact lowercase commit SHA")
+        if self.duplicate_resolution is not None:
+            envelope = self.duplicate_resolution
+            if (
+                envelope.project_id != self.project_id
+                or envelope.snapshot_at.astimezone(UTC) != self.snapshot_at.astimezone(UTC)
+                or envelope.source_revision != self.source_revision
+            ):
+                raise ValueError("duplicate resolution envelope differs from closure source binding")
         if not 600 <= self.timeout_seconds <= 43_000:
             raise ValueError("blogger closure timeout must be 600..43000 seconds")
         if not 1 <= self.poll_seconds <= 60:
@@ -132,7 +144,7 @@ class LocalClosureControl:
         return self._call("GET", "/control/v1/master")
 
     def create_request(self, request: BloggerMigrationRequest) -> dict[str, Any]:
-        return self._call("POST", "/control/v1/blogger-closure/requests", request.model_dump(mode="json"))
+        return self._call("POST", "/control/v1/blogger-closure/requests", request.metadata_payload)
 
     def request_status(self, request_id: UUID) -> dict[str, Any]:
         return self._call("GET", f"/control/v1/blogger-closure/requests/{request_id}")
@@ -322,12 +334,23 @@ def run_blogger_closure(
     )
     request_id = uuid5(_CLOSURE_NAMESPACE, config.idempotency_key)
     request = BloggerMigrationRequest(
+        schema_version=(
+            BLOGGER_REPLAY_STAGE_SCHEMA
+            if config.duplicate_resolution
+            else "my-data-hub-blogger-migration-request.v1"
+        ),
         request_id=request_id,
         operation_id=operation_id,
         project_id=config.project_id,
         snapshot_at=config.snapshot_at,
         source_revision=config.source_revision,
+        replay_of_request_id=(
+            config.duplicate_resolution.source_request_id if config.duplicate_resolution else None
+        ),
+        duplicate_resolution=config.duplicate_resolution,
     )
+    if len(canonical_json_bytes(request.metadata_payload)) > MAX_REQUEST_BYTES:
+        raise BloggerClosureError("bounded blogger request exceeds 256 KiB")
     created = control.create_request(request)
     if created.get("request_sha256") != request.request_sha256:
         raise BloggerClosureError("control plane stored a different blogger request")

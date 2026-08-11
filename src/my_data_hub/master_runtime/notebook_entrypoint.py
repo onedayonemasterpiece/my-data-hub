@@ -44,6 +44,7 @@ from my_data_hub.runtime_sdk import (
     RuntimeEventType,
 )
 from my_data_hub.workloads.bloggers.master_stage import (
+    MAX_REQUEST_BYTES,
     BloggerImportStageReceipt,
     BloggerMigrationRequest,
     BloggerStageContext,
@@ -772,11 +773,14 @@ def _claim_blogger_migration(
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
-            body = json.loads(response.read(32 * 1024))
+            raw = response.read(MAX_REQUEST_BYTES + 4097)
     except Exception:
         # Claim observation is optional while no request exists, but an actual
         # claimed request is durable and will be returned on the next heartbeat.
         return None
+    if len(raw) > MAX_REQUEST_BYTES + 4096:
+        raise RuntimeError("blogger claim response exceeds 256 KiB")
+    body = json.loads(raw)
     if body.get("available") is not True:
         return None
     migration = BloggerMigrationRequest.model_validate(body.get("request"))
