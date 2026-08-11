@@ -97,6 +97,208 @@ def find_dangerous_python_process_calls(source: str) -> list[str]:
     return findings
 
 
+@dataclass(frozen=True, slots=True)
+class KaggleTransportFinding:
+    kind: str
+    line: int
+    detail: str
+
+
+def find_direct_kaggle_transports(source: str) -> list[KaggleTransportFinding]:
+    """Find direct Kaggle SDK, HTTP, or CLI transport surfaces in Python.
+
+    Imports of the repository's central adapter are intentionally not findings:
+    they are reviewed call sites, not another transport implementation.
+    """
+
+    tree = ast.parse(source)
+    findings: list[KaggleTransportFinding] = []
+
+    def qualified_name(node: ast.AST) -> str:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            parent = qualified_name(node.value)
+            return f"{parent}.{node.attr}" if parent else node.attr
+        return ""
+
+    def static_text(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            parts: list[str] = []
+            for value in node.values:
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    parts.append(value.value)
+                else:
+                    parts.append("{}")
+            return "".join(parts)
+        if isinstance(node, (ast.List, ast.Tuple)):
+            values = [static_text(value) for value in node.elts]
+            return " ".join(value for value in values if value is not None)
+        return None
+
+    assignments: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            value = static_text(node.value) if node.value is not None else None
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if value is not None:
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        assignments[target.id] = value
+
+    def resolved_text(node: ast.AST) -> str:
+        if isinstance(node, ast.Name):
+            return assignments.get(node.id, "")
+        return static_text(node) or ""
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".", 1)[0]
+                if root in {"kaggle", "kagglesdk"}:
+                    findings.append(KaggleTransportFinding("sdk_import", node.lineno, alias.name))
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            root = node.module.split(".", 1)[0]
+            if root in {"kaggle", "kagglesdk"}:
+                findings.append(KaggleTransportFinding("sdk_import", node.lineno, node.module))
+        elif isinstance(node, ast.Call):
+            function = qualified_name(node.func)
+            arguments = [*node.args, *(keyword.value for keyword in node.keywords)]
+            command = " ".join(resolved_text(argument) for argument in arguments)
+            is_http_call = function.rsplit(".", 1)[-1] in {
+                "Request",
+                "urlopen",
+                "request",
+                "get",
+                "post",
+                "put",
+                "patch",
+                "delete",
+            }
+            if is_http_call and re.search(r"https?://(?:www\.)?(?:api\.)?kaggle\.com/api/", command, re.I):
+                findings.append(KaggleTransportFinding("http", node.lineno, command))
+            process_calls = {
+                "os.system",
+                "subprocess.run",
+                "subprocess.Popen",
+                "subprocess.call",
+                "subprocess.check_call",
+                "subprocess.check_output",
+                "asyncio.create_subprocess_exec",
+                "asyncio.create_subprocess_shell",
+            }
+            if function in process_calls and re.search(
+                r"(?:^|[;&|\s])(?:python(?:3)?\s+-m\s+)?kaggle\s+"
+                r"(?:auth|config|datasets?|kernels?|competitions?|models?)(?:\s|$)",
+                command,
+                re.I,
+            ):
+                findings.append(KaggleTransportFinding("cli", node.lineno, command))
+    return sorted(findings, key=lambda item: (item.line, item.kind, item.detail))
+
+
+def find_direct_kaggle_text_transports(source: str) -> list[KaggleTransportFinding]:
+    """Find direct Kaggle transports in shell, workflow, and Notebook text."""
+
+    patterns = {
+        "sdk_import": re.compile(r"\b(?:from|import)\s+(?:kaggle(?:\.|\s)|kagglesdk(?:\.|\s))", re.I),
+        "http": re.compile(
+            r"\b(?:curl|wget)\b[^\n]*https?://(?:www\.)?(?:api\.)?kaggle\.com/api/",
+            re.I,
+        ),
+        "cli": re.compile(
+            r"(?:^|[;&|\s])(?:python(?:3)?\s+-m\s+)?kaggle\s+"
+            r"(?:auth|config|datasets?|kernels?|competitions?|models?)(?:\s|$)",
+            re.I,
+        ),
+    }
+    findings: list[KaggleTransportFinding] = []
+    for line_number, line in enumerate(source.splitlines(), start=1):
+        for kind, pattern in patterns.items():
+            if pattern.search(line):
+                findings.append(KaggleTransportFinding(kind, line_number, line.strip()))
+    return findings
+
+
+def validate_kaggle_transport(report: Report) -> None:
+    """Enforce one production Kaggle transport implementation repository-wide."""
+
+    central = "src/my_data_hub/providers/kaggle/adapter.py"
+    ignored_roots = {"tests", "docs", ".git", ".venv", ".codex", "artifacts"}
+    implementation_files: set[str] = set()
+    central_findings: list[KaggleTransportFinding] = []
+    for path in sorted(ROOT.rglob("*.py")):
+        relative = path.relative_to(ROOT).as_posix()
+        if ignored_roots.intersection(path.relative_to(ROOT).parts):
+            continue
+        try:
+            findings = find_direct_kaggle_transports(path.read_text(encoding="utf-8"))
+        except SyntaxError as exc:
+            report.fail(f"cannot parse Kaggle transport surface {relative}: {exc}")
+            continue
+        if relative == "scripts/provider/real_kaggle_matrix.py":
+            # Reviewed, deliberately unauthenticated privacy-denial proof.  It
+            # neither authenticates nor mutates and therefore is not a provider
+            # transport implementation.  Pin its exact call site so any drift
+            # requires another review.
+            findings = [
+                finding
+                for finding in findings
+                if not (
+                    finding.kind == "http"
+                    and finding.line == 96
+                    and finding.detail
+                    == "https://www.kaggle.com/api/v1/datasets/download/{}?datasetVersionNumber={} "
+                )
+            ]
+        if not findings:
+            continue
+        implementation_files.add(relative)
+        if relative == central:
+            central_findings = findings
+            continue
+        report.fail(
+            f"second direct Kaggle transport implementation in {relative}: "
+            + ", ".join(f"{finding.kind}@{finding.line}" for finding in findings)
+        )
+    text_candidates = [
+        path
+        for path in ROOT.rglob("*")
+        if path.is_file()
+        and not ignored_roots.intersection(path.relative_to(ROOT).parts)
+        and (
+            path.suffix.lower() in {".sh", ".yml", ".yaml", ".ipynb"}
+            or path.name == "Makefile"
+            or path.name.startswith("Dockerfile")
+        )
+    ]
+    for path in sorted(text_candidates):
+        relative = path.relative_to(ROOT).as_posix()
+        findings = find_direct_kaggle_text_transports(path.read_text(encoding="utf-8"))
+        if not findings:
+            continue
+        implementation_files.add(relative)
+        report.fail(
+            f"second direct Kaggle transport implementation in {relative}: "
+            + ", ".join(f"{finding.kind}@{finding.line}" for finding in findings)
+        )
+    report.check((ROOT / central).is_file(), f"central Kaggle transport implementation is missing: {central}")
+    report.check(
+        any(
+            finding.kind == "sdk_import"
+            and finding.detail == "kaggle.api.kaggle_api_extended"
+            for finding in central_findings
+        ),
+        "central Kaggle adapter lost its pinned official SDK transport",
+    )
+    report.check(
+        implementation_files == {central},
+        f"direct Kaggle transport implementation inventory drifted: {sorted(implementation_files)}",
+    )
+
+
 def validate_json_and_schemas(report: Report) -> None:
     schemas: dict[str, dict[str, Any]] = {}
     for path in sorted(SCHEMA_DIR.glob("*.json")):
@@ -1065,6 +1267,7 @@ def main() -> int:
     report = Report()
     validate_json_and_schemas(report)
     validate_python(report)
+    validate_kaggle_transport(report)
     validate_sql(report)
     validate_pipeline(report)
     validate_notebooks(report)

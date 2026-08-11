@@ -187,7 +187,33 @@ class MasterCoordinator:
         for operation in operations:
             intent = intents.get(operation.idempotency_key)
             if intent is not None:
-                handles.append(self.reconcile_operation(operation.operation_id, intent))
+                try:
+                    handle = self.reconcile_operation(operation.operation_id, intent)
+                except Exception as exc:
+                    # Provider failures are operation-scoped.  Persist bounded,
+                    # non-secret evidence without terminalizing an ambiguous
+                    # mutation, then continue reconciling independent work.
+                    # Any claimed mutation remains IN_PROGRESS, which forces
+                    # the next pass through exact provider reconciliation
+                    # before another execution.
+                    current = self.ledger.get_operation(operation.operation_id)
+                    if current is None:
+                        raise
+                    self.ledger.transition_operation(
+                        operation.operation_id,
+                        expected_state=current.state,
+                        new_state=current.state,
+                        metadata={
+                            "schema_version": "my-data-hub-master-reconciliation-failure.v1",
+                            "code": "MASTER_RECONCILIATION_EXCEPTION",
+                            "exception_type": type(exc).__name__,
+                            "recovery": "EXACT_EFFECT_RECONCILIATION_REQUIRED",
+                        },
+                    )
+                    latest = self.ledger.get_operation(operation.operation_id)
+                    assert latest is not None
+                    handle = self._handle(latest)
+                handles.append(handle)
         return handles
 
     def _observe_terminal(self, operation: Any, intent: MasterIntent) -> MasterTerminalEvidence | None:
