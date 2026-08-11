@@ -911,8 +911,8 @@ def collect_live(
     observations = Observations()
     if not modern_token_configured():
         observations.blockers["kaggle_inventory"] = (
-            "KAGGLE_MODERN_API_TOKEN_REQUIRED",
-            "KAGGLE_API_TOKEN or ~/.kaggle/access_token",
+            "KAGGLE_AUTOMATED_CREDENTIAL_REQUIRED",
+            "one control-side SDK credential mode: access token or username/key profile",
         )
     else:
         try:

@@ -524,7 +524,10 @@ def test_cli_writes_blocked_receipt_when_live_credentials_are_unavailable(
     output = tmp_path / "scheduled.json"
     observations = acceptance.Observations(
         blockers={
-            "kaggle_inventory": ("KAGGLE_MODERN_API_TOKEN_REQUIRED", "KAGGLE_API_TOKEN"),
+            "kaggle_inventory": (
+                "KAGGLE_AUTOMATED_CREDENTIAL_REQUIRED",
+                "one control-side SDK credential mode",
+            ),
             "mcp": ("MCP_SCHEDULED_CREDENTIAL_OR_ENDPOINT_MISSING", "exact HTTPS /mcp endpoint"),
         }
     )
