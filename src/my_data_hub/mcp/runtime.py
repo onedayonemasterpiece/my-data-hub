@@ -31,7 +31,7 @@ from my_data_hub.mcp.postgres_broker import (
 )
 from my_data_hub.mcp.server import MCPDependencies, create_streamable_http_app
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
-from my_data_hub.providers.kaggle import KaggleProviderAdapter
+from my_data_hub.providers.kaggle import ControlLedgerKaggleJournal, KaggleProviderAdapter
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,18 +59,31 @@ def build_remote_runtime(
     runtime_settings = settings or Settings.from_env(require_database=False)
     if not runtime_settings.mcp_remote_enabled or runtime_settings.mcp_auth_mode != "oauth":
         raise ConfigurationError("remote MCP runtime requires the production OAuth profile")
-    if runtime_settings.mcp_write_enabled and (
-        not runtime_settings.mcp_operator_profile_enabled
-        or write_gate is None
-        or provider_adapter is None
-        or sql_policy is None
-    ):
-        raise ConfigurationError(
-            "remote MCP owner/operator writes require injected gate, adapter and SQL policy dependencies"
-        )
     control_ledger = ledger or ControlLedger(
         Path(os.getenv("MY_DATA_HUB_CONTROL_LEDGER_PATH", "/state/control.sqlite3")).expanduser()
     )
+    if runtime_settings.mcp_write_enabled:
+        if not runtime_settings.mcp_operator_profile_enabled:
+            raise ConfigurationError("remote MCP writes require the explicit owner/operator profile")
+        if write_gate is None:
+            secret_path = Path(os.getenv("MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE", "")).expanduser()
+            if not secret_path.is_absolute() or secret_path.is_symlink() or not secret_path.is_file():
+                raise ConfigurationError(
+                    "remote MCP owner/operator writes require injected gate secret file"
+                )
+            mode = secret_path.stat().st_mode & 0o777
+            secret = secret_path.read_bytes().strip()
+            if mode & 0o077 or not 32 <= len(secret) <= 256:
+                raise ConfigurationError("operator write-gate secret violates the bounded private-file contract")
+            write_gate = LedgerWriteGate(control_ledger, signing_secret=secret)
+        if provider_adapter is None:
+            try:
+                provider_adapter = KaggleProviderAdapter.from_environment(
+                    journal=ControlLedgerKaggleJournal(control_ledger)
+                )
+            except Exception as exc:
+                raise ConfigurationError("operator Kaggle adapter is unavailable") from exc
+        sql_policy = sql_policy or BoundedSQLPolicy()
     authority = ControlLedgerOAuthAuthority(control_ledger)
     token_decoder = decoder or JwksJwtDecoder(
         jwks_url=runtime_settings.mcp_oauth_jwks_url,

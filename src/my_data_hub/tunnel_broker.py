@@ -31,6 +31,7 @@ DEFAULT_LISTEN_PORT = 25432
 MAX_LEASE = timedelta(minutes=10)
 MIN_CERTIFICATE_LIFETIME = timedelta(seconds=15)
 MAX_ISSUED_CERTIFICATES = 4096
+MAX_BROKER_REQUEST_BYTES = 32 * 1024
 _ACCOUNT = re.compile(r"^[a-z_][a-z0-9_-]{0,30}$")
 _REASON = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _RUNTIME_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -489,6 +490,10 @@ class TunnelBroker:
             raise TunnelBrokerError("tunnel lease must be positive and no more than 10 minutes")
         with self._lock():
             state = self._load_or_fail_closed()
+            if state.active == active:
+                self._write_krl(state.revoked_serials)
+                self._write_principal(active)
+                return active
             if active.epoch <= state.highest_epoch:
                 raise TunnelBrokerError("activation epoch must advance the durable high-water mark")
             try:
@@ -536,7 +541,11 @@ class TunnelBroker:
                 or active.lease_until <= observed
             ):
                 raise TunnelBrokerError("only the current unexpired tunnel epoch may renew")
-            if requested <= active.lease_until or requested - observed > MAX_LEASE:
+            if requested <= active.lease_until:
+                self._write_krl(state.revoked_serials)
+                self._write_principal(active)
+                return active
+            if requested - observed > MAX_LEASE:
                 raise TunnelBrokerError("renewed lease must advance within the 10 minute bound")
             renewed = ActiveTunnelLease.create(
                 master_instance_id=instance,
@@ -627,6 +636,11 @@ class TunnelBroker:
         with self._lock():
             state = self._load_or_fail_closed()
             active = state.active
+            if active is None and epoch <= state.highest_epoch:
+                self._write_principal(None)
+                self._write_krl(state.revoked_serials)
+                self.session_terminator(self.account)
+                return
             if (
                 active is None
                 or active.master_instance_id != instance
@@ -694,7 +708,7 @@ class TunnelBroker:
                     )
                     generated = temporary_root / "ephemeral-cert.pub"
                     _regular_file(generated, "issued tunnel certificate")
-                    certificate = generated.read_text(encoding="ascii")
+                    certificate = generated.read_text(encoding="ascii").strip()
                 return TunnelCertificate(
                     certificate=certificate,
                     serial=serial,

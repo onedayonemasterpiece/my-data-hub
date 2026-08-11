@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 from my_data_hub.control_plane.ledger import ControlLedger, EffectState, EventDisposition, EventReceipt
@@ -22,6 +22,43 @@ from .provider import (
 from .state_machine import MasterSignal, MasterState, transition_master
 
 MASTER_SERVICE_KIND = "postgres-master"
+
+
+class MasterTunnelAuthority(Protocol):
+    """Host-side epoch authority; it never receives PostgreSQL or business bytes."""
+
+    def activate(
+        self,
+        *,
+        master_instance_id: str,
+        run_id: str,
+        attempt_id: str,
+        epoch: int,
+        lease_until: datetime,
+        listen_port: int,
+        now: datetime,
+    ) -> object: ...
+
+    def renew(
+        self,
+        *,
+        master_instance_id: str,
+        run_id: str,
+        attempt_id: str,
+        epoch: int,
+        lease_until: datetime,
+        now: datetime,
+    ) -> object: ...
+
+    def deactivate(
+        self,
+        *,
+        master_instance_id: str,
+        run_id: str,
+        attempt_id: str,
+        epoch: int,
+        reason: str,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,10 +98,14 @@ class MasterCoordinator:
         provider: MasterRuntimeProvider,
         *,
         lease_ttl: timedelta = timedelta(minutes=5),
+        tunnel_authority: MasterTunnelAuthority | None = None,
+        tunnel_listen_port: int = 25432,
     ) -> None:
         self.ledger = ledger
         self.provider = provider
         self.lease_ttl = lease_ttl
+        self.tunnel_authority = tunnel_authority
+        self.tunnel_listen_port = tunnel_listen_port
 
     def ensure_master(self, intent: MasterIntent, *, runtime_secret: str) -> MasterHandle:
         identity = self.identity_for(intent.idempotency_key)
@@ -201,6 +242,7 @@ class MasterCoordinator:
             if MasterState(operation.state) in {MasterState.FAILED, MasterState.FENCED, MasterState.ORPHANED}:
                 return True
             event_id = str(uuid5(NAMESPACE_URL, f"provider-terminal-error:{operation.operation_id}"))
+            self._deactivate_tunnel_authority(operation.identity, "provider_terminal_failed")
             self.ledger.project_master_lifecycle(
                 operation_id=operation.operation_id,
                 service_instance_id=str(operation.identity["service_instance_id"]),
@@ -307,6 +349,7 @@ class MasterCoordinator:
                 ],
             },
         )
+        self._deactivate_tunnel_authority(operation.identity, "provider_terminal_recovered")
         for event in events:
             self._project_recovered_terminal_event(operation.operation_id, event)
         self.ledger.revoke_runtime_token(output.run_id, output.attempt_id)
@@ -382,6 +425,7 @@ class MasterCoordinator:
         event = RuntimeEvent.model_validate_json(raw_body)
         projected_events = {
             RuntimeEventType.SERVICE_READY,
+            RuntimeEventType.RUNTIME_HEARTBEAT,
             RuntimeEventType.RUNTIME_DRAINING,
             RuntimeEventType.CHECKPOINT_STARTED,
             RuntimeEventType.CHECKPOINT_VERIFIED,
@@ -442,12 +486,14 @@ class MasterCoordinator:
         elif event.event_type == RuntimeEventType.RUNTIME_HEARTBEAT:
             lease_until_raw = event.data.get("lease_until")
             if lease_until_raw:
+                lease_until = self._parse_time(str(lease_until_raw))
                 self.ledger.renew_service(
                     event.service_instance_id,
                     event.epoch,
-                    self._parse_time(str(lease_until_raw)),
+                    lease_until,
                     event.event_id,
                 )
+                self._renew_tunnel_authority(event, operation.identity, lease_until)
         elif event.event_type == RuntimeEventType.RUNTIME_DRAINING:
             self.ledger.project_master_lifecycle(
                 operation_id=operation.operation_id,
@@ -510,6 +556,7 @@ class MasterCoordinator:
                 event_id=event.event_id,
             )
         elif event.event_type == RuntimeEventType.RUNTIME_TERMINAL:
+            self._deactivate_tunnel_authority(operation.identity, "runtime_terminal")
             self.ledger.project_master_lifecycle(
                 operation_id=operation.operation_id,
                 service_instance_id=event.service_instance_id,
@@ -570,12 +617,19 @@ class MasterCoordinator:
             claimed = self.ledger.claim_effect(effect.effect_id)
             if claimed is None:
                 return None
+            if effect_kind == "trigger_run":
+                self._activate_tunnel_authority(identity)
+            # A transport exception may occur after Kaggle accepted the run.
+            # Keep the short broker lease until exact reconciliation or expiry;
+            # deactivating here would strand a legitimately started notebook.
             receipt = self.provider.execute(planned)
         elif effect.state == EffectState.IN_PROGRESS:
             reconciliation = self.provider.reconcile(planned)
             if reconciliation.status == ReconciliationStatus.AMBIGUOUS:
                 return None
             if reconciliation.status == ReconciliationStatus.ABSENT:
+                if effect_kind == "trigger_run":
+                    self._activate_tunnel_authority(identity)
                 receipt = self.provider.execute(planned)
             else:
                 assert reconciliation.receipt is not None
@@ -588,6 +642,48 @@ class MasterCoordinator:
                 str(identity["attempt_id"]), receipt.exact_ref, MasterState.REGISTERING.value
             )
         return receipt
+
+    def _activate_tunnel_authority(self, identity: dict[str, Any]) -> None:
+        authority = self.tunnel_authority
+        if authority is None:
+            return
+        now = self.ledger.clock.now()
+        authority.activate(
+            master_instance_id=str(identity["master_instance_id"]),
+            run_id=str(identity["run_id"]),
+            attempt_id=str(identity["attempt_id"]),
+            epoch=int(identity["epoch"]),
+            lease_until=now + self.lease_ttl,
+            listen_port=self.tunnel_listen_port,
+            now=now,
+        )
+
+    def _renew_tunnel_authority(
+        self, event: RuntimeEvent, identity: dict[str, Any], lease_until: datetime
+    ) -> None:
+        authority = self.tunnel_authority
+        if authority is None:
+            return
+        authority.renew(
+            master_instance_id=str(identity["master_instance_id"]),
+            run_id=event.run_id,
+            attempt_id=event.attempt_id,
+            epoch=event.epoch,
+            lease_until=lease_until,
+            now=self.ledger.clock.now(),
+        )
+
+    def _deactivate_tunnel_authority(self, identity: dict[str, Any], reason: str) -> None:
+        authority = self.tunnel_authority
+        if authority is None:
+            return
+        authority.deactivate(
+            master_instance_id=str(identity["master_instance_id"]),
+            run_id=str(identity["run_id"]),
+            attempt_id=str(identity["attempt_id"]),
+            epoch=int(identity["epoch"]),
+            reason=reason,
+        )
 
     def _operation_for_attempt(self, run_id: str, attempt_id: str):  # type: ignore[no-untyped-def]
         operation = self.ledger.operation_for_attempt(run_id, attempt_id)

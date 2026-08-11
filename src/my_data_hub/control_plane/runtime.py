@@ -33,6 +33,7 @@ from my_data_hub.providers.kaggle import (
 from my_data_hub.providers.kaggle.contracts import KaggleDatasetIdentity
 from my_data_hub.providers.models import ProviderFingerprint
 from my_data_hub.runtime_sdk import CANONICAL_RUNTIME_CALLBACK_URL
+from my_data_hub.tunnel_broker_ipc import TunnelBrokerClient
 
 
 class MasterProviderUnavailable(RuntimeError):
@@ -143,6 +144,17 @@ class TunnelCertificate:
 
 
 class TunnelCertificateBroker(Protocol):
+    def renew(
+        self,
+        *,
+        master_instance_id: str,
+        run_id: str,
+        attempt_id: str,
+        epoch: int,
+        lease_until: datetime,
+        now: datetime,
+    ) -> object: ...
+
     def issue_public_key(
         self,
         *,
@@ -437,6 +449,8 @@ def build_production_runtime(
     *,
     adapter_factory: Callable[[ControlLedgerKaggleJournal], KaggleProviderAdapter] | None = None,
     session_credentials_path: Path | None = None,
+    tunnel_authority: TunnelBrokerClient | None = None,
+    tunnel_listen_port: int = 25432,
 ) -> ProductionRuntimeBuild:
     registrar = _build_session_registrar(session_credentials_path)
     if settings is None:
@@ -452,7 +466,12 @@ def build_production_runtime(
         # unhealthy and must not leak provider exception/credential detail.
         return ProductionRuntimeBuild(None, "provider_unavailable", registrar)
     provider = KaggleMasterRuntimeProvider(adapter, settings.assets)
-    coordinator = MasterCoordinator(ledger, provider)
+    coordinator = MasterCoordinator(
+        ledger,
+        provider,
+        tunnel_authority=tunnel_authority,
+        tunnel_listen_port=tunnel_listen_port,
+    )
     receipt_root = (session_credentials_path or Path(tempfile.gettempdir())) / "acceptance-receipts"
     runtime = ControlPlaneMasterRuntime(
         ledger,

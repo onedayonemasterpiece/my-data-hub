@@ -351,6 +351,61 @@ def test_callbacks_dedupe_coalesce_size_and_fence_stale_epoch(tmp_path: Path) ->
     assert ledger.resolve_service("postgres-master") is None
 
 
+def test_tunnel_authority_activates_before_run_and_renews_on_exact_heartbeat(tmp_path: Path) -> None:
+    clock = DeterministicClock(datetime(2026, 8, 10, 18, 0, tzinfo=UTC))
+    ledger = ledger_at(tmp_path, clock)
+
+    class Authority:
+        def __init__(self) -> None:
+            self.activated: list[dict[str, object]] = []
+            self.renewed: list[dict[str, object]] = []
+
+        def activate(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.activated.append(kwargs)
+            return object()
+
+        def renew(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.renewed.append(kwargs)
+            return object()
+
+        def deactivate(self, **kwargs):  # type: ignore[no-untyped-def]
+            return None
+
+    authority = Authority()
+    coordinator = MasterCoordinator(ledger, FakeKaggleRuntime(), tunnel_authority=authority)
+    handle = coordinator.ensure_master(intent("tunnel-authority"), runtime_secret=SECRET)
+    assert len(authority.activated) == 1
+    assert authority.activated[0]["epoch"] == handle.epoch
+    ready = runtime_event(
+        handle,
+        RuntimeEventType.SERVICE_READY,
+        1,
+        clock.now(),
+        service_kind="postgres-master",
+        endpoint="tunnel://master",
+        protocol="postgresql+tls",
+        tls_fingerprint="sha256:" + "a" * 64,
+        capabilities=["sql"],
+        canonical_revision=1,
+        schema_version="1",
+        lease_until=(clock.now() + timedelta(minutes=5)).isoformat(),
+        master_instance_id=handle.master_instance_id,
+        epoch=handle.epoch,
+    )
+    coordinator.accept_runtime_event(ready, header_token=SECRET)
+    heartbeat = runtime_event(
+        handle,
+        RuntimeEventType.RUNTIME_HEARTBEAT,
+        2,
+        clock.now(),
+        lease_until=(clock.now() + timedelta(minutes=5)).isoformat(),
+    )
+    assert coordinator.accept_runtime_event(heartbeat, header_token=SECRET).disposition == EventDisposition.ACCEPTED
+    assert coordinator.accept_runtime_event(heartbeat, header_token=SECRET).disposition == EventDisposition.DUPLICATE
+    assert len(authority.renewed) == 2
+    assert all(call["master_instance_id"] == handle.master_instance_id for call in authority.renewed)
+
+
 def test_duplicate_ready_callback_repairs_crash_between_event_and_projection(tmp_path: Path) -> None:
     clock = DeterministicClock(datetime(2026, 8, 10, 18, 0, tzinfo=UTC))
     ledger = ledger_at(tmp_path, clock)

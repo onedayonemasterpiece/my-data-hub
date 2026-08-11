@@ -86,9 +86,12 @@ def test_empty_bootstrap_commands_are_deterministic_and_no_shell(tmp_path: Path)
 
 def test_reverse_tunnel_is_loopback_only_and_disables_shell_agent_and_unknown_hosts(tmp_path: Path) -> None:
     identity = tmp_path / "id_ed25519"
+    certificate = tmp_path / "id_ed25519-cert.pub"
     known_hosts = tmp_path / "known_hosts"
     identity.write_text("private")
     identity.chmod(0o600)
+    certificate.write_text("ssh-ed25519-cert-v01@openssh.com fixture")
+    certificate.chmod(0o600)
     known_hosts.write_text("gateway fixture-key")
     spec = ReverseTunnelSpec(
         gateway_host="gateway.example.test",
@@ -98,6 +101,7 @@ def test_reverse_tunnel_is_loopback_only_and_disables_shell_agent_and_unknown_ho
         remote_bind_port=25432,
         local_postgres_port=15432,
         identity_file=identity,
+        certificate_file=certificate,
         known_hosts_file=known_hosts,
         expires_at=NOW + timedelta(minutes=5),
     )
@@ -106,6 +110,7 @@ def test_reverse_tunnel_is_loopback_only_and_disables_shell_agent_and_unknown_ho
     assert "-N -T" in joined
     assert "StrictHostKeyChecking=yes" in joined
     assert "ForwardAgent=no" in joined
+    assert f"CertificateFile={certificate}" in joined
     assert "127.0.0.1:25432:127.0.0.1:15432" in joined
 
     public = replace(spec, remote_bind_host="0.0.0.0")

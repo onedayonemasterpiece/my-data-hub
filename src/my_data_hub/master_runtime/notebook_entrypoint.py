@@ -6,6 +6,8 @@ import json
 import os
 import secrets
 import stat
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -583,6 +585,160 @@ def _activation_url(callback_url: str, run_id: str, attempt_id: str) -> str:
     return f"{callback_url.removesuffix(suffix)}/internal/runtime/activation/{run_id}/{attempt_id}"
 
 
+def _tunnel_certificate_url(callback_url: str, run_id: str, attempt_id: str) -> str:
+    suffix = "/internal/runtime/events"
+    if callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
+        raise ValueError("callback URL does not match the owner-pinned HTTPS runtime endpoint")
+    return f"{callback_url.removesuffix(suffix)}/internal/runtime/tunnel-certificates/{run_id}/{attempt_id}"
+
+
+def _tunnel_lease_url(callback_url: str, run_id: str, attempt_id: str) -> str:
+    suffix = "/internal/runtime/events"
+    if callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
+        raise ValueError("callback URL does not match the owner-pinned HTTPS runtime endpoint")
+    return f"{callback_url.removesuffix(suffix)}/internal/runtime/tunnel-leases/{run_id}/{attempt_id}"
+
+
+def _renew_registration_tunnel_lease(
+    *,
+    config: NotebookMasterConfig,
+    callback_url: str,
+    run_secret: str,
+    lease_until: datetime,
+    timeout_seconds: int = 90,
+) -> None:
+    payload = canonical_json_bytes(
+        {
+            "master_instance_id": str(config.master_instance_id),
+            "epoch": config.epoch,
+            "lease_until": lease_until.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        }
+    )
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        request = urllib.request.Request(
+            _tunnel_lease_url(callback_url, config.run_id, config.attempt_id),
+            data=payload,
+            headers={"Authorization": f"Bearer {run_secret}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=min(20, timeout_seconds)) as response:
+                body = json.loads(response.read(8 * 1024))
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {409, 503} or time.monotonic() + 2 >= deadline:
+                raise
+        except (OSError, TimeoutError, ValueError):
+            if time.monotonic() + 2 >= deadline:
+                raise
+        time.sleep(2)
+    try:
+        observed = datetime.fromisoformat(str(body.get("lease_until", "")).replace("Z", "+00:00")).astimezone(UTC)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RuntimeError("tunnel lease renewal response is malformed") from exc
+    if body.get("renewed") is not True or set(body) != {"renewed", "lease_until"} or observed < lease_until:
+        raise RuntimeError("tunnel lease renewal response differs from the exact contract")
+
+
+@dataclass(frozen=True, slots=True)
+class EphemeralTunnelIdentity:
+    root: Path
+    private_key: Path
+    certificate: Path
+
+    def cleanup(self) -> None:
+        for path in (self.certificate, self.private_key.with_suffix(".pub"), self.private_key):
+            with suppress(OSError):
+                path.unlink()
+        with suppress(OSError):
+            self.root.rmdir()
+
+
+def _issue_ephemeral_tunnel_identity(
+    *,
+    config: NotebookMasterConfig,
+    callback_url: str,
+    run_secret: str,
+    valid_before: datetime,
+) -> EphemeralTunnelIdentity:
+    """Create a task-local SSH key and exchange only its public half.
+
+    The private key lives under the notebook process temporary directory rather
+    than ``/kaggle/working`` so Kaggle output collection cannot publish it.  It
+    is never sent to the control plane or stored in a Dataset/checkpoint.
+    """
+
+    root = Path(tempfile.mkdtemp(prefix="my-data-hub-tunnel-", dir=os.getenv("TMPDIR", "/tmp")))
+    os.chmod(root, 0o700)
+    private_key = root / "identity"
+    certificate = root / "identity-cert.pub"
+    identity = EphemeralTunnelIdentity(root, private_key, certificate)
+    try:
+        completed = subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(private_key)],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=15,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError("ephemeral tunnel key generation failed")
+        os.chmod(private_key, 0o600)
+        public_key_path = private_key.with_suffix(".pub")
+        if public_key_path.is_symlink() or not public_key_path.is_file():
+            raise RuntimeError("ephemeral tunnel public key is absent")
+        public_key = public_key_path.read_text(encoding="ascii").strip()
+        # Strip the optional ssh-keygen comment; the control endpoint accepts
+        # exactly one algorithm/blob pair and never receives private material.
+        public_parts = public_key.split()
+        if len(public_parts) < 2:
+            raise RuntimeError("ephemeral tunnel public key is malformed")
+        public_key = " ".join(public_parts[:2])
+        payload = canonical_json_bytes(
+            {
+                "master_instance_id": str(config.master_instance_id),
+                "epoch": config.epoch,
+                "public_key": public_key,
+                "valid_before": valid_before.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            }
+        )
+        request = urllib.request.Request(
+            _tunnel_certificate_url(callback_url, config.run_id, config.attempt_id),
+            data=payload,
+            headers={"Authorization": f"Bearer {run_secret}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = json.loads(response.read(32 * 1024))
+        required = {"certificate", "serial", "principal", "valid_before", "listen_host", "listen_port"}
+        if not isinstance(body, dict) or set(body) != required:
+            raise RuntimeError("tunnel certificate response differs from the exact contract")
+        observed_expiry = datetime.fromisoformat(str(body["valid_before"]).replace("Z", "+00:00")).astimezone(UTC)
+        if (
+            observed_expiry != valid_before
+            or body["listen_host"] != "127.0.0.1"
+            or int(body["listen_port"]) != config.tunnel_remote_port
+            or not str(body["principal"]).startswith("mdh-")
+            or int(body["serial"]) < 1
+        ):
+            raise RuntimeError("tunnel certificate authority returned a mismatched epoch binding")
+        encoded = str(body["certificate"]).encode("ascii")
+        if not encoded.startswith(b"ssh-ed25519-cert-v01@openssh.com ") or len(encoded) > 16 * 1024:
+            raise RuntimeError("tunnel certificate is malformed or oversized")
+        descriptor = os.open(certificate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded.rstrip(b"\n") + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        public_key_path.unlink()
+        return identity
+    except Exception:
+        identity.cleanup()
+        raise
+
+
 def _blogger_migration_url(callback_url: str, run_id: str, attempt_id: str, suffix: str = "") -> str:
     events_suffix = "/internal/runtime/events"
     if callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
@@ -1026,19 +1182,84 @@ def run_master(
         binaries=PostgresBinaries.discover(config.postgres_bin),
         config=PostgresConfig(config.postgres_port, tls_certificate, tls_key),
     )
-    tunnel = TunnelSupervisor(
-        ReverseTunnelSpec(
-            gateway_host=config.tunnel_gateway_host,
-            gateway_port=config.tunnel_gateway_port,
-            gateway_user=config.tunnel_gateway_user,
-            remote_bind_host="127.0.0.1",
-            remote_bind_port=config.tunnel_remote_port,
-            local_postgres_port=config.postgres_port,
-            identity_file=Path(_required("MY_DATA_HUB_TUNNEL_IDENTITY_FILE")),
-            known_hosts_file=Path(_required("MY_DATA_HUB_TUNNEL_KNOWN_HOSTS")),
-            expires_at=now + timedelta(seconds=max(1.0, session_deadline - time.monotonic())),
-        )
+    initial_registration_lease = now + timedelta(minutes=4)
+    _renew_registration_tunnel_lease(
+        config=config,
+        callback_url=callback_url,
+        run_secret=run_secret,
+        lease_until=initial_registration_lease,
     )
+    class LazyCertifiedTunnel:
+        def __init__(self) -> None:
+            self.supervisor: TunnelSupervisor | None = None
+
+        def start(self, *, now: datetime) -> None:
+            del now  # Bootstrap time may be stale after a long restore.
+            observed = datetime.now(UTC)
+            valid_before = min(lease_until, observed + timedelta(minutes=4))
+            if valid_before <= observed + timedelta(seconds=15):
+                raise RuntimeError("REGISTERING lease is too short for an epoch-bound tunnel certificate")
+            tunnel_identity = _issue_ephemeral_tunnel_identity(
+                config=config,
+                callback_url=callback_url,
+                run_secret=run_secret,
+                valid_before=valid_before,
+            )
+            self.supervisor = TunnelSupervisor(
+                ReverseTunnelSpec(
+                    gateway_host=config.tunnel_gateway_host,
+                    gateway_port=config.tunnel_gateway_port,
+                    gateway_user=config.tunnel_gateway_user,
+                    remote_bind_host="127.0.0.1",
+                    remote_bind_port=config.tunnel_remote_port,
+                    local_postgres_port=config.postgres_port,
+                    identity_file=tunnel_identity.private_key,
+                    certificate_file=tunnel_identity.certificate,
+                    known_hosts_file=Path(_required("MY_DATA_HUB_TUNNEL_KNOWN_HOSTS")),
+                    expires_at=observed
+                    + timedelta(seconds=max(1.0, session_deadline - time.monotonic())),
+                    delete_identity_on_stop=True,
+                )
+            )
+            try:
+                self.supervisor.start(now=observed)
+            except Exception:
+                self.supervisor.stop()
+                raise
+
+        def poll(self, *, now: datetime) -> None:
+            if self.supervisor is None:
+                raise RuntimeError("certified tunnel is not started")
+            self.supervisor.poll(now=now)
+
+        def stop(self) -> None:
+            if self.supervisor is not None:
+                self.supervisor.stop()
+                self.supervisor = None
+
+    tunnel = LazyCertifiedTunnel()
+    registration_lease_stop = threading.Event()
+    registration_lease_errors: list[BaseException] = []
+
+    def keep_registration_tunnel_lease() -> None:
+        while not registration_lease_stop.wait(30):
+            try:
+                _renew_registration_tunnel_lease(
+                    config=config,
+                    callback_url=callback_url,
+                    run_secret=run_secret,
+                    lease_until=datetime.now(UTC) + timedelta(minutes=4),
+                )
+            except BaseException as exc:
+                registration_lease_errors.append(exc)
+                return
+
+    registration_lease_thread = threading.Thread(
+        target=keep_registration_tunnel_lease,
+        name="mdh-tunnel-registration-lease",
+        daemon=True,
+    )
+    registration_lease_thread.start()
     database_url = _local_url(paths, config.postgres_port)
     gate_connection: Any | None = None
 
@@ -1118,15 +1339,28 @@ def run_master(
         announce_ready=announce,
         endpoint=endpoint,
     )
-    ready = bootstrap.run(
-        BootstrapRequest(
-            identity=identity,
-            source=config.boot_source,
-            checkpoint_directory=config.checkpoint_directory,
-            lease_until=lease_until,
-            now=now,
+    try:
+        ready = bootstrap.run(
+            BootstrapRequest(
+                identity=identity,
+                source=config.boot_source,
+                checkpoint_directory=config.checkpoint_directory,
+                lease_until=lease_until,
+                now=now,
+            )
         )
-    )
+    except Exception:
+        # Bootstrap may fail before it starts the SSH subprocess, but the
+        # task-local private key must still be destroyed.
+        tunnel.stop()
+        raise
+    finally:
+        registration_lease_stop.set()
+        registration_lease_thread.join(timeout=5)
+    if registration_lease_errors:
+        tunnel.stop()
+        supervisor.stop(immediate=True)
+        raise RuntimeError("tunnel registration lease renewal failed") from registration_lease_errors[0]
     try:
         credential_roles = _wait_for_activation(
             _activation_url(callback_url, config.run_id, config.attempt_id), run_secret, identity

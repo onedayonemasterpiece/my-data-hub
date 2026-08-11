@@ -4,6 +4,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -154,6 +155,10 @@ def test_runtime_callback_reaches_active_through_production_app_wiring(tmp_path:
                 listen_port=25432,
             )
 
+        def renew(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls.append(kwargs)
+            return SimpleNamespace(lease_until=kwargs["lease_until"])
+
     certificate_broker = CertificateBroker()
     app = create_app(
         ControlPlaneSettings(ledger_path=path),
@@ -213,6 +218,17 @@ def test_runtime_callback_reaches_active_through_production_app_wiring(tmp_path:
     key_blob = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20" + b"k" * 32
     public_key = "ssh-ed25519 " + base64.b64encode(key_blob).decode()
     valid_before = datetime.now(UTC) + timedelta(minutes=2)
+    lease = TestClient(app).post(
+        f"/internal/runtime/tunnel-leases/{identity['run_id']}/{identity['attempt_id']}",
+        json={
+            "master_instance_id": identity["master_instance_id"],
+            "epoch": identity["epoch"],
+            "lease_until": valid_before.isoformat(),
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert lease.status_code == 200
+    assert lease.json()["renewed"] is True
     certificate = TestClient(app).post(
         f"/internal/runtime/tunnel-certificates/{identity['run_id']}/{identity['attempt_id']}",
         json={
@@ -227,7 +243,7 @@ def test_runtime_callback_reaches_active_through_production_app_wiring(tmp_path:
     assert certificate.json()["listen_host"] == "127.0.0.1"
     assert certificate.json()["listen_port"] == 25432
     assert "private" not in certificate.text.casefold()
-    call = certificate_broker.calls[0]
+    call = certificate_broker.calls[1]
     assert call["run_id"] == str(identity["run_id"])
     assert call["attempt_id"] == str(identity["attempt_id"])
     assert call["master_instance_id"] == str(identity["master_instance_id"])

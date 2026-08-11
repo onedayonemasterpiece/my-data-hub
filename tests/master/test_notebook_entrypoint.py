@@ -618,6 +618,9 @@ class _Process:
     def stop(self, **kwargs):  # type: ignore[no-untyped-def]
         self.events.append(f"{self.name}.stop")
 
+    def start(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.events.append(f"{self.name}.start")
+
 
 class _Coordinator:
     def __init__(self, events: list[str], *, fail: bool = False) -> None:
@@ -963,7 +966,6 @@ def test_run_master_suppresses_only_callback_lease_closure_after_exact_terminal_
         "MY_DATA_HUB_RUN_SECRET": "run-secret-long-enough",
         "MY_DATA_HUB_POSTGRES_TLS_CERT": str(tmp_path / "tls.crt"),
         "MY_DATA_HUB_POSTGRES_TLS_KEY": str(tmp_path / "tls.key"),
-        "MY_DATA_HUB_TUNNEL_IDENTITY_FILE": str(tmp_path / "tunnel.key"),
         "MY_DATA_HUB_TUNNEL_KNOWN_HOSTS": str(tmp_path / "known_hosts"),
     }.items():
         monkeypatch.setenv(name, value)
@@ -1001,8 +1003,10 @@ def test_run_master_suppresses_only_callback_lease_closure_after_exact_terminal_
     class Bootstrap:
         def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
             self.announce_ready = kwargs["announce_ready"]
+            self.tunnel = kwargs["tunnel"]
 
         def run(self, request):  # type: ignore[no-untyped-def]
+            self.tunnel.start(now=datetime.now(UTC))
             ready = SimpleNamespace(
                 lease_until=datetime.now(UTC) + timedelta(seconds=120),
                 event_payload=lambda: {"epoch": 1},
@@ -1049,6 +1053,17 @@ def test_run_master_suppresses_only_callback_lease_closure_after_exact_terminal_
     )
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.PostgresSupervisor", lambda **kwargs: postgres)
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.TunnelSupervisor", lambda spec: tunnel)
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._issue_ephemeral_tunnel_identity",
+        lambda **kwargs: SimpleNamespace(
+            private_key=tmp_path / "ephemeral-tunnel-key",
+            certificate=tmp_path / "ephemeral-tunnel-key-cert.pub",
+        ),
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._renew_registration_tunnel_lease",
+        lambda **kwargs: None,
+    )
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.MasterBootstrap", Bootstrap)
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.DatabaseGate", Gate)
     monkeypatch.setattr(
@@ -1093,7 +1108,6 @@ def test_run_master_never_checkpoints_unacknowledged_blogger_import_receipt(
         "MY_DATA_HUB_RUN_SECRET": "run-secret-long-enough",
         "MY_DATA_HUB_POSTGRES_TLS_CERT": str(tmp_path / "tls.crt"),
         "MY_DATA_HUB_POSTGRES_TLS_KEY": str(tmp_path / "tls.key"),
-        "MY_DATA_HUB_TUNNEL_IDENTITY_FILE": str(tmp_path / "tunnel.key"),
         "MY_DATA_HUB_TUNNEL_KNOWN_HOSTS": str(tmp_path / "known_hosts"),
     }.items():
         monkeypatch.setenv(name, value)
@@ -1122,8 +1136,10 @@ def test_run_master_never_checkpoints_unacknowledged_blogger_import_receipt(
     class Bootstrap:
         def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
             self.announce_ready = kwargs["announce_ready"]
+            self.tunnel = kwargs["tunnel"]
 
         def run(self, request):  # type: ignore[no-untyped-def]
+            self.tunnel.start(now=datetime.now(UTC))
             ready = SimpleNamespace(
                 lease_until=datetime.now(UTC) + timedelta(seconds=120),
                 event_payload=lambda: {"epoch": 1},
@@ -1190,6 +1206,17 @@ def test_run_master_never_checkpoints_unacknowledged_blogger_import_receipt(
     )
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.PostgresSupervisor", lambda **kwargs: postgres)
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.TunnelSupervisor", lambda spec: tunnel)
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._issue_ephemeral_tunnel_identity",
+        lambda **kwargs: SimpleNamespace(
+            private_key=tmp_path / "ephemeral-tunnel-key",
+            certificate=tmp_path / "ephemeral-tunnel-key-cert.pub",
+        ),
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._renew_registration_tunnel_lease",
+        lambda **kwargs: None,
+    )
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.MasterBootstrap", Bootstrap)
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.DatabaseGate", Gate)
     monkeypatch.setattr(

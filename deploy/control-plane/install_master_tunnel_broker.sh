@@ -11,15 +11,20 @@ umask 077
 require_command() {
   command -v "$1" >/dev/null || { echo "$1 is required" >&2; exit 2; }
 }
-for command_name in chmod getent grep id install mktemp python3 ssh-keygen sshd systemctl useradd usermod; do
+for command_name in chmod getent grep id install mktemp python3 rm ssh-keygen sshd systemctl useradd usermod; do
   require_command "$command_name"
 done
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 source_root="$(cd -- "$script_dir/../.." && pwd -P)"
 broker_source="$source_root/src/my_data_hub/tunnel_broker.py"
+broker_ipc_source="$source_root/src/my_data_hub/tunnel_broker_ipc.py"
 [[ -f "$broker_source" && ! -L "$broker_source" ]] || {
   echo "tunnel broker source must be a regular non-symlink file" >&2
+  exit 2
+}
+[[ -f "$broker_ipc_source" && ! -L "$broker_ipc_source" ]] || {
+  echo "tunnel broker IPC source must be a regular non-symlink file" >&2
   exit 2
 }
 
@@ -30,6 +35,10 @@ account_home="${MY_DATA_HUB_TUNNEL_ACCOUNT_HOME:-/var/lib/my-data-hub/tunnel-acc
 ca_private="${MY_DATA_HUB_TUNNEL_CA_PRIVATE_KEY:-/etc/my-data-hub/tunnel-user-ca}"
 sshd_fragment="${MY_DATA_HUB_TUNNEL_SSHD_FRAGMENT:-/etc/ssh/sshd_config.d/60-my-data-hub-master-tunnel.conf}"
 broker_program="${MY_DATA_HUB_TUNNEL_BROKER_PROGRAM:-/usr/local/libexec/my-data-hub-tunnel-broker}"
+broker_ipc_program="${MY_DATA_HUB_TUNNEL_BROKER_IPC_PROGRAM:-/usr/local/libexec/my-data-hub-tunnel-broker-ipc}"
+broker_socket="${MY_DATA_HUB_TUNNEL_BROKER_SOCKET:-/run/my-data-hub/tunnel-broker/control.sock}"
+control_uid="${MY_DATA_HUB_CONTROL_UID:-1000}"
+control_gid="${MY_DATA_HUB_CONTROL_GID:-1000}"
 unit_root="${MY_DATA_HUB_TUNNEL_SYSTEMD_DIR:-/etc/systemd/system}"
 
 [[ "$account" =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] || { echo "invalid tunnel account" >&2; exit 2; }
@@ -37,12 +46,21 @@ unit_root="${MY_DATA_HUB_TUNNEL_SYSTEMD_DIR:-/etc/systemd/system}"
   echo "tunnel listen port must be within 1024..65535" >&2
   exit 2
 }
-for path_value in "$state_root" "$account_home" "$ca_private" "$sshd_fragment" "$broker_program" "$unit_root"; do
+for path_value in "$state_root" "$account_home" "$ca_private" "$sshd_fragment" "$broker_program" \
+  "$broker_ipc_program" "$broker_socket" "$unit_root"; do
   [[ "$path_value" = /* && "$path_value" != *[$'\n\r\t ']* ]] || {
     echo "tunnel broker paths must be absolute and whitespace-free" >&2
     exit 2
   }
 done
+[[ "$control_uid" =~ ^[0-9]+$ && "$control_gid" =~ ^[0-9]+$ ]] || {
+  echo "control UID/GID must be numeric" >&2
+  exit 2
+}
+(( control_uid > 0 && control_gid > 0 )) || {
+  echo "control UID/GID must be non-root" >&2
+  exit 2
+}
 for directory_path in "$state_root" "$account_home" "$(dirname "$ca_private")" \
   "$(dirname "$sshd_fragment")" "$(dirname "$broker_program")" "$unit_root"; do
   [[ ! -L "$directory_path" ]] || { echo "tunnel broker directories may not be symbolic links" >&2; exit 2; }
@@ -72,6 +90,8 @@ install -d -o root -g root -m 0700 "$state_root" "$(dirname "$ca_private")"
 install -d -o "$account" -g "$account" -m 0700 "$account_home"
 install -d -o root -g root -m 0755 "$(dirname "$broker_program")" "$(dirname "$sshd_fragment")" "$unit_root"
 install -o root -g root -m 0755 "$broker_source" "$broker_program"
+install -o root -g root -m 0644 "$broker_source" "$(dirname "$broker_ipc_program")/tunnel_broker.py"
+install -o root -g root -m 0755 "$broker_ipc_source" "$broker_ipc_program"
 
 if [[ ! -e "$ca_private" && ! -e "$ca_private.pub" ]]; then
   ssh-keygen -q -t ed25519 -N '' -C 'my-data-hub master tunnel user CA' -f "$ca_private"
@@ -173,7 +193,34 @@ if ! systemctl reload ssh.service 2>/dev/null && ! systemctl reload sshd.service
   exit 2
 fi
 systemctl enable --now my-data-hub-master-tunnel-reconcile.timer
+ipc_unit="$unit_root/my-data-hub-master-tunnel-broker.service"
+cat > "$ipc_unit" <<UNIT
+[Unit]
+Description=Root-owned my-data-hub master tunnel certificate broker
+After=network.target ssh.service sshd.service
+Before=my-data-hub-master-tunnel-reconcile.timer
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/install -d -o root -g $control_gid -m 0750 $(dirname "$broker_socket")
+ExecStartPre=/usr/bin/rm -f $broker_socket
+ExecStart=$broker_ipc_program --state-root $state_root --ca-private-key $ca_private --account $account --socket $broker_socket --allowed-uid $control_uid --socket-gid $control_gid
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=$state_root $(dirname "$broker_socket")
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+chmod 0644 "$ipc_unit"
+systemctl daemon-reload
+systemctl enable --now my-data-hub-master-tunnel-broker.service
 trap - EXIT
 cleanup
-printf 'master_tunnel_broker_installed=true\naccount=%s\nlisten=127.0.0.1:%s\nactive_epoch=none_until_authenticated_activation\n' \
-  "$account" "$listen_port"
+printf 'master_tunnel_broker_installed=true\naccount=%s\nlisten=127.0.0.1:%s\nsocket=%s\nactive_epoch=none_until_authenticated_activation\n' \
+  "$account" "$listen_port" "$broker_socket"

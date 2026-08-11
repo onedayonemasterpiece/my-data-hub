@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import subprocess
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -24,8 +25,10 @@ class ReverseTunnelSpec:
     remote_bind_port: int
     local_postgres_port: int
     identity_file: Path
+    certificate_file: Path
     known_hosts_file: Path
     expires_at: datetime
+    delete_identity_on_stop: bool = False
 
     def validate(self, *, now: datetime) -> None:
         if not self.gateway_host or any(char.isspace() for char in self.gateway_host):
@@ -40,11 +43,13 @@ class ReverseTunnelSpec:
         for port in (self.gateway_port, self.remote_bind_port, self.local_postgres_port):
             if not 1 <= port <= 65535:
                 raise ValueError("tunnel port is outside 1..65535")
-        for path in (self.identity_file, self.known_hosts_file):
+        for path in (self.identity_file, self.certificate_file, self.known_hosts_file):
             if not path.is_file() or path.is_symlink():
                 raise ValueError(f"tunnel trust material must be a regular file: {path}")
         if self.identity_file.stat().st_mode & 0o077:
             raise ValueError("SSH identity must not be accessible by group/other")
+        if self.certificate_file.stat().st_mode & 0o077:
+            raise ValueError("SSH certificate must not be accessible by group/other")
         if require_utc(self.expires_at, "expires_at") <= require_utc(now, "now"):
             raise ValueError("tunnel credential is expired")
 
@@ -59,6 +64,8 @@ class ReverseTunnelSpec:
             str(self.gateway_port),
             "-i",
             str(self.identity_file.resolve()),
+            "-o",
+            f"CertificateFile={self.certificate_file.resolve()}",
             "-o",
             "BatchMode=yes",
             "-o",
@@ -116,9 +123,7 @@ class TunnelSupervisor:
 
     def stop(self) -> None:
         process = self._process
-        if process is None:
-            return
-        if process.poll() is None:
+        if process is not None and process.poll() is None:
             process.terminate()
             try:
                 process.wait(timeout=5)
@@ -126,3 +131,9 @@ class TunnelSupervisor:
                 process.kill()
                 process.wait(timeout=5)
         self._process = None
+        if self.spec.delete_identity_on_stop:
+            for path in (self.spec.certificate_file, self.spec.identity_file):
+                with suppress(FileNotFoundError):
+                    path.unlink()
+            with suppress(OSError):
+                self.spec.identity_file.parent.rmdir()

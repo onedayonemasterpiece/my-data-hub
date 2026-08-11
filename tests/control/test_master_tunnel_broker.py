@@ -14,6 +14,7 @@ from my_data_hub.tunnel_broker import (
     TunnelBrokerError,
     render_sshd_config,
 )
+from my_data_hub.tunnel_broker_ipc import _dispatch
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "deploy" / "control-plane" / "install_master_tunnel_broker.sh"
@@ -309,13 +310,23 @@ def test_stale_epoch_wrong_identity_and_overlong_certificate_are_denied(tmp_path
             valid_before=NOW + timedelta(minutes=6),
             now=NOW,
         )
+    replay = broker.activate(
+        master_instance_id=INSTANCE,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        epoch=2,
+        lease_until=NOW + timedelta(minutes=5),
+        listen_port=25432,
+        now=NOW,
+    )
+    assert replay.principal == active_principal.strip()
     with pytest.raises(TunnelBrokerError, match="advance"):
         broker.activate(
             master_instance_id=INSTANCE,
             run_id=RUN_ID,
             attempt_id=ATTEMPT_ID,
             epoch=2,
-            lease_until=NOW + timedelta(minutes=5),
+            lease_until=NOW + timedelta(minutes=4),
             listen_port=25432,
             now=NOW,
         )
@@ -337,6 +348,9 @@ def test_root_installer_is_explicitly_gated_and_does_not_add_listener_or_vpn(tmp
         "--shell /usr/sbin/nologin",
         "sshd -t",
         "my-data-hub-master-tunnel-reconcile.timer",
+        "my-data-hub-master-tunnel-broker.service",
+        "--allowed-uid",
+        "control.sock",
         "OnUnitActiveSec=5s",
         "systemctl reload ssh.service",
     ):
@@ -347,3 +361,38 @@ def test_root_installer_is_explicitly_gated_and_does_not_add_listener_or_vpn(tmp
     assert "postgresql://" not in lowered
     assert "pgdata" not in lowered
     assert "business" not in lowered
+
+
+def test_local_ipc_dispatch_accepts_only_exact_epoch_metadata(tmp_path: Path) -> None:
+    broker, _terminated, _ca = _broker(tmp_path)
+    now = datetime.now(UTC)
+    active = _dispatch(
+        broker,
+        {
+            "action": "activate",
+            "payload": {
+                "master_instance_id": INSTANCE,
+                "run_id": RUN_ID,
+                "attempt_id": ATTEMPT_ID,
+                "epoch": 9,
+                "lease_until": (now + timedelta(minutes=5)).isoformat(),
+                "listen_port": 25432,
+            },
+        },
+    )
+    assert active["epoch"] == 9
+    with pytest.raises(TunnelBrokerError, match="fields"):
+        _dispatch(
+            broker,
+            {
+                "action": "deactivate",
+                "payload": {
+                    "master_instance_id": INSTANCE,
+                    "run_id": RUN_ID,
+                    "attempt_id": ATTEMPT_ID,
+                    "epoch": 9,
+                    "reason": "test",
+                    "database_url": "forbidden",
+                },
+            },
+        )

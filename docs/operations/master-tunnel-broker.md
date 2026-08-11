@@ -37,9 +37,11 @@ The runtime-to-control protocol is:
    bearer, exact run/attempt identity, REGISTERING or ACTIVE state, and exact master
    instance/epoch. ACTIVE certificate expiry may not exceed the current lease;
    REGISTERING expiry is bounded to five minutes.
-4. An injected `TunnelBroker.issue_public_key(...)` returns only the public OpenSSH
-   certificate, serial, epoch principal, expiry, and exact loopback listener. The
-   private CA remains server-side and mode `0600`.
+4. The control container uses the mounted Unix socket and `TunnelBrokerClient` to
+   call the root-owned broker. Peer UID, socket mode, exact JSON fields, and a
+   32-KiB metadata ceiling are enforced before `issue_public_key(...)`. The reply
+   contains only the public OpenSSH certificate, serial, epoch principal, expiry,
+   and exact loopback listener. The private CA remains host-side and mode `0600`.
 5. The Notebook writes the public certificate beside its ephemeral private key,
    uses both for `ssh -N -R 127.0.0.1:25432:127.0.0.1:<postgres-port>`, and deletes
    both on fence/terminal cleanup.
@@ -86,10 +88,15 @@ sudo deploy/control-plane/install_master_tunnel_broker.sh \
 
 The root-gated installer generates a tunnel-only Ed25519 user CA, initializes empty
 authorization/KRL state, validates the sshd configuration before reload, and enables
-the fail-closed reconciliation timer. Repository tests execute only syntax and
+both the fail-closed reconciliation timer and root-owned local broker service. The
+ordinary control-plane installer refuses to start until the broker socket exists,
+and mounts only its socket directory into the control container. Repository tests execute only syntax and
 temporary-directory broker operations; they do not create an account, mutate sshd,
 reload a service, or touch a real host.
 
-Until the control route is injected with a host broker transport and the Notebook
-ephemeral-key client is integrated, this is implementation evidence only and must not
-be reported as a deployed or live tunnel.
+The production code now activates the broker before the Kaggle run, renews it from
+registration and ACTIVE heartbeats, issues a task-local key/certificate pair under
+the Notebook temporary filesystem, and revokes the epoch on terminal recovery. This
+is still implementation evidence only: the root installer and a real master
+data-plane connection have not been executed on Devstand and must not be reported as
+live acceptance.

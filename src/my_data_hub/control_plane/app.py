@@ -44,6 +44,7 @@ from my_data_hub.providers.kaggle.contracts import (
     TaskResourceClaim,
 )
 from my_data_hub.providers.models import ControlClass, ProviderKind
+from my_data_hub.tunnel_broker_ipc import TunnelBrokerClient
 from my_data_hub.workloads.bloggers.master_stage import (
     BloggerImportStageReceipt,
     BloggerMigrationRequest,
@@ -141,6 +142,15 @@ def _disabled(name: str) -> bool:
     return False
 
 
+def _boolean(name: str, default: bool = False) -> bool:
+    value = os.getenv(name, "true" if default else "false").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ControlPlaneConfigurationError(f"{name} must be a boolean")
+
+
 @dataclass(frozen=True, slots=True)
 class ControlPlaneSettings:
     host: str = "127.0.0.1"
@@ -152,6 +162,7 @@ class ControlPlaneSettings:
     ledger_path: Path | None = None
     master_runtime: MasterRuntimeSettings | None = None
     session_credentials_path: Path | None = None
+    operator_credentials_enabled: bool = False
 
     def __post_init__(self) -> None:
         if not self.host or not 1 <= self.port <= 65535:
@@ -180,6 +191,7 @@ class ControlPlaneSettings:
             session_credentials_path=Path(
                 os.getenv("MY_DATA_HUB_MASTER_SESSION_DIR", "/state/master-sessions")
             ).expanduser(),
+            operator_credentials_enabled=_boolean("MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED"),
         )
 
 
@@ -190,10 +202,22 @@ def create_app(
     master_runtime: ControlPlaneMasterRuntime | None = None,
     session_registrar: SessionCredentialRegistrar | None = None,
     embedding_stage_runner: object | None = None,
-    operator_credential_enabled: bool = False,
+    operator_credential_enabled: bool | None = None,
     tunnel_certificate_broker: TunnelCertificateBroker | None = None,
 ) -> FastAPI:
     runtime = settings or ControlPlaneSettings.from_env()
+    if operator_credential_enabled is None:
+        operator_credential_enabled = runtime.operator_credentials_enabled
+    if tunnel_certificate_broker is None:
+        socket_value = os.getenv("MY_DATA_HUB_TUNNEL_BROKER_SOCKET", "").strip()
+        if socket_value:
+            tunnel_certificate_broker = TunnelBrokerClient(Path(socket_value))
+    try:
+        tunnel_listen_port = int(os.getenv("MY_DATA_HUB_TUNNEL_LISTEN_PORT", "25432"))
+    except ValueError as exc:
+        raise ControlPlaneConfigurationError("tunnel listen port must be an integer") from exc
+    if not 1024 <= tunnel_listen_port <= 65535:
+        raise ControlPlaneConfigurationError("tunnel listen port is outside 1024..65535")
     ledger_path = runtime.ledger_path or Path(tempfile.mkdtemp(prefix="mdh-control-")) / "control.sqlite3"
     control_ledger = ledger or ControlLedger(ledger_path)
     if master_runtime is None:
@@ -201,6 +225,12 @@ def create_app(
             control_ledger,
             runtime.master_runtime,
             session_credentials_path=runtime.session_credentials_path,
+            tunnel_authority=(
+                tunnel_certificate_broker
+                if isinstance(tunnel_certificate_broker, TunnelBrokerClient)
+                else None
+            ),
+            tunnel_listen_port=tunnel_listen_port,
         )
         master_runtime = production.master
         provider_status = production.provider_status
@@ -1102,6 +1132,71 @@ def create_app(
             "listen_host": certificate.listen_host,
             "listen_port": certificate.listen_port,
         }
+
+    @app.post("/internal/runtime/tunnel-leases/{run_id}/{attempt_id}")
+    async def runtime_tunnel_lease(
+        run_id: str,
+        attempt_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        broker = app.state.tunnel_certificate_broker
+        if broker is None:
+            raise HTTPException(status_code=503, detail={"code": "tunnel_certificate_broker_unavailable"})
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail={"code": "runtime_token_required"})
+        token = authorization.removeprefix("Bearer ").strip()
+        if not control_ledger.runtime_token_valid(run_id, attempt_id, token):
+            raise HTTPException(status_code=401, detail={"code": "runtime_token_invalid"})
+        raw = await request.body()
+        if len(raw) > 4 * 1024:
+            raise HTTPException(status_code=413, detail={"code": "tunnel_lease_request_too_large"})
+        try:
+            body = json.loads(raw)
+            if not isinstance(body, dict) or set(body) != {"master_instance_id", "epoch", "lease_until"}:
+                raise ValueError("fields")
+            epoch_value = int(body["epoch"])
+            lease_until = datetime.fromisoformat(str(body["lease_until"]).replace("Z", "+00:00")).astimezone(UTC)
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail={"code": "tunnel_lease_contract_invalid"}) from exc
+        operation = control_ledger.operation_for_attempt(run_id, attempt_id)
+        if operation is None or operation.state not in {"REGISTERING", "ACTIVE"}:
+            raise HTTPException(status_code=409, detail={"code": "runtime_not_tunnel_eligible"})
+        identity = operation.identity
+        if (
+            str(identity.get("master_instance_id")) != str(body["master_instance_id"])
+            or int(identity.get("epoch", 0)) != epoch_value
+        ):
+            raise HTTPException(status_code=409, detail={"code": "runtime_epoch_fenced"})
+        now = control_ledger.clock.now().astimezone(UTC)
+        if lease_until <= now + timedelta(seconds=15) or lease_until > now + timedelta(minutes=5):
+            raise HTTPException(status_code=422, detail={"code": "tunnel_lease_expiry_invalid"})
+        if operation.state == "ACTIVE":
+            service = control_ledger.resolve_service("postgres-master", now=now)
+            if (
+                service is None
+                or service.run_id != run_id
+                or service.attempt_id != attempt_id
+                or service.master_instance_id != str(body["master_instance_id"])
+                or service.epoch != epoch_value
+                or lease_until > service.lease_until.astimezone(UTC)
+            ):
+                raise HTTPException(status_code=409, detail={"code": "runtime_epoch_fenced"})
+        try:
+            renewed = broker.renew(
+                master_instance_id=str(body["master_instance_id"]),
+                run_id=run_id,
+                attempt_id=attempt_id,
+                epoch=epoch_value,
+                lease_until=lease_until,
+                now=now,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail={"code": "tunnel_lease_renewal_failed"}) from exc
+        observed = getattr(renewed, "lease_until", None)
+        if not isinstance(observed, datetime) or observed < lease_until or observed > now + timedelta(minutes=10):
+            raise HTTPException(status_code=503, detail={"code": "tunnel_lease_result_invalid"})
+        return {"renewed": True, "lease_until": observed.isoformat().replace("+00:00", "Z")}
 
     @app.post("/internal/runtime/connector-coverage/{run_id}/{attempt_id}")
     async def runtime_connector_coverage(
