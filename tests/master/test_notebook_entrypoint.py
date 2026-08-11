@@ -11,6 +11,7 @@ import pytest
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.master_runtime.contracts import BootSource, MasterIdentity
 from my_data_hub.master_runtime.notebook_entrypoint import (
+    CheckpointRetryStage,
     CheckpointShutdownError,
     NotebookMasterConfig,
     _activation_url,
@@ -18,9 +19,10 @@ from my_data_hub.master_runtime.notebook_entrypoint import (
     _checkpoint_until_deadline,
     _credential_registration_url,
     _register_reader_credential,
+    _runtime_deadlines,
     main,
 )
-from my_data_hub.runtime_sdk import RuntimeEventType
+from my_data_hub.runtime_sdk import KAGGLE_PROVIDER_TIMEOUT_SECONDS, RuntimeEventType
 
 
 def _payload() -> dict[str, object]:
@@ -64,6 +66,24 @@ def test_master_notebook_config_requires_exact_fields_and_source_binding(tmp_pat
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="checkpoint reserve"):
         NotebookMasterConfig.load(path)
+
+    payload = _payload()
+    payload["maximum_runtime_seconds"] = KAGGLE_PROVIDER_TIMEOUT_SECONDS
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="provider timeout"):
+        NotebookMasterConfig.load(path)
+
+
+def test_runtime_deadlines_are_fixed_at_process_entry_and_charge_boot_time(tmp_path: Path) -> None:
+    path = tmp_path / "master.json"
+    path.write_text(json.dumps(_payload()))
+    config = NotebookMasterConfig.load(path)
+    active_deadline, session_deadline = _runtime_deadlines(config, 100.0)
+    assert active_deadline == 2_800.0
+    assert session_deadline == 3_700.0
+    # A 600-second bootstrap leaves 2,100 active seconds; it cannot reset either deadline.
+    boot_completed_at = 700.0
+    assert active_deadline - boot_completed_at == 2_100.0
 
 
 def test_activation_url_is_https_and_exact() -> None:
@@ -162,13 +182,30 @@ class _Delivery:
 
 
 class _Runtime:
-    def __init__(self, events: list[str], *, terminal_status: str = "delivered") -> None:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        terminal_status: str = "delivered",
+        verified_status: str = "delivered",
+        flush_results: list[bool] | None = None,
+    ) -> None:
         self.events = events
         self.terminal_status = terminal_status
+        self.verified_status = verified_status
+        self.flush_results = list(flush_results or [True])
 
     def emit(self, event_type, **kwargs):  # type: ignore[no-untyped-def]
         self.events.append(event_type.value)
-        return _Delivery(self.terminal_status if event_type is RuntimeEventType.RUNTIME_TERMINAL else "delivered")
+        if event_type is RuntimeEventType.RUNTIME_TERMINAL:
+            return _Delivery(self.terminal_status)
+        if event_type is RuntimeEventType.CHECKPOINT_VERIFIED:
+            return _Delivery(self.verified_status)
+        return _Delivery("delivered")
+
+    def flush_pending(self, *, max_events: int | None = None) -> bool:
+        self.events.append("runtime.flush")
+        return self.flush_results.pop(0) if self.flush_results else True
 
 
 class _Gate:
@@ -242,7 +279,11 @@ def test_master_stops_only_after_verified_checkpoint_and_durable_terminal(tmp_pa
 def test_checkpoint_failure_leaves_drained_master_nonterminal_and_running(tmp_path: Path, failure: str) -> None:
     events: list[str] = []
     coordinator = None if failure == "missing" else _Coordinator(events, fail=failure == "publish")
-    runtime = _Runtime(events, terminal_status="queued" if failure == "terminal" else "delivered")
+    runtime = _Runtime(
+        events,
+        terminal_status="queued" if failure == "terminal" else "delivered",
+        flush_results=[False] if failure == "terminal" else None,
+    )
     with pytest.raises(CheckpointShutdownError, match=r"remains|retry"):
         _checkpoint_before_stop(
             gate=_Gate(events),
@@ -294,6 +335,57 @@ def test_checkpoint_retry_uses_reserved_time_and_does_not_reopen_writes(tmp_path
     assert events.count("checkpoint.failed") == 1
 
 
+@pytest.mark.parametrize("lost_event", ["checkpoint_verified", "terminal"])
+def test_terminal_ack_loss_replays_callbacks_without_creating_second_checkpoint(
+    tmp_path: Path,
+    lost_event: str,
+) -> None:
+    events: list[str] = []
+    sleeps: list[float] = []
+    coordinator = _Coordinator(events)
+    receipt = _checkpoint_until_deadline(
+        gate=_Gate(events),
+        runtime=_Runtime(
+            events,
+            terminal_status="queued" if lost_event == "terminal" else "delivered",
+            verified_status="queued" if lost_event == "checkpoint_verified" else "delivered",
+            flush_results=[False, True],
+        ),
+        tunnel=_Process(events, "tunnel"),
+        supervisor=_Process(events, "postgres"),
+        coordinator=coordinator,
+        database_url="postgresql:///postgres",
+        package_directory=tmp_path,
+        identity=IDENTITY,
+        deadline=200,
+        retry_seconds=60,
+        monotonic=lambda: 0,
+        sleep=sleeps.append,
+    )
+    assert receipt.current_checkpoint_id == receipt.checkpoint_id
+    assert sleeps == [60]
+    assert events.count("checkpoint.publish") == 1
+    assert events.count("checkpoint.started") == 1
+    assert events.count("runtime.flush") == 2
+    assert events[-2:] == ["tunnel.stop", "postgres.stop"]
+
+
+def test_checkpoint_errors_identify_the_only_permitted_retry_stage(tmp_path: Path) -> None:
+    events: list[str] = []
+    with pytest.raises(CheckpointShutdownError) as failure:
+        _checkpoint_before_stop(
+            gate=_Gate(events),
+            runtime=_Runtime(events),
+            tunnel=_Process(events, "tunnel"),
+            supervisor=_Process(events, "postgres"),
+            coordinator=_Coordinator(events, fail=True),
+            database_url="postgresql:///postgres",
+            package_directory=tmp_path,
+            identity=IDENTITY,
+        )
+    assert failure.value.retry_stage is CheckpointRetryStage.PUBLICATION
+
+
 @pytest.mark.parametrize("has_head", [False, True])
 def test_notebook_main_resolves_exact_durable_head_and_always_wires_checkpoint_coordinator(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, has_head: bool
@@ -324,15 +416,23 @@ def test_notebook_main_resolves_exact_durable_head_and_always_wires_checkpoint_c
         lambda **kwargs: observed.update(factory=kwargs) or coordinator,
     )
 
-    def run(config: NotebookMasterConfig, *, checkpoint_coordinator: object) -> int:
+    def run(
+        config: NotebookMasterConfig,
+        *,
+        checkpoint_coordinator: object,
+        process_started_at: float,
+    ) -> int:
         observed["config"] = config
         observed["coordinator"] = checkpoint_coordinator
+        observed["process_started_at"] = process_started_at
         return 17
 
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.run_master", run)
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.time.monotonic", lambda: 123.0)
     assert main() == 17
     config = observed["config"]
     assert isinstance(config, NotebookMasterConfig)
     assert config.boot_source is (BootSource.VERIFIED_CHECKPOINT if has_head else BootSource.EMPTY_BASELINE)
     assert config.checkpoint_directory == (working / "exact-v7" if has_head else None)
     assert observed["coordinator"] is coordinator
+    assert observed["process_started_at"] == 123.0

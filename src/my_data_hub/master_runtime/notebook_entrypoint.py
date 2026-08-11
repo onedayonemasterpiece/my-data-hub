@@ -9,6 +9,7 @@ import time
 import urllib.request
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any, Protocol
@@ -19,7 +20,11 @@ import psycopg
 from my_data_hub.checkpoints import load_and_verify, restore_physical_archive
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.db.migrations import migrate
-from my_data_hub.runtime_sdk import RuntimeClient, RuntimeEventType
+from my_data_hub.runtime_sdk import (
+    KAGGLE_PROVIDER_TIMEOUT_SECONDS,
+    RuntimeClient,
+    RuntimeEventType,
+)
 
 from .bootstrap import BootstrapRequest, MasterBootstrap
 from .contracts import BootSource, MasterIdentity, MasterPaths
@@ -101,13 +106,17 @@ class NotebookMasterConfig:
         )
         if not 60 <= config.lease_seconds <= 600:
             raise ValueError("master lease must be 60..600 seconds")
-        if not 1_800 <= config.maximum_runtime_seconds <= 43_200:
-            raise ValueError("maximum runtime must be 1800..43200 seconds")
+        if config.maximum_runtime_seconds < 1_800:
+            raise ValueError("maximum runtime must be at least 1800 seconds")
         if (
             not 900 <= config.checkpoint_reserve_seconds <= 10_800
             or config.checkpoint_reserve_seconds >= config.maximum_runtime_seconds
         ):
             raise ValueError("checkpoint reserve must be 900..10800 seconds and below maximum runtime")
+        if config.maximum_runtime_seconds + config.checkpoint_reserve_seconds > KAGGLE_PROVIDER_TIMEOUT_SECONDS:
+            raise ValueError(
+                "process runtime plus exit reserve exceeds the declared Kaggle provider timeout"
+            )
         if (source is BootSource.EMPTY_BASELINE) != (checkpoint is None):
             raise ValueError("checkpoint source/config mismatch")
         return config
@@ -125,8 +134,33 @@ class RuntimeCheckpointCoordinator(Protocol):
     ) -> PublishReceipt: ...
 
 
+class CheckpointRetryStage(StrEnum):
+    PUBLICATION = "publication"
+    TERMINAL_DELIVERY = "terminal_delivery"
+
+
 class CheckpointShutdownError(RuntimeError):
     """The drained master was intentionally left running because durability failed."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_stage: CheckpointRetryStage,
+        receipt: PublishReceipt | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retry_stage = retry_stage
+        self.receipt = receipt
+
+
+def _runtime_deadlines(config: NotebookMasterConfig, process_started_at: float) -> tuple[float, float]:
+    """Return fixed active/session deadlines anchored before all boot work."""
+
+    if process_started_at < 0:
+        raise ValueError("process monotonic start must be non-negative")
+    session_deadline = process_started_at + config.maximum_runtime_seconds
+    return session_deadline - config.checkpoint_reserve_seconds, session_deadline
 
 
 def _required(name: str) -> str:
@@ -267,7 +301,14 @@ def run_master(
     config: NotebookMasterConfig,
     *,
     checkpoint_coordinator: RuntimeCheckpointCoordinator | None = None,
+    process_started_at: float | None = None,
 ) -> int:
+    # Direct callers get the same entry-bound budget as ``main``.  ``main``
+    # passes a timestamp captured before config/head resolution so all Python
+    # boot work is charged to the provider lifetime.
+    if process_started_at is None:
+        process_started_at = time.monotonic()
+    active_deadline, session_deadline = _runtime_deadlines(config, process_started_at)
     working = Path(os.environ.get("KAGGLE_WORKING_DIR", "/kaggle/working"))
     paths = MasterPaths.under(working)
     identity = MasterIdentity(config.master_instance_id, config.run_id, config.epoch)
@@ -304,7 +345,7 @@ def run_master(
             local_postgres_port=config.postgres_port,
             identity_file=Path(_required("MY_DATA_HUB_TUNNEL_IDENTITY_FILE")),
             known_hosts_file=Path(_required("MY_DATA_HUB_TUNNEL_KNOWN_HOSTS")),
-            expires_at=now + timedelta(seconds=config.maximum_runtime_seconds + 300),
+            expires_at=now + timedelta(seconds=max(1.0, session_deadline - time.monotonic())),
         )
     )
     database_url = _local_url(paths, config.postgres_port)
@@ -422,15 +463,10 @@ def run_master(
         supervisor.stop(immediate=True)
         gate_connection.close()
         raise
-    # The provider hard-stop applies to the whole Notebook, not only the active
-    # service loop.  Reserve a declared, testable window for drain, basebackup,
-    # exact readback, independent restore and durable HEAD promotion.
-    session_deadline = time.monotonic() + config.maximum_runtime_seconds
-    deadline = session_deadline - config.checkpoint_reserve_seconds
     current_lease = ready.lease_until
     active_error: BaseException | None = None
     try:
-        while time.monotonic() < deadline:
+        while time.monotonic() < active_deadline:
             time.sleep(30)
             tunnel.poll(now=datetime.now(UTC))
             proposed = datetime.now(UTC) + timedelta(seconds=config.lease_seconds)
@@ -520,7 +556,8 @@ def _checkpoint_before_stop(
             data={"failure_code": type(exc).__name__},
         )
         raise CheckpointShutdownError(
-            "checkpoint failed; old HEAD is preserved and the drained master requires retry"
+            "checkpoint failed; old HEAD is preserved and the drained master requires retry",
+            retry_stage=CheckpointRetryStage.PUBLICATION,
         ) from exc
 
     verified = runtime.emit(
@@ -540,8 +577,16 @@ def _checkpoint_before_stop(
         data={"checkpoint_id": receipt.current_checkpoint_id},
     )
     if verified.status != "delivered" or terminal.status != "delivered":
+        # ``emit(terminal)`` already auto-replays older callbacks.  Check the
+        # durable spool rather than trusting the earlier receipt snapshot.
+        if runtime.flush_pending(max_events=100):
+            tunnel.stop()
+            supervisor.stop(immediate=False)
+            return receipt
         raise CheckpointShutdownError(
-            "checkpoint is durable but terminal state was not acknowledged; master remains drained"
+            "checkpoint is durable but terminal state was not acknowledged; master remains drained",
+            retry_stage=CheckpointRetryStage.TERMINAL_DELIVERY,
+            receipt=receipt,
         )
     tunnel.stop()
     supervisor.stop(immediate=False)
@@ -566,8 +611,19 @@ def _checkpoint_until_deadline(
     """Retry failed candidates inside the declared provider shutdown reserve."""
 
     retry = False
+    terminal_receipt: PublishReceipt | None = None
     while True:
         try:
+            if terminal_receipt is not None:
+                if runtime.flush_pending(max_events=100):
+                    tunnel.stop()
+                    supervisor.stop(immediate=False)
+                    return terminal_receipt
+                raise CheckpointShutdownError(
+                    "terminal callbacks remain queued; master remains drained",
+                    retry_stage=CheckpointRetryStage.TERMINAL_DELIVERY,
+                    receipt=terminal_receipt,
+                )
             return _checkpoint_before_stop(
                 gate=gate,
                 runtime=runtime,
@@ -579,7 +635,13 @@ def _checkpoint_until_deadline(
                 identity=identity,
                 retry=retry,
             )
-        except CheckpointShutdownError:
+        except CheckpointShutdownError as exc:
+            if exc.retry_stage is CheckpointRetryStage.TERMINAL_DELIVERY:
+                if exc.receipt is None:
+                    raise AssertionError("terminal delivery retry lost its durable checkpoint receipt") from exc
+                terminal_receipt = exc.receipt
+            elif terminal_receipt is not None:
+                raise AssertionError("checkpoint publication cannot restart after durable promotion") from exc
             remaining = deadline - monotonic()
             if remaining <= retry_seconds + 30:
                 raise
@@ -588,6 +650,7 @@ def _checkpoint_until_deadline(
 
 
 def main() -> int:
+    process_started_at = time.monotonic()
     config = NotebookMasterConfig.load(Path(_required("MY_DATA_HUB_MASTER_CONFIG")))
     identity = MasterIdentity(config.master_instance_id, config.run_id, config.epoch)
     from my_data_hub.checkpoints.kaggle_runtime import (
@@ -606,4 +669,8 @@ def main() -> int:
         boot_source=(BootSource.VERIFIED_CHECKPOINT if boot_checkpoint is not None else BootSource.EMPTY_BASELINE),
         checkpoint_directory=boot_checkpoint,
     )
-    return run_master(config, checkpoint_coordinator=coordinator)
+    return run_master(
+        config,
+        checkpoint_coordinator=coordinator,
+        process_started_at=process_started_at,
+    )

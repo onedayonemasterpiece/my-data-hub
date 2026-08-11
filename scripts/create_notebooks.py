@@ -96,7 +96,8 @@ OPERATIONAL_SPECS: tuple[OperationalNotebookSpec, ...] = (
         "Run the single epoch-fenced PostgreSQL primary inside /kaggle/working.",
         "postgres_master/runtime.py",
         "my-data-hub-postgres-master.v1",
-        timeout_seconds=43_200,
+        # Leave the provider hard-cutoff reserve declared in runtime_sdk.lifetime.
+        timeout_seconds=42_300,
         canonical_write_allowed=True,
     ),
     OperationalNotebookSpec(

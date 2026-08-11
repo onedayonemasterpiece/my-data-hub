@@ -81,10 +81,31 @@ def test_outage_is_bounded_and_restart_replays_pending_terminal_event(tmp_path: 
 
     online = ScriptedTransport([TransportResponse(200)])
     restarted = client(tmp_path, online, clock)
-    replay = restarted.replay_pending()
-    assert [receipt.status for receipt in replay] == ["delivered"]
+    # Process construction is an automatic restart/replay boundary.
+    assert len(online.calls) == 1
+    assert restarted.replay_pending() == []
     assert restarted.spool.pending() == []
     assert restarted.spool.highest_local_sequence() == 1
+
+
+def test_next_callback_automatically_replays_queued_heartbeat_in_order(tmp_path: Path) -> None:
+    clock = DeterministicClock(datetime(2026, 8, 10, tzinfo=UTC))
+    transport = ScriptedTransport(
+        [
+            ConnectionError("offline"),
+            ConnectionError("offline"),
+            ConnectionError("offline"),
+            TransportResponse(200),
+            TransportResponse(200),
+        ]
+    )
+    runtime = client(tmp_path, transport, clock)
+    assert runtime.emit(RuntimeEventType.RUNTIME_HEARTBEAT, data={"step": 1}).status == "queued"
+    clock.advance(31)
+    assert runtime.emit(RuntimeEventType.RUNTIME_PROGRESS, data={"step": 2}).status == "delivered"
+    delivered_types = [json.loads(call[1])["event_type"] for call in transport.calls[-2:]]
+    assert delivered_types == ["runtime.heartbeat", "runtime.progress"]
+    assert runtime.flush_pending()
 
 
 def test_heartbeat_is_coalesced_but_terminal_is_always_durable(tmp_path: Path) -> None:

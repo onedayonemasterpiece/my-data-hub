@@ -24,7 +24,7 @@
     "production_ready": false,
     "resource_class": "orchestrator_protected",
     "runtime_contract": "my-data-hub-postgres-master.v1",
-    "timeout_seconds": 43200
+    "timeout_seconds": 42300
   },
   "title": "02-postgres-master"
 }

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
+
+import pytest
 
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.orchestrator.master import MasterCoordinator, MasterIntent, MasterState
@@ -13,7 +16,9 @@ from my_data_hub.providers.kaggle import (
     KaggleKernelRunIdentity,
     KaggleMasterLaunchAssets,
     KaggleMasterRuntimeProvider,
+    MasterLaunchContractError,
 )
+from my_data_hub.runtime_sdk import KAGGLE_HARD_CAP_SECONDS, KAGGLE_PROVIDER_TIMEOUT_SECONDS
 
 
 class FakeKaggleAdapter:
@@ -22,6 +27,7 @@ class FakeKaggleAdapter:
     def __init__(self) -> None:
         self.calls: Counter[str] = Counter()
         self.run: KaggleKernelRunIdentity | None = None
+        self.last_notebook_kwargs: dict[str, object] | None = None
 
     def create_private_dataset(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls["dataset"] += 1
@@ -35,6 +41,7 @@ class FakeKaggleAdapter:
 
     def push_private_notebook(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls["notebook_run"] += 1
+        self.last_notebook_kwargs = kwargs
         source = kwargs["source"]
         body = __import__("json").loads(source)
         for cell in body["cells"]:
@@ -101,3 +108,9 @@ def test_concrete_bridge_launches_dataset_notebook_and_run_once(tmp_path: Path) 
     assert first.state == second.state == MasterState.REGISTERING
     assert first.run_id == second.run_id == str(UUID(first.run_id))
     assert adapter.calls == {"dataset": 1, "notebook_run": 1, "run_reconcile": 1}
+    assert launch.notebook_timeout_seconds == KAGGLE_PROVIDER_TIMEOUT_SECONDS
+    assert KAGGLE_PROVIDER_TIMEOUT_SECONDS < KAGGLE_HARD_CAP_SECONDS
+    assert adapter.last_notebook_kwargs is not None
+    assert adapter.last_notebook_kwargs["timeout_seconds"] == KAGGLE_PROVIDER_TIMEOUT_SECONDS
+    with pytest.raises(MasterLaunchContractError, match="reserve"):
+        replace(launch, notebook_timeout_seconds=KAGGLE_HARD_CAP_SECONDS)

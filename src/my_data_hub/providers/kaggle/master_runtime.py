@@ -24,6 +24,7 @@ from my_data_hub.orchestrator.master.provider import (
     ReconciliationStatus,
 )
 from my_data_hub.providers.models import ControlClass
+from my_data_hub.runtime_sdk import KAGGLE_PROVIDER_TIMEOUT_SECONDS
 
 from .adapter import KaggleProviderAdapter
 from .contracts import (
@@ -64,7 +65,7 @@ class KaggleMasterLaunchAssets:
     notebook_code_file: str = "worker.ipynb"
     notebook_kernel_type: str = "notebook"
     notebook_language: str = "python"
-    notebook_timeout_seconds: int = 43_200
+    notebook_timeout_seconds: int = KAGGLE_PROVIDER_TIMEOUT_SECONDS
     enable_internet: bool = True
 
     def __post_init__(self) -> None:
@@ -93,6 +94,10 @@ class KaggleMasterLaunchAssets:
             raise MasterLaunchContractError("checkpoint verifier/probe assets are incomplete")
         if self.notebook_kernel_type not in {"notebook", "script"}:
             raise MasterLaunchContractError("master notebook kernel type is invalid")
+        if not 1_800 <= self.notebook_timeout_seconds <= KAGGLE_PROVIDER_TIMEOUT_SECONDS:
+            raise MasterLaunchContractError(
+                "master provider timeout must leave the declared reserve below Kaggle's 12-hour cap"
+            )
         for environment_name, secret_name in self.runtime_secret_bindings.items():
             if (
                 (

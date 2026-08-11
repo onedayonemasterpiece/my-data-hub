@@ -73,6 +73,7 @@ class RuntimeClient:
         now: Callable[[], datetime] | None = None,
         sleep: Callable[[float], None] | None = None,
         heartbeat_interval_seconds: float = 30.0,
+        automatic_replay_limit: int = 100,
     ) -> None:
         parsed = urlparse(callback_url)
         if parsed.scheme.lower() != "https" or not parsed.netloc:
@@ -81,6 +82,8 @@ class RuntimeClient:
             raise ValueError("per-run callback secret must be at least 16 characters")
         if epoch < 1 or heartbeat_interval_seconds <= 0:
             raise ValueError("runtime epoch and heartbeat interval must be positive")
+        if not 1 <= automatic_replay_limit <= 1_000:
+            raise ValueError("automatic replay limit must be 1..1000")
         self.callback_url = callback_url
         self._run_secret = run_secret
         self.run_id = run_id
@@ -94,12 +97,17 @@ class RuntimeClient:
         self._now = now or (lambda: datetime.now(UTC))
         self._sleep = sleep or time.sleep
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        self.automatic_replay_limit = automatic_replay_limit
         self.spool = JsonlEventSpool(spool_path)
         self._sequence = self.spool.highest_local_sequence()
         self._last_heartbeat_at: datetime | None = None
         self._lock = threading.RLock()
+        self._delivery_lock = threading.RLock()
         self._heartbeat_stop: threading.Event | None = None
         self._heartbeat_thread: threading.Thread | None = None
+        # Construction is the restart boundary: queued callbacks from a prior
+        # process are replayed without requiring notebook-specific glue code.
+        self.replay_pending(max_events=self.automatic_replay_limit)
 
     def emit(
         self,
@@ -112,6 +120,30 @@ class RuntimeClient:
         metrics: Mapping[str, int | float | str | bool | None] | None = None,
     ) -> DeliveryReceipt:
         event_type = RuntimeEventType(event_type)
+        with self._delivery_lock:
+            # Every new callback is also an automatic recovery opportunity.
+            # Serializing replay + append + delivery preserves local_sequence
+            # order across main and heartbeat threads.
+            self.replay_pending(max_events=self.automatic_replay_limit)
+            return self._emit_new(
+                event_type,
+                phase=phase,
+                status=status,
+                data=data,
+                artifact_refs=artifact_refs,
+                metrics=metrics,
+            )
+
+    def _emit_new(
+        self,
+        event_type: RuntimeEventType,
+        *,
+        phase: str | None,
+        status: str | None,
+        data: Mapping[str, Any] | None,
+        artifact_refs: tuple[ArtifactRef, ...],
+        metrics: Mapping[str, int | float | str | bool | None] | None,
+    ) -> DeliveryReceipt:
         now = self._aware_now()
         with self._lock:
             if (
@@ -154,8 +186,20 @@ class RuntimeClient:
                 self._last_heartbeat_at = now
         return self._deliver(payload)
 
-    def replay_pending(self) -> list[DeliveryReceipt]:
-        return [self._deliver(event) for event in self.spool.pending()]
+    def replay_pending(self, *, max_events: int | None = None) -> list[DeliveryReceipt]:
+        if max_events is not None and not 1 <= max_events <= 1_000:
+            raise ValueError("replay batch limit must be 1..1000")
+        with self._delivery_lock:
+            pending = self.spool.pending()
+            if max_events is not None:
+                pending = pending[:max_events]
+            return [self._deliver(event) for event in pending]
+
+    def flush_pending(self, *, max_events: int | None = None) -> bool:
+        """Attempt exact replay once and report whether the durable spool is empty."""
+
+        self.replay_pending(max_events=max_events)
+        return not self.spool.pending()
 
     def emit_donor_envelope(self, envelope: Mapping[str, Any]) -> DeliveryReceipt:
         """Adapt the proven status-client shape while moving its token to the header."""
@@ -231,30 +275,36 @@ class RuntimeClient:
             thread.join(timeout_seconds)
 
     def _deliver(self, event: dict[str, Any]) -> DeliveryReceipt:
-        event_id = str(event["event_id"])
-        body = json_body(event)
-        headers = {
-            "Authorization": f"Bearer {self._run_secret}",
-            "Content-Type": "application/json",
-            "User-Agent": "my-data-hub-runtime-sdk/1",
-        }
-        delays = self.retry_policy.delays(event_id)
-        attempts = 0
-        for attempt in range(self.retry_policy.max_attempts):
-            attempts += 1
-            try:
-                response = self.transport.post(self.callback_url, body, headers, self.retry_policy.timeout_seconds)
-                if 200 <= response.status < 300:
-                    self.spool.acknowledge(event_id, self._aware_now().isoformat())
-                    return DeliveryReceipt(event_id, "delivered", attempts, True)
-                retryable = response.status == 429 or response.status >= 500
-                if not retryable:
-                    return DeliveryReceipt(event_id, "rejected", attempts, True)
-            except (TimeoutError, ConnectionError, OSError):
-                pass
-            if attempt < len(delays):
-                self._sleep(delays[attempt])
-        return DeliveryReceipt(event_id, "queued", attempts, True)
+        with self._delivery_lock:
+            event_id = str(event["event_id"])
+            body = json_body(event)
+            headers = {
+                "Authorization": f"Bearer {self._run_secret}",
+                "Content-Type": "application/json",
+                "User-Agent": "my-data-hub-runtime-sdk/1",
+            }
+            delays = self.retry_policy.delays(event_id)
+            attempts = 0
+            for attempt in range(self.retry_policy.max_attempts):
+                attempts += 1
+                try:
+                    response = self.transport.post(
+                        self.callback_url,
+                        body,
+                        headers,
+                        self.retry_policy.timeout_seconds,
+                    )
+                    if 200 <= response.status < 300:
+                        self.spool.acknowledge(event_id, self._aware_now().isoformat())
+                        return DeliveryReceipt(event_id, "delivered", attempts, True)
+                    retryable = response.status == 429 or response.status >= 500
+                    if not retryable:
+                        return DeliveryReceipt(event_id, "rejected", attempts, True)
+                except (TimeoutError, ConnectionError, OSError):
+                    pass
+                if attempt < len(delays):
+                    self._sleep(delays[attempt])
+            return DeliveryReceipt(event_id, "queued", attempts, True)
 
     def _aware_now(self) -> datetime:
         value = self._now()

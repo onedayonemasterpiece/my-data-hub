@@ -2,10 +2,22 @@
 
 from .client import DeliveryReceipt, RetryPolicy, RuntimeClient
 from .events import ArtifactRef, RuntimeEvent, RuntimeEventType
+from .lifetime import (
+    KAGGLE_HARD_CAP_SECONDS,
+    KAGGLE_PROVIDER_TIMEOUT_SECONDS,
+    MAX_NOTEBOOK_PROCESS_SECONDS,
+    MIN_PROCESS_EXIT_RESERVE_SECONDS,
+    PROVIDER_HARD_CUTOFF_RESERVE_SECONDS,
+)
 from .spool import JsonlEventSpool
 from .transport import CallbackTransport, TransportResponse, UrllibCallbackTransport
 
 __all__ = [
+    "KAGGLE_HARD_CAP_SECONDS",
+    "KAGGLE_PROVIDER_TIMEOUT_SECONDS",
+    "MAX_NOTEBOOK_PROCESS_SECONDS",
+    "MIN_PROCESS_EXIT_RESERVE_SECONDS",
+    "PROVIDER_HARD_CUTOFF_RESERVE_SECONDS",
     "ArtifactRef",
     "CallbackTransport",
     "DeliveryReceipt",
