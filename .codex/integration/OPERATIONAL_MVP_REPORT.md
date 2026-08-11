@@ -36,6 +36,23 @@ The production topology reuses the existing events-bot/CherryFlash pattern:
   events, exact output readback, and claim-bound cleanup:
   `docs/operations/evidence/2026-08-11-operational-mvp/kaggle-pg18-runtime-canary-live.json`.
 - This diagnostic evidence is not a matrix scenario or a `LIVE_PASS`.
+- A second, independent live canary exercised the completed brokered checkpoint
+  data path with one central adapter: a credential-free private producer
+  Notebook PUT 4,096 bytes directly to Kaggle blob storage, the central adapter
+  finalized private Dataset version `1`, and a credential-free verifier read the
+  exact numeric version and matched the SHA-256. Both Notebooks and the Dataset
+  were then deleted and inventory absence was observed. The sanitized receipt is
+  `docs/operations/evidence/2026-08-11-operational-mvp/broker-live-canary-observed.json`.
+- The canary observed two real Kaggle runs (producer kernel `130485704` and
+  verifier kernel `130485733`), one central adapter instance, zero checkpoint
+  bytes through devstand, and no Kaggle credential, signed upload URL or blob
+  token in the receipt/state evidence. This closes the disposable broker POC;
+  it does not by itself satisfy the 15-run/24-scenario matrix.
+- A live read-only YDB aggregate observed 266 source rows and 266 distinct source
+  identities across 14 batches/files (202 confirmed, 64 review). The subsequent
+  full ordered export exhausted its bounded retries with YDB error `200803 /
+  CLIENT_RESOURCE_EXHAUSTED`: the source database has RCU throttling enabled with
+  the effective limit set to zero. No YDB setting or source row was changed.
 - The public MCP, OAuth issuer and OIDC discovery endpoints currently return
   HTTP 502; no production deployment acceptance is claimed.
 
@@ -46,7 +63,7 @@ The production topology reuses the existing events-bot/CherryFlash pattern:
 | Gate A | CODE PASS | Single-transport validator and 10,000 deterministic provider histories; lane `gates-a-b`. |
 | Gate B | CODE PASS | Poisoned operation isolation and retry-safe effect preservation; lane `gates-a-b`. |
 | Gate C | CODE PASS | Durable lease payload and event redaction; lane `gates-c-e`. |
-| Gate D | CODE PASS / LIVE PENDING | Central brokered direct upload, bounded reconcile, exact verifier and CAS HEAD; lanes `checkpoint-adapter-primitives` and `checkpoint-broker`. |
+| Gate D | CODE PASS / BROKER POC LIVE PASS / PHYSICAL CHECKPOINT PENDING | The disposable signed-PUT/private-Dataset/exact-verifier/cleanup POC passed live. Physical PostgreSQL checkpoint publication, restore and HEAD promotion remain unobserved. |
 | Gate E | CODE PASS | Exact generated E5/BGE worker assets and runtime-bound pins; lane `gates-c-e`. |
 | Gate F | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
 | Gate G | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
@@ -57,10 +74,10 @@ The production topology reuses the existing events-bot/CherryFlash pattern:
 | Gate L | CODE PASS / LIVE PENDING | Connector durability requires exact `DURABLE_COMPLETE` before spool deletion; lane `gate-l-connectors`. |
 | Gate M | CODE PASS / LIVE PENDING | Deployment/post-deploy evidence contracts; lane `gates-i-m-readiness`. |
 | Gate N | CODE PASS / LIVE PENDING | Typed acceptance dispatch and staged provider-real recovery; lane `acceptance-matrix-runtime`. |
-| Live matrix | MISSING | No synthetic or diagnostic carrier is counted. |
+| Live matrix | PARTIAL | Two broker POC Kaggle runs are observed and reconciled; the mandatory >=15-run/24-scenario operational matrix remains open. |
 | Security/fault matrix | AUDIT IN PROGRESS | Exact-head audit lane. |
-| Deployment | BLOCKED | PR #5 is not merged; public endpoints return 502. |
-| Final acceptance | BLOCKED | Required live evidence and deployment are absent. |
+| Deployment | BLOCKED | PR #5 is not merged; local OAuth/MCP listeners are absent, the root tunnel-broker service is not installed, and public MCP/OAuth routes return 502. |
+| Final acceptance | BLOCKED | Physical checkpoint/restore, full matrix, full YDB export/import, OAuth/MCP deployment and post-deploy evidence are absent. |
 
 ## Brokered checkpoint topology implemented
 
@@ -71,8 +88,10 @@ opaque blob tokens, finalizes the private Dataset version, launches the exact
 numeric-version restore verifier and advances HEAD by CAS. The master contains
 no Kaggle credential/SDK/CLI and streams each file directly to Kaggle storage;
 checkpoint bytes never traverse devstand. Deterministic full-suite acceptance
-passes. The disposable live upload/verifier/cleanup canary is now the next gate,
-not an internal topology blocker.
+passes. The disposable live upload/verifier/cleanup canary has now passed with
+observed provider IDs and complete cleanup. The next checkpoint gate is a real
+PostgreSQL checkpoint publication, exact-version restore verification and
+single CAS HEAD promotion; the canary must not be counted as that proof.
 
 ## Final gates
 

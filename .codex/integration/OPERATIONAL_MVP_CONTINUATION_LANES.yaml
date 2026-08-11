@@ -26,7 +26,7 @@ lanes:
     forbidden_files: [src/my_data_hub/embeddings/, src/my_data_hub/workloads/bloggers/, src/my_data_hub/control_plane/, src/my_data_hub/mcp/]
     expected_output: committed implementation plus RESULTS.md; credential-free run exits 78 before mutation; fake scenario driver cannot claim live PASS
     verification_scope: full_local
-    status: code_done_live_blocked_modern_kaggle_token_and_deployed_runtime
+    status: code_done_live_partial_broker_two_runs_deployed_runtime_absent
   - id: FINAL-EMBED-LIVE
     role: worker
     requirement_ids: [EMBED]
@@ -39,7 +39,7 @@ lanes:
     forbidden_files: [scripts/provider/real_kaggle_matrix.py, src/my_data_hub/workloads/bloggers/importer.py, .github/workflows/provider-real.yml]
     expected_output: committed production code and tests; no fake production capability; real execution remains fail-closed without modern token and imported corpus
     verification_scope: full_local
-    status: code_done_live_blocked_modern_kaggle_token_and_imported_corpus
+    status: code_done_live_blocked_full_ydb_export_import_and_active_master
   - id: FINAL-YDB-QUARANTINE
     role: worker
     requirement_ids: [YDB-Q]
@@ -66,3 +66,29 @@ lanes:
     expected_output: merged/rejected lane table, exact blockers or verified operational receipt
     verification_scope: full_local
     status: in_progress_exact_head_review_and_external_gate_audit
+  - id: BROKER-LIVE-CANARY
+    role: integrator
+    requirement_ids: [CHECKPOINT-BROKER, LIVE-KAGGLE]
+    target: prove one central adapter and credential-free direct signed-PUT data path with exact-version verification and cleanup
+    depends_on: [checkpoint-adapter-primitives, checkpoint-broker]
+    execution_mode: serial
+    branch: integration/operational-mvp
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-mvp
+    writable_files: [scripts/provider/, src/my_data_hub/providers/, tests/provider/, docs/operations/evidence/, .codex/lanes/broker-live-canary/]
+    forbidden_files: [credential values, signed create URLs, opaque blob tokens]
+    expected_output: observed sanitized live receipt with zero devstand checkpoint bytes and complete provider cleanup
+    verification_scope: live_private_provider
+    status: completed_live_pass
+  - id: YDB-LIVE-INVENTORY
+    role: integrator
+    requirement_ids: [YDB-EXPORT, BLOGGER-IMPORT]
+    target: obtain the complete ordered read-only Region Talk export and immutable source manifest
+    depends_on: []
+    execution_mode: serial
+    branch: integration/operational-mvp
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-mvp
+    writable_files: [scripts/bloggers/, docs/operations/evidence/, .codex/lanes/ydb-live-inventory/]
+    forbidden_files: [YDB mutations, source credentials, production row values in Git]
+    expected_output: complete protected export plus sanitized manifest and accounting evidence
+    verification_scope: live_read_only_ydb
+    status: partial_external_rcu_zero_throttling
