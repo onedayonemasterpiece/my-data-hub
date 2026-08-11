@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pytest
@@ -11,6 +13,7 @@ import pytest
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.master_runtime.contracts import BootSource, MasterIdentity
 from my_data_hub.master_runtime.notebook_entrypoint import (
+    CallbackLeaseClosingError,
     CheckpointAdmissionError,
     CheckpointRetryStage,
     CheckpointShutdownError,
@@ -23,6 +26,7 @@ from my_data_hub.master_runtime.notebook_entrypoint import (
     _register_reader_credential,
     _runtime_deadlines,
     main,
+    run_master,
 )
 from my_data_hub.runtime_sdk import (
     CHECKPOINT_ARCHIVE_COMMAND_COUNT,
@@ -632,6 +636,138 @@ def test_persistent_terminal_outage_without_exact_output_still_fails_closed(tmp_
         )
     assert events.count("checkpoint.publish") == 1
     assert "tunnel.stop" not in events and "postgres.stop" not in events
+
+
+@pytest.mark.parametrize(
+    ("active_error", "expected_error"),
+    [
+        (CallbackLeaseClosingError("callback unavailable; write lease is closing"), None),
+        (RuntimeError("unrelated tunnel failure"), RuntimeError),
+    ],
+)
+def test_run_master_suppresses_only_callback_lease_closure_after_exact_terminal_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    active_error: BaseException,
+    expected_error: type[BaseException] | None,
+) -> None:
+    events: list[str] = []
+    working = tmp_path / "kaggle" / "working"
+    working.mkdir(parents=True)
+    monkeypatch.setenv("KAGGLE_WORKING_DIR", str(working))
+    for name, value in {
+        "MY_DATA_HUB_CALLBACK_URL": "https://control.example/internal/runtime/events",
+        "MY_DATA_HUB_RUN_SECRET": "run-secret-long-enough",
+        "MY_DATA_HUB_POSTGRES_TLS_CERT": str(tmp_path / "tls.crt"),
+        "MY_DATA_HUB_POSTGRES_TLS_KEY": str(tmp_path / "tls.key"),
+        "MY_DATA_HUB_TUNNEL_IDENTITY_FILE": str(tmp_path / "tunnel.key"),
+        "MY_DATA_HUB_TUNNEL_KNOWN_HOSTS": str(tmp_path / "known_hosts"),
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    class Runtime(_Runtime):
+        def emit(self, event_type, **kwargs):  # type: ignore[no-untyped-def]
+            if event_type is RuntimeEventType.RUNTIME_HEARTBEAT:
+                raise active_error
+            return super().emit(event_type, **kwargs)
+
+    runtime = Runtime(events, terminal_status="queued", flush_results=[False, False])
+
+    class Connection:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = Connection()
+
+    class Gate(_Gate):
+        def __init__(self, _connection) -> None:  # type: ignore[no-untyped-def]
+            super().__init__(events)
+
+        def activate(self, identity) -> None:  # type: ignore[no-untyped-def]
+            events.append("gate.activate")
+
+        def fence(self, identity, reason) -> None:  # type: ignore[no-untyped-def]
+            events.append("gate.fence")
+
+    tunnel = _Process(events, "tunnel")
+    tunnel.poll = lambda **kwargs: events.append("tunnel.poll")  # type: ignore[attr-defined]
+    postgres = _Process(events, "postgres")
+
+    class Bootstrap:
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            self.announce_ready = kwargs["announce_ready"]
+
+        def run(self, request):  # type: ignore[no-untyped-def]
+            ready = SimpleNamespace(
+                lease_until=datetime.now(UTC) + timedelta(seconds=120),
+                event_payload=lambda: {"epoch": 1},
+            )
+            self.announce_ready(ready)
+            return ready
+
+    config = NotebookMasterConfig(
+        master_instance_id=IDENTITY.master_instance_id,
+        run_id=IDENTITY.run_id,
+        attempt_id="attempt-1",
+        service_instance_id="service-1",
+        epoch=IDENTITY.epoch,
+        boot_source=BootSource.EMPTY_BASELINE,
+        checkpoint_directory=None,
+        lease_seconds=120,
+        postgres_bin=tmp_path,
+        postgres_port=15432,
+        tunnel_gateway_host="gateway.example.test",
+        tunnel_gateway_port=22,
+        tunnel_gateway_user="mdh-tunnel",
+        tunnel_remote_port=25432,
+        maximum_runtime_seconds=21_600,
+        checkpoint_reserve_seconds=10_800,
+        source_identity="owner/postgres-master",
+        source_version="1",
+    )
+    original_checkpoint_until = _checkpoint_until_deadline
+
+    def checkpoint_until(**kwargs):  # type: ignore[no-untyped-def]
+        kwargs.update(
+            deadline=200.0,
+            publication_attempt_seconds=100.0,
+            retry_seconds=60.0,
+            monotonic=iter([0.0, 0.0, 111.0]).__next__,
+            sleep=lambda _seconds: None,
+        )
+        return original_checkpoint_until(**kwargs)
+
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.RuntimeClient", lambda **kwargs: runtime)
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint.PostgresBinaries.discover",
+        lambda path: object(),
+    )
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.PostgresSupervisor", lambda **kwargs: postgres)
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.TunnelSupervisor", lambda spec: tunnel)
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.MasterBootstrap", Bootstrap)
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.DatabaseGate", Gate)
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint.psycopg.connect",
+        lambda *args, **kwargs: connection,
+    )
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint._wait_for_activation", lambda *args: None)
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._register_reader_credential",
+        lambda **kwargs: ("reader", kwargs["expires_at"]),
+    )
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint._checkpoint_until_deadline", checkpoint_until)
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.time.sleep", lambda _seconds: None)
+
+    started_at = time.monotonic()
+    if expected_error is None:
+        assert run_master(config, checkpoint_coordinator=_Coordinator(events), process_started_at=started_at) == 0
+    else:
+        with pytest.raises(expected_error, match="unrelated tunnel failure"):
+            run_master(config, checkpoint_coordinator=_Coordinator(events), process_started_at=started_at)
+    assert (working / "my-data-hub-master-terminal.json").is_file()
+    assert events.count("checkpoint.publish") == 1
 
 
 def test_first_checkpoint_attempt_requires_its_conservative_admission_without_overrun_claim(

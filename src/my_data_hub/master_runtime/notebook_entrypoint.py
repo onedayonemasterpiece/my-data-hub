@@ -263,6 +263,10 @@ class CheckpointAdmissionError(RuntimeError):
     """A publication attempt was not started because its full budget was absent."""
 
 
+class CallbackLeaseClosingError(TimeoutError):
+    """The control callback outage closed the write lease as designed."""
+
+
 def _runtime_deadlines(config: NotebookMasterConfig, process_started_at: float) -> tuple[float, float]:
     """Return fixed active/session deadlines anchored before all boot work."""
 
@@ -745,11 +749,12 @@ def run_master(
                         now=observed_now,
                     )
             if datetime.now(UTC) + timedelta(seconds=15) >= current_lease:
-                raise TimeoutError("callback unavailable; write lease is closing")
+                raise CallbackLeaseClosingError("callback unavailable; write lease is closing")
     except BaseException as exc:
         active_error = exc
 
-    _checkpoint_until_deadline(
+    terminal_output_path = paths.working / MASTER_TERMINAL_OUTPUT_NAME
+    checkpoint_receipt = _checkpoint_until_deadline(
         gate=gate,
         runtime=runtime,
         tunnel=tunnel,
@@ -759,12 +764,16 @@ def run_master(
         package_directory=paths.checkpoints,
         identity=identity,
         deadline=session_deadline,
-        terminal_output_path=paths.working / MASTER_TERMINAL_OUTPUT_NAME,
+        terminal_output_path=terminal_output_path,
     )
     if active_error is not None:
-        if gate_connection is not None:
-            gate_connection.close()
-        raise active_error
+        callback_closure_recovered = isinstance(
+            active_error, CallbackLeaseClosingError
+        ) and _master_terminal_supports_output_recovery(terminal_output_path, checkpoint_receipt)
+        if not callback_closure_recovered:
+            if gate_connection is not None:
+                gate_connection.close()
+            raise active_error
     if gate_connection is not None:
         gate_connection.close()
     return 0
