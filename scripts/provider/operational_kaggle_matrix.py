@@ -863,22 +863,7 @@ def _typed_master_output(
     if row["requirement_id"] == "FM08":
         if not isinstance(evidence, CallbackLossEvidence):
             raise RuntimeError("FM08 control receipt has the wrong typed evidence")
-        proofs = {
-            "callback_withheld": {
-                "callback_suppressed_once": evidence.callback_suppressed_once,
-                "exact_event_id": str(evidence.exact_event_id),
-                "exact_body_sha256": evidence.exact_body_sha256,
-            },
-            "status_reconciled": {
-                "replay_disposition": evidence.replay_disposition,
-                "service_active_after_recovery": evidence.service_active_after_recovery,
-            },
-            "output_identity_reconciled": {
-                "provider_run_ref": locator.provider_run_ref,
-                "source_sha256": locator.source_sha256,
-                "output_receipt_sha256": locator.output_receipt_sha256,
-            },
-        }
+        raise RuntimeError("FM08 receipt lacks typed terminated/recovery provider identities")
     elif row["requirement_id"] == "FM10":
         if not isinstance(evidence, LeaseExpiryEvidence):
             raise RuntimeError("FM10 control receipt has the wrong typed evidence")

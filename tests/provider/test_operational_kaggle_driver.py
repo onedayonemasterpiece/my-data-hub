@@ -543,7 +543,7 @@ class MasterAcceptanceGateway(FakeGateway):
         )
         terminal_output = (
             {
-                "output_file_name": "master-terminal-output.json",
+                "output_file_name": "my-data-hub-master-terminal.json",
                 "output_file_sha256": "d" * 64,
                 "output_tree_sha256": "c" * 64,
                 "output_receipt_sha256": "d" * 64,
@@ -944,7 +944,7 @@ def test_master_carrier_output_policy_is_scenario_specific() -> None:
     fm10.status = fm10._terminal()
     fm10.status["provider_carrier"].update(
         {
-            "output_file_name": "master-terminal-output.json",
+            "output_file_name": "my-data-hub-master-terminal.json",
             "output_file_sha256": "d" * 64,
             "output_tree_sha256": "c" * 64,
             "output_receipt_sha256": "d" * 64,
