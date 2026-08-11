@@ -4,6 +4,7 @@ umask 077
 
 action="${1:-}"
 operator_profile=false
+acceptance_supervisor=false
 if [[ "$action" == "INSTALL_MY_DATA_HUB_SAME_HOST" ]]; then
   echo "FORBIDDEN: local PostgreSQL topology is superseded; no local database will be installed" >&2
   exit 78
@@ -85,6 +86,7 @@ fi
 for command_name in curl loginctl python3 stat systemctl; do
   require_command "$command_name"
 done
+python_path="$(command -v python3)"
 if [[ "${MY_DATA_HUB_APPROVED_CONTROL_COMMIT:-}" != "$commit" ]]; then
   echo "INSTALL requires MY_DATA_HUB_APPROVED_CONTROL_COMMIT to equal the exact release commit" >&2
   exit 2
@@ -109,9 +111,24 @@ operator_gate_receipt="${MY_DATA_HUB_OPERATOR_SECURITY_GATE_RECEIPT_FILE:-$runti
 operator_gate_key="${MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE:-$secret_root/mcp-write-gate.key}"
 control_gateway_token="${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:-$secret_root/mcp-control-gateway.token}"
 tunnel_broker_socket_dir="${MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR:-/run/my-data-hub/tunnel-broker}"
+acceptance_socket_dir="${MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_SOCKET_DIR:-$runtime_root/acceptance-supervisor}"
+acceptance_key="${MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_KEY_FILE:-$acceptance_socket_dir/supervisor.key}"
+if [[ -n "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SUPERVISOR:-}" ]]; then
+  if [[ "$operator_profile" != true \
+    || "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SUPERVISOR}" != "I_ACKNOWLEDGE_TASK_BOUND_CONTROL_RESTART" ]]; then
+    echo "acceptance supervisor requires operator install and the exact restart acknowledgement" >&2
+    exit 2
+  fi
+  if [[ "${MY_DATA_HUB_CONTROL_PORT:-8080}" != "8080" ]]; then
+    echo "acceptance supervisor requires the fixed loopback control health port 8080" >&2
+    exit 2
+  fi
+  acceptance_supervisor=true
+fi
 for path_value in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$asset_dir" \
   "$tls_ca_file" "$provider_env" "$mcp_env" "$oauth_env" "$oauth_key" "$oauth_overlap_jwks" \
-  "$operator_gate_receipt" "$operator_gate_key" "$control_gateway_token" "$tunnel_broker_socket_dir"; do
+  "$operator_gate_receipt" "$operator_gate_key" "$control_gateway_token" "$tunnel_broker_socket_dir" \
+  "$acceptance_socket_dir" "$acceptance_key"; do
   case "$path_value" in
     *[$'\n\r\t ']* ) echo "deployment inputs may not contain whitespace" >&2; exit 2 ;;
   esac
@@ -184,6 +201,8 @@ reject_environment_keys "$oauth_env" "OAuth environment" \
 
 operator_override=""
 operator_compose_arg=""
+acceptance_override=""
+acceptance_compose_arg=""
 if [[ "$operator_profile" == true ]]; then
   if [[ "${MY_DATA_HUB_ENABLE_OPERATOR_PROFILE:-}" != "I_ACKNOWLEDGE_REMOTE_CANONICAL_WRITES" ]]; then
     echo "operator install requires the exact MY_DATA_HUB_ENABLE_OPERATOR_PROFILE acknowledgement" >&2
@@ -224,6 +243,36 @@ YAML
   operator_compose_arg=" -f $operator_override"
 fi
 
+if [[ "$acceptance_supervisor" == true ]]; then
+  [[ ! -L "$acceptance_socket_dir" ]] || {
+    echo "acceptance supervisor socket directory may not be a symbolic link" >&2
+    exit 2
+  }
+  mkdir -p "$acceptance_socket_dir"
+  chmod 700 "$acceptance_socket_dir"
+  require_private_file "$acceptance_key" "acceptance supervisor signing key"
+  python3 - "$acceptance_key" <<'PY'
+from pathlib import Path
+import sys
+
+key = Path(sys.argv[1]).read_bytes().strip()
+if not 32 <= len(key) <= 256:
+    raise SystemExit("acceptance supervisor signing key must contain 32..256 bytes")
+PY
+  acceptance_override="$runtime_root/acceptance-supervisor.$commit.yaml"
+  cat > "$acceptance_override" <<YAML
+services:
+  control-plane:
+    environment:
+      MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_SOCKET: /run/mdh-acceptance/control.sock
+      MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_KEY_FILE: /run/mdh-acceptance/supervisor.key
+    volumes:
+      - "$acceptance_socket_dir:/run/mdh-acceptance:ro"
+YAML
+  chmod 600 "$acceptance_override"
+  acceptance_compose_arg=" -f $acceptance_override"
+fi
+
 compose_env="$runtime_root/compose.$commit.env"
 cat > "$compose_env" <<ENV
 MY_DATA_HUB_IMAGE_TAG=$commit
@@ -248,6 +297,9 @@ compose_files=(-f "$release/compose.control-plane.yaml")
 if [[ -n "$operator_override" ]]; then
   compose_files+=(-f "$operator_override")
 fi
+if [[ -n "$acceptance_override" ]]; then
+  compose_files+=(-f "$acceptance_override")
+fi
 compose=("$docker_path" compose --env-file "$compose_env" --profile remote-mcp \
   --project-directory "$release" "${compose_files[@]}")
 "${compose[@]}" config --quiet
@@ -255,10 +307,16 @@ compose=("$docker_path" compose --env-file "$compose_env" --profile remote-mcp \
 unit="$HOME/.config/systemd/user/my-data-hub-control-plane.service"
 unit_candidate="$runtime_root/my-data-hub-control-plane.service.$commit"
 unit_backup="$runtime_root/my-data-hub-control-plane.service.previous"
+supervisor_unit="$HOME/.config/systemd/user/my-data-hub-acceptance-supervisor.service"
+supervisor_unit_candidate="$runtime_root/my-data-hub-acceptance-supervisor.service.$commit"
+supervisor_unit_backup="$runtime_root/my-data-hub-acceptance-supervisor.service.previous"
 previous_release=""
 previous_unit_present=false
 previous_unit_enabled=false
 previous_unit_active=false
+previous_supervisor_unit_present=false
+previous_supervisor_unit_enabled=false
+previous_supervisor_unit_active=false
 if [[ -L "$current" ]]; then
   previous_release="$(readlink -f "$current")"
 fi
@@ -272,6 +330,41 @@ fi
 if systemctl --user is-active --quiet my-data-hub-control-plane.service 2>/dev/null; then
   previous_unit_active=true
 fi
+if [[ -f "$supervisor_unit" ]]; then
+  cp "$supervisor_unit" "$supervisor_unit_backup"
+  previous_supervisor_unit_present=true
+fi
+if systemctl --user is-enabled --quiet my-data-hub-acceptance-supervisor.service 2>/dev/null; then
+  previous_supervisor_unit_enabled=true
+fi
+if systemctl --user is-active --quiet my-data-hub-acceptance-supervisor.service 2>/dev/null; then
+  previous_supervisor_unit_active=true
+fi
+
+if [[ "$acceptance_supervisor" == true ]]; then
+  compose_file_argument="$release/compose.control-plane.yaml"
+  [[ -z "$operator_override" ]] || compose_file_argument="$compose_file_argument:$operator_override"
+  compose_file_argument="$compose_file_argument:$acceptance_override"
+  cat > "$supervisor_unit_candidate" <<UNIT
+[Unit]
+Description=my-data-hub task-bound FM08 control restart supervisor
+After=docker.service
+Before=my-data-hub-control-plane.service
+
+[Service]
+Type=simple
+ExecStart=$python_path -m my_data_hub.control_plane.acceptance_supervisor --socket $acceptance_socket_dir/control.sock --key-file $acceptance_key --journal $acceptance_socket_dir/restart-journal.json --docker $docker_path --compose-env $compose_env --project-directory $release --compose-files $compose_file_argument --allowed-uid $(id -u)
+Environment=PYTHONPATH=$release/src
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
+UNIT
+  chmod 600 "$supervisor_unit_candidate"
+fi
 
 cat > "$unit_candidate" <<UNIT
 [Unit]
@@ -283,9 +376,9 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=$compose_env
 ExecStartPre=$docker_path info
-ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg up --remove-orphans control-plane remote-mcp oauth-server
-ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg up -d --wait --remove-orphans control-plane remote-mcp oauth-server
-ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg down --remove-orphans
+ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg up --remove-orphans control-plane remote-mcp oauth-server
+ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg up -d --wait --remove-orphans control-plane remote-mcp oauth-server
+ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg down --remove-orphans
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=300
@@ -307,6 +400,11 @@ rollback() {
   else
     rm -f "$unit"
   fi
+  if [[ "$previous_supervisor_unit_present" == true ]]; then
+    cp "$supervisor_unit_backup" "$supervisor_unit"
+  else
+    rm -f "$supervisor_unit"
+  fi
   systemctl --user daemon-reload
   if [[ "$previous_unit_enabled" == true ]]; then
     systemctl --user enable my-data-hub-control-plane.service
@@ -317,6 +415,16 @@ rollback() {
     systemctl --user restart my-data-hub-control-plane.service
   else
     systemctl --user stop my-data-hub-control-plane.service
+  fi
+  if [[ "$previous_supervisor_unit_enabled" == true ]]; then
+    systemctl --user enable my-data-hub-acceptance-supervisor.service
+  else
+    systemctl --user disable my-data-hub-acceptance-supervisor.service
+  fi
+  if [[ "$previous_supervisor_unit_active" == true ]]; then
+    systemctl --user restart my-data-hub-acceptance-supervisor.service
+  else
+    systemctl --user stop my-data-hub-acceptance-supervisor.service
   fi
   if [[ -n "$previous_release" ]]; then
     rollback_link="$release_root/.current.rollback.$$"
@@ -331,7 +439,19 @@ rollback() {
 trap rollback ERR
 
 mv "$unit_candidate" "$unit"
+if [[ "$acceptance_supervisor" == true ]]; then
+  mv "$supervisor_unit_candidate" "$supervisor_unit"
+else
+  rm -f "$supervisor_unit"
+fi
 systemctl --user daemon-reload
+if [[ "$acceptance_supervisor" == true ]]; then
+  systemctl --user enable my-data-hub-acceptance-supervisor.service
+  systemctl --user restart my-data-hub-acceptance-supervisor.service
+else
+  systemctl --user disable my-data-hub-acceptance-supervisor.service
+  systemctl --user stop my-data-hub-acceptance-supervisor.service
+fi
 systemctl --user enable my-data-hub-control-plane.service
 systemctl --user restart my-data-hub-control-plane.service
 
@@ -361,4 +481,5 @@ ln -sfn "$release" "$next_link"
 mv -Tf "$next_link" "$current"
 trap - ERR
 rm -f "$unit_backup"
-printf 'installed_control_plane_commit=%s\nservices=control-plane,remote-mcp,oauth-server\noperator_profile=%s\nmaster_state=ABSENT_or_durable_runtime_state\n' "$commit" "$operator_profile"
+rm -f "$supervisor_unit_backup"
+printf 'installed_control_plane_commit=%s\nservices=control-plane,remote-mcp,oauth-server\noperator_profile=%s\nacceptance_supervisor=%s\nmaster_state=ABSENT_or_durable_runtime_state\n' "$commit" "$operator_profile" "$acceptance_supervisor"
