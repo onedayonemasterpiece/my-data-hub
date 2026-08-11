@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/acceptance/acceptance-scenario-status-request.v1.schema.json",
+  "title": "Unified acceptance scenario status request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["task_id"],
+  "properties": {
+    "task_id": {"type": "string", "format": "uuid"}
+  }
+}

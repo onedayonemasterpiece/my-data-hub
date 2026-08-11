@@ -20,8 +20,8 @@ There are two non-interchangeable claim identities:
    on append-only control migration 018. Migration 018 also prevents the
    runtime-token claim from taking a host command.
 
-The operator adapter has exactly two surfaces:
-`master.acceptance.request` and `master.acceptance.status`. It is not included
+The unified operator adapter has exactly two surfaces:
+`acceptance.scenario.request` and `acceptance.scenario.status`. It is not included
 in a reader catalog and has no list endpoint.
 
 ## Fixed scenario execution
@@ -61,3 +61,28 @@ Contract/unit tests are never LIVE_PASS evidence. The task status exposes
 `live_pass=true` only after the durable production receipt reaches `PASSED`.
 Real Kaggle IDs, PostgreSQL observations, host boot UUIDs and hashes must come
 from the official adapters during execution.
+
+
+## Unified checkpoint launch
+
+The same owner-only pair dispatches FM05, FM14, and FM15 through one injected
+`CheckpointAcceptanceLaunchPort`. The public request still accepts only
+`task_id`, the fixed scenario enum, `idempotency_key`, and `source_revision`; it
+has no SQL, bytes, duration, clock, fault, resource, or arbitrary action field.
+
+The control host persists and compares metadata only: an owner-fixed private
+evidence Notebook, task-owned candidate Dataset, exact numeric protected
+template Dataset version plus claim/manifest/content hashes, and (only for
+FM05/FM15) exact numeric verifier Dataset claim/source hash and a separate
+verifier Notebook. The launch identity is a dedicated `acceptance:operate`
+service identity, not a fabricated ACTIVE runtime identity. Only the User Secret
+name `MY_DATA_HUB_RUN_SECRET` crosses the launch contract; its value never
+appears in request or status. Timeout is fixed at 900 seconds.
+
+No `/kaggle` path exists in the control-side launch model. The task-owned
+Notebook alone maps claimed inputs into its fixed `/kaggle/working` paths and
+runs the entrypoint. Status returns `LIVE_EVIDENCE_READY`, never matrix `PASS`,
+only after an official-adapter numeric run locator, bounded output
+file/tree/receipt hashes, exact config/result hashes, and the fully validated
+checkpoint receipt with initial/final HEAD all reconcile. A missing scoped
+acceptance execution authority blocks before provider mutation.

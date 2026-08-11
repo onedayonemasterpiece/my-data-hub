@@ -1,0 +1,6 @@
+{
+  "task_id": "5cb4ea60-387d-4d0c-9bb2-fd337321b8f0",
+  "scenario": "FM05",
+  "idempotency_key": "acceptance-fm05-empty-roundtrip-20260811",
+  "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
