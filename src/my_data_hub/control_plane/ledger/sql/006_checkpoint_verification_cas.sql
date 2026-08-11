@@ -49,7 +49,7 @@ SELECT
     CASE WHEN source_checkpoint_id IS NULL THEN 0 ELSE 1 END,
     master_instance_id,
     epoch,
-    status,
+    CASE WHEN status = 'CANDIDATE' THEN 'UPLOADED' ELSE status END,
     failure_code,
     created_at,
     verified_at
