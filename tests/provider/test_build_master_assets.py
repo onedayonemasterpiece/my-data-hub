@@ -9,6 +9,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from scripts.provider.build_master_assets import AssetBundleError, build_bundle
+from scripts.provider.verify_master_assets import AssetVerificationError, verify_bundle
 
 COMMIT = "1" * 40
 
@@ -77,6 +78,15 @@ def test_build_bundle_is_exact_secret_free_and_schema_valid(tmp_path: Path) -> N
         for path in output.rglob("*")
         if path.is_file()
     )
+    assert verify_bundle(bundle=output, expected_commit=COMMIT) == {
+        "schema_version": "my-data-hub-master-asset-bundle.v1",
+        "source_commit": COMMIT,
+        "manifest_sha256": hashlib.sha256(
+            (output / "master-asset-bundle.json").read_bytes()
+        ).hexdigest(),
+        "asset_count": 3,
+        "verified": True,
+    }
 
 
 @pytest.mark.parametrize(
@@ -127,3 +137,29 @@ def test_build_bundle_refuses_source_checkout_output_and_nonempty_output(tmp_pat
     (output / "unexpected").write_text("x")
     with pytest.raises(AssetBundleError, match="empty"):
         build_bundle(output=output, **common)
+
+
+def test_verify_bundle_rejects_tampering_and_unexpected_files(tmp_path: Path) -> None:
+    output, _ = _build(tmp_path)
+    wheel = next((output / "dataset").glob("*.whl"))
+    wheel.write_bytes(b"tampered")
+    wheel.chmod(0o600)
+    with pytest.raises(AssetVerificationError, match="bytes"):
+        verify_bundle(bundle=output, expected_commit=COMMIT)
+
+    output, _ = _build(tmp_path / "second")
+    extra = output / "unexpected.txt"
+    extra.write_text("not allowed")
+    extra.chmod(0o600)
+    with pytest.raises(AssetVerificationError, match="unexpected"):
+        verify_bundle(bundle=output, expected_commit=COMMIT)
+
+
+def test_verify_bundle_rejects_wrong_commit_and_unsafe_mode(tmp_path: Path) -> None:
+    output, _ = _build(tmp_path)
+    with pytest.raises(AssetVerificationError, match="approved release"):
+        verify_bundle(bundle=output, expected_commit="2" * 40)
+
+    (output / "master-assets.env").chmod(0o644)
+    with pytest.raises(AssetVerificationError, match="0600"):
+        verify_bundle(bundle=output, expected_commit=COMMIT)

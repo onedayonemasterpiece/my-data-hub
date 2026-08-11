@@ -24,5 +24,15 @@ callback authority is delivered through the separate task-owned private status D
 it is not part of this static bundle.
 
 Validate the manifest before install with
-`schemas/master-asset-bundle.v1.schema.json`. The committed example is synthetic contract
-documentation and is not live provider or deployment evidence.
+`schemas/master-asset-bundle.v1.schema.json`, then independently verify the exact approved
+commit, canonical manifest, file inventory, modes, sizes, and hashes using only the host
+Python standard library:
+
+```bash
+python3 scripts/provider/verify_master_assets.py \
+  --bundle /path/to/master-assets \
+  --expected-commit "$(git rev-parse HEAD)"
+```
+
+The committed example is synthetic contract documentation and is not live provider or
+deployment evidence.
