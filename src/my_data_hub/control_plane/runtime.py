@@ -10,6 +10,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from my_data_hub.checkpoints import CheckpointManifest
@@ -33,6 +34,9 @@ from my_data_hub.providers.models import ProviderFingerprint
 
 class MasterProviderUnavailable(RuntimeError):
     """The control plane is healthy but no authenticated provider is available."""
+
+
+CANONICAL_RUNTIME_CALLBACK_URL = "https://mcp-datahub.kenigevents.ru/internal/runtime/events"
 
 
 @dataclass(slots=True)
@@ -146,6 +150,18 @@ class MasterRuntimeSettings:
         if not all(raw.values()):
             # Partial launch configuration never causes a best-effort provider call.
             return None
+        callback = urlsplit(raw["callback_url"])
+        if (
+            raw["callback_url"] != CANONICAL_RUNTIME_CALLBACK_URL
+            or callback.scheme != "https"
+            or callback.hostname != "mcp-datahub.kenigevents.ru"
+            or callback.port is not None
+            or callback.username
+            or callback.password
+            or callback.query
+            or callback.fragment
+        ):
+            raise ValueError("runtime callback must use the owner-approved canonical HTTPS audience")
         dataset_dir = Path(raw.pop("dataset_dir")).expanduser().resolve()
         notebook_source = Path(raw.pop("notebook_source")).expanduser().resolve()
         files = _bounded_files(dataset_dir)

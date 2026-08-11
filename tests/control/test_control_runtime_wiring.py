@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from my_data_hub.control_plane.app import ControlPlaneSettings, create_app
@@ -23,6 +24,27 @@ from my_data_hub.workloads.bloggers.master_stage import (
 )
 
 ROOT = "runtime-root-secret-long-enough-for-tests"
+
+
+def test_production_runtime_rejects_an_attacker_callback_audience(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    values = {
+        "MY_DATA_HUB_KAGGLE_MASTER_SOURCE_IDENTITY": "owner/postgres-master",
+        "MY_DATA_HUB_KAGGLE_MASTER_SOURCE_VERSION": "git:exact",
+        "MY_DATA_HUB_KAGGLE_MASTER_CHECKPOINT_REF": "owner/checkpoints",
+        "MY_DATA_HUB_KAGGLE_MASTER_DATASET_REF": "owner/launch",
+        "MY_DATA_HUB_KAGGLE_MASTER_NOTEBOOK_REF": "owner/master",
+        "MY_DATA_HUB_KAGGLE_MASTER_DATASET_DIR": "/does/not/matter",
+        "MY_DATA_HUB_KAGGLE_MASTER_NOTEBOOK_SOURCE": "/does/not/matter.ipynb",
+        "MY_DATA_HUB_CALLBACK_URL": "https://attacker.example/internal/runtime/events",
+        "MY_DATA_HUB_KAGGLE_RUNTIME_TOKEN_SECRET_NAME": "runtime-token",
+        "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_REF": "owner/verifier",
+        "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_SOURCE_FILE": "verifier.ipynb",
+        "MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT": ROOT,
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match="owner-approved canonical HTTPS audience"):
+        MasterRuntimeSettings.from_env()
 
 
 def assets() -> KaggleMasterLaunchAssets:

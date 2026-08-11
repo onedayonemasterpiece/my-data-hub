@@ -45,6 +45,12 @@ MY_DATA_HUB_KAGGLE_CHECKPOINT_PROBE_RELATIONS_JSON
 MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT
 ```
 
+`MY_DATA_HUB_CALLBACK_URL` is not an arbitrary deployment input. Production
+assembly accepts only
+`https://mcp-datahub.kenigevents.ru/internal/runtime/events`, without userinfo,
+custom port, query or fragment, before a per-attempt runtime token can be
+delivered to a Notebook.
+
 `MY_DATA_HUB_KAGGLE_MASTER_SECRET_BINDINGS_JSON` is an optional exact mapping from
 Notebook environment names to Kaggle User Secret names. It may include the modern
 `KAGGLE_API_TOKEN` binding needed by the in-Notebook instance of the same official adapter.
