@@ -1,0 +1,1162 @@
+{
+  "$defs": {
+    "BloggerAccountingEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "account_count": {
+          "maximum": 2128,
+          "minimum": 0,
+          "title": "Account Count",
+          "type": "integer"
+        },
+        "actor_count": {
+          "maximum": 266,
+          "minimum": 1,
+          "title": "Actor Count",
+          "type": "integer"
+        },
+        "canonical_outcome_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Canonical Outcome Sha256",
+          "type": "string"
+        },
+        "canonical_revision": {
+          "minimum": 1,
+          "title": "Canonical Revision",
+          "type": "integer"
+        },
+        "checkpoint_required": {
+          "const": true,
+          "default": true,
+          "title": "Checkpoint Required",
+          "type": "boolean"
+        },
+        "dispositioned_count": {
+          "const": 266,
+          "default": 266,
+          "title": "Dispositioned Count",
+          "type": "integer"
+        },
+        "duplicate_groups_pending": {
+          "const": 0,
+          "default": 0,
+          "title": "Duplicate Groups Pending",
+          "type": "integer"
+        },
+        "expected_row_count": {
+          "const": 266,
+          "default": 266,
+          "title": "Expected Row Count",
+          "type": "integer"
+        },
+        "export_batch_id": {
+          "format": "uuid",
+          "title": "Export Batch Id",
+          "type": "string"
+        },
+        "logical_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Logical Sha256",
+          "type": "string"
+        },
+        "quarantined_count": {
+          "const": 0,
+          "default": 0,
+          "title": "Quarantined Count",
+          "type": "integer"
+        },
+        "raw_count": {
+          "const": 266,
+          "default": 266,
+          "title": "Raw Count",
+          "type": "integer"
+        },
+        "record_id_set_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Record Id Set Sha256",
+          "type": "string"
+        },
+        "status": {
+          "const": "accepted",
+          "default": "accepted",
+          "title": "Status",
+          "type": "string"
+        },
+        "undispositioned_count": {
+          "const": 0,
+          "default": 0,
+          "title": "Undispositioned Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "export_batch_id",
+        "logical_sha256",
+        "record_id_set_sha256",
+        "canonical_outcome_sha256",
+        "actor_count",
+        "account_count",
+        "canonical_revision"
+      ],
+      "title": "BloggerAccountingEvidence",
+      "type": "object"
+    },
+    "BloggerQuarantineEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_outcome_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Canonical Outcome Sha256",
+          "type": "string"
+        },
+        "checkpoint": {
+          "$ref": "#/$defs/CheckpointEvidence"
+        },
+        "dispositioned_count": {
+          "const": 266,
+          "default": 266,
+          "title": "Dispositioned Count",
+          "type": "integer"
+        },
+        "duplicate_group_count": {
+          "maximum": 1330,
+          "minimum": 1,
+          "title": "Duplicate Group Count",
+          "type": "integer"
+        },
+        "duplicate_groups_pending": {
+          "maximum": 1330,
+          "minimum": 1,
+          "title": "Duplicate Groups Pending",
+          "type": "integer"
+        },
+        "export_batch_id": {
+          "format": "uuid",
+          "title": "Export Batch Id",
+          "type": "string"
+        },
+        "failure_code": {
+          "const": "BloggerMigrationQuarantined",
+          "title": "Failure Code",
+          "type": "string"
+        },
+        "logical_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Logical Sha256",
+          "type": "string"
+        },
+        "operation_id": {
+          "format": "uuid",
+          "title": "Operation Id",
+          "type": "string"
+        },
+        "quarantined_count": {
+          "maximum": 266,
+          "minimum": 1,
+          "title": "Quarantined Count",
+          "type": "integer"
+        },
+        "raw_count": {
+          "const": 266,
+          "default": 266,
+          "title": "Raw Count",
+          "type": "integer"
+        },
+        "record_id_set_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Record Id Set Sha256",
+          "type": "string"
+        },
+        "request_id": {
+          "format": "uuid",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "request_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Request Sha256",
+          "type": "string"
+        },
+        "row_count": {
+          "const": 266,
+          "default": 266,
+          "title": "Row Count",
+          "type": "integer"
+        },
+        "undispositioned_count": {
+          "const": 0,
+          "default": 0,
+          "title": "Undispositioned Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "request_id",
+        "request_sha256",
+        "operation_id",
+        "export_batch_id",
+        "failure_code",
+        "quarantined_count",
+        "logical_sha256",
+        "record_id_set_sha256",
+        "canonical_outcome_sha256",
+        "duplicate_group_count",
+        "duplicate_groups_pending",
+        "checkpoint"
+      ],
+      "title": "BloggerQuarantineEvidence",
+      "type": "object"
+    },
+    "BloggerTerminalEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "account_count": {
+          "maximum": 2128,
+          "minimum": 0,
+          "title": "Account Count",
+          "type": "integer"
+        },
+        "actor_count": {
+          "maximum": 266,
+          "minimum": 1,
+          "title": "Actor Count",
+          "type": "integer"
+        },
+        "canonical_outcome_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Canonical Outcome Sha256",
+          "type": "string"
+        },
+        "canonical_revision": {
+          "minimum": 1,
+          "title": "Canonical Revision",
+          "type": "integer"
+        },
+        "checkpoint": {
+          "$ref": "#/$defs/CheckpointEvidence"
+        },
+        "dispositioned_count": {
+          "const": 266,
+          "default": 266,
+          "title": "Dispositioned Count",
+          "type": "integer"
+        },
+        "dispositions": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Dispositions",
+          "type": "object"
+        },
+        "distinct_record_ids": {
+          "const": 266,
+          "default": 266,
+          "title": "Distinct Record Ids",
+          "type": "integer"
+        },
+        "duplicate_group_count": {
+          "maximum": 1330,
+          "minimum": 1,
+          "title": "Duplicate Group Count",
+          "type": "integer"
+        },
+        "duplicate_groups_pending": {
+          "const": 0,
+          "default": 0,
+          "title": "Duplicate Groups Pending",
+          "type": "integer"
+        },
+        "export_batch_id": {
+          "format": "uuid",
+          "title": "Export Batch Id",
+          "type": "string"
+        },
+        "import_schema": {
+          "const": "region-talk-ydb-bloggers-import-receipt.v3",
+          "title": "Import Schema",
+          "type": "string"
+        },
+        "logical_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Logical Sha256",
+          "type": "string"
+        },
+        "operation_id": {
+          "format": "uuid",
+          "title": "Operation Id",
+          "type": "string"
+        },
+        "quarantined_count": {
+          "const": 0,
+          "default": 0,
+          "title": "Quarantined Count",
+          "type": "integer"
+        },
+        "raw_count": {
+          "const": 266,
+          "default": 266,
+          "title": "Raw Count",
+          "type": "integer"
+        },
+        "record_id_set_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Record Id Set Sha256",
+          "type": "string"
+        },
+        "replayed_count": {
+          "const": 266,
+          "default": 266,
+          "title": "Replayed Count",
+          "type": "integer"
+        },
+        "request_id": {
+          "format": "uuid",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "request_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Request Sha256",
+          "type": "string"
+        },
+        "row_count": {
+          "const": 266,
+          "default": 266,
+          "title": "Row Count",
+          "type": "integer"
+        },
+        "source_epoch": {
+          "minimum": 1,
+          "title": "Source Epoch",
+          "type": "integer"
+        },
+        "source_master_instance_id": {
+          "format": "uuid",
+          "title": "Source Master Instance Id",
+          "type": "string"
+        },
+        "source_run_id": {
+          "format": "uuid",
+          "title": "Source Run Id",
+          "type": "string"
+        },
+        "undispositioned_count": {
+          "const": 0,
+          "default": 0,
+          "title": "Undispositioned Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "request_id",
+        "request_sha256",
+        "operation_id",
+        "import_schema",
+        "export_batch_id",
+        "dispositions",
+        "duplicate_group_count",
+        "actor_count",
+        "account_count",
+        "logical_sha256",
+        "record_id_set_sha256",
+        "canonical_outcome_sha256",
+        "source_master_instance_id",
+        "source_run_id",
+        "source_epoch",
+        "canonical_revision",
+        "checkpoint"
+      ],
+      "title": "BloggerTerminalEvidence",
+      "type": "object"
+    },
+    "ChangePreviewEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "insert",
+            "delete"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "affected_rows": {
+          "enum": [
+            0,
+            1
+          ],
+          "title": "Affected Rows",
+          "type": "integer"
+        },
+        "expected_revision": {
+          "minimum": 1,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "operation_id": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Operation Id",
+          "type": "string"
+        },
+        "pre_change_checkpoint_id": {
+          "format": "uuid",
+          "title": "Pre Change Checkpoint Id",
+          "type": "string"
+        },
+        "preview_receipt_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Preview Receipt Sha256",
+          "type": "string"
+        },
+        "request_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Request Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "request_sha256",
+        "action",
+        "affected_rows",
+        "expected_revision",
+        "pre_change_checkpoint_id",
+        "preview_receipt_sha256"
+      ],
+      "title": "ChangePreviewEvidence",
+      "type": "object"
+    },
+    "ChangeStatusEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "committed_revision": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Committed Revision"
+        },
+        "expected_revision": {
+          "minimum": 1,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "operation_id": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Operation Id",
+          "type": "string"
+        },
+        "post_change_checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CheckpointEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "pre_change_checkpoint_id": {
+          "format": "uuid",
+          "title": "Pre Change Checkpoint Id",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "PREVIEWED",
+            "APPLYING",
+            "COMMITTED_PENDING_CHECKPOINT",
+            "CHECKPOINTING",
+            "CHECKPOINT_VERIFIED",
+            "DURABLE_COMPLETE",
+            "FAILED"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "state",
+        "expected_revision",
+        "pre_change_checkpoint_id"
+      ],
+      "title": "ChangeStatusEvidence",
+      "type": "object"
+    },
+    "CheckpointEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_revision": {
+          "minimum": 1,
+          "title": "Canonical Revision",
+          "type": "integer"
+        },
+        "checkpoint_id": {
+          "format": "uuid",
+          "title": "Checkpoint Id",
+          "type": "string"
+        },
+        "exact_version_ref": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Exact Version Ref",
+          "type": "string"
+        },
+        "generation": {
+          "minimum": 1,
+          "title": "Generation",
+          "type": "integer"
+        },
+        "manifest_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
+        },
+        "status": {
+          "const": "VERIFIED",
+          "default": "VERIFIED",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "checkpoint_id",
+        "generation",
+        "exact_version_ref",
+        "manifest_sha256",
+        "canonical_revision"
+      ],
+      "title": "CheckpointEvidence",
+      "type": "object"
+    },
+    "DataPhase": {
+      "enum": [
+        "INITIAL",
+        "FM16_V1_RUNNING",
+        "FM16_V1_AMBIGUOUS",
+        "AWAITING_OWNER_AUTHORIZATION",
+        "FM16_V2_RUNNING",
+        "FM16_V2_AMBIGUOUS",
+        "FM16_COMPLETE",
+        "FM17_RESTORE_RUNNING",
+        "FM17_RESTORE_AMBIGUOUS",
+        "FM17_COMPLETE",
+        "FM18_19_RUNNING",
+        "FM18_19_AMBIGUOUS",
+        "FM18_19_COMPLETE",
+        "FM21_INSERT_PREVIEWED",
+        "FM21_INSERT_APPLYING",
+        "FM21_INSERT_AMBIGUOUS",
+        "FM21_INSERT_COMPLETE",
+        "FM21_DELETE_PREVIEWED",
+        "FM21_DELETE_APPLYING",
+        "FM21_DELETE_AMBIGUOUS",
+        "FM21_DELETE_COMPLETE",
+        "EVIDENCE_READY",
+        "FAILED"
+      ],
+      "title": "DataPhase",
+      "type": "string"
+    },
+    "DuplicateReviewEvidence": {
+      "additionalProperties": false,
+      "description": "Owner-reviewable identities only; source payload columns are forbidden.",
+      "properties": {
+        "duplicate_group_count": {
+          "maximum": 1330,
+          "minimum": 1,
+          "title": "Duplicate Group Count",
+          "type": "integer"
+        },
+        "duplicate_groups_pending": {
+          "maximum": 1330,
+          "minimum": 1,
+          "title": "Duplicate Groups Pending",
+          "type": "integer"
+        },
+        "export_batch_id": {
+          "format": "uuid",
+          "title": "Export Batch Id",
+          "type": "string"
+        },
+        "identity_set_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Identity Set Sha256",
+          "type": "string"
+        },
+        "member_record_id_set_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Member Record Id Set Sha256",
+          "type": "string"
+        },
+        "review_projection_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Review Projection Sha256",
+          "type": "string"
+        },
+        "source_operation_id": {
+          "format": "uuid",
+          "title": "Source Operation Id",
+          "type": "string"
+        },
+        "source_request_id": {
+          "format": "uuid",
+          "title": "Source Request Id",
+          "type": "string"
+        },
+        "source_request_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Request Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "export_batch_id",
+        "source_request_id",
+        "source_operation_id",
+        "source_request_sha256",
+        "duplicate_group_count",
+        "duplicate_groups_pending",
+        "identity_set_sha256",
+        "member_record_id_set_sha256",
+        "review_projection_sha256"
+      ],
+      "title": "DuplicateReviewEvidence",
+      "type": "object"
+    },
+    "EmbeddingModelEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "format": "uuid",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "artifact_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Artifact Sha256",
+          "type": "string"
+        },
+        "checkpoint_required": {
+          "const": true,
+          "default": true,
+          "title": "Checkpoint Required",
+          "type": "boolean"
+        },
+        "completed_documents": {
+          "const": 266,
+          "default": 266,
+          "title": "Completed Documents",
+          "type": "integer"
+        },
+        "coverage": {
+          "const": 1.0,
+          "default": 1.0,
+          "title": "Coverage",
+          "type": "number"
+        },
+        "expected_documents": {
+          "const": 266,
+          "default": 266,
+          "title": "Expected Documents",
+          "type": "integer"
+        },
+        "failed_count": {
+          "const": 0,
+          "default": 0,
+          "title": "Failed Count",
+          "type": "integer"
+        },
+        "inserted_count": {
+          "const": 266,
+          "default": 266,
+          "title": "Inserted Count",
+          "type": "integer"
+        },
+        "model_exact_id": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Model Exact Id",
+          "type": "string"
+        },
+        "primary_source_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Primary Source Sha256",
+          "type": "string"
+        },
+        "provider_kernel_id": {
+          "minimum": 1,
+          "title": "Provider Kernel Id",
+          "type": "integer"
+        },
+        "provider_ref": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Provider Ref",
+          "type": "string"
+        },
+        "provider_run_ref": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Provider Run Ref",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "stale_count": {
+          "const": 0,
+          "default": 0,
+          "title": "Stale Count",
+          "type": "integer"
+        },
+        "task_run_id": {
+          "format": "uuid",
+          "title": "Task Run Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_exact_id",
+        "task_run_id",
+        "provider_ref",
+        "provider_run_ref",
+        "provider_kernel_id",
+        "source_sha256",
+        "primary_source_sha256",
+        "artifact_id",
+        "artifact_sha256"
+      ],
+      "title": "EmbeddingModelEvidence",
+      "type": "object"
+    },
+    "EmbeddingTerminalEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "blogger_canonical_revision": {
+          "minimum": 1,
+          "title": "Blogger Canonical Revision",
+          "type": "integer"
+        },
+        "blogger_export_batch_id": {
+          "format": "uuid",
+          "title": "Blogger Export Batch Id",
+          "type": "string"
+        },
+        "canonical_revision": {
+          "minimum": 1,
+          "title": "Canonical Revision",
+          "type": "integer"
+        },
+        "checkpoint": {
+          "$ref": "#/$defs/CheckpointEvidence"
+        },
+        "models": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/EmbeddingModelEvidence"
+            },
+            {
+              "$ref": "#/$defs/EmbeddingModelEvidence"
+            }
+          ],
+          "title": "Models",
+          "type": "array"
+        },
+        "request_id": {
+          "format": "uuid",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "request_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Request Sha256",
+          "type": "string"
+        },
+        "state": {
+          "const": "CHECKPOINT_VERIFIED",
+          "default": "CHECKPOINT_VERIFIED",
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "request_sha256",
+        "blogger_export_batch_id",
+        "blogger_canonical_revision",
+        "canonical_revision",
+        "models",
+        "checkpoint"
+      ],
+      "title": "EmbeddingTerminalEvidence",
+      "type": "object"
+    },
+    "MasterEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_revision": {
+          "minimum": 1,
+          "title": "Canonical Revision",
+          "type": "integer"
+        },
+        "epoch": {
+          "minimum": 1,
+          "title": "Epoch",
+          "type": "integer"
+        },
+        "master_instance_id": {
+          "format": "uuid",
+          "title": "Master Instance Id",
+          "type": "string"
+        },
+        "run_id": {
+          "format": "uuid",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "state": {
+          "const": "ACTIVE",
+          "default": "ACTIVE",
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "master_instance_id",
+        "run_id",
+        "epoch",
+        "canonical_revision"
+      ],
+      "title": "MasterEvidence",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.my-data-hub.invalid/provider/operational-data-workload-state.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "blogger_terminal": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BloggerTerminalEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "delete_preview": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ChangePreviewEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "delete_status": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ChangeStatusEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "duplicate_review": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DuplicateReviewEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "embedding_request_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Embedding Request Id"
+    },
+    "embedding_request_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Embedding Request Sha256"
+    },
+    "embedding_terminal": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EmbeddingTerminalEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "failure_code": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Z0-9_]+$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Failure Code"
+    },
+    "final_zero_preview": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ChangePreviewEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "fixture_project_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Fixture Project Id"
+    },
+    "fixture_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Fixture Sha256"
+    },
+    "insert_preview": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ChangePreviewEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "insert_status": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ChangeStatusEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "matrix_id": {
+      "format": "uuid",
+      "title": "Matrix Id",
+      "type": "string"
+    },
+    "mutations_started": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Mutations Started",
+      "type": "integer"
+    },
+    "owner_authorization_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Owner Authorization Sha256"
+    },
+    "phase": {
+      "$ref": "#/$defs/DataPhase",
+      "default": "INITIAL"
+    },
+    "plan_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Plan Sha256",
+      "type": "string"
+    },
+    "post_restore_accounting": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BloggerAccountingEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "pre_restore_accounting": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BloggerAccountingEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "quarantine": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BloggerQuarantineEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "restore_operation_id": {
+      "anyOf": [
+        {
+          "maxLength": 300,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Restore Operation Id"
+    },
+    "restored_master": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MasterEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "resumable": {
+      "default": true,
+      "title": "Resumable",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": "my-data-hub-operational-data-workload-state.v1",
+      "default": "my-data-hub-operational-data-workload-state.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "v1_request_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "V1 Request Id"
+    },
+    "v1_request_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "V1 Request Sha256"
+    },
+    "v2_request_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "V2 Request Id"
+    },
+    "v2_request_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "V2 Request Sha256"
+    }
+  },
+  "required": [
+    "matrix_id",
+    "plan_sha256"
+  ],
+  "title": "DataWorkloadState",
+  "type": "object"
+}

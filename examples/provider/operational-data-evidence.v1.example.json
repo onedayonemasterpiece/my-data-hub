@@ -1,0 +1,14 @@
+{
+  "schema_version": "my-data-hub-operational-data-evidence.v1",
+  "matrix_id": "00000000-0000-0000-0000-000000000001",
+  "source_commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "outcome": "EVIDENCE_READY",
+  "live_evidence": false,
+  "requirements": [
+    {"requirement_id":"FM16","assertion_evidence_sha256":{"full_export_accounted":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"operation_ids":["00000000-0000-0000-0000-000000000016"]},
+    {"requirement_id":"FM17","assertion_evidence_sha256":{"logical_hash_equal":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"operation_ids":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]},
+    {"requirement_id":"FM18","assertion_evidence_sha256":{"exact_e5_model":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"operation_ids":["00000000-0000-0000-0000-000000000018"]},
+    {"requirement_id":"FM19","assertion_evidence_sha256":{"exact_bge_m3_model":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},"operation_ids":["00000000-0000-0000-0000-000000000019"]},
+    {"requirement_id":"FM21","assertion_evidence_sha256":{"durable_receipt":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},"operation_ids":["ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"]}
+  ]
+}
