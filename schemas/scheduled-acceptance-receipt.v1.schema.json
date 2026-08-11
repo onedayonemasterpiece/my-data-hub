@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/scheduled-acceptance-receipt.v1.schema.json",
+  "title": "Scheduled acceptance receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "mode", "outcome", "source_commit_sha", "deployed_commit_sha",
+    "workflow_run_id", "started_at", "completed_at", "checks", "blockers", "counts"
+  ],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-scheduled-acceptance.v1"},
+    "mode": {"enum": ["nightly", "weekly", "manual"]},
+    "outcome": {"enum": ["PASS", "FAIL", "BLOCKED"]},
+    "source_commit_sha": {"oneOf": [{"const": "unknown"}, {"pattern": "^[0-9a-f]{40}$"}]},
+    "deployed_commit_sha": {"oneOf": [{"const": "unknown"}, {"pattern": "^[0-9a-f]{40}$"}]},
+    "workflow_run_id": {"type": "string", "minLength": 1, "maxLength": 100},
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "checks": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "category", "outcome", "observed"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1, "maxLength": 100},
+          "category": {"type": "string", "minLength": 1, "maxLength": 100},
+          "outcome": {"enum": ["PASS", "FAIL", "BLOCKED"]},
+          "observed": {"type": "object", "maxProperties": 32},
+          "blocker_code": {"type": "string", "pattern": "^[A-Z0-9_]{3,100}$"},
+          "missing_interface": {"type": "string", "minLength": 1, "maxLength": 300}
+        }
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["check", "code", "missing_interface"],
+        "properties": {
+          "check": {"type": "string", "minLength": 1, "maxLength": 100},
+          "code": {"type": "string", "pattern": "^[A-Z0-9_]{3,100}$"},
+          "missing_interface": {"type": "string", "minLength": 1, "maxLength": 300}
+        }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pass", "fail", "blocked"],
+      "properties": {
+        "pass": {"type": "integer", "minimum": 0},
+        "fail": {"type": "integer", "minimum": 0},
+        "blocked": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

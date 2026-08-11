@@ -942,6 +942,51 @@ class ControlLedger:
             for row in rows
         ]
 
+    def record_connector_coverage(
+        self,
+        *,
+        connector_kind: str,
+        contract_version: str,
+        state: str,
+        observed_at: datetime,
+    ) -> None:
+        """Persist bounded connector progress metadata, never connector rows."""
+
+        if (
+            not connector_kind
+            or len(connector_kind) > 100
+            or not contract_version
+            or len(contract_version) > 100
+            or state not in {"PENDING", "COMPLETE", "FAILED"}
+            or observed_at.tzinfo is None
+        ):
+            raise ValueError("connector coverage metadata is invalid")
+        with self._transaction() as connection:
+            connection.execute(
+                "INSERT INTO connector_coverage_metadata(connector_kind,contract_version,state,observed_at,updated_at) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(connector_kind) DO UPDATE SET "
+                "contract_version=excluded.contract_version,state=excluded.state,"
+                "observed_at=excluded.observed_at,updated_at=excluded.updated_at",
+                (
+                    connector_kind,
+                    contract_version,
+                    state,
+                    _format_time(observed_at),
+                    _format_time(self.clock.now()),
+                ),
+            )
+
+    def connector_coverage_metadata(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 100:
+            raise ValueError("connector coverage limit must be between 1 and 100")
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT connector_kind,contract_version,state,observed_at "
+                "FROM connector_coverage_metadata ORDER BY connector_kind LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def register_oauth_client(
         self,
         *,
@@ -1683,7 +1728,7 @@ class ControlLedger:
         with self._reader() as connection:
             row = connection.execute(
                 "SELECT checkpoint_id,service_kind,operation_id,dataset_ref,version_ref,manifest_sha256,"
-                "source_checkpoint_id,source_head_generation,master_instance_id,epoch,status "
+                "source_checkpoint_id,source_head_generation,master_instance_id,epoch,status,verified_at "
                 "FROM checkpoint_candidates WHERE checkpoint_id=?",
                 (checkpoint_id,),
             ).fetchone()

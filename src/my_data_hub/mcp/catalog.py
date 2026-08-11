@@ -46,6 +46,13 @@ _READ = (
 
 _WRITES = (
     ToolContract("master.ensure", "master:ensure", False, idempotent=True, role="operator"),
+    ToolContract("master.rotation.request", "master:rotate", False, idempotent=True, role="operator"),
+    ToolContract("checkpoint.restore.request", "recovery:request", False, idempotent=True, role="operator"),
+    ToolContract("connector.coverage", "acceptance:probe", True, idempotent=True, role="operator"),
+    ToolContract("runtime.stale_epoch.probe", "acceptance:probe", True, idempotent=True, role="operator"),
+    ToolContract(
+        "provider.protected_resource.probe", "acceptance:probe", True, idempotent=True, role="operator"
+    ),
     ToolContract("data.change.preview", "data:write", False, role="operator"),
     ToolContract("data.change.apply", "data:write", False, destructive=True, role="operator"),
     ToolContract("bloggers.import.preview", "migration:operate", False, role="migration_operator"),

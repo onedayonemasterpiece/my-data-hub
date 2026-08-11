@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import jsonschema
 import pytest
 
 from scripts.provider import scheduled_acceptance as acceptance
@@ -93,10 +94,35 @@ def complete_observations() -> acceptance.Observations:
             "verified_at": (NOW - timedelta(hours=1)).isoformat(),
         },
         embedding_status={"e5": {"coverage": 1.0}, "bge_m3": {"coverage": 1.0}},
+        connector_status={
+            "available": True,
+            "bounded": True,
+            "connector_count": 2,
+            "complete_count": 2,
+            "oldest_observed_at": NOW.isoformat(),
+        },
+        stale_epoch_probe={"evaluated": True, "denied": True, "mutation_attempted": False},
+        protected_resource_probe={
+            "evaluated": True,
+            "denied": True,
+            "mutation_attempted": False,
+        },
         mcp_tools=set(READ_ONLY_TOOLS),
         unauthenticated_http_status=401,
         invalid_token_http_status=401,
         deployed_commit_matches=True,
+        deployed_commit_sha=COMMIT,
+        action_requests={
+            key: {
+                "accepted": True,
+                "state": "REQUESTED",
+                "execution_supported": False,
+                "blocker_code": "ISOLATED_RESTORE_OPERATION_CONSUMER_MISSING"
+                if "restore" in key
+                else "MASTER_ROTATION_OPERATION_CONSUMER_MISSING",
+            }
+            for key in ("current_restore", "previous_restore", "rotation")
+        },
         lifecycle_receipts={
             "dataset": {
                 "privacy": "private",
@@ -140,13 +166,17 @@ def test_nightly_runs_observable_gates_and_blocks_only_missing_runtime_interface
         "mcp_invalid_token_denial",
     }
     assert all(values[name].outcome is acceptance.Outcome.PASS for name in expected_passes)
-    assert values["connector_coverage"].blocker_code == "CONNECTOR_COVERAGE_API_MISSING"
-    assert values["bounded_cold_restore_request"].blocker_code == "COLD_RESTORE_REQUEST_API_MISSING"
-    assert values["stale_epoch_rejection"].blocker_code == "STALE_EPOCH_PROBE_API_MISSING"
+    assert values["connector_coverage"].outcome is acceptance.Outcome.PASS
+    assert (
+        values["bounded_cold_restore_request"].blocker_code
+        == "ISOLATED_RESTORE_OPERATION_CONSUMER_MISSING"
+    )
+    assert values["stale_epoch_rejection"].outcome is acceptance.Outcome.PASS
     receipt = acceptance.build_receipt(
         mode=acceptance.Mode.NIGHTLY,
         checks=checks,
-        commit_sha=COMMIT,
+        source_commit_sha="b" * 40,
+        deployed_commit_sha=COMMIT,
         started_at=NOW,
         completed_at=NOW,
         workflow_run_id="123",
@@ -164,12 +194,9 @@ def test_weekly_adds_rotation_previous_restore_denial_and_real_lifecycle_evidenc
     )
     values = by_name(checks)
 
-    assert values["forced_master_rotation"].blocker_code == "FORCED_ROTATION_API_MISSING"
-    assert values["previous_checkpoint_restore"].blocker_code == "PREVIOUS_CHECKPOINT_RESTORE_API_MISSING"
-    assert (
-        values["protected_resource_mutation_denial"].blocker_code
-        == "PROTECTED_RESOURCE_DENIAL_PROBE_API_MISSING"
-    )
+    assert values["forced_master_rotation"].blocker_code == "MASTER_ROTATION_OPERATION_CONSUMER_MISSING"
+    assert values["previous_checkpoint_restore"].blocker_code == "ISOLATED_RESTORE_OPERATION_CONSUMER_MISSING"
+    assert values["protected_resource_mutation_denial"].outcome is acceptance.Outcome.PASS
     assert values["mcp_managed_dataset_lifecycle_cleanup"].outcome is acceptance.Outcome.PASS
     assert values["mcp_managed_notebook_lifecycle_cleanup"].outcome is acceptance.Outcome.PASS
 
@@ -208,7 +235,8 @@ def test_failures_outrank_blockers_without_emitting_resource_or_business_rows() 
     receipt = acceptance.build_receipt(
         mode=acceptance.Mode.NIGHTLY,
         checks=checks,
-        commit_sha=COMMIT,
+        source_commit_sha="b" * 40,
+        deployed_commit_sha=COMMIT,
         started_at=NOW,
         completed_at=NOW,
         workflow_run_id="124",
@@ -280,6 +308,24 @@ def test_absent_master_is_healthy_and_does_not_invent_a_stale_epoch() -> None:
     assert check.observed == {"state": "ABSENT", "stale_active_epoch": False}
 
 
+def test_registry_only_negative_probe_remains_blocked_without_real_admission_path() -> None:
+    observations = complete_observations()
+    observations.stale_epoch_probe = {
+        "evaluated": False,
+        "denied": False,
+        "binding_valid": True,
+        "mutation_attempted": False,
+        "blocker_code": "STALE_EPOCH_ADMISSION_PATH_UNAVAILABLE",
+    }
+
+    check = acceptance._negative_policy_check(
+        observations, kind="stale_epoch", name="stale_epoch_rejection"
+    )
+
+    assert check.outcome is acceptance.Outcome.BLOCKED
+    assert check.blocker_code == "STALE_EPOCH_ADMISSION_PATH_UNAVAILABLE"
+
+
 def test_bad_lifecycle_cleanup_is_a_failure_not_a_success_claim() -> None:
     observations = complete_observations()
     observations.lifecycle_receipts["dataset"] = {
@@ -305,6 +351,41 @@ def test_receipt_sanitizer_rejects_secret_and_business_row_shapes() -> None:
         acceptance._assert_sanitized({"detail": "Bearer should-never-appear"})
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://mcp-datahub.kenigevents.ru/mcp",
+        "https://evil.example/mcp",
+        "https://mcp-datahub.kenigevents.ru:443/mcp",
+        "https://user@mcp-datahub.kenigevents.ru/mcp",
+        "https://mcp-datahub.kenigevents.ru/mcp?redirect=evil",
+        "https://mcp-datahub.kenigevents.ru/mcp#fragment",
+        "https://mcp-datahub.kenigevents.ru/other",
+    ],
+)
+def test_scheduled_endpoint_rejects_bearer_exfiltration_shapes(endpoint: str) -> None:
+    assert not acceptance._canonical_mcp_endpoint(endpoint)
+
+
+def test_scheduled_endpoint_accepts_only_canonical_https_implicit_port() -> None:
+    assert acceptance._canonical_mcp_endpoint("https://mcp-datahub.kenigevents.ru/mcp")
+
+
+def test_receipt_distinguishes_source_from_deployed_commit() -> None:
+    receipt = acceptance.build_receipt(
+        mode=acceptance.Mode.NIGHTLY,
+        checks=[],
+        source_commit_sha="b" * 40,
+        deployed_commit_sha=COMMIT,
+        started_at=NOW,
+        completed_at=NOW,
+        workflow_run_id="125",
+    )
+    assert receipt["source_commit_sha"] == "b" * 40
+    assert receipt["deployed_commit_sha"] == COMMIT
+    assert "commit_sha" not in receipt
+
+
 def test_cli_writes_blocked_receipt_when_live_credentials_are_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -318,6 +399,7 @@ def test_cli_writes_blocked_receipt_when_live_credentials_are_unavailable(
     )
     monkeypatch.setattr(acceptance, "collect_live", lambda **_kwargs: observations)
     monkeypatch.setenv("MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT", COMMIT)
+    monkeypatch.setenv("GITHUB_SHA", "b" * 40)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -329,6 +411,8 @@ def test_cli_writes_blocked_receipt_when_live_credentials_are_unavailable(
     assert receipt["schema_version"] == acceptance.RECEIPT_SCHEMA
     assert receipt["outcome"] == "BLOCKED"
     assert receipt["blockers"]
+    assert receipt["source_commit_sha"] == "b" * 40
+    assert receipt["deployed_commit_sha"] == COMMIT
 
 
 def test_workflows_execute_scheduled_runner_and_upload_its_receipts() -> None:
@@ -343,3 +427,19 @@ def test_workflows_execute_scheduled_runner_and_upload_its_receipts() -> None:
     assert "--dataset-lifecycle-receipt artifacts/dataset-canary.json" in provider
     assert "--notebook-lifecycle-receipt artifacts/notebook-canary.json" in provider
     assert "scheduled-provider-real.json" in provider
+    assert "MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN" in nightly
+    assert "MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN" in provider
+    assert "MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT: ${{ vars.MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT }}" in nightly
+
+
+def test_scheduled_receipt_schema_validates_sanitized_example() -> None:
+    root = Path(__file__).resolve().parents[2]
+    schema = json.loads(
+        (root / "schemas/scheduled-acceptance-receipt.v1.schema.json").read_text()
+    )
+    example = json.loads(
+        (root / "examples/contracts/scheduled-acceptance-receipt.v1.example.json").read_text()
+    )
+    jsonschema.Draft202012Validator(
+        schema, format_checker=jsonschema.FormatChecker()
+    ).validate(example)

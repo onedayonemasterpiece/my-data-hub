@@ -1,0 +1,28 @@
+{
+  "schema_version": "my-data-hub-scheduled-acceptance.v1",
+  "mode": "nightly",
+  "outcome": "BLOCKED",
+  "source_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "deployed_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "workflow_run_id": "123456",
+  "started_at": "2026-08-12T12:00:00+00:00",
+  "completed_at": "2026-08-12T12:01:00+00:00",
+  "checks": [
+    {
+      "name": "bounded_cold_restore_request",
+      "category": "BACKUP_RECOVERY",
+      "outcome": "BLOCKED",
+      "observed": {},
+      "blocker_code": "ISOLATED_RESTORE_OPERATION_CONSUMER_MISSING",
+      "missing_interface": "consumer for durable current_restore operation"
+    }
+  ],
+  "blockers": [
+    {
+      "check": "bounded_cold_restore_request",
+      "code": "ISOLATED_RESTORE_OPERATION_CONSUMER_MISSING",
+      "missing_interface": "consumer for durable current_restore operation"
+    }
+  ],
+  "counts": {"pass": 0, "fail": 0, "blocked": 1}
+}

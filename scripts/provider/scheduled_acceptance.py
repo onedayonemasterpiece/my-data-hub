@@ -34,6 +34,7 @@ EXTERNAL_BLOCKED = 78
 RECEIPT_SCHEMA = "my-data-hub-scheduled-acceptance.v1"
 MAX_RECEIPT_BYTES = 512 * 1024
 MAX_INVENTORY_RESOURCES = 1_000
+CANONICAL_MCP_HOST = "mcp-datahub.kenigevents.ru"
 READ_ONLY_TOOLS = frozenset(
     name for name, contract in TOOL_CONTRACTS.items() if contract.read_only and contract.role == "reader"
 )
@@ -103,10 +104,15 @@ class Observations:
     master_status: dict[str, object] | None = None
     checkpoint_status: dict[str, object] | None = None
     embedding_status: dict[str, object] | None = None
+    connector_status: dict[str, object] | None = None
+    stale_epoch_probe: dict[str, object] | None = None
+    protected_resource_probe: dict[str, object] | None = None
     mcp_tools: set[str] | None = None
     unauthenticated_http_status: int | None = None
     invalid_token_http_status: int | None = None
     deployed_commit_matches: bool | None = None
+    deployed_commit_sha: str | None = None
+    action_requests: dict[str, dict[str, object]] = field(default_factory=dict)
     lifecycle_receipts: dict[str, dict[str, object]] = field(default_factory=dict)
     blockers: dict[str, tuple[str, str]] = field(default_factory=dict)
 
@@ -138,6 +144,21 @@ def _parse_time(value: object) -> datetime | None:
         return None
 
 
+def _is_exact_numeric_version_ref(value: object) -> bool:
+    if not isinstance(value, str) or len(value) > 512:
+        return False
+    owner, separator, remainder = value.partition("/")
+    slug, separator_two, version = remainder.partition("/")
+    return bool(
+        separator
+        and separator_two
+        and owner
+        and slug
+        and "/" not in version
+        and version.isascii()
+        and version.isdigit()
+        and int(version) >= 1
+    )
 def _resource_checks(observations: Observations, *, now: datetime, freshness: timedelta) -> list[Check]:
     if observations.live_resources is None:
         return [
@@ -281,8 +302,8 @@ def _checkpoint_checks(
         ]
     current = bool(status.get("current_checkpoint_id"))
     previous = bool(status.get("previous_checkpoint_id"))
-    exact_current = bool(status.get("current_exact_version_ref"))
-    exact_previous = bool(status.get("previous_exact_version_ref"))
+    exact_current = _is_exact_numeric_version_ref(status.get("current_exact_version_ref"))
+    exact_previous = _is_exact_numeric_version_ref(status.get("previous_exact_version_ref"))
     if current and previous and not (exact_current and exact_previous):
         generations = _blocked(
             "checkpoint_current_previous",
@@ -338,6 +359,119 @@ def _embedding_check(observations: Observations) -> Check:
         "CONNECTOR_DELIVERY",
         Outcome.PASS if complete else Outcome.FAIL,
         {"model_count": len(values), "all_complete": complete},
+    )
+
+
+def _connector_check(
+    observations: Observations, *, now: datetime, freshness: timedelta
+) -> Check:
+    status = observations.connector_status
+    if status is None:
+        return _component_blocker(observations, "mcp", "connector_coverage", "CONNECTOR_DELIVERY")
+    if status.get("available") is not True:
+        return _blocked(
+            "connector_coverage",
+            "CONNECTOR_DELIVERY",
+            str(status.get("blocker_code") or "CONNECTOR_METADATA_UNAVAILABLE"),
+            "canonical connector metadata heartbeat in the control ledger",
+        )
+    bounded = status.get("bounded") is True
+    total = status.get("connector_count")
+    complete = status.get("complete_count")
+    oldest = _parse_time(status.get("oldest_observed_at"))
+    valid = (
+        bounded
+        and isinstance(total, int)
+        and not isinstance(total, bool)
+        and isinstance(complete, int)
+        and not isinstance(complete, bool)
+        and 0 <= complete <= total <= 100
+        and oldest is not None
+        and oldest <= now
+        and now - oldest <= freshness
+    )
+    return Check(
+        "connector_coverage",
+        "CONNECTOR_DELIVERY",
+        Outcome.PASS if valid and total > 0 and complete == total else Outcome.FAIL,
+        {
+            "bounded": bounded,
+            "connector_count": total or 0,
+            "complete_count": complete or 0,
+            "fresh": oldest is not None and oldest <= now and now - oldest <= freshness,
+        },
+    )
+
+
+def _negative_policy_check(
+    observations: Observations, *, kind: str, name: str
+) -> Check:
+    result = (
+        observations.stale_epoch_probe
+        if kind == "stale_epoch"
+        else observations.protected_resource_probe
+    )
+    if result is None:
+        return _component_blocker(observations, "mcp", name, "AUTHORIZATION")
+    if result.get("evaluated") is not True:
+        return _blocked(
+            name,
+            "AUTHORIZATION",
+            str(result.get("blocker_code") or "POLICY_ADMISSION_PROBE_UNAVAILABLE"),
+            "same production admission/policy path with a guaranteed non-mutating probe",
+        )
+    passed = (
+        result.get("evaluated") is True
+        and result.get("denied") is True
+        and result.get("mutation_attempted") is False
+    )
+    return Check(
+        name,
+        "AUTHORIZATION",
+        Outcome.PASS if passed else Outcome.FAIL,
+        {
+            "evaluated": result.get("evaluated") is True,
+            "denied": result.get("denied") is True,
+            "no_mutation": result.get("mutation_attempted") is False,
+        },
+    )
+
+
+def _action_request_check(observations: Observations, *, kind: str, name: str) -> Check:
+    result = observations.action_requests.get(kind)
+    if result is None:
+        code, interface = observations.blockers.get(
+            "operator_mcp",
+            ("ACCEPTANCE_OPERATOR_API_UNAVAILABLE", f"MCP {kind} durable request"),
+        )
+        return _blocked(name, "BACKUP_RECOVERY" if "restore" in kind else "DEPLOYMENT", code, interface)
+    if result.get("accepted") is not True or result.get("state") != "REQUESTED":
+        return Check(
+            name,
+            "BACKUP_RECOVERY" if "restore" in kind else "DEPLOYMENT",
+            Outcome.FAIL,
+            {"durable_request_accepted": False},
+        )
+    if result.get("execution_supported") is not True:
+        return Check(
+            name=name,
+            category="BACKUP_RECOVERY" if "restore" in kind else "DEPLOYMENT",
+            outcome=Outcome.BLOCKED,
+            observed={
+                "durable_request_accepted": True,
+                "exact_checkpoint_bound": bool(result.get("checkpoint_id"))
+                and _is_exact_numeric_version_ref(result.get("exact_version_ref")),
+                "duplicate": result.get("duplicate") is True,
+                "execution_supported": False,
+            },
+            blocker_code=str(result.get("blocker_code") or "ACTION_EXECUTOR_UNAVAILABLE"),
+            missing_interface=f"consumer for durable {kind} operation",
+        )
+    return Check(
+        name,
+        "BACKUP_RECOVERY" if "restore" in kind else "DEPLOYMENT",
+        Outcome.PASS,
+        {"durable_request_accepted": True, "execution_supported": True},
     )
 
 
@@ -443,45 +577,27 @@ def evaluate(
         *_checkpoint_checks(observations, now=now, freshness=freshness),
         _embedding_check(observations),
         *_mcp_checks(observations),
-        _blocked(
-            "connector_coverage",
-            "CONNECTOR_DELIVERY",
-            "CONNECTOR_COVERAGE_API_MISSING",
-            "bounded MCP connector.coverage status without business rows",
+        _connector_check(observations, now=now, freshness=freshness),
+        _action_request_check(
+            observations, kind="current_restore", name="bounded_cold_restore_request"
         ),
-        _blocked(
-            "bounded_cold_restore_request",
-            "BACKUP_RECOVERY",
-            "COLD_RESTORE_REQUEST_API_MISSING",
-            "bounded control API for isolated current-checkpoint restore smoke",
-        ),
-        _blocked(
-            "stale_epoch_rejection",
-            "AUTHORIZATION",
-            "STALE_EPOCH_PROBE_API_MISSING",
-            "safe control API that submits a synthetic stale-epoch request",
+        _negative_policy_check(
+            observations, kind="stale_epoch", name="stale_epoch_rejection"
         ),
     ]
     if mode in {Mode.WEEKLY, Mode.MANUAL}:
         checks.extend(
             [
-                _blocked(
-                    "forced_master_rotation",
-                    "DEPLOYMENT",
-                    "FORCED_ROTATION_API_MISSING",
-                    "checkpoint-bound control API for forced master rotation",
+                _action_request_check(
+                    observations, kind="rotation", name="forced_master_rotation"
                 ),
-                _blocked(
-                    "previous_checkpoint_restore",
-                    "BACKUP_RECOVERY",
-                    "PREVIOUS_CHECKPOINT_RESTORE_API_MISSING",
-                    "bounded control API for isolated previous-checkpoint restore",
+                _action_request_check(
+                    observations, kind="previous_restore", name="previous_checkpoint_restore"
                 ),
-                _blocked(
-                    "protected_resource_mutation_denial",
-                    "AUTHORIZATION",
-                    "PROTECTED_RESOURCE_DENIAL_PROBE_API_MISSING",
-                    "safe provider-control denial probe for an exact protected resource",
+                _negative_policy_check(
+                    observations,
+                    kind="protected_resource",
+                    name="protected_resource_mutation_denial",
                 ),
                 _lifecycle_check(observations, "dataset"),
                 _lifecycle_check(observations, "notebook"),
@@ -547,6 +663,142 @@ async def _collect_mcp(endpoint: str, token: str) -> dict[str, object]:
             return await _collect_mcp_session(session)
 
 
+async def _collect_operator_session(
+    session: object,
+    *,
+    mode: Mode,
+    snapshot: Mapping[str, object],
+    workflow_run_id: str,
+) -> dict[str, dict[str, object]]:
+    await session.initialize()  # type: ignore[attr-defined]
+    checkpoint = snapshot.get("checkpoint")
+    master = snapshot.get("master")
+    if not isinstance(checkpoint, Mapping) or not isinstance(master, Mapping):
+        raise RuntimeError("operator request lacks reader checkpoint/master binding")
+    results: dict[str, dict[str, object]] = {}
+    connector_result = await session.call_tool("connector.coverage", {})  # type: ignore[attr-defined]
+    if _result_is_error(connector_result):
+        raise RuntimeError("MCP connector.coverage returned an error")
+    results["connector"] = _structured_result(connector_result)
+    epoch = master.get("master_epoch", master.get("epoch"))
+    if isinstance(epoch, int) and not isinstance(epoch, bool) and epoch > 1:
+        stale_result = await session.call_tool(  # type: ignore[attr-defined]
+            "runtime.stale_epoch.probe",
+            {"expected_active_epoch": epoch, "submitted_epoch": epoch - 1},
+        )
+        if _result_is_error(stale_result):
+            raise RuntimeError("MCP runtime.stale_epoch.probe returned an error")
+        results["stale_epoch_probe"] = _structured_result(stale_result)
+    provider = snapshot.get("provider")
+    if isinstance(provider, Mapping) and isinstance(provider.get("resources"), list):
+        protected_ref = next(
+            (
+                row.get("resource_ref")
+                for row in provider["resources"]
+                if isinstance(row, Mapping)
+                and row.get("control_class") == "orchestrator_protected"
+                and isinstance(row.get("resource_ref"), str)
+            ),
+            None,
+        )
+        if protected_ref:
+            protected_result = await session.call_tool(  # type: ignore[attr-defined]
+                "provider.protected_resource.probe", {"resource_ref": protected_ref}
+            )
+            if _result_is_error(protected_result):
+                raise RuntimeError("MCP provider.protected_resource.probe returned an error")
+            results["protected_resource_probe"] = _structured_result(protected_result)
+    calls: list[tuple[str, str, dict[str, object]]] = [
+        (
+            "checkpoint.restore.request",
+            "current_restore",
+            {
+                "idempotency_key": f"{workflow_run_id}:current-restore",
+                "target": "current",
+                "checkpoint_id": checkpoint.get("current_checkpoint_id"),
+                "exact_version_ref": checkpoint.get("current_exact_version_ref"),
+                "timeout_seconds": 1200,
+            },
+        )
+    ]
+    if mode in {Mode.WEEKLY, Mode.MANUAL}:
+        calls.extend(
+            [
+                (
+                    "checkpoint.restore.request",
+                    "previous_restore",
+                    {
+                        "idempotency_key": f"{workflow_run_id}:previous-restore",
+                        "target": "previous",
+                        "checkpoint_id": checkpoint.get("previous_checkpoint_id"),
+                        "exact_version_ref": checkpoint.get("previous_exact_version_ref"),
+                        "timeout_seconds": 1200,
+                    },
+                ),
+                (
+                    "master.rotation.request",
+                    "rotation",
+                    {
+                        "idempotency_key": f"{workflow_run_id}:rotation",
+                        "checkpoint_id": checkpoint.get("current_checkpoint_id"),
+                        "exact_version_ref": checkpoint.get("current_exact_version_ref"),
+                        "expected_active_epoch": master.get("master_epoch", master.get("epoch")),
+                        "timeout_seconds": 1800,
+                    },
+                ),
+            ]
+        )
+    for tool, key, arguments in calls:
+        result = await session.call_tool(tool, arguments)  # type: ignore[attr-defined]
+        if _result_is_error(result):
+            raise RuntimeError(f"MCP {tool} returned an error")
+        results[key] = _structured_result(result)
+    return results
+
+
+async def _collect_operator(
+    endpoint: str,
+    token: str,
+    *,
+    mode: Mode,
+    snapshot: Mapping[str, object],
+    workflow_run_id: str,
+) -> dict[str, dict[str, object]]:
+    import httpx2
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    timeout = httpx2.Timeout(20.0, connect=5.0)
+    async with httpx2.AsyncClient(
+        headers={"Authorization": f"Bearer {token}"},
+        follow_redirects=False,
+        timeout=timeout,
+    ) as client, streamable_http_client(endpoint, http_client=client) as streams:
+        read_stream, write_stream = streams
+        async with ClientSession(read_stream, write_stream, read_timeout_seconds=20) as session:
+            return await _collect_operator_session(
+                session, mode=mode, snapshot=snapshot, workflow_run_id=workflow_run_id
+            )
+
+
+def _canonical_mcp_endpoint(endpoint: str) -> bool:
+    try:
+        parsed = urlsplit(endpoint)
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == CANONICAL_MCP_HOST
+        and parsed.username is None
+        and parsed.password is None
+        and port is None
+        and parsed.path == "/mcp"
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
 def _negative_http_status(endpoint: str, authorization: str | None) -> int:
     body = canonical_json_bytes(
         {
@@ -588,6 +840,9 @@ def collect_live(
     *,
     endpoint: str,
     token: str,
+    operator_token: str,
+    mode: Mode,
+    workflow_run_id: str,
     expected_commit: str,
     ledger_path: Path,
     lifecycle_paths: Mapping[str, Path],
@@ -623,13 +878,8 @@ def collect_live(
                 "KAGGLE_INVENTORY_UNAVAILABLE",
                 f"single KaggleProviderAdapter inventory ({type(exc).__name__})",
             )
-    parsed = urlsplit(endpoint)
     if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.path != "/mcp"
-        or parsed.query
-        or parsed.fragment
+        not _canonical_mcp_endpoint(endpoint)
         or not token
         or len(expected_commit) != 40
         or any(character not in "0123456789abcdef" for character in expected_commit)
@@ -646,6 +896,10 @@ def collect_live(
             observations.master_status = dict(snapshot["master"])  # type: ignore[arg-type]
             observations.checkpoint_status = dict(snapshot["checkpoint"])  # type: ignore[arg-type]
             observations.embedding_status = dict(snapshot["embedding"])  # type: ignore[arg-type]
+            if isinstance(snapshot.get("stale_epoch_probe"), Mapping):
+                observations.stale_epoch_probe = dict(snapshot["stale_epoch_probe"])  # type: ignore[arg-type]
+            if isinstance(snapshot.get("protected_resource_probe"), Mapping):
+                observations.protected_resource_probe = dict(snapshot["protected_resource_probe"])  # type: ignore[arg-type]
             provider = dict(snapshot["provider"])  # type: ignore[arg-type]
             rows = provider.get("resources")
             if not isinstance(rows, list) or len(rows) > 100:
@@ -658,6 +912,7 @@ def collect_live(
                     "MCP provider.resources.status completeness cursor/has_more contract",
                 )
             deployed = observations.platform_status.get("deployed_commit")
+            observations.deployed_commit_sha = deployed if isinstance(deployed, str) else None
             observations.deployed_commit_matches = deployed == expected_commit
             observations.unauthenticated_http_status = _negative_http_status(endpoint, None)
             observations.invalid_token_http_status = _negative_http_status(
@@ -669,6 +924,39 @@ def collect_live(
                 "MCP_SCHEDULED_OBSERVATION_UNAVAILABLE",
                 f"bounded MCP status/auth probes ({type(exc).__name__})",
             )
+    if observations.checkpoint_status is not None:
+        if not operator_token:
+            observations.blockers["operator_mcp"] = (
+                "MCP_ACCEPTANCE_OPERATOR_TOKEN_MISSING",
+                "owner/operator OAuth token for durable restore/rotation requests",
+            )
+        else:
+            try:
+                observations.action_requests = asyncio.run(
+                    _collect_operator(
+                        endpoint,
+                        operator_token,
+                        mode=mode,
+                        snapshot={
+                            "checkpoint": observations.checkpoint_status,
+                            "master": observations.master_status or {},
+                            "provider": {"resources": observations.registered_resources or []},
+                        },
+                        workflow_run_id=workflow_run_id,
+                    )
+                )
+                observations.connector_status = observations.action_requests.pop("connector", None)
+                observations.stale_epoch_probe = observations.action_requests.pop(
+                    "stale_epoch_probe", None
+                )
+                observations.protected_resource_probe = observations.action_requests.pop(
+                    "protected_resource_probe", None
+                )
+            except Exception as exc:
+                observations.blockers["operator_mcp"] = (
+                    "MCP_ACCEPTANCE_ACTION_REQUEST_UNAVAILABLE",
+                    f"bounded exact MCP action request ({type(exc).__name__})",
+                )
     for kind, path in lifecycle_paths.items():
         try:
             observations.lifecycle_receipts[kind] = _load_receipt(path)
@@ -699,7 +987,8 @@ def build_receipt(
     *,
     mode: Mode,
     checks: list[Check],
-    commit_sha: str,
+    source_commit_sha: str,
+    deployed_commit_sha: str,
     started_at: datetime,
     completed_at: datetime,
     workflow_run_id: str,
@@ -723,7 +1012,8 @@ def build_receipt(
         "schema_version": RECEIPT_SCHEMA,
         "mode": mode.value,
         "outcome": outcome.value,
-        "commit_sha": commit_sha,
+        "source_commit_sha": source_commit_sha,
+        "deployed_commit_sha": deployed_commit_sha,
         "workflow_run_id": workflow_run_id[:100],
         "started_at": started_at.isoformat(),
         "completed_at": completed_at.isoformat(),
@@ -777,7 +1067,10 @@ def main() -> int:
     started = datetime.now(UTC)
     endpoint = os.getenv("MY_DATA_HUB_MCP_CANARY_ENDPOINT", "").strip()
     token = os.getenv("MY_DATA_HUB_MCP_CANARY_TOKEN", "").strip()
+    operator_token = os.getenv("MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN", "").strip()
     expected_commit = os.getenv("MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT", "").strip()
+    source_commit = os.getenv("GITHUB_SHA", "").strip()
+    workflow_run_id = os.getenv("GITHUB_RUN_ID", "local")
     lifecycle_paths = {
         kind: path
         for kind, path in {
@@ -789,6 +1082,9 @@ def main() -> int:
     observations = collect_live(
         endpoint=endpoint,
         token=token,
+        operator_token=operator_token,
+        mode=mode,
+        workflow_run_id=workflow_run_id,
         expected_commit=expected_commit,
         ledger_path=args.ledger,
         lifecycle_paths=lifecycle_paths,
@@ -802,15 +1098,28 @@ def main() -> int:
     receipt = build_receipt(
         mode=mode,
         checks=checks,
-        commit_sha=(
-            expected_commit
+        source_commit_sha=(
+            source_commit
+            if len(source_commit) == 40
+            and all(character in "0123456789abcdef" for character in source_commit)
+            else "unknown"
+        ),
+        deployed_commit_sha=(
+            observations.deployed_commit_sha
+            if observations.deployed_commit_sha is not None
+            and len(observations.deployed_commit_sha) == 40
+            and all(
+                character in "0123456789abcdef"
+                for character in observations.deployed_commit_sha
+            )
+            else expected_commit
             if len(expected_commit) == 40
             and all(character in "0123456789abcdef" for character in expected_commit)
             else "unknown"
         ),
         started_at=started,
         completed_at=datetime.now(UTC),
-        workflow_run_id=os.getenv("GITHUB_RUN_ID", "local"),
+        workflow_run_id=workflow_run_id,
     )
     if args.receipt.is_symlink():
         raise SystemExit("--receipt must not be a symbolic link")
