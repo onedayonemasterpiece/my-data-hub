@@ -772,6 +772,7 @@ def validate_deployment(report: Report) -> None:
         "deploy/control-plane/Dockerfile",
         "deploy/control-plane/collect_deployment_evidence.py",
         "deploy/control-plane/install.sh",
+        "deploy/control-plane/install_master_tunnel_broker.sh",
         "deploy/same-host/install.sh",
         "deploy/yandex-edge/autossh.service",
         "deploy/yandex-edge/cloud-init.yaml.tpl",

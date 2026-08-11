@@ -1,0 +1,95 @@
+# Epoch-bound master tunnel broker
+
+## Boundary
+
+The devstand SSH daemon accepts a reverse PostgreSQL forward only through the
+dedicated `mdh-master-tunnel` account. The account has `/usr/sbin/nologin`, no
+password, no authorized keys, no PTY/session channel, and no local forwarding.
+Its `Match User` block permits only:
+
+```text
+AllowTcpForwarding remote
+PermitListen 127.0.0.1:25432
+GatewayPorts no
+MaxSessions 0
+```
+
+The port is configurable at installation but remains one exact non-privileged
+port. The installer does not add or alter an SSH listener, public port, VPN, edge
+route, PostgreSQL service, or PGDATA path. `PermitListen` is an sshd restriction,
+not an invented certificate critical option. Certificates contain only the
+standard `permit-port-forwarding` extension after `clear`; sshd supplies the exact
+listen restriction. This follows the upstream
+[`sshd_config(5)`](https://man.openbsd.org/sshd_config) and
+[`ssh-keygen(1)`](https://man.openbsd.org/ssh-keygen) contracts.
+
+## Authenticated certificate protocol
+
+The runtime-to-control protocol is:
+
+1. The Notebook generates a fresh Ed25519 key under its ephemeral working runtime,
+   mode `0600`. The private key is never sent to control, placed in a Dataset,
+   included in Notebook output, or reused by another attempt.
+2. It sends `POST /internal/runtime/tunnel-certificates/{run_id}/{attempt_id}` with
+   the per-attempt runtime bearer and a body containing exactly
+   `master_instance_id`, `epoch`, `public_key`, and `valid_before`.
+3. The control route accepts only a one-line Ed25519 public key after verifying the
+   bearer, exact run/attempt identity, REGISTERING or ACTIVE state, and exact master
+   instance/epoch. ACTIVE certificate expiry may not exceed the current lease;
+   REGISTERING expiry is bounded to five minutes.
+4. An injected `TunnelBroker.issue_public_key(...)` returns only the public OpenSSH
+   certificate, serial, epoch principal, expiry, and exact loopback listener. The
+   private CA remains server-side and mode `0600`.
+5. The Notebook writes the public certificate beside its ephemeral private key,
+   uses both for `ssh -N -R 127.0.0.1:25432:127.0.0.1:<postgres-port>`, and deletes
+   both on fence/terminal cleanup.
+
+The control ledger must not receive the public key or certificate body. The broker
+state stores only UUID/epoch/lease, serial, key ID, public-key SHA-256, expiry, and
+revocation metadata. It cannot represent database URLs, passwords, rows, artifacts,
+or checkpoint bytes.
+
+## Lifecycle calls
+
+The authenticated control lifecycle maps to these broker calls:
+
+| Control transition | Required broker call |
+| --- | --- |
+| new master epoch allocated for registration | `activate(instance, run, attempt, epoch, lease_until, listen_port, now)` |
+| ACTIVE lease renewed | `renew(instance, run, attempt, epoch, lease_until, now)` |
+| certificate requested | `issue_public_key(instance, run, attempt, epoch, public_key, valid_before, now)` |
+| one certificate rejected | `revoke(instance, run, attempt, epoch, serial, reason)` |
+| fence, terminal, rotation, or drain completion | `deactivate(instance, run, attempt, epoch, reason)` |
+| every five seconds and at boot | `reconcile(now)` |
+
+The principal, certificate key ID, and broker record bind the exact run/attempt as
+well as the instance/epoch. Activation must strictly advance the durable epoch high-water mark. A rotation
+revokes every older serial and terminates only sshd children owned by the dedicated
+tunnel account. Deactivation first blanks `authorized_principals`, adds the epoch's
+serials to the OpenSSH KRL, persists `active=null`, and then terminates those sessions.
+The systemd timer performs the same denial when the lease expires. Missing, malformed,
+oversized, or unreadable state blanks principals, revokes the CA in the KRL, terminates
+the dedicated sessions, and returns failure; it never falls back to a static key.
+
+OpenSSH checks certificate validity, the current epoch principal, the KRL, and exact
+`PermitListen` on every new authentication. The timer closes already-authenticated
+connections after expiry or lost lifecycle authority.
+
+## Installation (not executed by repository tests)
+
+Review the exact account, paths, port, and host OpenSSH include first, then explicitly run:
+
+```bash
+sudo deploy/control-plane/install_master_tunnel_broker.sh \
+  INSTALL_MY_DATA_HUB_MASTER_TUNNEL_BROKER
+```
+
+The root-gated installer generates a tunnel-only Ed25519 user CA, initializes empty
+authorization/KRL state, validates the sshd configuration before reload, and enables
+the fail-closed reconciliation timer. Repository tests execute only syntax and
+temporary-directory broker operations; they do not create an account, mutate sshd,
+reload a service, or touch a real host.
+
+Until the control route is injected with a host broker transport and the Notebook
+ephemeral-key client is integrated, this is implementation evidence only and must not
+be reported as a deployed or live tunnel.

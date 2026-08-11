@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+[[ "${1:-}" == "INSTALL_MY_DATA_HUB_MASTER_TUNNEL_BROKER" ]] || {
+  echo "usage: $0 INSTALL_MY_DATA_HUB_MASTER_TUNNEL_BROKER" >&2
+  exit 2
+}
+[[ "$(id -u)" == "0" ]] || { echo "master tunnel broker install requires root" >&2; exit 2; }
+
+require_command() {
+  command -v "$1" >/dev/null || { echo "$1 is required" >&2; exit 2; }
+}
+for command_name in chmod getent grep id install mktemp python3 ssh-keygen sshd systemctl useradd usermod; do
+  require_command "$command_name"
+done
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+source_root="$(cd -- "$script_dir/../.." && pwd -P)"
+broker_source="$source_root/src/my_data_hub/tunnel_broker.py"
+[[ -f "$broker_source" && ! -L "$broker_source" ]] || {
+  echo "tunnel broker source must be a regular non-symlink file" >&2
+  exit 2
+}
+
+account="${MY_DATA_HUB_TUNNEL_ACCOUNT:-mdh-master-tunnel}"
+listen_port="${MY_DATA_HUB_TUNNEL_LISTEN_PORT:-25432}"
+state_root="${MY_DATA_HUB_TUNNEL_STATE_ROOT:-/var/lib/my-data-hub/tunnel-broker}"
+account_home="${MY_DATA_HUB_TUNNEL_ACCOUNT_HOME:-/var/lib/my-data-hub/tunnel-account}"
+ca_private="${MY_DATA_HUB_TUNNEL_CA_PRIVATE_KEY:-/etc/my-data-hub/tunnel-user-ca}"
+sshd_fragment="${MY_DATA_HUB_TUNNEL_SSHD_FRAGMENT:-/etc/ssh/sshd_config.d/60-my-data-hub-master-tunnel.conf}"
+broker_program="${MY_DATA_HUB_TUNNEL_BROKER_PROGRAM:-/usr/local/libexec/my-data-hub-tunnel-broker}"
+unit_root="${MY_DATA_HUB_TUNNEL_SYSTEMD_DIR:-/etc/systemd/system}"
+
+[[ "$account" =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] || { echo "invalid tunnel account" >&2; exit 2; }
+[[ "$listen_port" =~ ^[0-9]+$ ]] && (( listen_port >= 1024 && listen_port <= 65535 )) || {
+  echo "tunnel listen port must be within 1024..65535" >&2
+  exit 2
+}
+for path_value in "$state_root" "$account_home" "$ca_private" "$sshd_fragment" "$broker_program" "$unit_root"; do
+  [[ "$path_value" = /* && "$path_value" != *[$'\n\r\t ']* ]] || {
+    echo "tunnel broker paths must be absolute and whitespace-free" >&2
+    exit 2
+  }
+done
+for directory_path in "$state_root" "$account_home" "$(dirname "$ca_private")" \
+  "$(dirname "$sshd_fragment")" "$(dirname "$broker_program")" "$unit_root"; do
+  [[ ! -L "$directory_path" ]] || { echo "tunnel broker directories may not be symbolic links" >&2; exit 2; }
+done
+[[ -f /etc/ssh/sshd_config && ! -L /etc/ssh/sshd_config ]] || {
+  echo "OpenSSH server configuration is unavailable" >&2
+  exit 2
+}
+grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf([[:space:]]|$)' /etc/ssh/sshd_config || {
+  echo "sshd_config must already include /etc/ssh/sshd_config.d/*.conf" >&2
+  exit 2
+}
+
+# The account has no usable password, shell, home content, groups, or other job.
+if getent passwd "$account" >/dev/null; then
+  IFS=: read -r _ _ _ _ _ observed_home observed_shell < <(getent passwd "$account")
+  [[ "$observed_home" == "$account_home" && "$observed_shell" == "/usr/sbin/nologin" ]] || {
+    echo "existing tunnel account differs from the dedicated contract" >&2
+    exit 2
+  }
+else
+  useradd --system --user-group --create-home --home-dir "$account_home" \
+    --shell /usr/sbin/nologin --password '*' "$account"
+fi
+usermod --shell /usr/sbin/nologin --password '*' "$account"
+install -d -o root -g root -m 0700 "$state_root" "$(dirname "$ca_private")"
+install -d -o "$account" -g "$account" -m 0700 "$account_home"
+install -d -o root -g root -m 0755 "$(dirname "$broker_program")" "$(dirname "$sshd_fragment")" "$unit_root"
+install -o root -g root -m 0755 "$broker_source" "$broker_program"
+
+if [[ ! -e "$ca_private" && ! -e "$ca_private.pub" ]]; then
+  ssh-keygen -q -t ed25519 -N '' -C 'my-data-hub master tunnel user CA' -f "$ca_private"
+elif [[ ! -f "$ca_private" || -L "$ca_private" || ! -f "$ca_private.pub" || -L "$ca_private.pub" ]]; then
+  echo "tunnel CA is incomplete or not regular" >&2
+  exit 2
+fi
+chmod 0600 "$ca_private"
+chmod 0644 "$ca_private.pub"
+
+if [[ ! -e "$state_root/state.json" && ! -e "$state_root/authorized_principals" && ! -e "$state_root/revoked.krl" ]]; then
+  "$broker_program" --state-root "$state_root" --ca-private-key "$ca_private" --account "$account" initialize
+fi
+for required_state in state.json authorized_principals revoked.krl; do
+  [[ -f "$state_root/$required_state" && ! -L "$state_root/$required_state" ]] || {
+    echo "tunnel broker state is incomplete: $required_state" >&2
+    exit 2
+  }
+done
+
+candidate="$(mktemp "$(dirname "$sshd_fragment")/.my-data-hub-sshd.XXXXXX")"
+fragment_backup=""
+cleanup() { python3 - "$candidate" "$fragment_backup" <<'PY'
+from pathlib import Path
+import sys
+for raw in sys.argv[1:]:
+    if raw:
+        Path(raw).unlink(missing_ok=True)
+PY
+}
+trap cleanup EXIT
+"$broker_program" --state-root "$state_root" --ca-private-key "$ca_private" --account "$account" \
+  render-sshd-config --listen-port "$listen_port" --output "$candidate"
+chmod 0600 "$candidate"
+# Validate the standalone Match block before it can affect the host include.
+sshd -t -f "$candidate"
+if [[ -e "$sshd_fragment" ]]; then
+  [[ -f "$sshd_fragment" && ! -L "$sshd_fragment" ]] || {
+    echo "existing sshd tunnel fragment is not a regular file" >&2
+    exit 2
+  }
+  fragment_backup="$(mktemp "$state_root/.sshd-fragment.previous.XXXXXX")"
+  install -o root -g root -m 0600 "$sshd_fragment" "$fragment_backup"
+fi
+install -o root -g root -m 0600 "$candidate" "$sshd_fragment"
+rollback_sshd_fragment() {
+  if [[ -n "$fragment_backup" ]]; then
+    install -o root -g root -m 0600 "$fragment_backup" "$sshd_fragment"
+  else
+    python3 - "$sshd_fragment" <<'PY'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).unlink(missing_ok=True)
+PY
+  fi
+}
+if ! sshd -t; then
+  rollback_sshd_fragment
+  echo "combined sshd configuration rejected the tunnel Match block" >&2
+  exit 2
+fi
+
+reconcile_unit="$unit_root/my-data-hub-master-tunnel-reconcile.service"
+timer_unit="$unit_root/my-data-hub-master-tunnel-reconcile.timer"
+cat > "$reconcile_unit" <<UNIT
+[Unit]
+Description=Fail-close expired my-data-hub master tunnel epochs
+After=network.target ssh.service sshd.service
+
+[Service]
+Type=oneshot
+ExecStart=$broker_program --state-root $state_root --ca-private-key $ca_private --account $account reconcile
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=$state_root
+UNIT
+cat > "$timer_unit" <<'UNIT'
+[Unit]
+Description=Reconcile my-data-hub master tunnel authorization
+
+[Timer]
+OnBootSec=5s
+OnUnitActiveSec=5s
+AccuracySec=1s
+Unit=my-data-hub-master-tunnel-reconcile.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+chmod 0644 "$reconcile_unit" "$timer_unit"
+systemctl daemon-reload
+if ! systemctl reload ssh.service 2>/dev/null && ! systemctl reload sshd.service; then
+  rollback_sshd_fragment
+  sshd -t
+  systemctl reload ssh.service 2>/dev/null || systemctl reload sshd.service
+  echo "sshd reload rejected the tunnel Match block; previous fragment restored" >&2
+  exit 2
+fi
+systemctl enable --now my-data-hub-master-tunnel-reconcile.timer
+trap - EXIT
+cleanup
+printf 'master_tunnel_broker_installed=true\naccount=%s\nlisten=127.0.0.1:%s\nactive_epoch=none_until_authenticated_activation\n' \
+  "$account" "$listen_port"
