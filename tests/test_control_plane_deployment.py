@@ -145,6 +145,30 @@ def test_operator_profile_keeps_kaggle_authority_only_in_control_process() -> No
     assert "KAGGLE_API_TOKEN" not in json.dumps(compose["services"]["remote-mcp"])
 
 
+def test_fm08_host_supervisor_is_explicit_private_and_has_one_restart_target() -> None:
+    source = installer_source()
+    assert "I_ACKNOWLEDGE_TASK_BOUND_CONTROL_RESTART" in source
+    assert "acceptance_supervisor=false" in source
+    assert "acceptance supervisor requires operator install" in source
+    assert "my-data-hub-acceptance-supervisor.service" in source
+    assert "acceptance_supervisor.py --socket" in source
+    assert "--allowed-uid $(id -u)" in source
+    assert 'chmod 700 "$acceptance_socket_dir"' in source
+    assert 'require_private_file "$acceptance_key"' in source
+    assert "control.sock" in source
+    assert "/run/mdh-acceptance:ro" in source
+    assert "restart --no-deps control-plane" not in source  # fixed inside the host implementation
+    assert "docker.sock" not in source
+    assert "MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_SOCKET" not in COMPOSE.read_text()
+
+    supervisor = (
+        ROOT / "src/my_data_hub/control_plane/acceptance_supervisor.py"
+    ).read_text(encoding="utf-8")
+    assert 'result.extend(("restart", "--no-deps", "control-plane"))' in supervisor
+    for forbidden in ('"restart", "remote-mcp"', '"restart", "oauth-server"', "shell=True"):
+        assert forbidden not in supervisor
+
+
 def test_prepare_checks_bounded_disk_headroom_before_building_release_image() -> None:
     source = installer_source()
     disk_check = source.index('minimum_free_kib="${MY_DATA_HUB_CONTROL_MIN_FREE_KIB:-4194304}"')

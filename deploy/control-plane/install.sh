@@ -341,31 +341,6 @@ if systemctl --user is-active --quiet my-data-hub-acceptance-supervisor.service 
   previous_supervisor_unit_active=true
 fi
 
-if [[ "$acceptance_supervisor" == true ]]; then
-  compose_file_argument="$release/compose.control-plane.yaml"
-  [[ -z "$operator_override" ]] || compose_file_argument="$compose_file_argument:$operator_override"
-  compose_file_argument="$compose_file_argument:$acceptance_override"
-  cat > "$supervisor_unit_candidate" <<UNIT
-[Unit]
-Description=my-data-hub task-bound FM08 control restart supervisor
-After=docker.service
-Before=my-data-hub-control-plane.service
-
-[Service]
-Type=simple
-ExecStart=$python_path -m my_data_hub.control_plane.acceptance_supervisor --socket $acceptance_socket_dir/control.sock --key-file $acceptance_key --journal $acceptance_socket_dir/restart-journal.json --docker $docker_path --compose-env $compose_env --project-directory $release --compose-files $compose_file_argument --allowed-uid $(id -u)
-Environment=PYTHONPATH=$release/src
-Restart=on-failure
-RestartSec=2
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=default.target
-UNIT
-  chmod 600 "$supervisor_unit_candidate"
-fi
-
 cat > "$unit_candidate" <<UNIT
 [Unit]
 Description=my-data-hub lightweight control, OAuth, and remote MCP processes
@@ -389,6 +364,30 @@ SuccessExitStatus=0 130 143
 WantedBy=default.target
 UNIT
 chmod 600 "$unit_candidate"
+
+if [[ "$acceptance_supervisor" == true ]]; then
+  compose_file_argument="$release/compose.control-plane.yaml"
+  cat > "$supervisor_unit_candidate" <<UNIT
+[Unit]
+Description=my-data-hub task-bound FM08 control restart supervisor
+After=docker.service
+Before=my-data-hub-control-plane.service
+
+[Service]
+Type=simple
+ExecStart=$python_path $release/src/my_data_hub/control_plane/acceptance_supervisor.py --socket $acceptance_socket_dir/control.sock --key-file $acceptance_key --journal $acceptance_socket_dir/restart-journal.json --docker $docker_path --compose-env $compose_env --project-directory $release --compose-files $compose_file_argument --allowed-uid $(id -u)
+Environment=PYTHONPATH=$release/src
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
+UNIT
+  chmod 600 "$supervisor_unit_candidate"
+fi
+
 
 rollback() {
   exit_code=$?
@@ -449,8 +448,8 @@ if [[ "$acceptance_supervisor" == true ]]; then
   systemctl --user enable my-data-hub-acceptance-supervisor.service
   systemctl --user restart my-data-hub-acceptance-supervisor.service
 else
-  systemctl --user disable my-data-hub-acceptance-supervisor.service
-  systemctl --user stop my-data-hub-acceptance-supervisor.service
+  systemctl --user disable my-data-hub-acceptance-supervisor.service 2>/dev/null || true
+  systemctl --user stop my-data-hub-acceptance-supervisor.service 2>/dev/null || true
 fi
 systemctl --user enable my-data-hub-control-plane.service
 systemctl --user restart my-data-hub-control-plane.service

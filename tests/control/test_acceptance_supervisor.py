@@ -20,6 +20,7 @@ from my_data_hub.acceptance.master_lifecycle import (
     MasterAcceptanceCommandKind,
     MasterAcceptanceScenario,
 )
+from my_data_hub.acceptance.master_production import ControlRestartReceipt
 from my_data_hub.control_plane.acceptance_supervisor import (
     ALLOWED_CALLBACK_EVENT_TYPES,
     CallbackCapture,
@@ -215,7 +216,7 @@ def test_compose_runner_has_one_immutable_target(tmp_path: Path) -> None:
     docker.chmod(0o700)
     env = tmp_path / "compose.env"
     env.write_text("TAG=x\n", encoding="utf-8")
-    compose = tmp_path / "compose.yaml"
+    compose = tmp_path / "compose.control-plane.yaml"
     compose.write_text("services: {}\n", encoding="utf-8")
     runner = ComposeControlPlaneRestartRunner(
         docker_path=docker,
@@ -235,6 +236,7 @@ class FakeControl:
     dispositions: list[Literal["accepted", "duplicate"] | None] = field(default_factory=list)
     arm_calls: int = 0
     disarmed: int = 0
+    restart_ids: tuple[UUID, UUID] | None = None
 
     def arm_callback_loss(self, value: MasterAcceptanceCommand, **kwargs: Any) -> CallbackLossDirective:
         self.arm_calls += 1
@@ -272,6 +274,18 @@ class FakeControl:
         assert value == command()
         assert armed == self.directive
         self.disarmed += 1
+
+    def record_control_restart(
+        self,
+        value: MasterAcceptanceCommand,
+        armed: CallbackLossDirective,
+        *,
+        before_boot_id: UUID,
+        after_boot_id: UUID,
+    ) -> None:
+        assert value == command()
+        assert armed == self.directive
+        self.restart_ids = (before_boot_id, after_boot_id)
 
     def exact_service_active(self, binding: MasterAcceptanceBinding) -> bool:
         return binding == command().binding
@@ -340,6 +354,10 @@ def test_supervisor_returns_only_captured_identity_and_waits_for_replay(tmp_path
     assert stored.event_id == event_id
     assert stored.body_sha256 == BODY_HASH
     assert not hasattr(stored, "body")
+    restart = supervisor.restart_control_process(command())
+    assert isinstance(restart, ControlRestartReceipt)
+    assert (restart.before_boot_id, restart.after_boot_id) == (BEFORE, AFTER)
+    assert control.restart_ids == (BEFORE, AFTER)
     assert supervisor.replay_stored_callback(command(), event_id) == "duplicate"
     assert supervisor.exact_service_active(command().binding)
 

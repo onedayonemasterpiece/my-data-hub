@@ -26,16 +26,16 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from my_data_hub.acceptance.master_lifecycle import (
-    MasterAcceptanceBinding,
-    MasterAcceptanceCommand,
-    MasterAcceptanceCommandKind,
-    MasterLifecycleAcceptanceError,
-)
 from my_data_hub.hashing import canonical_json_bytes
+
+if TYPE_CHECKING:
+    from my_data_hub.acceptance.master_lifecycle import (
+        MasterAcceptanceBinding,
+        MasterAcceptanceCommand,
+    )
 
 MAX_MESSAGE_BYTES = 16 * 1024
 MAX_RESPONSE_BYTES = 16 * 1024
@@ -49,7 +49,7 @@ _UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-
 _SHA_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
-class CallbackSupervisorBlocked(MasterLifecycleAcceptanceError):
+class CallbackSupervisorBlocked(RuntimeError):
     """FM08 could not safely begin or reconcile a host effect."""
 
     def __init__(self, code: str) -> None:
@@ -89,6 +89,21 @@ class CallbackLossDirective:
     acknowledged: Literal[True]
 
     def __post_init__(self) -> None:
+        receipt_payload = {
+            "task_id": str(self.task_id),
+            "command_id": str(self.command_id),
+            "operation_id": str(self.operation_id),
+            "run_id": str(self.run_id),
+            "attempt_id": str(self.attempt_id),
+            "master_instance_id": str(self.master_instance_id),
+            "epoch": self.epoch,
+            "allowed_event_types": list(self.allowed_event_types),
+            "max_callbacks": self.max_callbacks,
+            "armed_at": self.armed_at.astimezone(UTC).isoformat(),
+            "expires_at": self.expires_at.astimezone(UTC).isoformat(),
+            "before_boot_id": str(self.before_boot_id),
+        }
+        expected_receipt = hashlib.sha256(canonical_json_bytes(receipt_payload)).hexdigest()
         if (
             self.epoch < 1
             or self.allowed_event_types != ALLOWED_CALLBACK_EVENT_TYPES
@@ -98,6 +113,7 @@ class CallbackLossDirective:
             or self.expires_at.tzinfo is None
             or not self.armed_at < self.expires_at <= self.armed_at + timedelta(seconds=DIRECTIVE_TTL_SECONDS)
             or not _SHA_PATTERN.fullmatch(self.directive_receipt_sha256)
+            or not hmac.compare_digest(self.directive_receipt_sha256, expected_receipt)
         ):
             raise ValueError("callback-loss directive violates its fixed bounds")
 
@@ -141,6 +157,15 @@ class CallbackLossControlPort(Protocol):
         directive: CallbackLossDirective,
         event_id: UUID,
     ) -> Literal["accepted", "duplicate"] | None: ...
+
+    def record_control_restart(
+        self,
+        command: MasterAcceptanceCommand,
+        directive: CallbackLossDirective,
+        *,
+        before_boot_id: UUID,
+        after_boot_id: UUID,
+    ) -> None: ...
 
     def disarm_expired_callback_loss(
         self, command: MasterAcceptanceCommand, directive: CallbackLossDirective
@@ -436,6 +461,7 @@ class ComposeControlPlaneRestartRunner:
             or not self.project_directory.is_dir()
             or not self.compose_files
             or any(not path.is_file() for path in self.compose_files)
+            or self.compose_files != (self.project_directory / "compose.control-plane.yaml",)
         ):
             raise ValueError("compose restart configuration is unavailable")
 
@@ -727,6 +753,12 @@ class LedgerCallbackLossSupervisor:
         if capture is None:
             raise CallbackSupervisorBlocked("FM08_CALLBACK_NOT_CAPTURED")
         receipt = self.host.restart(HostRestartRequest.from_directive(directive))
+        self.control.record_control_restart(
+            command,
+            directive,
+            before_boot_id=receipt.before_boot_id,
+            after_boot_id=receipt.after_boot_id,
+        )
         from my_data_hub.acceptance.master_production import ControlRestartReceipt
 
         return ControlRestartReceipt(
@@ -777,7 +809,9 @@ class LedgerCallbackLossSupervisor:
 
     @staticmethod
     def _assert_fm08(command: MasterAcceptanceCommand) -> None:
-        if command.command_kind is not MasterAcceptanceCommandKind.CALLBACK_LOSS_RECOVERY:
+        if command.command_kind.value != "CALLBACK_LOSS_RECOVERY":
+            from my_data_hub.acceptance.master_lifecycle import MasterLifecycleAcceptanceError
+
             raise MasterLifecycleAcceptanceError("callback supervisor received a non-FM08 command")
 
 
