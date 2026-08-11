@@ -6,7 +6,16 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from my_data_hub.connectors.contracts import ConnectorReceipt, ReceiptStatus
+from my_data_hub.connectors.contracts import (
+    ConnectorCheckpointRequest,
+    ConnectorCheckpointState,
+    ConnectorCheckpointStatusReceipt,
+    ConnectorDurabilityReceipt,
+    ConnectorDurabilityState,
+    ConnectorReceipt,
+    ReceiptStatus,
+)
+from my_data_hub.connectors.durability import ConnectorDurabilityConflict
 from my_data_hub.connectors.repository import (
     AcceptanceDisposition,
     AcceptanceSubmission,
@@ -101,7 +110,8 @@ class PostgresConnectorAcceptanceRepository:
             )
             cursor.execute(
                 """
-                SELECT c.service_principal, c.status, p.enabled, p.schema_version
+                SELECT c.service_principal, c.status, p.enabled, p.schema_version,
+                       c.delivery_mode, c.policy
                 FROM integration.connector c
                 JOIN integration.data_product p ON p.connector_id = c.connector_id
                 WHERE c.connector_id = %s AND p.data_product = %s
@@ -117,6 +127,20 @@ class PostgresConnectorAcceptanceRepository:
                 raise PermissionError("connector or data product is disabled")
             if str(registration[3]) != envelope.schema_version:
                 raise ValueError("data product schema version is not registered")
+            if str(registration[4]) != envelope.delivery_mode.value:
+                raise PermissionError(
+                    "delivery_mode is not authorized by connector registry policy"
+                )
+            policy = registration[5] if isinstance(registration[5], dict) else {}
+            allowed_modes = policy.get("allowed_delivery_modes", [str(registration[4])])
+            if (
+                not isinstance(allowed_modes, list)
+                or not all(isinstance(mode, str) for mode in allowed_modes)
+                or envelope.delivery_mode.value not in allowed_modes
+            ):
+                raise PermissionError(
+                    "delivery_mode is not authorized by connector registry policy"
+                )
 
             cursor.execute(
                 """
@@ -228,7 +252,7 @@ class PostgresConnectorAcceptanceRepository:
                     submission.payload_sha256,
                     submission.envelope_sha256,
                     envelope.record_count,
-                    "inline" if envelope.inline_records is not None else "artifact",
+                    envelope.delivery_mode.value,
                     envelope.source_cursor.partition if envelope.source_cursor else None,
                     envelope.observed_period.start,
                     envelope.observed_period.end,
@@ -291,6 +315,14 @@ class PostgresConnectorAcceptanceRepository:
                     accepted_at,
                 ),
             )
+            cursor.execute(
+                """
+                INSERT INTO integration.connector_durability (
+                    batch_id, acceptance_receipt_id, state
+                ) VALUES (%s, %s, 'ACCEPTED')
+                """,
+                (submission.batch_id, receipt.receipt_id),
+            )
         return RepositoryDecision(AcceptanceDisposition.ACCEPTED, receipt=receipt)
 
     def get_receipt(self, batch_id: UUID) -> ConnectorReceipt | None:
@@ -305,6 +337,164 @@ class PostgresConnectorAcceptanceRepository:
             )
             row = cursor.fetchone()
         return ConnectorReceipt.model_validate(row[0]) if row else None
+
+    def get_durability_receipt(self, batch_id: UUID) -> ConnectorDurabilityReceipt | None:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT d.state, d.canonical_revision, d.checkpoint_request_id,
+                       d.checkpoint_operation_id, d.checkpoint_receipt_sha256,
+                       d.checkpoint_id, d.updated_at, r.receipt
+                FROM integration.connector_durability d
+                JOIN integration.receipt r ON r.receipt_id = d.acceptance_receipt_id
+                WHERE d.batch_id = %s
+                """,
+                (batch_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return ConnectorDurabilityReceipt(
+            state=ConnectorDurabilityState(str(row[0])),
+            canonical_revision=int(row[1]) if row[1] is not None else None,
+            checkpoint_request_id=str(row[2]) if row[2] is not None else None,
+            checkpoint_operation_id=str(row[3]) if row[3] is not None else None,
+            checkpoint_receipt_sha256=str(row[4]) if row[4] is not None else None,
+            checkpoint_id=str(row[5]) if row[5] is not None else None,
+            updated_at=row[6],
+            acceptance=ConnectorReceipt.model_validate(row[7]),
+        )
+
+    def record_checkpoint_request(
+        self,
+        batch_id: UUID,
+        *,
+        request: ConnectorCheckpointRequest,
+        operation: ConnectorCheckpointStatusReceipt,
+    ) -> ConnectorDurabilityReceipt:
+        request_sha256 = request.exact_sha256()
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            cursor.execute(
+                """
+                SELECT state, canonical_revision, checkpoint_request_id,
+                       checkpoint_request_sha256, checkpoint_operation_id
+                FROM integration.connector_durability
+                WHERE batch_id = %s FOR UPDATE
+                """,
+                (batch_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise LookupError("connector batch durability receipt was not found")
+            if str(row[0]) != "CANONICAL_COMMITTED":
+                if (
+                    str(row[2]) == request.request_id
+                    and str(row[3]) == request_sha256
+                    and str(row[4]) == operation.operation_id
+                ):
+                    return self.get_durability_receipt(batch_id)  # type: ignore[return-value]
+                raise ConnectorDurabilityConflict(
+                    "checkpoint request conflicts with recorded connector durability state"
+                )
+            if int(row[1]) != request.canonical_revision:
+                raise ConnectorDurabilityConflict(
+                    "checkpoint request canonical revision differs from committed batch"
+                )
+            state = (
+                "CHECKPOINTING"
+                if operation.state is ConnectorCheckpointState.RUNNING
+                else "CHECKPOINT_REQUESTED"
+            )
+            cursor.execute(
+                """
+                UPDATE integration.connector_durability
+                SET state = %s, checkpoint_request_id = %s,
+                    checkpoint_request_sha256 = %s, checkpoint_operation_id = %s,
+                    checkpoint_status_receipt = %s::jsonb, updated_at = clock_timestamp()
+                WHERE batch_id = %s
+                """,
+                (
+                    state,
+                    request.request_id,
+                    request_sha256,
+                    operation.operation_id,
+                    json.dumps(operation.model_dump(mode="json", exclude_none=True)),
+                    batch_id,
+                ),
+            )
+        receipt = self.get_durability_receipt(batch_id)
+        assert receipt is not None
+        return receipt
+
+    def record_checkpoint_status(
+        self,
+        batch_id: UUID,
+        *,
+        status: ConnectorCheckpointStatusReceipt,
+    ) -> ConnectorDurabilityReceipt:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            cursor.execute(
+                """
+                SELECT state, canonical_revision, checkpoint_request_id,
+                       checkpoint_operation_id, checkpoint_status_receipt
+                FROM integration.connector_durability
+                WHERE batch_id = %s FOR UPDATE
+                """,
+                (batch_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise LookupError("connector batch durability receipt was not found")
+            if (
+                int(row[1]) != status.canonical_revision
+                or str(row[2]) != status.request_id
+                or str(row[3]) != status.operation_id
+            ):
+                raise ConnectorDurabilityConflict(
+                    "checkpoint status differs from exact recorded request"
+                )
+            exact = status.model_dump(mode="json", exclude_none=True)
+            if str(row[0]) in {"DURABLE_COMPLETE", "FAILED"}:
+                if row[4] != exact:
+                    raise ConnectorDurabilityConflict("terminal checkpoint receipt changed")
+                receipt = self.get_durability_receipt(batch_id)
+                assert receipt is not None
+                return receipt
+            if status.state is ConnectorCheckpointState.DURABLE_COMPLETE:
+                state = "DURABLE_COMPLETE"
+            elif status.state in {
+                ConnectorCheckpointState.FAILED,
+                ConnectorCheckpointState.FENCED,
+                ConnectorCheckpointState.ORPHANED,
+            }:
+                state = "FAILED"
+            elif status.state is ConnectorCheckpointState.RUNNING:
+                state = "CHECKPOINTING"
+            else:
+                state = "CHECKPOINT_REQUESTED"
+            cursor.execute(
+                """
+                UPDATE integration.connector_durability
+                SET state = %s, checkpoint_status_receipt = %s::jsonb,
+                    checkpoint_receipt_sha256 = %s, checkpoint_id = %s,
+                    updated_at = clock_timestamp()
+                WHERE batch_id = %s
+                """,
+                (
+                    state,
+                    json.dumps(exact),
+                    status.exact_sha256()
+                    if status.state is ConnectorCheckpointState.DURABLE_COMPLETE
+                    else None,
+                    status.checkpoint_id,
+                    batch_id,
+                ),
+            )
+        receipt = self.get_durability_receipt(batch_id)
+        assert receipt is not None
+        return receipt
 
     def health(self, connector_id: str) -> dict[str, Any]:
         with self._connect() as connection, connection.cursor() as cursor:
@@ -484,6 +674,17 @@ class PostgresDailyStatisticsCommitter:
                 """,
                 (batch_id,),
             )
+            cursor.execute(
+                """
+                UPDATE integration.connector_durability
+                SET state = 'CANONICAL_COMMITTED', canonical_revision = %s,
+                    updated_at = clock_timestamp()
+                WHERE batch_id = %s AND state = 'ACCEPTED'
+                """,
+                (canonical_revision, batch_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("connector durability did not advance with canonical commit")
             source_cursor = row[4] if isinstance(row[4], dict) else {}
             partition = str(source_cursor.get("partition") or "")
             cursor.execute(

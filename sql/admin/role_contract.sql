@@ -63,9 +63,10 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA orchestration, sync TO mdh_orches
 
 GRANT USAGE ON SCHEMA integration TO mdh_connector_intake;
 GRANT SELECT ON integration.connector, integration.data_product, integration.batch,
-    integration.receipt TO mdh_connector_intake;
+    integration.receipt, integration.connector_durability TO mdh_connector_intake;
 GRANT INSERT ON integration.batch, integration.batch_payload, integration.batch_event,
-    integration.quarantine, integration.receipt TO mdh_connector_intake;
+    integration.quarantine, integration.receipt, integration.connector_durability
+    TO mdh_connector_intake;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA integration TO mdh_connector_intake;
 
 GRANT USAGE ON SCHEMA hub, analysis, orchestration, sync, region_talk, migration, joplin,
@@ -77,9 +78,14 @@ REVOKE INSERT, UPDATE, DELETE ON hub.canonical_state FROM mdh_mcp_reader, mdh_mc
 GRANT USAGE ON SCHEMA hub, integration, sync TO mdh_canonical_committer;
 GRANT SELECT ON hub.canonical_state, integration.batch, integration.batch_payload,
     integration.data_product, integration.daily_statistic, integration.watermark,
-    integration.quarantine,
+    integration.quarantine, integration.connector_durability,
     sync.external_outbox TO mdh_canonical_committer;
 GRANT UPDATE (status, committed_at) ON integration.batch TO mdh_canonical_committer;
+GRANT UPDATE (
+    state, canonical_revision, checkpoint_request_id, checkpoint_request_sha256,
+    checkpoint_operation_id, checkpoint_status_receipt, checkpoint_receipt_sha256,
+    checkpoint_id, updated_at
+) ON integration.connector_durability TO mdh_canonical_committer;
 GRANT INSERT ON integration.daily_statistic, integration.batch_event,
     integration.watermark, integration.quarantine, sync.external_outbox
     TO mdh_canonical_committer;

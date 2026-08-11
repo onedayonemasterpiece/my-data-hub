@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from my_data_hub.connectors.contracts import (
+    ConnectorDurabilityReceipt,
+    ConnectorDurabilityState,
     ConnectorReceipt,
     ValidatedEnvelope,
     canonical_json_bytes,
@@ -71,11 +73,17 @@ class SpoolState:
     attempts: int = 0
     next_attempt_at: datetime | None = None
     last_error: str | None = None
+    acceptance: ConnectorReceipt | None = None
 
     def to_bytes(self) -> bytes:
         return canonical_json_bytes(
             {
                 "attempts": self.attempts,
+                "acceptance": (
+                    self.acceptance.model_dump(mode="json")
+                    if self.acceptance is not None
+                    else None
+                ),
                 "last_error": self.last_error,
                 "next_attempt_at": (
                     _format_time(self.next_attempt_at) if self.next_attempt_at is not None else None
@@ -97,6 +105,11 @@ class SpoolState:
                     else None
                 ),
                 last_error=value.get("last_error"),
+                acceptance=(
+                    ConnectorReceipt.model_validate(value["acceptance"])
+                    if value.get("acceptance") is not None
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise SpoolIntegrityError("invalid durable spool state") from exc
@@ -210,10 +223,11 @@ class DurableConnectorSpool:
             attempts=item.state.attempts + 1,
             next_attempt_at=next_attempt_at,
             last_error=error[:2000],
+            acceptance=item.state.acceptance,
         )
         _atomic_write(item.state_path, state.to_bytes())
 
-    def acknowledge(self, item: SpoolItem, receipt: ConnectorReceipt) -> None:
+    def record_acceptance(self, item: SpoolItem, receipt: ConnectorReceipt) -> None:
         envelope = item.validated.envelope
         if (
             receipt.connector_id != envelope.connector_id
@@ -223,15 +237,42 @@ class DurableConnectorSpool:
             or receipt.envelope_sha256 != item.validated.envelope_sha256
         ):
             raise SpoolIntegrityError("receipt does not attest the spooled envelope")
-        receipt_path = self.receipts_dir / f"{item.spool_id}.json"
+        receipt_path = self.receipts_dir / f"{item.spool_id}.accepted.json"
         _atomic_write(
             receipt_path,
             canonical_json_bytes(receipt.model_dump(mode="json")),
         )
-        # Receipt is durable before source evidence is removed.  A crash between these
-        # steps causes a safe server replay, never a lost batch.
+        state = SpoolState(
+            queued_at=item.state.queued_at,
+            attempts=item.state.attempts,
+            next_attempt_at=None,
+            last_error=None,
+            acceptance=receipt,
+        )
+        _atomic_write(item.state_path, state.to_bytes())
+
+    def acknowledge_durable(
+        self, item: SpoolItem, receipt: ConnectorDurabilityReceipt
+    ) -> None:
+        envelope = item.validated.envelope
+        acceptance = receipt.acceptance
+        if receipt.state is not ConnectorDurabilityState.DURABLE_COMPLETE:
+            raise SpoolIntegrityError("source evidence can be removed only at DURABLE_COMPLETE")
+        if (
+            acceptance.connector_id != envelope.connector_id
+            or acceptance.idempotency_key != envelope.idempotency_key
+            or acceptance.batch_id != envelope.batch_id
+            or acceptance.payload_sha256 != envelope.payload_sha256
+            or acceptance.envelope_sha256 != item.validated.envelope_sha256
+        ):
+            raise SpoolIntegrityError("durability receipt does not attest the spooled envelope")
+        receipt_path = self.receipts_dir / f"{item.spool_id}.json"
+        _atomic_write(receipt_path, canonical_json_bytes(receipt.model_dump(mode="json")))
+        # The verified checkpoint receipt is durable before exact source evidence
+        # is removed.  ACCEPTED/CANONICAL_COMMITTED never enter this branch.
         item.envelope_path.unlink(missing_ok=True)
         item.state_path.unlink(missing_ok=True)
+        (self.receipts_dir / f"{item.spool_id}.accepted.json").unlink(missing_ok=True)
         _fsync_directory(self.pending_dir)
 
     def quarantine(
@@ -286,6 +327,38 @@ class DeliveryResult:
 
 class ConnectorTransport(Protocol):
     def submit(self, exact_envelope_bytes: bytes) -> DeliveryResult: ...
+
+    def durability(self, acceptance: ConnectorReceipt) -> DurabilityDeliveryResult: ...
+
+
+class DurabilityDisposition(StrEnum):
+    PENDING = "pending"
+    COMPLETE = "complete"
+    RETRY = "retry"
+    CONFLICT = "conflict"
+    REJECTED = "rejected"
+    AUTH_FAILURE = "auth_failure"
+
+
+@dataclass(frozen=True, slots=True)
+class DurabilityDeliveryResult:
+    disposition: DurabilityDisposition
+    receipt: ConnectorDurabilityReceipt | None = None
+    message: str = ""
+    retry_after_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        observed = self.disposition in {
+            DurabilityDisposition.PENDING,
+            DurabilityDisposition.COMPLETE,
+        }
+        if observed != (self.receipt is not None):
+            raise ValueError("only observed durability results carry a receipt")
+        if self.disposition is DurabilityDisposition.COMPLETE and (
+            self.receipt is None
+            or self.receipt.state is not ConnectorDurabilityState.DURABLE_COMPLETE
+        ):
+            raise ValueError("complete delivery requires DURABLE_COMPLETE receipt")
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,6 +415,44 @@ class ConnectorDeliveryService:
         attempted = delivered = deferred = quarantined = 0
         for item in self.spool.pending(ready_at=now)[:limit]:
             attempted += 1
+            if item.state.acceptance is not None:
+                try:
+                    durability = self.transport.durability(item.state.acceptance)
+                except Exception as exc:
+                    durability = DurabilityDeliveryResult(
+                        DurabilityDisposition.RETRY,
+                        message=f"durability status exception: {type(exc).__name__}: {exc}",
+                    )
+                if durability.disposition is DurabilityDisposition.COMPLETE:
+                    assert durability.receipt is not None
+                    self.spool.acknowledge_durable(item, durability.receipt)
+                    delivered += 1
+                elif durability.disposition in {
+                    DurabilityDisposition.PENDING,
+                    DurabilityDisposition.RETRY,
+                }:
+                    retry_delay = (
+                        timedelta(seconds=durability.retry_after_seconds)
+                        if durability.retry_after_seconds is not None
+                        else self.retry_policy.delay(
+                            item.state.attempts, jitter_key=str(item.spool_id)
+                        )
+                    )
+                    self.spool.record_retry(
+                        item,
+                        error=durability.message or "durability not complete",
+                        next_attempt_at=now + retry_delay,
+                    )
+                    deferred += 1
+                else:
+                    self.spool.quarantine(
+                        item,
+                        reason=f"durability_{durability.disposition.value}",
+                        details={"message": durability.message},
+                        quarantined_at=now,
+                    )
+                    quarantined += 1
+                continue
             try:
                 result = self.transport.submit(item.exact_bytes)
             except Exception as exc:  # transport failures are ambiguous and retryable
@@ -354,8 +465,8 @@ class ConnectorDeliveryService:
                 DeliveryDisposition.REPLAYED,
             }:
                 assert result.receipt is not None
-                self.spool.acknowledge(item, result.receipt)
-                delivered += 1
+                self.spool.record_acceptance(item, result.receipt)
+                deferred += 1
             elif result.disposition is DeliveryDisposition.RETRY:
                 retry_delay = (
                     timedelta(seconds=result.retry_after_seconds)

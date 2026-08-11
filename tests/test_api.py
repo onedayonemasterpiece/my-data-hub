@@ -95,7 +95,7 @@ def test_unconfigured_intake_is_fail_closed(monkeypatch: pytest.MonkeyPatch, tmp
     assert response.status_code == 503
 
 
-def test_production_api_requires_only_its_two_database_identities_and_worker_token(
+def test_production_api_does_not_require_static_connector_database_identity(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(api_module, "WorkerResultRepository", FakeRepository)
@@ -105,11 +105,40 @@ def test_production_api_requires_only_its_two_database_identities_and_worker_tok
     production = replace(
         production,
         application_database_url="postgresql://application@db/hub",
-        connector_intake_database_url="postgresql://connector@db/hub",
+        connector_intake_database_url="",
         worker_result_token=None,
     )
     with pytest.raises(ConfigurationError, match="worker result token"):
         api_module.create_app(production)
+    configured = replace(production, worker_result_token="worker-secret")
+    app = api_module.create_app(configured)
+    assert app.title == "my-data-hub control API"
+
+
+def test_connector_intake_without_active_master_runtime_is_pre_mutation_blocker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(api_module, "WorkerResultRepository", FakeRepository)
+    configured = replace(
+        settings(tmp_path),
+        connector_credentials=(("synthetic.daily-statistics", "connector-secret"),),
+    )
+    client = TestClient(api_module.create_app(configured))
+    envelope = (ROOT / "examples/contracts/data-connector-envelope.v1.example.json").read_bytes()
+    response = client.post(
+        "/intake/v1/batches",
+        content=envelope,
+        headers={
+            "Authorization": "Bearer connector-secret",
+            "Content-Type": "application/json",
+        },
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "CONNECTOR_ACTIVE_MASTER_RUNTIME_UNAVAILABLE",
+        "retryable": True,
+        "mutation_started": False,
+    }
 
 
 def test_chunked_or_declared_oversize_body_is_rejected(

@@ -8,13 +8,25 @@ from uuid import uuid5
 import pytest
 
 from my_data_hub.connectors.contracts import (
+    ConnectorCheckpointRequest,
+    ConnectorCheckpointState,
+    ConnectorCheckpointStatusReceipt,
     ConnectorContractError,
+    ConnectorDurabilityReceipt,
+    ConnectorDurabilityState,
     ConnectorReceipt,
+    DeliveryMode,
     ReceiptStatus,
     canonical_json_bytes,
     payload_sha256,
     validate_envelope_bytes,
 )
+from my_data_hub.connectors.durability import (
+    ConnectorDurabilityConflict,
+    ConnectorDurabilityService,
+    checkpoint_request_for,
+)
+from my_data_hub.connectors.interfaces import ConnectorRegistration, OrchestratorPullInterface
 from my_data_hub.connectors.postgres import normalize_daily_counters
 from my_data_hub.connectors.repository import (
     AcceptanceDisposition,
@@ -25,17 +37,26 @@ from my_data_hub.connectors.repository import (
     RepositoryDecision,
     classify_replay,
 )
+from my_data_hub.connectors.runtime import (
+    ActiveMasterConnectorRuntime,
+    ConnectorCapabilityBlocked,
+    ConnectorSessionRequest,
+    connector_principal,
+)
 from my_data_hub.connectors.service import ConnectorAuthorizationError, ConnectorIntakeService
 from my_data_hub.connectors.spool import (
     ConnectorDeliveryService,
     DeliveryDisposition,
     DeliveryResult,
+    DurabilityDeliveryResult,
+    DurabilityDisposition,
     DurableConnectorSpool,
     RetryPolicy,
     SpoolConflict,
 )
 from my_data_hub.connectors.synthetic import SYNTHETIC_NAMESPACE, SyntheticConnectorProducer
 from my_data_hub.connectors.transport import HttpConnectorTransport
+from my_data_hub.mcp.contracts import EnsureMasterReceipt, MasterSnapshot, MasterState
 
 ROOT = Path(__file__).resolve().parents[1]
 ACCEPTED_AT = datetime(2026, 8, 9, 12, tzinfo=UTC)
@@ -185,8 +206,9 @@ def test_authenticated_principal_cannot_submit_for_another_connector() -> None:
 
 
 class RecordingTransport:
-    def __init__(self, *, fail: bool) -> None:
+    def __init__(self, *, fail: bool, durable: bool = False) -> None:
         self.fail = fail
+        self.durable = durable
         self.submissions: list[bytes] = []
 
     def submit(self, exact_envelope_bytes: bytes) -> DeliveryResult:
@@ -207,6 +229,27 @@ class RecordingTransport:
         )
         return DeliveryResult(DeliveryDisposition.ACCEPTED, receipt=receipt)
 
+    def durability(self, acceptance: ConnectorReceipt) -> DurabilityDeliveryResult:
+        state = (
+            ConnectorDurabilityState.DURABLE_COMPLETE
+            if self.durable
+            else ConnectorDurabilityState.CANONICAL_COMMITTED
+        )
+        receipt = ConnectorDurabilityReceipt(
+            state=state,
+            acceptance=acceptance,
+            canonical_revision=18,
+            checkpoint_request_id="b" * 64 if self.durable else None,
+            checkpoint_operation_id="checkpoint-operation" if self.durable else None,
+            checkpoint_receipt_sha256="c" * 64 if self.durable else None,
+            checkpoint_id="checkpoint-18" if self.durable else None,
+            updated_at=ACCEPTED_AT,
+        )
+        return DurabilityDeliveryResult(
+            DurabilityDisposition.COMPLETE if self.durable else DurabilityDisposition.PENDING,
+            receipt=receipt,
+        )
+
 
 def test_outage_spool_survives_restart_and_eventually_delivers_exact_bytes(tmp_path: Path) -> None:
     exact = synthetic_bytes()
@@ -225,10 +268,17 @@ def test_outage_spool_survives_restart_and_eventually_delivers_exact_bytes(tmp_p
         now=queued_at + timedelta(seconds=2)
     )
 
-    assert second.delivered == 1
+    assert second.deferred == 1
+    assert original.envelope_path.exists()
     assert unavailable.submissions == [exact]
     assert available.submissions == [exact]
-    assert restarted_spool.pending(ready_at=queued_at + timedelta(seconds=2)) == []
+    final = RecordingTransport(fail=False, durable=True)
+    third = ConnectorDeliveryService(restarted_spool, final).deliver_ready(
+        now=queued_at + timedelta(seconds=4)
+    )
+    assert third.delivered == 1
+    assert final.submissions == []
+    assert restarted_spool.pending(ready_at=queued_at + timedelta(seconds=4)) == []
     assert len(list(restarted_spool.receipts_dir.glob("*.json"))) == 1
     with pytest.raises(SpoolConflict, match="durable receipt"):
         restarted_spool.enqueue(exact)
@@ -292,3 +342,271 @@ def test_connector_transport_requires_https_and_retry_has_bounded_jitter() -> No
     assert first != second
     assert policy.delay(99, jitter_key="batch-a").total_seconds() <= 30
     assert policy.delay(1_000_000, jitter_key="batch-a").total_seconds() <= 30
+
+
+def test_delivery_mode_is_one_registry_authorization_vocabulary() -> None:
+    validated = validate_envelope_bytes(synthetic_bytes())
+    registration = ConnectorRegistration(
+        connector_id=validated.envelope.connector_id,
+        delivery_mode=DeliveryMode.PUSH,
+        status="active",
+        policy_revision=1,
+        enabled_data_products=frozenset({validated.envelope.data_product}),
+    )
+    registration.authorize(validated.envelope)
+    mismatched = ConnectorRegistration(
+        connector_id=validated.envelope.connector_id,
+        delivery_mode=DeliveryMode.PULL,
+        status="active",
+        policy_revision=1,
+        enabled_data_products=frozenset({validated.envelope.data_product}),
+    )
+    with pytest.raises(PermissionError, match="delivery_mode"):
+        mismatched.authorize(validated.envelope)
+
+
+def test_region_talk_pull_stops_before_adapter_or_spool_mutation(tmp_path: Path) -> None:
+    class ForbiddenAdapter:
+        called = False
+
+        def pull(self, registration: ConnectorRegistration) -> bytes:
+            self.called = True
+            raise AssertionError("paused connector must not pull")
+
+    adapter = ForbiddenAdapter()
+    spool = DurableConnectorSpool(tmp_path / "spool")
+    interface = OrchestratorPullInterface(spool, adapter)
+    registration = ConnectorRegistration(
+        connector_id="region-talk-ydb-bloggers-v1",
+        delivery_mode=DeliveryMode.PULL,
+        status="paused",
+        policy_revision=1,
+        enabled_data_products=frozenset(),
+    )
+    with pytest.raises(RuntimeError, match="CONNECTOR_REGISTRY_PAUSED"):
+        interface.run_once(registration)
+    assert adapter.called is False
+    assert spool.pending() == []
+
+
+class MemoryDurabilityRepository:
+    def __init__(self, receipt: ConnectorDurabilityReceipt) -> None:
+        self.receipt = receipt
+        self.request_sha256: str | None = None
+        self.operation_id: str | None = None
+        self.terminal_sha256: str | None = None
+
+    def get_durability_receipt(self, batch_id) -> ConnectorDurabilityReceipt:  # type: ignore[no-untyped-def]
+        assert batch_id == self.receipt.acceptance.batch_id
+        return self.receipt
+
+    def record_checkpoint_request(
+        self,
+        batch_id,
+        *,
+        request: ConnectorCheckpointRequest,
+        operation: ConnectorCheckpointStatusReceipt,
+    ) -> ConnectorDurabilityReceipt:  # type: ignore[no-untyped-def]
+        exact = request.exact_sha256()
+        if self.request_sha256 is not None and (
+            self.request_sha256 != exact or self.operation_id != operation.operation_id
+        ):
+            raise ConnectorDurabilityConflict("checkpoint request changed")
+        self.request_sha256 = exact
+        self.operation_id = operation.operation_id
+        self.receipt = self.receipt.model_copy(
+            update={
+                "state": ConnectorDurabilityState.CHECKPOINT_REQUESTED,
+                "checkpoint_request_id": request.request_id,
+                "checkpoint_operation_id": operation.operation_id,
+            }
+        )
+        return self.receipt
+
+    def record_checkpoint_status(
+        self,
+        batch_id,
+        *,
+        status: ConnectorCheckpointStatusReceipt,
+    ) -> ConnectorDurabilityReceipt:  # type: ignore[no-untyped-def]
+        exact = status.exact_sha256()
+        if self.terminal_sha256 is not None and self.terminal_sha256 != exact:
+            raise ConnectorDurabilityConflict("terminal checkpoint receipt changed")
+        self.terminal_sha256 = exact
+        self.receipt = self.receipt.model_copy(
+            update={
+                "state": ConnectorDurabilityState.DURABLE_COMPLETE,
+                "checkpoint_receipt_sha256": exact,
+                "checkpoint_id": status.checkpoint_id,
+            }
+        )
+        return self.receipt
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_request_status_replay_is_exact_and_durable() -> None:
+    acceptance = RecordingTransport(fail=False).submit(synthetic_bytes()).receipt
+    assert acceptance is not None
+    initial = ConnectorDurabilityReceipt(
+        state=ConnectorDurabilityState.CANONICAL_COMMITTED,
+        acceptance=acceptance,
+        canonical_revision=18,
+        updated_at=ACCEPTED_AT,
+    )
+    repository = MemoryDurabilityRepository(initial)
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.requests: list[ConnectorCheckpointRequest] = []
+
+        def request_checkpoint(
+            self, request: ConnectorCheckpointRequest
+        ) -> ConnectorCheckpointStatusReceipt:
+            self.requests.append(request)
+            return ConnectorCheckpointStatusReceipt(
+                request_id=request.request_id,
+                operation_id="checkpoint-operation",
+                state=ConnectorCheckpointState.REQUESTED,
+                canonical_revision=request.canonical_revision,
+            )
+
+        def checkpoint_status(self, operation_id: str) -> ConnectorCheckpointStatusReceipt:
+            assert operation_id == "checkpoint-operation"
+            request = self.requests[0]
+            return ConnectorCheckpointStatusReceipt(
+                request_id=request.request_id,
+                operation_id=operation_id,
+                state=ConnectorCheckpointState.DURABLE_COMPLETE,
+                canonical_revision=request.canonical_revision,
+                checkpoint_id="checkpoint-18",
+                manifest_sha256="d" * 64,
+                verified_at=ACCEPTED_AT,
+            )
+
+    gateway = Gateway()
+    completed = await ConnectorDurabilityService(repository, gateway).advance(
+        acceptance.batch_id
+    )
+    assert completed.state is ConnectorDurabilityState.DURABLE_COMPLETE
+    assert checkpoint_request_for(initial) == gateway.requests[0]
+    replay = await ConnectorDurabilityService(repository, gateway).advance(acceptance.batch_id)
+    assert replay == completed
+    assert len(gateway.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_checkpoint_gateway_blocks_before_repository_mutation() -> None:
+    acceptance = RecordingTransport(fail=False).submit(synthetic_bytes()).receipt
+    assert acceptance is not None
+    initial = ConnectorDurabilityReceipt(
+        state=ConnectorDurabilityState.CANONICAL_COMMITTED,
+        acceptance=acceptance,
+        canonical_revision=18,
+        updated_at=ACCEPTED_AT,
+    )
+    repository = MemoryDurabilityRepository(initial)
+    with pytest.raises(ConnectorCapabilityBlocked) as raised:
+        await ConnectorDurabilityService(repository, None).advance(acceptance.batch_id)
+    assert raised.value.public()["code"] == "CONNECTOR_CHECKPOINT_GATEWAY_UNAVAILABLE"
+    assert raised.value.public()["mutation_started"] is False
+    assert repository.receipt == initial
+    assert repository.request_sha256 is None
+
+
+@pytest.mark.asyncio
+async def test_active_master_runtime_ensures_absent_master_before_any_mutation() -> None:
+    class Resolver:
+        ensured = 0
+
+        def resolve_master(self, principal) -> MasterSnapshot:  # type: ignore[no-untyped-def]
+            return MasterSnapshot(MasterState.ABSENT)
+
+        def ensure_master(self, principal, *, intent: str) -> EnsureMasterReceipt:  # type: ignore[no-untyped-def]
+            self.ensured += 1
+            return EnsureMasterReceipt("ensure-operation", MasterState.REQUESTED, False, intent)
+
+    class ForbiddenBroker:
+        def issue_connector_session(self, request: ConnectorSessionRequest):  # type: ignore[no-untyped-def]
+            raise AssertionError("broker must not run before ACTIVE")
+
+    resolver = Resolver()
+    runtime = ActiveMasterConnectorRuntime(resolver, ForbiddenBroker())  # type: ignore[arg-type]
+    with pytest.raises(ConnectorCapabilityBlocked) as raised:
+        await runtime.submit(
+            synthetic_bytes(),
+            principal=connector_principal("synthetic.daily-statistics"),
+            correlation_id="correlation",
+        )
+    assert raised.value.public() == {
+        "code": "MASTER_ENSURE_REQUESTED",
+        "master_state": "REQUESTED",
+        "operation_id": "ensure-operation",
+        "retryable": True,
+        "mutation_started": False,
+    }
+    assert resolver.ensured == 1
+
+
+@pytest.mark.asyncio
+async def test_active_master_runtime_binds_connector_session_to_exact_epoch() -> None:
+    repository = MemoryAcceptanceRepository()
+
+    class Resolver:
+        def resolve_master(self, principal) -> MasterSnapshot:  # type: ignore[no-untyped-def]
+            return MasterSnapshot(
+                MasterState.ACTIVE,
+                operation_id="master-operation",
+                instance_id="master-instance",
+                epoch=7,
+                capabilities=frozenset({"connector-intake"}),
+            )
+
+        def ensure_master(self, principal, *, intent: str) -> EnsureMasterReceipt:  # type: ignore[no-untyped-def]
+            raise AssertionError("ACTIVE master must not be re-ensured")
+
+    class Session:
+        closed = False
+
+        async def submit(self, exact_bytes: bytes, **kwargs) -> RepositoryDecision:  # type: ignore[no-untyped-def]
+            return ConnectorIntakeService(repository).submit(
+                exact_bytes,
+                authenticated_connector_id=kwargs["authenticated_connector_id"],
+                authenticated_principal=kwargs["authenticated_principal"],
+                correlation_id=kwargs["correlation_id"],
+            )
+
+        async def acceptance_receipt(self, batch_id):  # type: ignore[no-untyped-def]
+            return None
+
+        async def durability_receipt(self, batch_id):  # type: ignore[no-untyped-def]
+            return None
+
+        async def health(self, connector_id: str) -> dict[str, object]:
+            return {"connector_id": connector_id}
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class Broker:
+        request: ConnectorSessionRequest | None = None
+        session = Session()
+
+        def issue_connector_session(self, request: ConnectorSessionRequest) -> Session:
+            self.request = request
+            return self.session
+
+    broker = Broker()
+    runtime = ActiveMasterConnectorRuntime(Resolver(), broker)  # type: ignore[arg-type]
+    decision = await runtime.submit(
+        synthetic_bytes(),
+        principal=connector_principal("synthetic.daily-statistics"),
+        correlation_id="correlation",
+    )
+    assert decision.disposition is AcceptanceDisposition.ACCEPTED
+    assert broker.request is not None
+    assert (
+        broker.request.master_instance_id,
+        broker.request.epoch,
+        broker.request.role,
+    ) == ("master-instance", 7, "connector")
+    assert broker.session.closed is True

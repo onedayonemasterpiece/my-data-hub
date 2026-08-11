@@ -1,10 +1,11 @@
 # Data connector contract
 
-Status: `ENVELOPE/SPOOL CONTRACT PRESERVED / MASTER ROUTING DEFERRED`
+Status: `INTERNAL CONNECTOR PLANE CLOSED / EXTERNAL CREDENTIAL HANDOFF BLOCKED`
 
 Producer durable spool -> register batch/ensure master -> resolve ACTIVE latest epoch ->
 short-lived connector role -> connector-specific landing in Kaggle PostgreSQL -> validate,
-normalize and commit with receipt -> producer removes spool item.
+normalize and commit -> request and verify a private checkpoint -> producer removes the
+spool item only after a `DURABLE_COMPLETE` receipt.
 
 The devstand records operation/idempotency/routing metadata only; it does not land canonical
 or product data in a local database. Exact replay returns the same receipt. A different hash
@@ -18,7 +19,7 @@ PR-A performs no live connector deployment or producer change.
 
 The detailed material below is retained where topology-neutral. Any reference to a database, role, committer, backup or connector application is executed inside/against the latest ACTIVE Kaggle master; devstand execution claims are superseded.
 
-Status: `CONTRACT PRESERVED / ACTIVE-MASTER ROUTING PENDING`
+Status: `ACTIVE-MASTER ROUTING IMPLEMENTED / LIVE CREDENTIAL REGISTRATION PENDING`
 Date: 2026-08-10
 Related decisions: ADR-0010, ADR-0015
 Contract: [`../schemas/data-connector-envelope.v1.schema.json`](../schemas/data-connector-envelope.v1.schema.json)
@@ -27,8 +28,18 @@ Implemented in R1: exact versioned push intake, explicit connector principal bin
 PostgreSQL landing/receipt/watermark/quarantine tables, one-transaction acceptance,
 exact replay/conflict classification, a canonical daily-statistics committer with
 same-transaction semantic outbox, durable restart-safe producer spool, bounded status
-MCP read, and a live disposable PostgreSQL flow. Pull/artifact/trusted-landing adapters
-and a deployed events-bot canary are not claimed by this status.
+MCP read, and a live disposable PostgreSQL flow. Gate L replaces the API's static connector
+database URL with the existing ACTIVE-master resolver plus an exact epoch-bound `connector`
+session broker. When the master is absent it creates/reuses `ensure_master`; any missing
+master capability, session broker, pull adapter, private-artifact reader, trusted-landing
+writer, or checkpoint gateway returns a typed pre-mutation blocker.
+
+The callable pull/artifact/trusted-landing interfaces are implemented, but no external
+adapter deployment is claimed. `region-talk-ydb-bloggers-v1` is registered as `pull` and
+remains `paused`; its product is disabled and policy says `no_live_import=true`. The current
+runtime credential registrar still hands off only reader/operator credentials. Until its
+owner deploys a connector credential envelope, the API returns
+`CONNECTOR_EPOCH_CREDENTIAL_UNAVAILABLE` without accepting bytes.
 ADR-0015 multi-consumer application and scoped participation extensions remain an
 accepted design pending append-only migrations and runtime implementation.
 
@@ -102,8 +113,8 @@ is available. It submits the idempotent batch. The result is authoritative:
 
 | Result | Producer behavior |
 |---|---|
-| `202 Accepted` | persist receipt; remove batch from spool only after receipt is durable |
-| `200/201` replay receipt | same idempotency key already accepted; compare hash and finish |
+| `202 Accepted` | persist acceptance receipt; retain exact bytes and poll durability |
+| `200/201` replay receipt | same idempotency key already accepted; compare hash and continue durability polling |
 | `409 Conflict` | same identity/key with different content; retain locally and alert |
 | `422 Unprocessable Entity` | contract/schema failure; quarantine locally and alert |
 | `429 Too Many Requests` | retry after server guidance |
@@ -113,6 +124,13 @@ is available. It submits the idempotent batch. The result is authoritative:
 The spool must survive producer restart. Retries reuse the same batch bytes,
 idempotency key and hash. A producer must not generate a fresh identity after an
 ambiguous timeout.
+
+`ACCEPTED` only transfers intake responsibility; it is not the producer deletion gate.
+The durability receipt progresses through `CANONICAL_COMMITTED`,
+`CHECKPOINT_REQUESTED`, and `CHECKPOINTING`. Only `DURABLE_COMPLETE`, carrying the exact
+checkpoint request/operation identities and the hash of a verified checkpoint status
+receipt, permits deletion of the producer's exact envelope. A failed checkpoint retains
+the producer evidence.
 
 If the devstand control plane is unavailable, the connector waits in its spool. If the
 control plane is healthy and the master is ABSENT, batch registration creates/reuses an
@@ -187,6 +205,7 @@ schema, provisionally named `integration`:
 | `integration.watermark` | last committed source cursor/period per product/consumer/partition |
 | `integration.quarantine` | invalid, conflicting or semantically unresolved batches |
 | `integration.receipt` | accepted/committed/rejected receipt returned to producer |
+| `integration.connector_durability` | exact acceptance → canonical revision → verified checkpoint lifecycle |
 
 The exact schema names may change through an ADR before implementation. The ownership
 rules may not: intake owns immutable source evidence; a normalizer/committer owns
@@ -329,6 +348,13 @@ GET  /intake/v1/batches/{batch_id}/applications
 GET  /intake/v1/batches/{batch_id}/applications/{consumer_id}
 GET  /intake/v1/connectors/{connector_id}/health
 ```
+
+`GET /intake/v1/batches/{batch_id}/receipt` returns
+`connector-durability-receipt.v1`, not merely the original acceptance receipt. The
+checkpoint request and status contracts are
+`connector-checkpoint-request.v1` and `connector-checkpoint-status.v1`. Repeating an
+exact request/status receipt is a no-op; changing its request identity, canonical
+revision, operation identity, or terminal receipt is a conflict.
 
 Large artifact upload may later add a server-issued upload session, but an artifact
 must still be finalized through `POST /intake/v1/batches`.

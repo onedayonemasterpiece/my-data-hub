@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/connector-checkpoint-request.v1.schema.json",
+  "title": "Connector checkpoint request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "connector_id", "batch_id", "canonical_revision", "payload_sha256", "envelope_sha256"],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-connector-checkpoint-request.v1"},
+    "request_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "connector_id": {"type": "string", "minLength": 3, "maxLength": 200},
+    "batch_id": {"type": "string", "format": "uuid"},
+    "canonical_revision": {"type": "integer", "minimum": 1},
+    "payload_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "envelope_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "schema_version": "my-data-hub-connector-durability-receipt.v1",
+  "state": "DURABLE_COMPLETE",
+  "acceptance": {
+    "receipt_id": "14844b31-ca44-5c91-9d09-985b2b62ea17",
+    "status": "accepted",
+    "connector_id": "synthetic.daily-statistics",
+    "batch_id": "79cd25b7-f6bd-5952-a107-3a792c340578",
+    "idempotency_key": "synthetic.daily-statistics:2026-08-09:1",
+    "payload_sha256": "ffd261637531e68ad7d2ea36e72d81b5b34a729f8537a9c352ca1d2ee63b4696",
+    "envelope_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "accepted_at": "2026-08-09T12:00:00Z"
+  },
+  "canonical_revision": 18,
+  "checkpoint_request_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "checkpoint_operation_id": "checkpoint:connector:79cd25b7-f6bd-5952-a107-3a792c340578",
+  "checkpoint_receipt_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "checkpoint_id": "checkpoint-20260809-18",
+  "updated_at": "2026-08-09T12:05:00Z"
+}

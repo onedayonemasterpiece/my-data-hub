@@ -15,7 +15,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from my_data_hub.connectors.contracts import canonical_json_bytes, payload_sha256
+from my_data_hub.connectors.contracts import (
+    ConnectorDurabilityState,
+    ConnectorReceipt,
+    canonical_json_bytes,
+    payload_sha256,
+)
 from my_data_hub.connectors.postgres import (
     PostgresConnectorAcceptanceRepository,
     PostgresDailyStatisticsCommitter,
@@ -26,6 +31,8 @@ from my_data_hub.connectors.spool import (
     ConnectorDeliveryService,
     DeliveryDisposition,
     DeliveryResult,
+    DurabilityDeliveryResult,
+    DurabilityDisposition,
     DurableConnectorSpool,
 )
 from my_data_hub.connectors.synthetic import SyntheticConnectorProducer
@@ -148,6 +155,7 @@ def main() -> int:
     )
     parser.add_argument("--bootstrap-disposable-epoch", action="store_true")
     parser.add_argument("--sequence", type=int, default=None)
+    parser.add_argument("--durability-timeout-seconds", type=float, default=0.0)
     args = parser.parse_args()
     urls = {
         "intake": args.intake_database_url,
@@ -276,6 +284,9 @@ def main() -> int:
         def submit(self, _exact_envelope_bytes: bytes) -> DeliveryResult:
             raise TimeoutError("synthetic transport outage")
 
+        def durability(self, _acceptance: ConnectorReceipt) -> DurabilityDeliveryResult:
+            raise TimeoutError("synthetic transport outage")
+
     class IntakeTransport:
         def submit(self, exact_envelope_bytes: bytes) -> DeliveryResult:
             result = intake.submit(
@@ -293,6 +304,20 @@ def main() -> int:
             )
             return DeliveryResult(disposition, receipt=result.receipt)
 
+        def durability(self, acceptance: ConnectorReceipt) -> DurabilityDeliveryResult:
+            receipt = repository.get_durability_receipt(acceptance.batch_id)
+            if receipt is None:
+                return DurabilityDeliveryResult(
+                    DurabilityDisposition.RETRY,
+                    message="durability receipt is not visible",
+                )
+            disposition = (
+                DurabilityDisposition.COMPLETE
+                if receipt.state is ConnectorDurabilityState.DURABLE_COMPLETE
+                else DurabilityDisposition.PENDING
+            )
+            return DurabilityDeliveryResult(disposition, receipt=receipt)
+
     with tempfile.TemporaryDirectory(prefix="mdh-connector-spool-") as temp:
         spool_root = Path(temp) / "spool"
         first_spool = DurableConnectorSpool(spool_root)
@@ -304,15 +329,35 @@ def main() -> int:
         recovery_summary = ConnectorDeliveryService(
             restarted_spool, IntakeTransport()
         ).deliver_ready(now=outage_at + timedelta(seconds=2))
-        receipt_files = list(restarted_spool.receipts_dir.glob("*.json"))
-        eventual_receipt = json.loads(receipt_files[0].read_bytes())
-        eventual_commit = committer.commit(eventual_receipt["batch_id"])
-        eventual_replay = committer.commit(eventual_receipt["batch_id"])
+        accepted_files = list(restarted_spool.receipts_dir.glob("*.accepted.json"))
+        eventual_acceptance = ConnectorReceipt.model_validate_json(accepted_files[0].read_bytes())
+        eventual_commit = committer.commit(eventual_acceptance.batch_id)
+        eventual_replay = committer.commit(eventual_acceptance.batch_id)
+        deadline = time.monotonic() + max(0.0, args.durability_timeout_seconds)
+        durability_summary = ConnectorDeliveryService(
+            restarted_spool, IntakeTransport()
+        ).deliver_ready(now=outage_at + timedelta(seconds=4))
+        while durability_summary.delivered != 1 and time.monotonic() < deadline:
+            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+            durability_summary = ConnectorDeliveryService(
+                restarted_spool, IntakeTransport()
+            ).deliver_ready(now=datetime.now(UTC) + timedelta(minutes=5))
+        receipt_files = [
+            path
+            for path in restarted_spool.receipts_dir.glob("*.json")
+            if not path.name.endswith(".accepted.json")
+        ]
+        eventual_durability = (
+            json.loads(receipt_files[0].read_bytes()) if len(receipt_files) == 1 else None
+        )
         spool_ok = (
             outage_summary.deferred == 1
-            and recovery_summary.delivered == 1
-            and not restarted_spool.pending(ready_at=outage_at + timedelta(seconds=2))
+            and recovery_summary.deferred == 1
+            and durability_summary.delivered == 1
+            and not restarted_spool.pending(ready_at=datetime.now(UTC) + timedelta(minutes=5))
             and len(receipt_files) == 1
+            and eventual_durability is not None
+            and eventual_durability["state"] == "DURABLE_COMPLETE"
             and not eventual_commit.duplicate
             and eventual_replay.duplicate
         )
@@ -373,9 +418,15 @@ def main() -> int:
         },
         "outage_restart": {
             "first_delivery_deferred": outage_summary.deferred,
-            "eventual_delivery_count": recovery_summary.delivered,
+            "acceptance_deferred": recovery_summary.deferred,
+            "durable_complete_count": durability_summary.delivered,
             "durable_receipts": len(receipt_files),
-            "eventual_batch_id": str(eventual_receipt["batch_id"]),
+            "eventual_batch_id": str(eventual_acceptance.batch_id),
+            "durability_state": (
+                eventual_durability["state"]
+                if eventual_durability is not None
+                else repository.get_durability_receipt(eventual_acceptance.batch_id).state.value
+            ),
             "commit_replayed": eventual_replay.duplicate,
         },
         "restricted_master_reader": reader_row,

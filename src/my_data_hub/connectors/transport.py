@@ -8,8 +8,18 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from my_data_hub.connectors.contracts import ConnectorReceipt, ReceiptStatus
-from my_data_hub.connectors.spool import DeliveryDisposition, DeliveryResult
+from my_data_hub.connectors.contracts import (
+    ConnectorDurabilityReceipt,
+    ConnectorDurabilityState,
+    ConnectorReceipt,
+    ReceiptStatus,
+)
+from my_data_hub.connectors.spool import (
+    DeliveryDisposition,
+    DeliveryResult,
+    DurabilityDeliveryResult,
+    DurabilityDisposition,
+)
 
 
 def _retry_after(headers: Message) -> float | None:
@@ -152,6 +162,81 @@ class HttpConnectorTransport:
             return DeliveryResult(
                 DeliveryDisposition.RETRY,
                 message=f"intake unavailable: {exc}",
+            )
+
+    def durability(self, acceptance: ConnectorReceipt) -> DurabilityDeliveryResult:
+        url = f"{self.intake_url.rstrip('/')}/{acceptance.batch_id}/receipt"
+        request = Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.bearer_token}",
+            },
+            method="GET",
+        )
+        try:
+            class _RejectRedirects(HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+                    return None
+
+            with build_opener(_RejectRedirects).open(
+                request, timeout=self.timeout_seconds
+            ) as response:
+                body = self._read_bounded(response)
+                if response.status != 200:
+                    return DurabilityDeliveryResult(
+                        DurabilityDisposition.RETRY,
+                        message=f"unexpected HTTP status {response.status}",
+                    )
+                try:
+                    receipt = ConnectorDurabilityReceipt.model_validate_json(body)
+                except ValueError as exc:
+                    return DurabilityDeliveryResult(
+                        DurabilityDisposition.RETRY,
+                        message=f"durability response was invalid: {exc}",
+                    )
+                if receipt.acceptance.batch_id != acceptance.batch_id:
+                    return DurabilityDeliveryResult(
+                        DurabilityDisposition.CONFLICT,
+                        message="durability receipt batch identity changed",
+                    )
+                disposition = (
+                    DurabilityDisposition.COMPLETE
+                    if receipt.state is ConnectorDurabilityState.DURABLE_COMPLETE
+                    else DurabilityDisposition.PENDING
+                )
+                return DurabilityDeliveryResult(disposition, receipt=receipt)
+        except HTTPError as exc:
+            try:
+                body = self._read_bounded(exc)
+            except ValueError as body_error:
+                return DurabilityDeliveryResult(
+                    DurabilityDisposition.REJECTED, message=str(body_error)
+                )
+            if exc.code == 409:
+                return DurabilityDeliveryResult(
+                    DurabilityDisposition.CONFLICT, message=_message(body)
+                )
+            if exc.code in {401, 403}:
+                return DurabilityDeliveryResult(
+                    DurabilityDisposition.AUTH_FAILURE, message=_message(body)
+                )
+            if exc.code == 429 or exc.code in {404, 502, 503, 504}:
+                return DurabilityDeliveryResult(
+                    DurabilityDisposition.RETRY,
+                    message=_message(body) or f"HTTP {exc.code}",
+                    retry_after_seconds=_retry_after(exc.headers),
+                )
+            return DurabilityDeliveryResult(
+                DurabilityDisposition.REJECTED,
+                message=_message(body) or f"HTTP {exc.code}",
+            )
+        except ValueError as exc:
+            return DurabilityDeliveryResult(DurabilityDisposition.REJECTED, message=str(exc))
+        except (TimeoutError, URLError) as exc:
+            return DurabilityDeliveryResult(
+                DurabilityDisposition.RETRY,
+                message=f"durability status unavailable: {exc}",
             )
 
 
