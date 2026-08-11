@@ -23,6 +23,4 @@ overlap public JWKS file, master TLS CA
 and bounded release-owned master assets. It rejects PostgreSQL data-plane configuration and
 does not create PGDATA, a PostgreSQL volume or a database service.
 
-Master Notebook/checkpoint acceptance and the external DNS/TLS/Yandex Cloud edge remain
-separate prerequisites for a successful real deployment. The current implementation branch
-has not run INSTALL and has not changed DNS, VPN, port 443 or any other external service.
+Master Notebook/checkpoint acceptance remains a separate prerequisite. The dedicated Yandex DNS/TLS edge is already provisioned, but its MCP and OAuth routes last returned `502` because the reviewed application stack and owner secrets are not installed. This branch has not run INSTALL or changed any external service.

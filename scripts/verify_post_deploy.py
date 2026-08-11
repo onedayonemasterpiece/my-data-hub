@@ -39,6 +39,15 @@ _FORBIDDEN_PUBLIC_PORTS = (5432, 8080, 8765, 8780)
 _EDGE_POLICY_DENIAL_STATUSES = frozenset({400, 403, 404, 421})
 PUBLIC_MCP_URL = "https://mcp-datahub.kenigevents.ru/mcp"
 AUTHORIZATION_SERVER = "https://identity.kenigevents.ru"
+_NEGATIVE_CREDENTIAL_NAMES = (
+    "invalid",
+    "expired",
+    "revoked",
+    "wrong_issuer",
+    "wrong_audience",
+    "wrong_resource",
+    "wrong_scope",
+)
 _SECRET_FRAGMENTS = (
     "authorization",
     "cookie",
@@ -490,6 +499,7 @@ def verify_forbidden_public_ports(
 async def verify_http_negatives(
     endpoint: PublicEndpoint,
     *,
+    credentials: Mapping[str, str],
     client: Any | None = None,
 ) -> dict[str, object]:
     import httpx
@@ -498,13 +508,27 @@ async def verify_http_negatives(
     if client is None:
         client = httpx.AsyncClient(follow_redirects=False, timeout=httpx.Timeout(10, connect=5))
     try:
-        return await _verify_http_with_client(endpoint, client)
+        return await _verify_http_with_client(endpoint, credentials, client)
     finally:
         if owns_client:
             await client.aclose()
 
 
-async def _verify_http_with_client(endpoint: PublicEndpoint, client: Any) -> dict[str, object]:
+async def _verify_http_with_client(
+    endpoint: PublicEndpoint,
+    credentials: Mapping[str, str],
+    client: Any,
+) -> dict[str, object]:
+    if set(credentials) != set(_NEGATIVE_CREDENTIAL_NAMES) or any(
+        not isinstance(token, str)
+        or not token
+        or len(token) > 16_384
+        or any(character.isspace() or ord(character) < 0x21 for character in token)
+        for token in credentials.values()
+    ):
+        raise ValueError("OAuth negative credentials differ from the exact bounded contract")
+    if len(set(credentials.values())) != len(_NEGATIVE_CREDENTIAL_NAMES):
+        raise ValueError("OAuth negative credentials must be independent values")
     metadata = await client.get(endpoint.resource_metadata_url)
     wrong_host = await client.get(
         endpoint.resource_metadata_url,
@@ -519,14 +543,17 @@ async def _verify_http_with_client(endpoint: PublicEndpoint, client: Any) -> dic
         headers={"content-type": "application/json"},
         content=b"{}",
     )
-    wrong_auth = await client.post(
-        endpoint.url,
-        headers={
-            "content-type": "application/json",
-            "authorization": "Bearer post-deploy-invalid-marker",
-        },
-        content=b"{}",
-    )
+    auth_responses = {
+        name: await client.post(
+            endpoint.url,
+            headers={
+                "content-type": "application/json",
+                "authorization": f"Bearer {token}",
+            },
+            content=b"{}",
+        )
+        for name, token in credentials.items()
+    }
     if metadata.status_code != 200:
         raise RuntimeError("OAuth protected-resource metadata is unavailable")
     document = metadata.json()
@@ -571,17 +598,20 @@ async def _verify_http_with_client(endpoint: PublicEndpoint, client: Any) -> dic
         wrong_host.status_code not in _EDGE_POLICY_DENIAL_STATUSES
         or wrong_origin.status_code not in _EDGE_POLICY_DENIAL_STATUSES
         or missing_auth.status_code != 401
-        or wrong_auth.status_code != 401
+        or any(response.status_code != 401 for response in auth_responses.values())
     ):
         raise RuntimeError("one or more public Host/Origin/auth negative checks failed open")
-    if "www-authenticate" not in missing_auth.headers or "www-authenticate" not in wrong_auth.headers:
+    if "www-authenticate" not in missing_auth.headers or any(
+        "www-authenticate" not in response.headers for response in auth_responses.values()
+    ):
         raise RuntimeError("unauthenticated MCP rejection omitted its OAuth challenge")
     return {
         "resource_metadata": True,
         "wrong_host_rejected": True,
         "wrong_origin_rejected": True,
         "missing_auth_rejected": True,
-        "wrong_auth_rejected": True,
+        **{f"{name}_token_rejected" if name in {"invalid", "expired", "revoked"} else f"{name}_rejected": True
+           for name in _NEGATIVE_CREDENTIAL_NAMES},
         "authorization_server": issuer_url,
         "published_jwks_keys": len(keys),
     }
@@ -594,6 +624,7 @@ async def verify_all(
     expected_commit: str,
     expected_source_identity: str,
     evidence: dict[str, object],
+    negative_credentials: Mapping[str, str],
     cold_start_timeout_seconds: float,
 ) -> dict[str, object]:
     addresses = await asyncio.wait_for(
@@ -608,7 +639,9 @@ async def verify_all(
         asyncio.to_thread(verify_forbidden_public_ports, endpoint, addresses=addresses),
         timeout=15,
     )
-    negatives = await asyncio.wait_for(verify_http_negatives(endpoint), timeout=30)
+    negatives = await asyncio.wait_for(
+        verify_http_negatives(endpoint, credentials=negative_credentials), timeout=30
+    )
     remote = await asyncio.wait_for(
         verify_acceptance(
             endpoint.url,
@@ -639,6 +672,29 @@ def _read_argument(path_value: str, environment_name: str) -> str:
             raise ValueError("post-deploy input file is absent, symbolic or oversized")
         return path.read_text(encoding="utf-8")
     return os.getenv(environment_name, "")
+
+
+def _read_private_json(path_value: str, environment_name: str) -> dict[str, str]:
+    raw_path = path_value or os.getenv(environment_name, "")
+    if not raw_path:
+        raise ValueError("OAuth negative credential bundle path is absent")
+    path = Path(raw_path)
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 131_072:
+        raise ValueError("OAuth negative credential bundle is absent, symbolic or oversized")
+    if path.stat().st_mode & 0o077:
+        raise ValueError("OAuth negative credential bundle must be a mode-0600 private file")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("OAuth negative credential bundle is unreadable or invalid") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("OAuth negative credential bundle must be an object")
+    credentials = {str(name): value for name, value in payload.items()}
+    if set(credentials) != set(_NEGATIVE_CREDENTIAL_NAMES) or not all(
+        isinstance(value, str) for value in credentials.values()
+    ):
+        raise ValueError("OAuth negative credential bundle fields differ from policy")
+    return credentials
 
 
 def _expected_service_image_ids(raw: str) -> dict[str, str]:
@@ -676,6 +732,7 @@ def main() -> int:
     )
     parser.add_argument("--evidence-file", default="")
     parser.add_argument("--evidence-public-key-file", default="")
+    parser.add_argument("--negative-credentials-file", default="")
     parser.add_argument(
         "--expected-evidence-key-id",
         default=os.getenv("MY_DATA_HUB_DEPLOY_EVIDENCE_KEY_ID", ""),
@@ -717,6 +774,10 @@ def main() -> int:
             expected_service_image_ids=expected_image_ids,
             max_age_seconds=args.max_evidence_age_seconds,
         )
+        negative_credentials = _read_private_json(
+            args.negative_credentials_file,
+            "MY_DATA_HUB_MCP_NEGATIVE_CREDENTIALS_FILE",
+        )
         report = asyncio.run(
             verify_all(
                 endpoint=endpoint,
@@ -724,6 +785,7 @@ def main() -> int:
                 expected_commit=args.expected_commit,
                 expected_source_identity=args.expected_source_identity,
                 evidence=evidence,
+                negative_credentials=negative_credentials,
                 cold_start_timeout_seconds=args.cold_start_timeout_seconds,
             )
         )

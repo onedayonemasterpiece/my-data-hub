@@ -26,6 +26,15 @@ from scripts.verify_post_deploy import (
 from scripts.verify_remote_mcp import READ_ONLY_TOOLS, verify_acceptance_session
 
 COMMIT = "a" * 40
+NEGATIVE_CREDENTIALS = {
+    "invalid": "invalid-marker",
+    "expired": "expired-marker",
+    "revoked": "revoked-marker",
+    "wrong_issuer": "wrong-issuer-marker",
+    "wrong_audience": "wrong-audience-marker",
+    "wrong_resource": "wrong-resource-marker",
+    "wrong_scope": "wrong-scope-marker",
+}
 SOURCE = "onedayonemasterpiece/my-data-hub"
 KEY_ID = "devstand-evidence-2026-08"
 NOW = datetime(2026, 8, 11, 4, 0, tzinfo=UTC)
@@ -432,13 +441,19 @@ async def test_http_oauth_and_negative_contracts() -> None:
         raise AssertionError(path)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await verify_http_negatives(ENDPOINT, client=client)
+        result = await verify_http_negatives(ENDPOINT, credentials=NEGATIVE_CREDENTIALS, client=client)
     assert result == {
         "resource_metadata": True,
         "wrong_host_rejected": True,
         "wrong_origin_rejected": True,
         "missing_auth_rejected": True,
-        "wrong_auth_rejected": True,
+        "invalid_token_rejected": True,
+        "expired_token_rejected": True,
+        "revoked_token_rejected": True,
+        "wrong_issuer_rejected": True,
+        "wrong_audience_rejected": True,
+        "wrong_resource_rejected": True,
+        "wrong_scope_rejected": True,
         "authorization_server": AUTHORIZATION_SERVER,
         "published_jwks_keys": 1,
     }
@@ -481,7 +496,7 @@ async def test_http_accepts_fail_closed_edge_host_denials(wrong_host_status: int
         raise AssertionError(path)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await verify_http_negatives(ENDPOINT, client=client)
+        result = await verify_http_negatives(ENDPOINT, credentials=NEGATIVE_CREDENTIALS, client=client)
     assert result["wrong_host_rejected"] is True
 
 
@@ -523,7 +538,7 @@ async def test_http_rejects_non_policy_edge_host_outcomes(status: int) -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(RuntimeError, match="negative checks failed open"):
-            await verify_http_negatives(ENDPOINT, client=client)
+            await verify_http_negatives(ENDPOINT, credentials=NEGATIVE_CREDENTIALS, client=client)
 
 
 @pytest.mark.asyncio
@@ -541,7 +556,7 @@ async def test_http_rejects_unapproved_advertised_authorization_server() -> None
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(RuntimeError, match="endpoint contract"):
-            await verify_http_negatives(ENDPOINT, client=client)
+            await verify_http_negatives(ENDPOINT, credentials=NEGATIVE_CREDENTIALS, client=client)
 
 
 @pytest.mark.asyncio
@@ -585,13 +600,19 @@ async def test_real_verify_all_shape_matches_committed_report_schema(
         },
     )
 
-    async def negatives(endpoint: PublicEndpoint) -> dict[str, object]:
+    async def negatives(endpoint: PublicEndpoint, **kwargs: object) -> dict[str, object]:
         return {
             "resource_metadata": True,
             "wrong_host_rejected": True,
             "wrong_origin_rejected": True,
             "missing_auth_rejected": True,
-            "wrong_auth_rejected": True,
+            "invalid_token_rejected": True,
+            "expired_token_rejected": True,
+            "revoked_token_rejected": True,
+            "wrong_issuer_rejected": True,
+            "wrong_audience_rejected": True,
+            "wrong_resource_rejected": True,
+            "wrong_scope_rejected": True,
             "authorization_server": AUTHORIZATION_SERVER,
             "published_jwks_keys": 1,
         }
@@ -616,6 +637,7 @@ async def test_real_verify_all_shape_matches_committed_report_schema(
         expected_commit=COMMIT,
         expected_source_identity=SOURCE,
         evidence=evidence,
+        negative_credentials=NEGATIVE_CREDENTIALS,
         cold_start_timeout_seconds=30,
     )
     schema = json.loads(
@@ -731,8 +753,11 @@ def test_post_deploy_workflow_uses_trusted_verifier_and_scopes_secrets() -> None
     assert "MY_DATA_HUB_EXPECTED_DEPLOY_SOURCE_TREE_SHA256" in workflow
     assert "MY_DATA_HUB_EXPECTED_DEPLOY_SERVICE_IMAGE_IDS_JSON" in workflow
     assert "post-deploy-verification.json" in workflow
+    assert "MY_DATA_HUB_MCP_NEGATIVE_CREDENTIALS_JSON" in workflow
+    assert '--negative-credentials-file "$RUNNER_TEMP/mdh-oauth-negative.json"' in workflow
     job_environment = workflow.partition("    steps:")[0]
     assert "MY_DATA_HUB_MCP_CANARY_TOKEN" not in job_environment
+    assert "MY_DATA_HUB_MCP_NEGATIVE_CREDENTIALS_JSON" not in job_environment
 
 
 def test_committed_oauth_connection_metadata_matches_owner_runtime_paths() -> None:

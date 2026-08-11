@@ -30,12 +30,18 @@
   "expected_source_identity": "onedayonemasterpiece/my-data-hub",
   "http_negatives": {
     "authorization_server": "https://identity.kenigevents.ru",
+    "expired_token_rejected": true,
+    "invalid_token_rejected": true,
     "missing_auth_rejected": true,
     "published_jwks_keys": 1,
     "resource_metadata": true,
-    "wrong_auth_rejected": true,
+    "revoked_token_rejected": true,
+    "wrong_audience_rejected": true,
     "wrong_host_rejected": true,
-    "wrong_origin_rejected": true
+    "wrong_issuer_rejected": true,
+    "wrong_origin_rejected": true,
+    "wrong_resource_rejected": true,
+    "wrong_scope_rejected": true
   },
   "ok": true,
   "public_port_boundary": {
@@ -59,6 +65,7 @@
     "tools": [
       "bloggers.get",
       "bloggers.list",
+      "bloggers.migration.accounting",
       "bloggers.provenance",
       "bloggers.search",
       "bloggers.statistics",
@@ -66,6 +73,7 @@
       "data.change.status",
       "data.query",
       "embedding.coverage",
+      "embedding.production.capabilities",
       "master.status",
       "operation.get",
       "platform.status",

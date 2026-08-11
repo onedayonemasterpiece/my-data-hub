@@ -7,8 +7,21 @@ import pytest
 
 from my_data_hub.control_plane.adapters import LedgerControlReader
 from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.mcp.catalog import TOOL_CONTRACTS
 from my_data_hub.mcp.oauth import AccessIdentity
-from scripts.verify_remote_mcp import _result_is_error, _structured_status, _validate_endpoint
+from scripts.verify_remote_mcp import (
+    READ_ONLY_TOOLS,
+    _result_is_error,
+    _structured_status,
+    _validate_endpoint,
+)
+
+
+def test_verifier_reader_catalog_is_the_exact_15_runtime_read_tools() -> None:
+    assert len(READ_ONLY_TOOLS) == 15
+    assert {
+        name for name, contract in TOOL_CONTRACTS.items() if contract.role == "reader"
+    } == READ_ONLY_TOOLS
 
 
 def test_remote_status_prefers_structured_result() -> None:

@@ -10,6 +10,7 @@ from jwt.algorithms import RSAAlgorithm
 
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.oauth_server import runtime as runtime_module
+from my_data_hub.oauth_server.owner_oidc import OIDCSessionOwnerAuthenticator
 from my_data_hub.oauth_server.runtime import build_authorization_runtime
 
 
@@ -117,6 +118,38 @@ def test_runtime_accepts_empty_overlap_jwks_for_initial_deployment(
     overlap.write_text('{"keys":[]}', encoding="utf-8")
     monkeypatch.setenv("MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE", str(overlap))
     assert runtime_module._overlap_public_jwks() == ()
+
+
+def test_external_provider_subject_maps_only_to_fixed_datahub_owner(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    authenticator = OIDCSessionOwnerAuthenticator(
+        issuer="https://login.example.test",
+        audience="owner-app",
+        jwks_url="https://login.example.test/jwks",
+        login_url="https://login.example.test/start",
+        authorization_url="https://identity.example.test/authorize",
+        owner_subject="datahub-owner",
+        provider_subject="opaque-provider-subject",
+    )
+
+    class Keys:
+        @staticmethod
+        def get_signing_key_from_jwt(_token: str) -> object:
+            return type("SigningKey", (), {"key": object()})()
+
+    authenticator._client = Keys()
+    monkeypatch.setattr(
+        "jwt.decode",
+        lambda *_args, **_kwargs: {
+            "iss": "https://login.example.test",
+            "sub": "opaque-provider-subject",
+            "aud": "owner-app",
+            "exp": 2_000_000_000,
+            "iat": 1_900_000_000,
+            "nbf": 1_900_000_000,
+            "auth_time": 1_900_000_000,
+        },
+    )
+    assert authenticator._verified_identity("provider-jwt") == ("datahub-owner", 1_900_000_000)
 
 
 def test_runtime_registration_does_not_read_then_reenable_client(

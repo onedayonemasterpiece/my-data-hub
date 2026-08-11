@@ -183,4 +183,8 @@ Post-deploy acceptance is restricted to the owner MCP resource
 `https://mcp-datahub.kenigevents.ru/mcp` and authorization server
 `https://identity.kenigevents.ru`. It runs trusted default-branch verifier code only after
 the requested deployment SHA equals the approved repository variable and is proven to be
-a reachable merge commit. Reader credentials are scoped to the verification step.
+a reachable merge commit. Reader credentials are scoped to the verification step. The
+private negative-canary bundle is materialized only for that step and independently proves
+invalid, expired, revoked, wrong-issuer, wrong-audience, wrong-resource and wrong-scope
+bearers, in addition to missing auth and wrong Host/Origin. See
+[`../20-remote-mcp-endpoint.md`](../20-remote-mcp-endpoint.md).

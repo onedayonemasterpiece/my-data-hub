@@ -23,5 +23,4 @@ is disabled, and no named volume exists. Cleanup is always `docker compose down 
 Production and control-plane validators reject any reachability from installers to this
 profile.
 
-Master Notebook deployment/checkpointing is deferred to its own PoC PR. DNS/VPN/443 and
-remote MCP writes are frozen.
+The Yandex Cloud DNS/TLS edge is provisioned as documented in `operations/yandex-edge-deployment.md`, but the MCP/OAuth application backends are not deployed and last returned `502`. Master/checkpoint acceptance and remote MCP writes remain gated; edge existence is not application acceptance.

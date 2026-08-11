@@ -28,6 +28,7 @@ class OIDCSessionOwnerAuthenticator:
     authorization_url: str
     owner_subject: str
     cookie_name: str = "mdh_owner_session"
+    provider_subject: str | None = None
     algorithms: tuple[str, ...] = ("RS256",)
     _client: Any = field(init=False, repr=False)
 
@@ -47,6 +48,10 @@ class OIDCSessionOwnerAuthenticator:
             raise ValueError("owner authorization return URL must be the exact public authorize endpoint")
         if not self.audience or not self.owner_subject:
             raise ValueError("owner OIDC audience and exact subject are required")
+        if self.provider_subject is None:
+            self.provider_subject = self.owner_subject
+        if not self.provider_subject:
+            raise ValueError("owner OIDC provider subject is required")
         if not self.cookie_name.replace("_", "").isalnum():
             raise ValueError("owner session cookie name is invalid")
         if not self.algorithms or any(
@@ -87,13 +92,16 @@ class OIDCSessionOwnerAuthenticator:
         subject = claims.get("sub")
         authenticated_at = claims.get("auth_time")
         if (
-            subject != self.owner_subject
+            subject != self.provider_subject
             or isinstance(authenticated_at, bool)
             or not isinstance(authenticated_at, int)
             or authenticated_at < 0
         ):
             raise ValueError("owner session identity differs from policy")
-        return subject, authenticated_at
+        # The external opaque provider subject is pinned above, then mapped to
+        # the one local authorization principal. It is never exposed as an MCP
+        # principal or allowed to choose that local identity.
+        return self.owner_subject, authenticated_at
 
     def _challenge(self, return_to: str) -> str:
         target = urlsplit(return_to)

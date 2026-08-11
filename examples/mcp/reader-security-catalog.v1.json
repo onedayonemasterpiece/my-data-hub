@@ -2,27 +2,432 @@
   "protocolVersion": "2026-07-28",
   "securitySchemes": [
     {
-      "type": "oauth2",
       "scopes": [
-        "bloggers:read", "checkpoint:read", "data:read", "data:write", "embedding:read",
-        "master:ensure", "master:read", "migration:operate", "operation:read", "platform:read",
-        "provider:manage", "provider:read"
-      ]
+        "acceptance:operate",
+        "acceptance:probe",
+        "bloggers:read",
+        "checkpoint:read",
+        "data:read",
+        "data:write",
+        "embedding:read",
+        "master:ensure",
+        "master:read",
+        "master:rotate",
+        "migration:operate",
+        "operation:read",
+        "platform:read",
+        "provider:read",
+        "provider:write",
+        "recovery:request"
+      ],
+      "type": "oauth2"
     }
   ],
   "tools": [
     {
-      "name": "bloggers.search",
-      "securitySchemes": [{ "type": "oauth2", "scopes": ["bloggers:read"] }],
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "bloggers:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
       "annotations": {
-        "readOnlyHint": true,
         "destructiveHint": false,
         "idempotentHint": true,
-        "openWorldHint": false
+        "openWorldHint": false,
+        "readOnlyHint": true
       },
+      "name": "bloggers.get",
+      "securitySchemes": [
+        {
+          "scopes": [
+            "bloggers:read"
+          ],
+          "type": "oauth2"
+        }
+      ]
+    },
+    {
       "_meta": {
-        "securitySchemes": [{ "type": "oauth2", "scopes": ["bloggers:read"] }]
-      }
+        "securitySchemes": [
+          {
+            "scopes": [
+              "bloggers:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "name": "bloggers.list",
+      "securitySchemes": [
+        {
+          "scopes": [
+            "bloggers:read"
+          ],
+          "type": "oauth2"
+        }
+      ]
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "bloggers:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "name": "bloggers.migration.accounting",
+      "securitySchemes": [
+        {
+          "scopes": [
+            "bloggers:read"
+          ],
+          "type": "oauth2"
+        }
+      ]
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "bloggers:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "name": "bloggers.provenance",
+      "securitySchemes": [
+        {
+          "scopes": [
+            "bloggers:read"
+          ],
+          "type": "oauth2"
+        }
+      ]
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "bloggers:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "name": "bloggers.search",
+      "securitySchemes": [
+        {
+          "scopes": [
+            "bloggers:read"
+          ],
+          "type": "oauth2"
+        }
+      ]
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "bloggers:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "name": "bloggers.statistics",
+      "securitySchemes": [
+        {
+          "scopes": [
+            "bloggers:read"
+          ],
+          "type": "oauth2"
+        }
+      ]
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "checkpoint:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "name": "checkpoint.status",
+      "securitySchemes": [
+        {
+          "scopes": [
+            "checkpoint:read"
+          ],
+          "type": "oauth2"
+        }
+      ]
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "operation:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "name": "data.change.status",
+      "securitySchemes": [
+        {
+          "scopes": [
+            "operation:read"
+          ],
+          "type": "oauth2"
+        }
+      ]
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "data:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "name": "data.query",
+      "securitySchemes": [
+        {
+          "scopes": [
+            "data:read"
+          ],
+          "type": "oauth2"
+        }
+      ]
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "embedding:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "name": "embedding.coverage",
+      "securitySchemes": [
+        {
+          "scopes": [
+            "embedding:read"
+          ],
+          "type": "oauth2"
+        }
+      ]
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "embedding:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "name": "embedding.production.capabilities",
+      "securitySchemes": [
+        {
+          "scopes": [
+            "embedding:read"
+          ],
+          "type": "oauth2"
+        }
+      ]
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "master:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "name": "master.status",
+      "securitySchemes": [
+        {
+          "scopes": [
+            "master:read"
+          ],
+          "type": "oauth2"
+        }
+      ]
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "operation:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "name": "operation.get",
+      "securitySchemes": [
+        {
+          "scopes": [
+            "operation:read"
+          ],
+          "type": "oauth2"
+        }
+      ]
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "platform:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "name": "platform.status",
+      "securitySchemes": [
+        {
+          "scopes": [
+            "platform:read"
+          ],
+          "type": "oauth2"
+        }
+      ]
+    },
+    {
+      "_meta": {
+        "securitySchemes": [
+          {
+            "scopes": [
+              "provider:read"
+            ],
+            "type": "oauth2"
+          }
+        ]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "name": "provider.resources.status",
+      "securitySchemes": [
+        {
+          "scopes": [
+            "provider:read"
+          ],
+          "type": "oauth2"
+        }
+      ]
     }
   ]
 }

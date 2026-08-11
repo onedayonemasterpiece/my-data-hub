@@ -63,6 +63,16 @@ jobs:
           cache-dependency-path: trusted/pyproject.toml
       - name: Install trusted verifier dependencies
         run: python -m pip install -e 'trusted[dev]'
+      - name: Materialize private OAuth negative canaries
+        shell: bash
+        env:
+          MY_DATA_HUB_MCP_NEGATIVE_CREDENTIALS_JSON: ${{ secrets.MY_DATA_HUB_MCP_NEGATIVE_CREDENTIALS_JSON }}
+        run: |
+          set -euo pipefail
+          test -n "$MY_DATA_HUB_MCP_NEGATIVE_CREDENTIALS_JSON"
+          umask 077
+          printf '%s' "$MY_DATA_HUB_MCP_NEGATIVE_CREDENTIALS_JSON" > "$RUNNER_TEMP/mdh-oauth-negative.json"
+          chmod 0600 "$RUNNER_TEMP/mdh-oauth-negative.json"
       - name: Verify remote and signed host post-deploy contract
         env:
           MY_DATA_HUB_MCP_CANARY_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_READER_TOKEN }}
@@ -73,6 +83,7 @@ jobs:
           MY_DATA_HUB_EXPECTED_DEPLOY_SERVICE_IMAGE_IDS_JSON: ${{ vars.MY_DATA_HUB_EXPECTED_DEPLOY_SERVICE_IMAGE_IDS_JSON }}
         run: >-
           python trusted/scripts/verify_post_deploy.py
+          --negative-credentials-file "$RUNNER_TEMP/mdh-oauth-negative.json"
           --cold-start-timeout-seconds "${{ inputs.cold_start_timeout_seconds }}"
           --output artifacts/post-deploy-verification.json
       - name: Write post-deploy receipt

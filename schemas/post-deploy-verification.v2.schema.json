@@ -140,6 +140,12 @@
         "authorization_server": {
           "const": "https://identity.kenigevents.ru"
         },
+        "expired_token_rejected": {
+          "const": true
+        },
+        "invalid_token_rejected": {
+          "const": true
+        },
         "missing_auth_rejected": {
           "const": true
         },
@@ -151,13 +157,25 @@
         "resource_metadata": {
           "const": true
         },
-        "wrong_auth_rejected": {
+        "revoked_token_rejected": {
+          "const": true
+        },
+        "wrong_audience_rejected": {
           "const": true
         },
         "wrong_host_rejected": {
           "const": true
         },
+        "wrong_issuer_rejected": {
+          "const": true
+        },
         "wrong_origin_rejected": {
+          "const": true
+        },
+        "wrong_resource_rejected": {
+          "const": true
+        },
+        "wrong_scope_rejected": {
           "const": true
         }
       },
@@ -166,7 +184,13 @@
         "wrong_host_rejected",
         "wrong_origin_rejected",
         "missing_auth_rejected",
-        "wrong_auth_rejected",
+        "invalid_token_rejected",
+        "expired_token_rejected",
+        "revoked_token_rejected",
+        "wrong_issuer_rejected",
+        "wrong_audience_rejected",
+        "wrong_resource_rejected",
+        "wrong_scope_rejected",
         "authorization_server",
         "published_jwks_keys"
       ],
@@ -238,6 +262,7 @@
           "const": [
             "bloggers.get",
             "bloggers.list",
+            "bloggers.migration.accounting",
             "bloggers.provenance",
             "bloggers.search",
             "bloggers.statistics",
@@ -245,6 +270,7 @@
             "data.change.status",
             "data.query",
             "embedding.coverage",
+            "embedding.production.capabilities",
             "master.status",
             "operation.get",
             "platform.status",

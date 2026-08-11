@@ -46,6 +46,13 @@ installed DNS/OAuth edge secrets and has not enabled remote MCP writes.
 
 ## Rotation and retrieval boundary
 
+- Owner authentication: `datahub-owner` is a fixed local principal mapped from one exact
+  Yandex Identity Hub OIDC `sub`. Identity Hub, not this repository, owns the one-time
+  bootstrap password and mandatory first-login change. Any OIDC application secret lives
+  only in a task-owned Lockbox entry or a service-owned mode-`0600` file. See
+  [`../20-remote-mcp-endpoint.md`](../20-remote-mcp-endpoint.md) for non-emitting retrieval,
+  rotation and verification commands.
+
 - Kaggle control credential: keep exactly one complete control-side mode
   (`KAGGLE_API_TOKEN`, private access-token file, or
   `KAGGLE_USERNAME`/`KAGGLE_KEY`). Legacy values remain in the control process

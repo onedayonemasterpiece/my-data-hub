@@ -138,6 +138,7 @@ def build_authorization_runtime() -> AuthorizationRuntime:
         authorization_url=f"{issuer}/authorize",
         owner_subject=owner_subject,
         cookie_name=os.getenv("MY_DATA_HUB_OWNER_SESSION_COOKIE", "mdh_owner_session"),
+        provider_subject=os.getenv("MY_DATA_HUB_OWNER_OIDC_SUBJECT", "").strip() or owner_subject,
     )
     issuer_authority = urlsplit(issuer).netloc
     policy = OAuthHTTPPolicy(

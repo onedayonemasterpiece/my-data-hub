@@ -48,6 +48,9 @@ The detailed material below is retained where topology-neutral. Any reference to
 - YDB credentials removed after accepted migration window;
 - Joplin token remains on desktop adapter host;
 - remote MCP signing/OAuth keys rotate independently from DB/provider passwords;
+- the fixed `datahub-owner` principal maps only from one pinned external OIDC subject;
+  bootstrap/password rotation remains at Yandex Identity Hub and no owner password is
+  stored by the authorization service;
 - Kaggle credentials stay server-side and are split between orchestrator and MCP
   sandbox identities where practical;
 - plaintext production dumps never enter GitHub or exchange packages.
