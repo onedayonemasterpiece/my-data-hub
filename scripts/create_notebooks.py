@@ -517,6 +517,7 @@ def build_operational_notebook(spec: OperationalNotebookSpec):  # type: ignore[n
             "from __future__ import annotations\n\n"
             "import hashlib\n"
             "import os\n"
+            "import subprocess\n"
             "import sys\n"
             "from pathlib import Path\n\n"
             f"EXPECTED_SOURCE_SHA256 = {source_sha256!r}\n"
@@ -528,8 +529,11 @@ def build_operational_notebook(spec: OperationalNotebookSpec):  # type: ignore[n
             "if (len(expected_wheel_sha) != 64 or \n"
             "        hashlib.sha256(wheel.read_bytes()).hexdigest() != expected_wheel_sha):\n"
             "    raise RuntimeError('my-data-hub wheel hash mismatch')\n"
-            "os.system(f\"{sys.executable} -m pip install --no-deps --disable-pip-version-check {wheel}\") == 0 "
-            "or (_ for _ in ()).throw(RuntimeError('exact wheel installation failed'))",
+            "subprocess.run(\n"
+            "    [sys.executable, '-m', 'pip', 'install', '--no-deps', "
+            "'--disable-pip-version-check', str(wheel)],\n"
+            "    check=True,\n"
+            ")",
             "install-exact-wheel",
         ),
         _cell(
