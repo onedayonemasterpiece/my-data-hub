@@ -233,7 +233,7 @@ def _require_accounting(value: dict[str, Any], imported: BloggerImportStageRecei
         "dispositioned_count": EXPECTED_BLOGGER_ROWS,
         "undispositioned_count": 0,
         "quarantined_count": 0,
-        "actor_count": EXPECTED_BLOGGER_ROWS,
+        "actor_count": imported.actor_count,
         "account_count": imported.account_count,
         "checkpoint_required": True,
     }
@@ -244,7 +244,7 @@ def _require_accounting(value: dict[str, Any], imported: BloggerImportStageRecei
     return row
 
 
-def _require_public_projection(mcp: ClosureMcp) -> dict[str, Any]:
+def _require_public_projection(mcp: ClosureMcp, expected_actor_count: int) -> dict[str, Any]:
     blogger_ids: list[str] = []
     representative: dict[str, Any] | None = None
     cursor: str | None = None
@@ -264,8 +264,8 @@ def _require_public_projection(mcp: ClosureMcp) -> dict[str, Any]:
         if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
             raise BloggerClosureError("bounded MCP blogger list cursor did not advance")
         cursor = next_cursor
-    if len(blogger_ids) != EXPECTED_BLOGGER_ROWS or len(set(blogger_ids)) != EXPECTED_BLOGGER_ROWS:
-        raise BloggerClosureError("bounded MCP blogger list does not contain exactly 266 distinct bloggers")
+    if len(blogger_ids) != expected_actor_count or len(set(blogger_ids)) != expected_actor_count:
+        raise BloggerClosureError("bounded MCP blogger list differs from canonical actor accounting")
     if representative is None:
         raise BloggerClosureError("bounded MCP blogger list has no representative item")
     representative_id = representative["blogger_id"]
@@ -386,10 +386,10 @@ def run_blogger_closure(
         raise BloggerClosureError("blogger statistics revision differs from the restored import")
     if (
         not isinstance(statistics.get("statistics"), dict)
-        or statistics["statistics"].get("bloggers") != EXPECTED_BLOGGER_ROWS
+        or statistics["statistics"].get("bloggers") != imported.actor_count
     ):
-        raise BloggerClosureError("blogger statistics do not prove exactly 266 canonical bloggers")
-    projection = _require_public_projection(mcp)
+        raise BloggerClosureError("blogger statistics differ from canonical actor accounting")
+    projection = _require_public_projection(mcp, imported.actor_count)
     receipt_id = uuid5(_CLOSURE_NAMESPACE, f"receipt:{request_id}")
     receipt: dict[str, Any] = {
         "schema_version": FINAL_RECEIPT_SCHEMA,

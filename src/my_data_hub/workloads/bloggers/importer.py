@@ -34,6 +34,8 @@ from .transform import BloggerDisposition, BloggerProjection, transform_row
 
 _BATCH_NAMESPACE = UUID("fa5115d2-39c3-5eab-b849-df13bf06cbb0")
 _DUPLICATE_NAMESPACE = UUID("77c173c7-73b5-562d-af57-eb86ff06cc24")
+_REPLAY_NAMESPACE = UUID("f99ec159-bc7c-5d13-90e5-e535a5c7bb37")
+_RESOLUTION_NAMESPACE = UUID("68d8fbd7-a7ad-5acc-a44f-39fc17834a93")
 _MAX_QUARANTINE_JSON_BYTES = 128 * 1024
 _MAX_QUARANTINE_VALUE_BYTES = 4096
 _MAX_CONTAINER_ITEMS = 128
@@ -48,6 +50,7 @@ class ImportReceipt:
     duplicate_group_count: int
     replayed_count: int
     canonical_revision: int
+    duplicate_groups_pending: int = 0
     durability_state: str = "COMMITTED_PENDING_CHECKPOINT"
 
     @property
@@ -55,7 +58,7 @@ class ImportReceipt:
         return (
             self.durability_state == "COMMITTED_PENDING_CHECKPOINT"
             and self.export.complete
-            and self.duplicate_group_count == 0
+            and self.duplicate_groups_pending == 0
         )
 
     @property
@@ -74,6 +77,85 @@ class _Observation:
     row: BloggerSourceRow | None
     projection: BloggerProjection | None
     reason_code: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateResolution:
+    """One explicit same-person decision supplied only inside the ACTIVE master."""
+
+    identity_sha256: str
+    canonical_record_id: str
+    canonical_actor_id: UUID
+    member_record_ids: tuple[str, ...]
+    decided_by: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        if len(self.identity_sha256) != 64 or any(
+            char not in "0123456789abcdef" for char in self.identity_sha256
+        ):
+            raise ValueError("duplicate identity_sha256 must be lowercase SHA-256")
+        if not self.canonical_record_id or len(self.canonical_record_id.encode()) > 4096:
+            raise ValueError("canonical_record_id is invalid")
+        if (
+            not self.member_record_ids
+            or tuple(sorted(set(self.member_record_ids))) != self.member_record_ids
+            or self.canonical_record_id not in self.member_record_ids
+        ):
+            raise ValueError("duplicate member_record_ids must be sorted, unique, and include canonical")
+        if not self.decided_by.strip() or len(self.decided_by.encode()) > 512:
+            raise ValueError("duplicate decided_by is invalid")
+        if not self.reason.strip() or len(self.reason.encode()) > 4096:
+            raise ValueError("duplicate reason is invalid")
+
+    @property
+    def member_record_id_set_sha256(self) -> str:
+        return _string_set_hash(self.member_record_ids)
+
+    @property
+    def resolution_sha256(self) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                {
+                    "canonical_actor_id": str(self.canonical_actor_id),
+                    "canonical_record_id": self.canonical_record_id,
+                    "decided_by": self.decided_by,
+                    "identity_sha256": self.identity_sha256,
+                    "member_record_ids": self.member_record_ids,
+                    "reason": self.reason,
+                    "schema_version": "region-talk-blogger-duplicate-resolution.v1",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class _DuplicateClaim:
+    identity_hash: str
+    members: tuple[_Observation, ...]
+    existing_actor_id: UUID | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolutionPlan:
+    targets: dict[str, UUID]
+    canonical_records: dict[UUID, str]
+    resolutions: tuple[DuplicateResolution, ...]
+
+
+class DuplicateResolutionConflict(ValueError):
+    """Resolution input is partial, stale, or would silently merge identities."""
+
+
+def _string_set_hash(values: Iterable[str]) -> str:
+    digest = hashlib.sha256()
+    for value in sorted(set(values)):
+        encoded = value.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
 
 
 def batch_identity(snapshot_at: datetime, expected_count: int) -> UUID:
@@ -149,10 +231,10 @@ def _bounded_value(value: Any, *, depth: int = 0) -> Any:
             result["__truncated_items__"] = len(items) - _MAX_CONTAINER_ITEMS
         return result
     if isinstance(value, (list, tuple)):
-        result = [_bounded_value(child, depth=depth + 1) for child in value[:_MAX_CONTAINER_ITEMS]]
+        list_result = [_bounded_value(child, depth=depth + 1) for child in value[:_MAX_CONTAINER_ITEMS]]
         if len(value) > _MAX_CONTAINER_ITEMS:
-            result.append({"truncated_items": len(value) - _MAX_CONTAINER_ITEMS})
-        return result
+            list_result.append({"truncated_items": len(value) - _MAX_CONTAINER_ITEMS})
+        return list_result
     return {"unsupported_type": type(value).__name__, "repr": _bounded_text(repr(value))}
 
 
@@ -228,6 +310,62 @@ def _blocked_hash(items: list[tuple[_Observation, BloggerDisposition, str]]) -> 
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _resolution_set_hash(resolutions: Iterable[DuplicateResolution]) -> str:
+    return _string_set_hash(item.resolution_sha256 for item in resolutions)
+
+
+def _build_resolution_plan(
+    claims: Mapping[str, _DuplicateClaim],
+    resolutions: Iterable[DuplicateResolution],
+) -> _ResolutionPlan:
+    """Validate a complete decision set and return exact per-source targets.
+
+    Every observed shared identity must have exactly one decision. Connected
+    identity groups must select the same actor and canonical source row. This
+    forbids a resolution set from implicitly splitting or merging a person.
+    """
+
+    supplied: dict[str, DuplicateResolution] = {}
+    for resolution in resolutions:
+        if resolution.identity_sha256 in supplied:
+            raise DuplicateResolutionConflict("duplicate resolution identity")
+        supplied[resolution.identity_sha256] = resolution
+    if set(supplied) != set(claims):
+        raise DuplicateResolutionConflict("duplicate resolution set is incomplete or stale")
+
+    targets: dict[str, UUID] = {}
+    canonical_records: dict[UUID, str] = {}
+    by_record = {
+        member.logical_id: member
+        for claim in claims.values()
+        for member in claim.members
+    }
+    for identity_hash in sorted(claims):
+        claim = claims[identity_hash]
+        resolution = supplied[identity_hash]
+        member_ids = tuple(sorted({member.logical_id for member in claim.members}))
+        if resolution.member_record_ids != member_ids:
+            raise DuplicateResolutionConflict("duplicate resolution members differ from durable claim")
+        canonical = by_record.get(resolution.canonical_record_id)
+        if canonical is None or canonical.projection is None:
+            raise DuplicateResolutionConflict("duplicate canonical record is absent")
+        if claim.existing_actor_id is not None:
+            if resolution.canonical_actor_id != claim.existing_actor_id:
+                raise DuplicateResolutionConflict("existing account owner was not selected explicitly")
+        elif resolution.canonical_actor_id != canonical.projection.actor_id:
+            raise DuplicateResolutionConflict("new canonical actor does not match canonical source identity")
+        prior_canonical = canonical_records.setdefault(
+            resolution.canonical_actor_id, resolution.canonical_record_id
+        )
+        if prior_canonical != resolution.canonical_record_id:
+            raise DuplicateResolutionConflict("connected duplicate groups select different canonical rows")
+        for member_id in member_ids:
+            prior_target = targets.setdefault(member_id, resolution.canonical_actor_id)
+            if prior_target != resolution.canonical_actor_id:
+                raise DuplicateResolutionConflict("connected duplicate groups select different actors")
+    return _ResolutionPlan(targets, canonical_records, tuple(supplied[key] for key in sorted(supplied)))
+
+
 class BloggerSnapshotImporter:
     """Import one bounded snapshot, durably preserving terminal fault evidence."""
 
@@ -243,6 +381,7 @@ class BloggerSnapshotImporter:
         expected_row_count: int,
         rows: Iterable[dict[str, object]],
         source_code_revision: str,
+        duplicate_resolutions: Iterable[DuplicateResolution] = (),
     ) -> ImportReceipt:
         batch_id = batch_identity(snapshot_at, expected_row_count)
         manifest_sha = _manifest_hash(batch_id, snapshot_at, expected_row_count)
@@ -251,7 +390,9 @@ class BloggerSnapshotImporter:
         duplicate_input_ids = {key for key, count in id_counts.items() if count > 1}
         outcomes: list[WriteOutcome] = []
         terminal: list[tuple[_Observation, BloggerDisposition, str]] = []
-        duplicate_groups: dict[str, list[_Observation]] = defaultdict(list)
+        duplicate_groups: dict[str, _DuplicateClaim] = {}
+        supplied_resolutions = tuple(duplicate_resolutions)
+        resolution_plan: _ResolutionPlan | None = None
         durability_state = "BLOCKED_QUARANTINE"
         try:
             with connection.transaction(), connection.cursor() as cursor:
@@ -318,7 +459,7 @@ class BloggerSnapshotImporter:
                 all_new = input_clean and all(states.get(item.ordinal) is None for item in typed)
                 all_replay = input_clean and all(states.get(item.ordinal) is not None for item in typed)
 
-                if all_new:
+                if input_clean:
                     account_claims: dict[tuple[str, str], list[_Observation]] = defaultdict(list)
                     for item in typed:
                         assert item.projection is not None
@@ -334,43 +475,261 @@ class BloggerSnapshotImporter:
                             actor_ids.add(existing_account[0])
                         if len(actor_ids) > 1:
                             identity_hash = hashlib.sha256(f"{identity[0]}\0{identity[1]}".encode()).hexdigest()
-                            duplicate_groups[identity_hash].extend(claimants)
-                    if duplicate_groups:
-                        all_new = False
+                            duplicate_groups[identity_hash] = _DuplicateClaim(
+                                identity_hash=identity_hash,
+                                members=tuple(
+                                    sorted(
+                                        {item.logical_id: item for item in claimants}.values(),
+                                        key=lambda item: item.logical_id,
+                                    )
+                                ),
+                                existing_actor_id=existing_account[0] if existing_account else None,
+                            )
+                if duplicate_groups and all_new:
+                    all_new = False
 
-                can_commit = all_new or (all_replay and prior_status == "accepted")
-                if can_commit:
-                    for item in typed:
-                        assert item.row is not None and item.projection is not None
-                        outcome = self.writer.write_row(
-                            cursor,
-                            export_batch_id=batch_id,
-                            project_id=project_id,
-                            row=item.row,
-                            projection=item.projection,
+                resolving_replay = bool(
+                    duplicate_groups
+                    and all_replay
+                    and prior_status == "rejected"
+                    and supplied_resolutions
+                )
+                if resolving_replay:
+                    try:
+                        resolution_plan = _build_resolution_plan(
+                            duplicate_groups, supplied_resolutions
                         )
-                        outcomes.append(outcome)
-                        terminal.append((item, outcome.disposition, item.projection.reason_code))
-                    replayed_count = sum(item.replayed for item in outcomes)
-                    if replayed_count not in {0, expected_row_count}:
-                        raise ValueError("batch is partially replayed; exact all-or-nothing import required")
-                    if replayed_count == expected_row_count:
-                        stored = cursor.execute(
-                            "SELECT metadata->>'canonical_revision', metadata->>'canonical_outcome_sha256' "
-                            "FROM migration.export_batch WHERE export_batch_id=%s",
-                            (batch_id,),
-                        ).fetchone()
-                        if stored is None or None in stored:
-                            raise ValueError("replayed batch lacks canonical revision receipt")
-                        canonical_revision, canonical_hash = int(stored[0]), stored[1]
-                    else:
-                        canonical_hash = canonical_outcome_hash(outcomes)
+                        for claim in duplicate_groups.values():
+                            if claim.existing_actor_id is not None and cursor.execute(
+                                "SELECT 1 FROM region_talk.blogger_profile WHERE actor_id=%s",
+                                (claim.existing_actor_id,),
+                            ).fetchone() is None:
+                                raise DuplicateResolutionConflict(
+                                    "existing account owner is not a canonical blogger target"
+                                )
+                        by_id = {item.logical_id: item for item in typed}
+                        for record_id, target_actor_id in resolution_plan.targets.items():
+                            item = by_id[record_id]
+                            assert item.projection is not None
+                            for account in item.projection.accounts:
+                                owner = cursor.execute(
+                                    "SELECT actor_id FROM hub.external_account "
+                                    "WHERE platform=%s AND normalized_url=%s",
+                                    (account.platform, account.normalized_url),
+                                ).fetchone()
+                                if owner is not None and owner[0] != target_actor_id:
+                                    raise DuplicateResolutionConflict(
+                                        "resolved account owner changed after quarantine"
+                                    )
+                    except DuplicateResolutionConflict:
+                        resolution_plan = None
+
+                can_commit = (
+                    all_new
+                    or (all_replay and prior_status == "accepted")
+                    or resolution_plan is not None
+                )
+                if can_commit:
+                    if resolution_plan is not None:
+                        by_id = {item.logical_id: item for item in typed}
+                        target_by_record = {
+                            item.logical_id: resolution_plan.targets.get(
+                                item.logical_id, item.projection.actor_id  # type: ignore[union-attr]
+                            )
+                            for item in typed
+                        }
+                        canonical_by_target = dict(resolution_plan.canonical_records)
+                        for item in typed:
+                            assert item.projection is not None
+                            canonical_by_target.setdefault(item.projection.actor_id, item.logical_id)
+                        group_ids_by_record: dict[str, list[UUID]] = defaultdict(list)
+                        for identity_hash, claim in duplicate_groups.items():
+                            group_id = uuid5(_DUPLICATE_NAMESPACE, f"{batch_id}:{identity_hash}")
+                            for member in claim.members:
+                                group_ids_by_record[member.logical_id].append(group_id)
+
+                        planned: list[WriteOutcome] = []
+                        for item in typed:
+                            assert item.projection is not None
+                            target = target_by_record[item.logical_id]
+                            canonical_record = canonical_by_target[target]
+                            disposition = (
+                                BloggerDisposition.DEDUPLICATED
+                                if target != item.projection.actor_id
+                                or canonical_record != item.logical_id
+                                else item.projection.disposition
+                            )
+                            planned.append(
+                                WriteOutcome(
+                                    item.logical_id,
+                                    target,
+                                    disposition,
+                                    True,
+                                    tuple(sorted(group_ids_by_record[item.logical_id], key=str)),
+                                )
+                            )
+                        canonical_hash = canonical_outcome_hash(planned)
+                        target_ids = sorted({item.actor_id for item in planned}, key=str)
+                        existing_accounts = {
+                            (row[0], row[1], row[2])
+                            for row in cursor.execute(
+                                "SELECT actor_id,platform,normalized_url FROM hub.external_account "
+                                "WHERE actor_id = ANY(%s)",
+                                (target_ids,),
+                            ).fetchall()
+                        }
+                        projected_accounts = {
+                            (
+                                target_by_record[item.logical_id],
+                                account.platform,
+                                account.normalized_url,
+                            )
+                            for item in typed
+                            for account in item.projection.accounts  # type: ignore[union-attr]
+                        }
+                        account_count = len(existing_accounts | projected_accounts)
+                        actor_count = len(target_ids)
                         previous_revision = cursor.execute(
                             "SELECT canonical_revision FROM hub.canonical_state WHERE singleton=true"
                         ).fetchone()[0]
                         canonical_revision = cursor.execute(
                             "SELECT hub.advance_canonical_revision(%s)", (previous_revision,)
                         ).fetchone()[0]
+                        replay_id = uuid5(_REPLAY_NAMESPACE, str(batch_id))
+                        cursor.execute(
+                            """
+                            INSERT INTO migration.blogger_replay(
+                                blogger_replay_id,export_batch_id,resolution_set_sha256,
+                                canonical_outcome_sha256,canonical_revision,actor_count,
+                                account_count,replayed_row_count
+                            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                            """,
+                            (
+                                replay_id,
+                                batch_id,
+                                _resolution_set_hash(resolution_plan.resolutions),
+                                canonical_hash,
+                                canonical_revision,
+                                actor_count,
+                                account_count,
+                                expected_row_count,
+                            ),
+                        )
+                        existing_profiles = {
+                            row[0]
+                            for row in cursor.execute(
+                                "SELECT actor_id FROM region_talk.blogger_profile "
+                                "WHERE actor_id = ANY(%s)",
+                                (target_ids,),
+                            ).fetchall()
+                        }
+                        ordered = sorted(
+                            typed,
+                            key=lambda item: (
+                                str(target_by_record[item.logical_id]),
+                                item.logical_id != canonical_by_target[target_by_record[item.logical_id]],
+                                item.logical_id,
+                            ),
+                        )
+                        planned_by_record = {item.record_id: item for item in planned}
+                        created_profiles: set[UUID] = set(existing_profiles)
+                        for item in ordered:
+                            assert item.row is not None and item.projection is not None
+                            planned_outcome = planned_by_record[item.logical_id]
+                            target = planned_outcome.actor_id
+                            canonical_item = by_id[canonical_by_target[target]]
+                            assert canonical_item.projection is not None
+                            create_profile = (
+                                target not in created_profiles
+                                and item.logical_id == canonical_item.logical_id
+                            )
+                            outcome = self.writer.write_resolved_row(
+                                cursor,
+                                export_batch_id=batch_id,
+                                project_id=project_id,
+                                replay_id=replay_id,
+                                row=item.row,
+                                projection=item.projection,
+                                canonical_actor_id=target,
+                                canonical_projection=canonical_item.projection,
+                                disposition=planned_outcome.disposition,
+                                create_canonical_profile=create_profile,
+                                duplicate_group_ids=planned_outcome.duplicate_group_ids,
+                            )
+                            if create_profile:
+                                created_profiles.add(target)
+                            outcomes.append(outcome)
+                            terminal.append(
+                                (item, outcome.disposition, "explicit_duplicate_resolution")
+                            )
+                        for resolution in resolution_plan.resolutions:
+                            group_id = uuid5(
+                                _DUPLICATE_NAMESPACE,
+                                f"{batch_id}:{resolution.identity_sha256}",
+                            )
+                            cursor.execute(
+                                """
+                                INSERT INTO migration.blogger_duplicate_resolution(
+                                    duplicate_resolution_id,blogger_replay_id,duplicate_group_id,
+                                    canonical_source_pk,canonical_actor_id,
+                                    member_record_id_set_sha256,resolution_sha256,
+                                    decision_kind,reason,decided_by
+                                ) VALUES (%s,%s,%s,%s,%s,%s,%s,'same_actor',%s,%s)
+                                """,
+                                (
+                                    uuid5(_RESOLUTION_NAMESPACE, f"{batch_id}:{resolution.identity_sha256}"),
+                                    replay_id,
+                                    group_id,
+                                    resolution.canonical_record_id,
+                                    resolution.canonical_actor_id,
+                                    resolution.member_record_id_set_sha256,
+                                    resolution.resolution_sha256,
+                                    resolution.reason,
+                                    resolution.decided_by,
+                                ),
+                            )
+                        replayed_count = expected_row_count
+                    else:
+                        for item in typed:
+                            assert item.row is not None and item.projection is not None
+                            outcome = self.writer.write_row(
+                                cursor,
+                                export_batch_id=batch_id,
+                                project_id=project_id,
+                                row=item.row,
+                                projection=item.projection,
+                            )
+                            outcomes.append(outcome)
+                            terminal.append((item, outcome.disposition, item.projection.reason_code))
+                        replayed_count = sum(item.replayed for item in outcomes)
+                        if replayed_count not in {0, expected_row_count}:
+                            raise ValueError("batch is partially replayed; exact all-or-nothing import required")
+                    if replayed_count == expected_row_count and resolution_plan is None:
+                        stored = cursor.execute(
+                            "SELECT metadata->>'canonical_revision', metadata->>'canonical_outcome_sha256', "
+                            "metadata->>'actor_count', metadata->>'account_count' "
+                            "FROM migration.export_batch WHERE export_batch_id=%s",
+                            (batch_id,),
+                        ).fetchone()
+                        if stored is None or None in stored:
+                            raise ValueError("replayed batch lacks canonical revision receipt")
+                        canonical_revision, canonical_hash = int(stored[0]), stored[1]
+                        actor_count, account_count = int(stored[2]), int(stored[3])
+                    elif resolution_plan is None:
+                        canonical_hash = canonical_outcome_hash(outcomes)
+                        actor_count = len({item.actor_id for item in outcomes})
+                        previous_revision = cursor.execute(
+                            "SELECT canonical_revision FROM hub.canonical_state WHERE singleton=true"
+                        ).fetchone()[0]
+                        canonical_revision = cursor.execute(
+                            "SELECT hub.advance_canonical_revision(%s)", (previous_revision,)
+                        ).fetchone()[0]
+                        target_ids = sorted({item.actor_id for item in outcomes}, key=str)
+                        account_count = cursor.execute(
+                            "SELECT count(*) FROM hub.external_account WHERE actor_id = ANY(%s)",
+                            (target_ids,),
+                        ).fetchone()[0]
+                    if replayed_count == 0 or resolution_plan is not None:
                         cursor.execute(
                             """
                             INSERT INTO sync.external_outbox(
@@ -422,6 +781,11 @@ class BloggerSnapshotImporter:
                     elif any(states.get(item.ordinal) is not None for item in typed):
                         global_reason = "partial_replay"
 
+                    duplicate_member_ids = {
+                        member.logical_id
+                        for claim in duplicate_groups.values()
+                        for member in claim.members
+                    }
                     seen_in_call: Counter[str] = Counter()
                     for item in observations:
                         seen_in_call[item.logical_id] += 1
@@ -480,8 +844,16 @@ class BloggerSnapshotImporter:
                                 terminal.append((item, disposition, reason))
                                 continue
                             source_pk = item.source_pk
-                            disposition = BloggerDisposition.RETAINED_RAW
-                            reason = global_reason
+                            disposition = (
+                                BloggerDisposition.QUARANTINED
+                                if item.logical_id in duplicate_member_ids
+                                else BloggerDisposition.RETAINED_RAW
+                            )
+                            reason = (
+                                "duplicate_account_requires_explicit_resolution"
+                                if item.logical_id in duplicate_member_ids
+                                else global_reason
+                            )
                             target_refs = []
                         self.writer.retain_observation(
                             cursor,
@@ -496,7 +868,7 @@ class BloggerSnapshotImporter:
                         )
                         terminal.append((item, disposition, reason))
 
-                    for identity_hash, members in duplicate_groups.items():
+                    for identity_hash, claim in duplicate_groups.items():
                         group_id = uuid5(_DUPLICATE_NAMESPACE, f"{batch_id}:{identity_hash}")
                         cursor.execute(
                             """
@@ -510,18 +882,34 @@ class BloggerSnapshotImporter:
                             """,
                             (group_id, batch_id, identity_hash),
                         )
-                        for member in members:
+                        for member in claim.members:
                             state = self.writer.raw_state(
                                 cursor, export_batch_id=batch_id, source_pk=member.source_pk
                             )
                             if state:
+                                assert member.projection is not None
                                 cursor.execute(
                                     """
                                     INSERT INTO migration.duplicate_group_member(
                                         duplicate_group_id,raw_record_id,actor_id,evidence
                                     ) VALUES (%s,%s,NULL,%s) ON CONFLICT DO NOTHING
                                     """,
-                                    (group_id, state[0], Jsonb({"identity_sha256": identity_hash})),
+                                    (
+                                        group_id,
+                                        state[0],
+                                        Jsonb(
+                                            {
+                                                "identity_sha256": identity_hash,
+                                                "projected_actor_id": str(member.projection.actor_id),
+                                                "source_pk": member.source_pk,
+                                                "existing_actor_id": (
+                                                    str(claim.existing_actor_id)
+                                                    if claim.existing_actor_id
+                                                    else None
+                                                ),
+                                            }
+                                        ),
+                                    ),
                                 )
                     canonical_revision = cursor.execute(
                         "SELECT canonical_revision FROM hub.canonical_state WHERE singleton=true"
@@ -554,22 +942,28 @@ class BloggerSnapshotImporter:
                     "SELECT count(*) FROM migration.duplicate_group WHERE export_batch_id=%s",
                     (batch_id,),
                 ).fetchone()[0]
+                duplicate_groups_pending = cursor.execute(
+                    "SELECT duplicate_groups_pending "
+                    "FROM migration.blogger_duplicate_accounting WHERE export_batch_id=%s",
+                    (batch_id,),
+                ).fetchone()[0]
                 if can_commit and accounting != (expected_row_count, 0, 0):
                     raise ValueError(f"canonical accounting failed: {accounting!r}")
-                if can_commit and duplicate_count:
-                    raise ValueError("duplicate decision accounting is not empty")
-                actor_count = cursor.execute(
-                    "SELECT count(*) FROM region_talk.blogger_profile WHERE export_batch_id=%s",
-                    (batch_id,),
-                ).fetchone()[0]
-                account_count = cursor.execute(
-                    """
-                    SELECT count(*) FROM hub.external_account account
-                    JOIN region_talk.blogger_profile profile ON profile.actor_id=account.actor_id
-                    WHERE profile.export_batch_id=%s
-                    """,
-                    (batch_id,),
-                ).fetchone()[0]
+                if can_commit and duplicate_groups_pending:
+                    raise ValueError("duplicate decision accounting remains pending")
+                if not can_commit:
+                    actor_count = cursor.execute(
+                        "SELECT count(*) FROM region_talk.blogger_profile WHERE export_batch_id=%s",
+                        (batch_id,),
+                    ).fetchone()[0]
+                    account_count = cursor.execute(
+                        """
+                        SELECT count(*) FROM hub.external_account account
+                        JOIN region_talk.blogger_profile profile ON profile.actor_id=account.actor_id
+                        WHERE profile.export_batch_id=%s
+                        """,
+                        (batch_id,),
+                    ).fetchone()[0]
                 cursor.execute(
                     """
                     UPDATE migration.export_batch
@@ -584,7 +978,10 @@ class BloggerSnapshotImporter:
                                 "record_id_set_sha256": export.record_id_set_sha256,
                                 "canonical_outcome_sha256": canonical_hash,
                                 "duplicate_groups": duplicate_count,
+                                "duplicate_groups_pending": duplicate_groups_pending,
                                 "canonical_revision": canonical_revision,
+                                "actor_count": actor_count,
+                                "account_count": account_count,
                                 "observed_row_count": export.row_count,
                                 "undispositioned": export.undispositioned,
                                 "quarantined": export.dispositions.get("quarantined", 0),
@@ -603,6 +1000,7 @@ class BloggerSnapshotImporter:
             actor_count=actor_count,
             account_count=account_count,
             duplicate_group_count=duplicate_count,
+            duplicate_groups_pending=duplicate_groups_pending,
             replayed_count=replayed_count,
             canonical_revision=canonical_revision,
             durability_state=durability_state,

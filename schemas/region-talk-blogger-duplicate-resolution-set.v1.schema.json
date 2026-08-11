@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/region-talk-blogger-duplicate-resolution-set.v1.schema.json",
+  "title": "Explicit in-master Region Talk blogger duplicate decisions v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "export_batch_id", "decisions"],
+  "properties": {
+    "schema_version": {"const": "region-talk-blogger-duplicate-resolution-set.v1"},
+    "export_batch_id": {"type": "string", "format": "uuid"},
+    "decisions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1330,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "identity_sha256", "canonical_record_id", "canonical_actor_id",
+          "member_record_ids", "decided_by", "reason"
+        ],
+        "properties": {
+          "identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "canonical_record_id": {"type": "string", "minLength": 1, "maxLength": 4096},
+          "canonical_actor_id": {"type": "string", "format": "uuid"},
+          "member_record_ids": {
+            "type": "array", "minItems": 1, "maxItems": 266, "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+          },
+          "decided_by": {"type": "string", "minLength": 1, "maxLength": 512},
+          "reason": {"type": "string", "minLength": 1, "maxLength": 4096}
+        }
+      }
+    }
+  }
+}

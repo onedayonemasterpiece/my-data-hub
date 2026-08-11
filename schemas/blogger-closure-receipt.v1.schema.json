@@ -33,7 +33,7 @@
       "additionalProperties": false,
       "required": ["listed_bloggers", "get_found", "provenance_events", "search_matches", "completed_retrievers"],
       "properties": {
-        "listed_bloggers": {"const": 266},
+        "listed_bloggers": {"type": "integer", "minimum": 1, "maximum": 266},
         "get_found": {"const": true},
         "provenance_events": {"type": "integer", "minimum": 1, "maximum": 10},
         "search_matches": {"type": "integer", "minimum": 1, "maximum": 20},

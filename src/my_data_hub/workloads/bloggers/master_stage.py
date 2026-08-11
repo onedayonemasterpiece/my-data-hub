@@ -21,7 +21,7 @@ from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.master_runtime.contracts import MasterIdentity
 from my_data_hub.master_runtime.credentials import CredentialProvisioner, LoginPolicy
 
-from .importer import BloggerSnapshotImporter, ImportReceipt
+from .importer import BloggerSnapshotImporter, DuplicateResolution, ImportReceipt
 from .schema import SOURCE_QUERY_SHA256
 from .ydb_reader import YdbBloggerSnapshot
 
@@ -78,9 +78,9 @@ class BloggerImportStageReceipt(BaseModel):
     record_id_set_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     logical_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     canonical_outcome_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    actor_count: Literal[266]
+    actor_count: int = Field(ge=1, le=266)
     account_count: int = Field(ge=0, le=266 * 8)
-    duplicate_group_count: Literal[0] = 0
+    duplicate_group_count: int = Field(default=0, ge=0, le=266 * 5)
     duplicate_groups_pending: Literal[0] = 0
     undispositioned: Literal[0] = 0
     quarantined: Literal[0] = 0
@@ -98,6 +98,11 @@ class BloggerImportStageReceipt(BaseModel):
             raise ValueError("blogger dispositions are invalid")
         if self.replayed_count not in {0, EXPECTED_BLOGGER_ROWS}:
             raise ValueError("blogger import is a partial replay")
+        deduplicated = self.dispositions.get("deduplicated", 0)
+        if self.actor_count > self.row_count:
+            raise ValueError("blogger actor accounting exceeds source rows")
+        if self.duplicate_group_count == 0 and deduplicated:
+            raise ValueError("deduplicated rows require durable duplicate groups")
         return self
 
     @property
@@ -149,7 +154,7 @@ def _to_receipt(
         actor_count=imported.actor_count,
         account_count=imported.account_count,
         duplicate_group_count=imported.duplicate_group_count,
-        duplicate_groups_pending=0,
+        duplicate_groups_pending=imported.duplicate_groups_pending,
         undispositioned=export.undispositioned,
         quarantined=quarantined,
         replayed_count=imported.replayed_count,
@@ -165,6 +170,7 @@ def execute_blogger_migration_stage(
     owner_connection: Any,
     driver: Any | None = None,
     importer: BloggerSnapshotImporter | None = None,
+    duplicate_resolutions: tuple[DuplicateResolution, ...] = (),
     now: datetime | None = None,
 ) -> BloggerImportStageReceipt:
     """Execute denial probe + exact 266-row import under one epoch-bound login.
@@ -234,6 +240,7 @@ def execute_blogger_migration_stage(
                     expected_row_count=EXPECTED_BLOGGER_ROWS,
                     rows=rows,
                     source_code_revision=request.source_revision,
+                    duplicate_resolutions=duplicate_resolutions,
                 )
                 if not imported.accounting_complete:
                     raise RuntimeError(

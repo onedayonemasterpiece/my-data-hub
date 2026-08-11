@@ -52,10 +52,13 @@ class PostgresBloggerWriter:
         raw_record_id = _id("raw", f"{export_batch_id}:{SOURCE_TABLE}:{source_pk}")
         existing = cursor.execute(
             """
-            SELECT raw.payload_sha256, disposition.disposition
+            SELECT raw.payload_sha256,
+                   coalesce(replay.disposition, disposition.disposition)
             FROM migration.raw_record raw
             LEFT JOIN migration.row_disposition disposition
               ON disposition.raw_record_id=raw.raw_record_id
+            LEFT JOIN migration.blogger_replay_disposition replay
+              ON replay.raw_record_id=raw.raw_record_id
             WHERE raw.raw_record_id=%s
             """,
             (raw_record_id,),
@@ -150,7 +153,13 @@ class PostgresBloggerWriter:
             if existing[0] != row.payload_sha256:
                 raise BloggerReplayConflict("same raw_record_id has different payload hash")
             disposition = cursor.execute(
-                "SELECT disposition FROM migration.row_disposition WHERE raw_record_id=%s",
+                """
+                SELECT coalesce(replay.disposition, disposition.disposition)
+                FROM migration.row_disposition disposition
+                LEFT JOIN migration.blogger_replay_disposition replay
+                  ON replay.raw_record_id=disposition.raw_record_id
+                WHERE disposition.raw_record_id=%s
+                """,
                 (raw_record_id,),
             ).fetchone()
             if disposition is None:
@@ -341,6 +350,223 @@ class PostgresBloggerWriter:
             disposition,
             False,
             tuple(sorted(duplicate_groups, key=str)),
+        )
+
+    def write_resolved_row(
+        self,
+        cursor: Any,
+        *,
+        export_batch_id: UUID,
+        project_id: UUID,
+        replay_id: UUID,
+        row: BloggerSourceRow,
+        projection: BloggerProjection,
+        canonical_actor_id: UUID,
+        canonical_projection: BloggerProjection,
+        disposition: BloggerDisposition,
+        create_canonical_profile: bool,
+        duplicate_group_ids: tuple[UUID, ...],
+    ) -> WriteOutcome:
+        """Materialize one exact quarantined replay without changing raw evidence.
+
+        The caller has already validated a complete explicit resolution set.  This
+        method never updates an actor, account, raw record, or first disposition:
+        existing canonical values must agree, while the effective replay
+        disposition is inserted into the append-only migration ledger.
+        """
+
+        if disposition not in {
+            BloggerDisposition.NORMALIZED,
+            BloggerDisposition.DEDUPLICATED,
+            BloggerDisposition.RETAINED_RAW,
+        }:
+            raise ValueError("resolved replay disposition is not canonical")
+        raw_record_id = _id("raw", f"{export_batch_id}:{SOURCE_TABLE}:{row.record_id}")
+        raw = cursor.execute(
+            "SELECT payload_sha256 FROM migration.raw_record WHERE raw_record_id=%s",
+            (raw_record_id,),
+        ).fetchone()
+        if raw is None or raw[0] != row.payload_sha256:
+            raise BloggerReplayConflict("resolved replay raw evidence differs")
+
+        actor = cursor.execute(
+            "SELECT actor_type,display_name,canonical_name,summary FROM hub.actor WHERE actor_id=%s",
+            (canonical_actor_id,),
+        ).fetchone()
+        if actor is None:
+            if canonical_actor_id != canonical_projection.actor_id:
+                raise BloggerReplayConflict("explicit canonical actor does not exist")
+            cursor.execute(
+                """
+                INSERT INTO hub.actor(actor_id,actor_type,display_name,canonical_name,summary,metadata)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    canonical_actor_id,
+                    canonical_projection.actor_kind,
+                    canonical_projection.display_name,
+                    canonical_projection.display_name.casefold(),
+                    canonical_projection.summary,
+                    Jsonb({"blogger_contract": "bloggers_ru_v1"}),
+                ),
+            )
+        elif canonical_actor_id == canonical_projection.actor_id and actor != (
+            canonical_projection.actor_kind,
+            canonical_projection.display_name,
+            canonical_projection.display_name.casefold(),
+            canonical_projection.summary,
+        ):
+            raise BloggerReplayConflict("source-derived canonical actor already has different values")
+
+        provenance_id = _id("provenance", f"{export_batch_id}:{row.record_id}")
+        cursor.execute(
+            """
+            INSERT INTO hub.provenance_event(
+                provenance_event_id,project_id,subject_type,subject_id,event_type,
+                actor_kind,actor_ref,query_text,source_uri,observed_at,evidence
+            ) VALUES (%s,%s,'actor',%s,'ydb_blogger_import','system',%s,%s,%s,%s,%s)
+            """,
+            (
+                provenance_id,
+                project_id,
+                canonical_actor_id,
+                self.mapping_version,
+                f"sha256:{SOURCE_QUERY_SHA256}",
+                f"ydb://{SOURCE_DATABASE_PATH}/{SOURCE_TABLE}/{row.record_id}",
+                row.updated_at,
+                Jsonb(
+                    {
+                        "export_batch_id": str(export_batch_id),
+                        "payload_sha256": row.payload_sha256,
+                        "blogger_replay_id": str(replay_id),
+                    }
+                ),
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO hub.project_actor(
+                project_id,actor_id,membership_kind,status,provenance_event_id,metadata
+            ) VALUES (%s,%s,'blogger','included',%s,%s)
+            ON CONFLICT (project_id,actor_id,membership_kind) DO NOTHING
+            """,
+            (
+                project_id,
+                canonical_actor_id,
+                provenance_id,
+                Jsonb({"legacy_record_id": row.record_id, "blogger_replay_id": str(replay_id)}),
+            ),
+        )
+
+        for account_projection in projection.accounts:
+            account = cursor.execute(
+                "SELECT account_id,actor_id FROM hub.external_account "
+                "WHERE platform=%s AND normalized_url=%s",
+                (account_projection.platform, account_projection.normalized_url),
+            ).fetchone()
+            if account is not None:
+                if account[1] != canonical_actor_id:
+                    raise BloggerReplayConflict("resolved account still belongs to another actor")
+                continue
+            cursor.execute(
+                """
+                INSERT INTO hub.external_account(
+                    account_id,actor_id,platform,handle,url,normalized_url,status,metadata
+                ) VALUES (%s,%s,%s,%s,%s,%s,'active',%s)
+                """,
+                (
+                    _id(
+                        "account",
+                        f"{canonical_actor_id}:{account_projection.platform}:"
+                        f"{account_projection.normalized_url}",
+                    ),
+                    canonical_actor_id,
+                    account_projection.platform,
+                    account_projection.handle,
+                    account_projection.url,
+                    account_projection.normalized_url,
+                    Jsonb(
+                        {
+                            "source_record_id": row.record_id,
+                            "blogger_replay_id": str(replay_id),
+                        }
+                    ),
+                ),
+            )
+
+        if create_canonical_profile:
+            cursor.execute(
+                """
+                INSERT INTO region_talk.blogger_profile(
+                    actor_id,legacy_record_id,export_batch_id,confirmation_status,
+                    region_relation_status,geography_signal,geography_provenance,
+                    source_updated_at,public_evidence_url,requires_review
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    canonical_actor_id,
+                    row.record_id,
+                    export_batch_id,
+                    row.confirmation_status,
+                    row.region_relation_status,
+                    canonical_projection.geography_signal,
+                    canonical_projection.geography_provenance,
+                    row.updated_at,
+                    row.evidence_url,
+                    canonical_projection.requires_review or bool(duplicate_group_ids),
+                ),
+            )
+        elif cursor.execute(
+            "SELECT 1 FROM region_talk.blogger_profile WHERE actor_id=%s",
+            (canonical_actor_id,),
+        ).fetchone() is None:
+            raise BloggerReplayConflict("explicit canonical actor lacks a blogger profile")
+
+        cursor.execute(
+            """
+            INSERT INTO migration.legacy_identity_map(
+                source_system,source_table,source_pk,target_table,target_pk,
+                mapping_version,mapping_kind,evidence
+            ) VALUES ('ydb',%s,%s,'hub.actor',%s,%s,%s,%s)
+            """,
+            (
+                SOURCE_TABLE,
+                row.record_id,
+                Jsonb({"actor_id": str(canonical_actor_id)}),
+                self.mapping_version,
+                "merged" if disposition is BloggerDisposition.DEDUPLICATED else "created",
+                Jsonb(
+                    {
+                        "export_batch_id": str(export_batch_id),
+                        "blogger_replay_id": str(replay_id),
+                    }
+                ),
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO migration.blogger_replay_disposition(
+                raw_record_id,blogger_replay_id,disposition,target_refs,reason_code
+            ) VALUES (%s,%s,%s,%s,%s)
+            """,
+            (
+                raw_record_id,
+                replay_id,
+                disposition.value,
+                Jsonb([{"table": "hub.actor", "id": str(canonical_actor_id)}]),
+                (
+                    "explicit_duplicate_canonical_target"
+                    if disposition is BloggerDisposition.DEDUPLICATED
+                    else "resolved_batch_replay"
+                ),
+            ),
+        )
+        return WriteOutcome(
+            row.record_id,
+            canonical_actor_id,
+            disposition,
+            True,
+            tuple(sorted(duplicate_group_ids, key=str)),
         )
 
 
