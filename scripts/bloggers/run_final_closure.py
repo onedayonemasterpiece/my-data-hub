@@ -27,7 +27,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("run", choices=("run",))
     parser.add_argument("--control-url", default=os.getenv("MY_DATA_HUB_CONTROL_URL", LOCAL_CONTROL_URL))
     parser.add_argument("--mcp-url", default=os.getenv("MY_DATA_HUB_MCP_CANARY_ENDPOINT", CANONICAL_MCP_URL))
-    parser.add_argument("--mcp-token", default=os.getenv("MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN", ""))
     parser.add_argument("--idempotency-key", required=True)
     parser.add_argument("--project-id", type=UUID, required=True)
     parser.add_argument("--snapshot-at", required=True)
@@ -51,7 +50,7 @@ def main() -> int:
         source_revision=args.source_revision,
         timeout_seconds=args.timeout_seconds,
     )
-    mcp = StreamableHttpClosureMcp(args.mcp_url, args.mcp_token)
+    mcp = StreamableHttpClosureMcp(args.mcp_url, os.getenv("MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN", ""))
     receipt = run_blogger_closure(config, control=LocalClosureControl(config), mcp=mcp)
     encoded = canonical_json_bytes(receipt)
     args.receipt.parent.mkdir(parents=True, exist_ok=True)

@@ -8,6 +8,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from my_data_hub.control_plane.ledger import ControlLedger, EffectState, EventDisposition, EventReceipt
 from my_data_hub.runtime_sdk.events import RuntimeEvent, RuntimeEventType
+from my_data_hub.workloads.bloggers.master_stage import BloggerImportStageReceipt
 
 from .evidence import TerminalDecision, decide_terminal
 from .provider import (
@@ -196,6 +197,21 @@ class MasterCoordinator:
             source_version=intent.source_version,
             epoch=int(operation.identity["epoch"]),
         )
+        if decision is TerminalDecision.FAILED:
+            if MasterState(operation.state) in {MasterState.FAILED, MasterState.FENCED, MasterState.ORPHANED}:
+                return True
+            event_id = str(uuid5(NAMESPACE_URL, f"provider-terminal-error:{operation.operation_id}"))
+            self.ledger.project_master_lifecycle(
+                operation_id=operation.operation_id,
+                service_instance_id=str(operation.identity["service_instance_id"]),
+                epoch=int(operation.identity["epoch"]),
+                expected_operation_state=operation.state,
+                operation_state=MasterState.FAILED.value,
+                service_state=MasterState.FENCED.value,
+                event_id=event_id,
+            )
+            self.ledger.revoke_runtime_token(str(operation.identity["run_id"]), str(operation.identity["attempt_id"]))
+            return True
         if decision != TerminalDecision.SUCCEEDED or output is None:
             return False
         if output.service_instance_id != str(
@@ -203,6 +219,21 @@ class MasterCoordinator:
         ) or output.master_instance_id != str(operation.identity["master_instance_id"]):
             return False
         self._require_verified_terminal_checkpoint(operation, intent, output)
+        if output.blogger_import_receipt is not None:
+            blogger_receipt = BloggerImportStageReceipt.model_validate(output.blogger_import_receipt)
+            if (
+                str(blogger_receipt.operation_id) != operation.operation_id
+                or blogger_receipt.run_id != output.run_id
+                or blogger_receipt.epoch != output.epoch
+                or str(blogger_receipt.master_instance_id) != output.master_instance_id
+            ):
+                raise ValueError("recovered blogger receipt differs from the exact master operation")
+            self.ledger.record_blogger_import_receipt(
+                request_id=str(blogger_receipt.request_id),
+                run_id=output.run_id,
+                attempt_id=output.attempt_id,
+                receipt=blogger_receipt.model_dump(mode="json"),
+            )
         events = tuple(RuntimeEvent.model_validate_json(raw) for raw in output.recovered_events)
         expected_types = (
             RuntimeEventType.RUNTIME_DRAINING,
@@ -262,6 +293,11 @@ class MasterCoordinator:
                 "output_tree_sha256": output.output_tree_sha256,
                 "output_receipt_sha256": output.output_receipt_sha256,
                 "provider_status": evidence.platform_status.value,
+                "blogger_import_receipt_sha256": (
+                    BloggerImportStageReceipt.model_validate(output.blogger_import_receipt).receipt_sha256
+                    if output.blogger_import_receipt is not None
+                    else None
+                ),
                 "events": [
                     {
                         "event_id": event.event_id,

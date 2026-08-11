@@ -26,6 +26,7 @@ from my_data_hub.runtime_sdk import (
     RuntimeEvent,
     RuntimeEventType,
 )
+from my_data_hub.workloads.bloggers.master_stage import BloggerImportStageReceipt, BloggerMigrationRequest
 
 SECRET = "runtime-secret-long-enough"
 
@@ -339,6 +340,81 @@ def test_exact_terminal_output_recovers_callbacks_lost_through_process_exit(tmp_
     )
     assert service_latest == (recovered_event_ids[-1],)
     assert restarted.reconcile_all({request.idempotency_key: request}) == []
+
+
+def test_terminal_output_recovers_committed_blogger_receipt_after_all_callback_acks_are_lost(
+    tmp_path: Path,
+) -> None:
+    _, adapter, ledger, coordinator, request, handle = _active_master_with_terminal_output(tmp_path)
+    blogger_request = BloggerMigrationRequest(
+        request_id=uuid4(),
+        operation_id=UUID(handle.operation_id),
+        project_id=uuid4(),
+        snapshot_at=datetime.now(UTC),
+        source_revision="a" * 40,
+    )
+    ledger.ensure_blogger_migration_request(
+        request_id=str(blogger_request.request_id),
+        operation_id=handle.operation_id,
+        request_sha256=blogger_request.request_sha256,
+        request=blogger_request.model_dump(mode="json"),
+    )
+    ledger.claim_blogger_migration_request(
+        operation_id=handle.operation_id,
+        run_id=handle.run_id,
+        attempt_id=handle.attempt_id,
+        master_instance_id=handle.master_instance_id,
+        epoch=handle.epoch,
+    )
+    blogger_receipt = BloggerImportStageReceipt(
+        request_id=blogger_request.request_id,
+        operation_id=UUID(handle.operation_id),
+        master_instance_id=UUID(handle.master_instance_id),
+        run_id=handle.run_id,
+        epoch=handle.epoch,
+        request_sha256=blogger_request.request_sha256,
+        export_batch_id=uuid4(),
+        row_count=266,
+        distinct_record_ids=266,
+        source_file_count=14,
+        dispositions={"imported": 266},
+        record_id_set_sha256="b" * 64,
+        logical_sha256="c" * 64,
+        canonical_outcome_sha256="d" * 64,
+        actor_count=266,
+        account_count=250,
+        replayed_count=0,
+        canonical_revision=9,
+    )
+    assert adapter.terminal_payload is not None
+    adapter.terminal_payload["blogger_import_receipt"] = blogger_receipt.model_dump(mode="json")
+
+    restarted_ledger = ControlLedger(ledger.path)
+    restarted = MasterCoordinator(restarted_ledger, coordinator.provider)
+    recovered = restarted.reconcile_all({request.idempotency_key: request})
+
+    assert len(recovered) == 1 and recovered[0].state is MasterState.STOPPED
+    stored = restarted_ledger.blogger_migration_request(str(blogger_request.request_id))
+    assert stored is not None
+    assert stored["state"] == "IMPORT_COMMITTED"
+    assert stored["import_receipt"]["canonical_revision"] == 9
+
+
+def test_provider_error_terminalizes_active_master_without_accepting_stale_output(tmp_path: Path) -> None:
+    _, adapter, ledger, coordinator, request, handle = _active_master_with_terminal_output(tmp_path)
+    adapter.status_state = "failed"
+    adapter.terminal_payload = None
+
+    recovered = coordinator.reconcile_operation(handle.operation_id, request)
+
+    assert recovered.state is MasterState.FAILED
+    service = (
+        sqlite3.connect(ledger.path)
+        .execute("SELECT state FROM services WHERE service_instance_id=?", (handle.service_instance_id,))
+        .fetchone()
+    )
+    assert service == (MasterState.FENCED.value,)
+    assert not ledger.runtime_token_valid(handle.run_id, handle.attempt_id, SECRET)
 
 
 @pytest.mark.parametrize(

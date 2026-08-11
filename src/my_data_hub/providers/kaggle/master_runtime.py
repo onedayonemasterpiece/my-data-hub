@@ -31,6 +31,7 @@ from my_data_hub.orchestrator.master.provider import (
 )
 from my_data_hub.providers.models import ControlClass
 from my_data_hub.runtime_sdk import CANONICAL_RUNTIME_CALLBACK_URL, KAGGLE_PROVIDER_TIMEOUT_SECONDS
+from my_data_hub.workloads.bloggers.master_stage import BloggerImportStageReceipt
 
 from .adapter import KaggleProviderAdapter
 from .contracts import (
@@ -405,7 +406,7 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             raw = json.loads(encoded)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise MasterLaunchContractError("master terminal output is not bounded canonical JSON") from exc
-        expected_keys = {
+        required_keys = {
             "schema_version",
             "run_id",
             "attempt_id",
@@ -418,7 +419,8 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             "checkpoint",
             "events",
         }
-        if not isinstance(raw, dict) or set(raw) != expected_keys:
+        allowed_keys = required_keys | {"blogger_import_receipt"}
+        if not isinstance(raw, dict) or not required_keys.issubset(raw) or not set(raw).issubset(allowed_keys):
             raise MasterLaunchContractError("master terminal output has an invalid top-level contract")
         try:
             canonical = canonical_json_bytes(raw)
@@ -457,7 +459,17 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
         encoded_events = tuple(
             json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode() for event in events
         )
+        blogger_import_receipt: dict[str, object] | None = None
         try:
+            if raw.get("blogger_import_receipt") is not None:
+                parsed_blogger_receipt = BloggerImportStageReceipt.model_validate(raw["blogger_import_receipt"])
+                if (
+                    parsed_blogger_receipt.run_id != raw["run_id"]
+                    or parsed_blogger_receipt.epoch != raw["epoch"]
+                    or str(parsed_blogger_receipt.master_instance_id) != raw["master_instance_id"]
+                ):
+                    raise ValueError("blogger receipt differs from terminal runtime identity")
+                blogger_import_receipt = parsed_blogger_receipt.model_dump(mode="json")
             return MasterTerminalOutput(
                 run_id=raw["run_id"],
                 attempt_id=raw["attempt_id"],
@@ -473,6 +485,7 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
                 recovered_events=encoded_events,
                 output_tree_sha256=output_tree_sha256,
                 output_receipt_sha256=hashlib.sha256(encoded).hexdigest(),
+                blogger_import_receipt=blogger_import_receipt,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise MasterLaunchContractError("master terminal output values are invalid") from exc

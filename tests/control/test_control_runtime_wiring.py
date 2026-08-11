@@ -274,6 +274,17 @@ def test_active_runtime_claims_only_its_exact_blogger_request(tmp_path: Path) ->
         },
     )
     assert imported.status_code == 200
+    cannot_downgrade = client.post(
+        f"/internal/runtime/blogger-migration/{identity['run_id']}/{identity['attempt_id']}/failed",
+        json={"request_id": str(request.request_id), "failure_code": "lost_response"},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-MDH-Master-Instance-ID": str(identity["master_instance_id"]),
+            "X-MDH-Epoch": str(identity["epoch"]),
+        },
+    )
+    assert cannot_downgrade.status_code == 409
+    assert ledger.blogger_migration_request(str(request.request_id))["state"] == "IMPORT_COMMITTED"
     checkpoint_id = str(uuid4())
     ledger.add_checkpoint_candidate(
         checkpoint_id=checkpoint_id,

@@ -91,6 +91,7 @@ class MasterTerminalRecord(BaseModel):
     status: Literal["succeeded"] = "succeeded"
     checkpoint: MasterTerminalCheckpoint
     events: tuple[dict[str, Any], ...] = Field(min_length=4, max_length=4)
+    blogger_import_receipt: BloggerImportStageReceipt | None = None
 
     @model_validator(mode="after")
     def exact_event_chain(self) -> MasterTerminalRecord:
@@ -264,6 +265,10 @@ class CheckpointAdmissionError(RuntimeError):
     """A publication attempt was not started because its full budget was absent."""
 
 
+class BloggerReceiptDeliveryError(RuntimeError):
+    """Exact metadata delivery was not acknowledged after bounded retries."""
+
+
 class CallbackLeaseClosingError(TimeoutError):
     """The control callback outage closed the write lease as designed."""
 
@@ -313,6 +318,7 @@ def _write_master_terminal(
     runtime: Any,
     identity: MasterIdentity,
     receipt: PublishReceipt,
+    blogger_import_receipt: BloggerImportStageReceipt | None = None,
 ) -> None:
     """Atomically persist the exact spooled terminal lifecycle for recovery."""
 
@@ -333,11 +339,12 @@ def _write_master_terminal(
             current_checkpoint_id=receipt.current_checkpoint_id,
         ),
         events=event_bodies,
+        blogger_import_receipt=blogger_import_receipt,
     )
     if record.run_id != identity.run_id or runtime.epoch != identity.epoch:
         raise RuntimeError("master terminal runtime identity differs from the fenced master")
     encoded = json.dumps(
-        record.model_dump(mode="json"),
+        record.model_dump(mode="json", exclude_none=True),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -387,7 +394,7 @@ def _master_terminal_supports_output_recovery(
         encoded = output_path.read_bytes()
         record = MasterTerminalRecord.model_validate_json(encoded)
         canonical = json.dumps(
-            record.model_dump(mode="json"),
+            record.model_dump(mode="json", exclude_none=True),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -462,21 +469,37 @@ def _claim_blogger_migration(
 
 
 def _post_blogger_runtime_receipt(
-    *, config: NotebookMasterConfig, callback_url: str, run_secret: str, suffix: str, payload: dict[str, Any]
+    *,
+    config: NotebookMasterConfig,
+    callback_url: str,
+    run_secret: str,
+    suffix: str,
+    payload: dict[str, Any],
+    attempts: int = 3,
+    sleep: Any = time.sleep,
 ) -> None:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     if len(encoded) > 64 * 1024:
         raise RuntimeError("blogger runtime metadata receipt exceeds 64 KiB")
-    request = urllib.request.Request(
-        _blogger_migration_url(callback_url, config.run_id, config.attempt_id, suffix),
-        data=encoded,
-        headers=_runtime_metadata_headers(config, run_secret),
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=10) as response:
-        body = json.loads(response.read(16 * 1024))
-    if body.get("accepted") is not True:
-        raise RuntimeError("control plane did not accept blogger runtime metadata")
+    if not 1 <= attempts <= 5:
+        raise ValueError("blogger receipt delivery attempts must be 1..5")
+    for attempt in range(attempts):
+        request = urllib.request.Request(
+            _blogger_migration_url(callback_url, config.run_id, config.attempt_id, suffix),
+            data=encoded,
+            headers=_runtime_metadata_headers(config, run_secret),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                body = json.loads(response.read(16 * 1024))
+            if body.get("accepted") is True:
+                return
+        except Exception:
+            pass
+        if attempt + 1 < attempts:
+            sleep(min(2**attempt, 2))
+    raise BloggerReceiptDeliveryError("control plane did not acknowledge exact blogger runtime metadata")
 
 
 def _credential_registration_url(callback_url: str, run_id: str, attempt_id: str) -> str:
@@ -795,13 +818,6 @@ def run_master(
                         ),
                         owner_connection=gate_connection,
                     )
-                    _post_blogger_runtime_receipt(
-                        config=config,
-                        callback_url=callback_url,
-                        run_secret=run_secret,
-                        suffix="/import-receipt",
-                        payload=blogger_receipt.model_dump(mode="json"),
-                    )
                 except Exception as exc:
                     with suppress(Exception):
                         _post_blogger_runtime_receipt(
@@ -815,6 +831,18 @@ def run_master(
                             },
                         )
                     raise
+                with suppress(BloggerReceiptDeliveryError):
+                    # The PostgreSQL commit is authoritative and must never be
+                    # downgraded to FAILED because a metadata ACK was lost.  The
+                    # exact receipt is carried in the terminal output and is
+                    # durably reconciled before recovered lifecycle projection.
+                    _post_blogger_runtime_receipt(
+                        config=config,
+                        callback_url=callback_url,
+                        run_secret=run_secret,
+                        suffix="/import-receipt",
+                        payload=blogger_receipt.model_dump(mode="json"),
+                    )
                 break
             time.sleep(min(30.0, remaining_active))
             if time.monotonic() >= active_deadline:
@@ -861,6 +889,7 @@ def run_master(
         identity=identity,
         deadline=session_deadline,
         terminal_output_path=terminal_output_path,
+        blogger_import_receipt=blogger_receipt,
     )
     if blogger_receipt is not None:
         checkpoint_payload = {
@@ -906,6 +935,7 @@ def _checkpoint_before_stop(
     package_directory: Path,
     identity: MasterIdentity,
     terminal_output_path: Path | None = None,
+    blogger_import_receipt: BloggerImportStageReceipt | None = None,
     retry: bool = False,
 ) -> PublishReceipt:
     """Close writes and stop processes only after durable checkpoint success.
@@ -960,6 +990,7 @@ def _checkpoint_before_stop(
             runtime=runtime,
             identity=identity,
             receipt=receipt,
+            blogger_import_receipt=blogger_import_receipt,
         )
     if verified.status != "delivered" or terminal.status != "delivered":
         # ``emit(terminal)`` already auto-replays older callbacks.  Check the
@@ -990,6 +1021,7 @@ def _checkpoint_until_deadline(
     identity: MasterIdentity,
     deadline: float,
     terminal_output_path: Path | None = None,
+    blogger_import_receipt: BloggerImportStageReceipt | None = None,
     publication_attempt_seconds: float = CHECKPOINT_ATTEMPT_BUDGET_SECONDS,
     retry_seconds: float = 60.0,
     monotonic: Any = time.monotonic,
@@ -1033,6 +1065,7 @@ def _checkpoint_until_deadline(
                 package_directory=package_directory,
                 identity=identity,
                 terminal_output_path=terminal_output_path,
+                blogger_import_receipt=blogger_import_receipt,
                 retry=retry,
             )
         except CheckpointShutdownError as exc:

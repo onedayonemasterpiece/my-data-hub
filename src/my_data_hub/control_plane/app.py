@@ -17,7 +17,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, status
 from my_data_hub.checkpoints import CheckpointManifest, ControlLedgerCheckpointRegistry
 from my_data_hub.checkpoints.manifest import ManifestError
 from my_data_hub.control_plane.adapters import LedgerMasterResolver
-from my_data_hub.control_plane.ledger import ControlLedger, ControlLedgerError, EventRejected
+from my_data_hub.control_plane.ledger import ControlLedger, ControlLedgerError, EventRejected, StaleRuntimeEvent
 from my_data_hub.control_plane.runtime import (
     ControlPlaneMasterRuntime,
     MasterRuntimeSettings,
@@ -449,6 +449,16 @@ def create_app(
         record = control_ledger.blogger_migration_request(exact_id)
         if record is None:
             raise HTTPException(status_code=404, detail={"code": "blogger_request_not_found"})
+        if record["state"] in {"CLAIMED", "IMPORT_COMMITTED"} and master_runtime is not None:
+            source_operation = control_ledger.get_operation(record["operation_id"])
+            if source_operation is not None:
+                with suppress(Exception):
+                    master_runtime.coordinator.reconcile_operation(
+                        source_operation.operation_id,
+                        master_runtime.intent(source_operation.idempotency_key),
+                    )
+            record = control_ledger.reconcile_abandoned_blogger_migration_request(exact_id)
+            assert record is not None
         if record["state"] == "IMPORT_COMMITTED":
             recovered = control_ledger.verified_checkpoint_for_operation(record["operation_id"])
             if recovered is not None:
@@ -562,12 +572,15 @@ def create_app(
         body = await _bounded_json(request)
         if set(body) != {"request_id", "failure_code"}:
             raise HTTPException(status_code=422, detail={"code": "blogger_failure_invalid"})
-        control_ledger.fail_blogger_migration_request(
-            request_id=str(body["request_id"]),
-            run_id=run_id,
-            attempt_id=attempt_id,
-            failure_code=str(body["failure_code"]),
-        )
+        try:
+            control_ledger.fail_blogger_migration_request(
+                request_id=str(body["request_id"]),
+                run_id=run_id,
+                attempt_id=attempt_id,
+                failure_code=str(body["failure_code"]),
+            )
+        except StaleRuntimeEvent as exc:
+            raise HTTPException(status_code=409, detail={"code": "blogger_import_already_committed"}) from exc
         return {"accepted": True, "state": "FAILED"}
 
     @app.post("/internal/runtime/blogger-migration/{run_id}/{attempt_id}/checkpoint-receipt")

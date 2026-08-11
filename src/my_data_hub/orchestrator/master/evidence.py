@@ -49,6 +49,7 @@ class MasterTerminalOutput:
     recovered_events: tuple[bytes, ...]
     output_tree_sha256: str
     output_receipt_sha256: str
+    blogger_import_receipt: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         identities = (

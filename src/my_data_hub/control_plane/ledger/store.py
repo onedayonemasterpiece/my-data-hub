@@ -1002,12 +1002,20 @@ class ControlLedger:
 
     def record_acceptance_consumer_heartbeat(self, available: bool) -> None:
         with self._transaction() as connection:
-            connection.execute("INSERT INTO acceptance_consumer_heartbeat VALUES (1,?,?) ON CONFLICT(singleton) DO UPDATE SET available=excluded.available,observed_at=excluded.observed_at", (int(available), _format_time(self.clock.now())))
+            connection.execute(
+                "INSERT INTO acceptance_consumer_heartbeat VALUES (1,?,?) ON CONFLICT(singleton) "
+                "DO UPDATE SET available=excluded.available,observed_at=excluded.observed_at",
+                (int(available), _format_time(self.clock.now())),
+            )
 
     def acceptance_consumer_available(self, max_age_seconds: int = 30) -> bool:
         with self._reader() as connection:
             row = connection.execute("SELECT * FROM acceptance_consumer_heartbeat WHERE singleton=1").fetchone()
-        return bool(row and row["available"] and (self.clock.now() - _parse_time(row["observed_at"])).total_seconds() <= max_age_seconds)
+        return bool(
+            row
+            and row["available"]
+            and (self.clock.now() - _parse_time(row["observed_at"])).total_seconds() <= max_age_seconds
+        )
 
     def register_oauth_client(
         self,
@@ -1921,12 +1929,50 @@ class ControlLedger:
         if not failure_code or len(failure_code) > 100:
             raise ValueError("blogger failure code is invalid")
         with self._transaction() as connection:
-            connection.execute(
+            changed = connection.execute(
                 "UPDATE blogger_migration_requests SET state='FAILED',failure_code=?,updated_at=? "
                 "WHERE request_id=? AND claimed_run_id=? AND claimed_attempt_id=? "
-                "AND state IN ('CLAIMED','IMPORT_COMMITTED')",
+                "AND state='CLAIMED' AND import_receipt_json IS NULL",
                 (failure_code, _format_time(self.clock.now()), request_id, run_id, attempt_id),
-            )
+            ).rowcount
+            row = connection.execute(
+                "SELECT state,claimed_run_id,claimed_attempt_id FROM blogger_migration_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if changed != 1 and (
+                row is None
+                or row["state"] != "FAILED"
+                or row["claimed_run_id"] != run_id
+                or row["claimed_attempt_id"] != attempt_id
+            ):
+                raise StaleRuntimeEvent("committed blogger import cannot be downgraded to failed")
+
+    def reconcile_abandoned_blogger_migration_request(self, request_id: str) -> dict[str, Any] | None:
+        """Terminalize a claim only after its exact master ended without import evidence."""
+
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT b.*,o.state AS operation_state FROM blogger_migration_requests b "
+                "JOIN operations o ON o.operation_id=b.operation_id WHERE b.request_id=?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            if (
+                row["state"] == "CLAIMED"
+                and row["import_receipt_json"] is None
+                and row["operation_state"] in {"FAILED", "FENCED", "ORPHANED"}
+            ):
+                connection.execute(
+                    "UPDATE blogger_migration_requests SET state='FAILED',failure_code=?,updated_at=? "
+                    "WHERE request_id=? AND state='CLAIMED' AND import_receipt_json IS NULL",
+                    ("CLAIMED_RUNTIME_TERMINAL_WITHOUT_RECEIPT", now, request_id),
+                )
+            current = connection.execute(
+                "SELECT * FROM blogger_migration_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            return self._blogger_request_from_row(current) if current else None
 
     def verified_checkpoint_for_operation(self, operation_id: str) -> dict[str, Any] | None:
         """Return the exact current VERIFIED candidate owned by one master operation."""
@@ -2050,9 +2096,12 @@ class ControlLedger:
             "provider_status",
             "events",
         }
+        optional_keys = {"blogger_import_receipt_sha256"}
+        blogger_receipt_sha = metadata.get("blogger_import_receipt_sha256")
         events = metadata.get("events")
         if (
-            set(metadata) != expected_keys
+            not expected_keys.issubset(metadata)
+            or not set(metadata).issubset(expected_keys | optional_keys)
             or metadata.get("schema_version") != "my-data-hub-master-terminal-recovery-evidence.v1"
             or metadata.get("provider_status") != provider_status
             or metadata.get("output_receipt_sha256") != output_receipt_sha256
@@ -2069,6 +2118,14 @@ class ControlLedger:
                 for event in events
             )
             or len({str(event["event_id"]) for event in events}) != 4
+            or (
+                blogger_receipt_sha is not None
+                and (
+                    not isinstance(blogger_receipt_sha, str)
+                    or len(blogger_receipt_sha) != 64
+                    or any(character not in "0123456789abcdef" for character in blogger_receipt_sha)
+                )
+            )
             or any(
                 not isinstance(metadata[key], str) or not metadata[key] or len(str(metadata[key])) > 500
                 for key in expected_keys - {"events"}
