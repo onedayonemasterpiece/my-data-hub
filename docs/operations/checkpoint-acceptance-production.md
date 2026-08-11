@@ -90,3 +90,59 @@ pattern. This creates an unavoidable post-download residual of the receipt (at
 most 64 KiB) plus that log (at most 1 MiB). The adapter rejects an oversized log
 and any third path, removes the log before return, and deletes the entire
 destination on failure. It never requests or accepts a broad output tree.
+
+## Kaggle evidence entrypoint
+
+The task-owned evidence Notebook invokes exactly:
+
+```bash
+python scripts/provider/checkpoint_acceptance_evidence.py \
+  --config /kaggle/working/checkpoint-acceptance-config.json \
+  --output /kaggle/working/operational-result.json
+```
+
+The owner matrix host must launch and independently reconcile that Notebook; it
+must not run this command on the host. The config, output, template, verifier,
+working directory and local metadata journal are all restricted to descendants
+of `/kaggle/working`. The config must be a regular non-symlink file with mode
+`0600` and size at most 256 KiB. Its strict v1 contract binds one scenario,
+operation/task/source/start identity, owner Dataset and Notebook refs, exact
+numeric protected template Dataset version/claim plus manifest/content hashes,
+the task-owned evidence Notebook ref, exact numeric protected verifier Dataset
+version/claim/path/hash and isolated verifier Notebook ref for FM05 or FM15,
+and run/attempt/master/epoch control identity. The launch port validates the
+protected input claims before launch; the config hash lets the outer status
+path prove that the Notebook consumed that same binding. The config contains no
+token, Kaggle credential, PostgreSQL URL, checkpoint bytes or verifier bytes.
+
+`MY_DATA_HUB_RUN_SECRET` is the only accepted control credential. Kaggle
+credentials use the official SDK's environment/User Secret discovery. There is
+no CLI/config credential override. Before creating the local acceptance journal
+or permitting any adapter/provider mutation, the factory validates the modern
+runtime token by resolving the bounded remote checkpoint HEAD. It then verifies
+the template and verifier assets and requires the exact official
+`KaggleProviderAdapter`, Kaggle `KaggleApi`, remote provider journal and remote
+checkpoint registry types. An injected adapter can never emit live evidence.
+
+The fixed local journal is
+`<working_directory>/checkpoint-acceptance-control.sqlite3`, mode `0600`. A
+rerun with the same config reopens it and uses the same operation, task,
+candidate and provider effect IDs. Provider effects additionally reconcile
+against the remote journal/registry. The absolute deadline remains exactly 900
+seconds from `started_at`; a new deadline cannot be selected during replay.
+
+The bounded output schema is
+`schemas/checkpoint-acceptance-operational-result.v1.schema.json`:
+
+- `LIVE_EVIDENCE_READY` (exit 0) embeds the exact durable `LIVE_PASS` receipt,
+  its SHA-256, flattened HEAD/intent/candidate/stage identities and the owner
+  evidence/verifier Notebook, protected-input claim and produced exact-version
+  locator. This is intermediate evidence, not a
+  matrix `PASS`; the outer driver must validate and bind it to its planned task.
+- `BLOCKED` (exit 78) is allowed only for a named missing/auth/interface/asset
+  capability before mutation and has `mutations_started=0`.
+- `FAIL` (exit 1) is mandatory after journal/action entry or whenever mutation
+  status may be ambiguous. It never includes exception text, credentials or
+  business bytes and conservatively reports `mutations_started=1`.
+
+Config and sanitized result examples live under `examples/provider/`.

@@ -1,0 +1,730 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/checkpoint-acceptance-operational-result.v1.schema.json",
+  "$defs": {
+    "CheckpointAcceptanceHead": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "minimum": 0,
+          "title": "Generation",
+          "type": "integer"
+        },
+        "current_checkpoint_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Current Checkpoint Id"
+        },
+        "previous_checkpoint_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Previous Checkpoint Id"
+        }
+      },
+      "required": [
+        "generation"
+      ],
+      "title": "CheckpointAcceptanceHead",
+      "type": "object"
+    },
+    "CheckpointAcceptanceProviderLocator": {
+      "additionalProperties": false,
+      "description": "Bounded provider identities sufficient for outer evidence reconciliation.",
+      "properties": {
+        "provider_owner": {
+          "pattern": "^[A-Za-z0-9_.-]{1,80}$",
+          "title": "Provider Owner",
+          "type": "string"
+        },
+        "dataset_ref": {
+          "maxLength": 300,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Dataset Ref",
+          "type": "string"
+        },
+        "evidence_notebook_ref": {
+          "maxLength": 300,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Evidence Notebook Ref",
+          "type": "string"
+        },
+        "verifier_notebook_ref": {
+          "anyOf": [
+            {
+              "maxLength": 300,
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verifier Notebook Ref"
+        },
+        "template_dataset_version_ref": {
+          "maxLength": 320,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Template Dataset Version Ref",
+          "type": "string"
+        },
+        "template_claim_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Template Claim Sha256",
+          "type": "string"
+        },
+        "verifier_dataset_version_ref": {
+          "anyOf": [
+            {
+              "maxLength": 320,
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verifier Dataset Version Ref"
+        },
+        "verifier_claim_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verifier Claim Sha256"
+        },
+        "exact_version_refs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 5,
+          "title": "Exact Version Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "provider_owner",
+        "dataset_ref",
+        "evidence_notebook_ref",
+        "template_dataset_version_ref",
+        "template_claim_sha256"
+      ],
+      "title": "CheckpointAcceptanceProviderLocator",
+      "type": "object"
+    },
+    "CheckpointAcceptanceReceipt": {
+      "additionalProperties": false,
+      "description": "Terminal bounded receipt; injected contract evidence is never labelled live.",
+      "properties": {
+        "schema_version": {
+          "const": "my-data-hub-checkpoint-acceptance-receipt.v1",
+          "default": "my-data-hub-checkpoint-acceptance-receipt.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "scenario": {
+          "enum": [
+            "FM05",
+            "FM14",
+            "FM15"
+          ],
+          "title": "Scenario",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "CONTRACT_PASS",
+            "LIVE_PASS"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        },
+        "evidence_class": {
+          "enum": [
+            "injected",
+            "live"
+          ],
+          "title": "Evidence Class",
+          "type": "string"
+        },
+        "operation_id": {
+          "format": "uuid",
+          "title": "Operation Id",
+          "type": "string"
+        },
+        "task_run_id": {
+          "format": "uuid",
+          "title": "Task Run Id",
+          "type": "string"
+        },
+        "candidate_checkpoint_id": {
+          "format": "uuid",
+          "title": "Candidate Checkpoint Id",
+          "type": "string"
+        },
+        "intent_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Intent Sha256",
+          "type": "string"
+        },
+        "initial_head": {
+          "$ref": "#/$defs/CheckpointAcceptanceHead"
+        },
+        "final_head": {
+          "$ref": "#/$defs/CheckpointAcceptanceHead"
+        },
+        "head_unchanged": {
+          "title": "Head Unchanged",
+          "type": "boolean"
+        },
+        "stages": {
+          "items": {
+            "$ref": "#/$defs/CheckpointAcceptanceStageReceipt"
+          },
+          "maxItems": 5,
+          "minItems": 2,
+          "title": "Stages",
+          "type": "array"
+        },
+        "completed_at": {
+          "format": "date-time",
+          "title": "Completed At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scenario",
+        "verdict",
+        "evidence_class",
+        "operation_id",
+        "task_run_id",
+        "candidate_checkpoint_id",
+        "intent_sha256",
+        "initial_head",
+        "final_head",
+        "head_unchanged",
+        "stages",
+        "completed_at"
+      ],
+      "title": "CheckpointAcceptanceReceipt",
+      "type": "object"
+    },
+    "CheckpointAcceptanceStageReceipt": {
+      "additionalProperties": false,
+      "description": "Bounded metadata returned by one fixed idempotent provider effect.",
+      "properties": {
+        "stage": {
+          "pattern": "^[a-z][a-z0-9_]{2,63}$",
+          "title": "Stage",
+          "type": "string"
+        },
+        "candidate_checkpoint_id": {
+          "format": "uuid",
+          "title": "Candidate Checkpoint Id",
+          "type": "string"
+        },
+        "task_owned": {
+          "const": true,
+          "default": true,
+          "title": "Task Owned",
+          "type": "boolean"
+        },
+        "disposable_candidate": {
+          "default": false,
+          "title": "Disposable Candidate",
+          "type": "boolean"
+        },
+        "outcome": {
+          "enum": [
+            "succeeded",
+            "rejected_expected"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "detail_code": {
+          "pattern": "^[A-Z][A-Z0-9_]{2,99}$",
+          "title": "Detail Code",
+          "type": "string"
+        },
+        "provider_receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Provider Receipt Sha256",
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manifest Sha256"
+        },
+        "package_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Package Sha256"
+        },
+        "expected_content_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Content Sha256"
+        },
+        "observed_content_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observed Content Sha256"
+        },
+        "exact_version_ref": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exact Version Ref"
+        },
+        "canonical_revision": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Canonical Revision"
+        },
+        "canonical_row_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Canonical Row Count"
+        }
+      },
+      "required": [
+        "stage",
+        "candidate_checkpoint_id",
+        "outcome",
+        "detail_code",
+        "provider_receipt_sha256"
+      ],
+      "title": "CheckpointAcceptanceStageReceipt",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Terminal metadata-only Notebook output; never a matrix PASS claim.",
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-checkpoint-acceptance-operational-result.v1",
+      "default": "my-data-hub-checkpoint-acceptance-operational-result.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scenario": {
+      "enum": [
+        "FM05",
+        "FM14",
+        "FM15"
+      ],
+      "title": "Scenario",
+      "type": "string"
+    },
+    "outcome": {
+      "enum": [
+        "LIVE_EVIDENCE_READY",
+        "BLOCKED",
+        "FAIL"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "live_evidence": {
+      "title": "Live Evidence",
+      "type": "boolean"
+    },
+    "operation_id": {
+      "format": "uuid",
+      "title": "Operation Id",
+      "type": "string"
+    },
+    "task_run_id": {
+      "format": "uuid",
+      "title": "Task Run Id",
+      "type": "string"
+    },
+    "source_revision": {
+      "pattern": "^[a-f0-9]{40}$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "config_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Config Sha256",
+      "type": "string"
+    },
+    "mutations_started": {
+      "maximum": 5,
+      "minimum": 0,
+      "title": "Mutations Started",
+      "type": "integer"
+    },
+    "locator": {
+      "$ref": "#/$defs/CheckpointAcceptanceProviderLocator"
+    },
+    "candidate_checkpoint_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Candidate Checkpoint Id"
+    },
+    "intent_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Intent Sha256"
+    },
+    "verdict": {
+      "anyOf": [
+        {
+          "const": "LIVE_PASS",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Verdict"
+    },
+    "evidence_class": {
+      "anyOf": [
+        {
+          "const": "live",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Evidence Class"
+    },
+    "initial_head": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CheckpointAcceptanceHead"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "final_head": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CheckpointAcceptanceHead"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "head_unchanged": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Head Unchanged"
+    },
+    "stages": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/CheckpointAcceptanceStageReceipt"
+      },
+      "maxItems": 5,
+      "title": "Stages",
+      "type": "array"
+    },
+    "receipt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CheckpointAcceptanceReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "receipt_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Receipt Sha256"
+    },
+    "blocker_code": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Z][A-Z0-9_]{2,119}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Blocker Code"
+    },
+    "failure_code": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Z][A-Z0-9_]{2,119}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Failure Code"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "scenario",
+    "outcome",
+    "live_evidence",
+    "operation_id",
+    "task_run_id",
+    "source_revision",
+    "config_sha256",
+    "mutations_started",
+    "locator",
+    "completed_at"
+  ],
+  "title": "CheckpointAcceptanceOperationalResult",
+  "type": "object",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "LIVE_EVIDENCE_READY"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "required": [
+          "candidate_checkpoint_id",
+          "intent_sha256",
+          "verdict",
+          "evidence_class",
+          "initial_head",
+          "final_head",
+          "head_unchanged",
+          "receipt",
+          "receipt_sha256"
+        ],
+        "properties": {
+          "live_evidence": {
+            "const": true
+          },
+          "mutations_started": {
+            "minimum": 1
+          },
+          "verdict": {
+            "const": "LIVE_PASS"
+          },
+          "evidence_class": {
+            "const": "live"
+          },
+          "locator": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/CheckpointAcceptanceProviderLocator"
+              },
+              {
+                "properties": {
+                  "exact_version_refs": {
+                    "minItems": 1
+                  }
+                }
+              }
+            ]
+          },
+          "receipt": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/CheckpointAcceptanceReceipt"
+              },
+              {
+                "properties": {
+                  "verdict": {
+                    "const": "LIVE_PASS"
+                  },
+                  "evidence_class": {
+                    "const": "live"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "BLOCKED"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "required": [
+          "blocker_code"
+        ],
+        "properties": {
+          "live_evidence": {
+            "const": false
+          },
+          "mutations_started": {
+            "const": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "FAIL"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "required": [
+          "failure_code"
+        ],
+        "properties": {
+          "live_evidence": {
+            "const": false
+          },
+          "mutations_started": {
+            "minimum": 1
+          }
+        }
+      }
+    }
+  ]
+}

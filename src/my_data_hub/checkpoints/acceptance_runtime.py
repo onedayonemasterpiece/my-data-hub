@@ -8,14 +8,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import shutil
-from collections.abc import Callable, Iterator
+import stat
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from uuid import UUID, uuid5
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from my_data_hub.control_plane.ledger.models import EffectState
 from my_data_hub.control_plane.ledger.store import ControlLedger
@@ -36,19 +42,27 @@ from my_data_hub.providers.kaggle.contracts import (
     PollPolicy,
     ProviderEffectIntent,
 )
-from my_data_hub.providers.kaggle.control_journal import RemoteControlLedgerKaggleJournal
+from my_data_hub.providers.kaggle.control_journal import (
+    AuthenticatedControlPlaneClient,
+    ControlPlaneRuntimeIdentity,
+    RemoteControlLedgerKaggleJournal,
+)
 from my_data_hub.providers.models import ControlClass, ProviderKind
 
 from .acceptance import (
     ACCEPTANCE_MAX_ATTEMPTS,
     ACCEPTANCE_TIMEOUT_SECONDS,
+    CheckpointAcceptanceCoordinator,
     CheckpointAcceptanceError,
     CheckpointAcceptanceHead,
     CheckpointAcceptanceIntent,
     CheckpointAcceptanceReceipt,
     CheckpointAcceptanceStageReceipt,
+    CorruptCheckpointRejectionRequest,
     DurableAcceptanceOperation,
+    EmptyCheckpointRoundtripRequest,
     EvidenceClass,
+    ForcedRestoreFailureRequest,
     Scenario,
 )
 from .kaggle_runtime import (
@@ -79,6 +93,292 @@ class CheckpointAcceptanceCapabilityError(CheckpointAcceptanceError):
     """A required safe production seam is absent; no provider mutation is allowed."""
 
 
+class CheckpointAcceptanceEntrypointBlocker(CheckpointAcceptanceCapabilityError):
+    """Named pre-mutation production capability blocker for exit status 78."""
+
+    def __init__(self, code: str) -> None:
+        if re.fullmatch(r"[A-Z][A-Z0-9_]{2,119}", code) is None:
+            raise ValueError("checkpoint acceptance blocker code is invalid")
+        self.code = code
+        super().__init__(code)
+
+
+class CheckpointAcceptanceRuntimeAmbiguity(CheckpointAcceptanceError):
+    """The mutation phase may have started and must never be reported BLOCKED."""
+
+
+class CheckpointAcceptanceControlIdentity(BaseModel):
+    """Exact modern runtime-token identity sent only as control request headers."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: UUID
+    attempt_id: UUID
+    master_instance_id: UUID
+    epoch: int = Field(ge=1)
+
+
+class CheckpointAcceptanceVerifierAsset(BaseModel):
+    """Owner-reviewed verifier source identity; source bytes remain in Kaggle."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    dataset_version_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+        max_length=320,
+    )
+    claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    path: Path
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    code_file: Literal["worker.py"] = "worker.py"
+
+
+class CheckpointAcceptanceProductionConfig(BaseModel):
+    """Strict metadata-only input for one fixed production checkpoint scenario."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["my-data-hub-checkpoint-acceptance-production-config.v1"]
+    scenario: Scenario
+    operation_id: UUID
+    task_run_id: UUID
+    source_revision: str = Field(pattern=r"^[a-f0-9]{40}$")
+    started_at: datetime
+    provider_owner: str = Field(pattern=r"^[A-Za-z0-9_.-]{1,80}$")
+    dataset_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=300)
+    evidence_notebook_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+        max_length=300,
+    )
+    verifier_notebook_ref: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+        max_length=300,
+    )
+    template_dataset_version_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+        max_length=320,
+    )
+    template_claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    template_directory: Path
+    template_manifest_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    template_content_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    verifier: CheckpointAcceptanceVerifierAsset | None = None
+    working_directory: Path
+    control_base_url: str = Field(min_length=12, max_length=500)
+    control_identity: CheckpointAcceptanceControlIdentity
+    timeout_seconds: Literal[900]
+
+    @model_validator(mode="after")
+    def exact_production_binding(self) -> CheckpointAcceptanceProductionConfig:
+        if self.started_at.tzinfo is None or self.started_at.utcoffset() is None:
+            raise ValueError("checkpoint acceptance start must be timezone-aware")
+        if self.control_identity.run_id != self.task_run_id:
+            raise ValueError("control run identity must equal the task run id")
+        output_refs = [self.dataset_ref, self.evidence_notebook_ref]
+        if self.verifier_notebook_ref is not None:
+            output_refs.append(self.verifier_notebook_ref)
+        if any(ref.split("/", 1)[0] != self.provider_owner for ref in output_refs):
+            raise ValueError("checkpoint acceptance resources must have the fixed provider owner")
+        input_refs = [self.template_dataset_version_ref]
+        if self.verifier is not None:
+            input_refs.append(self.verifier.dataset_version_ref)
+        if any(ref.split("/", 1)[0] != self.provider_owner for ref in input_refs):
+            raise ValueError("checkpoint acceptance input assets must have the fixed provider owner")
+        if (self.scenario in {"FM05", "FM15"}) != (self.verifier is not None):
+            raise ValueError("only restore scenarios require the fixed verifier asset")
+        if (self.scenario in {"FM05", "FM15"}) != (self.verifier_notebook_ref is not None):
+            raise ValueError("only restore scenarios require the fixed verifier Notebook")
+        parsed = urlsplit(self.control_base_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+        ):
+            raise ValueError("control base URL must be credential-free HTTPS origin")
+        paths = [
+            (self.template_directory, "template"),
+            (self.working_directory, "working"),
+        ]
+        if self.verifier is not None:
+            paths.append((self.verifier.path, "verifier"))
+        for path, label in paths:
+            _assert_runtime_path(path, label, allow_root=False)
+        if self.template_directory.resolve() == self.working_directory.resolve():
+            raise ValueError("template and working directories must differ")
+        return self
+
+    @property
+    def config_sha256(self) -> str:
+        return _metadata_sha256(self.model_dump(mode="json"))
+
+    @property
+    def journal_path(self) -> Path:
+        return self.working_directory / "checkpoint-acceptance-control.sqlite3"
+
+
+class CheckpointAcceptanceProviderLocator(BaseModel):
+    """Bounded provider identities sufficient for outer evidence reconciliation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider_owner: str = Field(pattern=r"^[A-Za-z0-9_.-]{1,80}$")
+    dataset_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=300)
+    evidence_notebook_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+        max_length=300,
+    )
+    verifier_notebook_ref: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+        max_length=300,
+    )
+    template_dataset_version_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+        max_length=320,
+    )
+    template_claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    verifier_dataset_version_ref: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+        max_length=320,
+    )
+    verifier_claim_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    exact_version_refs: tuple[str, ...] = Field(default=(), max_length=5)
+
+    @model_validator(mode="after")
+    def exact_refs(self) -> CheckpointAcceptanceProviderLocator:
+        if (
+            self.dataset_ref.split("/", 1)[0] != self.provider_owner
+            or self.evidence_notebook_ref.split("/", 1)[0] != self.provider_owner
+            or (
+                self.verifier_notebook_ref is not None
+                and self.verifier_notebook_ref.split("/", 1)[0] != self.provider_owner
+            )
+            or self.template_dataset_version_ref.split("/", 1)[0] != self.provider_owner
+            or (
+                self.verifier_dataset_version_ref is not None
+                and self.verifier_dataset_version_ref.split("/", 1)[0] != self.provider_owner
+            )
+            or (self.verifier_dataset_version_ref is None) != (self.verifier_claim_sha256 is None)
+            or (self.verifier_dataset_version_ref is None) != (self.verifier_notebook_ref is None)
+            or len(set(self.exact_version_refs)) != len(self.exact_version_refs)
+            or any(
+                re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*", ref) is None
+                for ref in self.exact_version_refs
+            )
+        ):
+            raise ValueError("checkpoint acceptance provider locator is not exact")
+        return self
+
+
+class CheckpointAcceptanceOperationalResult(BaseModel):
+    """Terminal metadata-only Notebook output; never a matrix PASS claim."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["my-data-hub-checkpoint-acceptance-operational-result.v1"] = (
+        "my-data-hub-checkpoint-acceptance-operational-result.v1"
+    )
+    scenario: Scenario
+    outcome: Literal["LIVE_EVIDENCE_READY", "BLOCKED", "FAIL"]
+    live_evidence: bool
+    operation_id: UUID
+    task_run_id: UUID
+    source_revision: str = Field(pattern=r"^[a-f0-9]{40}$")
+    config_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    mutations_started: int = Field(ge=0, le=5)
+    locator: CheckpointAcceptanceProviderLocator
+    candidate_checkpoint_id: UUID | None = None
+    intent_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    verdict: Literal["LIVE_PASS"] | None = None
+    evidence_class: Literal["live"] | None = None
+    initial_head: CheckpointAcceptanceHead | None = None
+    final_head: CheckpointAcceptanceHead | None = None
+    head_unchanged: bool | None = None
+    stages: tuple[CheckpointAcceptanceStageReceipt, ...] = Field(default=(), max_length=5)
+    receipt: CheckpointAcceptanceReceipt | None = None
+    receipt_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    blocker_code: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{2,119}$")
+    failure_code: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{2,119}$")
+    completed_at: datetime
+
+    @model_validator(mode="after")
+    def exact_outcome_shape(self) -> CheckpointAcceptanceOperationalResult:
+        receipt_fields = (
+            self.candidate_checkpoint_id,
+            self.intent_sha256,
+            self.verdict,
+            self.evidence_class,
+            self.initial_head,
+            self.final_head,
+            self.head_unchanged,
+            self.receipt,
+            self.receipt_sha256,
+        )
+        if self.completed_at.tzinfo is None or self.completed_at.utcoffset() is None:
+            raise ValueError("checkpoint acceptance result time must be timezone-aware")
+        if self.outcome == "LIVE_EVIDENCE_READY":
+            if (
+                not self.live_evidence
+                or self.mutations_started < 1
+                or not self.locator.exact_version_refs
+                or self.blocker_code is not None
+                or self.failure_code is not None
+                or any(value is None for value in receipt_fields)
+                or self.receipt is None
+                or self.receipt.verdict != "LIVE_PASS"
+                or self.receipt.evidence_class != "live"
+                or self.receipt.receipt_sha256 != self.receipt_sha256
+                or self.stages != self.receipt.stages
+                or self.candidate_checkpoint_id != self.receipt.candidate_checkpoint_id
+                or self.intent_sha256 != self.receipt.intent_sha256
+                or self.initial_head != self.receipt.initial_head
+                or self.final_head != self.receipt.final_head
+                or self.head_unchanged != self.receipt.head_unchanged
+            ):
+                raise ValueError("ready result lacks one exact durable live receipt")
+        elif self.outcome == "BLOCKED":
+            if self.live_evidence or self.mutations_started != 0 or not self.blocker_code:
+                raise ValueError("blocked result must be pre-mutation with a named blocker")
+            if any(value is not None for value in receipt_fields) or self.stages:
+                raise ValueError("blocked result cannot include acceptance receipt claims")
+        else:
+            if (
+                self.live_evidence
+                or self.mutations_started < 1
+                or not self.failure_code
+                or self.blocker_code is not None
+                or any(value is not None for value in receipt_fields)
+                or self.stages
+            ):
+                raise ValueError("failed result must conservatively mark the mutation phase")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionCheckpointAcceptanceRuntime:
+    """Exact assembled production runtime and its deterministic request."""
+
+    config: CheckpointAcceptanceProductionConfig
+    coordinator: CheckpointAcceptanceCoordinator
+    request: EmptyCheckpointRoundtripRequest | CorruptCheckpointRejectionRequest | ForcedRestoreFailureRequest
+
+    def run(self) -> CheckpointAcceptanceReceipt:
+        if self.config.scenario == "FM05":
+            assert isinstance(self.request, EmptyCheckpointRoundtripRequest)
+            return self.coordinator.run_empty_roundtrip(self.request)
+        if self.config.scenario == "FM14":
+            assert isinstance(self.request, CorruptCheckpointRejectionRequest)
+            return self.coordinator.run_corruption_rejection(self.request)
+        assert isinstance(self.request, ForcedRestoreFailureRequest)
+        return self.coordinator.run_forced_restore_failure(self.request)
+
+
 def _effect_key(operation_id: UUID, kind: str) -> str:
     return f"checkpoint-acceptance:{operation_id}:{kind}"
 
@@ -89,6 +389,45 @@ def _effect_id(operation_id: UUID, kind: str) -> str:
 
 def _metadata_sha256(value: object) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def _assert_runtime_path(path: Path, label: str, *, allow_root: bool) -> None:
+    if not path.is_absolute() or path.is_symlink():
+        raise ValueError(f"checkpoint acceptance {label} path must be absolute and non-symlink")
+    root = _RUNTIME_ROOT.resolve()
+    resolved = path.resolve()
+    if path != resolved:
+        raise ValueError(f"checkpoint acceptance {label} path must be normalized")
+    if (not allow_root and resolved == root) or (resolved != root and root not in resolved.parents):
+        raise ValueError(f"checkpoint acceptance {label} path must stay below /kaggle/working")
+    current = path
+    while current != _RUNTIME_ROOT and current != current.parent:
+        if current.exists() and current.is_symlink():
+            raise ValueError(f"checkpoint acceptance {label} path contains a symbolic link")
+        current = current.parent
+
+
+def _required_runtime_token(environ: Mapping[str, str]) -> str:
+    token = environ.get("MY_DATA_HUB_RUN_SECRET", "")
+    if not 24 <= len(token) <= 4096 or any(char.isspace() for char in token):
+        raise CheckpointAcceptanceEntrypointBlocker("CHECKPOINT_CONTROL_RUNTIME_TOKEN_MISSING")
+    return token
+
+
+def _read_bounded_regular_file(path: Path, *, max_bytes: int) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or not 1 <= metadata.st_size <= max_bytes:
+            raise ValueError("checkpoint acceptance asset is absent or unbounded")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            payload = handle.read(max_bytes + 1)
+        if not 1 <= len(payload) <= max_bytes:
+            raise ValueError("checkpoint acceptance asset changed or exceeds its bound")
+        return payload
+    finally:
+        os.close(descriptor)
 
 
 class ControlLedgerCheckpointAcceptanceJournal:
@@ -355,6 +694,153 @@ class CheckpointAcceptanceRuntimeBinding:
     @property
     def deadline_at(self) -> datetime:
         return self.started_at.astimezone(UTC) + timedelta(seconds=ACCEPTANCE_TIMEOUT_SECONDS)
+
+
+def build_production_checkpoint_acceptance_runtime(
+    config: CheckpointAcceptanceProductionConfig,
+    *,
+    environ: Mapping[str, str] | None = None,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    control_transport: Any | None = None,
+    adapter_factory: Callable[..., KaggleProviderAdapter] = KaggleProviderAdapter.from_environment,
+    ledger_factory: Callable[[Path], ControlLedger] = ControlLedger,
+) -> ProductionCheckpointAcceptanceRuntime:
+    """Preflight and assemble one exact official production acceptance runtime.
+
+    The modern control token is read only from ``MY_DATA_HUB_RUN_SECRET``.  A
+    runtime-authenticated, read-only HEAD resolution happens before local
+    journal creation and before any provider mutation.  Test injections cannot
+    produce a live runtime because the concrete official types are checked.
+    """
+
+    values = os.environ if environ is None else environ
+    token = _required_runtime_token(values)
+    now = clock()
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise CheckpointAcceptanceEntrypointBlocker("CHECKPOINT_RUNTIME_CLOCK_INVALID")
+    remaining = (config.started_at.astimezone(UTC) + timedelta(seconds=ACCEPTANCE_TIMEOUT_SECONDS)) - now.astimezone(
+        UTC
+    )
+    if remaining.total_seconds() <= 0 or remaining.total_seconds() > ACCEPTANCE_TIMEOUT_SECONDS:
+        raise CheckpointAcceptanceEntrypointBlocker("CHECKPOINT_ACCEPTANCE_DEADLINE_INVALID")
+
+    try:
+        client = AuthenticatedControlPlaneClient(
+            base_url=config.control_base_url,
+            bearer_token=token,
+            runtime_identity=ControlPlaneRuntimeIdentity(
+                run_id=config.control_identity.run_id,
+                attempt_id=config.control_identity.attempt_id,
+                master_instance_id=config.control_identity.master_instance_id,
+                epoch=config.control_identity.epoch,
+            ),
+            transport=control_transport,
+        )
+        registry = RemoteControlCheckpointRegistry(
+            client,
+            operation_id=str(config.operation_id),
+            dataset_ref=config.dataset_ref,
+        )
+        # This is the modern-token/control authorization preflight.  It is a
+        # bounded metadata GET and cannot change the registry or provider.
+        registry.resolve_head()
+    except Exception as exc:
+        raise CheckpointAcceptanceEntrypointBlocker("CHECKPOINT_CONTROL_AUTH_PREFLIGHT_FAILED") from exc
+
+    try:
+        manifest = load_and_verify(
+            config.template_directory / CHECKPOINT_MANIFEST_NAME,
+            config.template_directory,
+        )
+        if (
+            manifest.manifest_sha256 != config.template_manifest_sha256
+            or directory_sha256(config.template_directory) != config.template_content_sha256
+            or manifest.canonical_revision != 0
+            or sum(manifest.restore_probe.row_counts.values()) != 0
+        ):
+            raise ValueError("template identity differs")
+        verifier_source = b""
+        verifier_code_file = "worker.py"
+        if config.verifier is not None:
+            path = config.verifier.path
+            verifier_source = _read_bounded_regular_file(path, max_bytes=1024 * 1024)
+            if hashlib.sha256(verifier_source).hexdigest() != config.verifier.source_sha256:
+                raise ValueError("verifier identity differs")
+            verifier_code_file = config.verifier.code_file
+        binding = CheckpointAcceptanceRuntimeBinding(
+            scenario=config.scenario,
+            operation_id=config.operation_id,
+            task_run_id=config.task_run_id,
+            source_revision=config.source_revision,
+            started_at=config.started_at,
+            dataset_ref=config.dataset_ref,
+            notebook_ref=config.verifier_notebook_ref or config.evidence_notebook_ref,
+            template_directory=config.template_directory,
+            working_directory=config.working_directory,
+            verifier_source=verifier_source,
+            verifier_code_file=verifier_code_file,
+        )
+    except Exception as exc:
+        raise CheckpointAcceptanceEntrypointBlocker("CHECKPOINT_ACCEPTANCE_ASSET_PREFLIGHT_FAILED") from exc
+
+    remote_journal = RemoteControlLedgerKaggleJournal(client)
+    try:
+        adapter = adapter_factory(journal=remote_journal, clock=clock)
+        api_type = type(adapter.api)
+        if (
+            type(adapter) is not KaggleProviderAdapter
+            or not api_type.__module__.startswith("kaggle.")
+            or api_type.__name__ != "KaggleApi"
+            or type(adapter.journal) is not RemoteControlLedgerKaggleJournal
+            or type(registry) is not RemoteControlCheckpointRegistry
+        ):
+            raise TypeError("injected checkpoint adapter cannot produce live evidence")
+        effects = KaggleTaskOwnedCheckpointEffects(
+            adapter=adapter,
+            registry=registry,
+            binding=binding,
+            clock=clock,
+        )
+        if effects.evidence_class != "live":
+            raise TypeError("checkpoint runtime is not exact official live evidence")
+    except Exception as exc:
+        raise CheckpointAcceptanceEntrypointBlocker("CHECKPOINT_KAGGLE_AUTH_PREFLIGHT_FAILED") from exc
+
+    journal_path = config.journal_path
+    try:
+        if journal_path.exists():
+            if journal_path.is_symlink() or not journal_path.is_file():
+                raise ValueError("checkpoint acceptance journal is not a regular file")
+            if journal_path.stat().st_mode & 0o777 != 0o600:
+                raise ValueError("checkpoint acceptance journal mode differs from 0600")
+        ledger = ledger_factory(journal_path)
+        journal = ControlLedgerCheckpointAcceptanceJournal(ledger)
+    except Exception as exc:
+        raise CheckpointAcceptanceRuntimeAmbiguity("checkpoint acceptance journal initialization failed") from exc
+
+    idempotency_key = (
+        f"checkpoint-acceptance:{config.scenario}:{config.operation_id}:{config.task_run_id}:{config.source_revision}"
+    )
+    request_type: type[
+        EmptyCheckpointRoundtripRequest | CorruptCheckpointRejectionRequest | ForcedRestoreFailureRequest
+    ]
+    if config.scenario == "FM05":
+        request_type = EmptyCheckpointRoundtripRequest
+    elif config.scenario == "FM14":
+        request_type = CorruptCheckpointRejectionRequest
+    else:
+        request_type = ForcedRestoreFailureRequest
+    request = request_type(
+        operation_id=config.operation_id,
+        task_run_id=config.task_run_id,
+        idempotency_key=idempotency_key,
+        source_revision=config.source_revision,
+    )
+    return ProductionCheckpointAcceptanceRuntime(
+        config=config,
+        coordinator=CheckpointAcceptanceCoordinator(journal=journal, effects=effects, now=clock),
+        request=request,
+    )
 
 
 class KaggleTaskOwnedCheckpointEffects:
