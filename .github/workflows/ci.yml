@@ -13,15 +13,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
       - run: python -m pip install -e '.[dev]'
       - run: python scripts/validate_repository.py
+      - run: python scripts/scan_tracked_secrets.py
       - run: python -m compileall -q src tests scripts
       - run: pytest
       - run: ruff check .
+      - run: mypy
 
   postgres-integration:
     runs-on: ubuntu-latest
@@ -62,6 +66,8 @@ jobs:
       MDH_RUN_DISPOSABLE_POSTGRES: '1'
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

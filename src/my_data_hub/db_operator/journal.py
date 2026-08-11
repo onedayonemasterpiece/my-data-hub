@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
-from typing import Any, Protocol
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, Protocol, cast
 from uuid import UUID
 
 from my_data_hub.hashing import sha256_value
@@ -12,7 +12,7 @@ from my_data_hub.hashing import sha256_value
 
 class JournalCursor(Protocol):
     def execute(self, query: str, params: tuple[object, ...] | None = None) -> Any: ...
-    def fetchone(self) -> tuple[object, ...] | None: ...
+    def fetchone(self) -> Sequence[object] | None: ...
 
 
 class OperatorJournal(Protocol):
@@ -143,7 +143,13 @@ class PostgresOperatorJournal:
         row = cursor.fetchone()
         if row is None:
             return None
-        return (str(row[0]), str(row[1]), int(row[2]), int(row[3]), int(row[4]))
+        return (
+            str(row[0]),
+            str(row[1]),
+            int(cast(Any, row[2])),
+            int(cast(Any, row[3])),
+            int(cast(Any, row[4])),
+        )
 
     def record_apply(
         self,

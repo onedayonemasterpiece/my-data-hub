@@ -30,6 +30,7 @@ dev = [
   "pytest>=8.3,<10",
   "pytest-asyncio>=0.25,<1",
   "hypothesis>=6.138,<7",
+  "mypy>=1.15,<2",
   "ruff>=0.9,<1",
 ]
 ydb = ["ydb==3.31.2"]
@@ -61,3 +62,16 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 "notebooks/**" = ["E501"]
 "scripts/validate_repository.py" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+follow_imports = "skip"
+files = [
+  "src/my_data_hub/checkpoints/manifest.py",
+  "src/my_data_hub/control_plane/ledger/models.py",
+  "src/my_data_hub/mcp/contracts.py",
+  "src/my_data_hub/orchestrator/master/evidence.py",
+  "src/my_data_hub/orchestrator/master/provider.py",
+]

@@ -22,7 +22,7 @@ class FakeKaggleRuntime(MasterRuntimeProvider):
     """Deterministic provider double with exact-identity idempotency and fault scripts."""
 
     def __init__(self, fault_scripts: dict[str, Iterable[Any]] | None = None) -> None:
-        self._scripts = defaultdict(deque)
+        self._scripts: defaultdict[str, deque[Any]] = defaultdict(deque)
         for kind, script in (fault_scripts or {}).items():
             self._scripts[kind].extend(script)
         self._receipts: dict[str, ProviderEffectReceipt] = {}

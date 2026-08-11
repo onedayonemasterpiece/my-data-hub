@@ -1,0 +1,21 @@
+from __future__ import annotations
+
+from scripts.scan_tracked_secrets import findings
+
+
+def test_secret_scan_detects_strong_tokens_and_private_keys() -> None:
+    github_token = "gh" + "p_" + "A" * 40
+    private_key = "-----BEGIN " + "PRIVATE KEY-----"
+
+    assert "github-token" in findings(github_token)
+    assert "private-key" in findings(private_key)
+
+
+def test_secret_scan_detects_nonplaceholder_sensitive_assignment() -> None:
+    assignment = "KAGGLE_API_" + "TOKEN=" + "sensitive-value-123456789"
+    assert findings(assignment) == ["credential-assignment"]
+
+
+def test_secret_scan_allows_ci_and_documentation_placeholders() -> None:
+    assert findings("PASSWORD=integration-only-password") == []
+    assert findings("KAGGLE_API_TOKEN=${{ secrets.KAGGLE_API_TOKEN }}") == []

@@ -118,7 +118,7 @@ def decide_terminal(
         return (
             TerminalDecision.AMBIGUOUS if platform_status == PlatformStatus.COMPLETE else TerminalDecision.NONTERMINAL
         )
-    if exact_output:
+    if exact_output and output is not None:
         if output.status == "succeeded":
             return (
                 TerminalDecision.SUCCEEDED if platform_status == PlatformStatus.COMPLETE else TerminalDecision.AMBIGUOUS
