@@ -211,9 +211,9 @@ if [[ "$operator_profile" == true ]]; then
   require_private_file "$operator_gate_receipt" "operator security gate receipt"
   require_private_file "$operator_gate_key" "operator write-gate signing key"
   require_private_file "$control_gateway_token" "provider control gateway token"
-  kaggle_token_count="$(grep -Eic '^[[:space:]]*KAGGLE_API_TOKEN[[:space:]]*=[^[:space:]].*$' "$provider_env")"
-  kaggle_username_count="$(grep -Eic '^[[:space:]]*KAGGLE_USERNAME[[:space:]]*=[^[:space:]].*$' "$provider_env")"
-  kaggle_key_count="$(grep -Eic '^[[:space:]]*KAGGLE_KEY[[:space:]]*=[^[:space:]].*$' "$provider_env")"
+  kaggle_token_count="$(grep -Eic '^[[:space:]]*KAGGLE_API_TOKEN[[:space:]]*=[^[:space:]].*$' "$provider_env" || true)"
+  kaggle_username_count="$(grep -Eic '^[[:space:]]*KAGGLE_USERNAME[[:space:]]*=[^[:space:]].*$' "$provider_env" || true)"
+  kaggle_key_count="$(grep -Eic '^[[:space:]]*KAGGLE_KEY[[:space:]]*=[^[:space:]].*$' "$provider_env" || true)"
   if ! { [[ "$kaggle_token_count" == 1 && "$kaggle_username_count" == 0 && "$kaggle_key_count" == 0 ]] \
     || [[ "$kaggle_token_count" == 0 && "$kaggle_username_count" == 1 && "$kaggle_key_count" == 1 ]]; }; then
     echo "single control provider environment requires access token OR one legacy username/key pair" >&2
