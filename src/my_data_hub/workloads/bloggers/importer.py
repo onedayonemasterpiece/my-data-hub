@@ -52,6 +52,7 @@ class ImportReceipt:
     canonical_revision: int
     duplicate_groups_pending: int = 0
     durability_state: str = "COMMITTED_PENDING_CHECKPOINT"
+    duplicate_review_groups: tuple[DuplicateReviewGroup, ...] = ()
 
     @property
     def accounting_complete(self) -> bool:
@@ -77,6 +78,25 @@ class _Observation:
     row: BloggerSourceRow | None
     projection: BloggerProjection | None
     reason_code: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateReviewMember:
+    record_id: str
+    projected_actor_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateReviewGroup:
+    """Metadata-only facts for owner review; never an owner decision."""
+
+    identity_sha256: str
+    members: tuple[DuplicateReviewMember, ...]
+    existing_actor_id: UUID | None
+
+    @property
+    def member_record_ids(self) -> tuple[str, ...]:
+        return tuple(item.record_id for item in self.members)
 
 
 @dataclass(frozen=True, slots=True)
@@ -994,6 +1014,20 @@ class BloggerSnapshotImporter:
         except Exception:
             connection.rollback()
             raise
+        review_groups = tuple(
+            DuplicateReviewGroup(
+                identity_sha256=identity_hash,
+                members=tuple(
+                    DuplicateReviewMember(
+                        record_id=member.logical_id,
+                        projected_actor_id=member.projection.actor_id,  # type: ignore[union-attr]
+                    )
+                    for member in claim.members
+                ),
+                existing_actor_id=claim.existing_actor_id,
+            )
+            for identity_hash, claim in sorted(duplicate_groups.items())
+        )
         return ImportReceipt(
             export=export,
             canonical_outcome_sha256=canonical_hash,
@@ -1004,4 +1038,5 @@ class BloggerSnapshotImporter:
             replayed_count=replayed_count,
             canonical_revision=canonical_revision,
             durability_state=durability_state,
+            duplicate_review_groups=review_groups,
         )
