@@ -1000,6 +1000,15 @@ class ControlLedger:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def record_acceptance_consumer_heartbeat(self, available: bool) -> None:
+        with self._transaction() as connection:
+            connection.execute("INSERT INTO acceptance_consumer_heartbeat VALUES (1,?,?) ON CONFLICT(singleton) DO UPDATE SET available=excluded.available,observed_at=excluded.observed_at", (int(available), _format_time(self.clock.now())))
+
+    def acceptance_consumer_available(self, max_age_seconds: int = 30) -> bool:
+        with self._reader() as connection:
+            row = connection.execute("SELECT * FROM acceptance_consumer_heartbeat WHERE singleton=1").fetchone()
+        return bool(row and row["available"] and (self.clock.now() - _parse_time(row["observed_at"])).total_seconds() <= max_age_seconds)
+
     def register_oauth_client(
         self,
         *,

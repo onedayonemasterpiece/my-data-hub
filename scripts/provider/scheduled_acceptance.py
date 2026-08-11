@@ -751,7 +751,12 @@ async def _collect_operator_session(
                         "idempotency_key": f"{workflow_run_id}:rotation",
                         "checkpoint_id": checkpoint.get("current_checkpoint_id"),
                         "exact_version_ref": checkpoint.get("current_exact_version_ref"),
-                        "expected_active_epoch": master.get("master_epoch", master.get("epoch")),
+                        "expected_active_epoch": (
+                            checkpoint.get("current", {}).get("source_epoch")
+                            if isinstance(checkpoint.get("current"), Mapping)
+                            and checkpoint.get("current", {}).get("source_state") == "STOPPED"
+                            else None
+                        ),
                         "expected_canonical_revision": (
                             checkpoint.get("current", {}).get("canonical_revision")
                             if isinstance(checkpoint.get("current"), Mapping)

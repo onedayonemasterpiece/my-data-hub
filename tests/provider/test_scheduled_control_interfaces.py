@@ -110,7 +110,8 @@ def test_checkpoint_status_exposes_exact_current_previous_metadata(tmp_path: Pat
 def test_restore_request_is_exact_durable_and_idempotent_for_consumer(tmp_path: Path) -> None:
     ledger = ControlLedger(tmp_path / "control.sqlite3")
     _checkpoint(ledger, "cp-1", None, 0)
-    reader = LedgerControlReader(ledger, acceptance_consumer_available=True)
+    ledger.record_acceptance_consumer_heartbeat(True)
+    reader = LedgerControlReader(ledger)
     arguments = {
         "idempotency_key": "workflow-123:current",
         "target": "current",
@@ -150,7 +151,8 @@ def test_restore_request_is_exact_durable_and_idempotent_for_consumer(tmp_path: 
 def test_rotation_requires_the_exact_source_master_to_be_stopped(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     ledger = ControlLedger(tmp_path / "control.sqlite3")
     _stopped_master_checkpoint(ledger)
-    reader = LedgerControlReader(ledger, acceptance_consumer_available=True)
+    ledger.record_acceptance_consumer_heartbeat(True)
+    reader = LedgerControlReader(ledger)
     arguments = {
         "idempotency_key": "blogger-cold-restore",
         "checkpoint_id": "cp-stopped",
@@ -172,7 +174,7 @@ def test_rotation_requires_the_exact_source_master_to_be_stopped(tmp_path: Path,
         lambda _kind: SimpleNamespace(epoch=1, canonical_revision=9),
     )
     with pytest.raises(ValueError, match="durably stopped"):
-        LedgerControlReader(other, acceptance_consumer_available=True).invoke_control(
+            LedgerControlReader(other).invoke_control(
             "master.rotation.request", arguments, _identity()
         )
 

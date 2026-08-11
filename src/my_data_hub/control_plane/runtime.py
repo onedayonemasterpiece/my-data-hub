@@ -279,6 +279,7 @@ class ControlPlaneMasterRuntime:
             raise
 
     def reconcile_acceptance_once(self) -> dict[str, Any] | None:
+        self.ledger.record_acceptance_consumer_heartbeat(self.acceptance_executor is not None)
         operations = [
             *self.ledger.incomplete_operations("checkpoint_restore_smoke"),
             *self.ledger.incomplete_operations("forced_master_rotation"),

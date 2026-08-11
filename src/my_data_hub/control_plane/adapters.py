@@ -71,7 +71,6 @@ class LedgerControlReader(ControlPlaneReader):
         ledger: ControlLedger,
         *,
         deployed_commit: str | None = None,
-        acceptance_consumer_available: bool = False,
     ) -> None:
         if deployed_commit is not None and (
             len(deployed_commit) != 40 or any(character not in "0123456789abcdef" for character in deployed_commit)
@@ -79,7 +78,6 @@ class LedgerControlReader(ControlPlaneReader):
             raise ValueError("deployed commit must be an exact lowercase Git SHA")
         self.ledger = ledger
         self.deployed_commit = deployed_commit
-        self.acceptance_consumer_available = acceptance_consumer_available
 
     def invoke_control(self, tool: str, arguments: dict[str, Any], principal: AccessIdentity) -> dict[str, Any]:
         if tool == "platform.status":
@@ -195,16 +193,18 @@ class LedgerControlReader(ControlPlaneReader):
             return {"e5": {"coverage": 0.0}, "bge_m3": {"coverage": 0.0}, "master_state": "ABSENT"}
         raise ValueError(f"unsupported bounded control tool: {tool}")
 
-    @staticmethod
-    def _checkpoint_projection(candidate: dict[str, Any] | None) -> dict[str, Any] | None:
+    def _checkpoint_projection(self, candidate: dict[str, Any] | None) -> dict[str, Any] | None:
         if candidate is None:
             return None
+        source = self.ledger.get_operation(str(candidate["operation_id"]))
         return {
             "checkpoint_id": candidate["checkpoint_id"],
             "exact_version_ref": candidate["version_ref"],
             "manifest_sha256": candidate["manifest_sha256"],
             "verified_at": candidate["verified_at"],
             "status": candidate["status"],
+            "source_epoch": candidate["epoch"],
+            "source_state": source.state if source else None,
             "canonical_revision": (
                 candidate["manifest"].get("canonical_revision") if isinstance(candidate.get("manifest"), dict) else None
             ),
@@ -273,7 +273,7 @@ class LedgerControlReader(ControlPlaneReader):
         digest = hashlib.sha256(
             json.dumps(intent, sort_keys=True, separators=(",", ":")).encode() + b":" + request_key.encode()
         ).hexdigest()
-        if not self.acceptance_consumer_available:
+        if not self.ledger.acceptance_consumer_available():
             return {
                 "accepted": False,
                 "duplicate": False,
