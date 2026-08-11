@@ -1,0 +1,8 @@
+{
+  "schema_version": "my-data-hub-master-lifecycle-acceptance.v1",
+  "task_id": "10000000-0000-4000-8000-000000000010",
+  "scenario": "FM10",
+  "idempotency_key": "acceptance-fm10-example",
+  "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "target_operation_id": "20000000-0000-4000-8000-000000000010"
+}

@@ -14,6 +14,12 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from my_data_hub.acceptance.master_lifecycle import (
+    AcceptancePrincipal,
+    MasterAcceptanceReceipt,
+    MasterAcceptanceRequest,
+    require_acceptance_operator,
+)
 from my_data_hub.checkpoints import CheckpointManifest
 from my_data_hub.checkpoints.kaggle_runtime import (
     KaggleCheckpointRestoreVerifier,
@@ -259,6 +265,54 @@ class ControlPlaneMasterRuntime:
     coordinator: MasterCoordinator
     settings: MasterRuntimeSettings
     acceptance_executor: KaggleAcceptanceOperationExecutor | None = None
+
+    def request_master_acceptance(
+        self,
+        request: MasterAcceptanceRequest,
+        principal: AcceptancePrincipal,
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist one fixed scenario under the dedicated operator scope."""
+
+        require_acceptance_operator(principal)
+        return self.ledger.ensure_master_acceptance_task(
+            task_id=str(request.task_id),
+            scenario_id=request.scenario.value,
+            idempotency_key=request.idempotency_key,
+            request_sha256=request.request_sha256,
+            principal_id=principal.subject,
+            client_id=principal.client_id,
+            source_revision=request.source_revision,
+            target_operation_id=(str(request.target_operation_id) if request.target_operation_id is not None else None),
+        )
+
+    def bind_master_acceptance(self, task_id: str, operation_id: str) -> dict[str, Any]:
+        """Bind an admitted FM04/FM07 after its fixed real provider ensure(s)."""
+
+        return self.ledger.bind_master_acceptance_task(task_id=task_id, operation_id=operation_id)
+
+    def complete_master_acceptance(
+        self,
+        receipt: MasterAcceptanceReceipt,
+        principal: AcceptancePrincipal,
+    ) -> dict[str, Any]:
+        """Allow the scoped control executor to close cross-epoch FM07/FM11 work.
+
+        The exact old runtime must already have claimed the command.  This path
+        does not weaken runtime claim binding; it only permits the control
+        executor that observed the replacement epoch to persist the combined
+        live receipt after the old epoch is fenced.
+        """
+
+        require_acceptance_operator(principal)
+        return self.ledger.complete_master_acceptance_command(
+            command_id=str(receipt.command_id),
+            command_sha256=receipt.command_sha256,
+            run_id=str(receipt.binding.run_id),
+            attempt_id=str(receipt.binding.attempt_id),
+            epoch=receipt.binding.epoch,
+            state="SUCCEEDED",
+            receipt=receipt.model_dump(mode="json"),
+        )
 
     def record_connector_heartbeat(
         self,

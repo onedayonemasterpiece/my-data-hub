@@ -27,6 +27,11 @@ from uuid import UUID
 import psycopg
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from my_data_hub.acceptance.master_lifecycle import (
+    MasterAcceptanceCommand,
+    MasterAcceptanceRuntimeEffects,
+    execute_master_acceptance_command,
+)
 from my_data_hub.checkpoints import load_and_verify, restore_physical_archive
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.db.migrations import migrate
@@ -755,6 +760,13 @@ def _embedding_production_url(callback_url: str, run_id: str, attempt_id: str, s
     return f"{base}/internal/runtime/embedding-production/{run_id}/{attempt_id}{suffix}"
 
 
+def _master_acceptance_url(callback_url: str, run_id: str, attempt_id: str, suffix: str = "") -> str:
+    if callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
+        raise ValueError("callback URL does not match the owner-pinned HTTPS runtime endpoint")
+    base = callback_url.removesuffix("/internal/runtime/events")
+    return f"{base}/internal/runtime/master-acceptance/{run_id}/{attempt_id}{suffix}"
+
+
 def _runtime_metadata_headers(config: NotebookMasterConfig, run_secret: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {run_secret}",
@@ -814,6 +826,63 @@ def _claim_embedding_production(
     if body.get("request_sha256") != production.request_sha256:
         raise RuntimeError("embedding work request hash differs from its exact body")
     return production
+
+
+def _claim_master_acceptance(
+    *, config: NotebookMasterConfig, callback_url: str, run_secret: str
+) -> MasterAcceptanceCommand | None:
+    """Poll only the fixed command envelope; no arbitrary task body is accepted."""
+
+    request = urllib.request.Request(
+        _master_acceptance_url(callback_url, config.run_id, config.attempt_id),
+        headers=_runtime_metadata_headers(config, run_secret),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read(64 * 1024 + 1)
+    except urllib.error.HTTPError as exc:
+        if exc.code in {502, 503, 504}:
+            return None
+        raise
+    except OSError:
+        return None
+    if len(raw) > 64 * 1024:
+        raise RuntimeError("master acceptance command exceeds 64 KiB")
+    body = json.loads(raw)
+    if not isinstance(body, dict) or body.get("available") is not True:
+        return None
+    return MasterAcceptanceCommand.model_validate(body.get("command"))
+
+
+def _post_master_acceptance_receipt(
+    *,
+    config: NotebookMasterConfig,
+    callback_url: str,
+    run_secret: str,
+    receipt: Any,
+    attempts: int = 3,
+    sleep: Any = time.sleep,
+) -> None:
+    encoded = canonical_json_bytes(receipt.model_dump(mode="json"))
+    if len(encoded) > 64 * 1024 or not 1 <= attempts <= 5:
+        raise RuntimeError("master acceptance receipt transport bounds are invalid")
+    for attempt in range(attempts):
+        request = urllib.request.Request(
+            _master_acceptance_url(callback_url, config.run_id, config.attempt_id, "/receipt"),
+            data=encoded,
+            headers=_runtime_metadata_headers(config, run_secret),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                body = json.loads(response.read(16 * 1024))
+            if body.get("accepted") is True and body.get("receipt_sha256") == receipt.receipt_sha256:
+                return
+        except Exception:
+            pass
+        if attempt + 1 < attempts:
+            sleep(min(2**attempt, 2))
+    raise RuntimeError("control did not acknowledge exact master acceptance receipt")
 
 
 def _post_blogger_runtime_receipt(
@@ -1150,6 +1219,7 @@ def run_master(
     config: NotebookMasterConfig,
     *,
     checkpoint_coordinator: RuntimeCheckpointCoordinator | None = None,
+    acceptance_effects: MasterAcceptanceRuntimeEffects | None = None,
     process_started_at: float | None = None,
 ) -> int:
     # Direct callers get the same entry-bound budget as ``main``.  ``main``
@@ -1415,6 +1485,21 @@ def run_master(
             remaining_active = active_deadline - time.monotonic()
             if remaining_active <= 0:
                 break
+            if acceptance_effects is not None:
+                acceptance_command = _claim_master_acceptance(
+                    config=config, callback_url=callback_url, run_secret=run_secret
+                )
+                if acceptance_command is not None:
+                    acceptance_receipt = execute_master_acceptance_command(
+                        acceptance_command, acceptance_effects
+                    )
+                    _post_master_acceptance_receipt(
+                        config=config,
+                        callback_url=callback_url,
+                        run_secret=run_secret,
+                        receipt=acceptance_receipt,
+                    )
+                    break
             migration_request = _claim_blogger_migration(
                 config=config, callback_url=callback_url, run_secret=run_secret
             )

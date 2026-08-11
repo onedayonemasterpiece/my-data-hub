@@ -2110,6 +2110,435 @@ class ControlLedger:
         value["bounded"] = True
         return value
 
+    def ensure_master_acceptance_task(
+        self,
+        *,
+        task_id: str,
+        scenario_id: str,
+        idempotency_key: str,
+        request_sha256: str,
+        principal_id: str,
+        client_id: str,
+        source_revision: str,
+        target_operation_id: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically persist one fixed lifecycle task before any fault/effect.
+
+        FM04/FM07 intentionally start unbound.  All other scenarios must bind
+        the exact currently ACTIVE master in this same transaction.
+        """
+
+        scenarios = {"FM04", "FM07", "FM08", "FM09", "FM10", "FM11", "FM12", "FM24"}
+        try:
+            UUID(task_id)
+            if target_operation_id is not None:
+                UUID(target_operation_id)
+        except ValueError as exc:
+            raise ValueError("master acceptance task identities must be UUIDs") from exc
+        if (
+            scenario_id not in scenarios
+            or not 8 <= len(idempotency_key) <= 200
+            or len(request_sha256) != 64
+            or len(source_revision) != 40
+            or not principal_id
+            or not client_id
+            or ((scenario_id in {"FM04", "FM07"}) != (target_operation_id is None))
+        ):
+            raise ValueError("master acceptance request violates the fixed contract")
+        now = _format_time(self.clock.now())
+        timeout_seconds = 5700 if scenario_id == "FM24" else 1800
+        deadline_at = _format_time(self.clock.now() + timedelta(seconds=timeout_seconds))
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_tasks WHERE task_id=? OR idempotency_key=?",
+                (task_id, idempotency_key),
+            ).fetchone()
+            if row is not None:
+                expected = {
+                    "task_id": task_id,
+                    "scenario_id": scenario_id,
+                    "idempotency_key": idempotency_key,
+                    "request_sha256": request_sha256,
+                    "principal_id": principal_id,
+                    "client_id": client_id,
+                    "source_revision": source_revision,
+                    "target_operation_id": target_operation_id,
+                }
+                if any(row[key] != value for key, value in expected.items()):
+                    raise IdempotencyConflict("master acceptance identity was reused for another request")
+                return self._master_acceptance_task_from_connection(connection, row), False
+
+            binding: dict[str, Any] | None = None
+            if target_operation_id is not None:
+                binding = self._active_master_binding(connection, target_operation_id)
+            else:
+                live = connection.execute(
+                    "SELECT 1 FROM services WHERE service_kind='postgres-master' "
+                    "AND state IN ('ACTIVE','DRAINING') LIMIT 1"
+                ).fetchone()
+                if live is not None:
+                    raise StaleRuntimeEvent("FM04/FM07 require an ABSENT or terminal master")
+                if scenario_id == "FM04":
+                    head = connection.execute(
+                        "SELECT current_checkpoint_id FROM checkpoint_heads WHERE service_kind='postgres-master'"
+                    ).fetchone()
+                    if head is not None and head["current_checkpoint_id"] is not None:
+                        raise StaleRuntimeEvent("FM04 empty bootstrap requires no checkpoint HEAD")
+            values = binding or {}
+            state = "BOUND" if binding else "PENDING"
+            connection.execute(
+                "INSERT INTO master_acceptance_tasks(task_id,scenario_id,idempotency_key,request_sha256,"
+                "principal_id,client_id,source_revision,target_operation_id,target_run_id,target_attempt_id,"
+                "target_service_instance_id,target_master_instance_id,target_epoch,state,timeout_seconds,"
+                "deadline_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    task_id,
+                    scenario_id,
+                    idempotency_key,
+                    request_sha256,
+                    principal_id,
+                    client_id,
+                    source_revision,
+                    values.get("operation_id"),
+                    values.get("run_id"),
+                    values.get("attempt_id"),
+                    values.get("service_instance_id"),
+                    values.get("master_instance_id"),
+                    values.get("epoch"),
+                    state,
+                    timeout_seconds,
+                    deadline_at,
+                    now,
+                    now,
+                ),
+            )
+            self._append_master_acceptance_event(
+                connection,
+                task_id=task_id,
+                event_type="PENDING",
+                evidence={"request_sha256": request_sha256, "scenario_id": scenario_id},
+                now=now,
+            )
+            if binding is not None:
+                self._insert_master_acceptance_command(
+                    connection,
+                    task_id=task_id,
+                    scenario_id=scenario_id,
+                    source_revision=source_revision,
+                    binding=binding,
+                    now=now,
+                )
+            created = connection.execute("SELECT * FROM master_acceptance_tasks WHERE task_id=?", (task_id,)).fetchone()
+            assert created is not None
+            return self._master_acceptance_task_from_connection(connection, created), True
+
+    def bind_master_acceptance_task(self, *, task_id: str, operation_id: str) -> dict[str, Any]:
+        """Bind a pre-boot FM04/FM07 task to the one observed ACTIVE result."""
+
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute("SELECT * FROM master_acceptance_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if row is None or row["scenario_id"] not in {"FM04", "FM07"}:
+                raise StaleRuntimeEvent("only a claimed pre-boot acceptance task can be bound")
+            binding = self._active_master_binding(connection, operation_id)
+            if row["state"] == "PENDING":
+                connection.execute(
+                    "UPDATE master_acceptance_tasks SET target_operation_id=?,target_run_id=?,target_attempt_id=?,"
+                    "target_service_instance_id=?,target_master_instance_id=?,target_epoch=?,state='BOUND',"
+                    "updated_at=? "
+                    "WHERE task_id=? AND state='PENDING'",
+                    (
+                        binding["operation_id"],
+                        binding["run_id"],
+                        binding["attempt_id"],
+                        binding["service_instance_id"],
+                        binding["master_instance_id"],
+                        binding["epoch"],
+                        now,
+                        task_id,
+                    ),
+                )
+                self._insert_master_acceptance_command(
+                    connection,
+                    task_id=task_id,
+                    scenario_id=str(row["scenario_id"]),
+                    source_revision=str(row["source_revision"]),
+                    binding=binding,
+                    now=now,
+                )
+            elif any(
+                row[key] != binding[key.removeprefix("target_")]
+                for key in (
+                    "target_operation_id",
+                    "target_run_id",
+                    "target_attempt_id",
+                    "target_service_instance_id",
+                    "target_master_instance_id",
+                    "target_epoch",
+                )
+            ):
+                raise IdempotencyConflict("pre-boot task was already bound to another master")
+            current = connection.execute("SELECT * FROM master_acceptance_tasks WHERE task_id=?", (task_id,)).fetchone()
+            assert current is not None
+            return self._master_acceptance_task_from_connection(connection, current)
+
+    def claim_master_acceptance_command(self, *, run_id: str, attempt_id: str, epoch: int) -> dict[str, Any] | None:
+        """Lease the sole fixed command only to its exact authenticated runtime."""
+
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT c.*,t.source_revision,t.deadline_at,t.target_operation_id,t.target_master_instance_id,"
+                "t.target_service_instance_id FROM master_acceptance_commands c "
+                "JOIN master_acceptance_tasks t ON t.task_id=c.task_id "
+                "WHERE t.target_run_id=? AND t.target_attempt_id=? AND t.target_epoch=? "
+                "AND t.state IN ('BOUND','CLAIMED') AND c.state IN ('PENDING','CLAIMED') "
+                "ORDER BY t.created_at LIMIT 1",
+                (run_id, attempt_id, epoch),
+            ).fetchone()
+            if row is None:
+                return None
+            if _parse_time(str(row["deadline_at"])) <= self.clock.now():
+                connection.execute(
+                    "UPDATE master_acceptance_tasks SET state='FAILED',failure_code='ACCEPTANCE_TIMEOUT',"
+                    "updated_at=? WHERE task_id=? AND state IN ('BOUND','CLAIMED')",
+                    (now, row["task_id"]),
+                )
+                self._append_master_acceptance_event(
+                    connection,
+                    task_id=str(row["task_id"]),
+                    event_type="FAILED",
+                    evidence={"failure_code": "ACCEPTANCE_TIMEOUT"},
+                    now=now,
+                )
+                return None
+            binding = self._active_master_binding(connection, str(row["target_operation_id"]))
+            if (binding["run_id"], binding["attempt_id"], binding["epoch"]) != (
+                run_id,
+                attempt_id,
+                epoch,
+            ):
+                raise StaleRuntimeEvent("acceptance command target is no longer the ACTIVE runtime")
+            if row["state"] == "PENDING":
+                connection.execute(
+                    "UPDATE master_acceptance_commands SET state='CLAIMED',claimed_run_id=?,claimed_attempt_id=?,"
+                    "claimed_epoch=?,claimed_at=? WHERE command_id=? AND state='PENDING'",
+                    (run_id, attempt_id, epoch, now, row["command_id"]),
+                )
+                connection.execute(
+                    "UPDATE master_acceptance_tasks SET state='CLAIMED',updated_at=? WHERE task_id=? AND state='BOUND'",
+                    (now, row["task_id"]),
+                )
+                self._append_master_acceptance_event(
+                    connection,
+                    task_id=str(row["task_id"]),
+                    event_type="CLAIMED",
+                    evidence={"command_sha256": str(row["command_sha256"]), "epoch": epoch},
+                    now=now,
+                )
+            return self._master_acceptance_command_from_row(row, binding)
+
+    def complete_master_acceptance_command(
+        self,
+        *,
+        command_id: str,
+        command_sha256: str,
+        run_id: str,
+        attempt_id: str,
+        epoch: int,
+        state: str,
+        receipt: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if state not in {"SUCCEEDED", "FAILED"}:
+            raise ValueError("master acceptance terminal state is invalid")
+        receipt_json = _safe_json(receipt, max_bytes=64 * 1024)
+        receipt_sha256 = hashlib.sha256(receipt_json.encode()).hexdigest()
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_commands WHERE command_id=?", (command_id,)
+            ).fetchone()
+            if row is None:
+                raise StaleRuntimeEvent("acceptance command is unknown")
+            if (
+                row["command_sha256"] != command_sha256
+                or row["claimed_run_id"] != run_id
+                or row["claimed_attempt_id"] != attempt_id
+                or row["claimed_epoch"] != epoch
+            ):
+                raise StaleRuntimeEvent("acceptance receipt does not bind its exact command/runtime")
+            if row["state"] in {"SUCCEEDED", "FAILED"}:
+                if row["state"] != state or not hmac.compare_digest(str(row["receipt_sha256"]), receipt_sha256):
+                    raise IdempotencyConflict("acceptance command already has another terminal receipt")
+            elif row["state"] != "CLAIMED":
+                raise StaleRuntimeEvent("acceptance command was not claimed")
+            else:
+                connection.execute(
+                    "UPDATE master_acceptance_commands SET state=?,receipt_json=?,receipt_sha256=?,completed_at=? "
+                    "WHERE command_id=? AND state='CLAIMED'",
+                    (state, receipt_json, receipt_sha256, now, command_id),
+                )
+                connection.execute(
+                    "UPDATE master_acceptance_tasks SET state=?,failure_code=?,updated_at=? WHERE task_id=?",
+                    (
+                        "PASSED" if state == "SUCCEEDED" else "FAILED",
+                        None if state == "SUCCEEDED" else "RUNTIME_SCENARIO_FAILED",
+                        now,
+                        row["task_id"],
+                    ),
+                )
+                self._append_master_acceptance_event(
+                    connection,
+                    task_id=str(row["task_id"]),
+                    event_type=state,
+                    evidence={"receipt_sha256": receipt_sha256},
+                    now=now,
+                )
+            task = connection.execute(
+                "SELECT * FROM master_acceptance_tasks WHERE task_id=?", (row["task_id"],)
+            ).fetchone()
+            assert task is not None
+            return self._master_acceptance_task_from_connection(connection, task)
+
+    def master_acceptance_task(self, task_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute("SELECT * FROM master_acceptance_tasks WHERE task_id=?", (task_id,)).fetchone()
+            return self._master_acceptance_task_from_connection(connection, row) if row else None
+
+    def _active_master_binding(self, connection: sqlite3.Connection, operation_id: str) -> dict[str, Any]:
+        operation = connection.execute(
+            "SELECT * FROM operations WHERE operation_id=? AND operation_kind='ensure_master' AND state='ACTIVE'",
+            (operation_id,),
+        ).fetchone()
+        if operation is None:
+            raise StaleRuntimeEvent("master acceptance target is not an ACTIVE master operation")
+        identity = json.loads(str(operation["identity_json"]))
+        service = connection.execute(
+            "SELECT * FROM services WHERE service_kind='postgres-master' AND state='ACTIVE' AND "
+            "run_id=? AND attempt_id=? AND service_instance_id=? AND master_instance_id=? AND epoch=?",
+            (
+                identity.get("run_id"),
+                identity.get("attempt_id"),
+                identity.get("service_instance_id"),
+                identity.get("master_instance_id"),
+                identity.get("epoch"),
+            ),
+        ).fetchone()
+        current_epoch = connection.execute(
+            "SELECT current_epoch FROM service_epochs WHERE service_kind='postgres-master'"
+        ).fetchone()
+        if service is None or current_epoch is None or int(current_epoch[0]) != int(identity.get("epoch", 0)):
+            raise StaleRuntimeEvent("master acceptance target differs from current ACTIVE service")
+        return {
+            "operation_id": operation_id,
+            "run_id": str(identity["run_id"]),
+            "attempt_id": str(identity["attempt_id"]),
+            "service_instance_id": str(identity["service_instance_id"]),
+            "master_instance_id": str(identity["master_instance_id"]),
+            "epoch": int(identity["epoch"]),
+        }
+
+    def _insert_master_acceptance_command(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        task_id: str,
+        scenario_id: str,
+        source_revision: str,
+        binding: Mapping[str, Any],
+        now: str,
+    ) -> None:
+        from my_data_hub.acceptance.master_lifecycle import (
+            MasterAcceptanceBinding,
+            MasterAcceptanceRequest,
+            MasterAcceptanceScenario,
+            command_for,
+        )
+
+        request = MasterAcceptanceRequest(
+            task_id=task_id,
+            scenario=MasterAcceptanceScenario(scenario_id),
+            idempotency_key="internal-binding-only",
+            source_revision=source_revision,
+            target_operation_id=None if scenario_id in {"FM04", "FM07"} else binding["operation_id"],
+        )
+        command = command_for(request, MasterAcceptanceBinding.model_validate(binding))
+        command_json = _safe_json(command.model_dump(mode="json"))
+        command_sha256 = hashlib.sha256(command_json.encode()).hexdigest()
+        connection.execute(
+            "INSERT INTO master_acceptance_commands(command_id,task_id,scenario_id,command_kind,command_sha256,state) "
+            "VALUES (?,?,?,?,?,'PENDING')",
+            (str(command.command_id), task_id, scenario_id, command.command_kind.value, command_sha256),
+        )
+        self._append_master_acceptance_event(
+            connection,
+            task_id=task_id,
+            event_type="BOUND",
+            evidence={"command_sha256": command_sha256, "epoch": binding["epoch"]},
+            now=now,
+        )
+
+    def _master_acceptance_command_from_row(self, row: sqlite3.Row, binding: Mapping[str, Any]) -> dict[str, Any]:
+        from my_data_hub.acceptance.master_lifecycle import (
+            MasterAcceptanceBinding,
+            MasterAcceptanceRequest,
+            MasterAcceptanceScenario,
+            command_for,
+        )
+
+        request = MasterAcceptanceRequest(
+            task_id=row["task_id"],
+            scenario=MasterAcceptanceScenario(str(row["scenario_id"])),
+            idempotency_key="internal-binding-only",
+            source_revision=str(row["source_revision"]),
+            target_operation_id=(None if row["scenario_id"] in {"FM04", "FM07"} else binding["operation_id"]),
+        )
+        command = command_for(request, MasterAcceptanceBinding.model_validate(binding))
+        if command.command_sha256 != row["command_sha256"]:
+            raise StaleRuntimeEvent("stored acceptance command hash is inconsistent")
+        return command.model_dump(mode="json")
+
+    def _master_acceptance_task_from_connection(
+        self, connection: sqlite3.Connection, row: sqlite3.Row
+    ) -> dict[str, Any]:
+        value = dict(row)
+        command = connection.execute(
+            "SELECT command_id,command_kind,command_sha256,state,receipt_sha256,claimed_at,completed_at "
+            "FROM master_acceptance_commands WHERE task_id=?",
+            (row["task_id"],),
+        ).fetchone()
+        events = connection.execute(
+            "SELECT sequence,event_type,evidence_json,evidence_sha256,recorded_at "
+            "FROM master_acceptance_events WHERE task_id=? ORDER BY sequence LIMIT 100",
+            (row["task_id"],),
+        ).fetchall()
+        value["command"] = dict(command) if command else None
+        value["events"] = [
+            {
+                **{key: event[key] for key in ("sequence", "event_type", "evidence_sha256", "recorded_at")},
+                "evidence": json.loads(str(event["evidence_json"])),
+            }
+            for event in events
+        ]
+        value["bounded"] = True
+        return value
+
+    def _append_master_acceptance_event(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        task_id: str,
+        event_type: str,
+        evidence: Mapping[str, Any],
+        now: str,
+    ) -> None:
+        evidence_json = _safe_json(evidence)
+        connection.execute(
+            "INSERT OR IGNORE INTO master_acceptance_events(task_id,event_type,evidence_json,evidence_sha256,"
+            "recorded_at) VALUES (?,?,?,?,?)",
+            (task_id, event_type, evidence_json, hashlib.sha256(evidence_json.encode()).hexdigest(), now),
+        )
+
     def runtime_event_history(
         self, *, run_id: str, attempt_id: str, epoch: int, limit: int = 100
     ) -> list[dict[str, Any]]:

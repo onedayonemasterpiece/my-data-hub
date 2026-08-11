@@ -15,6 +15,7 @@ from uuid import UUID
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
 
+from my_data_hub.acceptance.master_lifecycle import MasterAcceptanceReceipt
 from my_data_hub.checkpoints import CheckpointManifest, ControlLedgerCheckpointRegistry
 from my_data_hub.checkpoints.manifest import ManifestError
 from my_data_hub.control_plane.adapters import LedgerMasterResolver
@@ -1012,6 +1013,88 @@ def create_app(
             "event_id": receipt.event_id,
             "disposition": receipt.disposition.value,
             "body_sha256": receipt.body_sha256,
+        }
+
+    @app.get("/internal/runtime/master-acceptance/{run_id}/{attempt_id}")
+    def runtime_master_acceptance_command(
+        run_id: str,
+        attempt_id: str,
+        authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        """Claim one task-owned command; arbitrary fault payloads are impossible."""
+
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            allowed_states=frozenset({"ACTIVE"}),
+        )
+        command = control_ledger.claim_master_acceptance_command(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            epoch=int(operation.identity["epoch"]),
+        )
+        return {"available": command is not None, "command": command}
+
+    @app.post("/internal/runtime/master-acceptance/{run_id}/{attempt_id}/receipt")
+    async def runtime_master_acceptance_receipt(
+        run_id: str,
+        attempt_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        """Accept only a validated live receipt from its exact ACTIVE runtime."""
+
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            allowed_states=frozenset({"ACTIVE"}),
+        )
+        body = await _bounded_json(request)
+        try:
+            receipt = MasterAcceptanceReceipt.model_validate(body)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail={"code": "master_acceptance_receipt_invalid"}) from exc
+        identity = operation.identity
+        expected = (
+            run_id,
+            attempt_id,
+            str(identity["service_instance_id"]),
+            str(identity["master_instance_id"]),
+            int(identity["epoch"]),
+        )
+        observed = (
+            str(receipt.binding.run_id),
+            str(receipt.binding.attempt_id),
+            receipt.binding.service_instance_id,
+            str(receipt.binding.master_instance_id),
+            receipt.binding.epoch,
+        )
+        if observed != expected or str(receipt.binding.operation_id) != operation.operation_id:
+            raise HTTPException(status_code=409, detail={"code": "master_acceptance_runtime_binding_stale"})
+        task = control_ledger.complete_master_acceptance_command(
+            command_id=str(receipt.command_id),
+            command_sha256=receipt.command_sha256,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            epoch=receipt.binding.epoch,
+            state="SUCCEEDED",
+            receipt=receipt.model_dump(mode="json"),
+        )
+        return {
+            "accepted": True,
+            "task_id": task["task_id"],
+            "state": task["state"],
+            "receipt_sha256": receipt.receipt_sha256,
         }
 
     @app.get("/internal/runtime/activation/{run_id}/{attempt_id}")

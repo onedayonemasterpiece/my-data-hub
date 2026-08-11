@@ -13,8 +13,25 @@ from .data_workloads import (
     DataWorkloadState,
     DataWorkloadStateMachine,
 )
+from .master_lifecycle import (
+    ACCEPTANCE_OPERATE_SCOPE,
+    COMMAND_FOR_SCENARIO,
+    MasterAcceptanceBinding,
+    MasterAcceptanceCommand,
+    MasterAcceptanceCommandKind,
+    MasterAcceptanceReceipt,
+    MasterAcceptanceRequest,
+    MasterAcceptanceRuntimeEffects,
+    MasterAcceptanceScenario,
+    MasterLifecycleAcceptanceError,
+    command_for,
+    execute_master_acceptance_command,
+    require_acceptance_operator,
+)
 
 __all__ = [
+    "ACCEPTANCE_OPERATE_SCOPE",
+    "COMMAND_FOR_SCENARIO",
     "AtomicJsonStateStore",
     "ControlPlaneDataWorkloadGateway",
     "DataWorkloadEvidenceBundle",
@@ -24,4 +41,15 @@ __all__ = [
     "DataWorkloadStateMachine",
     "ProductionDataWorkloadConfig",
     "ProductionDataWorkloadReceipt",
+    "MasterAcceptanceBinding",
+    "MasterAcceptanceCommand",
+    "MasterAcceptanceCommandKind",
+    "MasterAcceptanceReceipt",
+    "MasterAcceptanceRequest",
+    "MasterAcceptanceRuntimeEffects",
+    "MasterAcceptanceScenario",
+    "MasterLifecycleAcceptanceError",
+    "command_for",
+    "execute_master_acceptance_command",
+    "require_acceptance_operator",
 ]
