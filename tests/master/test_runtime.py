@@ -11,7 +11,14 @@ import pytest
 
 from my_data_hub.master_runtime.bootstrap import BootstrapError, BootstrapRequest, MasterBootstrap
 from my_data_hub.master_runtime.contracts import BootPhase, BootSource, MasterIdentity, MasterPaths
-from my_data_hub.master_runtime.postgres import PostgresBinaries, PostgresConfig, PostgresSupervisor
+from my_data_hub.master_runtime.postgres import (
+    KAGGLE_POSTGRES_GID,
+    KAGGLE_POSTGRES_UID,
+    PostgresBinaries,
+    PostgresConfig,
+    PostgresSupervisor,
+    SubprocessRunner,
+)
 from my_data_hub.master_runtime.tunnel import ReverseTunnelSpec
 
 NOW = datetime(2026, 8, 10, tzinfo=UTC)
@@ -82,6 +89,63 @@ def test_empty_bootstrap_commands_are_deterministic_and_no_shell(tmp_path: Path)
     assert runner.calls[1][0] == "/fixture/pg_ctl"
     assert runner.calls[2][0] == "/fixture/pg_isready"
     assert (tmp_path / "working/postgres/data/postgresql.auto.conf").is_file()
+
+
+def test_root_kaggle_postgres_uses_setpriv_without_python_preexec(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_run(arguments, **kwargs):  # type: ignore[no-untyped-def]
+        observed["arguments"] = arguments
+        observed["kwargs"] = kwargs
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr("my_data_hub.master_runtime.postgres.os.geteuid", lambda: 0)
+    setpriv = tmp_path / "setpriv"
+    setpriv.write_text("fixture", encoding="utf-8")
+    setpriv.chmod(0o700)
+    monkeypatch.setattr("my_data_hub.master_runtime.postgres.SETPRIV", setpriv)
+    monkeypatch.setattr("my_data_hub.master_runtime.postgres.os.access", lambda *_args: True)
+    monkeypatch.setattr("my_data_hub.master_runtime.postgres.subprocess.run", fake_run)
+    SubprocessRunner().run(["/runtime/bin/initdb", "--version"], timeout_seconds=10)
+    assert observed["arguments"] == [
+        str(setpriv),
+        f"--reuid={KAGGLE_POSTGRES_UID}",
+        f"--regid={KAGGLE_POSTGRES_GID}",
+        "--clear-groups",
+        "--",
+        "/runtime/bin/initdb",
+        "--version",
+    ]
+    assert "preexec_fn" not in observed["kwargs"]  # type: ignore[operator]
+
+
+def test_root_kaggle_runtime_transfers_only_postgres_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    certificate, key = _tls(tmp_path)
+    paths = MasterPaths.under(tmp_path / "working")
+    binaries = PostgresBinaries(**{name: Path(f"/fixture/{name}") for name in PostgresBinaries.__annotations__})
+    ownership: list[tuple[Path, int, int]] = []
+    monkeypatch.setattr("my_data_hub.master_runtime.postgres.os.geteuid", lambda: 0)
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.postgres.os.chown",
+        lambda path, uid, gid: ownership.append((Path(path), uid, gid)),
+    )
+    supervisor = PostgresSupervisor(
+        paths=paths,
+        binaries=binaries,
+        config=PostgresConfig(15432, certificate, key),
+        runner=_Runner(),
+    )
+    supervisor.prepare_directories()
+    owned = {item[0] for item in ownership}
+    assert {paths.pgdata, paths.socket, paths.logs, certificate, key} <= owned
+    assert paths.runtime_events.parent not in owned
+    assert all(uid == KAGGLE_POSTGRES_UID and gid == KAGGLE_POSTGRES_GID for _, uid, gid in ownership)
 
 
 def test_reverse_tunnel_is_loopback_only_and_disables_shell_agent_and_unknown_hosts(tmp_path: Path) -> None:

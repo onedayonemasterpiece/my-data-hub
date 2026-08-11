@@ -76,13 +76,16 @@ contains only the lightweight control ledger/process and no canonical rows.
   hashes. PostgreSQL master fencing, typed blogger import, separate E5/BGE spaces,
   deterministic RRF, and checkpoint verification have executable unit/integration
   contracts. They have **not** yet passed the required real Kaggle matrix.
-- The checkpoint execution path is now wired end to end in code: the master uses
-  the single official adapter inside Kaggle, streams physical/WAL/logical backup
-  artifacts only below `/kaggle/working`, publishes a permanent private exact
-  Dataset version, performs exact numeric-version readback, launches a separate
-  restore verifier Notebook, and advances metadata-only current/previous HEAD by
-  compare-and-swap. A later master boots only from that exact verified HEAD.
-  These statements describe tested code contracts, not a completed real checkpoint.
+- The checkpoint implementation has exact physical/WAL/logical artifacts,
+  numeric-version readback, an independent restore verifier, and metadata-only
+  current/previous HEAD compare-and-swap.  Its former runtime factory would,
+  however, construct a second credentialed Kaggle adapter inside the master
+  Notebook.  That contradicts the owner-approved events-bot/CherryFlash topology:
+  provider credentials and provider mutations remain in the central control
+  adapter.  Production master admission therefore now stops **before provider
+  mutation** with `CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE`; it will not launch
+  an ACTIVE primary that cannot checkpoint.  No provider credential is copied
+  through the per-attempt status Dataset.
 - The FINAL-BLOGGER command now implements the metadata-only external closure and
   the in-master bounded YDB stage. It requires an acknowledged exact 266-row import
   receipt before checkpoint publication, then a verified exact-version checkpoint,
@@ -118,16 +121,23 @@ contains only the lightweight control ledger/process and no canonical rows.
   strict mypy target pass. These remain code and disposable-integration evidence,
   not real-provider or deployment acceptance.
 
-## Exact external blocker
+## Exact blockers and real provider proof
 
 Kaggle authentication is **not** the current blocker. The installed automated
 legacy username/key profile uses the same non-interactive official SDK path as
-the existing events-bot/CherryFlash launchers. Two fresh private runtime
-diagnostics reached `COMPLETE`; the latest emitted `kernel_started`,
-`preflight_ok`, `alive`, `report_written`, and `terminal`, attested its executed
-source hash, returned bounded output, and was then deleted with absence observed.
+the existing events-bot/CherryFlash launchers. Fresh private runtime diagnostics
+reached `COMPLETE`, attested their executed source, returned bounded output, and
+were deleted with absence observed.  A later real private Kaggle run also unpacked
+the pinned portable runtime, started PostgreSQL 18.4,
+created `pgcrypto`, `citext`, `pg_trgm`, and pgvector 0.8.6, evaluated an actual
+vector distance, returned five deterministic custom-state event UUIDs, and then
+deleted both its Notebook and input Dataset through exact claims.  This is a live
+runtime diagnostic, not an operational-matrix PASS.
 
-The actual blocker is the undeployed devstand application/control path:
+The internal blocker is the absence of an approved provider-side checkpoint
+upload/copy mechanism that preserves both the one-central-adapter rule and the
+ban on canonical checkpoint bytes crossing the devstand.  The external blocker
+is the undeployed devstand application/control path:
 `mcp-datahub.kenigevents.ru`, the MCP endpoint, and the identity discovery
 endpoint currently return 502, while the GitHub repository and `devstand`
 Environment contain no deployment/Kaggle/OAuth secrets. Therefore a Kaggle
@@ -138,6 +148,7 @@ Sanitized evidence:
 
 - [first automated runtime-attestation canary](evidence/2026-08-11-operational-mvp/kaggle-runtime-attestation-canary.json)
 - [second automated runtime-attestation canary](evidence/2026-08-11-operational-mvp/kaggle-runtime-attestation-canary-2.json)
+- [real PostgreSQL 18.4 + pgvector Kaggle runtime canary](evidence/2026-08-11-operational-mvp/kaggle-pg18-runtime-canary-live.json)
 - [observed devstand deployment blocker](evidence/2026-08-11-operational-mvp/devstand-live-blocker.json)
 
 Closure requires installing the reviewed control-plane release with the existing

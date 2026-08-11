@@ -12,6 +12,10 @@ from typing import Protocol
 
 from .contracts import MasterPaths
 
+KAGGLE_POSTGRES_UID = 65534
+KAGGLE_POSTGRES_GID = 65534
+SETPRIV = Path("/usr/bin/setpriv")
+
 
 class PostgresRuntimeError(RuntimeError):
     """PostgreSQL runtime precondition or command failure."""
@@ -37,8 +41,20 @@ class SubprocessRunner:
         timeout_seconds: int,
         environment: Mapping[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        command = list(arguments)
+        if os.geteuid() == 0:
+            if not SETPRIV.is_file() or not os.access(SETPRIV, os.X_OK):
+                raise PostgresRuntimeError("root Kaggle runtime requires exact /usr/bin/setpriv")
+            command = [
+                str(SETPRIV),
+                f"--reuid={KAGGLE_POSTGRES_UID}",
+                f"--regid={KAGGLE_POSTGRES_GID}",
+                "--clear-groups",
+                "--",
+                *command,
+            ]
         result = subprocess.run(
-            list(arguments),
+            command,
             check=False,
             capture_output=True,
             text=True,
@@ -191,6 +207,12 @@ class PostgresSupervisor:
         for path in (self.paths.pgdata, self.paths.socket, self.paths.logs, self.paths.runtime_events.parent):
             path.mkdir(parents=True, exist_ok=True, mode=0o700)
             path.chmod(0o700)
+        self._give_tree_to_postgres(self.paths.pgdata)
+        self._give_to_postgres(self.paths.socket)
+        self._give_to_postgres(self.paths.logs)
+        for path in (self.config.tls_certificate, self.config.tls_private_key, self.config.tls_ca):
+            if path is not None:
+                self._give_to_postgres(path)
 
     def initialize_empty(self) -> None:
         self.prepare_directories()
@@ -214,8 +236,32 @@ class PostgresSupervisor:
 
     def write_configuration(self) -> None:
         self.prepare_directories()
-        _atomic_write(self.paths.pgdata / "postgresql.auto.conf", self.config.render(self.paths), mode=0o600)
-        _atomic_write(self.paths.pgdata / "pg_hba.conf", self.config.render_hba(), mode=0o600)
+        auto_conf = self.paths.pgdata / "postgresql.auto.conf"
+        hba = self.paths.pgdata / "pg_hba.conf"
+        _atomic_write(auto_conf, self.config.render(self.paths), mode=0o600)
+        _atomic_write(hba, self.config.render_hba(), mode=0o600)
+        self._give_to_postgres(auto_conf)
+        self._give_to_postgres(hba)
+
+    @staticmethod
+    def _give_to_postgres(path: Path) -> None:
+        if os.geteuid() == 0:
+            os.chown(path, KAGGLE_POSTGRES_UID, KAGGLE_POSTGRES_GID)
+
+    @classmethod
+    def _give_tree_to_postgres(cls, root: Path) -> None:
+        if os.geteuid() != 0:
+            return
+        if root.is_symlink():
+            raise PostgresRuntimeError("PostgreSQL runtime tree root cannot be a symlink")
+        cls._give_to_postgres(root)
+        for directory, names, files in os.walk(root, followlinks=False):
+            base = Path(directory)
+            for name in (*names, *files):
+                child = base / name
+                if child.is_symlink():
+                    raise PostgresRuntimeError("PostgreSQL runtime tree cannot contain symlinks")
+                cls._give_to_postgres(child)
 
     def start(self) -> None:
         log_path = self.paths.logs / "postgres.log"
