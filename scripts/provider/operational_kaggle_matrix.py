@@ -33,10 +33,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from my_data_hub.acceptance.master_lifecycle import (
     CallbackLossEvidence,
+    CleanDrainEvidence,
+    ConcurrentEnsureEvidence,
+    EmptyBootstrapEvidence,
     LeaseExpiryEvidence,
     MasterAcceptanceReceipt,
     OldEpochEvidence,
     RotationSoakEvidence,
+    StaleReplayEvidence,
 )
 from my_data_hub.acceptance.scenario_operator import CheckpointAcceptanceOperationalResult
 from my_data_hub.hashing import canonical_json_bytes
@@ -860,10 +864,97 @@ def _typed_master_output(
     evidence = receipt.evidence
     proofs: dict[str, object]
     lifecycle: list[dict[str, Any]] = []
-    if row["requirement_id"] == "FM08":
+    if row["requirement_id"] == "FM04":
+        if not isinstance(evidence, EmptyBootstrapEvidence):
+            raise RuntimeError("FM04 control receipt has the wrong typed evidence")
+        proofs = {
+            "empty_checkpoint_selected": {
+                "boot_source": evidence.boot_source,
+                "canonical_revision": evidence.canonical_revision,
+            },
+            "postgres_bootstrapped": {
+                "canonical_revision": evidence.canonical_revision,
+                "canonical_row_count": evidence.canonical_row_count,
+            },
+            "master_active": {
+                "service_active": evidence.service_active,
+                "operation_id": str(receipt.binding.operation_id),
+                "epoch": receipt.binding.epoch,
+                "provider_run_ref": locator.provider_run_ref,
+                "provider_kernel_id": locator.provider_kernel_id,
+            },
+        }
+        lifecycle.append(
+            {
+                "gate": "master_boot",
+                "event_id": str(uuid5(NAMESPACE_URL, f"operational:{receipt.task_id}:master_boot")),
+                "started_at": receipt.completed_at.isoformat(),
+                "completed_at": receipt.completed_at.isoformat(),
+                "new_provider_run_ref": locator.provider_run_ref,
+                "new_epoch": receipt.binding.epoch,
+                "operation_id": str(receipt.binding.operation_id),
+            }
+        )
+    elif row["requirement_id"] == "FM07":
+        if not isinstance(evidence, ConcurrentEnsureEvidence):
+            raise RuntimeError("FM07 control receipt has the wrong typed evidence")
+        proofs = {
+            "twenty_requests": {"request_count": evidence.request_count},
+            "one_operation": {
+                "operation_ids": tuple(str(value) for value in evidence.operation_ids)
+            },
+            "one_provider_run": {
+                "provider_run_refs": evidence.provider_run_refs,
+                "provider_kernel_ids": evidence.provider_kernel_ids,
+            },
+            "all_resolved_same_epoch": {"epochs": evidence.epochs},
+        }
+    elif row["requirement_id"] == "FM08":
         if not isinstance(evidence, CallbackLossEvidence):
             raise RuntimeError("FM08 control receipt has the wrong typed evidence")
-        raise RuntimeError("FM08 receipt lacks typed terminated/recovery provider identities")
+        proofs = {
+            "callback_withheld": {
+                "callback_suppressed_once": evidence.callback_suppressed_once,
+                "exact_event_id": str(evidence.exact_event_id),
+                "exact_body_sha256": evidence.exact_body_sha256,
+                "termination_receipt_sha256": evidence.termination_receipt_sha256,
+            },
+            "status_reconciled": {
+                "old_operation_id": str(evidence.old_operation_id),
+                "new_operation_id": str(evidence.new_operation_id),
+                "old_epoch": evidence.old_epoch,
+                "new_epoch": evidence.new_epoch,
+                "control_boot_id_before": str(evidence.control_boot_id_before),
+                "control_boot_id_after": str(evidence.control_boot_id_after),
+                "replay_disposition": evidence.replay_disposition,
+                "service_active_after_recovery": evidence.service_active_after_recovery,
+                "recovery_receipt_sha256": evidence.recovery_receipt_sha256,
+            },
+            "output_identity_reconciled": {
+                "old_provider_run_ref": evidence.old_provider_run_ref,
+                "old_provider_kernel_id": evidence.old_provider_kernel_id,
+                "new_provider_run_ref": evidence.new_provider_run_ref,
+                "new_provider_kernel_id": evidence.new_provider_kernel_id,
+            },
+        }
+    elif row["requirement_id"] == "FM09":
+        if not isinstance(evidence, StaleReplayEvidence):
+            raise RuntimeError("FM09 control receipt has the wrong typed evidence")
+        proofs = {
+            "duplicate_callback_noop": {
+                "exact_event_id": str(evidence.exact_event_id),
+                "exact_body_sha256": evidence.exact_body_sha256,
+                "duplicate_disposition": evidence.duplicate_disposition,
+                "state_sha256_before": evidence.state_sha256_before,
+                "state_sha256_after": evidence.state_sha256_after,
+            },
+            "stale_callback_rejected": {
+                "stale_runtime_auth_rejected": evidence.stale_runtime_auth_rejected,
+            },
+            "stale_output_rejected": {
+                "stale_epoch_rejected": evidence.stale_epoch_rejected,
+            },
+        }
     elif row["requirement_id"] == "FM10":
         if not isinstance(evidence, LeaseExpiryEvidence):
             raise RuntimeError("FM10 control receipt has the wrong typed evidence")
@@ -912,6 +1003,21 @@ def _typed_master_output(
                 "old_provider_run_ref": evidence.old_provider_run_ref,
                 "new_provider_run_ref": evidence.new_provider_run_ref,
             },
+        }
+    elif row["requirement_id"] == "FM12":
+        if not isinstance(evidence, CleanDrainEvidence):
+            raise RuntimeError("FM12 control receipt has the wrong typed evidence")
+        proofs = {
+            "drain_started": {"write_gate_closed": evidence.write_gate_closed},
+            "checkpoint_verified": {
+                "checkpoint_id": str(evidence.checkpoint_id),
+                "exact_version_ref": evidence.exact_version_ref,
+                "manifest_sha256": evidence.manifest_sha256,
+                "exact_readback_verified": evidence.exact_readback_verified,
+                "restore_smoke_verified": evidence.restore_smoke_verified,
+                "head_promoted": evidence.head_promoted,
+            },
+            "terminal_stopped": {"terminal_state": evidence.terminal_state},
         }
     elif row["requirement_id"] == "FM24":
         if not isinstance(evidence, RotationSoakEvidence):
@@ -1038,9 +1144,9 @@ def _trusted_control_receipt(
         if locator.scenario_output is not None:
             raise RuntimeError("driver result mixes typed control receipt and scenario output")
         output = _typed_master_output(plan=plan, row=row, locator=locator)
-        if row["requirement_id"] == "FM11":
+        if row["requirement_id"] in {"FM11", "FM12"}:
             if locator.output_file_sha256 is None:
-                raise RuntimeError("FM11 typed control receipt lacks stopped-master terminal output")
+                raise RuntimeError("stopped-master typed control receipt lacks terminal output")
             result_sha256 = locator.output_file_sha256
         else:
             if any(
@@ -1261,6 +1367,7 @@ def run_operational_matrix(
     for row in plan["scenarios"]:
         scenario_path = _scenario_path(scenario_directory, row)
         owner_pause_path = scenario_path.with_suffix(".owner-pause.json")
+        retry_pre_action_blocker = False
         if scenario_path.is_file():
             existing = json.loads(scenario_path.read_bytes())
             if (
@@ -1278,7 +1385,12 @@ def run_operational_matrix(
                 and blocker.get("code") == RESUMABLE_OWNER_BLOCKER
                 and existing.get("driver_mutations_started") == 0
             )
-            if not resumable_owner_pause:
+            retry_pre_action_blocker = (
+                existing.get("outcome") == "BLOCKED"
+                and existing.get("driver_mutations_started") == 0
+                and not resumable_owner_pause
+            )
+            if not resumable_owner_pause and not retry_pre_action_blocker:
                 receipts.append(existing)
                 continue
         if owner_pause_path.exists():
@@ -1299,7 +1411,12 @@ def run_operational_matrix(
         launch_path = scenario_path.with_suffix(".launch.json")
         reconciliation_path = scenario_path.with_suffix(".reconciled.json")
         reconciliation_loaded = reconciliation_path.exists()
-        resume_only = launch_path.exists()
+        # A completed zero-mutation blocker proves that the prior invocation
+        # stopped before an acceptance action.  Re-probe it as a fresh,
+        # idempotent execute instead of freezing a missing credential/tool for
+        # the lifetime of the matrix plan.  A crash without such a receipt and
+        # the explicit FM16 owner pause both remain resume-only.
+        resume_only = launch_path.exists() and not retry_pre_action_blocker
         request = _driver_request(plan, row, resume_only=resume_only)
         if not resume_only:
             _atomic_write(launch_path, request)

@@ -37,20 +37,15 @@ terminally is a typed `FAIL`, not a blocker.
 Existing safe production surfaces are wired now: FM01 Dataset lifecycle,
 FM02 Notebook lifecycle, FM03 bounded runtime history, FM05/FM14/FM15 through
 the owner-only checkpoint acceptance launcher, FM06 durable restore,
+FM04/FM07--FM12/FM24 through the closed master-lifecycle acceptance protocol,
 FM16--FM19 and FM21 through the single resumable production data workload,
 FM22 Dataset plus Notebook lifecycles, FM23 protected-resource denial, master/
 checkpoint/provider status, stale-epoch denial, blogger accounting/statistics,
 embedding coverage, claim-gated rotation, and the FM20 signed-host-evidence
 cold-start path.
-Unresolved mutation/fault interfaces use a
-scenario-specific code such as `CHECKPOINT_CORRUPTION_FAULT_API_MISSING` or
-`E5_WORKER_SUBMISSION_TOOL_MISSING`; the generic
+Unavailable typed primitives use a scenario-specific code; the generic
 `OPERATIONAL_DRIVER_INTERFACE_MISSING` blocker is not used by the trusted
 driver. This remains a blocked operational state, not a readiness claim.
-
-The current internal gaps are explicit in the executor registry. They include
-empty-bootstrap selection, stale replay controls, and drain control. Privileged actions
-are not attempted until their terminal exact-run evidence contract exists.
 
 ### Evidence-plane scenarios and two-phase cleanup
 
@@ -221,32 +216,30 @@ mutations. Any ambiguous ensure response, lost post-action observation, failure
 to reach ACTIVE, or malformed/empty search result is FAIL with
 `mutations_started: 1`.
 
-### Fault/action blockers retained intentionally
+### Typed master-lifecycle acceptance
 
-- FM09: callback ingestion accepts exact replay from its per-run bearer, but
-  there is no stale-output injection tool.
-- FM12: the master drains itself at its natural lifecycle boundary; there is no
-  authenticated clean-drain/checkpoint/stop request or credential revocation
-  endpoint.
+FM04, FM07--FM12, and FM24 use only the closed
+`acceptance.scenario.request/status` pair. FM04/FM07 are admitted from an exact
+ABSENT projection and omit a target operation; the durable task binds the
+single resulting ACTIVE operation. The other scenarios carry the exact ACTIVE
+operation target. A missing pair is a pre-action typed-primitive blocker;
+once a request may have been accepted, unresolved status is FAIL rather than
+BLOCKED.
 
-FM10, FM11, and FM24 use `acceptance.scenario.request/status` with an exact
-ACTIVE operation target. PASS requires a full validated
+PASS requires a full validated
 `MasterAcceptanceReceipt`, its receipt hash, and the numeric control-owned
-Kaggle carrier with runtime-attested source SHA. FM10 and FM24 are active-master
-scenarios: their durable typed control receipt is the evidence and terminal
-Kaggle output hashes must remain absent. FM11 stops and replaces the old master,
-so it additionally requires the persisted terminal output receipt and exact
-old/new operation, provider run, kernel, and consecutive epoch identities. FM11
-owns the second `clean_rotation` gate. FM24 remains a single-epoch
+Kaggle carrier with runtime-attested source SHA. FM04 proves revision/row-count
+zero and contributes its exact `master_boot` gate. FM07 cross-binds all twenty
+observations to the receipt carrier. FM08 cross-binds terminated and recovery
+run/kernel/epoch identities plus distinct control boot IDs. FM09 derives its
+three fixed assertions only from `StaleReplayEvidence`. FM10 and FM24 remain
+active-master scenarios with no terminal output hashes. FM11 stops and replaces
+the old master; FM12 stops without replacement. Both stopped carriers require
+the persisted terminal output receipt, and FM12 additionally re-reads the
+current checkpoint and exact ABSENT master projection. FM11 owns the second
+`clean_rotation` gate. FM24 remains a single-epoch
 session/credential rotation soak and proves 12 heartbeats, 12 bounded reads,
 checkpoint/recovery receipts, and the 3,600–5,400 second duration.
-
-FM08 now has a default-off production action path: one exact persisted old
-provider run is terminated and fenced, one distinct next-epoch run is admitted,
-and the typed receipt binds both numeric run/kernel identities plus the real
-control-process restart. This is implementation readiness, not live evidence;
-the matrix remains BLOCKED until a deployed run returns that validated durable
-receipt and independent provider reconciliation confirms both run identities.
 
 ## What counts as PASS
 
@@ -315,6 +308,25 @@ with a fence but no receipt sets `resume_only: true`; the driver must reconcile
 the exact run and must not launch another run under the same task identity.
 Completed receipts are consumed only when matrix, commit and planned task
 identity match.
+
+A completed `BLOCKED` receipt with `driver_mutations_started: 0` is deliberately
+re-probed with `resume_only: false`: it proves that the previous invocation did
+not start an action, so a temporarily absent credential or typed catalog entry
+must not freeze the matrix forever. The idempotency identity is unchanged. The
+FM16 owner pause is different: its append-only `.owner-pause.json` fence and
+durable workload state require `resume_only: true`.
+
+`provider-real.yml` is the durable staged controller. For a new run it binds a
+matrix UUID/source commit into the owner-supplied data-workload plan template,
+validates the production config, and creates the evidence-driver configuration
+with absolute controller paths. Its artifact contains the matrix plan, launch/
+reconciliation/pause fences, scenario receipts, and mode-0600 data-workload
+state. A dispatch with `continuation_run_id` must restore that artifact and
+uses `continuation_run_attempt` to select one exact immutable artifact; it
+rejects commit/config drift. `fm16_resume_authorized=true` additionally requires
+restored state and the owner-envelope secret; the envelope is written mode 0600
+under runner temporary storage and is never uploaded. Provider calls still
+traverse the central MCP/Kaggle adapter, and the workflow has no Kaggle token.
 
 ```bash
 python scripts/provider/operational_kaggle_matrix.py preflight

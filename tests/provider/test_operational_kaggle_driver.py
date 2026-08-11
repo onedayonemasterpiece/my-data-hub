@@ -32,12 +32,17 @@ from my_data_hub.acceptance.data_workloads import (
     RequirementEvidence,
 )
 from my_data_hub.acceptance.master_lifecycle import (
+    CallbackLossEvidence,
+    CleanDrainEvidence,
+    ConcurrentEnsureEvidence,
+    EmptyBootstrapEvidence,
     LeaseExpiryEvidence,
     MasterAcceptanceBinding,
     MasterAcceptanceReceipt,
     MasterAcceptanceRequest,
     OldEpochEvidence,
     RotationSoakEvidence,
+    StaleReplayEvidence,
     command_for,
 )
 from my_data_hub.acceptance.scenario_operator import (
@@ -536,13 +541,33 @@ class MasterAcceptanceGateway(FakeGateway):
 
     def _master(self) -> dict[str, Any]:
         self.master_reads += 1
+        if self.request.requirement_id in {"FM04", "FM07"} and self.master_reads == 1:
+            return {
+                "master_state": "ABSENT",
+                "operation_id": None,
+                "instance_id": None,
+                "master_epoch": None,
+                "canonical_revision": None,
+                "lease_expires_at": None,
+                "capabilities": [],
+            }
+        if self.request.requirement_id == "FM12" and self.master_reads > 1:
+            return {
+                "master_state": "ABSENT",
+                "operation_id": None,
+                "instance_id": None,
+                "master_epoch": None,
+                "canonical_revision": None,
+                "lease_expires_at": None,
+                "capabilities": [],
+            }
         replacement = self.request.requirement_id in {"FM08", "FM11"} and self.master_reads > 1
         return {
             "master_state": "ACTIVE",
             "operation_id": str(UUID(int=9) if replacement else self.target_operation_id),
             "instance_id": str(UUID(int=20 if replacement else 19)),
             "master_epoch": 2 if replacement else 1,
-            "canonical_revision": 4,
+            "canonical_revision": 0 if self.request.requirement_id == "FM04" else 4,
             "lease_expires_at": "2026-08-11T02:00:00Z",
             "provider_run_ref": "owner/master/8" if replacement else "owner/master/7",
             "provider_kernel_id": 8 if replacement else 7,
@@ -563,7 +588,9 @@ class MasterAcceptanceGateway(FakeGateway):
             scenario=self.request.requirement_id,
             idempotency_key=f"operational:{self.request.matrix_id}:{self.request.requirement_id}:master",
             source_revision=self.request.commit_sha,
-            target_operation_id=self.target_operation_id,
+            target_operation_id=(
+                None if self.request.requirement_id in {"FM04", "FM07"} else self.target_operation_id
+            ),
         )
         command = command_for(master_request, binding)
         receipt = MasterAcceptanceReceipt(
@@ -585,7 +612,7 @@ class MasterAcceptanceGateway(FakeGateway):
                 "output_tree_sha256": "c" * 64,
                 "output_receipt_sha256": "d" * 64,
             }
-            if self.request.requirement_id == "FM11"
+            if self.request.requirement_id in {"FM11", "FM12"}
             else {
                 "output_file_name": None,
                 "output_file_sha256": None,
@@ -625,10 +652,19 @@ class MasterAcceptanceGateway(FakeGateway):
         self.calls.append((profile, tool, dict(arguments)))
         if tool == "master.status":
             return self._master()
+        if tool == "checkpoint.status" and self.request.requirement_id == "FM12":
+            assert isinstance(self.evidence, CleanDrainEvidence)
+            return {
+                "current_checkpoint_id": str(self.evidence.checkpoint_id),
+                "current_exact_version_ref": self.evidence.exact_version_ref,
+            }
         if tool == "acceptance.scenario.status":
             return self.status or {"found": False}
         if tool == "acceptance.scenario.request":
-            assert arguments["target_operation_id"] == str(self.target_operation_id)
+            if self.request.requirement_id in {"FM04", "FM07"}:
+                assert "target_operation_id" not in arguments
+            else:
+                assert arguments["target_operation_id"] == str(self.target_operation_id)
             self.status = self._terminal()
             return self.status
         raise AssertionError(f"unexpected master acceptance call: {tool}")
@@ -773,10 +809,6 @@ def test_each_executor_runs_only_safe_existing_probes_then_names_exact_gap(
     result = asyncio.run(execute(_request(ordinal), gateway))
     spec = EXECUTORS[ordinal - 1]
     assert result.outcome == "BLOCKED"
-    if ordinal == 8:
-        assert result.blocker_code == "FM08_ABRUPT_MASTER_PROVIDER_IDENTITIES_MISSING"
-        assert result.mutations_started == 0
-        return
     assert result.blocker_code == spec.gap_code
     assert result.integration_dependency is not None
     assert result.integration_dependency.startswith(spec.gap_dependency)
@@ -802,6 +834,64 @@ def test_each_executor_runs_only_safe_existing_probes_then_names_exact_gap(
 @pytest.mark.parametrize(
     ("ordinal", "evidence"),
     [
+        (
+            4,
+            EmptyBootstrapEvidence(
+                kind="EMPTY_MASTER_BOOTSTRAP",
+                boot_source="empty_baseline",
+                canonical_revision=0,
+                canonical_row_count=0,
+                service_active=True,
+            ),
+        ),
+        (
+            7,
+            ConcurrentEnsureEvidence(
+                kind="CONCURRENT_ENSURE_SINGLE_RUN",
+                request_count=20,
+                operation_ids=(UUID("11111111-1111-4111-8111-111111111111"),) * 20,
+                provider_run_refs=("owner/master/7",) * 20,
+                provider_kernel_ids=(7,) * 20,
+                epochs=(1,) * 20,
+            ),
+        ),
+        (
+            8,
+            CallbackLossEvidence(
+                kind="CALLBACK_LOSS_RECOVERY",
+                callback_suppressed_once=True,
+                exact_event_id=UUID(int=30),
+                exact_body_sha256="1" * 64,
+                control_boot_id_before=UUID(int=31),
+                control_boot_id_after=UUID(int=32),
+                replay_disposition="accepted",
+                service_active_after_recovery=True,
+                old_master_abruptly_terminated=True,
+                old_operation_id=UUID("11111111-1111-4111-8111-111111111111"),
+                new_operation_id=UUID(int=9),
+                old_epoch=1,
+                new_epoch=2,
+                old_provider_run_ref="owner/master/7",
+                old_provider_kernel_id=7,
+                new_provider_run_ref="owner/master/8",
+                new_provider_kernel_id=8,
+                termination_receipt_sha256="2" * 64,
+                recovery_receipt_sha256="3" * 64,
+            ),
+        ),
+        (
+            9,
+            StaleReplayEvidence(
+                kind="STALE_REPLAY_REJECTION",
+                exact_event_id=UUID(int=33),
+                exact_body_sha256="4" * 64,
+                duplicate_disposition="duplicate",
+                stale_runtime_auth_rejected=True,
+                stale_epoch_rejected=True,
+                state_sha256_before="5" * 64,
+                state_sha256_after="5" * 64,
+            ),
+        ),
         (
             10,
             LeaseExpiryEvidence(
@@ -840,6 +930,20 @@ def test_each_executor_runs_only_safe_existing_probes_then_names_exact_gap(
                 handoff_checkpoint_id=UUID(int=34),
                 write_denial_receipt_sha256="3" * 64,
                 tunnel_denial_receipt_sha256="4" * 64,
+            ),
+        ),
+        (
+            12,
+            CleanDrainEvidence(
+                kind="CLEAN_DRAIN",
+                write_gate_closed=True,
+                checkpoint_id=UUID(int=36),
+                exact_version_ref="owner/checkpoint/12",
+                manifest_sha256="8" * 64,
+                exact_readback_verified=True,
+                restore_smoke_verified=True,
+                head_promoted=True,
+                terminal_state="STOPPED",
             ),
         ),
         (
@@ -884,13 +988,20 @@ def test_master_acceptance_scenarios_bind_typed_receipt_and_exact_carrier(
     assert result.control_receipt is not None
     assert result.control_receipt.evidence == evidence
     assert result.provider_run_ref == "owner/master/7"
-    assert result.output_receipt_sha256 == ("d" * 64 if request.requirement_id == "FM11" else None)
+    assert result.output_receipt_sha256 == (
+        "d" * 64 if request.requirement_id in {"FM11", "FM12"} else None
+    )
     assert result.scenario_output is None
     assert [tool for _profile, tool, _arguments in gateway.calls].count(
         "acceptance.scenario.request"
     ) == 1
     if request.requirement_id == "FM11":
         assert [item.gate for item in result.control_lifecycle] == ["clean_rotation"]
+    elif request.requirement_id == "FM08":
+        assert [item.gate for item in result.control_lifecycle] == [
+            "abrupt_master_termination",
+            "control_plane_restart",
+        ]
     else:
         assert result.control_lifecycle == ()
     plan = build_plan(
@@ -913,17 +1024,60 @@ def test_master_acceptance_scenarios_bind_typed_receipt_and_exact_carrier(
     )
     Draft202012Validator(scenario_schema, format_checker=FormatChecker()).validate(receipt)
 
+    reconcile_request = DriverRequest.model_validate(
+        request.model_copy(
+            update={
+                "phase": "RECONCILE",
+                "resume_only": True,
+                "cleanup": CleanupBinding(
+                    provider_ref=str(result.provider_ref),
+                    provider_run_ref=str(result.provider_run_ref),
+                    provider_kernel_id=int(result.provider_kernel_id or 0),
+                    source_version=int(result.source_version or 0),
+                    source_sha256=str(result.source_sha256),
+                    output_receipt_sha256=result.output_receipt_sha256,
+                    output_file_sha256=result.output_file_sha256,
+                    output_tree_sha256=result.output_tree_sha256,
+                ),
+            }
+        ).model_dump(mode="json")
+    )
+    reconciled = asyncio.run(execute(reconcile_request, gateway))
+    assert reconciled.outcome == "PASS" and reconciled.phase == "RECONCILE"
+    assert reconciled.control_receipt == result.control_receipt
+    assert reconciled.provider_run_ref == result.provider_run_ref
 
-def test_fm08_stays_pre_action_blocked_without_typed_abrupt_provider_runs() -> None:
-    gateway = FakeGateway()
+
+def test_fm08_stays_pre_action_blocked_without_typed_acceptance_primitive() -> None:
+    gateway = FakeGateway(missing_tool="acceptance.scenario.request")
 
     result = asyncio.run(execute(_request(8), gateway))
 
     assert result.outcome == "BLOCKED"
-    assert result.blocker_code == "FM08_ABRUPT_MASTER_PROVIDER_IDENTITIES_MISSING"
+    assert result.blocker_code == "FM08_MCP_TOOLSET_INCOMPLETE"
     assert result.mutations_started == 0
     called = [tool for _profile, tool, _arguments in gateway.calls]
-    assert called == ["master.status"]
+    assert called == []
+    assert "acceptance.scenario.request" not in called
+
+
+def test_preboot_resume_reconciles_bound_task_without_requiring_absent_master() -> None:
+    request = _request(4).model_copy(update={"resume_only": True})
+    evidence = EmptyBootstrapEvidence(
+        kind="EMPTY_MASTER_BOOTSTRAP",
+        boot_source="empty_baseline",
+        canonical_revision=0,
+        canonical_row_count=0,
+        service_active=True,
+    )
+    gateway = MasterAcceptanceGateway(request, evidence)
+    gateway.status = gateway._terminal()
+    gateway.master_reads = 1
+
+    result = asyncio.run(execute(request, gateway))
+
+    assert result.outcome == "PASS"
+    called = [tool for _profile, tool, _arguments in gateway.calls]
     assert "acceptance.scenario.request" not in called
 
 

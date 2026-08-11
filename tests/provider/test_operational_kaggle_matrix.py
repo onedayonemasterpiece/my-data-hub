@@ -513,6 +513,45 @@ def test_fm16_owner_pause_resumes_same_launch_and_stops_dependents_until_authori
     assert json.loads(pause_path.read_text())["blocker"]["code"] == "FM16_AWAITING_OWNER_AUTHORIZATION"
 
 
+def test_zero_mutation_blockers_are_reprobed_without_resume_only_freeze(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    requests: list[dict[str, object]] = []
+
+    def invoke(request: dict[str, object], *, timeout_seconds: int) -> DriverResult:
+        assert timeout_seconds == 7200
+        requests.append(dict(request))
+        return DriverResult.model_validate(
+            {
+                "schema_version": "my-data-hub-operational-kaggle-driver-result.v2",
+                "phase": "EXECUTE",
+                "outcome": "BLOCKED",
+                "scenario": request["scenario"],
+                "task_run_id": request["task_run_id"],
+                "blocker_code": "UNIT_TEST_PRE_ACTION_DEPENDENCY",
+                "integration_dependency": "unit-test pre-action dependency",
+                "mutations_started": 0,
+                "capability_checks": [],
+                "cleanup_state": "NOT_REQUIRED",
+            }
+        )
+
+    monkeypatch.setattr(matrix_module, "_exact_commit", lambda _root: "a" * 40)
+    monkeypatch.setattr(matrix_module, "_invoke_driver", invoke)
+    kwargs = {
+        "ledger_path": tmp_path / "ledger.sqlite3",
+        "plan_path": tmp_path / "plan.json",
+        "receipt_path": tmp_path / "summary.json",
+        "scenario_directory": tmp_path / "scenarios",
+        "matrix_id": UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+    }
+
+    assert run_operational_matrix(**kwargs) == EXTERNAL_BLOCKED  # type: ignore[arg-type]
+    assert run_operational_matrix(**kwargs) == EXTERNAL_BLOCKED  # type: ignore[arg-type]
+    fm01 = [item for item in requests if item["requirement_id"] == "FM01"]
+    assert [item["resume_only"] for item in fm01] == [False, False]
+
+
 @pytest.mark.parametrize(
     ("schema_name", "example_name"),
     [
@@ -548,3 +587,9 @@ def test_provider_workflow_runs_operational_matrix_not_smoke_surrogate() -> None
     assert "MY_DATA_HUB_OPERATIONAL_DRIVER_JSON" not in workflow
     assert "KAGGLE_API_TOKEN" not in workflow
     assert "timeout-minutes: 360" in workflow
+    assert "actions/download-artifact@v4" in workflow
+    assert "continuation_run_id" in workflow
+    assert "fm16_resume_authorized" in workflow
+    assert "operational-data-workload-state.json" in workflow
+    assert "MY_DATA_HUB_OPERATIONAL_EVIDENCE_DRIVER_JSON" in workflow
+    assert "provider-real-controller-${{ github.run_id }}-${{ github.run_attempt }}" in workflow
