@@ -389,7 +389,7 @@ class KaggleMCPProviderGateway:
         if tool == "provider.resources.version":
             return self._version(provider_ref, control_class, payload, principal)
         if tool == "provider.resources.run":
-            return self._run(provider_ref, control_class, payload)
+            return self._run(provider_ref, control_class, payload, principal)
         if tool == "provider.resources.read":
             return self._read(provider_ref, control_class, payload, principal)
         if tool == "provider.resources.delete":
@@ -441,7 +441,7 @@ class KaggleMCPProviderGateway:
             control_class=control_class,
             disposable=bool(payload["disposable"]),
         )
-        self._register_dataset(result, exchange_manifest=exchange_manifest)
+        self._register_dataset(result, created_by=principal.subject, exchange_manifest=exchange_manifest)
         return self._dataset_response(result)
 
     def _version(
@@ -498,15 +498,19 @@ class KaggleMCPProviderGateway:
             )
         finally:
             self.ledger.release_resource_lease(str(lease.lease_id), principal.subject, lease.fencing_token)
-        self._register_dataset(result, exchange_manifest=exchange_manifest)
+        self._register_dataset(result, created_by=principal.subject, exchange_manifest=exchange_manifest)
         return self._dataset_response(result)
 
     def _run(
-        self, provider_ref: str, control_class: ControlClass, payload: Mapping[str, Any]
+        self,
+        provider_ref: str,
+        control_class: ControlClass,
+        payload: Mapping[str, Any],
+        principal: AccessIdentity,
     ) -> dict[str, Any]:
         required = {
             "kind", "task_id", "effect_id", "idempotency_key", "task_run_id", "title",
-            "code_file", "kernel_type", "language", "source_utf8", "dataset_sources", "disposable",
+            "code_file", "kernel_type", "language", "source_utf8", "dataset_inputs", "disposable",
         }
         optional = {"timeout_seconds"}
         if set(payload) - optional != required or not required <= set(payload):
@@ -516,13 +520,20 @@ class KaggleMCPProviderGateway:
         source = str(payload["source_utf8"]).encode("utf-8")
         if len(source) > 256 * 1024:
             raise ValueError("provider notebook source exceeds the bounded contract")
+        task_id = UUID(str(payload["task_id"]))
         task_run_id = UUID(str(payload["task_run_id"]))
         source_sha256 = hashlib.sha256(source).hexdigest()
-        sources = tuple(str(item) for item in payload["dataset_sources"])
+        sources, input_claims = self._authorize_run_inputs(
+            notebook_ref=provider_ref,
+            task_id=task_id,
+            value=payload["dataset_inputs"],
+            principal=principal,
+        )
         arguments = {
             "task_run_id": str(task_run_id),
             "source_sha256": source_sha256,
             "dataset_sources": sources,
+            "dataset_inputs": input_claims,
             "control_class": control_class.value,
             "disposable": bool(payload["disposable"]),
         }
@@ -772,11 +783,16 @@ class KaggleMCPProviderGateway:
         )
 
     def _register_dataset(
-        self, result: Any, *, exchange_manifest: ExchangeManifest | None = None
+        self,
+        result: Any,
+        *,
+        created_by: str,
+        exchange_manifest: ExchangeManifest | None = None,
     ) -> None:
         metadata = {
             "claim": result.claim.model_dump(mode="json"),
             "identity": result.identity.model_dump(mode="json"),
+            "mcp_access": {"created_by": created_by},
         }
         if exchange_manifest is not None:
             metadata["exchange_access"] = {
@@ -801,6 +817,107 @@ class KaggleMCPProviderGateway:
             state="complete",
             metadata=metadata,
         )
+
+    def _authorize_run_inputs(
+        self,
+        *,
+        notebook_ref: str,
+        task_id: UUID,
+        value: Any,
+        principal: AccessIdentity,
+    ) -> tuple[tuple[str, ...], tuple[dict[str, Any], ...]]:
+        """Resolve only exact, claim-bound private Dataset inputs.
+
+        Kaggle attaches Dataset sources with the configured account's
+        credentials. A caller-supplied slug/latest would therefore bypass the
+        control-class boundary. Every source is resolved to an already
+        registered numeric version before the adapter sees it.
+        """
+
+        if not isinstance(value, list) or len(value) > 16:
+            raise PermissionError("provider run requires a bounded exact registered input claim list")
+        notebook_owner = notebook_ref.split("/", 1)[0]
+        observed: set[tuple[str, int]] = set()
+        sources: list[str] = []
+        normalized: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, Mapping) or set(item) != {
+                "resource_ref",
+                "provider_version",
+                "claim_sha256",
+                "control_class",
+            }:
+                raise PermissionError("provider run requires exact registered input claims")
+            resource_ref = item["resource_ref"]
+            provider_version = item["provider_version"]
+            claim_sha256 = item["claim_sha256"]
+            control_class_value = item["control_class"]
+            if (
+                not isinstance(resource_ref, str)
+                or len(resource_ref.split("/")) != 2
+                or not isinstance(provider_version, int)
+                or isinstance(provider_version, bool)
+                or provider_version < 1
+                or not isinstance(claim_sha256, str)
+                or not isinstance(control_class_value, str)
+            ):
+                raise PermissionError("provider run input must bind an exact numeric registered claim")
+            try:
+                input_class = ControlClass(control_class_value)
+            except ValueError as exc:
+                raise PermissionError("provider run input control class is forbidden") from exc
+            if input_class not in {ControlClass.MCP_MANAGED, ControlClass.MCP_EXCHANGE}:
+                raise PermissionError("provider run input control class is forbidden")
+            claim = self._claim(
+                resource_ref,
+                input_class,
+                claim_sha256,
+                ProviderKind.DATASET,
+            )
+            if claim.provider_version != provider_version:
+                raise PermissionError("provider run input claim does not bind the exact numeric version")
+            projection = self.ledger.provider_resource(resource_ref, str(provider_version))
+            if (
+                projection is None
+                or projection.get("provider") != "kaggle"
+                or projection.get("resource_kind") != ProviderKind.DATASET.value
+                or projection.get("source_identity") != str(claim.task_id)
+                or projection.get("source_version") != str(provider_version)
+                or projection.get("control_class") != input_class.value
+                or projection.get("private") is not True
+            ):
+                raise PermissionError("provider run input lacks an exact registered projection")
+            if input_class is ControlClass.MCP_MANAGED:
+                access = projection.get("metadata", {}).get("mcp_access")
+                if (
+                    claim.task_id != task_id
+                    or resource_ref.split("/", 1)[0] != notebook_owner
+                    or not isinstance(access, Mapping)
+                    or access.get("created_by") != principal.subject
+                ):
+                    raise PermissionError("mcp_managed run input requires the same task and owner")
+            else:
+                self._authorize_exchange_access(claim, principal, action="read")
+            self.policy.authorize(
+                self._resource(claim, state=str(projection.get("state", "recorded"))),
+                ProviderAction.DOWNLOAD,
+                principal=principal.subject,
+                now=self.ledger.clock.now(),
+            )
+            source_key = (resource_ref, provider_version)
+            if source_key in observed:
+                raise PermissionError("provider run input claims must be unique")
+            observed.add(source_key)
+            sources.append(f"{resource_ref}/{provider_version}")
+            normalized.append(
+                {
+                    "resource_ref": resource_ref,
+                    "provider_version": provider_version,
+                    "claim_sha256": claim.claim_sha256,
+                    "control_class": input_class.value,
+                }
+            )
+        return tuple(sources), tuple(normalized)
 
     def _authorize_exchange_access(
         self,

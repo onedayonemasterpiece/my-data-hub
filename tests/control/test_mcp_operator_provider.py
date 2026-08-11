@@ -162,6 +162,7 @@ class FakeAdapter:
         self.output_bytes = b'{"accepted":true}'
         self.create_calls = 0
         self.version_calls = 0
+        self.run_dataset_sources: tuple[str, ...] | None = None
         self.run_calls = 0
         self.delete_calls = 0
 
@@ -217,8 +218,9 @@ class FakeAdapter:
     def read_private_dataset(self, *, provider_ref, version):  # type: ignore[no-untyped-def]
         return self.datasets[(provider_ref, version)]
 
-    def push_private_notebook(self, *, intent, task_run_id, source, control_class, disposable, **_kwargs):  # type: ignore[no-untyped-def]
+    def push_private_notebook(self, *, intent, task_run_id, source, control_class, disposable, **kwargs):  # type: ignore[no-untyped-def]
         self.run_calls += 1
+        self.run_dataset_sources = tuple(kwargs.get("dataset_sources", ()))
         source_identity = KaggleKernelSourceIdentity(
             provider_ref=intent.provider_ref,
             source_version=1,
@@ -303,9 +305,49 @@ class FakeAdapter:
         return SimpleNamespace(output_tree_sha256="9" * 64, file_count=1)
 
 
+def _dataset_input(result: dict[str, object]) -> dict[str, object]:
+    return {
+        "resource_ref": result["provider_ref"],
+        "provider_version": result["provider_version"],
+        "claim_sha256": result["claim_sha256"],
+        "control_class": "mcp_managed",
+    }
+
+
+def _run_request(
+    *,
+    task_id: object,
+    dataset_inputs: list[dict[str, object]],
+    notebook_ref: str = "owner/mcp-notebook",
+    idempotency_key: str | None = None,
+) -> dict[str, object]:
+    task_run_id = uuid4()
+    return {
+        "resource_ref": notebook_ref,
+        "control_class": "mcp_managed",
+        "private": True,
+        "payload": {
+            "kind": "notebook",
+            "task_id": str(task_id),
+            "effect_id": str(uuid4()),
+            "idempotency_key": idempotency_key or f"provider-run-{uuid4()}",
+            "task_run_id": str(task_run_id),
+            "title": "mcp-notebook",
+            "code_file": "worker.py",
+            "kernel_type": "script",
+            "language": "python",
+            "source_utf8": f"# {task_run_id}\nprint('ok')\n",
+            "dataset_inputs": dataset_inputs,
+            "disposable": True,
+        },
+    }
+
+
 def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_path: Path) -> None:
     ledger = ControlLedger(tmp_path / "provider.sqlite3")
-    gateway = KaggleMCPProviderGateway(ledger, FakeAdapter(ledger))  # type: ignore[arg-type]
+    adapter = FakeAdapter(ledger)
+    gateway = KaggleMCPProviderGateway(ledger, adapter)  # type: ignore[arg-type]
+    task_id = uuid4()
     common = {
         "resource_ref": "owner/mcp-data",
         "control_class": "mcp_managed",
@@ -317,7 +359,7 @@ def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_
             **common,
             "payload": {
                 "kind": "dataset",
-                "task_id": str(uuid4()),
+                "task_id": str(task_id),
                 "effect_id": str(uuid4()),
                 "idempotency_key": "provider-create-1",
                 "title": "MCP data",
@@ -353,29 +395,14 @@ def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_
     assert b"must-not-be-journaled" not in ledger.path.read_bytes()
 
     task_run_id = uuid4()
-    notebook = gateway.invoke(
-        "provider.resources.run",
-        {
-            "resource_ref": "owner/mcp-notebook",
-            "control_class": "mcp_managed",
-            "private": True,
-            "payload": {
-                "kind": "notebook",
-                "task_id": str(uuid4()),
-                "effect_id": str(uuid4()),
-                "idempotency_key": "provider-run-1",
-                "task_run_id": str(task_run_id),
-                "title": "mcp-notebook",
-                "code_file": "worker.py",
-                "kernel_type": "script",
-                "language": "python",
-                "source_utf8": f"# {task_run_id}\nprint('ok')\n",
-                "dataset_sources": [],
-                "disposable": True,
-            },
-        },
-        principal(),
+    run_request = _run_request(
+        task_id=task_id,
+        dataset_inputs=[_dataset_input(created)],
+        idempotency_key="provider-run-1",
     )
+    run_request["payload"]["task_run_id"] = str(task_run_id)  # type: ignore[index]
+    notebook = gateway.invoke("provider.resources.run", run_request, principal())
+    assert adapter.run_dataset_sources == ("owner/mcp-data/1",)
     notebook_read = gateway.invoke(
         "provider.resources.read",
         {
@@ -405,6 +432,110 @@ def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_
         principal(),
     )
     assert deleted["outcome"] == "applied"
+
+
+def test_provider_run_rejects_legacy_raw_dataset_source_before_adapter(
+    tmp_path: Path,
+) -> None:
+    ledger = ControlLedger(tmp_path / "provider.sqlite3")
+    adapter = FakeAdapter(ledger)
+    gateway = KaggleMCPProviderGateway(ledger, adapter)  # type: ignore[arg-type]
+
+    request = _run_request(task_id=uuid4(), dataset_inputs=[])
+    payload = request["payload"]
+    assert isinstance(payload, dict)
+    payload.pop("dataset_inputs")
+    payload["dataset_sources"] = ["owner/orchestrator-checkpoints"]
+    with pytest.raises(ValueError, match="exact contract"):
+        gateway.invoke(
+            "provider.resources.run",
+            request,
+            principal(),
+        )
+
+    assert adapter.run_dataset_sources is None
+
+
+def test_provider_run_rejects_unregistered_and_inexact_input_claims_before_adapter(
+    tmp_path: Path,
+) -> None:
+    ledger = ControlLedger(tmp_path / "provider.sqlite3")
+    adapter = FakeAdapter(ledger)
+    gateway = KaggleMCPProviderGateway(ledger, adapter)  # type: ignore[arg-type]
+    task_id = uuid4()
+    common = {"resource_ref": "owner/mcp-data", "control_class": "mcp_managed", "private": True}
+    created = gateway.invoke(
+        "provider.resources.create",
+        {
+            **common,
+            "payload": {
+                "kind": "dataset",
+                "task_id": str(task_id),
+                "effect_id": str(uuid4()),
+                "idempotency_key": "provider-create-input-bounds",
+                "title": "MCP data",
+                "disposable": True,
+                "files": {"payload.txt": "bounded"},
+            },
+        },
+        principal(),
+    )
+    exact = _dataset_input(created)
+    forbidden_inputs = [
+        ({**exact, "provider_version": "latest"}, "exact numeric"),
+        ({**exact, "provider_version": 2}, "exact numeric version"),
+        ({**exact, "claim_sha256": "a" * 64}, "no exact registered claim"),
+        ({**exact, "control_class": "orchestrator_protected"}, "control class is forbidden"),
+        ({**exact, "control_class": "external_read_only"}, "control class is forbidden"),
+        ({**exact, "control_class": "unknown"}, "control class is forbidden"),
+    ]
+    for dataset_input, message in forbidden_inputs:
+        with pytest.raises(PermissionError, match=message):
+            gateway.invoke(
+                "provider.resources.run",
+                _run_request(task_id=task_id, dataset_inputs=[dataset_input]),
+                principal(),
+            )
+
+    assert adapter.run_calls == 0
+
+
+def test_provider_run_enforces_managed_same_task_namespace_and_creator(
+    tmp_path: Path,
+) -> None:
+    ledger = ControlLedger(tmp_path / "provider.sqlite3")
+    adapter = FakeAdapter(ledger)
+    gateway = KaggleMCPProviderGateway(ledger, adapter)  # type: ignore[arg-type]
+    task_id = uuid4()
+    created = gateway.invoke(
+        "provider.resources.create",
+        {
+            "resource_ref": "owner/mcp-data",
+            "control_class": "mcp_managed",
+            "private": True,
+            "payload": {
+                "kind": "dataset",
+                "task_id": str(task_id),
+                "effect_id": str(uuid4()),
+                "idempotency_key": "provider-create-owner-bounds",
+                "title": "MCP data",
+                "disposable": True,
+                "files": {"payload.txt": "bounded"},
+            },
+        },
+        principal(),
+    )
+    exact = _dataset_input(created)
+    denied = [
+        (_run_request(task_id=uuid4(), dataset_inputs=[exact]), principal()),
+        (_run_request(task_id=task_id, dataset_inputs=[exact], notebook_ref="other/notebook"), principal()),
+        (_run_request(task_id=task_id, dataset_inputs=[exact]), principal("different-principal")),
+    ]
+    for request, caller in denied:
+        with pytest.raises(PermissionError, match="same task and owner"):
+            gateway.invoke("provider.resources.run", request, caller)
+
+    assert adapter.run_calls == 0
 
 
 def _exchange_manifest(
@@ -453,7 +584,8 @@ def test_exchange_gateway_binds_creator_recipients_ttl_manifest_and_encryption(
 ) -> None:
     clock = DeterministicClock(datetime(2026, 8, 11, 12, tzinfo=UTC))
     ledger = ControlLedger(tmp_path / "exchange.sqlite3", clock=clock)
-    gateway = KaggleMCPProviderGateway(ledger, FakeAdapter(ledger))  # type: ignore[arg-type]
+    adapter = FakeAdapter(ledger)
+    gateway = KaggleMCPProviderGateway(ledger, adapter)  # type: ignore[arg-type]
     common = {
         "resource_ref": "owner/mcp-exchange",
         "control_class": "mcp_exchange",
@@ -511,6 +643,36 @@ def test_exchange_gateway_binds_creator_recipients_ttl_manifest_and_encryption(
             },
             principal("recipient"),
         )
+
+    exchange_input = {
+        "resource_ref": created["provider_ref"],
+        "provider_version": created["provider_version"],
+        "claim_sha256": created["claim_sha256"],
+        "control_class": "mcp_exchange",
+    }
+    gateway.invoke(
+        "provider.resources.run",
+        _run_request(task_id=uuid4(), dataset_inputs=[exchange_input]),
+        principal("recipient"),
+    )
+    assert adapter.run_dataset_sources == ("owner/mcp-exchange/1",)
+    assert adapter.run_calls == 1
+    with pytest.raises(PermissionError, match="intended exchange recipient"):
+        gateway.invoke(
+            "provider.resources.run",
+            _run_request(task_id=uuid4(), dataset_inputs=[exchange_input]),
+            principal(),
+        )
+    assert adapter.run_calls == 1
+
+    clock.advance(delta=timedelta(days=2))
+    with pytest.raises(PermissionError, match="exchange resource has expired"):
+        gateway.invoke(
+            "provider.resources.run",
+            _run_request(task_id=uuid4(), dataset_inputs=[exchange_input]),
+            principal("recipient"),
+        )
+    assert adapter.run_calls == 1
 
     plaintext_confidential = _exchange_manifest(
         content="plaintext",
