@@ -13,7 +13,7 @@
 - Exact capability/request/closure schemas and synthetic examples describe the future live interface without claiming it exists.
 - Fake interfaces cover the complete state machine with `live_evidence=false`; generated worker metadata tests bind the exact pinned E5/BGE revisions, primary-source hashes, privacy, and protected control class.
 
-Integration hardening at `a7524eb39b20dfa43c0216641df635fab1d268fe`
+Integration hardening at `699f5b333dc40218f6a7d033a974ee356881108e`
 additionally rejects partial FINAL-BLOGGER receipts, non-numeric checkpoint refs,
 wrong checkpoint manifest hashes, and worker provider/source identities that do
 not exactly match `WORKER_ASSETS`. The operator bearer is now environment-only.

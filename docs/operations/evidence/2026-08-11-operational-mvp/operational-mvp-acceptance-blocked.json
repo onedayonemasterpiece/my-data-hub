@@ -21,7 +21,7 @@
     {
       "name": "code_and_disposable_integration",
       "outcome": "PASS",
-      "evidence": "655 tests passed with one opt-in disposable PostgreSQL test skipped; repository validator 3085/0"
+      "evidence": "656 tests passed with one opt-in disposable PostgreSQL test skipped; repository validator 3085/0"
     },
     {
       "name": "readonly_ydb_inventory",

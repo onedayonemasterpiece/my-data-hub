@@ -101,9 +101,9 @@ contains only the lightweight control ledger/process and no canonical rows.
   exit `78`; it is not the required operational master/import/embedding/restore
   scenario matrix.
 - At pre-documentation integration commit
-  `a7524eb39b20dfa43c0216641df635fab1d268fe`, local validation reports 3,085
-  repository checks with zero errors and 655 tests pass with only the separately
-  opt-in live PostgreSQL test skipped (656 collected). That disposable PostgreSQL
+  `699f5b333dc40218f6a7d033a974ee356881108e`, local validation reports 3,085
+  repository checks with zero errors and 656 tests pass with only the separately
+  opt-in live PostgreSQL test skipped (657 collected). That disposable PostgreSQL
   18 fencing test passes when explicitly enabled. Strict type checks cover the
   high-risk protocol/manifest modules and a reachable-history secret scan passes.
   These results are code and disposable-integration evidence, not real-provider
