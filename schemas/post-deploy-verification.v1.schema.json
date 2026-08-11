@@ -1,0 +1,280 @@
+{
+  "$defs": {
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "$id": "https://my-data-hub.invalid/schemas/post-deploy-verification.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "deployment_evidence": {
+      "additionalProperties": false,
+      "properties": {
+        "deployed_commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "evidence_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "host_id_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "installed_release_tree_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "local_database_absent": {
+          "const": true
+        },
+        "process_kill_recovered": {
+          "const": true
+        },
+        "reboot_autostart_verified": {
+          "const": true
+        },
+        "schema_version": {
+          "const": "my-data-hub-deployment-evidence.v1"
+        },
+        "service_image_ids": {
+          "additionalProperties": false,
+          "properties": {
+            "control-plane": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "oauth-server": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "remote-mcp": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "control-plane",
+            "oauth-server",
+            "remote-mcp"
+          ],
+          "type": "object"
+        },
+        "signing_key_id": {
+          "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+          "type": "string"
+        },
+        "source_identity": {
+          "const": "onedayonemasterpiece/my-data-hub"
+        },
+        "source_tree_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "verified": {
+          "const": true
+        }
+      },
+      "required": [
+        "verified",
+        "schema_version",
+        "source_identity",
+        "deployed_commit",
+        "host_id_sha256",
+        "source_tree_sha256",
+        "installed_release_tree_sha256",
+        "service_image_ids",
+        "signing_key_id",
+        "evidence_sha256",
+        "process_kill_recovered",
+        "reboot_autostart_verified",
+        "local_database_absent"
+      ],
+      "type": "object"
+    },
+    "dns_tls": {
+      "additionalProperties": false,
+      "properties": {
+        "certificate_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "dns_global_address_count": {
+          "maximum": 64,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "tls_version": {
+          "enum": [
+            "TLSv1.2",
+            "TLSv1.3"
+          ]
+        }
+      },
+      "required": [
+        "dns_global_address_count",
+        "tls_version",
+        "certificate_sha256"
+      ],
+      "type": "object"
+    },
+    "endpoint": {
+      "const": "https://mcp-datahub.kenigevents.ru/mcp"
+    },
+    "expected_commit": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "expected_source_identity": {
+      "const": "onedayonemasterpiece/my-data-hub"
+    },
+    "http_negatives": {
+      "additionalProperties": false,
+      "properties": {
+        "authorization_server": {
+          "const": "https://identity.kenigevents.ru"
+        },
+        "missing_auth_rejected": {
+          "const": true
+        },
+        "published_jwks_keys": {
+          "maximum": 5,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "resource_metadata": {
+          "const": true
+        },
+        "wrong_auth_rejected": {
+          "const": true
+        },
+        "wrong_host_rejected": {
+          "const": true
+        },
+        "wrong_origin_rejected": {
+          "const": true
+        }
+      },
+      "required": [
+        "resource_metadata",
+        "wrong_host_rejected",
+        "wrong_origin_rejected",
+        "missing_auth_rejected",
+        "wrong_auth_rejected",
+        "authorization_server",
+        "published_jwks_keys"
+      ],
+      "type": "object"
+    },
+    "ok": {
+      "const": true
+    },
+    "public_port_boundary": {
+      "additionalProperties": false,
+      "properties": {
+        "probe_count": {
+          "maximum": 256,
+          "minimum": 4,
+          "type": "integer"
+        },
+        "probed_closed_ports": {
+          "const": [
+            5432,
+            8080,
+            8765,
+            8780
+          ]
+        },
+        "probed_global_address_count": {
+          "maximum": 64,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "public_database_port_open": {
+          "const": false
+        }
+      },
+      "required": [
+        "probed_global_address_count",
+        "probed_closed_ports",
+        "probe_count",
+        "public_database_port_open"
+      ],
+      "type": "object"
+    },
+    "remote_mcp": {
+      "additionalProperties": false,
+      "properties": {
+        "active_master_epoch": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "canonical_revision": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cold_operation_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "data_read_rows": {
+          "const": 1
+        },
+        "deployed_commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "initial_master_state": {
+          "const": "ABSENT"
+        },
+        "tools": {
+          "const": [
+            "bloggers.get",
+            "bloggers.list",
+            "bloggers.provenance",
+            "bloggers.search",
+            "bloggers.statistics",
+            "checkpoint.status",
+            "data.change.status",
+            "data.query",
+            "embedding.coverage",
+            "master.status",
+            "operation.get",
+            "platform.status",
+            "provider.resources.status"
+          ]
+        },
+        "writes_discoverable": {
+          "const": false
+        }
+      },
+      "required": [
+        "tools",
+        "deployed_commit",
+        "initial_master_state",
+        "cold_operation_id",
+        "active_master_epoch",
+        "canonical_revision",
+        "data_read_rows",
+        "writes_discoverable"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "my-data-hub-post-deploy-verification.v1"
+    }
+  },
+  "required": [
+    "schema_version",
+    "ok",
+    "endpoint",
+    "expected_commit",
+    "expected_source_identity",
+    "dns_tls",
+    "public_port_boundary",
+    "http_negatives",
+    "remote_mcp",
+    "deployment_evidence"
+  ],
+  "title": "Sanitized post-deploy acceptance report",
+  "type": "object"
+}

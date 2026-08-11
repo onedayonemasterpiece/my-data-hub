@@ -125,6 +125,13 @@ def validate_json_and_schemas(report: Report) -> None:
             "kaggle-real-canary-receipt.v2.schema.json"
         ),
         "workflow-receipt.v1.example.json": "workflow-receipt.v1.schema.json",
+        "deployment-evidence.v1.example.json": "deployment-evidence.v1.schema.json",
+        "deployment-evidence-state.v1.example.json": (
+            "deployment-evidence-state.v1.schema.json"
+        ),
+        "post-deploy-verification.v1.example.json": (
+            "post-deploy-verification.v1.schema.json"
+        ),
     }
     checker = FormatChecker()
     for example_name, schema_name in mappings.items():
@@ -712,6 +719,7 @@ def validate_deployment(report: Report) -> None:
     }
     expected_deploy_files = {
         "deploy/control-plane/Dockerfile",
+        "deploy/control-plane/collect_deployment_evidence.py",
         "deploy/control-plane/install.sh",
         "deploy/same-host/install.sh",
     }

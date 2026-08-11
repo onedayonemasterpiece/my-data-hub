@@ -116,3 +116,17 @@ Before even preparing an image, the installer requires at least 4 GiB free on th
 runtime/release filesystem (bounded override: `MY_DATA_HUB_CONTROL_MIN_FREE_KIB`). Each
 container uses Docker `json-file` rotation capped at five 10 MiB files; durable ledger
 retention is enforced separately by the control-ledger policy.
+
+## Signed host evidence closure
+
+After an authorized install, process-failure exercise and host reboot, follow
+[`deployment-evidence.md`](deployment-evidence.md). The collector derives the exact clean
+source/installed-release hash, immutable running image IDs, systemd/Compose recovery,
+DB-free boundary and loopback inventory before using a separate external Ed25519 key. It
+does not initiate the reboot and no repository example is deployment evidence.
+
+Post-deploy acceptance is restricted to the owner MCP resource
+`https://mcp-datahub.kenigevents.ru/mcp` and authorization server
+`https://identity.kenigevents.ru`. It runs trusted default-branch verifier code only after
+the requested deployment SHA equals the approved repository variable and is proven to be
+a reachable merge commit. Reader credentials are scoped to the verification step.

@@ -146,6 +146,7 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
         if path.is_file()
     } == {
         "deploy/control-plane/Dockerfile",
+        "deploy/control-plane/collect_deployment_evidence.py",
         "deploy/control-plane/install.sh",
         "deploy/same-host/install.sh",
     }

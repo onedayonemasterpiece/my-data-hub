@@ -31,9 +31,12 @@ _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SOURCE_IDENTITY = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 _KEY_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _B64URL_SIGNATURE = re.compile(r"^[A-Za-z0-9_-]{86}$")
+_IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SERVICES = frozenset({"control-plane", "remote-mcp", "oauth-server"})
 _LOOPBACK_PORTS = [8080, 8765, 8780]
 _FORBIDDEN_PUBLIC_PORTS = (5432, 8080, 8765, 8780)
+PUBLIC_MCP_URL = "https://mcp-datahub.kenigevents.ru/mcp"
+AUTHORIZATION_SERVER = "https://identity.kenigevents.ru"
 _SECRET_FRAGMENTS = (
     "authorization",
     "cookie",
@@ -56,8 +59,9 @@ class PublicEndpoint:
     def parse(cls, value: str) -> PublicEndpoint:
         parsed = urlsplit(value)
         if (
-            parsed.scheme != "https"
-            or not parsed.hostname
+            value != PUBLIC_MCP_URL
+            or parsed.scheme != "https"
+            or parsed.hostname != "mcp-datahub.kenigevents.ru"
             or parsed.port is not None
             or parsed.username is not None
             or parsed.password is not None
@@ -65,7 +69,7 @@ class PublicEndpoint:
             or parsed.query
             or parsed.fragment
         ):
-            raise ValueError("endpoint must be an exact HTTPS /mcp URL on port 443")
+            raise ValueError("endpoint must be the owner-approved canonical HTTPS MCP resource")
         return cls(value, parsed.hostname.casefold(), parsed.hostname.casefold())
 
     @property
@@ -158,6 +162,8 @@ def validate_deployment_evidence(
             "schema_version",
             "source_identity",
             "deployed_commit",
+            "source_tree_sha256",
+            "installed_release_tree_sha256",
             "host_id_sha256",
             "issued_at",
             "expires_at",
@@ -173,6 +179,14 @@ def validate_deployment_evidence(
         raise ValueError("deployment evidence commit differs from the requested deployment")
     if receipt["source_identity"] != expected_source_identity:
         raise ValueError("deployment evidence source identity differs from the requested source")
+    if (
+        not isinstance(receipt["source_tree_sha256"], str)
+        or not _SHA256.fullmatch(receipt["source_tree_sha256"])
+        or not isinstance(receipt["installed_release_tree_sha256"], str)
+        or not _SHA256.fullmatch(receipt["installed_release_tree_sha256"])
+        or receipt["source_tree_sha256"] != receipt["installed_release_tree_sha256"]
+    ):
+        raise ValueError("deployment evidence installed release differs from its source tree")
     if not isinstance(receipt["host_id_sha256"], str) or not _SHA256.fullmatch(receipt["host_id_sha256"]):
         raise ValueError("deployment evidence host identity must be a sanitized SHA-256 reference")
 
@@ -203,6 +217,7 @@ def validate_deployment_evidence(
         receipt["checks"],
         {
             "services",
+            "service_image_ids",
             "database_process_present",
             "pgdata_present",
             "database_environment_present",
@@ -215,6 +230,14 @@ def validate_deployment_evidence(
     )
     if checks["services"] != {service: "running" for service in sorted(_SERVICES)}:
         raise ValueError("deployment evidence does not show all control services running")
+    image_ids = checks["service_image_ids"]
+    if (
+        not isinstance(image_ids, dict)
+        or set(image_ids) != _SERVICES
+        or any(not isinstance(value, str) or not _IMAGE_ID.fullmatch(value) for value in image_ids.values())
+        or len(set(image_ids.values())) != 1
+    ):
+        raise ValueError("deployment evidence does not bind the exact immutable service image")
     if any(
         checks[name] is not False
         for name in ("database_process_present", "pgdata_present", "database_environment_present")
@@ -270,16 +293,17 @@ def validate_deployment_evidence(
         reboot["systemd_unit"] != "my-data-hub-control-plane.service"
         or reboot["unit_enabled"] is not True
         or reboot["linger_enabled"] is not True
-        or not isinstance(reboot["autostart_services"], list)
-        or set(reboot["autostart_services"]) != _SERVICES
-        or len(reboot["autostart_services"]) != len(_SERVICES)
+        or reboot["autostart_services"] != sorted(_SERVICES)
         or not isinstance(reboot["boot_id_sha256"], str)
         or not _SHA256.fullmatch(reboot["boot_id_sha256"])
     ):
         raise ValueError("deployment evidence reboot/autostart receipt differs from policy")
     rebooted_at = _utc(reboot["rebooted_at"], "reboot_autostart.rebooted_at")
     verified_at = _utc(reboot["verified_at"], "reboot_autostart.verified_at")
-    if not killed_at <= recovered_at <= rebooted_at <= verified_at <= issued_at:
+    if (
+        not killed_at <= recovered_at <= rebooted_at <= verified_at <= issued_at
+        or issued_at - killed_at > timedelta(seconds=max_age_seconds)
+    ):
         raise ValueError("deployment evidence recovery timestamps are out of order")
 
     canonical = _canonical_unsigned(receipt)
@@ -289,6 +313,9 @@ def validate_deployment_evidence(
         "source_identity": expected_source_identity,
         "deployed_commit": expected_commit,
         "host_id_sha256": receipt["host_id_sha256"],
+        "source_tree_sha256": receipt["source_tree_sha256"],
+        "installed_release_tree_sha256": receipt["installed_release_tree_sha256"],
+        "service_image_ids": dict(image_ids),
         "signing_key_id": expected_key_id,
         "evidence_sha256": hashlib.sha256(canonical).hexdigest(),
         "process_kill_recovered": True,
@@ -297,13 +324,26 @@ def validate_deployment_evidence(
     }
 
 
-def verify_dns_tls(endpoint: PublicEndpoint, *, timeout_seconds: float = 5) -> dict[str, object]:
-    addresses = {
+def resolve_global_addresses(endpoint: PublicEndpoint) -> tuple[str, ...]:
+    resolved = {
         item[4][0]
         for item in socket.getaddrinfo(endpoint.hostname, 443, type=socket.SOCK_STREAM)
     }
-    if not addresses or not any(ipaddress.ip_address(address).is_global for address in addresses):
+    addresses = tuple(
+        sorted(address for address in resolved if ipaddress.ip_address(address).is_global)
+    )
+    if not addresses:
         raise RuntimeError("public MCP DNS has no globally routable address")
+    return addresses
+
+
+def verify_dns_tls(
+    endpoint: PublicEndpoint,
+    *,
+    addresses: tuple[str, ...] | None = None,
+    timeout_seconds: float = 5,
+) -> dict[str, object]:
+    addresses = addresses or resolve_global_addresses(endpoint)
     context = ssl.create_default_context()
     with (
         socket.create_connection((endpoint.hostname, 443), timeout=timeout_seconds) as raw,
@@ -314,9 +354,7 @@ def verify_dns_tls(endpoint: PublicEndpoint, *, timeout_seconds: float = 5) -> d
     if not certificate or tls_version not in {"TLSv1.2", "TLSv1.3"}:
         raise RuntimeError("public MCP TLS did not present a verified modern certificate")
     return {
-        "dns_global_address_count": sum(
-            ipaddress.ip_address(address).is_global for address in addresses
-        ),
+        "dns_global_address_count": len(addresses),
         "tls_version": tls_version,
         "certificate_sha256": hashlib.sha256(certificate).hexdigest(),
     }
@@ -325,21 +363,31 @@ def verify_dns_tls(endpoint: PublicEndpoint, *, timeout_seconds: float = 5) -> d
 def verify_forbidden_public_ports(
     endpoint: PublicEndpoint,
     *,
+    addresses: tuple[str, ...] | None = None,
     ports: tuple[int, ...] = _FORBIDDEN_PUBLIC_PORTS,
     timeout_seconds: float = 2,
 ) -> dict[str, object]:
-    def probe(port: int) -> int:
-        try:
-            with socket.create_connection((endpoint.hostname, port), timeout=timeout_seconds):
-                return port
-        except OSError:
-            return 0
+    addresses = addresses or resolve_global_addresses(endpoint)
 
-    with ThreadPoolExecutor(max_workers=len(ports)) as executor:
-        exposed = sorted(port for port in executor.map(probe, ports) if port)
+    def probe(target: tuple[str, int]) -> tuple[str, int] | None:
+        address, port = target
+        try:
+            with socket.create_connection((address, port), timeout=timeout_seconds):
+                return target
+        except OSError:
+            return None
+
+    targets = [(address, port) for address in addresses for port in ports]
+    with ThreadPoolExecutor(max_workers=min(32, len(targets))) as executor:
+        exposed = [target for target in executor.map(probe, targets) if target]
     if exposed:
         raise RuntimeError("a forbidden devstand service port is publicly reachable")
-    return {"probed_closed_ports": list(ports), "public_database_port_open": False}
+    return {
+        "probed_global_address_count": len(addresses),
+        "probed_closed_ports": list(ports),
+        "probe_count": len(targets),
+        "public_database_port_open": False,
+    }
 
 
 async def verify_http_negatives(
@@ -388,23 +436,10 @@ async def _verify_http_with_client(endpoint: PublicEndpoint, client: Any) -> dic
     authorization_servers = document.get("authorization_servers")
     if (
         document.get("resource") != endpoint.url
-        or not isinstance(authorization_servers, list)
-        or len(authorization_servers) != 1
-        or not isinstance(authorization_servers[0], str)
+        or authorization_servers != [AUTHORIZATION_SERVER]
     ):
         raise RuntimeError("OAuth protected-resource metadata differs from the endpoint contract")
-    issuer = urlsplit(authorization_servers[0])
-    if (
-        issuer.scheme != "https"
-        or not issuer.netloc
-        or issuer.username is not None
-        or issuer.password is not None
-        or issuer.path not in {"", "/"}
-        or issuer.query
-        or issuer.fragment
-    ):
-        raise RuntimeError("OAuth authorization server identifier is not an exact HTTPS origin")
-    issuer_url = authorization_servers[0].rstrip("/")
+    issuer_url = AUTHORIZATION_SERVER
     discovery = await client.get(f"{issuer_url}/.well-known/oauth-authorization-server")
     if discovery.status_code != 200:
         raise RuntimeError("OAuth authorization server discovery is unavailable")
@@ -460,12 +495,16 @@ async def verify_all(
     evidence: dict[str, object],
     cold_start_timeout_seconds: float,
 ) -> dict[str, object]:
+    addresses = await asyncio.wait_for(
+        asyncio.to_thread(resolve_global_addresses, endpoint),
+        timeout=10,
+    )
     dns_tls = await asyncio.wait_for(
-        asyncio.to_thread(verify_dns_tls, endpoint),
+        asyncio.to_thread(verify_dns_tls, endpoint, addresses=addresses),
         timeout=15,
     )
     ports = await asyncio.wait_for(
-        asyncio.to_thread(verify_forbidden_public_ports, endpoint),
+        asyncio.to_thread(verify_forbidden_public_ports, endpoint, addresses=addresses),
         timeout=15,
     )
     negatives = await asyncio.wait_for(verify_http_negatives(endpoint), timeout=30)
