@@ -1,0 +1,193 @@
+{
+  "$defs": {
+    "DataWorkloadEvidenceBundle": {
+      "additionalProperties": false,
+      "description": "Input to later live evidence execution. It is intentionally not PASS.",
+      "properties": {
+        "live_evidence": {
+          "const": false,
+          "default": false,
+          "title": "Live Evidence",
+          "type": "boolean"
+        },
+        "matrix_id": {
+          "format": "uuid",
+          "title": "Matrix Id",
+          "type": "string"
+        },
+        "outcome": {
+          "const": "EVIDENCE_READY",
+          "default": "EVIDENCE_READY",
+          "title": "Outcome",
+          "type": "string"
+        },
+        "requirements": {
+          "maxItems": 5,
+          "minItems": 5,
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/RequirementEvidence"
+            },
+            {
+              "$ref": "#/$defs/RequirementEvidence"
+            },
+            {
+              "$ref": "#/$defs/RequirementEvidence"
+            },
+            {
+              "$ref": "#/$defs/RequirementEvidence"
+            },
+            {
+              "$ref": "#/$defs/RequirementEvidence"
+            }
+          ],
+          "title": "Requirements",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": "my-data-hub-operational-data-evidence.v1",
+          "default": "my-data-hub-operational-data-evidence.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_commit": {
+          "pattern": "^[a-f0-9]{40}$",
+          "title": "Source Commit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "matrix_id",
+        "source_commit",
+        "requirements"
+      ],
+      "title": "DataWorkloadEvidenceBundle",
+      "type": "object"
+    },
+    "RequirementEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "assertion_evidence_sha256": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Assertion Evidence Sha256",
+          "type": "object"
+        },
+        "operation_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Operation Ids",
+          "type": "array"
+        },
+        "requirement_id": {
+          "enum": [
+            "FM16",
+            "FM17",
+            "FM18",
+            "FM19",
+            "FM21"
+          ],
+          "title": "Requirement Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "requirement_id",
+        "assertion_evidence_sha256",
+        "operation_ids"
+      ],
+      "title": "RequirementEvidence",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.my-data-hub.invalid/provider/data-workload-production-receipt.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "blocker_code": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Z0-9_]+$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Blocker Code"
+    },
+    "evidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DataWorkloadEvidenceBundle"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "failure_code": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Z0-9_]+$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Failure Code"
+    },
+    "live_evidence": {
+      "const": false,
+      "default": false,
+      "title": "Live Evidence",
+      "type": "boolean"
+    },
+    "matrix_id": {
+      "format": "uuid",
+      "title": "Matrix Id",
+      "type": "string"
+    },
+    "outcome": {
+      "enum": [
+        "PROGRESS",
+        "AWAITING_OWNER_AUTHORIZATION",
+        "FAIL",
+        "BLOCKED",
+        "EVIDENCE_READY"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "outer_reconciliation_required": {
+      "const": true,
+      "default": true,
+      "title": "Outer Reconciliation Required",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": "my-data-hub-data-workload-production-receipt.v1",
+      "default": "my-data-hub-data-workload-production-receipt.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "state_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "State Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "matrix_id",
+    "outcome",
+    "state_sha256"
+  ],
+  "title": "ProductionDataWorkloadReceipt",
+  "type": "object"
+}

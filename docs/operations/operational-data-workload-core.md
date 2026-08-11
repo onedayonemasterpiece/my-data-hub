@@ -16,21 +16,23 @@ sign live claims.
    one `deduplicated` disposition, no pending/quarantined rows, and a verified
    checkpoint. Actor/account counts are observed metadata, never hard-coded equality.
 2. **FM17:** capture the complete migration accounting hash, persist a deterministic
-   restore operation identity, cold-restore the exact checkpoint, and require a new
-   master instance/run and higher epoch. The post-restore accounting object and
+   restore idempotency identity, cold-restore the exact checkpoint, then persist and
+   poll the server-assigned operation identity. Require a new master instance and
+   higher epoch. The post-restore accounting object and
    canonical revision must equal the pre-restore values exactly.
 3. **FM18/FM19:** persist and submit one H3 request covering the exact pinned E5 and
    BGE-M3 worker assets. One terminal checkpoint is split into model-specific hashed
    evidence; task identities must be distinct and each model must account for all 266
    documents with no failed/stale items.
 4. **FM21:** use only the fixed `fm21_hub_project_fixture.v1` adapter contract. Require
-   empty insert preview, persist its operation ID before apply, await the post-insert
+   exact one-row insert preview, persist its operation ID before apply, await the post-insert
    verified checkpoint, require a one-row delete preview, persist before delete,
    await its checkpoint, and finish with a zero-row delete preview proving cleanup.
 
-Every accepted/replayed mutation is idempotent. An ambiguous mutation becomes typed
-`FAIL` with its already-persisted identity; resume polls status rather than submitting
-again. Cleanup failures remain resumable. Rejections, prerequisite drift, changed
+Every accepted/replayed mutation is idempotent. An ambiguous H5/H3 request becomes typed
+`FAIL` with its already-persisted request UUID and resumes by replaying that exact
+versioned request; its returned request hash must match. An ambiguous operation with a
+known server operation ID resumes by status. Cleanup failures remain resumable. Rejections, prerequisite drift, changed
 restore accounting, and missing checkpoints never become evidence-ready.
 
 ## Boundary and persistence

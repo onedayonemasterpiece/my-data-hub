@@ -104,7 +104,6 @@ class Gateway:
             canonical_outcome_sha256=H3,
             duplicate_group_count=1,
             duplicate_groups_pending=1,
-            checkpoint=self.cp1,
         )
         self.review = DuplicateReviewEvidence(
             export_batch_id=self.batch,
@@ -120,6 +119,7 @@ class Gateway:
         self.terminal = BloggerTerminalEvidence(
             request_id=self.v2,
             request_sha256=H2,
+            receipt_sha256=H,
             operation_id=uid(22),
             import_schema="region-talk-ydb-bloggers-import-receipt.v3",
             export_batch_id=self.batch,
@@ -170,9 +170,10 @@ class Gateway:
         )
         self.previews: dict[str, ChangePreviewEvidence] = {}
 
-    def acceptance(self, operation_id: str, outcome: str = "accepted") -> MutationAcceptance:
+    def acceptance(self, operation_id: str, outcome: str = "accepted", request_sha256: str = H) -> MutationAcceptance:
         return MutationAcceptance(
             operation_id=operation_id,
+            request_sha256=request_sha256,
             outcome=outcome,
             state="REQUESTED",
             response_sha256=H,
@@ -181,7 +182,7 @@ class Gateway:
     async def start_blogger_v1(self, *, request_id, intent_sha256, plan):
         self.v1_sha = intent_sha256
         self.events.append("mutate:v1")
-        return self.acceptance(str(request_id))
+        return self.acceptance(str(request_id), request_sha256=self.v1_sha)
 
     async def observe_blogger(self, request_id):
         if request_id == self.v1:
@@ -207,26 +208,26 @@ class Gateway:
     async def start_blogger_v2(self, *, request_id, intent_sha256, authorization):
         self.v2_sha = intent_sha256
         self.events.append("mutate:v2")
-        return self.acceptance(str(request_id))
+        return self.acceptance(str(request_id), request_sha256=self.v2_sha)
 
     async def migration_accounting(self, export_batch_id):
         return self.accounting
 
-    async def start_restore(self, *, operation_id, checkpoint, expected_epoch):
+    async def start_restore(self, *, idempotency_key_sha256, checkpoint, expected_epoch):
         assert expected_epoch == 7
         self.events.append("mutate:restore")
-        return self.acceptance(operation_id)
+        return self.acceptance("server-restore-operation")
 
     async def observe_restore(self, operation_id):
         return RestoreObservation(operation_id=operation_id, state="DURABLE_COMPLETE")
 
     async def active_master(self):
-        return MasterEvidence(master_instance_id=uid(32), run_id=uid(33), epoch=8, canonical_revision=10)
+        return MasterEvidence(master_instance_id=uid(32), epoch=8, canonical_revision=10)
 
     async def start_embedding(self, *, request_id, intent_sha256, blogger, probe_query_sha256):
         self.embedding_sha = intent_sha256
         self.events.append("mutate:embedding")
-        return self.acceptance(str(request_id))
+        return self.acceptance(str(request_id), request_sha256=self.embedding_sha)
 
     async def observe_embedding(self, request_id):
         terminal = self.embedding_terminal.model_copy(update={"request_sha256": self.embedding_sha})
@@ -239,7 +240,7 @@ class Gateway:
 
     async def preview_fixed_change(self, intent):
         if intent.action == "insert":
-            affected, operation, cp = 0, H, self.cp3
+            affected, operation, cp = 1, H, self.cp3
         elif intent.expected_revision == 12:
             affected, operation, cp = 1, H2, self.cp4
         else:
@@ -350,6 +351,32 @@ async def test_ambiguous_insert_resumes_by_status_without_reapplying(plan):
     resumed = await machine.advance(plan, state, gateway)
     assert resumed.state.phase == DataPhase.FM21_INSERT_COMPLETE
     assert gateway.insert_apply_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_h5_request_replays_exact_identity_and_hash(plan):
+    events: list[str] = []
+
+    class AmbiguousGateway(Gateway):
+        calls = 0
+
+        async def start_blogger_v1(self, *, request_id, intent_sha256, plan):
+            self.calls += 1
+            self.v1_sha = H3
+            return self.acceptance(
+                str(request_id),
+                outcome="ambiguous" if self.calls == 1 else "replayed",
+                request_sha256=self.v1_sha,
+            )
+
+    store, gateway = Store(events), AmbiguousGateway(plan, events)
+    machine = DataWorkloadStateMachine(store)
+    first = await machine.advance(plan, DataWorkloadState.initial(plan), gateway)
+    assert first.failure_code == "FM16_V1_REQUEST_AMBIGUOUS"
+    resumed = await machine.advance(plan, first.state, gateway)
+    assert resumed.state.phase == DataPhase.FM16_V1_RUNNING
+    assert resumed.state.v1_request_sha256 == H3
+    assert gateway.calls == 2
 
 
 def test_contract_cannot_claim_live_pass(plan):

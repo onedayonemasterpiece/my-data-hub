@@ -1,0 +1,11 @@
+{
+  "schema_version": "my-data-hub-data-workload-production-receipt.v1",
+  "matrix_id": "00000000-0000-0000-0000-000000000001",
+  "outcome": "BLOCKED",
+  "live_evidence": false,
+  "outer_reconciliation_required": true,
+  "state_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "blocker_code": "FM16_H5_QUARANTINE_PROJECTION_UNAVAILABLE",
+  "failure_code": null,
+  "evidence": null
+}

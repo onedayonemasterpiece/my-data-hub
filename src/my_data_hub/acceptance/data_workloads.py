@@ -47,7 +47,6 @@ class MasterEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     master_instance_id: UUID
-    run_id: UUID
     epoch: int = Field(ge=1)
     canonical_revision: int = Field(ge=1)
     state: Literal["ACTIVE"] = "ACTIVE"
@@ -59,6 +58,7 @@ class MutationAcceptance(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     operation_id: str = Field(min_length=1, max_length=300)
+    request_sha256: str = Field(pattern=SHA256_PATTERN)
     outcome: Literal["accepted", "replayed", "ambiguous", "rejected"]
     state: str = Field(min_length=1, max_length=100)
     response_sha256: str = Field(pattern=SHA256_PATTERN)
@@ -137,7 +137,6 @@ class BloggerQuarantineEvidence(BaseModel):
     canonical_outcome_sha256: str = Field(pattern=SHA256_PATTERN)
     duplicate_group_count: int = Field(ge=1, le=1330)
     duplicate_groups_pending: int = Field(ge=1, le=1330)
-    checkpoint: CheckpointEvidence
 
     @model_validator(mode="after")
     def exact_quarantine(self) -> BloggerQuarantineEvidence:
@@ -151,6 +150,7 @@ class BloggerTerminalEvidence(BaseModel):
 
     request_id: UUID
     request_sha256: str = Field(pattern=SHA256_PATTERN)
+    receipt_sha256: str = Field(pattern=SHA256_PATTERN)
     operation_id: UUID
     import_schema: Literal["region-talk-ydb-bloggers-import-receipt.v3"]
     export_batch_id: UUID
@@ -446,6 +446,8 @@ class DataWorkloadState(BaseModel):
     blogger_terminal: BloggerTerminalEvidence | None = None
     pre_restore_accounting: BloggerAccountingEvidence | None = None
     restore_operation_id: str | None = Field(default=None, min_length=1, max_length=300)
+    restore_idempotency_key_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    restore_request_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
     restored_master: MasterEvidence | None = None
     post_restore_accounting: BloggerAccountingEvidence | None = None
     embedding_request_id: UUID | None = None
@@ -549,7 +551,7 @@ class DataWorkloadGateway(Protocol):
     ) -> MutationAcceptance: ...
     async def migration_accounting(self, export_batch_id: UUID) -> BloggerAccountingEvidence: ...
     async def start_restore(
-        self, *, operation_id: str, checkpoint: CheckpointEvidence, expected_epoch: int
+        self, *, idempotency_key_sha256: str, checkpoint: CheckpointEvidence, expected_epoch: int
     ) -> MutationAcceptance: ...
     async def observe_restore(self, operation_id: str) -> RestoreObservation: ...
     async def active_master(self) -> MasterEvidence: ...
@@ -626,7 +628,6 @@ class DataWorkloadStateMachine:
                     update={
                         "phase": DataPhase.FM16_V1_AMBIGUOUS,
                         "v1_request_id": request_id,
-                        "v1_request_sha256": intent_sha,
                     }
                 )
             )
@@ -637,13 +638,47 @@ class DataWorkloadStateMachine:
             if next_phase is None:
                 return self._fail(planned, "FM16_V1_REQUEST_REJECTED", resumable=False)
             updated = self._persist(
-                planned.model_copy(update={"phase": next_phase, "mutations_started": planned.mutations_started + 1})
+                planned.model_copy(
+                    update={
+                        "phase": next_phase,
+                        "v1_request_sha256": accepted.request_sha256,
+                        "mutations_started": planned.mutations_started + 1,
+                    }
+                )
             )
             if accepted.outcome == "ambiguous":
                 return self._fail(updated, "FM16_V1_REQUEST_AMBIGUOUS", resumable=True)
             return self._result(updated)
 
-        if phase in {DataPhase.FM16_V1_RUNNING, DataPhase.FM16_V1_AMBIGUOUS}:
+        if phase == DataPhase.FM16_V1_AMBIGUOUS:
+            assert state.v1_request_id is not None
+            intent_sha = _sha({"request_id": str(state.v1_request_id), "plan": plan.model_dump(mode="json")})
+            accepted = await gateway.start_blogger_v1(
+                request_id=state.v1_request_id, intent_sha256=intent_sha, plan=plan
+            )
+            if accepted.operation_id != str(state.v1_request_id):
+                return self._fail(state, "FM16_V1_OPERATION_MISMATCH", resumable=False)
+            if state.v1_request_sha256 not in {None, accepted.request_sha256}:
+                return self._fail(state, "FM16_V1_REQUEST_REPLAY_MISMATCH", resumable=False)
+            if accepted.outcome == "rejected":
+                return self._fail(state, "FM16_V1_REQUEST_REJECTED", resumable=False)
+            replayed = self._persist(
+                state.model_copy(
+                    update={
+                        "phase": (
+                            DataPhase.FM16_V1_AMBIGUOUS
+                            if accepted.outcome == "ambiguous"
+                            else DataPhase.FM16_V1_RUNNING
+                        ),
+                        "v1_request_sha256": accepted.request_sha256,
+                    }
+                )
+            )
+            if accepted.outcome == "ambiguous":
+                return self._fail(replayed, "FM16_V1_REQUEST_AMBIGUOUS", resumable=True)
+            return self._result(replayed)
+
+        if phase == DataPhase.FM16_V1_RUNNING:
             assert state.v1_request_id is not None
             observed = await gateway.observe_blogger(state.v1_request_id)
             if observed.request_id != state.v1_request_id or observed.request_sha256 != state.v1_request_sha256:
@@ -699,7 +734,6 @@ class DataWorkloadStateMachine:
                     update={
                         "phase": DataPhase.FM16_V2_AMBIGUOUS,
                         "v2_request_id": request_id,
-                        "v2_request_sha256": intent_sha,
                         "owner_authorization_sha256": owner_authorization.envelope_sha256,
                     }
                 )
@@ -713,13 +747,57 @@ class DataWorkloadStateMachine:
             if next_phase is None:
                 return self._fail(planned, "FM16_V2_REQUEST_REJECTED", resumable=False)
             updated = self._persist(
-                planned.model_copy(update={"phase": next_phase, "mutations_started": planned.mutations_started + 1})
+                planned.model_copy(
+                    update={
+                        "phase": next_phase,
+                        "v2_request_sha256": accepted.request_sha256,
+                        "mutations_started": planned.mutations_started + 1,
+                    }
+                )
             )
             if accepted.outcome == "ambiguous":
                 return self._fail(updated, "FM16_V2_REQUEST_AMBIGUOUS", resumable=True)
             return self._result(updated)
 
-        if phase in {DataPhase.FM16_V2_RUNNING, DataPhase.FM16_V2_AMBIGUOUS}:
+        if phase == DataPhase.FM16_V2_AMBIGUOUS:
+            if owner_authorization is None:
+                return self._result(state, "AWAITING_OWNER_AUTHORIZATION")
+            assert state.v2_request_id is not None
+            intent_sha = _sha(
+                {
+                    "request_id": str(state.v2_request_id),
+                    "plan_sha256": state.plan_sha256,
+                    "envelope_sha256": owner_authorization.envelope_sha256,
+                }
+            )
+            accepted = await gateway.start_blogger_v2(
+                request_id=state.v2_request_id,
+                intent_sha256=intent_sha,
+                authorization=owner_authorization,
+            )
+            if accepted.operation_id != str(state.v2_request_id):
+                return self._fail(state, "FM16_V2_OPERATION_MISMATCH", resumable=False)
+            if state.v2_request_sha256 not in {None, accepted.request_sha256}:
+                return self._fail(state, "FM16_V2_REQUEST_REPLAY_MISMATCH", resumable=False)
+            if accepted.outcome == "rejected":
+                return self._fail(state, "FM16_V2_REQUEST_REJECTED", resumable=False)
+            replayed = self._persist(
+                state.model_copy(
+                    update={
+                        "phase": (
+                            DataPhase.FM16_V2_AMBIGUOUS
+                            if accepted.outcome == "ambiguous"
+                            else DataPhase.FM16_V2_RUNNING
+                        ),
+                        "v2_request_sha256": accepted.request_sha256,
+                    }
+                )
+            )
+            if accepted.outcome == "ambiguous":
+                return self._fail(replayed, "FM16_V2_REQUEST_AMBIGUOUS", resumable=True)
+            return self._result(replayed)
+
+        if phase == DataPhase.FM16_V2_RUNNING:
             assert state.v2_request_id is not None
             observed = await gateway.observe_blogger(state.v2_request_id)
             if observed.request_id != state.v2_request_id or observed.request_sha256 != state.v2_request_sha256:
@@ -745,12 +823,16 @@ class DataWorkloadStateMachine:
             )
             return self._result(completed)
 
-        if phase == DataPhase.FM16_COMPLETE:
+        if phase == DataPhase.FM16_COMPLETE or (
+            phase == DataPhase.FM17_RESTORE_AMBIGUOUS and state.restore_operation_id is None
+        ):
             assert state.blogger_terminal is not None
-            before = await gateway.migration_accounting(state.blogger_terminal.export_batch_id)
+            before = state.pre_restore_accounting or await gateway.migration_accounting(
+                state.blogger_terminal.export_batch_id
+            )
             if before.canonical_revision != state.blogger_terminal.canonical_revision:
                 return self._fail(state, "FM17_PRE_RESTORE_REVISION_MISMATCH", resumable=False)
-            operation_id = hashlib.sha256(
+            idempotency_key_sha256 = hashlib.sha256(
                 canonical_json_bytes(
                     {
                         "matrix_id": str(plan.matrix_id),
@@ -764,24 +846,29 @@ class DataWorkloadStateMachine:
                     update={
                         "phase": DataPhase.FM17_RESTORE_AMBIGUOUS,
                         "pre_restore_accounting": before,
-                        "restore_operation_id": operation_id,
+                        "restore_idempotency_key_sha256": idempotency_key_sha256,
                     }
                 )
             )
             accepted = await gateway.start_restore(
-                operation_id=operation_id,
+                idempotency_key_sha256=idempotency_key_sha256,
                 checkpoint=state.blogger_terminal.checkpoint,
                 expected_epoch=state.blogger_terminal.source_epoch,
             )
-            if accepted.operation_id != operation_id:
-                return self._fail(planned, "FM17_RESTORE_OPERATION_MISMATCH", resumable=False)
             next_phase = self._acceptance_phase(
                 accepted, DataPhase.FM17_RESTORE_RUNNING, DataPhase.FM17_RESTORE_AMBIGUOUS
             )
             if next_phase is None:
                 return self._fail(planned, "FM17_RESTORE_REJECTED", resumable=False)
             updated = self._persist(
-                planned.model_copy(update={"phase": next_phase, "mutations_started": planned.mutations_started + 1})
+                planned.model_copy(
+                    update={
+                        "phase": next_phase,
+                        "restore_operation_id": accepted.operation_id,
+                        "restore_request_sha256": accepted.request_sha256,
+                        "mutations_started": planned.mutations_started + 1,
+                    }
+                )
             )
             if accepted.outcome == "ambiguous":
                 return self._fail(updated, "FM17_RESTORE_AMBIGUOUS", resumable=True)
@@ -803,7 +890,6 @@ class DataWorkloadStateMachine:
                 or master.canonical_revision != after.canonical_revision
                 or master.epoch <= state.blogger_terminal.source_epoch
                 or master.master_instance_id == state.blogger_terminal.source_master_instance_id
-                or master.run_id == state.blogger_terminal.source_run_id
             ):
                 return self._fail(state, "FM17_ACCOUNTING_CHANGED_AFTER_RESTORE", resumable=False)
             completed = self._persist(
@@ -833,7 +919,6 @@ class DataWorkloadStateMachine:
                     update={
                         "phase": DataPhase.FM18_19_AMBIGUOUS,
                         "embedding_request_id": request_id,
-                        "embedding_request_sha256": intent_sha,
                     }
                 )
             )
@@ -849,13 +934,57 @@ class DataWorkloadStateMachine:
             if next_phase is None:
                 return self._fail(planned, "FM18_19_REQUEST_REJECTED", resumable=False)
             updated = self._persist(
-                planned.model_copy(update={"phase": next_phase, "mutations_started": planned.mutations_started + 1})
+                planned.model_copy(
+                    update={
+                        "phase": next_phase,
+                        "embedding_request_sha256": accepted.request_sha256,
+                        "mutations_started": planned.mutations_started + 1,
+                    }
+                )
             )
             if accepted.outcome == "ambiguous":
                 return self._fail(updated, "FM18_19_REQUEST_AMBIGUOUS", resumable=True)
             return self._result(updated)
 
-        if phase in {DataPhase.FM18_19_RUNNING, DataPhase.FM18_19_AMBIGUOUS}:
+        if phase == DataPhase.FM18_19_AMBIGUOUS:
+            assert state.embedding_request_id and state.blogger_terminal
+            intent_sha = _sha(
+                {
+                    "request_id": str(state.embedding_request_id),
+                    "blogger_request_sha256": state.blogger_terminal.request_sha256,
+                    "checkpoint_id": str(state.blogger_terminal.checkpoint.checkpoint_id),
+                    "probe_query_sha256": plan.embedding_probe_query_sha256,
+                }
+            )
+            accepted = await gateway.start_embedding(
+                request_id=state.embedding_request_id,
+                intent_sha256=intent_sha,
+                blogger=state.blogger_terminal,
+                probe_query_sha256=plan.embedding_probe_query_sha256,
+            )
+            if accepted.operation_id != str(state.embedding_request_id):
+                return self._fail(state, "FM18_19_OPERATION_MISMATCH", resumable=False)
+            if state.embedding_request_sha256 not in {None, accepted.request_sha256}:
+                return self._fail(state, "FM18_19_REQUEST_REPLAY_MISMATCH", resumable=False)
+            if accepted.outcome == "rejected":
+                return self._fail(state, "FM18_19_REQUEST_REJECTED", resumable=False)
+            replayed = self._persist(
+                state.model_copy(
+                    update={
+                        "phase": (
+                            DataPhase.FM18_19_AMBIGUOUS
+                            if accepted.outcome == "ambiguous"
+                            else DataPhase.FM18_19_RUNNING
+                        ),
+                        "embedding_request_sha256": accepted.request_sha256,
+                    }
+                )
+            )
+            if accepted.outcome == "ambiguous":
+                return self._fail(replayed, "FM18_19_REQUEST_AMBIGUOUS", resumable=True)
+            return self._result(replayed)
+
+        if phase == DataPhase.FM18_19_RUNNING:
             assert state.embedding_request_id and state.blogger_terminal
             observed = await gateway.observe_embedding(state.embedding_request_id)
             if (
@@ -909,9 +1038,9 @@ class DataWorkloadStateMachine:
                 or preview.action != intent.action
                 or preview.expected_revision != intent.expected_revision
                 or preview.pre_change_checkpoint_id != state.embedding_terminal.checkpoint.checkpoint_id
-                or preview.affected_rows != 0
+                or preview.affected_rows != 1
             ):
-                return self._fail(state, "FM21_INSERT_PREVIEW_NOT_EMPTY", resumable=False)
+                return self._fail(state, "FM21_INSERT_PREVIEW_NOT_EXACT", resumable=False)
             previewed = self._persist(
                 state.model_copy(
                     update={

@@ -27,5 +27,7 @@
   "delete_status": null,
   "final_zero_preview": null,
   "failure_code": null,
-  "resumable": true
+  "resumable": true,
+  "restore_idempotency_key_sha256": null,
+  "restore_request_sha256": null
 }

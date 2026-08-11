@@ -1,0 +1,10 @@
+{
+  "schema_version": "my-data-hub-operational-data-workload-plan.v1",
+  "matrix_id": "00000000-0000-4000-8000-000000000001",
+  "source_commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "blogger_project_id": "00000000-0000-4000-8000-000000000002",
+  "blogger_snapshot_at": "2026-08-09T00:00:00Z",
+  "blogger_source_revision": "dddddddddddddddddddddddddddddddddddddddd",
+  "embedding_probe_query_sha256": "a9ccb9cc4b48a60806583ac95f68808ea3f7e2e1d8f4687c8aec1c65fa95aff6",
+  "require_duplicate_replay": true
+}
