@@ -5,7 +5,7 @@
 - Lane: `fix_mcp_operator_provider`
 - Requirements: H1, H2, H3, and assigned H4 tunnel-certificate control endpoint.
 - Base SHA: `4916d166e7df80ab676c619a8e2eae7d0ada7b8b`
-- Implementation SHA: `a8f93fa7b02e88f4528308693d7b7c9bc849d558`
+- Implementation SHA: `a8f93fac396ca3bc5dbf7ccc8a3758244504da31`
 - Evidence commit: this file's commit; final SHA is reported in the integration handoff.
 
 ## Outcome
