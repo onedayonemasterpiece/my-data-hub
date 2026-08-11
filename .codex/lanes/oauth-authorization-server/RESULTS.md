@@ -22,7 +22,7 @@ committed
 
 ## Head SHA
 
-Implementation commit: `5f4dc60`
+Implementation commits: `5f4dc60` through `053644f`
 
 ## Files changed
 
@@ -46,9 +46,9 @@ Implementation commit: `5f4dc60`
 
 ## Tests / verification
 
-- Full suite: `435 passed, 2 skipped`.
-- Repository validator: `2793` checks, no errors or notes.
-- OAuth tests cover discovery/JWKS, owner-auth challenge wiring, exact static redirects, S256 PKCE omissions and mismatch, exact resource/audience/scope policy, authorization-code replay, JWT claims, refresh rotation/replay-family revocation, explicit refresh revocation, disabled clients, duplicate form fields and rejected client secrets.
+- Full suite: `436 passed, 2 skipped`.
+- Repository validator: `2794` checks, no errors or notes.
+- OAuth tests cover discovery/JWKS, owner-auth challenge and exact configured-owner enforcement, exact static redirects, S256 PKCE omissions and mismatch, exact resource/audience/scope policy, authorization-code replay, JWT claims, refresh rotation/replay-family revocation, explicit refresh revocation, disabled clients, duplicate form fields and rejected client secrets.
 - PyJWT with its cryptography backend performs RS256 signing/JWK serialization; the implementation contains no custom JWT signing or password database.
 
 ## Risks
