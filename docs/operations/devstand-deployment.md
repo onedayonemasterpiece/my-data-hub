@@ -5,17 +5,19 @@ Status: `CONTROL RUNTIME IMPLEMENTED / OPERATIONAL INSTALL BLOCKED`
 DevCoveer is the permanent lightweight control-plane host. It must not run production
 PostgreSQL, PGDATA, master migrations, canonical committer or master backup.
 
-`compose.control-plane.yaml` defines one loopback-only DB-free process. Its readiness is
-healthy at `master_state=ABSENT`; its data methods fail closed. The implementation branch
-adds the durable ledger, one concrete Kaggle adapter, master lifecycle coordinator,
-metadata-only runtime callbacks/checkpoint registry, epoch credential handoff, OAuth
-resource/authorization components and the bounded MCP runtime. None of those code paths is
+`compose.control-plane.yaml` defines a DB-free stack of three loopback-only processes:
+the lifecycle control plane, remote MCP resource server and OAuth authorization server.
+The control readiness is healthy at `master_state=ABSENT`; data methods fail closed. The
+implementation branch adds the durable ledger, one concrete Kaggle adapter, master
+lifecycle coordinator, metadata-only runtime callbacks/checkpoint registry, epoch
+credential handoff, OAuth components and bounded MCP runtime. None of those code paths is
 evidence that the current host is installed or that a public endpoint exists.
 
 The legacy same-host token is permanently disabled. The replacement installer has a new
-explicit token and may enable only `my-data-hub-control-plane.service`. It must deploy the
-reviewed implementation merge commit; this branch has not run it. No DNS/VPN/443 change
-has been made.
+explicit token and may enable only `my-data-hub-control-plane.service`; that foreground
+unit reconciles exactly the three containers through the opt-in `remote-mcp` Compose
+profile. It must deploy the reviewed implementation merge commit; this branch has not run
+it. No DNS/VPN/443 change has been made.
 
 Disposable database work uses root `compose.yaml` only, tmpfs only, and ends with
 `docker compose down -v`.
@@ -70,3 +72,39 @@ Do not install or enable the unit until all of these have evidence:
 4. the full real provider/checkpoint/fencing matrix is green;
 5. the edge/OAuth configuration is provisioned without changing the existing VPN;
 6. the merge commit passes control process-kill and host-reboot recovery.
+
+The installation command additionally refuses to proceed unless:
+
+- `MY_DATA_HUB_APPROVED_CONTROL_COMMIT` equals the clean checkout `HEAD`;
+- `loginctl show-user` reports `Linger=yes` for the service user;
+- provider, MCP-reader and OAuth environment files are distinct regular non-symlink
+  files with no group/world permissions;
+- the OAuth signing key has the same private-file constraint;
+- the master TLS CA is a regular non-symlink file;
+- the bounded master-asset root is a real non-symlink directory;
+- none of the static environments contains a PostgreSQL data-plane URL or crosses the
+  provider/MCP/OAuth secret boundary.
+
+Default paths are below `$HOME/.local/state/my-data-hub-control-plane`; operators may
+override them only with the installer variables documented by `deploy/control-plane/install.sh`:
+
+```text
+MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE
+MY_DATA_HUB_MCP_ENV_FILE
+MY_DATA_HUB_OAUTH_ENV_FILE
+MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE
+MY_DATA_HUB_MASTER_TLS_CA_FILE
+MY_DATA_HUB_MASTER_ASSET_DIR
+MY_DATA_HUB_CONTROL_LEDGER_DIR
+MY_DATA_HUB_MASTER_SESSION_DIR
+```
+
+The generated non-secret Compose environment records only these paths, UID/GID and exact
+image commit. Upstreams bind only to `127.0.0.1:8080`, `:8765` and `:8780`. Docker
+`restart: unless-stopped` handles process recreation, while the enabled foreground user
+systemd unit plus lingering reconciles all three after login-independent host boot.
+
+`PREPARE_CONTROL_PLANE` builds an immutable release/image without reading secrets,
+changing the current pointer or enabling a unit. Only the separately gated
+`INSTALL_MY_DATA_HUB_CONTROL_PLANE` action reads the private inputs and installs the stack.
+Neither action provisions DNS, Yandex Cloud, certificates, VPN or a local database.

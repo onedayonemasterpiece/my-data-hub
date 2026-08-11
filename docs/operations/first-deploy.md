@@ -11,7 +11,17 @@ PGDATA. It was not deleted blindly. Prepared releases, environment files and the
 unit are likewise non-runtime residue. Exact evidence is in
 [`evidence/2026-08-10-pr-a-host.json`](evidence/2026-08-10-pr-a-host.json).
 
-Future first deployment may install only the lightweight control plane after separate owner
-approval. It must prove DB-free environment, `master=ABSENT` readiness, loopback listener,
-autostart of only the control process and fail-closed data methods. Master Notebook,
-checkpoints, DNS/VPN/443 and remote MCP are later gates.
+Future first deployment may install only the lightweight DB-free stack after all operational
+gates pass. The one enabled user unit reconciles the control plane, remote MCP resource
+server and OAuth authorization server through the explicit `remote-mcp` profile. It must
+prove `master=ABSENT` readiness, the three loopback listeners (`8080`, `8765`, `8780`),
+process-kill recovery, login-independent reboot recovery and fail-closed data methods.
+
+The installer requires the exact approved merge commit, pre-enabled user lingering,
+private split provider/MCP/OAuth environments, a private OAuth signing key, master TLS CA
+and bounded release-owned master assets. It rejects PostgreSQL data-plane configuration and
+does not create PGDATA, a PostgreSQL volume or a database service.
+
+Master Notebook/checkpoint acceptance and the external DNS/TLS/Yandex Cloud edge remain
+separate prerequisites for a successful real deployment. The current implementation branch
+has not run INSTALL and has not changed DNS, VPN, port 443 or any other external service.
