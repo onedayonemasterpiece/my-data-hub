@@ -27,6 +27,25 @@ READ_ONLY_TOOLS = {
     "data.change.status",
 }
 FORBIDDEN_FRAGMENTS = ("write", "enqueue", "submit", "delete", "create", "update", "operator")
+CANONICAL_MCP_HOST = "mcp-datahub.kenigevents.ru"
+
+
+def _validate_endpoint(endpoint: str) -> str:
+    parsed = urlsplit(endpoint)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != CANONICAL_MCP_HOST
+        or parsed.port not in (None, 443)
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path != "/mcp"
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "endpoint must be the canonical HTTPS mcp-datahub.kenigevents.ru/mcp resource"
+        )
+    return f"https://{CANONICAL_MCP_HOST}/mcp"
 
 
 def _structured_status(result: object) -> dict[str, object]:
@@ -190,6 +209,7 @@ async def verify_acceptance(
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
 
+    endpoint = _validate_endpoint(endpoint)
     timeout = httpx2.Timeout(30.0, connect=5.0)
     async with httpx2.AsyncClient(
         headers={"Authorization": f"Bearer {token}"},
@@ -214,6 +234,7 @@ async def verify(endpoint: str, token: str, expected_commit: str) -> dict[str, o
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
 
+    endpoint = _validate_endpoint(endpoint)
     timeout = httpx2.Timeout(15.0, connect=5.0)
     async with httpx2.AsyncClient(
         headers={"Authorization": f"Bearer {token}"},
@@ -239,7 +260,7 @@ async def verify(endpoint: str, token: str, expected_commit: str) -> dict[str, o
                     f"missing={sorted(READ_ONLY_TOOLS - names)}, forbidden={forbidden}"
                 )
             result = await session.call_tool("platform.status", {})
-            if result.isError:
+            if _result_is_error(result):
                 raise RuntimeError("remote platform.status returned an MCP error")
             status = _structured_status(result)
             observed_commit = status.get("deployed_commit")
@@ -270,9 +291,10 @@ def main() -> int:
         default=os.getenv("MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT", ""),
     )
     args = parser.parse_args()
-    parsed = urlsplit(args.endpoint)
-    if parsed.scheme != "https" or parsed.path != "/mcp" or parsed.query or parsed.fragment:
-        parser.error("endpoint must be an exact HTTPS /mcp resource without query or fragment")
+    try:
+        args.endpoint = _validate_endpoint(args.endpoint)
+    except ValueError as exc:
+        parser.error(str(exc))
     if not args.token:
         parser.error("MY_DATA_HUB_MCP_CANARY_TOKEN or --token is required")
     if len(args.expected_commit) != 40 or any(
