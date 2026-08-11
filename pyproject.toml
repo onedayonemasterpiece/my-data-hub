@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "aiohttp>=3.11,<4",
+  "cryptography>=44,<51",
   "fastapi>=0.115,<1",
   "jsonschema>=4.23,<5",
   "mcp==2.0.0",

@@ -10,6 +10,20 @@ on:
       expected_commit:
         description: Exact deployed merge commit
         required: true
+      expected_source_identity:
+        description: Exact deployment source repository identity
+        required: true
+        default: onedayonemasterpiece/my-data-hub
+      deployment_evidence_receipt:
+        description: Signed sanitized host deployment evidence JSON (never include secrets)
+        required: true
+      deployment_evidence_key_id:
+        description: Expected Ed25519 deployment evidence signing key id
+        required: true
+      cold_start_timeout_seconds:
+        description: Bounded wait for cold master activation
+        required: true
+        default: '900'
 
 permissions:
   contents: read
@@ -17,41 +31,67 @@ permissions:
 jobs:
   remote-read-only-contract:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     env:
       MY_DATA_HUB_MCP_CANARY_ENDPOINT: ${{ inputs.endpoint }}
       MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT: ${{ inputs.expected_commit }}
+      MY_DATA_HUB_EXPECTED_SOURCE_IDENTITY: ${{ inputs.expected_source_identity }}
       MY_DATA_HUB_MCP_CANARY_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_READER_TOKEN }}
+      MY_DATA_HUB_DEPLOY_EVIDENCE_JSON: ${{ inputs.deployment_evidence_receipt }}
+      MY_DATA_HUB_DEPLOY_EVIDENCE_KEY_ID: ${{ inputs.deployment_evidence_key_id }}
+      MY_DATA_HUB_DEPLOY_EVIDENCE_PUBLIC_KEY_PEM: ${{ vars.MY_DATA_HUB_DEPLOY_EVIDENCE_PUBLIC_KEY_PEM }}
+      MY_DATA_HUB_SOURCE_COMMIT: ${{ inputs.expected_commit }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_commit }}
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
       - run: python -m pip install -e '.[dev]'
-      - name: Require exact deploy identity and reader token
+      - name: Require exact deploy/source identity and evidence inputs
         shell: bash
         run: |
+          set -euo pipefail
           test -n "$MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT"
+          test -n "$MY_DATA_HUB_EXPECTED_SOURCE_IDENTITY"
           test -n "$MY_DATA_HUB_MCP_CANARY_TOKEN"
+          test -n "$MY_DATA_HUB_DEPLOY_EVIDENCE_JSON"
+          test -n "$MY_DATA_HUB_DEPLOY_EVIDENCE_KEY_ID"
+          test -n "$MY_DATA_HUB_DEPLOY_EVIDENCE_PUBLIC_KEY_PEM"
           test "${#MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT}" -eq 40
-      - name: Verify remote OAuth/MCP read-only contract
-        run: python scripts/verify_remote_mcp.py
+          test "$GITHUB_REPOSITORY" = "$MY_DATA_HUB_EXPECTED_SOURCE_IDENTITY"
+          test "$(git rev-parse HEAD)" = "$MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT"
+      - name: Verify remote and signed host post-deploy contract
+        run: >-
+          python scripts/verify_post_deploy.py
+          --cold-start-timeout-seconds "${{ inputs.cold_start_timeout_seconds }}"
+          --output artifacts/post-deploy-verification.json
       - name: Write post-deploy receipt
         if: always()
-        run: >-
-          python scripts/write_workflow_receipt.py
-          --workflow post-deploy --environment devstand
-          --outcome "${{ job.status == 'success' && 'PASS' || 'FAIL' }}"
-          --observed "remote read-only MCP verification for exact requested deployment"
-          --resource endpoint="$MY_DATA_HUB_MCP_CANARY_ENDPOINT"
-          --resource expected_commit="$MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT"
-          --output artifacts/post-deploy.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          hash_args=()
+          if test -f artifacts/post-deploy-verification.json; then
+            hash_args+=(--hash-file verification=artifacts/post-deploy-verification.json)
+          fi
+          python scripts/write_workflow_receipt.py \
+            --workflow post-deploy --environment devstand \
+            --outcome "${{ job.status == 'success' && 'PASS' || 'FAIL' }}" \
+            --observed "remote and signed host acceptance for exact requested deployment" \
+            --resource endpoint="$MY_DATA_HUB_MCP_CANARY_ENDPOINT" \
+            --resource expected_commit="$MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT" \
+            --resource expected_source_identity="$MY_DATA_HUB_EXPECTED_SOURCE_IDENTITY" \
+            "${hash_args[@]}" \
+            --output artifacts/post-deploy.json
       - name: Upload receipt
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: post-deploy-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/post-deploy.json
+          path: artifacts/
           if-no-files-found: error
           retention-days: 30
