@@ -1,0 +1,117 @@
+{
+  "schema_version": "my-data-hub.ydb-readonly-export-attempt-receipt/v1",
+  "observed_window": {
+    "started_at": "2026-08-11T23:27:05Z",
+    "completed_at": "2026-08-11T23:36:31Z"
+  },
+  "source": {
+    "system": "ydb",
+    "endpoint": "grpcs://ydb.serverless.yandexcloud.net:2135",
+    "database_id": "etnkibjidis0o6stn2cq",
+    "database_path": "/ru-central1/b1ghfk15fpug7mn5439l/etnkibjidis0o6stn2cq",
+    "table": "region_talk_external_blogger_evidence",
+    "primary_key": [
+      "record_id"
+    ],
+    "ordered_source_query": "SELECT `record_id`, `batch_id`, `list_order`, `level`, `blogger_name`, `segment`, `region_relation_status`, `visit_period_text`, `locations_text`, `confirmation_basis`, `evidence_url`, `telegram_url`, `vk_public_url`, `vk_video_url`, `rutube_url`, `source_kind`, `confirmation_status`, `pipeline_status`, `source_file_sha256`, `ingested_at`, `updated_at`, `external_region_basis`, `external_region_evidence_url`, `submission_batch_ids_json`, `other_primary_url`, `social_links_type`, `evidence_type` FROM `region_talk_external_blogger_evidence` ORDER BY `record_id`;",
+    "ordered_source_query_sha256": "ef94cf114fea0e2f89418c5dacbc289e5c2d21f6935883c2b685ec4f64bd0e50",
+    "contract_schema_sha256": "a44855556115f90c0b6353cac0b8c5d1eaebf91485ca594c621cc73f91b2564f",
+    "observed_columns": [
+      "record_id Utf8 PRIMARY KEY",
+      "batch_id Utf8",
+      "list_order Uint64",
+      "level Utf8",
+      "blogger_name Utf8",
+      "segment Utf8",
+      "region_relation_status Utf8",
+      "visit_period_text Utf8",
+      "locations_text Utf8",
+      "confirmation_basis Utf8",
+      "evidence_url Utf8",
+      "telegram_url Utf8?",
+      "vk_public_url Utf8?",
+      "vk_video_url Utf8?",
+      "rutube_url Utf8?",
+      "source_kind Utf8",
+      "confirmation_status Utf8",
+      "pipeline_status Utf8",
+      "source_file_sha256 Utf8",
+      "ingested_at Timestamp",
+      "updated_at Timestamp",
+      "external_region_basis Utf8?",
+      "external_region_evidence_url Utf8?",
+      "submission_batch_ids_json Utf8?",
+      "other_primary_url Utf8?",
+      "social_links_type Utf8?",
+      "evidence_type Utf8?"
+    ]
+  },
+  "reader_identity": {
+    "service_account_name": "my-data-hub-ydb-reader",
+    "service_account_id": "ajeri3qs6jbijih0bs5d",
+    "credential_mode": "ephemeral yc iam create-token impersonation",
+    "live_database_role_bindings": [
+      "ydb.viewer"
+    ],
+    "non_viewer_database_role_binding_count": 0,
+    "token_or_key_material_recorded": false
+  },
+  "successful_live_aggregate": {
+    "read_at": "2026-08-11T23:27:05Z",
+    "query_sha256": "5ba943903704dc69535b4311205ada68f6ee6e47f8553f94afff33bb317aebf7",
+    "row_count": 266,
+    "distinct_record_ids": 266,
+    "batch_count": 14,
+    "source_file_count": 14,
+    "min_updated_at": "2026-07-12T09:31:27.839864Z",
+    "max_updated_at": "2026-07-14T19:43:08.458787Z",
+    "confirmation_status_counts": {
+      "confirmed_external": 202,
+      "needs_externality_review": 64
+    },
+    "sample_or_limit_clause_used": false
+  },
+  "bounded_full_export_attempt": {
+    "tool": "scripts/provider/read_only_ydb_blogger_export.py",
+    "transaction_mode": "QuerySnapshotReadOnly",
+    "full_ordered_query": true,
+    "attempt_count": 3,
+    "backoff_seconds": [
+      30,
+      60
+    ],
+    "terminal_error_class": "Overloaded",
+    "provider_error_code": 200803,
+    "provider_error": "Throughput limit exceeded",
+    "direct_ordered_table_read_probe": "CLIENT_RESOURCE_EXHAUSTED",
+    "raw_row_count_persisted": 0,
+    "manifest_created": false,
+    "status": "BLOCKED_EXTERNAL_THROTTLING"
+  },
+  "provider_state": {
+    "database_status": "RUNNING",
+    "enable_throttling_rcu_limit": true,
+    "throttling_rcu_limit_field_present": false,
+    "documented_effective_limit_when_omitted_or_zero": 0,
+    "metadata_before_sha256": "e8c8ff547abd8eb5c149b183fb861b0d26916816419935b6de80947b40a33b46",
+    "metadata_after_sha256": "e8c8ff547abd8eb5c149b183fb861b0d26916816419935b6de80947b40a33b46",
+    "metadata_equal_before_after": true,
+    "provider_configuration_mutated": false,
+    "reference": "https://yandex.cloud/en/docs/ydb/concepts/serverless-and-dedicated"
+  },
+  "read_only_and_unchanged_proof": {
+    "reader_has_only_ydb_viewer": true,
+    "database_metadata_equal_before_after": true,
+    "postgresql_contacted": false,
+    "ydb_data_mutation_succeeded": false,
+    "provider_configuration_mutated": false,
+    "current_attempt_write_denial_statement_reached_server": false,
+    "current_attempt_write_denial_blocker": "Query session creation was rejected by serverless throughput before statement execution",
+    "prior_same_identity_write_denial_evidence": "docs/operations/evidence/2026-08-11-operational-mvp/ydb-readonly-inventory.json"
+  },
+  "protected_export_root": "/home/dev/.local/share/my-data-hub/protected/ydb-region-talk-20260811/exports",
+  "protected_export_root_mode": "0700",
+  "protected_export_root_owner": "dev:dev",
+  "raw_rows_committed_to_git": false,
+  "completion_status": "PARTIAL_EXACT_COUNT_FULL_EXPORT_BLOCKED"
+}
