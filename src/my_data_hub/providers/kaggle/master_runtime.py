@@ -285,7 +285,7 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
                     "disposable": False,
                 },
             )
-            result = self.adapter.push_private_notebook(
+            result = self.adapter.push_private_master_notebook_pending_attestation(
                 intent=intent,
                 task_run_id=UUID(str(effect.exact_identity["run_id"])),
                 source=source,
@@ -303,7 +303,12 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
         if effect.effect_kind == "trigger_run":
             launch = effect.exact_identity.get("notebook_launch")
             run = self._run_from_identity(launch)
-            self.adapter.read_run_status(run)
+            read_status = getattr(
+                self.adapter,
+                "read_attested_master_run_status",
+                self.adapter.read_run_status,
+            )
+            read_status(run)
             return self._receipt(effect, run.provider_run_ref, run.model_dump(mode="json"))
         raise MasterLaunchContractError(f"unsupported master provider effect: {effect.effect_kind}")
 
@@ -347,7 +352,12 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
         run = self._run_from_identity(query.provider_run_identity)
         if run.task_run_id != UUID(query.run_id) or run.provider_ref != self.assets.notebook_ref:
             raise MasterLaunchContractError("terminal query differs from the exact launched run")
-        observed = self.adapter.read_run_status(run)
+        read_status = getattr(
+            self.adapter,
+            "read_attested_master_run_status",
+            self.adapter.read_run_status,
+        )
+        observed = read_status(run)
         platform_status = {
             KernelState.QUEUED: PlatformStatus.QUEUED,
             KernelState.RUNNING: PlatformStatus.RUNNING,
@@ -359,7 +369,12 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             return MasterTerminalEvidence(platform_status)
         with tempfile.TemporaryDirectory(prefix="my-data-hub-terminal-") as folder:
             destination = Path(folder)
-            output_tree = self.adapter.download_exact_run_output_file(
+            download_output = getattr(
+                self.adapter,
+                "download_attested_master_output_file",
+                self.adapter.download_exact_run_output_file,
+            )
+            output_tree = download_output(
                 run,
                 destination=destination,
                 file_name=MASTER_TERMINAL_OUTPUT_NAME,

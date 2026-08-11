@@ -67,6 +67,9 @@ class FakeKaggleAdapter:
         )
         return SimpleNamespace(run=self.run)
 
+    def push_private_master_notebook_pending_attestation(self, **kwargs):  # type: ignore[no-untyped-def]
+        return self.push_private_notebook(**kwargs)
+
     def read_run_status(self, run):  # type: ignore[no-untyped-def]
         assert self.run == run
         self.calls["run_reconcile"] += 1

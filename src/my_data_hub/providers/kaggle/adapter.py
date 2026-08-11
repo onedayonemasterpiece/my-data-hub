@@ -785,6 +785,80 @@ class KaggleProviderAdapter:
         enable_internet: bool = False,
         timeout_seconds: int | None = None,
     ) -> NotebookMutationResult:
+        return self._push_private_notebook(
+            intent=intent,
+            task_run_id=task_run_id,
+            source=source,
+            title=title,
+            code_file=code_file,
+            kernel_type=kernel_type,
+            language=language,
+            control_class=control_class,
+            disposable=disposable,
+            dataset_sources=dataset_sources,
+            enable_internet=enable_internet,
+            timeout_seconds=timeout_seconds,
+            pending_runtime_attestation=False,
+        )
+
+    def push_private_master_notebook_pending_attestation(
+        self,
+        *,
+        intent: ProviderEffectIntent,
+        task_run_id: UUID,
+        source: bytes,
+        title: str,
+        code_file: str,
+        kernel_type: str,
+        language: str,
+        control_class: ControlClass,
+        disposable: bool,
+        dataset_sources: Sequence[str] = (),
+        enable_internet: bool = False,
+        timeout_seconds: int | None = None,
+    ) -> NotebookMutationResult:
+        """Persist an exact legacy push response pending runtime source proof.
+
+        This is deliberately master-only: ordinary workers retain independent
+        GetKernel source readback.  The caller must gate ACTIVE authority on
+        the authenticated runtime-computed source digest.
+        """
+
+        if control_class is not ControlClass.ORCHESTRATOR_PROTECTED or disposable:
+            raise KagglePolicyError("pending runtime attestation is master-only")
+        return self._push_private_notebook(
+            intent=intent,
+            task_run_id=task_run_id,
+            source=source,
+            title=title,
+            code_file=code_file,
+            kernel_type=kernel_type,
+            language=language,
+            control_class=control_class,
+            disposable=disposable,
+            dataset_sources=dataset_sources,
+            enable_internet=enable_internet,
+            timeout_seconds=timeout_seconds,
+            pending_runtime_attestation=True,
+        )
+
+    def _push_private_notebook(
+        self,
+        *,
+        intent: ProviderEffectIntent,
+        task_run_id: UUID,
+        source: bytes,
+        title: str,
+        code_file: str,
+        kernel_type: str,
+        language: str,
+        control_class: ControlClass,
+        disposable: bool,
+        dataset_sources: Sequence[str] = (),
+        enable_internet: bool = False,
+        timeout_seconds: int | None = None,
+        pending_runtime_attestation: bool,
+    ) -> NotebookMutationResult:
         if intent.action != MutationAction.PUSH_NOTEBOOK:
             raise KaggleContractError("effect intent action does not authorize notebook push/run")
         self._validate_control_class(control_class, kind=ProviderKind.NOTEBOOK)
@@ -837,12 +911,20 @@ class KaggleProviderAdapter:
             (folder / "kernel-metadata.json").write_bytes(canonical_json_bytes(metadata))
             self.journal.persist_intent(intent)
             try:
-                response, attempts = self.retry.call(
-                    "kernels_push",
-                    lambda: self.api.kernels_push(
-                        str(folder), timeout=str(timeout_seconds) if timeout_seconds is not None else None, acc=None
-                    ),
-                )
+                if pending_runtime_attestation:
+                    response = self.api.kernels_push(
+                        str(folder),
+                        timeout=str(timeout_seconds) if timeout_seconds is not None else None,
+                        acc=None,
+                    )
+                    attempts = 1
+                else:
+                    response, attempts = self.retry.call(
+                        "kernels_push",
+                        lambda: self.api.kernels_push(
+                            str(folder), timeout=str(timeout_seconds) if timeout_seconds is not None else None, acc=None
+                        ),
+                    )
                 ref = _normalized_ref(_field(response, "ref") or intent.provider_ref)
                 version = _version(_field(response, "version_number", "versionNumber"))
                 provider_kernel_id = _version(_field(response, "kernel_id", "kernelId"))
@@ -851,11 +933,35 @@ class KaggleProviderAdapter:
                     raise KaggleTerminalFailure(f"Kaggle rejected notebook push: {error[:500]}")
                 if ref != intent.provider_ref or version is None or provider_kernel_id is None:
                     raise KaggleIdentityError("Kaggle push response lacks the exact requested ref/kernel-id/version")
-                source_identity = self.read_private_notebook_source(
-                    provider_ref=ref, source_version=version, expected_source_sha256=source_sha
-                )
+                if pending_runtime_attestation:
+                    source_identity = KaggleKernelSourceIdentity(
+                        provider_ref=ref,
+                        source_version=version,
+                        privacy="private",
+                        source_sha256=source_sha,
+                        fingerprint=ProviderFingerprint(
+                            value=sha256_value(
+                                {
+                                    "provider_ref": ref,
+                                    "source_version": version,
+                                    "privacy": "private",
+                                    "source_sha256": source_sha,
+                                }
+                            )
+                        ),
+                        observed_at=self.clock(),
+                    )
+                else:
+                    source_identity = self.read_private_notebook_source(
+                        provider_ref=ref, source_version=version, expected_source_sha256=source_sha
+                    )
                 outcome = EffectOutcome.APPLIED
             except Exception as exc:
+                if pending_runtime_attestation:
+                    self._persist_uncertain(intent, detail="master_push_response_ambiguous")
+                    raise KaggleAmbiguousMutation(
+                        "master push outcome lacks an exact persisted response"
+                    ) from exc
                 recovered = self._recover_notebook(intent.provider_ref, source_sha)
                 if recovered is None:
                     self._persist_uncertain(intent, detail="notebook_push_ambiguous")
@@ -887,7 +993,11 @@ class KaggleProviderAdapter:
             observed_fingerprint=source_identity.fingerprint,
             provider_version=source_identity.source_version,
             observed_at=self.clock(),
-            detail_code="private_notebook_pushed_and_run",
+            detail_code=(
+                "private_master_notebook_pushed_pending_runtime_attestation"
+                if pending_runtime_attestation
+                else "private_notebook_pushed_and_run"
+            ),
         )
         claim = TaskResourceClaim.create(
             task_id=intent.task_id,
@@ -967,7 +1077,23 @@ class KaggleProviderAdapter:
         return source_sha, provider_id
 
     def read_run_status(self, run: KaggleKernelRunIdentity) -> KaggleKernelStatus:
-        self._assert_current_run(run)
+        return self._read_run_status(run, require_source_readback=True)
+
+    def read_attested_master_run_status(
+        self, run: KaggleKernelRunIdentity
+    ) -> KaggleKernelStatus:
+        """Read the exact persisted master run after runtime source attestation."""
+
+        return self._read_run_status(run, require_source_readback=False)
+
+    def _read_run_status(
+        self,
+        run: KaggleKernelRunIdentity,
+        *,
+        require_source_readback: bool,
+    ) -> KaggleKernelStatus:
+        if require_source_readback:
+            self._assert_current_run(run)
         response, _ = self.retry.call("kernels_status", lambda: self.api.kernels_status(run.provider_ref))
         raw = _field(response, "status")
         raw_name = str(getattr(raw, "name", raw) or "unknown").strip().casefold()
@@ -1191,6 +1317,41 @@ class KaggleProviderAdapter:
         file_name: str,
         max_bytes: int,
     ) -> KaggleKernelOutputTreeIdentity:
+        return self._download_exact_run_output_file(
+            run,
+            destination=destination,
+            file_name=file_name,
+            max_bytes=max_bytes,
+            require_source_readback=True,
+        )
+
+    def download_attested_master_output_file(
+        self,
+        run: KaggleKernelRunIdentity,
+        *,
+        destination: Path,
+        file_name: str,
+        max_bytes: int,
+    ) -> KaggleKernelOutputTreeIdentity:
+        """Read bounded terminal output for a control-attested master run."""
+
+        return self._download_exact_run_output_file(
+            run,
+            destination=destination,
+            file_name=file_name,
+            max_bytes=max_bytes,
+            require_source_readback=False,
+        )
+
+    def _download_exact_run_output_file(
+        self,
+        run: KaggleKernelRunIdentity,
+        *,
+        destination: Path,
+        file_name: str,
+        max_bytes: int,
+        require_source_readback: bool,
+    ) -> KaggleKernelOutputTreeIdentity:
         """Download one exact top-level output without copying the run's broad tree.
 
         Kaggle resolves output against the current session even when given the
@@ -1205,7 +1366,7 @@ class KaggleProviderAdapter:
         _validate_relative_path(file_name)
         if not 1 <= max_bytes <= 64 * 1024 * 1024:
             raise KaggleContractError("exact output file size bound is invalid")
-        status = self.read_run_status(run)
+        status = self._read_run_status(run, require_source_readback=require_source_readback)
         if status.state != KernelState.COMPLETE:
             raise KaggleContractError("run output is unavailable before exact terminal completion")
         _prepare_destination(destination)
@@ -1244,7 +1405,8 @@ class KaggleProviderAdapter:
         except Exception:
             shutil.rmtree(destination, ignore_errors=True)
             raise
-        self._assert_current_run(run)
+        if require_source_readback:
+            self._assert_current_run(run)
         return KaggleKernelOutputTreeIdentity(
             run=run,
             terminal_state=KernelState.COMPLETE,
