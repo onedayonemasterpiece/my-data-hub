@@ -20,6 +20,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
 import scripts.provider.operational_kaggle_driver as driver_module
+import scripts.provider.operational_kaggle_matrix as matrix_module
 from my_data_hub.acceptance.data_production import ProductionDataWorkloadReceipt
 from my_data_hub.acceptance.data_workloads import (
     BloggerQuarantineEvidence,
@@ -29,6 +30,16 @@ from my_data_hub.acceptance.data_workloads import (
     DataWorkloadState,
     DuplicateReviewEvidence,
     RequirementEvidence,
+)
+from my_data_hub.acceptance.master_lifecycle import (
+    CallbackLossEvidence,
+    LeaseExpiryEvidence,
+    MasterAcceptanceBinding,
+    MasterAcceptanceReceipt,
+    MasterAcceptanceRequest,
+    OldEpochEvidence,
+    RotationSoakEvidence,
+    command_for,
 )
 from my_data_hub.acceptance.scenario_operator import (
     CheckpointAcceptanceLaunchStatus,
@@ -478,6 +489,103 @@ class CheckpointAcceptanceGateway(FakeGateway):
         raise AssertionError(f"unexpected checkpoint tool call: {tool}")
 
 
+class MasterAcceptanceGateway(FakeGateway):
+    def __init__(self, request: DriverRequest, evidence: object) -> None:
+        super().__init__()
+        self.request = request
+        self.evidence = evidence
+        self.target_operation_id = UUID("11111111-1111-4111-8111-111111111111")
+        self.status: dict[str, Any] | None = None
+        self.master_reads = 0
+
+    def _master(self) -> dict[str, Any]:
+        self.master_reads += 1
+        replacement = self.request.requirement_id in {"FM08", "FM11"} and self.master_reads > 1
+        return {
+            "master_state": "ACTIVE",
+            "operation_id": str(UUID(int=9) if replacement else self.target_operation_id),
+            "instance_id": str(UUID(int=20 if replacement else 19)),
+            "master_epoch": 2 if replacement else 1,
+            "canonical_revision": 4,
+            "lease_expires_at": "2026-08-11T02:00:00Z",
+            "provider_run_ref": "owner/master/8" if replacement else "owner/master/7",
+            "provider_kernel_id": 8 if replacement else 7,
+            "capabilities": ["bloggers:read"],
+        }
+
+    def _terminal(self) -> dict[str, Any]:
+        binding = MasterAcceptanceBinding(
+            operation_id=self.target_operation_id,
+            run_id=UUID(int=2),
+            attempt_id=UUID(int=3),
+            service_instance_id="master-service",
+            master_instance_id=UUID(int=4),
+            epoch=1,
+        )
+        master_request = MasterAcceptanceRequest(
+            task_id=self.request.task_run_id,
+            scenario=self.request.requirement_id,
+            idempotency_key=f"operational:{self.request.matrix_id}:{self.request.requirement_id}:master",
+            source_revision=self.request.commit_sha,
+            target_operation_id=self.target_operation_id,
+        )
+        command = command_for(master_request, binding)
+        receipt = MasterAcceptanceReceipt(
+            command_id=command.command_id,
+            command_sha256=command.command_sha256,
+            task_id=self.request.task_run_id,
+            scenario=self.request.requirement_id,
+            command_kind=command.command_kind,
+            binding=binding,
+            evidence_class="live",
+            outcome="succeeded",
+            evidence=self.evidence,
+            completed_at=datetime(2026, 8, 11, 1, tzinfo=UTC),
+        )
+        return {
+            "found": True,
+            "bounded": True,
+            "task_id": str(self.request.task_run_id),
+            "scenario_id": self.request.requirement_id,
+            "source_revision": self.request.commit_sha,
+            "operation_id": str(self.target_operation_id),
+            "target_operation_id": str(self.target_operation_id),
+            "state": "PASSED",
+            "failure_code": None,
+            "command": {
+                "command_id": str(command.command_id),
+                "command_kind": command.command_kind.value,
+                "command_sha256": command.command_sha256,
+                "state": "SUCCEEDED",
+                "receipt_sha256": receipt.receipt_sha256,
+                "receipt": receipt.model_dump(mode="json"),
+            },
+            "provider_carrier": {
+                "provider_ref": "owner/master",
+                "provider_run_ref": "owner/master/7",
+                "provider_kernel_id": 7,
+                "source_version": 7,
+                "source_sha256": "a" * 64,
+                "output_file_name": "operational-result.json",
+                "output_file_sha256": "b" * 64,
+                "output_tree_sha256": "c" * 64,
+                "output_receipt_sha256": "d" * 64,
+            },
+        }
+
+    async def call(self, profile: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((profile, tool, dict(arguments)))
+        if tool == "master.status":
+            return self._master()
+        if tool == "acceptance.scenario.status":
+            return self.status or {"found": False}
+        if tool == "acceptance.scenario.request":
+            assert arguments["target_operation_id"] == str(self.target_operation_id)
+            self.status = self._terminal()
+            return self.status
+        raise AssertionError(f"unexpected master acceptance call: {tool}")
+
+
 def _set_evidence_config(monkeypatch: pytest.MonkeyPatch, *, fm03: bool = False) -> None:
     value: dict[str, Any] = {
         "schema_version": "my-data-hub-operational-kaggle-evidence-driver.v1",
@@ -637,6 +745,126 @@ def test_each_executor_runs_only_safe_existing_probes_then_names_exact_gap(
         "provider.resources.run",
         "provider.resources.delete",
     }
+
+
+@pytest.mark.parametrize(
+    ("ordinal", "evidence"),
+    [
+        (
+            8,
+            CallbackLossEvidence(
+                kind="CALLBACK_LOSS_RECOVERY",
+                callback_suppressed_once=True,
+                exact_event_id=UUID(int=30),
+                exact_body_sha256="1" * 64,
+                control_boot_id_before=UUID(int=31),
+                control_boot_id_after=UUID(int=32),
+                replay_disposition="accepted",
+                service_active_after_recovery=True,
+            ),
+        ),
+        (
+            10,
+            LeaseExpiryEvidence(
+                kind="LEASE_EXPIRY_DENIAL",
+                observed_wait_seconds=60,
+                lease_expired=True,
+                bounded_operator_dml_denied=True,
+                transaction_state="rollback_only",
+                operator_operation_id=UUID(int=33),
+                operator_receipt_sha256="2" * 64,
+                denial_code="MDH_EPOCH_LEASE_EXPIRED",
+                canonical_revision_before=4,
+                canonical_revision_after=4,
+            ),
+        ),
+        (
+            11,
+            OldEpochEvidence(
+                kind="OLD_EPOCH_RETURN_DENIAL",
+                old_epoch=1,
+                new_epoch=2,
+                old_runtime_draining_before_rotation=True,
+                renew_denied=True,
+                register_denied=True,
+                bounded_write_denied=True,
+                tunnel_denied=True,
+                new_epoch_active=True,
+                old_operation_id=UUID("11111111-1111-4111-8111-111111111111"),
+                new_operation_id=UUID(int=9),
+                handoff_checkpoint_id=UUID(int=34),
+                write_denial_receipt_sha256="3" * 64,
+                tunnel_denial_receipt_sha256="4" * 64,
+            ),
+        ),
+        (
+            24,
+            RotationSoakEvidence(
+                kind="SESSION_ROTATION_SOAK",
+                monotonic_started_ns=10,
+                monotonic_finished_ns=3_600_000_000_010,
+                observed_duration_seconds=3600,
+                session_rotations=12,
+                lease_renewals=12,
+                tunnel_renewals=12,
+                rejected_stale_sessions=1,
+                remained_single_epoch=True,
+                service_active_at_end=True,
+                heartbeats_continuous=True,
+                heartbeat_count=12,
+                heartbeat_receipt_sha256s=tuple(f"{index:x}".rjust(64, "0") for index in range(1, 13)),
+                reads_succeeded=True,
+                read_query_count=12,
+                bounded_read_receipt_sha256s=tuple(f"{index:x}".rjust(64, "1") for index in range(1, 13)),
+                checkpoint_verified=True,
+                recovery_succeeded=True,
+                checkpoint_id=UUID(int=35),
+                exact_version_ref="owner/checkpoint/9",
+                manifest_sha256="5" * 64,
+                checkpoint_receipt_sha256="6" * 64,
+                recovery_receipt_sha256="7" * 64,
+            ),
+        ),
+    ],
+)
+def test_master_acceptance_scenarios_bind_typed_receipt_and_exact_carrier(
+    ordinal: int, evidence: object
+) -> None:
+    request = _request(ordinal)
+    gateway = MasterAcceptanceGateway(request, evidence)
+
+    result = asyncio.run(execute(request, gateway))
+
+    assert result.outcome == "PASS"
+    assert result.control_receipt is not None
+    assert result.control_receipt.evidence == evidence
+    assert result.provider_run_ref == "owner/master/7"
+    assert result.output_receipt_sha256 == "d" * 64
+    assert result.scenario_output is None
+    assert [tool for _profile, tool, _arguments in gateway.calls].count(
+        "acceptance.scenario.request"
+    ) == 1
+    if request.requirement_id == "FM08":
+        assert {item.gate for item in result.control_lifecycle} == {
+            "abrupt_master_termination",
+            "control_plane_restart",
+        }
+    elif request.requirement_id == "FM11":
+        assert [item.gate for item in result.control_lifecycle] == ["clean_rotation"]
+    else:
+        assert result.control_lifecycle == ()
+    plan = build_plan(
+        matrix_id=request.matrix_id,
+        commit_sha=request.commit_sha,
+        created_at=request.evidence_issued_at,
+    )
+    receipt, cleanup = matrix_module._trusted_control_receipt(
+        plan=plan,
+        row=plan["scenarios"][ordinal - 1],
+        locator=matrix_module.DriverResult.model_validate(result.model_dump(mode="json")),
+        started_at=request.evidence_issued_at,
+    )
+    assert receipt["outcome"] == "PASS" and cleanup is None
 
 
 def test_fm14_checkpoint_executor_requests_then_returns_exact_evidence_locator(

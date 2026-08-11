@@ -250,6 +250,41 @@ class MasterCommandProjection(BaseModel):
         return self
 
 
+class DriverControlLifecycle(BaseModel):
+    """Exact lifecycle identities independently projected by control status."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    gate: Literal["abrupt_master_termination", "control_plane_restart", "clean_rotation"]
+    operation_id: UUID
+    old_provider_run_ref: str | None = None
+    new_provider_run_ref: str | None = None
+    old_epoch: int | None = Field(default=None, ge=1)
+    new_epoch: int | None = Field(default=None, ge=1)
+    before_identity: UUID | None = None
+    after_identity: UUID | None = None
+
+    @model_validator(mode="after")
+    def exact_gate(self) -> DriverControlLifecycle:
+        if self.gate in {"abrupt_master_termination", "clean_rotation"} and not (
+            self.old_provider_run_ref
+            and self.new_provider_run_ref
+            and self.old_provider_run_ref != self.new_provider_run_ref
+        ):
+            raise ValueError("master lifecycle requires distinct provider runs")
+        if self.gate == "clean_rotation" and not (
+            self.old_epoch and self.new_epoch == self.old_epoch + 1
+        ):
+            raise ValueError("clean rotation requires consecutive epochs")
+        if self.gate == "control_plane_restart" and not (
+            self.before_identity
+            and self.after_identity
+            and self.before_identity != self.after_identity
+        ):
+            raise ValueError("control restart requires distinct boot identities")
+        return self
+
+
 class TrustedDriverResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     schema_version: Literal["my-data-hub-operational-kaggle-driver-result.v2"]
@@ -275,6 +310,7 @@ class TrustedDriverResult(BaseModel):
     cleanup_state: Literal["NOT_REQUIRED", "PENDING", "COMPLETE"] = "NOT_REQUIRED"
     scenario_output: DriverScenarioOutput | None = None
     control_receipt: MasterAcceptanceReceipt | None = None
+    control_lifecycle: tuple[DriverControlLifecycle, ...] = ()
 
     @model_validator(mode="after")
     def exact_outcome_shape(self) -> TrustedDriverResult:
@@ -2039,6 +2075,23 @@ def _master_evidence_is_exact(request: DriverRequest, receipt: MasterAcceptanceR
     elif request.requirement_id == "FM24":
         if not isinstance(evidence, RotationSoakEvidence):
             raise ValueError("FM24 receipt lacks typed soak evidence")
+        required = (
+            evidence.heartbeats_continuous,
+            evidence.heartbeat_count,
+            evidence.heartbeat_receipt_sha256s,
+            evidence.reads_succeeded,
+            evidence.read_query_count,
+            evidence.bounded_read_receipt_sha256s,
+            evidence.checkpoint_verified,
+            evidence.recovery_succeeded,
+            evidence.checkpoint_id,
+            evidence.exact_version_ref,
+            evidence.manifest_sha256,
+            evidence.checkpoint_receipt_sha256,
+            evidence.recovery_receipt_sha256,
+        )
+        if any(value is None for value in required):
+            raise ValueError("FM24 receipt lacks exact continuity/read/checkpoint/recovery evidence")
     else:  # pragma: no cover - closed dispatch invariant
         raise ValueError("unsupported master acceptance scenario")
 
@@ -2050,9 +2103,49 @@ def _master_driver_pass(
     *,
     checks: list[CapabilityCheck],
     observations: Mapping[str, Any],
+    terminal_master: Mapping[str, Any],
     phase: Literal["EXECUTE", "RECONCILE"] = "EXECUTE",
 ) -> TrustedDriverResult:
     _master_evidence_is_exact(request, receipt)
+    if not _exact_active_master(terminal_master):
+        raise ValueError("terminal master projection is not exact ACTIVE state")
+    terminal_operation_id = UUID(str(terminal_master.get("operation_id")))
+    terminal_ref = terminal_master.get("provider_run_ref")
+    terminal_epoch = terminal_master.get("master_epoch")
+    if not isinstance(terminal_ref, str) or not terminal_ref:
+        raise ValueError("terminal master lacks exact provider run")
+    lifecycle: tuple[DriverControlLifecycle, ...] = ()
+    if isinstance(receipt.evidence, CallbackLossEvidence):
+        lifecycle = (
+            DriverControlLifecycle(
+                gate="abrupt_master_termination",
+                operation_id=receipt.binding.operation_id,
+                old_provider_run_ref=carrier.provider_run_ref,
+                new_provider_run_ref=terminal_ref,
+            ),
+            DriverControlLifecycle(
+                gate="control_plane_restart",
+                operation_id=receipt.binding.operation_id,
+                before_identity=receipt.evidence.control_boot_id_before,
+                after_identity=receipt.evidence.control_boot_id_after,
+            ),
+        )
+    elif isinstance(receipt.evidence, OldEpochEvidence):
+        if (
+            terminal_operation_id != receipt.evidence.new_operation_id
+            or terminal_epoch != receipt.evidence.new_epoch
+        ):
+            raise ValueError("FM11 terminal master differs from replacement evidence")
+        lifecycle = (
+            DriverControlLifecycle(
+                gate="clean_rotation",
+                operation_id=receipt.evidence.new_operation_id,
+                old_provider_run_ref=carrier.provider_run_ref,
+                new_provider_run_ref=terminal_ref,
+                old_epoch=receipt.evidence.old_epoch,
+                new_epoch=receipt.evidence.new_epoch,
+            ),
+        )
     return TrustedDriverResult(
         schema_version="my-data-hub-operational-kaggle-driver-result.v2",
         phase=phase,
@@ -2072,6 +2165,7 @@ def _master_driver_pass(
         output_tree_sha256=carrier.output_tree_sha256,
         cleanup_state="NOT_REQUIRED",
         control_receipt=receipt,
+        control_lifecycle=lifecycle,
     )
 
 
@@ -2219,12 +2313,18 @@ async def _execute_master_acceptance_scenario(
         receipt, carrier = _terminal_master_evidence(
             request, status, target_operation_id=target_operation_id
         )
+        terminal_master = await gateway.call("reader", "master.status", {})
         return _master_driver_pass(
             request,
             receipt,
             carrier,
             checks=[*checks, _check("acceptance.terminal", "PASS", "TYPED_CONTROL_RECEIPT_BOUND", status)],
-            observations={**observations, "terminal_status_sha256": _sha(status)},
+            observations={
+                **observations,
+                "terminal_status_sha256": _sha(status),
+                "terminal_master_sha256": _sha(terminal_master),
+            },
+            terminal_master=terminal_master,
         )
     except Exception as exc:
         return _failed(
@@ -2457,6 +2557,9 @@ async def _execute_reconcile(
             catalog = await gateway.catalog("operator")
             if "acceptance.scenario.status" not in catalog:
                 raise ValueError("acceptance scenario status tool is absent")
+            reader_catalog = await gateway.catalog("reader")
+            if "master.status" not in reader_catalog:
+                raise ValueError("master status tool is absent")
             status = await gateway.call(
                 "operator", "acceptance.scenario.status", {"task_id": str(request.task_run_id)}
             )
@@ -2465,12 +2568,14 @@ async def _execute_reconcile(
             receipt, carrier = _terminal_master_evidence(
                 request, status, target_operation_id=target_operation_id
             )
+            terminal_master = await gateway.call("reader", "master.status", {})
             result = _master_driver_pass(
                 request,
                 receipt,
                 carrier,
                 checks=[_check("reconcile.acceptance", "PASS", "TYPED_CONTROL_RECEIPT_RECONCILED", status)],
                 observations={"status_sha256": _sha(status)},
+                terminal_master=terminal_master,
                 phase="RECONCILE",
             )
             if not _binding_matches_result(binding, result):

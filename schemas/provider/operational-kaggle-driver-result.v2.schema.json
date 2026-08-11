@@ -259,6 +259,108 @@
       "title": "DriverAssertionEvidence",
       "type": "object"
     },
+    "DriverControlLifecycle": {
+      "additionalProperties": false,
+      "description": "Exact lifecycle identities independently projected by control status.",
+      "properties": {
+        "after_identity": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "After Identity"
+        },
+        "before_identity": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Before Identity"
+        },
+        "gate": {
+          "enum": [
+            "abrupt_master_termination",
+            "control_plane_restart",
+            "clean_rotation"
+          ],
+          "title": "Gate",
+          "type": "string"
+        },
+        "new_epoch": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "New Epoch"
+        },
+        "new_provider_run_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "New Provider Run Ref"
+        },
+        "old_epoch": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Old Epoch"
+        },
+        "old_provider_run_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Old Provider Run Ref"
+        },
+        "operation_id": {
+          "format": "uuid",
+          "title": "Operation Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "gate",
+        "operation_id"
+      ],
+      "title": "DriverControlLifecycle",
+      "type": "object"
+    },
     "DriverScenarioOutput": {
       "additionalProperties": false,
       "description": "Trusted, source-generated output metadata; provider bytes stay control-side.",
@@ -717,6 +819,120 @@
     "RotationSoakEvidence": {
       "additionalProperties": false,
       "properties": {
+        "bounded_read_receipt_sha256s": {
+          "anyOf": [
+            {
+              "items": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bounded Read Receipt Sha256S"
+        },
+        "checkpoint_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint Id"
+        },
+        "checkpoint_receipt_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint Receipt Sha256"
+        },
+        "checkpoint_verified": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint Verified"
+        },
+        "exact_version_ref": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exact Version Ref"
+        },
+        "heartbeat_count": {
+          "anyOf": [
+            {
+              "const": 12,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Heartbeat Count"
+        },
+        "heartbeat_receipt_sha256s": {
+          "anyOf": [
+            {
+              "items": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Heartbeat Receipt Sha256S"
+        },
+        "heartbeats_continuous": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Heartbeats Continuous"
+        },
         "kind": {
           "const": "SESSION_ROTATION_SOAK",
           "title": "Kind",
@@ -727,6 +943,19 @@
           "minimum": 12,
           "title": "Lease Renewals",
           "type": "integer"
+        },
+        "manifest_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manifest Sha256"
         },
         "monotonic_finished_ns": {
           "minimum": 0,
@@ -743,6 +972,58 @@
           "minimum": 3600,
           "title": "Observed Duration Seconds",
           "type": "integer"
+        },
+        "read_query_count": {
+          "anyOf": [
+            {
+              "const": 12,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Read Query Count"
+        },
+        "reads_succeeded": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reads Succeeded"
+        },
+        "recovery_receipt_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recovery Receipt Sha256"
+        },
+        "recovery_succeeded": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recovery Succeeded"
         },
         "rejected_stale_sessions": {
           "maximum": 400,
@@ -1106,6 +1387,14 @@
       ],
       "title": "Cleanup State",
       "type": "string"
+    },
+    "control_lifecycle": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DriverControlLifecycle"
+      },
+      "title": "Control Lifecycle",
+      "type": "array"
     },
     "control_receipt": {
       "anyOf": [

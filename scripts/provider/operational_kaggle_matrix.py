@@ -154,6 +154,7 @@ SCENARIOS: tuple[OperationalScenario, ...] = (
         "fencing",
         ("epoch_advanced", "old_renew_denied", "old_register_denied", "old_write_denied", "registry_resolves_new"),
         "split-brain old-run resume injector and admission probes",
+        ("clean_rotation",),
     ),
     OperationalScenario(
         "FM12",
@@ -248,7 +249,7 @@ SCENARIOS: tuple[OperationalScenario, ...] = (
         "soak",
         ("duration_in_range", "heartbeats_continuous", "reads_succeeded", "checkpoint_verified", "recovery_succeeded"),
         "60-90 minute soak controller with session rotation",
-        ("clean_rotation", "soak"),
+        ("soak",),
     ),
 )
 
@@ -360,6 +361,36 @@ class DriverCleanupBinding(BaseModel):
         return self
 
 
+class DriverControlLifecycle(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    gate: Literal["abrupt_master_termination", "control_plane_restart", "clean_rotation"]
+    operation_id: UUID
+    old_provider_run_ref: str | None = None
+    new_provider_run_ref: str | None = None
+    old_epoch: int | None = Field(default=None, ge=1)
+    new_epoch: int | None = Field(default=None, ge=1)
+    before_identity: UUID | None = None
+    after_identity: UUID | None = None
+
+    @model_validator(mode="after")
+    def exact_gate(self) -> DriverControlLifecycle:
+        if self.gate in {"abrupt_master_termination", "clean_rotation"} and not (
+            self.old_provider_run_ref
+            and self.new_provider_run_ref
+            and self.old_provider_run_ref != self.new_provider_run_ref
+        ):
+            raise ValueError("control lifecycle requires distinct provider runs")
+        if self.gate == "clean_rotation" and not (
+            self.old_epoch and self.new_epoch == self.old_epoch + 1
+        ):
+            raise ValueError("control clean rotation requires consecutive epochs")
+        if self.gate == "control_plane_restart" and not (
+            self.before_identity and self.after_identity and self.before_identity != self.after_identity
+        ):
+            raise ValueError("control restart requires distinct identities")
+        return self
+
+
 class DriverResult(BaseModel):
     """Control-owned locator/receipt returned by the pinned operational driver."""
 
@@ -387,6 +418,7 @@ class DriverResult(BaseModel):
     cleanup_state: Literal["NOT_REQUIRED", "PENDING", "COMPLETE"]
     scenario_output: dict[str, Any] | None = None
     control_receipt: MasterAcceptanceReceipt | None = None
+    control_lifecycle: tuple[DriverControlLifecycle, ...] = ()
 
     @model_validator(mode="after")
     def pass_has_exact_provider_locator(self) -> DriverResult:
@@ -670,6 +702,7 @@ def _reconcile_driver_result(
         or result.task_run_id != locator.task_run_id
         or _driver_binding(result) != binding
         or result.control_receipt != locator.control_receipt
+        or result.control_lifecycle != locator.control_lifecycle
     ):
         raise RuntimeError("independent control reconciliation differs from execution evidence")
     return result, binding
@@ -830,11 +863,23 @@ def _typed_master_output(
     if row["requirement_id"] == "FM08":
         if not isinstance(evidence, CallbackLossEvidence):
             raise RuntimeError("FM08 control receipt has the wrong typed evidence")
-        # The fixed lifecycle schema requires distinct terminated/recovery run
-        # locators. CallbackLossEvidence currently carries neither; one current
-        # carrier cannot be duplicated to manufacture that proof.
-        raise RuntimeError("FM08 typed receipt lacks distinct terminated/recovery provider runs")
-    if row["requirement_id"] == "FM10":
+        proofs = {
+            "callback_withheld": {
+                "callback_suppressed_once": evidence.callback_suppressed_once,
+                "exact_event_id": str(evidence.exact_event_id),
+                "exact_body_sha256": evidence.exact_body_sha256,
+            },
+            "status_reconciled": {
+                "replay_disposition": evidence.replay_disposition,
+                "service_active_after_recovery": evidence.service_active_after_recovery,
+            },
+            "output_identity_reconciled": {
+                "provider_run_ref": locator.provider_run_ref,
+                "source_sha256": locator.source_sha256,
+                "output_receipt_sha256": locator.output_receipt_sha256,
+            },
+        }
+    elif row["requirement_id"] == "FM10":
         if not isinstance(evidence, LeaseExpiryEvidence):
             raise RuntimeError("FM10 control receipt has the wrong typed evidence")
         proofs = {
@@ -884,13 +929,87 @@ def _typed_master_output(
     elif row["requirement_id"] == "FM24":
         if not isinstance(evidence, RotationSoakEvidence):
             raise RuntimeError("FM24 control receipt has the wrong typed evidence")
-        raise RuntimeError(
-            "FM24 typed receipt lacks heartbeat/read/checkpoint/recovery observations"
-        )
+        if any(
+            value is None
+            for value in (
+                evidence.heartbeats_continuous,
+                evidence.heartbeat_count,
+                evidence.heartbeat_receipt_sha256s,
+                evidence.reads_succeeded,
+                evidence.read_query_count,
+                evidence.bounded_read_receipt_sha256s,
+                evidence.checkpoint_verified,
+                evidence.recovery_succeeded,
+                evidence.checkpoint_id,
+                evidence.exact_version_ref,
+                evidence.manifest_sha256,
+                evidence.checkpoint_receipt_sha256,
+                evidence.recovery_receipt_sha256,
+            )
+        ):
+            raise RuntimeError(
+                "FM24 typed receipt lacks heartbeat/read/checkpoint/recovery observations"
+            )
+        proofs = {
+            "duration_in_range": {
+                "observed_duration_seconds": evidence.observed_duration_seconds,
+                "monotonic_started_ns": evidence.monotonic_started_ns,
+                "monotonic_finished_ns": evidence.monotonic_finished_ns,
+            },
+            "heartbeats_continuous": {
+                "heartbeat_count": evidence.heartbeat_count,
+                "receipt_sha256s": evidence.heartbeat_receipt_sha256s,
+            },
+            "reads_succeeded": {
+                "read_query_count": evidence.read_query_count,
+                "receipt_sha256s": evidence.bounded_read_receipt_sha256s,
+            },
+            "checkpoint_verified": {
+                "checkpoint_id": str(evidence.checkpoint_id),
+                "exact_version_ref": evidence.exact_version_ref,
+                "manifest_sha256": evidence.manifest_sha256,
+                "receipt_sha256": evidence.checkpoint_receipt_sha256,
+            },
+            "recovery_succeeded": {
+                "recovery_receipt_sha256": evidence.recovery_receipt_sha256,
+                "service_active_at_end": evidence.service_active_at_end,
+            },
+        }
     else:
         raise RuntimeError("control receipt is not admitted for this matrix scenario")
     if set(proofs) != set(row["required_assertions"]):
         raise RuntimeError("typed control receipt differs from fixed scenario assertions")
+    for observed in locator.control_lifecycle:
+        lifecycle.append(
+            {
+                "gate": observed.gate,
+                "event_id": str(uuid5(NAMESPACE_URL, f"operational:{receipt.task_id}:{observed.gate}")),
+                "started_at": receipt.completed_at.isoformat(),
+                "completed_at": receipt.completed_at.isoformat(),
+                "old_provider_run_ref": observed.old_provider_run_ref,
+                "new_provider_run_ref": observed.new_provider_run_ref,
+                "old_epoch": observed.old_epoch,
+                "new_epoch": observed.new_epoch,
+                "operation_id": str(observed.operation_id),
+                "before_identity": str(observed.before_identity) if observed.before_identity else None,
+                "after_identity": str(observed.after_identity) if observed.after_identity else None,
+            }
+        )
+    if isinstance(evidence, RotationSoakEvidence):
+        lifecycle.append(
+            {
+                "gate": "soak",
+                "event_id": str(uuid5(NAMESPACE_URL, f"operational:{receipt.task_id}:soak")),
+                "started_at": receipt.completed_at.isoformat(),
+                "completed_at": receipt.completed_at.isoformat(),
+                "operation_id": str(receipt.binding.operation_id),
+                "duration_seconds": evidence.observed_duration_seconds,
+                "heartbeat_count": evidence.heartbeat_count,
+                "read_query_count": evidence.read_query_count,
+                "checkpoint_count": 1,
+                "recovery_count": 1,
+            }
+        )
     return OperationalOutput(
         schema_version="my-data-hub-operational-kaggle-output.v1",
         matrix_id=UUID(str(plan["matrix_id"])),
@@ -1250,6 +1369,7 @@ def run_operational_matrix(
                     or reconciled.outcome != "PASS"
                     or _driver_binding(reconciled) != binding
                     or reconciled.control_receipt != locator.control_receipt
+                    or reconciled.control_lifecycle != locator.control_lifecycle
                 ):
                     raise RuntimeError("durable control reconciliation differs from execution evidence")
                 cleanup_binding = binding if locator.outcome == "READY" else None
