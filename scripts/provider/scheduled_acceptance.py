@@ -492,6 +492,8 @@ def evaluate(
 
 def _structured_result(result: object) -> dict[str, object]:
     structured = getattr(result, "structuredContent", None)
+    if structured is None:
+        structured = getattr(result, "structured_content", None)
     if isinstance(structured, dict):
         return structured
     for block in getattr(result, "content", ()):
@@ -507,6 +509,28 @@ def _structured_result(result: object) -> dict[str, object]:
     raise RuntimeError("MCP tool returned no bounded structured object")
 
 
+def _result_is_error(result: object) -> bool:
+    return getattr(result, "isError", getattr(result, "is_error", False)) is True
+
+
+async def _collect_mcp_session(session: object) -> dict[str, object]:
+    await session.initialize()  # type: ignore[attr-defined]
+    catalog = await session.list_tools()  # type: ignore[attr-defined]
+    values: dict[str, object] = {"tools": {tool.name for tool in catalog.tools}}
+    for tool, key, arguments in (
+        ("platform.status", "platform", {}),
+        ("master.status", "master", {}),
+        ("checkpoint.status", "checkpoint", {}),
+        ("embedding.coverage", "embedding", {}),
+        ("provider.resources.status", "provider", {"limit": 100}),
+    ):
+        result = await session.call_tool(tool, arguments)  # type: ignore[attr-defined]
+        if _result_is_error(result):
+            raise RuntimeError(f"MCP {tool} returned an error")
+        values[key] = _structured_result(result)
+    return values
+
+
 async def _collect_mcp(endpoint: str, token: str) -> dict[str, object]:
     import httpx2
     from mcp import ClientSession
@@ -520,21 +544,7 @@ async def _collect_mcp(endpoint: str, token: str) -> dict[str, object]:
     ) as client, streamable_http_client(endpoint, http_client=client) as streams:
         read_stream, write_stream = streams
         async with ClientSession(read_stream, write_stream, read_timeout_seconds=20) as session:
-            await session.initialize()
-            catalog = await session.list_tools()
-            values: dict[str, object] = {"tools": {tool.name for tool in catalog.tools}}
-            for tool, key, arguments in (
-                ("platform.status", "platform", {}),
-                ("master.status", "master", {}),
-                ("checkpoint.status", "checkpoint", {}),
-                ("embedding.coverage", "embedding", {}),
-                ("provider.resources.status", "provider", {"limit": 100}),
-            ):
-                result = await session.call_tool(tool, arguments)
-                if result.isError:
-                    raise RuntimeError(f"MCP {tool} returned an error")
-                values[key] = _structured_result(result)
-            return values
+            return await _collect_mcp_session(session)
 
 
 def _negative_http_status(endpoint: str, authorization: str | None) -> int:

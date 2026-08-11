@@ -4,6 +4,7 @@ import json
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,50 @@ from scripts.provider import scheduled_acceptance as acceptance
 NOW = datetime(2026, 8, 12, 12, tzinfo=UTC)
 COMMIT = "a" * 40
 READ_ONLY_TOOLS = acceptance.READ_ONLY_TOOLS
+
+
+class SnakeCaseMCPResult:
+    def __init__(self, value: dict[str, object], *, is_error: bool = False) -> None:
+        self.structured_content = value
+        self.content: list[object] = []
+        self.is_error = is_error
+
+
+class SnakeCaseMCPSession:
+    def __init__(self, *, error_tool: str | None = None) -> None:
+        self.error_tool = error_tool
+        self.initialized = False
+
+    async def initialize(self) -> None:
+        self.initialized = True
+
+    async def list_tools(self) -> object:
+        assert self.initialized
+        return SimpleNamespace(tools=[SimpleNamespace(name=name) for name in READ_ONLY_TOOLS])
+
+    async def call_tool(self, name: str, arguments: dict[str, object]) -> object:
+        assert arguments == ({"limit": 100} if name == "provider.resources.status" else {})
+        return SnakeCaseMCPResult(
+            {"tool": name},
+            is_error=name == self.error_tool,
+        )
+
+
+@pytest.mark.asyncio
+async def test_live_mcp_collection_accepts_pinned_sdk_snake_case_result_fields() -> None:
+    values = await acceptance._collect_mcp_session(SnakeCaseMCPSession())
+
+    assert values["platform"] == {"tool": "platform.status"}
+    assert values["provider"] == {"tool": "provider.resources.status"}
+    assert values["tools"] == READ_ONLY_TOOLS
+
+
+@pytest.mark.asyncio
+async def test_live_mcp_collection_rejects_pinned_sdk_snake_case_error() -> None:
+    with pytest.raises(RuntimeError, match=r"checkpoint\.status returned an error"):
+        await acceptance._collect_mcp_session(
+            SnakeCaseMCPSession(error_tool="checkpoint.status")
+        )
 
 
 def complete_observations() -> acceptance.Observations:
