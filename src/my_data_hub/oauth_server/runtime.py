@@ -114,8 +114,7 @@ def build_authorization_runtime() -> AuthorizationRuntime:
     issuer = settings.issuer
     authority = ControlLedgerOAuthAuthority(ledger)
     for client in settings.clients:
-        existing = ledger.oauth_client(issuer, client.client_id)
-        ledger.register_oauth_client(
+        ledger.register_configured_oauth_client(
             issuer=issuer,
             client_id=client.client_id,
             principal_id=owner_subject,
@@ -125,7 +124,6 @@ def build_authorization_runtime() -> AuthorizationRuntime:
                 if client.allowed_scopes - {"openid", "offline_access"} <= READER_PROFILE_SCOPES
                 else "owner_operator"
             ),
-            enabled=True if existing is None else bool(existing["enabled"]),
         )
     service = AuthorizationService(
         settings=settings,

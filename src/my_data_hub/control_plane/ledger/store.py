@@ -943,6 +943,37 @@ class ControlLedger:
                 (issuer, client_id, int(enabled), scopes_json, principal_id, profile_kind, now, now),
             )
 
+    def register_configured_oauth_client(
+        self,
+        *,
+        issuer: str,
+        client_id: str,
+        principal_id: str,
+        allowed_scopes: frozenset[str],
+        profile_kind: str,
+    ) -> None:
+        """Register static config without re-enabling an administratively disabled client.
+
+        Startup reconciliation is one atomic statement.  On first registration
+        the configured client is enabled; on conflict its policy metadata is
+        refreshed while the durable security-state bit is deliberately absent
+        from the update set.  This avoids a read/upsert race with revocation or
+        an administrative disable.
+        """
+
+        if profile_kind not in {"reader", "owner_operator"} or not allowed_scopes:
+            raise ValueError("OAuth client profile/scopes are invalid")
+        scopes_json = _safe_json({"scopes": sorted(allowed_scopes)})
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            connection.execute(
+                "INSERT INTO oauth_clients(issuer,client_id,enabled,allowed_scopes_json,principal_id,profile_kind,"
+                "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(issuer,client_id) DO UPDATE SET "
+                "allowed_scopes_json=excluded.allowed_scopes_json,principal_id=excluded.principal_id,"
+                "profile_kind=excluded.profile_kind,updated_at=excluded.updated_at",
+                (issuer, client_id, 1, scopes_json, principal_id, profile_kind, now, now),
+            )
+
     def oauth_client(self, issuer: str, client_id: str) -> dict[str, Any] | None:
         with self._reader() as connection:
             row = connection.execute(

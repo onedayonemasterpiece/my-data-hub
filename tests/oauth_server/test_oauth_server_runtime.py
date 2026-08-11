@@ -117,3 +117,63 @@ def test_runtime_accepts_empty_overlap_jwks_for_initial_deployment(
     overlap.write_text('{"keys":[]}', encoding="utf-8")
     monkeypatch.setenv("MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE", str(overlap))
     assert runtime_module._overlap_public_jwks() == ()
+
+
+def test_runtime_registration_does_not_read_then_reenable_client(
+    monkeypatch, tmp_path: Path
+) -> None:  # type: ignore[no-untyped-def]
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    key_path = tmp_path / "signing.pem"
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    key_path.chmod(0o600)
+    ledger_path = tmp_path / "ledger" / "control.sqlite3"
+    for name, value in {
+        "MY_DATA_HUB_CONTROL_LEDGER_PATH": str(ledger_path),
+        "MY_DATA_HUB_OAUTH_ISSUER": "https://auth.example.test",
+        "MY_DATA_HUB_OAUTH_OWNER_SUBJECT": "owner-1",
+        "MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE": str(key_path),
+        "MY_DATA_HUB_OAUTH_SIGNING_KEY_ID": "key-1",
+        "MY_DATA_HUB_MCP_OAUTH_RESOURCE": "https://mcp.example.test/mcp",
+        "MY_DATA_HUB_MCP_OAUTH_AUDIENCE": "https://mcp.example.test/mcp",
+        "MY_DATA_HUB_OAUTH_CLIENTS_JSON": json.dumps(
+            [{
+                "client_id": "chatgpt-reader",
+                "redirect_uris": ["https://chatgpt.example.test/oauth/callback"],
+                "allowed_scopes": ["bloggers:read", "data:read"],
+            }]
+        ),
+        "MY_DATA_HUB_OWNER_OIDC_ISSUER": "https://login.example.test",
+        "MY_DATA_HUB_OWNER_OIDC_AUDIENCE": "my-data-hub-owner",
+        "MY_DATA_HUB_OWNER_OIDC_JWKS_URL": "https://login.example.test/.well-known/jwks.json",
+        "MY_DATA_HUB_OWNER_LOGIN_URL": "https://login.example.test/start",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    ledger = ControlLedger(ledger_path)
+    ledger.register_oauth_client(
+        issuer="https://auth.example.test",
+        client_id="chatgpt-reader",
+        principal_id="owner-1",
+        allowed_scopes=frozenset({"bloggers:read", "data:read"}),
+        profile_kind="reader",
+        enabled=False,
+    )
+    oauth_client = ControlLedger.oauth_client
+    monkeypatch.setattr(
+        ControlLedger,
+        "oauth_client",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("startup read race")),
+    )
+    build_authorization_runtime()
+
+    configured = oauth_client(
+        ControlLedger(ledger_path),
+        "https://auth.example.test", "chatgpt-reader"
+    )
+    assert configured is not None and configured["enabled"] is False

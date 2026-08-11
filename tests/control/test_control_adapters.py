@@ -34,3 +34,33 @@ def test_oauth_clients_revocation_and_audit_live_in_control_ledger(tmp_path) -> 
             client_id=query.client_id, subject=query.subject, token_id=query.token_id,
         )
     )
+
+
+def test_configured_oauth_client_refresh_preserves_atomic_disabled_state(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    ledger = ControlLedger(tmp_path / "control.sqlite3")
+    ledger.register_oauth_client(
+        issuer="https://issuer.example",
+        client_id="chatgpt-reader",
+        principal_id="datahub-owner",
+        allowed_scopes=frozenset({"hub:read"}),
+        profile_kind="reader",
+        enabled=False,
+    )
+
+    ledger.register_configured_oauth_client(
+        issuer="https://issuer.example",
+        client_id="chatgpt-reader",
+        principal_id="new-owner",
+        allowed_scopes=frozenset({"hub:read", "data:read"}),
+        profile_kind="owner_operator",
+    )
+
+    configured = ledger.oauth_client("https://issuer.example", "chatgpt-reader")
+    assert configured == {
+        "issuer": "https://issuer.example",
+        "client_id": "chatgpt-reader",
+        "enabled": False,
+        "allowed_scopes": frozenset({"hub:read", "data:read"}),
+        "principal_id": "new-owner",
+        "profile_kind": "owner_operator",
+    }
