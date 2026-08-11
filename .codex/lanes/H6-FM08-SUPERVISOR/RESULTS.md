@@ -20,10 +20,20 @@ Implemented and committed; no live restart claimed.
 1. `c91b1c4` — host controller, signed Unix IPC, restart journal, initial deploy wiring and focused tests.
 2. `aeac669` — hardened default-off installer/systemd wiring and immutable restart path.
 3. `6fd43c5` — exact migration-020 control-ledger adapter and production composition factory.
+4. `3eefde8` — adapter/deployment documentation and focused composition coverage.
+5. `c6a7030` — race-safe Unix-server test shutdown.
 
 Dependency commits `8490155`, `9fcfe1e`, and `905fe0e` came from H6-MASTER-SCENARIOS
 and must not be cherry-picked from this lane when their integration equivalents
 are already present.
 
 ## Validation
-Final exact-head gate results are recorded in the final RESULTS commit and handoff.
+- Full exact-head pytest: **960 passed, 2 expected skips** (**962 collected**).
+- Focused supervisor/deployment/lifecycle/production suite: **53 passed** before the final full run.
+- Repository validator: **3554 checks, 0 errors**.
+- `python -m compileall -q src tests`: passed.
+- `ruff check src tests`: passed.
+- `git diff --check`: passed; branch clean.
+
+No host restart or Kaggle callback was executed by these tests. FM08 live evidence
+remains pending the explicit acceptance-profile deployment and real task run.
