@@ -26,13 +26,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
-      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
-      KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-      KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-      # This is a JSON argv array, not a shell command.  The referenced trusted
-      # executable owns real master/import/embed/MCP/host fault actions and
-      # must return an exact Kaggle run locator or a typed BLOCKED dependency.
-      MY_DATA_HUB_OPERATIONAL_DRIVER_JSON: ${{ vars.MY_DATA_HUB_OPERATIONAL_DRIVER_JSON || '["python","scripts/provider/operational_kaggle_driver.py"]' }}
+      # Provider mutations and reconciliation use the deployed control-owned
+      # gateway.  The runner has no Kaggle credential and cannot replace the
+      # checked-in operational driver with workflow variable content.
       MY_DATA_HUB_MCP_CANARY_ENDPOINT: ${{ vars.MY_DATA_HUB_MCP_CANARY_ENDPOINT || 'https://mcp-datahub.kenigevents.ru/mcp' }}
       MY_DATA_HUB_MCP_CANARY_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_CANARY_TOKEN }}
       MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN }}

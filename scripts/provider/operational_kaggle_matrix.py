@@ -22,7 +22,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,19 +31,9 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from my_data_hub.acceptance.master_lifecycle import MasterAcceptanceReceipt
 from my_data_hub.acceptance.scenario_operator import CheckpointAcceptanceOperationalResult
-from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.hashing import canonical_json_bytes
-from my_data_hub.providers.kaggle import KaggleProviderAdapter
-from my_data_hub.providers.kaggle.contracts import KernelState
-from my_data_hub.providers.kaggle.control_journal import ControlLedgerKaggleJournal
-
-try:
-    from scripts.provider.kaggle_credential_preflight import (
-        kaggle_exact_kernel_read_credentials_configured,
-    )
-except ModuleNotFoundError:  # direct ``python scripts/provider/...`` execution
-    from kaggle_credential_preflight import kaggle_exact_kernel_read_credentials_configured
 
 EXTERNAL_BLOCKED = 78
 FAIL = 1
@@ -57,6 +47,7 @@ MINIMUM_SOAK_SECONDS = 60 * 60
 MAXIMUM_SOAK_SECONDS = 90 * 60
 MAX_RESULT_BYTES = 2 * 1024 * 1024
 RESUMABLE_OWNER_BLOCKER = "FM16_AWAITING_OWNER_AUTHORIZATION"
+TRUSTED_DRIVER_PATH = Path(__file__).with_name("operational_kaggle_driver.py")
 CHECKPOINT_REQUIREMENTS = frozenset({"FM05", "FM14", "FM15"})
 CHECKPOINT_SCENARIO_NAMES = frozenset(
     {
@@ -387,6 +378,8 @@ class DriverResult(BaseModel):
     output_file_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     output_tree_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     cleanup_state: Literal["NOT_REQUIRED", "PENDING", "COMPLETE"]
+    scenario_output: dict[str, Any] | None = None
+    control_receipt: MasterAcceptanceReceipt | None = None
 
     @model_validator(mode="after")
     def pass_has_exact_provider_locator(self) -> DriverResult:
@@ -406,6 +399,10 @@ class DriverResult(BaseModel):
         )
         if self.outcome in {"READY", "PASS"} and any(value is None for value in locator):
             raise ValueError("successful driver result lacks exact provider run identity")
+        if self.phase == "EXECUTE" and self.outcome in {"READY", "PASS"} and (
+            (self.scenario_output is None) == (self.control_receipt is None)
+        ):
+            raise ValueError("successful execution requires exactly one trusted evidence payload")
         if self.outcome in {"READY", "PASS"} and self.mutations_started < 1:
             raise ValueError("successful driver result lacks a real evidence Notebook mutation")
         if self.outcome == "READY" and (
@@ -450,10 +447,11 @@ class OperationalOutput(BaseModel):
     completed_at: datetime
 
 
-def modern_token_configured() -> bool:
-    """Backward-compatible name for the pinned SDK credential preflight."""
-
-    return kaggle_exact_kernel_read_credentials_configured()
+def _trusted_driver_command() -> tuple[str, str]:
+    path = TRUSTED_DRIVER_PATH.resolve(strict=True)
+    if TRUSTED_DRIVER_PATH.is_symlink() or not path.is_file() or path.parent != Path(__file__).resolve().parent:
+        raise RuntimeError("checked-in operational driver path is not an exact regular sibling")
+    return sys.executable, str(path)
 
 
 def _exact_commit(root: Path) -> str:
@@ -527,22 +525,6 @@ def _load_or_create_plan(path: Path, *, matrix_id: UUID | None, commit_sha: str)
     value = build_plan(matrix_id=matrix_id or uuid4(), commit_sha=commit_sha, created_at=datetime.now(UTC))
     _atomic_write(path, value)
     return value
-
-
-def _parse_driver_command(value: str | None) -> tuple[str, ...] | None:
-    if not value:
-        return None
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise ValueError("operational driver command must be a JSON argv array") from exc
-    if (
-        not isinstance(parsed, list)
-        or not 1 <= len(parsed) <= 20
-        or any(not isinstance(item, str) or not item or len(item) > 1000 for item in parsed)
-    ):
-        raise ValueError("operational driver command must be a bounded non-empty JSON argv array")
-    return tuple(parsed)
 
 
 def _blocker_receipt(
@@ -624,13 +606,13 @@ def _cleanup_request(
     }
 
 
-def _invoke_driver(command: Sequence[str], request: Mapping[str, Any], *, timeout_seconds: int) -> DriverResult:
+def _invoke_driver(request: Mapping[str, Any], *, timeout_seconds: int) -> DriverResult:
     with tempfile.TemporaryDirectory(prefix="my-data-hub-operational-driver-") as folder:
         request_path = Path(folder) / "request.json"
         result_path = Path(folder) / "result.json"
         request_path.write_bytes(canonical_json_bytes(dict(request)))
         completed = subprocess.run(
-            [*command, "--request", str(request_path), "--result", str(result_path)],
+            [*_trusted_driver_command(), "--request", str(request_path), "--result", str(result_path)],
             check=False,
             timeout=timeout_seconds,
             env=os.environ.copy(),
@@ -764,53 +746,30 @@ def _checkpoint_operational_output(
     )
 
 
-def _reconciled_live_receipt(
+def _trusted_control_receipt(
     *,
-    adapter: KaggleProviderAdapter,
     plan: Mapping[str, Any],
     row: Mapping[str, Any],
     locator: DriverResult,
-    output_directory: Path,
     started_at: datetime,
 ) -> tuple[dict[str, Any], DriverCleanupBinding | None]:
+    """Build a receipt only from the pinned driver's control-reconciled metadata.
+
+    Provider output bytes and credentials never enter this process. For generated
+    evidence outputs, the canonical document must hash to the control-owned
+    OUTPUT_READ receipt. Master acceptance scenarios are derived separately from
+    their typed control receipt and exact provider carrier projection.
+    """
+
     if locator.scenario != row["name"] or str(locator.task_run_id) != row["planned_task_run_id"]:
         raise RuntimeError("driver result differs from planned scenario identity")
-    assert locator.provider_ref and locator.source_sha256 and locator.provider_run_ref
-    run = adapter.reconcile_private_notebook_run(
-        task_run_id=locator.task_run_id,
-        provider_ref=locator.provider_ref,
-        expected_source_sha256=locator.source_sha256,
-    )
-    if run is None or (
-        run.provider_run_ref != locator.provider_run_ref
-        or run.provider_kernel_id != locator.provider_kernel_id
-        or run.source_version != locator.source_version
-    ):
-        raise RuntimeError("driver locator is not the exact reconciled Kaggle run")
-    status = adapter.read_run_status(run)
-    if status.state is not KernelState.COMPLETE:
-        raise RuntimeError("operational Kaggle run is not terminal complete")
-    output_directory.mkdir(parents=True, exist_ok=True)
-    identity = adapter.download_exact_run_output_file(
-        run,
-        destination=output_directory,
-        file_name=RESULT_FILE,
-        max_bytes=MAX_RESULT_BYTES,
-    )
-    raw = (output_directory / RESULT_FILE).read_bytes()
+    if locator.scenario_output is None:
+        raise RuntimeError("driver result lacks trusted scenario output metadata")
+    output = OperationalOutput.model_validate(locator.scenario_output)
+    raw = canonical_json_bytes(output.model_dump(mode="json"))
     result_sha256 = hashlib.sha256(raw).hexdigest()
-    if (locator.outcome == "READY" or row["requirement_id"] in CHECKPOINT_REQUIREMENTS) and (
-        locator.output_file_sha256 is None
-        or locator.output_tree_sha256 is None
-        or locator.output_file_sha256 != result_sha256
-        or locator.output_tree_sha256 != identity.output_tree_sha256
-    ):
-        raise RuntimeError("outer output reconciliation differs from the durable output-read receipt")
-    output = (
-        _checkpoint_operational_output(raw, plan=plan, row=row, locator=locator)
-        if row["requirement_id"] in CHECKPOINT_REQUIREMENTS
-        else OperationalOutput.model_validate_json(raw)
-    )
+    if locator.output_file_sha256 is not None and locator.output_file_sha256 != result_sha256:
+        raise RuntimeError("trusted scenario output differs from the control-owned output receipt")
     expected_assertions = set(row["required_assertions"])
     actual_assertions = {item.name for item in output.assertions}
     if (
@@ -822,7 +781,14 @@ def _reconciled_live_receipt(
         or any(item.outcome != "PASS" for item in output.assertions)
         or {item.gate for item in output.lifecycle_events} != set(row["lifecycle_gates"])
     ):
-        raise RuntimeError("exact operational output does not satisfy the scenario contract")
+        raise RuntimeError("trusted scenario evidence does not satisfy the exact contract")
+    assert (
+        locator.provider_ref
+        and locator.provider_run_ref
+        and locator.provider_kernel_id
+        and locator.source_version
+        and locator.source_sha256
+    )
     receipt = {
         "schema_version": SCENARIO_SCHEMA,
         "matrix_id": plan["matrix_id"],
@@ -834,14 +800,14 @@ def _reconciled_live_receipt(
         "live_evidence": True,
         "planned_task_run_id": row["planned_task_run_id"],
         "real_run_identity": {
-            "provider_ref": run.provider_ref,
-            "provider_run_ref": run.provider_run_ref,
-            "provider_kernel_id": run.provider_kernel_id,
-            "source_version": run.source_version,
-            "source_sha256": run.source_sha256,
+            "provider_ref": locator.provider_ref,
+            "provider_run_ref": locator.provider_run_ref,
+            "provider_kernel_id": locator.provider_kernel_id,
+            "source_version": locator.source_version,
+            "source_sha256": locator.source_sha256,
             "provider_claim_sha256": locator.claim_sha256,
-            "provider_status": status.state.value,
-            "output_tree_sha256": identity.output_tree_sha256,
+            "provider_status": "control_reconciled",
+            "output_tree_sha256": locator.output_tree_sha256,
             "result_sha256": result_sha256,
         },
         "assertions": [item.model_dump(mode="json") for item in output.assertions],
@@ -862,13 +828,8 @@ def _reconciled_live_receipt(
         and locator.output_receipt_sha256
         and locator.output_file_sha256
         and locator.output_tree_sha256
-        and locator.provider_ref
-        and locator.provider_run_ref
-        and locator.provider_kernel_id
-        and locator.source_version
-        and locator.source_sha256
     )
-    binding = DriverCleanupBinding(
+    return receipt, DriverCleanupBinding(
         claim_task_id=locator.claim_task_id,
         claim_sha256=locator.claim_sha256,
         provider_ref=locator.provider_ref,
@@ -877,10 +838,9 @@ def _reconciled_live_receipt(
         source_version=locator.source_version,
         source_sha256=locator.source_sha256,
         output_receipt_sha256=locator.output_receipt_sha256,
-        output_file_sha256=result_sha256,
-        output_tree_sha256=identity.output_tree_sha256,
+        output_file_sha256=locator.output_file_sha256,
+        output_tree_sha256=locator.output_tree_sha256,
     )
-    return receipt, binding
 
 
 def _aggregate_lifecycle(receipts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -980,59 +940,32 @@ def run_operational_matrix(
     plan_path: Path,
     receipt_path: Path,
     scenario_directory: Path,
-    driver_command: Sequence[str] | None,
     matrix_id: UUID | None = None,
     commit_sha: str | None = None,
-    adapter_factory: Callable[[ControlLedgerKaggleJournal], KaggleProviderAdapter] | None = None,
     root: Path | None = None,
     driver_timeout_seconds: int = 7200,
 ) -> int:
     """Run or resume the exact operational matrix.
 
-    Missing Kaggle credentials fail before the plan, ledger, adapter, driver or
-    any provider mutation.  Test injection disables live execution entirely:
-    an injected adapter may exercise reconciliation failures but cannot produce
-    a PASS summary.
+    The checked-in driver is the only executable boundary. Provider credentials,
+    mutations, status, output reads, and cleanup remain inside the deployed
+    control-owned gateway; this process never constructs a Kaggle adapter.
     """
 
-    if not modern_token_configured():
-        _atomic_write(
-            receipt_path,
-            {
-                "schema_version": "my-data-hub-operational-kaggle-matrix-blocker.v1",
-                "outcome": "BLOCKED",
-                "blocker_code": "KAGGLE_MODERN_API_TOKEN_REQUIRED",
-                "planned_scenarios": 24,
-                "mutations_started": 0,
-                "observed_at": datetime.now(UTC).isoformat(),
-            },
-        )
-        return EXTERNAL_BLOCKED
     repository_root = root or Path(__file__).resolve().parents[2]
     exact_commit = commit_sha or _exact_commit(repository_root)
     plan = _load_or_create_plan(plan_path, matrix_id=matrix_id, commit_sha=exact_commit)
-    if not driver_command:
-        blocked_receipts = _write_all_blocked(
-            plan=plan,
-            directory=scenario_directory,
-            code="OPERATIONAL_DRIVER_INTERFACE_MISSING",
-        )
-        _atomic_write(receipt_path, _summary(plan, blocked_receipts))
-        return EXTERNAL_BLOCKED
-    live_execution = adapter_factory is None and commit_sha is None and root is None
+    live_execution = commit_sha is None and root is None
     if not live_execution:
         blocked_receipts = _write_all_blocked(
             plan=plan,
             directory=scenario_directory,
             code="TEST_INJECTION_CANNOT_CREATE_LIVE_EVIDENCE",
-            dependency="uninjected CLI execution with the real Kaggle adapter and operational driver",
+            dependency="uninjected CLI execution with the checked-in driver and control-owned provider gateway",
         )
         _atomic_write(receipt_path, _summary(plan, blocked_receipts))
         return EXTERNAL_BLOCKED
-    ledger = ControlLedger(ledger_path)
-    # Exactly one concrete adapter is constructed and reused for all 24 exact
-    # provider run reconciliations.  The driver must not return credentials.
-    adapter = KaggleProviderAdapter.from_environment(journal=ControlLedgerKaggleJournal(ledger))
+    del ledger_path  # retained CLI compatibility; no local provider journal is opened
     receipts: list[dict[str, Any]] = []
     for row in plan["scenarios"]:
         scenario_path = _scenario_path(scenario_directory, row)
@@ -1126,7 +1059,7 @@ def run_operational_matrix(
             started = datetime.fromisoformat(str(reconciliation["started_at"]))
         else:
             started = datetime.now(UTC)
-            locator = _invoke_driver(driver_command, request, timeout_seconds=driver_timeout_seconds)
+            locator = _invoke_driver(request, timeout_seconds=driver_timeout_seconds)
             cleanup_request = {}
         if locator.scenario != row["name"] or str(locator.task_run_id) != row["planned_task_run_id"]:
             raise RuntimeError("driver returned a different scenario identity")
@@ -1153,15 +1086,12 @@ def run_operational_matrix(
             receipt["driver_capability_checks"] = [item.model_dump(mode="json") for item in locator.capability_checks]
             receipt["driver_observation_sha256"] = locator.observation_sha256
         elif locator.outcome == "PASS":
-            with tempfile.TemporaryDirectory(prefix="my-data-hub-operational-output-") as folder:
-                receipt, cleanup_binding = _reconciled_live_receipt(
-                    adapter=adapter,
-                    plan=plan,
-                    row=row,
-                    locator=locator,
-                    output_directory=Path(folder),
-                    started_at=started,
-                )
+            receipt, cleanup_binding = _trusted_control_receipt(
+                plan=plan,
+                row=row,
+                locator=locator,
+                started_at=started,
+            )
             if cleanup_binding is not None:
                 raise RuntimeError("driver PASS unexpectedly requires pending cleanup")
         else:
@@ -1172,15 +1102,12 @@ def run_operational_matrix(
                     cleanup_request.get("cleanup")
                 )
             else:
-                with tempfile.TemporaryDirectory(prefix="my-data-hub-operational-output-") as folder:
-                    receipt, cleanup_binding = _reconciled_live_receipt(
-                        adapter=adapter,
-                        plan=plan,
-                        row=row,
-                        locator=locator,
-                        output_directory=Path(folder),
-                        started_at=started,
-                    )
+                receipt, cleanup_binding = _trusted_control_receipt(
+                    plan=plan,
+                    row=row,
+                    locator=locator,
+                    started_at=started,
+                )
                 if cleanup_binding is None:
                     raise RuntimeError("driver READY lacks a cleanup binding")
                 execute_request = dict(request)
@@ -1211,9 +1138,7 @@ def run_operational_matrix(
                 )
                 if cleanup_request != expected_cleanup:
                     raise RuntimeError("durable cleanup request differs from outer reconciliation")
-            cleanup_result = _invoke_driver(
-                driver_command, cleanup_request, timeout_seconds=driver_timeout_seconds
-            )
+            cleanup_result = _invoke_driver(cleanup_request, timeout_seconds=driver_timeout_seconds)
             if (
                 cleanup_result.phase != "CLEANUP"
                 or cleanup_result.outcome != "PASS"
@@ -1273,35 +1198,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--receipt", type=Path, default=Path("artifacts/operational-kaggle-matrix.json"))
     parser.add_argument("--scenario-receipts", type=Path, default=Path("artifacts/operational-kaggle-scenarios"))
     parser.add_argument("--matrix-id", type=UUID)
-    parser.add_argument(
-        "--driver-command-json",
-        default=os.environ.get("MY_DATA_HUB_OPERATIONAL_DRIVER_JSON"),
-        help='trusted operational driver argv as JSON, e.g. ["python","/opt/mdh/driver.py"]',
-    )
     parser.add_argument("--driver-timeout-seconds", type=int, default=7200)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    try:
-        driver = _parse_driver_command(args.driver_command_json)
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return FAIL
     if args.command == "preflight":
+        try:
+            _trusted_driver_command()
+            driver_ready = True
+        except (OSError, RuntimeError):
+            driver_ready = False
         payload = {
-            "modern_token_configured": modern_token_configured(),
-            "operational_driver_configured": bool(driver),
+            "local_kaggle_credentials_used": False,
+            "checked_in_operational_driver_ready": driver_ready,
             "scenario_count": len(SCENARIOS),
             "minimum_distinct_provider_runs": MINIMUM_DISTINCT_PROVIDER_RUNS,
             "soak_seconds": [MINIMUM_SOAK_SECONDS, MAXIMUM_SOAK_SECONDS],
         }
         print(json.dumps(payload, sort_keys=True))
         return (
-            PASS
-            if all((payload["modern_token_configured"], payload["operational_driver_configured"]))
-            else EXTERNAL_BLOCKED
+            PASS if payload["checked_in_operational_driver_ready"] else EXTERNAL_BLOCKED
         )
     if not 60 <= args.driver_timeout_seconds <= 7200:
         print("driver timeout must be between 60 and 7200 seconds", file=sys.stderr)
@@ -1311,7 +1229,6 @@ def main() -> int:
         plan_path=args.plan,
         receipt_path=args.receipt,
         scenario_directory=args.scenario_receipts,
-        driver_command=driver,
         matrix_id=args.matrix_id,
         driver_timeout_seconds=args.driver_timeout_seconds,
     )

@@ -50,6 +50,7 @@ from my_data_hub.acceptance.data_workloads import (
     DataWorkloadPlan,
     DataWorkloadState,
 )
+from my_data_hub.acceptance.master_lifecycle import MasterAcceptanceReceipt
 from my_data_hub.acceptance.scenario_operator import CheckpointAcceptanceLaunchStatus
 from my_data_hub.hashing import canonical_json_bytes
 
@@ -108,7 +109,7 @@ class CleanupBinding(BaseModel):
 class DriverRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     schema_version: Literal["my-data-hub-operational-kaggle-driver-request.v2"]
-    phase: Literal["EXECUTE", "CLEANUP"]
+    phase: Literal["EXECUTE", "RECONCILE", "CLEANUP"]
     matrix_id: UUID
     commit_sha: str = Field(pattern=r"^[a-f0-9]{40}$")
     ordinal: int = Field(ge=1, le=24)
@@ -138,8 +139,8 @@ class DriverRequest(BaseModel):
             self.minimum_soak_seconds == 3600 and self.maximum_soak_seconds == 5400
         ):
             raise ValueError("driver request has inconsistent soak bounds")
-        if (self.phase == "CLEANUP") != (self.cleanup is not None):
-            raise ValueError("driver cleanup phase requires one exact reconciliation binding")
+        if (self.phase == "EXECUTE") == (self.cleanup is not None):
+            raise ValueError("driver reconcile/cleanup phase requires one exact binding")
         return self
 
 
@@ -151,10 +152,40 @@ class CapabilityCheck(BaseModel):
     detail_code: str = Field(pattern=r"^[A-Z0-9_]+$", max_length=120)
 
 
+class DriverAssertionEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(pattern=r"^[a-z0-9_]+$", max_length=100)
+    outcome: Literal["PASS"]
+    evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class DriverScenarioOutput(BaseModel):
+    """Trusted, source-generated output metadata; provider bytes stay control-side."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["my-data-hub-operational-kaggle-output.v1"]
+    matrix_id: UUID
+    scenario: str
+    task_run_id: UUID
+    outcome: Literal["PASS"]
+    assertions: tuple[DriverAssertionEvidence, ...]
+    lifecycle_events: tuple[dict[str, Any], ...] = ()
+    operation_ids: tuple[str, ...] = ()
+    completed_at: datetime
+
+    @model_validator(mode="after")
+    def exact_assertions(self) -> DriverScenarioOutput:
+        if self.completed_at.tzinfo is None or len({item.name for item in self.assertions}) != len(self.assertions):
+            raise ValueError("driver scenario output is not exact and timezone-bound")
+        return self
+
+
 class TrustedDriverResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     schema_version: Literal["my-data-hub-operational-kaggle-driver-result.v2"]
-    phase: Literal["EXECUTE", "CLEANUP"]
+    phase: Literal["EXECUTE", "RECONCILE", "CLEANUP"]
     outcome: Literal["READY", "PASS", "FAIL", "BLOCKED"]
     scenario: str
     task_run_id: UUID
@@ -174,6 +205,8 @@ class TrustedDriverResult(BaseModel):
     output_file_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     output_tree_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     cleanup_state: Literal["NOT_REQUIRED", "PENDING", "COMPLETE"] = "NOT_REQUIRED"
+    scenario_output: DriverScenarioOutput | None = None
+    control_receipt: MasterAcceptanceReceipt | None = None
 
     @model_validator(mode="after")
     def exact_outcome_shape(self) -> TrustedDriverResult:
@@ -193,12 +226,20 @@ class TrustedDriverResult(BaseModel):
         )
         if self.outcome in {"READY", "PASS"} and any(value is None for value in locator):
             raise ValueError("successful driver result lacks an exact provider run locator")
+        if self.phase == "EXECUTE" and self.outcome in {"READY", "PASS"} and (
+            (self.scenario_output is None) == (self.control_receipt is None)
+        ):
+            raise ValueError("successful execution requires exactly one trusted evidence payload")
         if self.outcome == "READY" and (
             self.phase != "EXECUTE" or self.cleanup_state != "PENDING" or any(value is None for value in cleanup)
         ):
             raise ValueError("driver READY lacks an exact pending cleanup binding")
         if self.phase == "CLEANUP" and self.outcome == "PASS" and self.cleanup_state != "COMPLETE":
             raise ValueError("cleanup PASS requires a COMPLETE durable claim")
+        if self.phase == "RECONCILE" and self.outcome == "PASS" and (
+            self.cleanup_state not in {"PENDING", "NOT_REQUIRED"} or any(value is None for value in cleanup)
+        ):
+            raise ValueError("reconciliation PASS requires the exact pending provider binding")
         if (
             self.phase == "EXECUTE"
             and self.outcome == "PASS"
@@ -1260,6 +1301,7 @@ def _ready(
     task_id: UUID,
     locator: EvidenceRunLocator,
     output: Mapping[str, Any],
+    scenario_output: Mapping[str, Any],
     *,
     checks: list[CapabilityCheck],
     observations: Mapping[str, Any],
@@ -1285,6 +1327,7 @@ def _ready(
         output_file_sha256=str(output["output_file_sha256"]),
         output_tree_sha256=str(output["output_tree_sha256"]),
         cleanup_state="PENDING",
+        scenario_output=DriverScenarioOutput.model_validate(scenario_output),
     )
 
 
@@ -1503,6 +1546,7 @@ async def _execute_evidence_scenario(
             notebook_task,
             locator,
             output,
+            output_document,
             checks=checks,
             observations=mutable_observations,
             mutations_started=mutations_started,
@@ -1829,10 +1873,17 @@ def _checkpoint_driver_pass(
     *,
     checks: list[CapabilityCheck],
     observations: Mapping[str, Any],
+    proofs: Mapping[str, object],
 ) -> TrustedDriverResult:
     output = status.provider_output
     result = status.result
     assert output is not None and result is not None
+    scenario_output = _output_document(
+        request,
+        proofs,
+        operation_ids=(str(result.operation_id),),
+    )
+    scenario_output["completed_at"] = result.completed_at.isoformat()
     return TrustedDriverResult(
         schema_version="my-data-hub-operational-kaggle-driver-result.v2",
         phase="EXECUTE",
@@ -1853,6 +1904,7 @@ def _checkpoint_driver_pass(
         output_file_sha256=output.output_file_sha256,
         output_tree_sha256=output.output_tree_sha256,
         cleanup_state="NOT_REQUIRED",
+        scenario_output=DriverScenarioOutput.model_validate(scenario_output),
     )
 
 
@@ -2005,6 +2057,7 @@ async def _execute_checkpoint_acceptance_scenario(
         status,
         checks=checks,
         observations=observations,
+        proofs=proofs,
     )
 
 
@@ -2044,6 +2097,7 @@ async def _launch_post_action_evidence(
         notebook_task,
         locator,
         output,
+        output_document,
         checks=checks,
         observations={**dict(observations), "notebook_claim_sha256": _sha(notebook_claim)},
         mutations_started=mutations_started + 1,
