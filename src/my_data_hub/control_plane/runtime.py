@@ -300,6 +300,24 @@ class ControlPlaneMasterRuntime:
                 metadata={"code": "CHECKPOINT_BINDING_INVALID"},
             )
             return {"operation_id": operation.operation_id, "state": "FAILED"}
+        if operation.operation_kind == "forced_master_rotation":
+            head = self.ledger.checkpoint_head("postgres-master")
+            manifest = candidate.get("manifest")
+            if (
+                head is None
+                or head.current_checkpoint_id != checkpoint_id
+                or head.generation != int(operation.identity.get("head_generation", -1))
+                or not isinstance(manifest, dict)
+                or manifest.get("canonical_revision")
+                != operation.identity.get("expected_canonical_revision")
+            ):
+                self.ledger.transition_operation(
+                    operation.operation_id,
+                    expected_state=operation.state,
+                    new_state="FAILED",
+                    metadata={"code": "ROTATION_CHECKPOINT_BINDING_STALE"},
+                )
+                return {"operation_id": operation.operation_id, "state": "FAILED"}
         if operation.operation_kind == "checkpoint_restore_smoke":
             if self.acceptance_executor is None:
                 raise MasterProviderUnavailable("restore provider is unavailable")
