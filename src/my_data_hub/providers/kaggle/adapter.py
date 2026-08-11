@@ -276,7 +276,7 @@ def _canonical_notebook_source(source: bytes, *, kernel_type: str) -> bytes:
     return json.dumps(body).encode("utf-8")
 
 
-def _brokered_sdk_types() -> tuple[Any, Any, Any, Any, Any, Any]:
+def _brokered_sdk_types() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
     """Load only types shipped with the pinned official Kaggle SDK."""
 
     try:
@@ -286,6 +286,7 @@ def _brokered_sdk_types() -> tuple[Any, Any, Any, Any, Any, Any]:
             ApiCreateDatasetVersionRequest,
             ApiCreateDatasetVersionRequestBody,
             ApiDatasetNewFile,
+            ApiGetDatasetMetadataRequest,
         )
     except (ImportError, ModuleNotFoundError) as exc:
         raise KaggleDependencyError("the official kaggle==2.2.4 SDK types are required") from exc
@@ -296,6 +297,7 @@ def _brokered_sdk_types() -> tuple[Any, Any, Any, Any, Any, Any]:
         ApiCreateDatasetVersionRequest,
         ApiCreateDatasetVersionRequestBody,
         ApiDatasetNewFile,
+        ApiGetDatasetMetadataRequest,
     )
 
 
@@ -462,6 +464,7 @@ class KaggleProviderAdapter:
         )
         expected_version = 1 if expected_previous_version is None else expected_previous_version + 1
         expected_files = tuple((item.name, item.total_bytes, item.description) for item in files)
+        dataset_description = self._brokered_dataset_description(expected_files)
         current = self.current_private_dataset_version(provider_ref=ref)
         if current == expected_version:
             if self.reconcile_brokered_checkpoint_dataset(
@@ -481,6 +484,7 @@ class KaggleProviderAdapter:
             ApiCreateDatasetVersionRequest,
             ApiCreateDatasetVersionRequestBody,
             ApiDatasetNewFile,
+            _ApiGetDatasetMetadataRequest,
         ) = _brokered_sdk_types()
         new_files: list[Any] = []
         for item in files:
@@ -499,6 +503,7 @@ class KaggleProviderAdapter:
                     request.title = title
                     request.license_name = "CC0-1.0"
                     request.is_private = True
+                    request.description = dataset_description
                     request.files = new_files
                     kaggle.datasets.dataset_api_client.create_dataset(request)
                 else:
@@ -506,6 +511,7 @@ class KaggleProviderAdapter:
                     body = ApiCreateDatasetVersionRequestBody()
                     body.version_notes = version_notes
                     body.delete_old_versions = False
+                    body.description = dataset_description
                     body.files = new_files
                     request = ApiCreateDatasetVersionRequest()
                     request.owner_slug = owner_slug
@@ -556,7 +562,26 @@ class KaggleProviderAdapter:
         if self.current_private_dataset_version(provider_ref=ref) != version:
             return False
 
-        observed: list[tuple[str, int, str]] = []
+        expected_dataset_description = self._brokered_dataset_description(normalized_expected)
+        *_other_types, ApiGetDatasetMetadataRequest = _brokered_sdk_types()
+        owner_slug, dataset_slug = ref.split("/", 1)
+        metadata_request = ApiGetDatasetMetadataRequest()
+        metadata_request.owner_slug = owner_slug
+        metadata_request.dataset_slug = dataset_slug
+        try:
+            with self.api.build_kaggle_client() as kaggle:
+                metadata_response = kaggle.datasets.dataset_api_client.get_dataset_metadata(
+                    metadata_request
+                )
+        except Exception as exc:
+            raise KaggleContractError("Kaggle exact Dataset binding metadata was unavailable") from exc
+        if str(_field(metadata_response, "error_message", "errorMessage") or "").strip():
+            raise KaggleContractError("Kaggle exact Dataset binding metadata was unavailable")
+        metadata_info = _field(metadata_response, "info")
+        if str(_field(metadata_info, "description") or "") != expected_dataset_description:
+            return False
+
+        observed: list[tuple[str, int]] = []
         cursor: str | None = None
         seen: set[str] = set()
         for _ in range(100):
@@ -580,8 +605,7 @@ class KaggleProviderAdapter:
                     total_bytes = int(raw_size)
                 except (TypeError, ValueError):
                     raise KaggleIdentityError("Kaggle Dataset file size metadata is invalid") from None
-                description = str(_field(row, "description") or "")
-                observed.append((name, total_bytes, description))
+                observed.append((name, total_bytes))
             next_cursor = str(_field(response, "next_page_token", "nextPageToken") or "").strip() or None
             if next_cursor is None:
                 break
@@ -591,7 +615,8 @@ class KaggleProviderAdapter:
             cursor = next_cursor
         else:
             raise KaggleContractError("Kaggle Dataset file metadata exceeded its page bound")
-        return tuple(sorted(observed)) == normalized_expected
+        expected_name_sizes = tuple(sorted((name, size) for name, size, _description in normalized_expected))
+        return tuple(sorted(observed)) == expected_name_sizes
 
     def list_resources(self, *, kind: ProviderKind, cursor: str | None, limit: int) -> InventoryPage:
         if not 1 <= limit <= 100:
@@ -2353,6 +2378,44 @@ class KaggleProviderAdapter:
                 raise KaggleContractError("brokered Dataset file description digest or size is invalid")
             normalized.append((name, total_bytes, description))
         return tuple(sorted(normalized))
+
+    @staticmethod
+    def _brokered_dataset_description(
+        expected_files: tuple[tuple[str, int, str], ...],
+    ) -> str:
+        """Build the provider-visible exact binding for one Dataset version.
+
+        Kaggle's live file-list response currently omits ``ApiDatasetNewFile.description``
+        even though the pinned generated request type accepts it.  The Dataset-level
+        description is both persisted and returned by the official metadata endpoint,
+        so it carries one bounded hash of the already validated per-file bindings.
+        """
+
+        normalized = KaggleProviderAdapter._validate_brokered_expected_files(expected_files)
+        first = json.loads(normalized[0][2])
+        return canonical_json_bytes(
+            {
+                "schema_version": "my-data-hub-brokered-dataset-binding.v1",
+                "operation_id": first["operation_id"],
+                "master_run_ref": first["master_run_ref"],
+                "epoch": first["epoch"],
+                "manifest_sha256": first["manifest_sha256"],
+                "files_sha256": hashlib.sha256(
+                    canonical_json_bytes(
+                        [
+                            {
+                                "name": name,
+                                "total_bytes": total_bytes,
+                                "description_sha256": hashlib.sha256(
+                                    description.encode("utf-8")
+                                ).hexdigest(),
+                            }
+                            for name, total_bytes, description in normalized
+                        ]
+                    )
+                ).hexdigest(),
+            }
+        ).decode("utf-8")
 
     def _expected_directory_package_sha256(
         self,

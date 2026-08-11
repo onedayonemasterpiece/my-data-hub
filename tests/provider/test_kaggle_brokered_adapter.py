@@ -23,7 +23,15 @@ class _BlobType:
     DATASET = "dataset"
 
 
-SDK_TYPES = (_BlobType, _SdkObject, _SdkObject, _SdkObject, _SdkObject, _SdkObject)
+SDK_TYPES = (
+    _BlobType,
+    _SdkObject,
+    _SdkObject,
+    _SdkObject,
+    _SdkObject,
+    _SdkObject,
+    _SdkObject,
+)
 
 
 class _Journal:
@@ -61,6 +69,7 @@ class _BrokeredApi:
         self.start_calls: list[object] = []
         self.create_calls: list[object] = []
         self.version_calls: list[object] = []
+        self.dataset_description = ""
         self.list_calls: list[str] = []
         self.start_failure: Exception | None = None
         self.raise_after_version_apply: Exception | None = None
@@ -68,6 +77,7 @@ class _BrokeredApi:
         self.dataset_api_client = SimpleNamespace(
             create_dataset=self._create_dataset,
             create_dataset_version=self._create_dataset_version,
+            get_dataset_metadata=self._get_dataset_metadata,
         )
         self.blobs = SimpleNamespace(blob_api_client=self.blob_api_client)
         self.datasets = SimpleNamespace(dataset_api_client=self.dataset_api_client)
@@ -111,7 +121,8 @@ class _BrokeredApi:
             SimpleNamespace(
                 name=self.blob_metadata[file.token][0],
                 total_bytes=self.blob_metadata[file.token][1],
-                description=file.description,
+                # The live Kaggle list-files response omits this request field.
+                description=None,
             )
             for file in files
         ]
@@ -119,16 +130,23 @@ class _BrokeredApi:
     def _create_dataset(self, request: object) -> SimpleNamespace:
         self.create_calls.append(request)
         self.current_version = 1
+        self.dataset_description = request.description
         self.version_files[1] = self._metadata_from_files(request.files)
         return SimpleNamespace(status="ok", url="https://www.kaggle.com/datasets/owner/checkpoint-data")
 
     def _create_dataset_version(self, request: object) -> SimpleNamespace:
         self.version_calls.append(request)
         self.current_version = (self.current_version or 0) + 1
+        self.dataset_description = request.body.description
         self.version_files[self.current_version] = self._metadata_from_files(request.body.files)
         if self.raise_after_version_apply is not None:
             raise self.raise_after_version_apply
         return SimpleNamespace(status="ok", url="https://www.kaggle.com/datasets/owner/checkpoint-data")
+
+    def _get_dataset_metadata(self, _request: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            info=SimpleNamespace(description=self.dataset_description), error_message=""
+        )
 
 
 def _description(*, total_bytes: int, file_sha256: str = "b" * 64) -> str:
@@ -244,6 +262,9 @@ def test_finalize_private_create_forwards_tokens_and_exact_descriptions(
     assert request.title == "Private checkpoints"
     assert request.license_name == "CC0-1.0"
     assert request.is_private is True
+    assert request.description == adapter._brokered_dataset_description(
+        ((file.name, file.total_bytes, file.description),)
+    )
     assert request.files[0].token == file.blob_token
     assert request.files[0].description == file.description
     assert api.list_calls == ["owner/checkpoint-data/1"]
@@ -272,6 +293,9 @@ def test_lost_version_response_reconciles_once_without_duplicate_or_download(
     assert len(api.version_calls) == 1
     assert api.version_calls[0].body.version_notes == "checkpoint epoch 9"
     assert api.version_calls[0].body.delete_old_versions is False
+    assert api.version_calls[0].body.description == adapter._brokered_dataset_description(
+        ((file.name, file.total_bytes, file.description),)
+    )
     assert api.list_calls == ["owner/checkpoint-data/2"]
     assert not hasattr(api, "dataset_download_files")
 
@@ -297,6 +321,7 @@ def test_reconcile_requires_current_exact_numeric_version_and_all_metadata(
     file = _file()
     expected = ((file.name, file.total_bytes, file.description),)
     api.current_version = 2
+    api.dataset_description = adapter._brokered_dataset_description(expected)
     api.version_files[2] = [
         SimpleNamespace(name=file.name, total_bytes=file.total_bytes, description=file.description)
     ]
@@ -307,7 +332,9 @@ def test_reconcile_requires_current_exact_numeric_version_and_all_metadata(
     assert not adapter.reconcile_brokered_checkpoint_dataset(
         provider_ref="owner/checkpoint-data", version=1, expected_files=expected
     )
-    api.version_files[2][0].description = _description(total_bytes=file.total_bytes, file_sha256="c" * 64)
+    api.dataset_description = adapter._brokered_dataset_description(
+        ((file.name, file.total_bytes, _description(total_bytes=file.total_bytes, file_sha256="c" * 64)),)
+    )
     assert not adapter.reconcile_brokered_checkpoint_dataset(
         provider_ref="owner/checkpoint-data", version=2, expected_files=expected
     )
