@@ -238,8 +238,8 @@ class LedgerControlReader(ControlPlaneReader):
         exact_version = str(candidate.get("version_ref") or "")
         if arguments.get("checkpoint_id") != checkpoint_id or arguments.get("exact_version_ref") != exact_version:
             raise ValueError("request does not bind the exact checkpoint HEAD generation")
+        rotation_binding: tuple[object, object, object] | None = None
         if tool == "master.rotation.request":
-            service = self.ledger.resolve_service("postgres-master")
             expected_epoch = arguments.get("expected_active_epoch")
             manifest = candidate.get("manifest")
             expected_revision = arguments.get("expected_canonical_revision")
@@ -247,15 +247,7 @@ class LedgerControlReader(ControlPlaneReader):
                 raise ValueError("rotation request does not bind the checkpoint canonical revision")
             source_operation = self.ledger.get_operation(str(candidate.get("operation_id", "")))
             source_identity = source_operation.identity if source_operation is not None else {}
-            if (
-                service is not None
-                or source_operation is None
-                or source_operation.state != "STOPPED"
-                or expected_epoch != candidate.get("epoch")
-                or expected_epoch != source_identity.get("epoch")
-                or candidate.get("master_instance_id") != source_identity.get("master_instance_id")
-            ):
-                raise ValueError("rotation requires the exact checkpoint source master to be durably stopped")
+            rotation_binding = (expected_epoch, source_operation, source_identity)
         timeout = arguments.get("timeout_seconds")
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 60 <= timeout <= 3600:
             raise ValueError("acceptance request timeout_seconds must be between 60 and 3600")
@@ -273,6 +265,46 @@ class LedgerControlReader(ControlPlaneReader):
         digest = hashlib.sha256(
             json.dumps(intent, sort_keys=True, separators=(",", ":")).encode() + b":" + request_key.encode()
         ).hexdigest()
+        operation_kind = (
+            "checkpoint_restore_smoke" if tool == "checkpoint.restore.request" else "forced_master_rotation"
+        )
+        idempotency_key = f"scheduled-acceptance:{tool}:{request_key}"
+        existing = self.ledger.get_operation(digest)
+        if existing is not None:
+            expected_intent_hash = hashlib.sha256(
+                json.dumps(intent, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+            ).hexdigest()
+            if (
+                existing.operation_kind != operation_kind
+                or existing.idempotency_key != idempotency_key
+                or existing.intent_hash != expected_intent_hash
+            ):
+                raise ValueError("acceptance request identity was reused for different intent")
+            return {
+                "accepted": True,
+                "duplicate": True,
+                "request_sha256": digest,
+                "operation_id": existing.operation_id,
+                "state": existing.state,
+                "target": target,
+                "checkpoint_id": checkpoint_id,
+                "exact_version_ref": exact_version,
+                "head_generation": head.generation,
+                "execution_supported": True,
+            }
+        if tool == "master.rotation.request":
+            assert rotation_binding is not None
+            expected_epoch, source_operation, source_identity = rotation_binding
+            service = self.ledger.resolve_service("postgres-master")
+            if (
+                service is not None
+                or source_operation is None
+                or source_operation.state != "STOPPED"
+                or expected_epoch != candidate.get("epoch")
+                or expected_epoch != source_identity.get("epoch")
+                or candidate.get("master_instance_id") != source_identity.get("master_instance_id")
+            ):
+                raise ValueError("rotation requires the exact checkpoint source master to be durably stopped")
         if not self.ledger.acceptance_consumer_available():
             return {
                 "accepted": False,
@@ -289,10 +321,8 @@ class LedgerControlReader(ControlPlaneReader):
             }
         operation, created = self.ledger.ensure_operation(
             operation_id=digest,
-            idempotency_key=f"scheduled-acceptance:{tool}:{request_key}",
-            operation_kind=(
-                "checkpoint_restore_smoke" if tool == "checkpoint.restore.request" else "forced_master_rotation"
-            ),
+            idempotency_key=idempotency_key,
+            operation_kind=operation_kind,
             intent=intent,
             initial_state="REQUESTED",
             identity={"principal": principal.subject, "request_sha256": digest, **intent},

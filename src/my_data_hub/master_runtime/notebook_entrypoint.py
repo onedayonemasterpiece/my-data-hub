@@ -831,18 +831,13 @@ def run_master(
                             },
                         )
                     raise
-                with suppress(BloggerReceiptDeliveryError):
-                    # The PostgreSQL commit is authoritative and must never be
-                    # downgraded to FAILED because a metadata ACK was lost.  The
-                    # exact receipt is carried in the terminal output and is
-                    # durably reconciled before recovered lifecycle projection.
-                    _post_blogger_runtime_receipt(
-                        config=config,
-                        callback_url=callback_url,
-                        run_secret=run_secret,
-                        suffix="/import-receipt",
-                        payload=blogger_receipt.model_dump(mode="json"),
-                    )
+                _post_blogger_runtime_receipt(
+                    config=config,
+                    callback_url=callback_url,
+                    run_secret=run_secret,
+                    suffix="/import-receipt",
+                    payload=blogger_receipt.model_dump(mode="json"),
+                )
                 break
             time.sleep(min(30.0, remaining_active))
             if time.monotonic() >= active_deadline:
@@ -876,6 +871,17 @@ def run_master(
                 raise CallbackLeaseClosingError("callback unavailable; write lease is closing")
     except BaseException as exc:
         active_error = exc
+
+    if isinstance(active_error, BloggerReceiptDeliveryError):
+        # Never promote a checkpoint containing the committed workload until
+        # the metadata ledger has acknowledged the exact import receipt.  A
+        # persistent callback outage therefore loses only this ephemeral
+        # attempt; the previous verified HEAD remains authoritative.
+        gate.fence(identity, "blogger_import_receipt_unacknowledged")
+        tunnel.stop()
+        supervisor.stop(immediate=True)
+        gate_connection.close()
+        raise active_error
 
     terminal_output_path = paths.working / MASTER_TERMINAL_OUTPUT_NAME
     checkpoint_receipt = _checkpoint_until_deadline(

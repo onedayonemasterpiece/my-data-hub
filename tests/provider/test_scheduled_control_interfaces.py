@@ -165,6 +165,14 @@ def test_rotation_requires_the_exact_source_master_to_be_stopped(tmp_path: Path,
     accepted = reader.invoke_control("master.rotation.request", arguments, _identity())
     assert accepted["accepted"] is True
     assert accepted["execution_supported"] is True
+    monkeypatch.setattr(
+        ledger,
+        "resolve_service",
+        lambda _kind: SimpleNamespace(epoch=2, canonical_revision=9),
+    )
+    replay = reader.invoke_control("master.rotation.request", arguments, _identity())
+    assert replay["operation_id"] == accepted["operation_id"]
+    assert replay["duplicate"] is True
 
     other = ControlLedger(tmp_path / "other.sqlite3")
     _stopped_master_checkpoint(other)
@@ -174,9 +182,7 @@ def test_rotation_requires_the_exact_source_master_to_be_stopped(tmp_path: Path,
         lambda _kind: SimpleNamespace(epoch=1, canonical_revision=9),
     )
     with pytest.raises(ValueError, match="durably stopped"):
-            LedgerControlReader(other).invoke_control(
-            "master.rotation.request", arguments, _identity()
-        )
+        LedgerControlReader(other).invoke_control("master.rotation.request", arguments, _identity())
 
 
 def test_protected_resource_probe_exercises_policy_without_provider_mutation(tmp_path: Path) -> None:

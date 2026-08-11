@@ -1969,6 +1969,23 @@ class ControlLedger:
                     "WHERE request_id=? AND state='CLAIMED' AND import_receipt_json IS NULL",
                     ("CLAIMED_RUNTIME_TERMINAL_WITHOUT_RECEIPT", now, request_id),
                 )
+            elif row["state"] == "IMPORT_COMMITTED" and row["operation_state"] in {
+                "FAILED",
+                "FENCED",
+                "ORPHANED",
+            }:
+                verified = connection.execute(
+                    "SELECT 1 FROM checkpoint_candidates c JOIN checkpoint_heads h "
+                    "ON h.service_kind=c.service_kind AND h.current_checkpoint_id=c.checkpoint_id "
+                    "WHERE c.operation_id=? AND c.status='VERIFIED' LIMIT 1",
+                    (row["operation_id"],),
+                ).fetchone()
+                if verified is None:
+                    connection.execute(
+                        "UPDATE blogger_migration_requests SET state='FAILED',failure_code=?,updated_at=? "
+                        "WHERE request_id=? AND state='IMPORT_COMMITTED' AND checkpoint_receipt_json IS NULL",
+                        ("IMPORT_COMMITTED_WITHOUT_DURABLE_CHECKPOINT", now, request_id),
+                    )
             current = connection.execute(
                 "SELECT * FROM blogger_migration_requests WHERE request_id=?", (request_id,)
             ).fetchone()

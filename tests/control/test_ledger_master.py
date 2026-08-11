@@ -128,6 +128,49 @@ def test_packaged_and_repository_control_migrations_are_identical() -> None:
     assert [(item.version, item.sha256) for item in repository] == [(item.version, item.sha256) for item in packaged]
 
 
+def test_import_commit_without_verified_checkpoint_terminalizes_after_provider_failure(tmp_path: Path) -> None:
+    ledger = ledger_at(tmp_path)
+    operation, _ = ledger.ensure_operation(
+        operation_id="blogger-master-operation",
+        idempotency_key="blogger-master-operation",
+        operation_kind="ensure_master",
+        intent={"source": "test"},
+        initial_state="ACTIVE",
+        identity={"run_id": "run-1", "attempt_id": "attempt-1"},
+    )
+    ledger.ensure_blogger_migration_request(
+        request_id="request-1",
+        operation_id=operation.operation_id,
+        request_sha256="a" * 64,
+        request={"schema_version": "test"},
+    )
+    ledger.claim_blogger_migration_request(
+        operation_id=operation.operation_id,
+        run_id="run-1",
+        attempt_id="attempt-1",
+        master_instance_id="master-1",
+        epoch=1,
+    )
+    ledger.record_blogger_import_receipt(
+        request_id="request-1",
+        run_id="run-1",
+        attempt_id="attempt-1",
+        receipt={"canonical_revision": 9},
+    )
+    ledger.transition_operation(
+        operation.operation_id,
+        expected_state="ACTIVE",
+        new_state="FAILED",
+        metadata={"reason": "provider_error_before_checkpoint"},
+    )
+
+    reconciled = ledger.reconcile_abandoned_blogger_migration_request("request-1")
+
+    assert reconciled is not None
+    assert reconciled["state"] == "FAILED"
+    assert reconciled["failure_code"] == "IMPORT_COMMITTED_WITHOUT_DURABLE_CHECKPOINT"
+
+
 def test_twenty_concurrent_ensure_requests_collapse_to_one_physical_run(tmp_path: Path) -> None:
     ledger = ledger_at(tmp_path)
     fake = FakeKaggleRuntime()
