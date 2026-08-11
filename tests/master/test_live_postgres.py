@@ -359,7 +359,7 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
             assert state == (3, 3, "open")
             assert admin.execute(
                 "SELECT schema_revision FROM hub.canonical_state WHERE singleton"
-            ).fetchone()[0] == 13
+            ).fetchone()[0] == 14
             assert admin.execute(
                 "SELECT canonical_revision FROM hub.canonical_state WHERE singleton"
             ).fetchone()[0] == first_import.canonical_revision
