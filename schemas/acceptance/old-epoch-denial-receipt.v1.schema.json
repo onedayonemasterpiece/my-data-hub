@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.local/schemas/acceptance/old-epoch-denial-receipt.v1.schema.json",
+  "title": "FM11 sanitized old epoch denial receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "context_sha256",
+    "task_id",
+    "old_operation_id",
+    "old_epoch",
+    "new_operation_id",
+    "new_master_instance_id",
+    "new_epoch",
+    "new_epoch_active",
+    "checkpoint",
+    "runtime",
+    "credential",
+    "write",
+    "tunnel"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-old-epoch-denial-receipt.v1"
+    },
+    "context_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "task_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "old_operation_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "old_epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "new_operation_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "new_master_instance_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "new_epoch": {
+      "type": "integer",
+      "minimum": 2
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checkpoint_id",
+        "exact_version_ref",
+        "manifest_sha256",
+        "status",
+        "current"
+      ],
+      "properties": {
+        "checkpoint_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "exact_version_ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$"
+        },
+        "manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "status": {
+          "const": "VERIFIED"
+        },
+        "current": {
+          "const": true
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "heartbeat_denied",
+        "lease_renewal_denied",
+        "runtime_token_revoked",
+        "runtime_token_sha256",
+        "denial_code"
+      ],
+      "properties": {
+        "heartbeat_denied": {
+          "const": true
+        },
+        "lease_renewal_denied": {
+          "const": true
+        },
+        "runtime_token_revoked": {
+          "const": true
+        },
+        "runtime_token_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "denial_code": {
+          "const": "MDH_RETIRED_RUNTIME_TOKEN"
+        }
+      }
+    },
+    "credential": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registration_denied",
+        "bind_denied",
+        "registration_code",
+        "bind_code"
+      ],
+      "properties": {
+        "registration_denied": {
+          "const": true
+        },
+        "bind_denied": {
+          "const": true
+        },
+        "registration_code": {
+          "const": "MDH_RETIRED_RUNTIME_REGISTER"
+        },
+        "bind_code": {
+          "const": "MDH_RETIRED_CREDENTIAL_BIND"
+        }
+      }
+    },
+    "write": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "denied",
+        "sqlstate",
+        "transaction_state",
+        "canonical_revision_before",
+        "canonical_revision_after",
+        "denial_code"
+      ],
+      "properties": {
+        "denied": {
+          "const": true
+        },
+        "sqlstate": {
+          "const": "55000"
+        },
+        "transaction_state": {
+          "const": "rollback_only"
+        },
+        "canonical_revision_before": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "canonical_revision_after": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "denial_code": {
+          "const": "MDH_OLD_EPOCH_WRITE"
+        }
+      }
+    },
+    "tunnel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lease_renewal_denied",
+        "certificate_renewal_denied",
+        "lease_denial_code",
+        "certificate_denial_code",
+        "certificate_serial",
+        "principal_sha256"
+      ],
+      "properties": {
+        "lease_renewal_denied": {
+          "const": true
+        },
+        "certificate_renewal_denied": {
+          "const": true
+        },
+        "lease_denial_code": {
+          "const": "MDH_RETIRED_TUNNEL_LEASE"
+        },
+        "certificate_denial_code": {
+          "const": "MDH_RETIRED_TUNNEL_CERTIFICATE"
+        },
+        "certificate_serial": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "principal_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "new_epoch_active": {
+      "const": true
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

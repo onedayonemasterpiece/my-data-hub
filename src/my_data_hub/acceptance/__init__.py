@@ -42,6 +42,14 @@ from .master_production import (
     ProductionMasterAcceptanceEffects,
     ProductionMasterAcceptanceEffectsFactory,
 )
+from .old_epoch_denial import (
+    OldEpochReplacementBinder,
+    OldRuntimeProbeContext,
+    ProductionOldEpochDenialProbe,
+    PsycopgRetiredBoundedWriteClient,
+    ReplacementEpochContext,
+    RetiredTunnelCertificateIdentity,
+)
 from .scenario_operator import (
     AcceptanceScenarioId,
     AcceptanceScenarioOperatorAdapter,
@@ -93,6 +101,8 @@ __all__ = [
     "MasterAcceptanceRuntimeEffects",
     "MasterAcceptanceScenario",
     "MasterLifecycleAcceptanceError",
+    "OldEpochReplacementBinder",
+    "OldRuntimeProbeContext",
     "OwnerBoundAcceptanceClaimPort",
     "ProductionControlAcceptanceContext",
     "ProductionControlHostEffects",
@@ -100,6 +110,10 @@ __all__ = [
     "ProductionDataWorkloadReceipt",
     "ProductionMasterAcceptanceEffects",
     "ProductionMasterAcceptanceEffectsFactory",
+    "ProductionOldEpochDenialProbe",
+    "PsycopgRetiredBoundedWriteClient",
+    "ReplacementEpochContext",
+    "RetiredTunnelCertificateIdentity",
     "UnifiedAcceptanceScenarioExecutor",
     "command_for",
     "execute_master_acceptance_command",

@@ -1,0 +1,47 @@
+{
+  "schema_version": "my-data-hub-old-epoch-denial-receipt.v1",
+  "context_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+  "task_id": "00000000-0000-4000-8000-000000000011",
+  "old_operation_id": "00000000-0000-4000-8000-000000000101",
+  "old_epoch": 4,
+  "new_operation_id": "00000000-0000-4000-8000-000000000201",
+  "new_master_instance_id": "00000000-0000-4000-8000-000000000202",
+  "new_epoch": 5,
+  "checkpoint": {
+    "checkpoint_id": "00000000-0000-4000-8000-000000000203",
+    "exact_version_ref": "owner/checkpoint/9",
+    "manifest_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "status": "VERIFIED",
+    "current": true
+  },
+  "runtime": {
+    "heartbeat_denied": true,
+    "lease_renewal_denied": true,
+    "runtime_token_revoked": true,
+    "runtime_token_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "denial_code": "MDH_RETIRED_RUNTIME_TOKEN"
+  },
+  "credential": {
+    "registration_denied": true,
+    "bind_denied": true,
+    "registration_code": "MDH_RETIRED_RUNTIME_REGISTER",
+    "bind_code": "MDH_RETIRED_CREDENTIAL_BIND"
+  },
+  "write": {
+    "denied": true,
+    "sqlstate": "55000",
+    "transaction_state": "rollback_only",
+    "canonical_revision_before": 12,
+    "canonical_revision_after": 12,
+    "denial_code": "MDH_OLD_EPOCH_WRITE"
+  },
+  "tunnel": {
+    "lease_renewal_denied": true,
+    "certificate_renewal_denied": true,
+    "lease_denial_code": "MDH_RETIRED_TUNNEL_LEASE",
+    "certificate_denial_code": "MDH_RETIRED_TUNNEL_CERTIFICATE",
+    "certificate_serial": 17,
+    "principal_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "new_epoch_active": true
+}

@@ -86,3 +86,49 @@ only after an official-adapter numeric run locator, bounded output
 file/tree/receipt hashes, exact config/result hashes, and the fully validated
 checkpoint receipt with initial/final HEAD all reconcile. A missing scoped
 acceptance execution authority blocks before provider mutation.
+
+## FM11 old-epoch probe composition handoff
+
+`my_data_hub.acceptance.old_epoch_denial.ProductionOldEpochDenialProbe` is the
+concrete `OldEpochDenialPort`. It is intentionally a one-task, in-memory object;
+it is not an MCP tool and has no serializer for its context.
+
+The production composition order is fixed:
+
+1. While the selected old runtime is still ACTIVE, capture an
+   `OldRuntimeProbeContext` bound to the acceptance task and exact old
+   operation/run/attempt/service/master/epoch. Store only the runtime bearer
+   SHA-256, a UUID handle for a protected pre-opened H1 operator session, and
+   the old tunnel certificate serial plus principal/public-key digests. Raw
+   bearer, DSN, password, certificate and private key remain inside their
+   narrow clients.
+2. Construct `ProductionOldEpochDenialProbe` with `replacement=None`, install it
+   as `ProductionControlHostEffects.old_epoch_denials`, and then perform the
+   ordinary drain, verified checkpoint and STOPPED transition.
+   Never rotate first and reconstruct an old context from durable state.
+3. After `ControlPlaneMasterRuntime.ensure` returns the exact ACTIVE
+   replacement, build `ReplacementEpochContext` from its operation/master/epoch
+   and the already selected current VERIFIED checkpoint (numeric Dataset
+   version and manifest hash), then call the probe's one-shot
+   `bind_replacement`. Exact replay is allowed; rebinding is denied. This is the
+   post-`ensure` composition handoff in `ProductionControlHostEffects._old_epoch`.
+4. The runtime client exercises the old
+   heartbeat/renewal path; the credential client exercises registration and
+   master-local binding; `PsycopgRetiredBoundedWriteClient` executes only H1's
+   fixed `assert_session_write_epoch()` followed by the no-row bounded UPDATE;
+   and the tunnel client exercises both lease and certificate renewal.
+5. The adapter requires normalized exact denials, revoked token evidence,
+   SQLSTATE `55000`, PostgreSQL `rollback_only`, unchanged canonical revision,
+   and the original certificate identity. It then releases the protected
+   session/tunnel handle and drops the context reference. The TTL is a fixed
+   monotonic 900 seconds and cannot be supplied or widened by a request.
+
+An exact retry after a lost completion response returns the same
+`OldEpochDenials` and receipt hashes without repeating physical probes. Only
+hashes, UUIDs, numeric epochs/checkpoint versions, denial codes and booleans are
+representable in the sanitized internal receipt. Its schema is
+`schemas/acceptance/old-epoch-denial-receipt.v1.schema.json`.
+
+This implementation and its injected-client tests are not live FM11 evidence.
+FM11 remains blocked until the four clients are wired to deployed authorities
+and one real stopped-old/active-new rotation yields the receipt.
