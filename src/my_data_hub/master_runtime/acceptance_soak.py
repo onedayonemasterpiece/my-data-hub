@@ -160,17 +160,20 @@ class NotebookSoakCredentialAuthority:
 @dataclass(frozen=True, slots=True)
 class NotebookSoakReadProbe:
     credentials: NotebookSoakCredentialAuthority
+    owner_connection: Any = field(repr=False)
 
     def bounded_read(
         self, binding: MasterAcceptanceBinding, *, step: int, intent_sha256: str,
     ) -> BoundedReadReceipt:
         with psycopg.connect(self.credentials.current.database_url, connect_timeout=5) as connection:
+            connection.execute("SET TRANSACTION READ ONLY")
+            connection.execute("SET LOCAL ROLE mdh_mcp_reader")
             row = connection.execute(
-                "SELECT current_epoch FROM master_control.epoch_state WHERE singleton=true"
+                "SELECT canonical_revision FROM hub.canonical_state WHERE singleton=true"
             ).fetchone()
             connection.rollback()
-        if row is None or int(row[0]) != binding.epoch:
-            raise RuntimeError("FM24 bounded read observed another epoch")
+        if row is None or int(row[0]) < 0:
+            raise RuntimeError("FM24 bounded canonical read returned no revision")
         return BoundedReadReceipt(
             evidence_class="live", step=step, query_contract="fm24_active_epoch_read.v1",
             observed_rows=1, active_epoch=binding.epoch,
@@ -198,13 +201,18 @@ class NotebookSoakReadProbe:
         )
 
     def exact_service_active(self, binding: MasterAcceptanceBinding) -> ActiveServiceReceipt:
-        with psycopg.connect(self.credentials.current.database_url, connect_timeout=5) as connection:
-            row = connection.execute(
-                "SELECT current_epoch,gate_state,lease_until>clock_timestamp() "
-                "FROM master_control.epoch_state WHERE singleton=true"
-            ).fetchone()
-            connection.rollback()
-        if row is None or int(row[0]) != binding.epoch or row[1] != "open" or row[2] is not True:
+        row = self.owner_connection.execute(
+            "SELECT current_epoch,master_instance_id::text,gate_state,lease_until>clock_timestamp() "
+            "FROM master_control.epoch_state WHERE singleton=true"
+        ).fetchone()
+        self.owner_connection.rollback()
+        if (
+            row is None
+            or int(row[0]) != binding.epoch
+            or str(row[1]) != str(binding.master_instance_id)
+            or row[2] != "open"
+            or row[3] is not True
+        ):
             raise RuntimeError("FM24 final service is not the exact ACTIVE epoch")
         return ActiveServiceReceipt(
             evidence_class="live", active=True, epoch=binding.epoch,
@@ -254,6 +262,6 @@ def build_notebook_soak_port(
         database_gate=database_gate,
         tunnel_authority=HttpTunnelLeaseAuthority(renew_tunnel),  # type: ignore[arg-type]
         credential_registrar=credential_authority,
-        read_probe=NotebookSoakReadProbe(credential_authority),
+        read_probe=NotebookSoakReadProbe(credential_authority, database_gate.connection),
         evidence_class="live",
     )
