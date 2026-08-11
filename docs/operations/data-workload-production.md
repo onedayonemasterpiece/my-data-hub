@@ -59,14 +59,12 @@ record IDs in the full envelope are never copied into H6 state or receipts.
   No generic SQL argument, local PostgreSQL, PGDATA, YDB rows, blogger fields,
   vectors, DSN, or provider mutation is exposed.
 
-## Current fail-closed H5 handoff
+## Implemented fail-closed H5 handoff
 
-The existing H5 `FAILED / BloggerMigrationQuarantined` status contains only the
-failure code. Production replay therefore stops with
-`FM16_H5_QUARANTINE_PROJECTION_UNAVAILABLE`; it does **not** infer hashes from an
-owner envelope or fabricate accounting. To unblock the serial H5 status lane,
-`GET /control/v1/blogger-closure/requests/{request_id}` must add these two
-metadata objects for that exact terminal failure:
+H5 now derives a bounded metadata-only `BloggerQuarantineReceipt` from the
+durably committed rejected import and exposes three sanitized objects from
+`GET /control/v1/blogger-closure/requests/{request_id}` for the exact
+`FAILED / BloggerMigrationQuarantined` request:
 
 1. `quarantine_evidence`, validating as `BloggerQuarantineEvidence`: exact
    request/request hash, source operation, export batch, failure code, all 266
@@ -77,8 +75,16 @@ metadata objects for that exact terminal failure:
    request, operation and request hash; equal group/pending counts; SHA-256 of
    the sorted identity set, sorted member-record-id set, and bounded review
    projection.
+3. `duplicate_review_inputs`: the sorted identity groups, record IDs, projected
+   actor IDs and optional existing actor IDs used to prepare the owner envelope.
 
-These fields contain no source payload columns or decisions. They must be read
-from durable H5 quarantine/review evidence. Until both validate and cross-bind,
-no v2 request is sent. No default reader/catalog expansion is requested by this
-lane.
+These fields contain no source payload columns or decisions. The gateway parses
+the first two projections and the state machine cross-binds them before returning
+`AWAITING_OWNER_AUTHORIZATION`. The mode-0600 envelope decisions must cover the
+exact third projection; H5 revalidates that coverage at atomic v2 admission.
+The accepted v2 response and subsequent status must retain the exact H5 request
+SHA-256 and `REQUESTED` state. The former projection blocker is therefore closed.
+
+This is interface evidence only: no real provider run, owner decision, H5 import,
+checkpoint, or outer reconciliation was executed, so `live_evidence` remains
+false and production acceptance remains blocked pending those live steps.

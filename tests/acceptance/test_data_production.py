@@ -26,7 +26,18 @@ from my_data_hub.acceptance.data_workloads import (
     FixedChangeIntent,
 )
 from my_data_hub.hashing import canonical_json_bytes
-from my_data_hub.workloads.bloggers.master_stage import BloggerMigrationRequest
+from my_data_hub.workloads.bloggers.importer import batch_identity
+from my_data_hub.workloads.bloggers.master_stage import (
+    BLOGGER_REPLAY_STAGE_SCHEMA,
+    BloggerDuplicateDecision,
+    BloggerDuplicateResolutionEnvelope,
+    BloggerDuplicateReviewGroup,
+    BloggerDuplicateReviewInputs,
+    BloggerDuplicateReviewMember,
+    BloggerMigrationRequest,
+    BloggerQuarantineReceipt,
+    resolution_matches_quarantine,
+)
 
 H = "a" * 64
 H2 = "b" * 64
@@ -159,6 +170,141 @@ async def test_missing_h5_quarantine_projection_is_precise_fail_closed_blocker(p
         await gateway(plan, config, control=control).observe_blogger(request_id)
     assert caught.value.code == "FM16_H5_QUARANTINE_PROJECTION_UNAVAILABLE"
     assert control.posts == []
+
+
+@pytest.mark.asyncio
+async def test_real_h5_quarantine_status_drives_exact_owner_bound_v2_replay(
+    plan: DataWorkloadPlan, config: ProductionDataWorkloadConfig, tmp_path: Path
+) -> None:
+    """Exercise the integrated H5 public projection, not a hand-written substitute."""
+
+    control = Control()
+    source = BloggerMigrationRequest(
+        request_id=plan.identity("fm16:v1"),
+        operation_id=config.blogger_v1_operation_id,
+        project_id=plan.blogger_project_id,
+        snapshot_at=plan.blogger_snapshot_at,
+        source_revision=plan.blogger_source_revision,
+    )
+    canonical_actor = uid(40)
+    other_actor = uid(41)
+    receipt = BloggerQuarantineReceipt(
+        request_id=source.request_id,
+        operation_id=source.operation_id,
+        request_sha256=source.request_sha256,
+        master_instance_id=uid(42),
+        run_id="owner/postgres-master/run-1",
+        attempt_id="attempt-1",
+        epoch=7,
+        export_batch_id=batch_identity(plan.blogger_snapshot_at, source.expected_rows),
+        row_count=266,
+        raw_count=266,
+        dispositioned_count=266,
+        undispositioned_count=0,
+        quarantined_count=2,
+        logical_sha256="1" * 64,
+        record_id_set_sha256="2" * 64,
+        canonical_outcome_sha256="3" * 64,
+        duplicate_group_count=1,
+        duplicate_groups_pending=1,
+        duplicate_review_inputs=BloggerDuplicateReviewInputs(
+            groups=(
+                BloggerDuplicateReviewGroup(
+                    identity_sha256="4" * 64,
+                    members=(
+                        BloggerDuplicateReviewMember(
+                            record_id="blogger-001", projected_actor_id=canonical_actor
+                        ),
+                        BloggerDuplicateReviewMember(
+                            record_id="blogger-002", projected_actor_id=other_actor
+                        ),
+                    ),
+                ),
+            )
+        ),
+    )
+    # This is the exact shape composed by H5 blogger_closure_status from the
+    # receipt's three public projections. The internal receipt itself is absent.
+    control.status = {
+        "request_id": str(source.request_id),
+        "operation_id": str(source.operation_id),
+        "request_sha256": source.request_sha256,
+        "state": "FAILED",
+        "failure_code": receipt.failure_code,
+        "quarantine_receipt_sha256": receipt.receipt_sha256,
+        "quarantine_evidence": receipt.quarantine_evidence,
+        "duplicate_review": receipt.duplicate_review,
+        "duplicate_review_inputs": receipt.duplicate_review_inputs.model_dump(mode="json"),
+    }
+    observed_gateway = gateway(plan, config, control=control)
+    observed = await observed_gateway.observe_blogger(source.request_id)
+    assert observed.state == "FAILED"
+    assert observed.quarantine is not None
+    assert observed.quarantine.request_sha256 == source.request_sha256
+    review = await observed_gateway.duplicate_review(source.request_id)
+
+    group = receipt.duplicate_review_inputs.groups[0]
+    authorizer = "owner-review:fm16"
+    envelope = BloggerDuplicateResolutionEnvelope(
+        authorization_id=uid(43),
+        authorized_by=authorizer,
+        authorized_at=datetime(2026, 8, 11, tzinfo=UTC),
+        source_request_id=source.request_id,
+        source_operation_id=source.operation_id,
+        source_request_sha256=source.request_sha256,
+        export_batch_id=receipt.export_batch_id,
+        project_id=plan.blogger_project_id,
+        snapshot_at=plan.blogger_snapshot_at,
+        source_revision=plan.blogger_source_revision,
+        decisions=(
+            BloggerDuplicateDecision(
+                identity_sha256=group.identity_sha256,
+                canonical_record_id="blogger-001",
+                canonical_actor_id=canonical_actor,
+                member_record_ids=tuple(member.record_id for member in group.members),
+                decided_by=authorizer,
+                reason="Owner reviewed the exact H5 duplicate projection.",
+            ),
+        ),
+    )
+    assert resolution_matches_quarantine(envelope, receipt)
+    envelope_path = tmp_path / "owner-envelope.json"
+    envelope_path.write_bytes(canonical_json_bytes(envelope.model_dump(mode="json")))
+    envelope_path.chmod(0o600)
+    loaded, authorization = load_owner_authorization(envelope_path)
+    assert loaded == envelope
+    assert authorization.binds(review)
+
+    replay_gateway = ControlPlaneDataWorkloadGateway(
+        plan=plan,
+        config=config,
+        control=control,
+        mcp=Mcp(),
+        owner_envelope=loaded,
+    )
+    replay_id = plan.identity("fm16:v2")
+    accepted = await replay_gateway.start_blogger_v2(
+        request_id=replay_id,
+        intent_sha256=H3,
+        authorization=authorization,
+    )
+    replay_request = BloggerMigrationRequest.model_validate(control.posts[-1][1])
+    assert replay_request.schema_version == BLOGGER_REPLAY_STAGE_SCHEMA
+    assert replay_request.duplicate_resolution == envelope
+    assert accepted.request_sha256 == replay_request.request_sha256
+    assert accepted.state == "REQUESTED"
+    assert accepted.outcome == "accepted"
+
+    # Mirror the H5 atomic-CAS status returned immediately after insertion and
+    # prove observation retains the exact server request hash/state.
+    control.status = {
+        "request_id": str(replay_id),
+        "request_sha256": accepted.request_sha256,
+        "state": accepted.state,
+    }
+    replay_status = await replay_gateway.observe_blogger(replay_id)
+    assert replay_status.request_sha256 == replay_request.request_sha256
+    assert replay_status.state == "REQUESTED"
 
 
 @pytest.mark.asyncio

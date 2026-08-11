@@ -17,16 +17,27 @@
 - Production receipts always set `live_evidence=false` and `outer_reconciliation_required=true`; this lane has no `PASS` value or authority.
 - Added plan/config/receipt/state JSON schemas and examples plus operational documentation.
 
-## Current exact H5 blocker / serial handoff
+## H5 handoff closure (integration follow-up)
 
-Current `GET /control/v1/blogger-closure/requests/{request_id}` reports a v1 duplicate quarantine only as `state=FAILED` plus `failure_code=BloggerMigrationQuarantined`. It does not expose enough durable metadata to authorize replay. The gateway therefore stops before v2 with `FM16_H5_QUARANTINE_PROJECTION_UNAVAILABLE`; it never derives these hashes from the owner envelope.
+Integrated H5 now exposes durable `quarantine_evidence`, `duplicate_review`, and
+`duplicate_review_inputs` from the exact `BloggerQuarantineReceipt`. An
+integration-focused test feeds those real receipt projections through
+`ControlPlaneDataWorkloadGateway.observe_blogger`, binds a mode-0600 envelope to
+the exact identity/member inputs, verifies H5's replay-source matcher, and proves
+the v2 request acceptance/status retain the exact server request SHA-256 and
+`REQUESTED` state. `FM16_H5_QUARANTINE_PROJECTION_UNAVAILABLE` is no longer the
+interface blocker.
 
-The serial H5 status lane must add two bounded objects for that exact terminal failure:
+The implemented status supplies:
 
 1. `quarantine_evidence` validating as `BloggerQuarantineEvidence`: exact request/request hash/source operation/export batch/failure code; raw, dispositioned, undispositioned and quarantined accounting for all 266 source records; logical, record-ID-set and canonical-outcome SHA-256; positive duplicate-group count equal to pending count.
 2. `duplicate_review` validating as `DuplicateReviewEvidence`: the same batch/request/operation/request hash and group counts, plus SHA-256 of the sorted identity set, sorted member-record-ID set and bounded review projection.
 
-Both objects must come from durable H5 quarantine/review evidence and contain no source payload columns or decisions. The gateway cross-binds every field before returning `AWAITING_OWNER_AUTHORIZATION`. The full owner-authorized decisions remain only in a regular current-user-owned mode-0600 envelope and are sent solely in the H5 v2 request.
+It additionally supplies deterministic `duplicate_review_inputs` for the owner;
+all projections contain no source payload columns or decisions. The gateway and
+state machine cross-bind the evidence before returning
+`AWAITING_OWNER_AUTHORIZATION`. Full decisions remain only in a regular
+current-user-owned mode-0600 envelope and are sent solely in the H5 v2 request.
 
 The production config also deliberately requires distinct exact ACTIVE-master operation UUIDs for H5 v1 and v2. The outer orchestration lane must source-pin/persist those pre-existing operations; this gateway does not silently call `master.ensure` behind the core's mutation journal.
 
@@ -48,7 +59,9 @@ Focused tests cover server/model request-hash fidelity, exact ambiguous replay, 
 ## Risks / integration boundary
 
 - No real production mutation was attempted. Fake dependencies exercise transitions but cannot produce live acceptance.
-- Until the H5 projection handoff above lands, production execution intentionally stops before owner authorization/v2; FM17–FM21 therefore cannot become evidence-ready.
+- The H5 projection interface is implemented, but no real owner-authorized replay
+  or provider run was executed in this follow-up. Live FM16 and downstream
+  evidence remain blocked on production execution and outer reconciliation.
 - The outer driver must independently bind `EVIDENCE_READY` to the exact provider run/output. Inner evidence alone is not PASS.
 - No operational driver/matrix, control/MCP implementation, adapter/catalog/app/ledger/migration, master notebook core, provider gateway, canonical SQL migration, deploy file, local PostgreSQL, raw business row, vector, DSN or credential was added or modified.
 
