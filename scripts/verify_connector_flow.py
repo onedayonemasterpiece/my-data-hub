@@ -202,6 +202,7 @@ def main() -> int:
     reporting_date = date(2000, 1, 1) + timedelta(days=sequence % 1_000_000)
     exact = producer.exact_bytes(reporting_date, sequence=sequence)
     repository = PostgresConnectorAcceptanceRepository(args.intake_database_url)
+    durability_repository = PostgresConnectorAcceptanceRepository(args.committer_database_url)
     intake = ConnectorIntakeService(repository)
     committer = PostgresDailyStatisticsCommitter(args.committer_database_url)
 
@@ -387,7 +388,7 @@ def main() -> int:
 
             asyncio.run(
                 ConnectorDurabilityService(
-                    repository, DisposableCheckpointGateway()
+                    durability_repository, DisposableCheckpointGateway()
                 ).advance(eventual_acceptance.batch_id)
             )
         deadline = time.monotonic() + max(0.0, args.durability_timeout_seconds)
