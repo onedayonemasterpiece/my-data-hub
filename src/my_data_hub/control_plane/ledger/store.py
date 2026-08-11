@@ -235,6 +235,21 @@ class ControlLedger:
         return self._operation_from_row(row) if row else None
 
     def incomplete_operations(self, operation_kind: str | None = None) -> list[OperationRecord]:
+        if operation_kind == "ensure_master":
+            # ACTIVE masters still require provider observation.  A STOPPED
+            # operation whose service remains DRAINING represents a verified
+            # checkpoint with a lost terminal callback and must also resume.
+            query = (
+                "SELECT DISTINCT operations.* FROM operations "
+                "LEFT JOIN run_attempts ON run_attempts.operation_id=operations.operation_id "
+                "LEFT JOIN services ON services.service_instance_id=run_attempts.service_instance_id "
+                "WHERE operations.operation_kind=? "
+                "AND operations.state NOT IN ('FAILED','FENCED','ORPHANED') "
+                "AND (operations.state!='STOPPED' OR services.state='DRAINING') "
+                "ORDER BY operations.created_at,operations.operation_id"
+            )
+            with self._reader() as connection:
+                return [self._operation_from_row(row) for row in connection.execute(query, (operation_kind,))]
         terminal = ("ACTIVE", "STOPPED", "FAILED", "FENCED", "ORPHANED")
         placeholders = ",".join("?" for _ in terminal)
         query = f"SELECT * FROM operations WHERE state NOT IN ({placeholders})"
@@ -537,18 +552,32 @@ class ControlLedger:
             ).fetchone()
             candidate_hash = hashlib.sha256(header_token.encode()).hexdigest()
             if (
-                token_row is None
-                or token_row["revoked_at"] is not None
-                or not hmac.compare_digest(token_row["token_sha256"], candidate_hash)
-            ):
-                raise EventRejected("invalid or revoked runtime token")
-            if (
                 event.service_instance_id != expected["service_instance_id"]
                 or event.source_identity != expected["source_identity"]
                 or event.source_version != expected["source_version"]
                 or event.epoch != expected["epoch"]
             ):
                 raise StaleRuntimeEvent("event exact identity does not match the durable attempt")
+            duplicate = connection.execute(
+                "SELECT body_sha256 FROM runtime_event_dedup WHERE event_id=?", (event.event_id,)
+            ).fetchone()
+            if duplicate is not None:
+                if duplicate[0] != body_sha256:
+                    raise EventRejected("event ID was reused with a different body")
+                # A terminal callback can be committed before the HTTP response
+                # reaches the Notebook.  Its projection revokes the token, but
+                # an exact body replay under the same former token is still a
+                # read-only acknowledgement.  No altered token/body/attempt is
+                # allowed through this narrow response-loss exception.
+                if token_row is None or not hmac.compare_digest(token_row["token_sha256"], candidate_hash):
+                    raise EventRejected("invalid runtime token for duplicate event")
+                return EventReceipt(event.event_id, EventDisposition.DUPLICATE, body_sha256)
+            if (
+                token_row is None
+                or token_row["revoked_at"] is not None
+                or not hmac.compare_digest(token_row["token_sha256"], candidate_hash)
+            ):
+                raise EventRejected("invalid or revoked runtime token")
             current_epoch = connection.execute(
                 "SELECT current_epoch FROM service_epochs WHERE service_kind='postgres-master'"
             ).fetchone()
@@ -558,13 +587,6 @@ class ControlLedger:
                     (now, event.attempt_id),
                 )
                 return EventReceipt(event.event_id, EventDisposition.FENCED, body_sha256)
-            duplicate = connection.execute(
-                "SELECT body_sha256 FROM runtime_event_dedup WHERE event_id=?", (event.event_id,)
-            ).fetchone()
-            if duplicate is not None:
-                if duplicate[0] != body_sha256:
-                    raise EventRejected("event ID was reused with a different body")
-                return EventReceipt(event.event_id, EventDisposition.DUPLICATE, body_sha256)
             connection.execute(
                 "INSERT INTO runtime_event_dedup(event_id,body_sha256,first_seen_at) VALUES (?,?,?)",
                 (event.event_id, body_sha256, now),

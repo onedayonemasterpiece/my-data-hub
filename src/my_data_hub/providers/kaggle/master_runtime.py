@@ -9,16 +9,22 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
 from uuid import UUID
 
+from my_data_hub.hashing import canonical_json_bytes
+from my_data_hub.orchestrator.master.evidence import MasterTerminalOutput, PlatformStatus
 from my_data_hub.orchestrator.master.provider import (
     EffectReconciliation,
     MasterRuntimeProvider,
+    MasterTerminalEvidence,
+    MasterTerminalQuery,
     PlannedProviderEffect,
     ProviderEffectReceipt,
     ReconciliationStatus,
@@ -29,10 +35,16 @@ from my_data_hub.runtime_sdk import KAGGLE_PROVIDER_TIMEOUT_SECONDS
 from .adapter import KaggleProviderAdapter
 from .contracts import (
     KaggleKernelRunIdentity,
+    KernelState,
     MutationAction,
     NotebookMutationResult,
     ProviderEffectIntent,
 )
+
+MASTER_TERMINAL_OUTPUT_NAME = "my-data-hub-master-terminal.json"
+MAX_MASTER_TERMINAL_OUTPUT_BYTES = 256 * 1024
+MAX_MASTER_OUTPUT_TREE_BYTES = 64 * 1024 * 1024
+MAX_MASTER_OUTPUT_TREE_FILES = 256
 
 
 class MasterLaunchContractError(ValueError):
@@ -323,6 +335,160 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             except Exception:
                 return EffectReconciliation(ReconciliationStatus.AMBIGUOUS)
         return EffectReconciliation(ReconciliationStatus.AMBIGUOUS)
+
+    def observe_terminal(self, query: MasterTerminalQuery) -> MasterTerminalEvidence:
+        """Read bounded terminal evidence from this exact launched Notebook run."""
+
+        self._validate_terminal_query(query)
+        run = self._run_from_identity(query.provider_run_identity)
+        if run.task_run_id != UUID(query.run_id) or run.provider_ref != self.assets.notebook_ref:
+            raise MasterLaunchContractError("terminal query differs from the exact launched run")
+        observed = self.adapter.read_run_status(run)
+        platform_status = {
+            KernelState.QUEUED: PlatformStatus.QUEUED,
+            KernelState.RUNNING: PlatformStatus.RUNNING,
+            KernelState.COMPLETE: PlatformStatus.COMPLETE,
+            KernelState.FAILED: PlatformStatus.ERROR,
+            KernelState.UNKNOWN: PlatformStatus.UNKNOWN,
+        }.get(KernelState(observed.state), PlatformStatus.UNKNOWN)
+        if platform_status != PlatformStatus.COMPLETE:
+            return MasterTerminalEvidence(platform_status)
+        with tempfile.TemporaryDirectory(prefix="my-data-hub-terminal-") as folder:
+            destination = Path(folder)
+            output_tree = self.adapter.download_exact_run_output_tree(run, destination=destination)
+            self._validate_bounded_output_tree(destination, expected_file_count=output_tree.file_count)
+            output = self._read_terminal_output(
+                destination / MASTER_TERMINAL_OUTPUT_NAME,
+                output_tree_sha256=output_tree.output_tree_sha256,
+            )
+        expected = (
+            query.run_id,
+            query.attempt_id,
+            query.service_instance_id,
+            query.master_instance_id,
+            query.source_identity,
+            query.source_version,
+            query.epoch,
+        )
+        actual = (
+            output.run_id,
+            output.attempt_id,
+            output.service_instance_id,
+            output.master_instance_id,
+            output.source_identity,
+            output.source_version,
+            output.epoch,
+        )
+        if actual != expected:
+            raise MasterLaunchContractError("terminal output differs from the exact master attempt")
+        return MasterTerminalEvidence(platform_status, output)
+
+    def _validate_terminal_query(self, query: MasterTerminalQuery) -> None:
+        if (
+            query.source_identity != self.assets.source_identity
+            or query.source_version != self.assets.source_version
+            or query.checkpoint_ref != self.assets.checkpoint_ref
+            or query.epoch < 1
+        ):
+            raise MasterLaunchContractError("terminal query differs from configured launch assets")
+
+    @staticmethod
+    def _read_terminal_output(path: Path, *, output_tree_sha256: str) -> MasterTerminalOutput:
+        try:
+            if path.is_symlink() or not path.is_file():
+                raise MasterLaunchContractError("exact run output lacks the master terminal contract")
+            if path.stat().st_size > MAX_MASTER_TERMINAL_OUTPUT_BYTES:
+                raise MasterLaunchContractError("master terminal output exceeds 256 KiB")
+            encoded = path.read_bytes()
+            raw = json.loads(encoded)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise MasterLaunchContractError("master terminal output is not bounded canonical JSON") from exc
+        expected_keys = {
+            "schema_version",
+            "run_id",
+            "attempt_id",
+            "service_instance_id",
+            "master_instance_id",
+            "source_identity",
+            "source_version",
+            "epoch",
+            "status",
+            "checkpoint",
+            "events",
+        }
+        if not isinstance(raw, dict) or set(raw) != expected_keys:
+            raise MasterLaunchContractError("master terminal output has an invalid top-level contract")
+        try:
+            canonical = canonical_json_bytes(raw)
+        except ValueError as exc:
+            raise MasterLaunchContractError("master terminal output contains non-finite JSON values") from exc
+        if encoded != canonical:
+            raise MasterLaunchContractError("master terminal output is not canonical JSON")
+        checkpoint = raw["checkpoint"]
+        if not isinstance(checkpoint, dict) or set(checkpoint) != {
+            "checkpoint_id",
+            "manifest_sha256",
+            "current_checkpoint_id",
+        }:
+            raise MasterLaunchContractError("master terminal checkpoint contract is invalid")
+        events = raw["events"]
+        if not isinstance(events, list) or any(not isinstance(event, dict) for event in events):
+            raise MasterLaunchContractError("master terminal events contract is invalid")
+        if raw["schema_version"] != "my-data-hub-master-terminal.v1":
+            raise MasterLaunchContractError("master terminal schema version is unsupported")
+        string_fields = (
+            "run_id",
+            "attempt_id",
+            "service_instance_id",
+            "master_instance_id",
+            "source_identity",
+            "source_version",
+            "status",
+        )
+        if (
+            any(not isinstance(raw[field], str) for field in string_fields)
+            or not isinstance(raw["epoch"], int)
+            or isinstance(raw["epoch"], bool)
+            or any(not isinstance(checkpoint[field], str) for field in checkpoint)
+        ):
+            raise MasterLaunchContractError("master terminal output field types are invalid")
+        encoded_events = tuple(
+            json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode() for event in events
+        )
+        try:
+            return MasterTerminalOutput(
+                run_id=raw["run_id"],
+                attempt_id=raw["attempt_id"],
+                service_instance_id=raw["service_instance_id"],
+                master_instance_id=raw["master_instance_id"],
+                source_identity=raw["source_identity"],
+                source_version=raw["source_version"],
+                epoch=raw["epoch"],
+                status=raw["status"],
+                checkpoint_id=checkpoint["checkpoint_id"],
+                manifest_sha256=checkpoint["manifest_sha256"],
+                current_checkpoint_id=checkpoint["current_checkpoint_id"],
+                recovered_events=encoded_events,
+                output_tree_sha256=output_tree_sha256,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MasterLaunchContractError("master terminal output values are invalid") from exc
+
+    @staticmethod
+    def _validate_bounded_output_tree(root: Path, *, expected_file_count: int) -> None:
+        total_bytes = 0
+        file_count = 0
+        for path in root.rglob("*"):
+            if path.is_symlink():
+                raise MasterLaunchContractError("master output tree contains a symbolic link")
+            if not path.is_file():
+                continue
+            file_count += 1
+            total_bytes += path.stat().st_size
+            if file_count > MAX_MASTER_OUTPUT_TREE_FILES or total_bytes > MAX_MASTER_OUTPUT_TREE_BYTES:
+                raise MasterLaunchContractError("master output tree exceeds the bounded recovery contract")
+        if file_count != expected_file_count:
+            raise MasterLaunchContractError("master output tree changed after exact provider readback")
 
     def _validate_effect(self, effect: PlannedProviderEffect) -> None:
         expected = {

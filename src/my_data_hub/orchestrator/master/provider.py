@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
 
+from .evidence import MasterTerminalOutput, PlatformStatus
+
 
 @dataclass(frozen=True, slots=True)
 class PlannedProviderEffect:
@@ -51,9 +53,31 @@ class EffectReconciliation:
             raise ValueError("found reconciliation requires exactly one provider receipt")
 
 
+@dataclass(frozen=True, slots=True)
+class MasterTerminalQuery:
+    operation_id: str
+    run_id: str
+    attempt_id: str
+    service_instance_id: str
+    master_instance_id: str
+    source_identity: str
+    source_version: str
+    epoch: int
+    checkpoint_ref: str
+    provider_run_identity: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class MasterTerminalEvidence:
+    platform_status: PlatformStatus
+    output: MasterTerminalOutput | None = None
+
+
 class MasterRuntimeProvider(Protocol):
     """FakeKaggle-facing port; the core never imports a Kaggle SDK."""
 
     def execute(self, effect: PlannedProviderEffect) -> ProviderEffectReceipt: ...
 
     def reconcile(self, effect: PlannedProviderEffect) -> EffectReconciliation: ...
+
+    def observe_terminal(self, query: MasterTerminalQuery) -> MasterTerminalEvidence: ...

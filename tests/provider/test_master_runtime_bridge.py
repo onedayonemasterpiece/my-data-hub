@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import sqlite3
 from collections import Counter
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -18,7 +20,14 @@ from my_data_hub.providers.kaggle import (
     KaggleMasterRuntimeProvider,
     MasterLaunchContractError,
 )
-from my_data_hub.runtime_sdk import KAGGLE_HARD_CAP_SECONDS, KAGGLE_PROVIDER_TIMEOUT_SECONDS
+from my_data_hub.runtime_sdk import (
+    KAGGLE_HARD_CAP_SECONDS,
+    KAGGLE_PROVIDER_TIMEOUT_SECONDS,
+    RuntimeEvent,
+    RuntimeEventType,
+)
+
+SECRET = "runtime-secret-long-enough"
 
 
 class FakeKaggleAdapter:
@@ -28,6 +37,8 @@ class FakeKaggleAdapter:
         self.calls: Counter[str] = Counter()
         self.run: KaggleKernelRunIdentity | None = None
         self.last_notebook_kwargs: dict[str, object] | None = None
+        self.status_state = "running"
+        self.terminal_payload: dict[str, object] | None = None
 
     def create_private_dataset(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls["dataset"] += 1
@@ -64,7 +75,16 @@ class FakeKaggleAdapter:
     def read_run_status(self, run):  # type: ignore[no-untyped-def]
         assert self.run == run
         self.calls["run_reconcile"] += 1
-        return SimpleNamespace(state="running")
+        return SimpleNamespace(state=self.status_state)
+
+    def download_exact_run_output_tree(self, run, *, destination):  # type: ignore[no-untyped-def]
+        assert self.run == run
+        assert self.terminal_payload is not None
+        self.calls["output_download"] += 1
+        (destination / "my-data-hub-master-terminal.json").write_text(
+            json.dumps(self.terminal_payload, sort_keys=True, separators=(",", ":"))
+        )
+        return SimpleNamespace(output_tree_sha256="d" * 64, file_count=1)
 
     def reconcile_private_notebook_run(self, **kwargs):  # type: ignore[no-untyped-def]
         if self.run is None:
@@ -107,10 +127,241 @@ def test_concrete_bridge_launches_dataset_notebook_and_run_once(tmp_path: Path) 
     second = coordinator.ensure_master(intent, runtime_secret="runtime-secret-long-enough")
     assert first.state == second.state == MasterState.REGISTERING
     assert first.run_id == second.run_id == str(UUID(first.run_id))
-    assert adapter.calls == {"dataset": 1, "notebook_run": 1, "run_reconcile": 1}
+    assert adapter.calls == {"dataset": 1, "notebook_run": 1, "run_reconcile": 2}
     assert launch.notebook_timeout_seconds == KAGGLE_PROVIDER_TIMEOUT_SECONDS
     assert KAGGLE_PROVIDER_TIMEOUT_SECONDS < KAGGLE_HARD_CAP_SECONDS
     assert adapter.last_notebook_kwargs is not None
     assert adapter.last_notebook_kwargs["timeout_seconds"] == KAGGLE_PROVIDER_TIMEOUT_SECONDS
     with pytest.raises(MasterLaunchContractError, match="reserve"):
         replace(launch, notebook_timeout_seconds=KAGGLE_HARD_CAP_SECONDS)
+
+
+def _launch() -> KaggleMasterLaunchAssets:
+    return KaggleMasterLaunchAssets(
+        source_identity="owner/postgres-master",
+        source_version="git:exact",
+        checkpoint_ref="owner/checkpoints",
+        dataset_ref="owner/master-launch",
+        notebook_ref="owner/postgres-master",
+        dataset_files={"checkpoint-verifier.ipynb": b"{}"},
+        notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
+        callback_url="https://control.example/internal/runtime/events",
+        runtime_token_secret_name="master-runtime-root",
+        checkpoint_verifier_ref="owner/checkpoint-verifier",
+        checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
+        checkpoint_probe_relations=("hub.canonical_state",),
+    )
+
+
+def _runtime_event(handle, launch, event_type, sequence, *, phase=None, status=None, data=None):  # type: ignore[no-untyped-def]
+    return RuntimeEvent(
+        event_id=str(uuid4()),
+        run_id=handle.run_id,
+        attempt_id=handle.attempt_id,
+        service_instance_id=handle.service_instance_id,
+        source_identity=launch.source_identity,
+        source_version=launch.source_version,
+        event_type=event_type,
+        emitted_at=datetime.now(UTC),
+        local_sequence=sequence,
+        epoch=handle.epoch,
+        phase=phase,
+        status=status,
+        data=data or {},
+    )
+
+
+def _active_master_with_terminal_output(tmp_path: Path):  # type: ignore[no-untyped-def]
+    launch = _launch()
+    adapter = FakeKaggleAdapter()
+    ledger = ControlLedger(tmp_path / "control.sqlite3")
+    coordinator = MasterCoordinator(ledger, KaggleMasterRuntimeProvider(adapter, launch))  # type: ignore[arg-type]
+    request = MasterIntent(
+        idempotency_key="terminal-recovery",
+        source_identity=launch.source_identity,
+        source_version=launch.source_version,
+        checkpoint_ref=launch.checkpoint_ref,
+        dataset_ref=launch.dataset_ref,
+        notebook_ref=launch.notebook_ref,
+    )
+    handle = coordinator.ensure_master(request, runtime_secret=SECRET)
+    ready = _runtime_event(
+        handle,
+        launch,
+        RuntimeEventType.SERVICE_READY,
+        1,
+        data={
+            "service_kind": "postgres-master",
+            "endpoint": "tunnel://terminal-recovery",
+            "protocol": "postgresql+tls",
+            "tls_fingerprint": "sha256:" + "a" * 64,
+            "capabilities": ["sql"],
+            "canonical_revision": 1,
+            "schema_version": "13",
+            "lease_until": "2099-01-01T00:00:00+00:00",
+            "master_instance_id": handle.master_instance_id,
+            "epoch": handle.epoch,
+        },
+    )
+    coordinator.accept_runtime_event(ready.model_dump_json(exclude_none=True).encode(), header_token=SECRET)
+    checkpoint_id = str(uuid4())
+    manifest_sha256 = "c" * 64
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=checkpoint_id,
+        service_kind="postgres-master",
+        operation_id=handle.operation_id,
+        dataset_ref=launch.checkpoint_ref,
+        version_ref=None,
+        manifest_sha256=manifest_sha256,
+        source_checkpoint_id=None,
+        source_head_generation=0,
+        master_instance_id=handle.master_instance_id,
+        epoch=handle.epoch,
+    )
+    ledger.mark_checkpoint_uploaded(checkpoint_id, f"{launch.checkpoint_ref}/1")
+    ledger.mark_checkpoint_readback_verified(checkpoint_id)
+    ledger.mark_checkpoint_restore_verified(checkpoint_id)
+    ledger.promote_checkpoint(
+        "postgres-master",
+        checkpoint_id,
+        expected_generation=0,
+        expected_parent_checkpoint_id=None,
+    )
+    events = [
+        _runtime_event(
+            handle,
+            launch,
+            RuntimeEventType.RUNTIME_DRAINING,
+            2,
+            phase="draining",
+            status="closed",
+        ),
+        _runtime_event(
+            handle,
+            launch,
+            RuntimeEventType.CHECKPOINT_STARTED,
+            3,
+            phase="checkpointing",
+            status="started",
+        ),
+        _runtime_event(
+            handle,
+            launch,
+            RuntimeEventType.CHECKPOINT_VERIFIED,
+            4,
+            phase="checkpointing",
+            status="verified",
+            data={
+                "checkpoint_id": checkpoint_id,
+                "manifest_sha256": manifest_sha256,
+                "current_checkpoint_id": checkpoint_id,
+            },
+        ),
+        _runtime_event(
+            handle,
+            launch,
+            RuntimeEventType.RUNTIME_TERMINAL,
+            5,
+            phase="stopped",
+            status="succeeded",
+            data={"checkpoint_id": checkpoint_id},
+        ),
+    ]
+    adapter.status_state = "complete"
+    adapter.terminal_payload = {
+        "schema_version": "my-data-hub-master-terminal.v1",
+        "run_id": handle.run_id,
+        "attempt_id": handle.attempt_id,
+        "service_instance_id": handle.service_instance_id,
+        "master_instance_id": handle.master_instance_id,
+        "source_identity": launch.source_identity,
+        "source_version": launch.source_version,
+        "epoch": handle.epoch,
+        "status": "succeeded",
+        "checkpoint": {
+            "checkpoint_id": checkpoint_id,
+            "manifest_sha256": manifest_sha256,
+            "current_checkpoint_id": checkpoint_id,
+        },
+        "events": [event.model_dump(mode="json", exclude_none=True) for event in events],
+    }
+    return launch, adapter, ledger, coordinator, request, handle
+
+
+def test_exact_terminal_output_recovers_callbacks_lost_through_process_exit(tmp_path: Path) -> None:
+    _, adapter, ledger, coordinator, request, handle = _active_master_with_terminal_output(tmp_path)
+
+    restarted = MasterCoordinator(ControlLedger(ledger.path), coordinator.provider)
+    recovered_handles = restarted.reconcile_all({request.idempotency_key: request})
+    assert len(recovered_handles) == 1
+    recovered = recovered_handles[0]
+
+    assert recovered.state == MasterState.STOPPED
+    row = (
+        sqlite3.connect(ledger.path)
+        .execute("SELECT state FROM services WHERE service_instance_id=?", (handle.service_instance_id,))
+        .fetchone()
+    )
+    assert row == (MasterState.STOPPED.value,)
+    assert not ledger.runtime_token_valid(handle.run_id, handle.attempt_id, SECRET)
+    assert adapter.calls["output_download"] == 1
+    assert restarted.reconcile_all({request.idempotency_key: request}) == []
+
+
+@pytest.mark.parametrize(
+    ("delivered_count", "intermediate_state"),
+    (
+        (1, MasterState.DRAINING),
+        (2, MasterState.CHECKPOINTING),
+        (3, MasterState.STOPPED),
+    ),
+)
+def test_terminal_reconciliation_completes_from_each_durable_shutdown_state(
+    tmp_path: Path, delivered_count: int, intermediate_state: MasterState
+) -> None:
+    _, adapter, ledger, coordinator, request, handle = _active_master_with_terminal_output(tmp_path)
+    assert adapter.terminal_payload is not None
+    events = adapter.terminal_payload["events"]
+    assert isinstance(events, list)
+    for event in events[:delivered_count]:
+        coordinator.accept_runtime_event(
+            json.dumps(event, sort_keys=True, separators=(",", ":")).encode(),
+            header_token=SECRET,
+        )
+    operation = ledger.get_operation(handle.operation_id)
+    assert operation is not None and operation.state == intermediate_state.value
+
+    restarted = MasterCoordinator(ControlLedger(ledger.path), coordinator.provider)
+    recovered_handles = restarted.reconcile_all({request.idempotency_key: request})
+    assert len(recovered_handles) == 1
+    recovered = recovered_handles[0]
+
+    assert recovered.state == MasterState.STOPPED
+    row = (
+        sqlite3.connect(ledger.path)
+        .execute("SELECT state FROM services WHERE service_instance_id=?", (handle.service_instance_id,))
+        .fetchone()
+    )
+    assert row == (MasterState.STOPPED.value,)
+    assert not ledger.runtime_token_valid(handle.run_id, handle.attempt_id, SECRET)
+
+
+@pytest.mark.parametrize(
+    ("field", "stale_value"),
+    (
+        ("run_id", str(UUID(int=0))),
+        ("source_version", "git:stale"),
+        ("master_instance_id", str(UUID(int=1))),
+    ),
+)
+def test_stale_or_mismatched_exact_terminal_output_is_denied(tmp_path: Path, field: str, stale_value: str) -> None:
+    _, adapter, ledger, coordinator, request, handle = _active_master_with_terminal_output(tmp_path)
+    assert adapter.terminal_payload is not None
+    adapter.terminal_payload[field] = stale_value
+
+    with pytest.raises(MasterLaunchContractError, match="exact master attempt"):
+        coordinator.reconcile_operation(handle.operation_id, request)
+
+    operation = ledger.get_operation(handle.operation_id)
+    assert operation is not None and operation.state == MasterState.ACTIVE.value
+    assert ledger.runtime_token_valid(handle.run_id, handle.attempt_id, SECRET)

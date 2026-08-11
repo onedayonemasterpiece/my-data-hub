@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import random
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -31,7 +32,14 @@ from my_data_hub.orchestrator.master import (
     decide_terminal,
     transition_master,
 )
-from my_data_hub.runtime_sdk import RuntimeEvent, RuntimeEventType
+from my_data_hub.runtime_sdk import (
+    JsonlEventSpool,
+    RetryPolicy,
+    RuntimeClient,
+    RuntimeEvent,
+    RuntimeEventType,
+    TransportResponse,
+)
 
 SECRET = "correct-horse-battery-staple"
 
@@ -329,9 +337,11 @@ def test_checkpoint_callbacks_project_drain_stop_and_revoke_runtime_token(tmp_pa
         coordinator.accept_runtime_event(event, header_token=SECRET)
     operation = ledger.get_operation(handle.operation_id)
     assert operation is not None and operation.state == MasterState.STOPPED.value
-    row = sqlite3.connect(ledger.path).execute(
-        "SELECT state FROM services WHERE service_instance_id=?", (handle.service_instance_id,)
-    ).fetchone()
+    row = (
+        sqlite3.connect(ledger.path)
+        .execute("SELECT state FROM services WHERE service_instance_id=?", (handle.service_instance_id,))
+        .fetchone()
+    )
     assert row == (MasterState.STOPPED.value,)
     assert not ledger.runtime_token_valid(handle.run_id, handle.attempt_id, SECRET)
 
@@ -350,8 +360,147 @@ def test_stale_output_never_completes_attempt() -> None:
     )
     exact = ExactOutput("run-a", "attempt-a", "source", "v1", 2, "succeeded")
     assert (
-        decide_terminal(platform_status=PlatformStatus.UNKNOWN, output=exact, **expected) == TerminalDecision.SUCCEEDED
+        decide_terminal(platform_status=PlatformStatus.UNKNOWN, output=exact, **expected) == TerminalDecision.AMBIGUOUS
     )
+    assert (
+        decide_terminal(platform_status=PlatformStatus.COMPLETE, output=exact, **expected) == TerminalDecision.SUCCEEDED
+    )
+
+
+def test_lost_terminal_response_replays_exact_duplicate_and_empties_spool(tmp_path: Path) -> None:
+    clock = DeterministicClock(datetime(2026, 8, 10, 18, 0, tzinfo=UTC))
+    ledger = ledger_at(tmp_path, clock)
+    coordinator = MasterCoordinator(ledger, FakeKaggleRuntime())
+    handle = coordinator.ensure_master(intent("terminal-response-loss"), runtime_secret=SECRET)
+    ready = runtime_event(
+        handle,
+        RuntimeEventType.SERVICE_READY,
+        1,
+        clock.now(),
+        service_kind="postgres-master",
+        endpoint="tunnel://terminal-response-loss",
+        protocol="postgresql+tls",
+        tls_fingerprint="sha256:" + "a" * 64,
+        capabilities=["sql"],
+        canonical_revision=1,
+        schema_version="13",
+        lease_until=(clock.now() + timedelta(minutes=5)).isoformat(),
+        master_instance_id=handle.master_instance_id,
+        epoch=handle.epoch,
+    )
+    coordinator.accept_runtime_event(ready, header_token=SECRET)
+    delivered_events = [ready]
+    checkpoint_id = "checkpoint-terminal-response-loss"
+    manifest_sha256 = "e" * 64
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=checkpoint_id,
+        service_kind="postgres-master",
+        operation_id=handle.operation_id,
+        dataset_ref="private/checkpoint-dataset",
+        version_ref=None,
+        manifest_sha256=manifest_sha256,
+        source_checkpoint_id=None,
+        source_head_generation=0,
+        master_instance_id=handle.master_instance_id,
+        epoch=handle.epoch,
+    )
+    ledger.mark_checkpoint_uploaded(checkpoint_id, "private/checkpoint-dataset/1")
+    ledger.mark_checkpoint_readback_verified(checkpoint_id)
+    ledger.mark_checkpoint_restore_verified(checkpoint_id)
+    ledger.promote_checkpoint(
+        "postgres-master", checkpoint_id, expected_generation=0, expected_parent_checkpoint_id=None
+    )
+    for sequence, event_type in enumerate(
+        (
+            RuntimeEventType.RUNTIME_DRAINING,
+            RuntimeEventType.CHECKPOINT_STARTED,
+            RuntimeEventType.CHECKPOINT_VERIFIED,
+        ),
+        start=2,
+    ):
+        data = (
+            {
+                "checkpoint_id": checkpoint_id,
+                "manifest_sha256": manifest_sha256,
+                "current_checkpoint_id": checkpoint_id,
+            }
+            if event_type == RuntimeEventType.CHECKPOINT_VERIFIED
+            else {}
+        )
+        event = runtime_event(handle, event_type, sequence, clock.now(), **data)
+        coordinator.accept_runtime_event(event, header_token=SECRET)
+        delivered_events.append(event)
+
+    class CommitThenLoseResponse:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.body = b""
+
+        def post(self, url, body, headers, timeout_seconds):  # type: ignore[no-untyped-def]
+            del url, headers, timeout_seconds
+            self.calls += 1
+            self.body = body
+            receipt = coordinator.accept_runtime_event(body, header_token=SECRET)
+            if self.calls == 1:
+                assert receipt.disposition == EventDisposition.ACCEPTED
+                raise OSError("response lost after durable commit")
+            assert receipt.disposition == EventDisposition.DUPLICATE
+            return TransportResponse(200)
+
+    transport = CommitThenLoseResponse()
+    spool_path = tmp_path / "terminal-spool.jsonl"
+    prior_spool = JsonlEventSpool(spool_path)
+    for raw_event in delivered_events:
+        payload = json.loads(raw_event)
+        prior_spool.append_event(payload)
+        prior_spool.acknowledge(str(payload["event_id"]), clock.now().isoformat())
+    client = RuntimeClient(
+        callback_url="https://control.example/internal/runtime/events",
+        run_secret=SECRET,
+        run_id=handle.run_id,
+        attempt_id=handle.attempt_id,
+        service_instance_id=handle.service_instance_id,
+        source_identity="my-data-hub/postgres-master",
+        source_version="git:0123456789abcdef",
+        epoch=handle.epoch,
+        spool_path=spool_path,
+        transport=transport,
+        retry_policy=RetryPolicy(
+            max_attempts=1,
+            base_seconds=0,
+            max_seconds=0,
+            jitter_ratio=0,
+            timeout_seconds=1,
+        ),
+        now=clock.now,
+        sleep=lambda _: None,
+    )
+    queued = client.emit(
+        RuntimeEventType.RUNTIME_TERMINAL,
+        status="succeeded",
+        data={"checkpoint_id": checkpoint_id},
+    )
+    assert queued.status == "queued" and len(client.spool.pending()) == 1
+    operation_log_before = sqlite3.connect(ledger.path).execute("SELECT count(*) FROM operation_log").fetchone()
+    assert client.flush_pending()
+    assert client.spool.pending() == []
+    operation_log_after = sqlite3.connect(ledger.path).execute("SELECT count(*) FROM operation_log").fetchone()
+    assert operation_log_after == operation_log_before
+    assert not ledger.runtime_token_valid(handle.run_id, handle.attempt_id, SECRET)
+
+    with pytest.raises(EventRejected, match="token"):
+        coordinator.accept_runtime_event(transport.body, header_token="wrong-former-token")
+    altered = json.loads(transport.body)
+    altered["status"] = "failed"
+    with pytest.raises(EventRejected, match="different body"):
+        coordinator.accept_runtime_event(
+            json.dumps(altered, sort_keys=True, separators=(",", ":")).encode(), header_token=SECRET
+        )
+    altered["run_id"] = str(uuid4())
+    with pytest.raises(StaleRuntimeEvent, match="unknown run/attempt"):
+        coordinator.accept_runtime_event(
+            json.dumps(altered, sort_keys=True, separators=(",", ":")).encode(), header_token=SECRET
+        )
 
 
 def test_checkpoint_promotion_keeps_previous_and_failed_candidate_cannot_advance(tmp_path: Path) -> None:
