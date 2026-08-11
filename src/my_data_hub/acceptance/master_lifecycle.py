@@ -166,7 +166,7 @@ class MasterProviderCarrierObservation(BaseModel):
     provider_kernel_id: int = Field(ge=1)
     source_version: int = Field(ge=1)
     source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    output_file_name: Literal["master-terminal-output.json"] | None = None
+    output_file_name: Literal["my-data-hub-master-terminal.json"] | None = None
     output_file_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     output_tree_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     output_receipt_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")

@@ -344,7 +344,7 @@ def test_ledger_claim_is_exact_epoch_bound_and_replay_safe(tmp_path: Path) -> No
         "provider_kernel_id": 71,
         "source_version": 7,
         "source_sha256": "f" * 64,
-        "output_file_name": "master-terminal-output.json",
+        "output_file_name": "my-data-hub-master-terminal.json",
         "output_file_sha256": "9" * 64,
         "output_tree_sha256": "8" * 64,
         "output_receipt_sha256": "9" * 64,

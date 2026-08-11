@@ -3207,7 +3207,7 @@ class ControlLedger:
                         ):
                             raise StaleRuntimeEvent("terminal carrier differs from the exact provider run")
                         output = {
-                            "output_file_name": "master-terminal-output.json",
+                            "output_file_name": "my-data-hub-master-terminal.json",
                             "output_file_sha256": terminal_metadata["output_receipt_sha256"],
                             "output_tree_sha256": terminal_metadata["output_tree_sha256"],
                             "output_receipt_sha256": terminal_metadata["output_receipt_sha256"],
