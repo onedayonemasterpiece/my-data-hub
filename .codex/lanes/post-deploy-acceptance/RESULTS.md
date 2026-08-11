@@ -15,7 +15,7 @@
 - **OAuth publication:** validates protected-resource metadata, exact authorization-server endpoints, and a bounded public-only RSA/RS256 JWKS.
 - **Control and cold data path:** requires the exact read-only MCP catalog, healthy control status and `master=ABSENT`, starts a cold ensure through a bounded `data.query`, observes its durable operation in control status, waits boundedly for an ACTIVE fenced master, and completes a one-row bounded canonical read.
 - **Public network boundary:** actively probes that PostgreSQL and all control-loopback ports are not publicly reachable.
-- **Host-local boundary and recovery:** requires fresh Ed25519-signed, sanitized evidence for exact running control services, absence of database process/PGDATA/database environment, exact public and loopback listener inventories, process replacement after a process-kill test, and systemd reboot/autostart recovery.
+- **Host-local boundary and recovery:** requires fresh Ed25519-signed, sanitized evidence for exact running control services, absence of database process/PGDATA/database environment, no my-data-hub public listener plus exact loopback listeners, process replacement after a process-kill test, and systemd reboot/autostart recovery. Unrelated pre-existing VPN listeners are not relabelled as my-data-hub processes; the separate public edge probe proves HTTPS 443.
 - **Secret safety:** the verifier never includes the bearer token or raw host receipt in results or error output. The uploaded workflow artifact contains only the sanitized verification result and its workflow receipt/hash.
 
 ## Required integration wiring

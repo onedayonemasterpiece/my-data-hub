@@ -206,8 +206,8 @@ def validate_deployment_evidence(
             "database_process_present",
             "pgdata_present",
             "database_environment_present",
-            "public_listener_ports",
-            "loopback_listener_ports",
+            "my_data_hub_public_listener_ports",
+            "my_data_hub_loopback_listener_ports",
             "process_kill",
             "reboot_autostart",
         },
@@ -220,8 +220,11 @@ def validate_deployment_evidence(
         for name in ("database_process_present", "pgdata_present", "database_environment_present")
     ):
         raise ValueError("deployment evidence reports forbidden local database state")
-    if checks["public_listener_ports"] != [443] or checks["loopback_listener_ports"] != _LOOPBACK_PORTS:
-        raise ValueError("deployment evidence listener inventory differs from the exact allowlist")
+    if (
+        checks["my_data_hub_public_listener_ports"] != []
+        or checks["my_data_hub_loopback_listener_ports"] != _LOOPBACK_PORTS
+    ):
+        raise ValueError("deployment evidence my-data-hub listener inventory differs from the exact allowlist")
 
     process_kill = _exact_keys(
         checks["process_kill"],

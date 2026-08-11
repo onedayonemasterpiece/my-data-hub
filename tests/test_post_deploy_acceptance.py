@@ -45,8 +45,8 @@ def _evidence(private_key: Ed25519PrivateKey, **changes: object) -> str:
             "database_process_present": False,
             "pgdata_present": False,
             "database_environment_present": False,
-            "public_listener_ports": [443],
-            "loopback_listener_ports": [8080, 8765, 8780],
+            "my_data_hub_public_listener_ports": [],
+            "my_data_hub_loopback_listener_ports": [8080, 8765, 8780],
             "process_kill": {
                 "target_service": "remote-mcp",
                 "killed_at": (NOW - timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
@@ -136,7 +136,7 @@ def test_evidence_rejects_tamper_staleness_and_failed_host_checks(
 ) -> None:
     private_key, public_pem, raw = evidence_material
     tampered = json.loads(raw)
-    tampered["checks"]["public_listener_ports"] = [443, 5432]
+    tampered["checks"]["my_data_hub_public_listener_ports"] = [5432]
     with pytest.raises(ValueError, match="signature verification"):
         validate_deployment_evidence(
             json.dumps(tampered),
