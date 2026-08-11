@@ -1,0 +1,43 @@
+{
+  "blockers": [
+    "POSTGRESQL_18_RUNTIME_ASSET_MISSING"
+  ],
+  "callback_delivery": "not_configured_inventory_only",
+  "cleanup": {
+    "destructive_calls_after_initial_delete": 0,
+    "observed_at": "2026-08-11T20:42:52.852934+00:00",
+    "state": "ABSENT"
+  },
+  "credential_mode": "automated_legacy_username_key",
+  "event_names": [
+    "kernel_started",
+    "preflight_ok",
+    "inventory_done",
+    "report_written"
+  ],
+  "event_uid_count": 4,
+  "evidence_class": "live_diagnostic_nonqualifying",
+  "notes": [
+    "This is a real private inventory run, not an operational-matrix PASS.",
+    "The provider kernel id was not copied into the sanitized host receipt and is not inferred."
+  ],
+  "output_sha256": "07517ed7d01c1fb2d7f28388f82fcf8b0397360d5f43629928b84658d4ab01fc",
+  "platform": "Linux-6.12.90+-x86_64-with-glibc2.35",
+  "postgres_bin_dirs": [],
+  "postgres_binaries_present": {
+    "initdb": false,
+    "pg_basebackup": false,
+    "pg_ctl": false,
+    "pg_dump": false,
+    "pg_isready": false,
+    "pg_restore": false,
+    "postgres": false
+  },
+  "provider_effect_receipt_sha256": "927de46b26fd93bb35dd2f76f2f3aaead1162b79286c1e78a43ddd2d0b56970e",
+  "provider_ref": "zigomaro/mdh-runtime-inventory-11650d3e",
+  "provider_run_ref": "zigomaro/mdh-runtime-inventory-11650d3e/1",
+  "provider_source_readback_attested": true,
+  "python": "3.12.13",
+  "schema_version": "my-data-hub-runtime-inventory-live-receipt.v1",
+  "task_run_id": "11650d3e-486c-4744-80a0-bb653e218f68"
+}
