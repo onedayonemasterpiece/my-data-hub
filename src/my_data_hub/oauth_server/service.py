@@ -178,6 +178,8 @@ class AuthorizationService:
     async def complete_authorization(
         self, request: ValidatedAuthorizationRequest, owner: OwnerIdentity
     ) -> str:
+        if owner.subject != self.settings.owner_subject:
+            raise OAuthProtocolError("access_denied", status_code=401)
         now = int(self.clock())
         for _ in range(3):
             code = _credential()

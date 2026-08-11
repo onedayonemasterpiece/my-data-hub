@@ -74,6 +74,7 @@ class AuthorizationServerSettings:
     issuer: str
     resource: str
     audience: str
+    owner_subject: str
     clients: tuple[StaticClient, ...]
     signing_key_pem: bytes
     signing_key_id: str
@@ -85,6 +86,8 @@ class AuthorizationServerSettings:
         object.__setattr__(self, "issuer", _exact_https_url(self.issuer, root_only=True))
         _exact_https_url(self.resource)
         _exact_https_url(self.audience)
+        if not self.owner_subject or len(self.owner_subject) > 255:
+            raise ValueError("one bounded owner subject is required")
         if not self.clients or len({client.client_id for client in self.clients}) != len(self.clients):
             raise ValueError("static clients must be non-empty and unique")
         if not self.signing_key_pem or not self.signing_key_id or len(self.signing_key_id) > 128:

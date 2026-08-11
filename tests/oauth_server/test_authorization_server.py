@@ -131,6 +131,7 @@ def harness() -> Harness:
         issuer=ISSUER,
         resource=RESOURCE,
         audience=AUDIENCE,
+        owner_subject="owner-1",
         clients=(
             StaticClient(
                 client_id=CLIENT_ID,
@@ -424,3 +425,16 @@ def test_owner_authentication_is_an_external_challenge_seam(harness: Harness) ->
     assert response.status_code == 303
     assert response.headers["location"].startswith("https://login.example/passkey")
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_authenticated_non_owner_cannot_receive_a_code(harness: Harness) -> None:
+    class NonOwner:
+        def authenticate_owner(self, request: object, *, return_to: str) -> OwnerIdentity:
+            return OwnerIdentity("not-the-configured-owner", NOW)
+
+    app = create_authorization_app(service=harness.service, owner_authenticator=NonOwner())
+    response = TestClient(app, base_url=ISSUER).get(
+        "/authorize", params=harness.authorization_parameters(), follow_redirects=False
+    )
+    assert response.status_code == 401
+    assert response.json() == {"error": "access_denied"}
