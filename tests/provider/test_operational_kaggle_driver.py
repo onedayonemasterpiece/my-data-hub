@@ -72,6 +72,75 @@ class FakeGateway:
         raise AssertionError(f"unexpected mutating/unsupported tool call: {tool}")
 
 
+class ClaimedActionGateway(FakeGateway):
+    def __init__(self, *, rotation_ready: bool = False, action_state: str = "DURABLE_COMPLETE") -> None:
+        super().__init__()
+        self.rotation_ready = rotation_ready
+        self.action_state = action_state
+
+    async def call(self, profile: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((profile, tool, dict(arguments)))
+        if tool == "master.status":
+            return {
+                "master_state": "STOPPED" if self.rotation_ready else "ACTIVE",
+                "master_epoch": 2,
+                "canonical_revision": 9,
+            }
+        if tool == "checkpoint.status":
+            return {
+                "current_checkpoint_id": "checkpoint-current",
+                "current_exact_version_ref": "owner/checkpoints/12",
+                "generation": 3,
+                "current": {
+                    "source_state": "STOPPED" if self.rotation_ready else "ACTIVE",
+                    "source_epoch": 2,
+                    "canonical_revision": 9,
+                },
+            }
+        if tool == "provider.resources.read":
+            resource_ref = str(arguments["resource_ref"])
+            ordinal = 13 if "fm13" in resource_ref else 6
+            return {
+                "claim_sha256": "c" * 64,
+                "task_id": "22222222-2222-4222-8222-222222222222",
+                "task_run_id": str(_request(ordinal).task_run_id),
+                "provider_ref": resource_ref,
+                "provider_run_ref": f"{resource_ref}/7",
+                "provider_kernel_id": 701,
+                "source_version": 4,
+                "source_sha256": "d" * 64,
+                "fingerprint": {"algorithm": "sha256", "value": "e" * 64},
+                "private": True,
+            }
+        if tool in {"checkpoint.restore.request", "master.rotation.request"}:
+            from scripts.provider.operational_kaggle_driver import _action_request
+
+            ordinal = 6 if tool == "checkpoint.restore.request" else 13
+            request = _request(ordinal)
+            spec = EXECUTORS[ordinal - 1]
+            observations = {
+                "checkpoint": await self.call("reader", "checkpoint.status", {}),
+                "master": await self.call("reader", "master.status", {}),
+            }
+            _arguments, operation_id, _timeout = _action_request(request, spec, observations)
+            return {
+                "accepted": True,
+                "duplicate": False,
+                "execution_supported": True,
+                "operation_id": operation_id,
+                "state": "REQUESTED",
+            }
+        if tool == "operation.get":
+            return {
+                "found": True,
+                "operation_id": arguments["operation_id"],
+                "operation_kind": "acceptance-action",
+                "state": self.action_state,
+                "updated_at": "2026-08-11T00:00:00Z",
+            }
+        return await super().call(profile, tool, arguments)
+
+
 def _request(ordinal: int) -> DriverRequest:
     plan = build_plan(
         matrix_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
@@ -142,6 +211,223 @@ def test_missing_profile_is_specific_and_precedes_safe_probe(monkeypatch: pytest
     assert not gateway.calls
 
 
+def test_restore_runs_only_after_exact_provider_evidence_claim_and_durable_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(6)
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    monkeypatch.setenv(
+        "MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON",
+        json.dumps(
+            {
+                "schema_version": "my-data-hub-operational-kaggle-evidence-claims.v1",
+                "claims": {
+                    "FM06": {
+                        "requirement_id": "FM06",
+                        "task_id": "22222222-2222-4222-8222-222222222222",
+                        "resource_ref": "owner/fm06-evidence",
+                        "claim_sha256": "c" * 64,
+                    }
+                },
+            }
+        ),
+    )
+    gateway = ClaimedActionGateway()
+
+    result = asyncio.run(execute(request, gateway))
+
+    assert result.outcome == "PASS"
+    assert result.mutations_started == 1
+    assert result.provider_run_ref == "owner/fm06-evidence/7"
+    calls = [tool for _profile, tool, _arguments in gateway.calls]
+    assert calls.index("provider.resources.read") < calls.index("checkpoint.restore.request")
+    assert "operation.get" in calls
+
+
+def test_contradictory_action_acceptance_is_fail_not_zero_mutation_blocker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    monkeypatch.setenv(
+        "MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON",
+        json.dumps(
+            {
+                "schema_version": "my-data-hub-operational-kaggle-evidence-claims.v1",
+                "claims": {
+                    "FM06": {
+                        "requirement_id": "FM06",
+                        "task_id": "22222222-2222-4222-8222-222222222222",
+                        "resource_ref": "owner/fm06-evidence",
+                        "claim_sha256": "c" * 64,
+                    }
+                },
+            }
+        ),
+    )
+
+    class ContradictoryGateway(ClaimedActionGateway):
+        async def call(self, profile: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            if tool == "checkpoint.restore.request":
+                self.calls.append((profile, tool, dict(arguments)))
+                return {"accepted": True, "execution_supported": False, "operation_id": None}
+            return await super().call(profile, tool, arguments)
+
+    result = asyncio.run(execute(_request(6), ContradictoryGateway()))
+
+    assert result.outcome == "FAIL"
+    assert result.mutations_started == 1
+    assert result.blocker_code is None
+
+
+def test_rotation_refuses_action_until_checkpoint_source_is_durably_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    monkeypatch.setenv(
+        "MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON",
+        json.dumps(
+            {
+                "schema_version": "my-data-hub-operational-kaggle-evidence-claims.v1",
+                "claims": {
+                    "FM13": {
+                        "requirement_id": "FM13",
+                        "task_id": "22222222-2222-4222-8222-222222222222",
+                        "resource_ref": "owner/fm13-evidence",
+                        "claim_sha256": "c" * 64,
+                    }
+                },
+            }
+        ),
+    )
+    gateway = ClaimedActionGateway(rotation_ready=False)
+
+    result = asyncio.run(execute(_request(13), gateway))
+
+    assert result.outcome == "BLOCKED"
+    assert result.mutations_started == 0
+    assert result.blocker_code == "FM13_EVIDENCE_ACTION_PRECONDITION_UNMET"
+    assert "master.rotation.request" not in {tool for _profile, tool, _arguments in gateway.calls}
+
+
+def test_rotation_uses_exact_stopped_checkpoint_binding_and_polls_durable_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    monkeypatch.setenv(
+        "MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON",
+        json.dumps(
+            {
+                "schema_version": "my-data-hub-operational-kaggle-evidence-claims.v1",
+                "claims": {
+                    "FM13": {
+                        "requirement_id": "FM13",
+                        "task_id": "22222222-2222-4222-8222-222222222222",
+                        "resource_ref": "owner/fm13-evidence",
+                        "claim_sha256": "c" * 64,
+                    }
+                },
+            }
+        ),
+    )
+    gateway = ClaimedActionGateway(rotation_ready=True)
+
+    result = asyncio.run(execute(_request(13), gateway))
+
+    assert result.outcome == "PASS"
+    rotation = next(arguments for _profile, tool, arguments in gateway.calls if tool == "master.rotation.request")
+    assert rotation["expected_active_epoch"] == 2
+    assert rotation["expected_canonical_revision"] == 9
+    assert rotation["checkpoint_id"] == "checkpoint-current"
+    assert "operation.get" in {tool for _profile, tool, _arguments in gateway.calls}
+
+
+def test_resume_only_never_creates_a_missing_durable_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    monkeypatch.setenv(
+        "MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON",
+        json.dumps(
+            {
+                "schema_version": "my-data-hub-operational-kaggle-evidence-claims.v1",
+                "claims": {
+                    "FM06": {
+                        "requirement_id": "FM06",
+                        "task_id": "22222222-2222-4222-8222-222222222222",
+                        "resource_ref": "owner/fm06-evidence",
+                        "claim_sha256": "c" * 64,
+                        "operation_id": "f" * 64,
+                    }
+                },
+            }
+        ),
+    )
+
+    class MissingResumeGateway(ClaimedActionGateway):
+        async def call(self, profile: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            if tool == "operation.get":
+                self.calls.append((profile, tool, dict(arguments)))
+                return {"found": False}
+            return await super().call(profile, tool, arguments)
+
+    gateway = MissingResumeGateway()
+    request = _request(6).model_copy(update={"resume_only": True})
+
+    result = asyncio.run(execute(request, gateway))
+
+    assert result.outcome == "FAIL"
+    assert result.mutations_started == 0
+    assert result.blocker_code is None
+    assert "provider.resources.read" not in {tool for _profile, tool, _arguments in gateway.calls}
+    assert "checkpoint.restore.request" not in {tool for _profile, tool, _arguments in gateway.calls}
+
+
+def test_resume_uses_claimed_operation_id_without_recomputing_or_creating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation_id = "f" * 64
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    monkeypatch.setenv(
+        "MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON",
+        json.dumps(
+            {
+                "schema_version": "my-data-hub-operational-kaggle-evidence-claims.v1",
+                "claims": {
+                    "FM06": {
+                        "requirement_id": "FM06",
+                        "task_id": "22222222-2222-4222-8222-222222222222",
+                        "resource_ref": "owner/fm06-evidence",
+                        "claim_sha256": "c" * 64,
+                        "operation_id": operation_id,
+                    }
+                },
+            }
+        ),
+    )
+
+    class ResumeGateway(ClaimedActionGateway):
+        async def call(self, profile: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            if tool == "operation.get":
+                self.calls.append((profile, tool, dict(arguments)))
+                return {
+                    "found": True,
+                    "operation_id": arguments["operation_id"],
+                    "operation_kind": "checkpoint_restore_smoke",
+                    "state": "DURABLE_COMPLETE",
+                    "updated_at": "2026-08-11T00:00:00Z",
+                }
+            return await super().call(profile, tool, arguments)
+
+    gateway = ResumeGateway()
+    request = _request(6).model_copy(update={"resume_only": True})
+
+    result = asyncio.run(execute(request, gateway))
+
+    assert result.outcome == "PASS"
+    assert result.mutations_started == 1
+    operation_calls = [arguments for _profile, tool, arguments in gateway.calls if tool == "operation.get"]
+    assert operation_calls and all(arguments["operation_id"] == operation_id for arguments in operation_calls)
+    assert "checkpoint.restore.request" not in {tool for _profile, tool, _arguments in gateway.calls}
+
+
 def test_missing_catalog_tool_is_scenario_specific(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
     gateway = FakeGateway(missing_tool="provider.protected_resource.probe")
@@ -177,6 +463,27 @@ def test_extended_driver_result_example_validates() -> None:
     example = json.loads((root / "examples/provider/operational-kaggle-driver-result.v1.example.json").read_text())
     Draft202012Validator.check_schema(schema)
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(example)
+
+
+def test_evidence_claim_schema_and_runtime_share_keyed_requirement_identity() -> None:
+    root = Path(__file__).resolve().parents[2]
+    schema = json.loads((root / "schemas/provider/operational-kaggle-evidence-claims.v1.schema.json").read_text())
+    payload = {
+        "schema_version": "my-data-hub-operational-kaggle-evidence-claims.v1",
+        "claims": {
+            "FM06": {
+                "requirement_id": "FM13",
+                "task_id": "22222222-2222-4222-8222-222222222222",
+                "resource_ref": "owner/evidence",
+                "claim_sha256": "c" * 64,
+            }
+        },
+    }
+    assert list(Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(payload))
+    from scripts.provider.operational_kaggle_driver import EvidenceClaimsDocument
+
+    with pytest.raises(ValueError, match="key differs"):
+        EvidenceClaimsDocument.model_validate(payload)
 
 
 def test_provider_workflow_selects_trusted_repository_driver_by_default() -> None:

@@ -557,13 +557,17 @@ def _invoke_driver(command: Sequence[str], request: Mapping[str, Any], *, timeou
             timeout=timeout_seconds,
             env=os.environ.copy(),
         )
-        if completed.returncode not in {0, EXTERNAL_BLOCKED}:
+        if completed.returncode not in {PASS, FAIL, EXTERNAL_BLOCKED}:
             raise RuntimeError(f"operational driver failed with exit {completed.returncode}")
         if not result_path.is_file() or result_path.is_symlink() or result_path.stat().st_size > 256 * 1024:
             raise RuntimeError("operational driver did not emit a bounded regular result")
         result = DriverResult.model_validate_json(result_path.read_bytes())
         if completed.returncode == EXTERNAL_BLOCKED and result.outcome != "BLOCKED":
             raise RuntimeError("driver exit 78 must carry a BLOCKED result")
+        if completed.returncode == FAIL and result.outcome != "FAIL":
+            raise RuntimeError("driver exit 1 must carry a FAIL result")
+        if completed.returncode == PASS and result.outcome != "PASS":
+            raise RuntimeError("driver exit 0 must carry a PASS result")
         return result
 
 

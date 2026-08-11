@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -16,6 +17,8 @@ from scripts.provider.operational_kaggle_matrix import (
     MINIMUM_SOAK_SECONDS,
     SCENARIOS,
     LifecycleEvent,
+    _driver_request,
+    _invoke_driver,
     _parse_driver_command,
     _summary,
     build_plan,
@@ -230,6 +233,34 @@ def test_driver_command_is_json_argv_not_shell_text() -> None:
         _parse_driver_command("python /opt/mdh/driver.py")
 
 
+def test_typed_driver_fail_exit_is_preserved_as_scenario_failure(tmp_path: Path) -> None:
+    script = tmp_path / "typed_fail_driver.py"
+    script.write_text(
+        "import json, sys\n"
+        "result = sys.argv[sys.argv.index('--result') + 1]\n"
+        "request = json.load(open(sys.argv[sys.argv.index('--request') + 1]))\n"
+        "json.dump({\n"
+        " 'schema_version': 'my-data-hub-operational-kaggle-driver-result.v1',\n"
+        " 'outcome': 'FAIL', 'scenario': request['scenario'],\n"
+        " 'task_run_id': request['task_run_id'], 'provider_ref': None,\n"
+        " 'provider_run_ref': None, 'provider_kernel_id': None,\n"
+        " 'source_version': None, 'source_sha256': None,\n"
+        " 'blocker_code': None, 'integration_dependency': None,\n"
+        " 'mutations_started': 1, 'capability_checks': [],\n"
+        " 'observation_sha256': None}, open(result, 'w'))\n"
+        "raise SystemExit(1)\n"
+    )
+    plan = _plan()
+    rows = plan["scenarios"]
+    assert isinstance(rows, list)
+    request = _driver_request(plan, rows[5], resume_only=False)
+
+    result = _invoke_driver((sys.executable, str(script)), request, timeout_seconds=10)
+
+    assert result.outcome == "FAIL"
+    assert result.mutations_started == 1
+
+
 @pytest.mark.parametrize(
     ("schema_name", "example_name"),
     [
@@ -239,6 +270,10 @@ def test_driver_command_is_json_argv_not_shell_text() -> None:
         ("operational-kaggle-output.v1.schema.json", "operational-kaggle-output.v1.example.json"),
         ("operational-kaggle-driver-result.v1.schema.json", "operational-kaggle-driver-result.v1.example.json"),
         ("operational-kaggle-driver-request.v1.schema.json", "operational-kaggle-driver-request.v1.example.json"),
+        (
+            "operational-kaggle-evidence-claims.v1.schema.json",
+            "operational-kaggle-evidence-claims.v1.example.json",
+        ),
     ],
 )
 def test_operational_contract_examples_validate(schema_name: str, example_name: str) -> None:

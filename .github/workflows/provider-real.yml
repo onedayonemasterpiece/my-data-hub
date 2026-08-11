@@ -36,6 +36,10 @@ jobs:
       MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN }}
       MY_DATA_HUB_MCP_MIGRATION_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_MIGRATION_OPERATOR_TOKEN }}
       MY_DATA_HUB_MCP_PROVIDER_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_PROVIDER_OPERATOR_TOKEN }}
+      # Non-secret exact claims for already-running disposable FM06/FM13
+      # evidence Notebooks.  The driver re-reads each claim through the
+      # provider MCP before it can request a restore or rotation.
+      MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON: ${{ vars.MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

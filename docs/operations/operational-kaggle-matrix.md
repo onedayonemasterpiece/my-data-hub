@@ -34,14 +34,16 @@ validate as `my-data-hub-operational-kaggle-driver-result.v1` and either:
 
 The driver has one exact executor entry for every FM01–FM24 scenario. It checks
 the required reader/operator/migration/provider OAuth profile and exact MCP tool
-catalog, then performs only bounded non-mutating observations until the whole
+catalog, then performs bounded non-mutating observations until the whole
 scenario can be bound to an exact evidence Notebook run. It never starts a
 mutation and then returns BLOCKED: every BLOCKED result requires
-`mutations_started: 0`.
+`mutations_started: 0`. A mutation that was accepted but cannot be reconciled
+terminally is a typed `FAIL`, not a blocker.
 
 Existing safe production surfaces are wired now: master/checkpoint/provider
 status, stale-epoch denial, blogger accounting/statistics, embedding coverage,
-and protected-resource denial. Unresolved mutation/fault interfaces use a
+protected-resource denial, and claim-gated durable restore/rotation requests.
+Unresolved mutation/fault interfaces use a
 scenario-specific code such as `CHECKPOINT_CORRUPTION_FAULT_API_MISSING` or
 `E5_WORKER_SUBMISSION_TOOL_MISSING`; the generic
 `OPERATIONAL_DRIVER_INTERFACE_MISSING` blocker is not used by the trusted
@@ -54,6 +56,51 @@ replay fault controls, drain control, YDB batch-to-checkpoint binding, blogger
 logical hash reads, embedding submission tools, host boot identity, a controlled
 business-row fixture, and the accelerated soak controller. Privileged actions
 are not attempted until their terminal exact-run evidence contract exists.
+
+### Claim-gated restore and rotation
+
+FM06 and FM13 can use the real `checkpoint.restore.request`,
+`master.rotation.request`, and `operation.get` paths only when an owner has
+already launched a disposable evidence Notebook for the exact planned task.
+The non-secret keyed claim document in
+`MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON` validates against
+`my-data-hub-operational-kaggle-evidence-claims.v1`. The driver does **not**
+trust locator fields from that document: it sends the claim hash to
+`provider.resources.read`, requires the returned task UUID, provider ref,
+numeric run ref/kernel ID, source version, and source SHA to match the matrix,
+and only then builds the checkpoint/epoch/revision-bound action request.
+
+On a launch-fenced `resume_only` invocation, the keyed claim must carry the
+previously accepted `operation_id`. The driver first uses `operation.get` to
+bind that exact restore/rotation kind, then re-reads the provider claim; it
+never recomputes the operation from a possibly newer checkpoint HEAD and never
+creates a replacement action. A missing, lost, or mismatched resume identity is
+typed `FAIL`, not BLOCKED. `DURABLE_COMPLETE` may produce a driver locator,
+but the matrix runner still independently reconciles the Kaggle run and
+downloads and validates its exact `operational-result.json`. An accepted action
+that fails, is fenced/orphaned, times out, or loses its receipt produces typed
+`FAIL` with `mutations_started: 1`; it is never rewritten as external BLOCKED.
+
+This closes the client-side restore/rotation request and polling seam only. It
+does not claim a live run: the deployed MCP must expose the exact action schemas
+and consumer, and the owner must supply claims from real pre-launched verifier
+Notebooks. No such provider evidence is checked in.
+
+### Fault/action blockers retained intentionally
+
+- FM08/FM09: callback ingestion accepts exact replay from its per-run bearer,
+  but there is no safe callback-suppression, stale-output injection, or bounded
+  runtime event-history tool for the external driver.
+- FM12: the master drains itself at its natural lifecycle boundary; there is no
+  authenticated clean-drain/checkpoint/stop request or credential revocation
+  endpoint.
+- FM14/FM15: normal runtime-authenticated checkpoint reject/restore paths exist,
+  but no disposable corruption or forced restore-smoke failure selector exists.
+- FM21: preview/apply signatures are bounded, but no owner-approved exact
+  disposable business-row SQL/parameters/revision/cleanup fixture is defined.
+- FM24: status polling alone cannot prove heartbeat, read, checkpoint, recovery,
+  or credential-rotation counts. No accelerated soak controller/event stream is
+  exposed, so the 3,600–5,400 second scenario remains BLOCKED before mutation.
 
 ## What counts as PASS
 

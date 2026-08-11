@@ -2,11 +2,12 @@
 """Trusted, fail-closed production driver for the operational Kaggle matrix.
 
 This executable binds each FM01--FM24 scenario to the production MCP/control
-surface that exists today.  It deliberately performs only non-mutating
-capability/status probes until the repository exposes an exact evidence
-Notebook submission contract capable of returning the matrix-planned task run
-identity.  Every unresolved scenario therefore has a named internal API gap;
-there is no generic fallback and no synthetic PASS.
+surface that exists today.  It performs non-mutating capability/status probes
+unless an owner-issued provider claim first reconciles an already-running exact
+evidence Notebook for the matrix-planned task.  Only that claim-gated path may
+issue an idempotent durable restore/rotation request and poll its receipt. Every
+unresolved scenario has a named internal API gap; there is no generic fallback
+and no synthetic PASS.
 
 The matrix runner invokes this file with ``--request`` and ``--result``.  A
 future executor may return PASS only after it owns an exact Kaggle run locator;
@@ -21,6 +22,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -42,6 +44,9 @@ FAIL = 1
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_RESULT_BYTES = 256 * 1024
 DEFAULT_ENDPOINT = "https://mcp-datahub.kenigevents.ru/mcp"
+MAX_EVIDENCE_CLAIMS_BYTES = 64 * 1024
+ACTION_POLL_SECONDS = 5.0
+ACTION_TERMINAL_STATES = frozenset({"DURABLE_COMPLETE", "FAILED", "FENCED", "ORPHANED"})
 
 
 class DriverRequest(BaseModel):
@@ -115,6 +120,60 @@ class TrustedDriverResult(BaseModel):
             raise ValueError("driver PASS lacks an exact provider run locator")
         if self.outcome == "BLOCKED" and not (self.blocker_code and self.integration_dependency):
             raise ValueError("driver BLOCKED lacks a named integration dependency")
+        return self
+
+
+class EvidenceClaim(BaseModel):
+    """Owner-issued claim for an already-running disposable evidence Notebook.
+
+    The claim is not accepted as a run locator.  The driver sends it to the
+    production provider control gateway and accepts only the exact identity
+    returned by that read path.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    requirement_id: str = Field(pattern=r"^FM(06|13)$")
+    task_id: UUID
+    resource_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=300)
+    claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    operation_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+
+class EvidenceClaimsDocument(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal["my-data-hub-operational-kaggle-evidence-claims.v1"]
+    claims: dict[Literal["FM06", "FM13"], EvidenceClaim] = Field(max_length=2)
+
+    @model_validator(mode="after")
+    def keyed_requirements_match(self) -> EvidenceClaimsDocument:
+        if any(key != claim.requirement_id for key, claim in self.claims.items()):
+            raise ValueError("evidence claim key differs from requirement_id")
+        return self
+
+
+class EvidenceRunLocator(BaseModel):
+    """Exact locator observed from ``provider.resources.read``."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+    claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    task_id: UUID
+    task_run_id: UUID
+    provider_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+    provider_run_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$")
+    provider_kernel_id: int = Field(ge=1)
+    source_version: int = Field(ge=1)
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    fingerprint: dict[Literal["algorithm", "value"], str]
+    private: Literal[True]
+
+    @model_validator(mode="after")
+    def exact_fingerprint(self) -> EvidenceRunLocator:
+        if set(self.fingerprint) != {"algorithm", "value"}:
+            raise ValueError("provider fingerprint has an unexpected shape")
+        if self.fingerprint["algorithm"] != "sha256" or re.fullmatch(
+            r"[a-f0-9]{64}", self.fingerprint["value"]
+        ) is None:
+            raise ValueError("provider fingerprint is not an exact SHA-256")
         return self
 
 
@@ -215,6 +274,8 @@ class ExecutorSpec:
     probe: str
     gap_code: str
     gap_dependency: str
+    action_tool: str | None = None
+    action_target: Literal["current", "previous"] | None = None
 
 
 # Every scenario has an explicit production surface and a concrete remaining
@@ -262,11 +323,18 @@ EXECUTORS: tuple[ExecutorSpec, ...] = (
     ),
     ExecutorSpec(
         "FM06",
-        ("reader", "operator"),
-        (("reader", "checkpoint.status"), ("operator", "checkpoint.restore.request"), ("operator", "operation.get")),
+        ("reader", "operator", "provider"),
+        (
+            ("reader", "checkpoint.status"),
+            ("operator", "checkpoint.restore.request"),
+            ("operator", "operation.get"),
+            ("provider", "provider.resources.read"),
+        ),
         "checkpoint_status",
         "RESTORE_EVIDENCE_RUN_LOCATOR_MISSING",
-        "restore operation terminal result bound to the matrix task run and exact verifier Notebook locator",
+        "owner-issued claim for an already-running exact verifier Notebook, followed by a durable restore receipt",
+        "checkpoint.restore.request",
+        "current",
     ),
     ExecutorSpec(
         "FM07",
@@ -318,16 +386,18 @@ EXECUTORS: tuple[ExecutorSpec, ...] = (
     ),
     ExecutorSpec(
         "FM13",
-        ("reader", "operator"),
+        ("reader", "operator", "provider"),
         (
             ("reader", "master.status"),
             ("reader", "checkpoint.status"),
             ("operator", "master.rotation.request"),
             ("operator", "operation.get"),
+            ("provider", "provider.resources.read"),
         ),
         "master_checkpoint_status",
         "ROTATION_EVIDENCE_RUN_LOCATOR_MISSING",
-        "rotation terminal result bound to old/new numeric Kaggle runs and matrix evidence run",
+        "owner-issued claim for an already-running exact verifier Notebook, followed by a durable rotation receipt",
+        "master.rotation.request",
     ),
     ExecutorSpec(
         "FM14",
@@ -533,6 +603,338 @@ async def _safe_probe(gateway: McpGateway, spec: ExecutorSpec) -> tuple[list[Cap
     return checks, observations
 
 
+def _evidence_claim_for(requirement_id: str) -> EvidenceClaim | None:
+    raw = os.environ.get("MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON", "").strip()
+    if not raw:
+        return None
+    if len(raw.encode()) > MAX_EVIDENCE_CLAIMS_BYTES:
+        raise ValueError("operational evidence claims document is too large")
+    document = EvidenceClaimsDocument.model_validate_json(raw)
+    return document.claims.get(requirement_id)  # type: ignore[arg-type]
+
+
+def _evidence_read_arguments(claim: EvidenceClaim) -> dict[str, Any]:
+    return {
+        "resource_ref": claim.resource_ref,
+        "control_class": "mcp_managed",
+        "private": True,
+        "payload": {"kind": "notebook", "claim_sha256": claim.claim_sha256},
+    }
+
+
+def _evidence_locator(
+    request: DriverRequest, claim: EvidenceClaim, response: Mapping[str, Any]
+) -> EvidenceRunLocator:
+    locator = EvidenceRunLocator.model_validate(response)
+    if (
+        locator.claim_sha256 != claim.claim_sha256
+        or locator.task_id != claim.task_id
+        or locator.provider_ref != claim.resource_ref
+        or locator.task_run_id != request.task_run_id
+    ):
+        raise ValueError("provider evidence identity differs from the exact matrix claim")
+    return locator
+
+
+def _exact_checkpoint(observations: Mapping[str, Any]) -> dict[str, Any]:
+    checkpoint = observations.get("checkpoint")
+    if not isinstance(checkpoint, Mapping):
+        raise ValueError("checkpoint observation is absent")
+    checkpoint_id = checkpoint.get("current_checkpoint_id")
+    version_ref = checkpoint.get("current_exact_version_ref")
+    generation = checkpoint.get("generation")
+    if not isinstance(checkpoint_id, str) or not checkpoint_id:
+        raise ValueError("current checkpoint identity is absent")
+    if (
+        not isinstance(version_ref, str)
+        or len(version_ref) > 512
+        or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*", version_ref) is None
+    ):
+        raise ValueError("current checkpoint exact numeric version is absent")
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        raise ValueError("current checkpoint generation is absent")
+    return {
+        "checkpoint_id": checkpoint_id,
+        "exact_version_ref": version_ref,
+        "head_generation": generation,
+        "current": checkpoint.get("current"),
+    }
+
+
+def _action_request(
+    request: DriverRequest, spec: ExecutorSpec, observations: Mapping[str, Any]
+) -> tuple[dict[str, Any], str, int]:
+    checkpoint = _exact_checkpoint(observations)
+    timeout_seconds = 1200 if spec.action_tool == "checkpoint.restore.request" else 1800
+    request_key = f"operational-matrix:{request.matrix_id}:{request.requirement_id}:{request.task_run_id}"
+    arguments: dict[str, Any] = {
+        "idempotency_key": request_key,
+        "checkpoint_id": checkpoint["checkpoint_id"],
+        "exact_version_ref": checkpoint["exact_version_ref"],
+        "timeout_seconds": timeout_seconds,
+    }
+    intent: dict[str, Any] = {
+        "tool": spec.action_tool,
+        "target": spec.action_target or "current",
+        "checkpoint_id": checkpoint["checkpoint_id"],
+        "exact_version_ref": checkpoint["exact_version_ref"],
+        "head_generation": checkpoint["head_generation"],
+        "timeout_seconds": timeout_seconds,
+    }
+    if spec.action_tool == "checkpoint.restore.request":
+        arguments["target"] = spec.action_target or "current"
+    elif spec.action_tool == "master.rotation.request":
+        current = checkpoint.get("current")
+        master = observations.get("master")
+        if not isinstance(current, Mapping) or current.get("source_state") != "STOPPED":
+            raise ValueError("rotation checkpoint source master is not durably stopped")
+        if not isinstance(master, Mapping) or master.get("master_state", master.get("state")) not in {
+            "ABSENT",
+            "STOPPED",
+        }:
+            raise ValueError("rotation requires no ACTIVE master")
+        epoch = current.get("source_epoch")
+        revision = current.get("canonical_revision")
+        if (
+            not isinstance(epoch, int)
+            or isinstance(epoch, bool)
+            or epoch < 1
+            or not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 0
+        ):
+            raise ValueError("rotation checkpoint lacks exact epoch/revision binding")
+        arguments.update(expected_active_epoch=epoch, expected_canonical_revision=revision)
+        intent.update(expected_active_epoch=epoch, expected_canonical_revision=revision)
+    else:  # pragma: no cover - authoring invariant
+        raise ValueError("unsupported operational action tool")
+    operation_id = hashlib.sha256(
+        json.dumps(intent, sort_keys=True, separators=(",", ":")).encode() + b":" + request_key.encode()
+    ).hexdigest()
+    return arguments, operation_id, timeout_seconds
+
+
+async def _poll_operation(
+    gateway: McpGateway, operation_id: str, *, timeout_seconds: int
+) -> dict[str, Any]:
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while True:
+        status = await gateway.call("operator", "operation.get", {"operation_id": operation_id})
+        if status.get("found") is not True or status.get("operation_id") != operation_id:
+            return status
+        if status.get("state") in ACTION_TERMINAL_STATES:
+            return status
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return status
+        await asyncio.sleep(min(ACTION_POLL_SECONDS, remaining))
+
+
+def _pass(
+    request: DriverRequest,
+    locator: EvidenceRunLocator,
+    *,
+    checks: list[CapabilityCheck],
+    observations: Mapping[str, Any],
+) -> TrustedDriverResult:
+    return TrustedDriverResult(
+        schema_version="my-data-hub-operational-kaggle-driver-result.v1",
+        outcome="PASS",
+        scenario=request.scenario,
+        task_run_id=request.task_run_id,
+        provider_ref=locator.provider_ref,
+        provider_run_ref=locator.provider_run_ref,
+        provider_kernel_id=locator.provider_kernel_id,
+        source_version=locator.source_version,
+        source_sha256=locator.source_sha256,
+        mutations_started=1,
+        capability_checks=tuple(checks),
+        observation_sha256=_sha(dict(observations)),
+    )
+
+
+def _failed(
+    request: DriverRequest,
+    *,
+    checks: list[CapabilityCheck],
+    observations: Mapping[str, Any],
+    mutations_started: int,
+) -> TrustedDriverResult:
+    return TrustedDriverResult(
+        schema_version="my-data-hub-operational-kaggle-driver-result.v1",
+        outcome="FAIL",
+        scenario=request.scenario,
+        task_run_id=request.task_run_id,
+        mutations_started=mutations_started,
+        capability_checks=tuple(checks),
+        observation_sha256=_sha(dict(observations)),
+    )
+
+
+async def _execute_claimed_action(
+    request: DriverRequest,
+    spec: ExecutorSpec,
+    gateway: McpGateway,
+    *,
+    checks: list[CapabilityCheck],
+    observations: dict[str, Any],
+) -> TrustedDriverResult:
+    try:
+        claim = _evidence_claim_for(request.requirement_id)
+    except Exception as exc:
+        return _blocked(
+            request,
+            checks=[*checks, _check("evidence-claim", "FAIL", "EVIDENCE_CLAIMS_INVALID")],
+            code=f"{request.requirement_id}_EVIDENCE_CLAIM_INVALID",
+            dependency=f"valid bounded evidence claims document ({type(exc).__name__})",
+            observations=observations,
+        )
+    if claim is None:
+        return _blocked(
+            request,
+            checks=[*checks, _check("evidence-claim", "BLOCKED", "EVIDENCE_NOTEBOOK_CLAIM_MISSING")],
+            code=spec.gap_code,
+            dependency=spec.gap_dependency,
+            observations=observations,
+        )
+    resume_initial: dict[str, Any] | None = None
+    mutations_started = 0
+    if request.resume_only:
+        if claim.operation_id is None:
+            return _failed(
+                request,
+                checks=[*checks, _check("action-resume", "FAIL", "DURABLE_ACTION_IDENTITY_MISSING")],
+                observations=observations,
+                mutations_started=0,
+            )
+        try:
+            resume_initial = await gateway.call(
+                "operator", "operation.get", {"operation_id": claim.operation_id}
+            )
+        except Exception as exc:
+            return _failed(
+                request,
+                checks=[*checks, _check("action-resume", "FAIL", "DURABLE_ACTION_OBSERVATION_FAILED")],
+                observations={**observations, "failure_type": type(exc).__name__},
+                mutations_started=0,
+            )
+        expected_kind = (
+            "checkpoint_restore_smoke"
+            if spec.action_tool == "checkpoint.restore.request"
+            else "forced_master_rotation"
+        )
+        if (
+            resume_initial.get("found") is not True
+            or resume_initial.get("operation_id") != claim.operation_id
+            or resume_initial.get("operation_kind") != expected_kind
+        ):
+            return _failed(
+                request,
+                checks=[*checks, _check("action-resume", "FAIL", "DURABLE_ACTION_IDENTITY_NOT_FOUND")],
+                observations={**observations, "action_resume": resume_initial},
+                mutations_started=0,
+            )
+        observations["action_resume"] = resume_initial
+        mutations_started = 1
+    try:
+        provider_observation = await gateway.call(
+            "provider", "provider.resources.read", _evidence_read_arguments(claim)
+        )
+        locator = _evidence_locator(request, claim, provider_observation)
+        if request.resume_only:
+            assert claim.operation_id is not None
+            arguments: dict[str, Any] = {}
+            expected_operation_id = claim.operation_id
+            timeout_seconds = 1200 if spec.action_tool == "checkpoint.restore.request" else 1800
+        else:
+            arguments, expected_operation_id, timeout_seconds = _action_request(request, spec, observations)
+    except Exception as exc:
+        if mutations_started:
+            return _failed(
+                request,
+                checks=[*checks, _check("evidence-precondition", "FAIL", "EVIDENCE_ACTION_RECONCILIATION_FAILED")],
+                observations={**observations, "failure_type": type(exc).__name__},
+                mutations_started=mutations_started,
+            )
+        return _blocked(
+            request,
+            checks=[*checks, _check("evidence-precondition", "FAIL", "EVIDENCE_ACTION_PRECONDITION_UNMET")],
+            code=f"{request.requirement_id}_EVIDENCE_ACTION_PRECONDITION_UNMET",
+            dependency=f"exact provider claim and stopped/checkpoint action binding ({type(exc).__name__})",
+            observations=observations,
+        )
+    observations["evidence_locator"] = locator.model_dump(mode="json")
+    checks.append(_check("evidence-locator", "PASS", "EXACT_EVIDENCE_NOTEBOOK_RECONCILED", provider_observation))
+    try:
+        if request.resume_only:
+            assert resume_initial is not None
+            initial = resume_initial
+        else:
+            assert spec.action_tool is not None
+            initial = await gateway.call("operator", spec.action_tool, arguments)
+            if initial.get("accepted") is not True or initial.get("execution_supported") is not True:
+                raw_blocker = initial.get("blocker_code")
+                valid_blocker = (
+                    isinstance(raw_blocker, str)
+                    and len(raw_blocker) <= 120
+                    and re.fullmatch(r"[A-Z0-9_]+", raw_blocker) is not None
+                )
+                exact_negative = (
+                    initial.get("accepted") is False
+                    and initial.get("execution_supported") is False
+                    and not initial.get("operation_id")
+                    and valid_blocker
+                )
+                if not exact_negative:
+                    return _failed(
+                        request,
+                        checks=[
+                            *checks,
+                            _check("action-request", "FAIL", "DURABLE_ACTION_ACCEPTANCE_AMBIGUOUS", initial),
+                        ],
+                        observations={**observations, "action_request": initial},
+                        mutations_started=1,
+                    )
+                assert isinstance(raw_blocker, str)
+                return _blocked(
+                    request,
+                    checks=[*checks, _check("action-request", "BLOCKED", "DURABLE_ACTION_NOT_ACCEPTED", initial)],
+                    code=raw_blocker,
+                    dependency=f"durable consumer for exact {spec.action_tool} request",
+                    observations={**observations, "action_request": initial},
+                )
+            if initial.get("operation_id") != expected_operation_id:
+                return _failed(
+                    request,
+                    checks=[*checks, _check("action-request", "FAIL", "DURABLE_ACTION_IDENTITY_MISMATCH", initial)],
+                    observations={**observations, "action_request": initial},
+                    mutations_started=1,
+                )
+            mutations_started = 1
+        terminal = await _poll_operation(gateway, expected_operation_id, timeout_seconds=timeout_seconds)
+    except Exception as exc:
+        return _failed(
+            request,
+            checks=[*checks, _check("action-execution", "FAIL", "DURABLE_ACTION_OBSERVATION_FAILED")],
+            observations={**observations, "failure_type": type(exc).__name__},
+            mutations_started=mutations_started or 1,
+        )
+    observations["action_terminal"] = terminal
+    if (
+        terminal.get("found") is not True
+        or terminal.get("operation_id") != expected_operation_id
+        or terminal.get("state") != "DURABLE_COMPLETE"
+    ):
+        return _failed(
+            request,
+            checks=[*checks, _check("action-terminal", "FAIL", "DURABLE_ACTION_NOT_COMPLETE", terminal)],
+            observations=observations,
+            mutations_started=mutations_started,
+        )
+    checks.append(_check("action-terminal", "PASS", "DURABLE_ACTION_COMPLETE", terminal))
+    return _pass(request, locator, checks=checks, observations=observations)
+
+
 async def execute(request: DriverRequest, gateway: McpGateway) -> TrustedDriverResult:
     spec = EXECUTORS[request.ordinal - 1]
     checks: list[CapabilityCheck] = []
@@ -585,6 +987,14 @@ async def execute(request: DriverRequest, gateway: McpGateway) -> TrustedDriverR
             dependency=f"bounded {spec.probe} production observation ({type(exc).__name__})",
         )
     checks.extend(probe_checks)
+    if spec.action_tool is not None:
+        return await _execute_claimed_action(
+            request,
+            spec,
+            gateway,
+            checks=checks,
+            observations=observations,
+        )
     return _blocked(
         request,
         checks=checks,

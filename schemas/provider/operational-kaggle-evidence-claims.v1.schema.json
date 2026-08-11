@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/provider/operational-kaggle-evidence-claims.v1.schema.json",
+  "title": "Operational Kaggle evidence Notebook claims v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "claims"],
+  "$defs": {
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requirement_id", "task_id", "resource_ref", "claim_sha256"],
+      "properties": {
+        "requirement_id": {"enum": ["FM06", "FM13"]},
+        "task_id": {"type": "string", "format": "uuid"},
+        "resource_ref": {
+          "type": "string",
+          "maxLength": 300,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "claim_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "operation_id": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {"const": "my-data-hub-operational-kaggle-evidence-claims.v1"},
+    "claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 2,
+      "properties": {
+        "FM06": {
+          "allOf": [
+            {"$ref": "#/$defs/claim"},
+            {"properties": {"requirement_id": {"const": "FM06"}}}
+          ]
+        },
+        "FM13": {
+          "allOf": [
+            {"$ref": "#/$defs/claim"},
+            {"properties": {"requirement_id": {"const": "FM13"}}}
+          ]
+        }
+      }
+    }
+  }
+}
