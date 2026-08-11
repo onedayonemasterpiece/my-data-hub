@@ -164,6 +164,15 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
                 expires_at=now + timedelta(minutes=4),
                 now=now,
             )
+            CredentialProvisioner(admin, gate).create(
+                principal="mdh_e3_operator_a11ce001",
+                password="operator-password-long-enough",
+                group="mdh_mcp_editor",
+                identity=b,
+                credential_id=UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+                expires_at=now + timedelta(minutes=4),
+                now=now,
+            )
 
         # A remains connected and knows B's public epoch, but session_user is
         # immutably bound to epoch 1 and therefore remains fenced.
@@ -394,7 +403,7 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
             assert state == (3, 3, "open")
             assert admin.execute(
                 "SELECT schema_revision FROM hub.canonical_state WHERE singleton"
-            ).fetchone()[0] == 15
+            ).fetchone()[0] == 16
             assert admin.execute(
                 "SELECT canonical_revision FROM hub.canonical_state WHERE singleton"
             ).fetchone()[0] == first_import.canonical_revision
@@ -409,5 +418,80 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
                 "SELECT has_table_privilege('mdh_migration_operator','migration.raw_record','INSERT'), "
                 "has_table_privilege('mdh_migration_operator','migration.raw_record','UPDATE')"
             ).fetchone() == (True, False)
+
+        operator_url = (
+            f"postgresql://mdh_e3_operator_a11ce001:operator-password-long-enough"
+            f"@127.0.0.1:{port}/postgres"
+        )
+        with psycopg.connect(operator_url) as operator:
+            operator.execute("SET ROLE mdh_mcp_editor")
+            operator.execute(
+                "INSERT INTO hub.project(project_id,slug,name,description,status,metadata) "
+                "VALUES (%s,%s,%s,%s,%s,%s::jsonb)",
+                (
+                    UUID("33333333-3333-4333-8333-333333333333"),
+                    "operator-no-receipt",
+                    "Must roll back",
+                    "receipt guard proof",
+                    "active",
+                    "{}",
+                ),
+            )
+            with pytest.raises(psycopg.Error, match="lacks transactional receipt/outbox"):
+                operator.commit()
+            operator.rollback()
+
+            operator.execute("SET ROLE mdh_mcp_editor")
+            operator.execute(
+                "INSERT INTO hub.project(project_id,slug,name,description,status,metadata) "
+                "VALUES (%s,%s,%s,%s,%s,%s::jsonb)",
+                (
+                    UUID("44444444-4444-4444-8444-444444444444"),
+                    "operator-committed",
+                    "Bounded operator proof",
+                    "same transaction audit and outbox",
+                    "active",
+                    "{}",
+                ),
+            )
+            revision = operator.execute(
+                "SELECT operator_control.commit_mcp_change(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    "f" * 64,
+                    first_import.canonical_revision,
+                    "hub.project",
+                    "insert",
+                    1,
+                    "1" * 64,
+                    "2" * 64,
+                    "owner",
+                    "owner-operator",
+                ),
+            ).fetchone()[0]
+            operator.commit()
+            assert revision == first_import.canonical_revision + 1
+
+        with psycopg.connect(admin_url) as admin:
+            assert admin.execute(
+                "SELECT count(*) FROM hub.project WHERE slug='operator-committed'"
+            ).fetchone()[0] == 1
+            assert admin.execute(
+                "SELECT count(*) FROM sync.audit_event "
+                "WHERE action='mcp_operator_change' AND details->>'operation_id'=%s",
+                ("f" * 64,),
+            ).fetchone()[0] == 1
+            assert admin.execute(
+                "SELECT required_revision FROM sync.external_outbox "
+                "WHERE idempotency_key=%s",
+                ("mcp-operator:" + "f" * 64,),
+            ).fetchone()[0] == revision
+            assert admin.execute(
+                "SELECT has_column_privilege('mdh_mcp_editor','hub.project','name','UPDATE'), "
+                "has_column_privilege('mdh_mcp_editor','hub.project','revision','UPDATE'), "
+                "has_table_privilege('mdh_mcp_editor','hub.canonical_state','UPDATE'), "
+                "has_function_privilege('mdh_mcp_editor',"
+                "'operator_control.commit_mcp_change(text,bigint,text,text,integer,text,text,text,text)',"
+                "'EXECUTE')"
+            ).fetchone() == (True, False, False, True)
     finally:
         subprocess.run(["docker", "rm", "--force", name], check=False, capture_output=True)

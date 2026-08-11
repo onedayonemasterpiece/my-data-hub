@@ -80,3 +80,31 @@ def test_change_accepts_one_parameterized_allowlisted_statement(
     policy: BoundedSQLPolicy, sql: str, parameters: list[str], kind: str
 ) -> None:
     assert policy.classify_change(sql, parameters).kind == kind
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "INSERT INTO hub.project(project_id, name, created_at) VALUES ($1, $2, $3)",
+        "UPDATE hub.project SET revision=$1 WHERE project_id=$2",
+        "UPDATE hub.content_item SET search_document=$1 WHERE content_id=$2",
+        "INSERT INTO hub.content_item(content_id, updated_at) VALUES ($1, $2)",
+    ],
+)
+def test_change_rejects_identity_generated_revision_and_timestamp_columns(
+    policy: BoundedSQLPolicy, sql: str
+) -> None:
+    with pytest.raises(SQLPolicyError, match="column is not allowlisted"):
+        policy.classify_change(sql, ["value"] * sql.count("$"))
+
+
+def test_change_receipt_fingerprints_normalized_sql_and_reports_exact_columns(
+    policy: BoundedSQLPolicy,
+) -> None:
+    result = policy.classify_change(
+        "UPDATE hub.project SET name = $1 WHERE project_id = $2",
+        ["New name", "11111111-1111-4111-8111-111111111111"],
+    )
+    assert result.target == "hub.project"
+    assert result.target_columns == ("name",)
+    assert len(result.sql_sha256) == 64

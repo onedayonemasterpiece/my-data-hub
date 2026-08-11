@@ -369,6 +369,27 @@ class PostgresMasterSession(MasterSession):
         maximum = int(arguments.get("max_affected_rows", 0))
         if not 0 <= affected <= maximum <= 1_000:
             raise SessionBrokerError("data change affected rows outside the permitted bound")
+        if self.request.tool == "data.change.apply":
+            if affected == 0:
+                raise SessionBrokerError("data change apply must affect at least one row")
+            parameter_sha256 = hashlib.sha256(canonical_json_bytes(parameters)).hexdigest()
+            revision = cursor.execute(
+                "SELECT operator_control.commit_mcp_change("
+                "%s,%s,%s,%s,%s,%s,%s,%s,%s) AS canonical_revision",
+                (
+                    str(permit["permit_id"]),
+                    int(arguments["expected_revision"]),
+                    str(classified.target),
+                    classified.kind,
+                    affected,
+                    classified.sql_sha256,
+                    parameter_sha256,
+                    self.request.principal.subject,
+                    self.request.principal.client_id,
+                ),
+            ).fetchone()
+            if revision is None:
+                raise SessionBrokerError("operator change did not return a canonical revision")
         return {
             "operation_id": str(permit["permit_id"]),
             "affected_rows": affected,

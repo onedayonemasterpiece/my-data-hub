@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -14,6 +15,8 @@ class ClassifiedSQL:
     kind: str
     target: str | None
     parameter_count: int
+    sql_sha256: str
+    target_columns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +27,35 @@ class BoundedSQLPolicy:
         }
     )
     change_targets: frozenset[str] = frozenset({"hub.project", "hub.content_item"})
+    # The database grants repeat this exact surface.  Identity, generated/search,
+    # revision and timestamp columns are deliberately not remotely mutable.
+    change_columns: tuple[tuple[str, frozenset[str]], ...] = (
+        (
+            "hub.project",
+            frozenset({"project_id", "slug", "name", "description", "status", "metadata"}),
+        ),
+        (
+            "hub.content_item",
+            frozenset(
+                {
+                    "content_id",
+                    "content_type",
+                    "title",
+                    "summary",
+                    "body_excerpt",
+                    "language",
+                    "canonical_url",
+                    "normalized_url",
+                    "content_hash",
+                    "published_at",
+                    "first_observed_at",
+                    "last_observed_at",
+                    "status",
+                    "metadata",
+                }
+            ),
+        ),
+    )
     safe_functions: frozenset[str] = frozenset(
         {
             "avg",
@@ -41,11 +73,12 @@ class BoundedSQLPolicy:
     max_sql_bytes: int = 32_768
     max_parameters: int = 256
 
-    def _parse(self, sql: str) -> tuple[Any, tuple[Any, ...]]:
+    def _parse(self, sql: str) -> tuple[Any, tuple[Any, ...], str]:
         if not isinstance(sql, str) or not sql.strip() or len(sql.encode("utf-8")) > self.max_sql_bytes:
             raise SQLPolicyError("SQL is empty or exceeds the bounded size")
         try:
             from pglast import parse_sql
+            from pglast.stream import RawStream
             from pglast.visitors import Visitor
 
             roots = parse_sql(sql)
@@ -61,12 +94,14 @@ class BoundedSQLPolicy:
                 nodes.append(node)
 
         Collector()(roots)
-        return roots[0].stmt, tuple(nodes)
+        statement = roots[0].stmt
+        normalized = RawStream()(statement).strip()
+        return statement, tuple(nodes), normalized
 
     def classify_read(self, sql: str, parameters: Sequence[Any]) -> ClassifiedSQL:
         from pglast import ast
 
-        statement, nodes = self._parse(sql)
+        statement, nodes, normalized = self._parse(sql)
         if not isinstance(statement, ast.SelectStmt):
             raise SQLPolicyError("data.query accepts SELECT or read-only CTE only")
         if statement.intoClause is not None or statement.lockingClause:
@@ -103,12 +138,17 @@ class BoundedSQLPolicy:
             if name not in self.safe_functions:
                 raise SQLPolicyError("query function is not allowlisted")
         count = self._validate_parameters(nodes, parameters, require_all=False)
-        return ClassifiedSQL(kind="select", target=None, parameter_count=count)
+        return ClassifiedSQL(
+            kind="select",
+            target=None,
+            parameter_count=count,
+            sql_sha256=hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
+        )
 
     def classify_change(self, sql: str, parameters: Sequence[Any]) -> ClassifiedSQL:
         from pglast import ast
 
-        statement, nodes = self._parse(sql)
+        statement, nodes, normalized = self._parse(sql)
         allowed = (ast.InsertStmt, ast.UpdateStmt, ast.DeleteStmt)
         if not isinstance(statement, allowed):
             raise SQLPolicyError("change accepts parameterized INSERT, UPDATE or DELETE only")
@@ -128,6 +168,19 @@ class BoundedSQLPolicy:
         target = self._relation_name(relation)
         if target not in self.change_targets:
             raise SQLPolicyError("change target is not allowlisted")
+        if isinstance(statement, ast.InsertStmt):
+            columns = tuple(str(column.name).casefold() for column in (statement.cols or ()))
+            if not columns or len(columns) != len(statement.cols or ()):
+                raise SQLPolicyError("bounded INSERT must name every target column")
+        elif isinstance(statement, ast.UpdateStmt):
+            columns = tuple(str(column.name).casefold() for column in (statement.targetList or ()))
+            if not columns or len(columns) != len(statement.targetList or ()):
+                raise SQLPolicyError("bounded UPDATE must name simple target columns")
+        else:
+            columns = ()
+        allowed_columns = dict(self.change_columns).get(target, frozenset())
+        if set(columns) - allowed_columns:
+            raise SQLPolicyError("change column is not allowlisted")
         relations = [node for node in nodes if isinstance(node, ast.RangeVar)]
         if len(relations) != 1 or self._relation_name(relations[0]) != target:
             raise SQLPolicyError("changes may not read or join any secondary relation")
@@ -157,7 +210,13 @@ class BoundedSQLPolicy:
         count = self._validate_parameters(nodes, parameters, require_all=True)
         if count == 0:
             raise SQLPolicyError("remote changes must be parameterized")
-        return ClassifiedSQL(kind=kind, target=target, parameter_count=count)
+        return ClassifiedSQL(
+            kind=kind,
+            target=target,
+            parameter_count=count,
+            sql_sha256=hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
+            target_columns=columns,
+        )
 
     @staticmethod
     def _relation_name(relation: Any) -> str:

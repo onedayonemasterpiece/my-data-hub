@@ -3,12 +3,17 @@ set -Eeuo pipefail
 umask 077
 
 action="${1:-}"
+operator_profile=false
 if [[ "$action" == "INSTALL_MY_DATA_HUB_SAME_HOST" ]]; then
   echo "FORBIDDEN: local PostgreSQL topology is superseded; no local database will be installed" >&2
   exit 78
 fi
-if [[ "$action" != "PREPARE_CONTROL_PLANE" && "$action" != "INSTALL_MY_DATA_HUB_CONTROL_PLANE" ]]; then
-  echo "usage: $0 PREPARE_CONTROL_PLANE|INSTALL_MY_DATA_HUB_CONTROL_PLANE" >&2
+if [[ "$action" == "INSTALL_MY_DATA_HUB_CONTROL_PLANE_OPERATOR" ]]; then
+  operator_profile=true
+fi
+if [[ "$action" != "PREPARE_CONTROL_PLANE" && "$action" != "INSTALL_MY_DATA_HUB_CONTROL_PLANE" \
+  && "$operator_profile" != true ]]; then
+  echo "usage: $0 PREPARE_CONTROL_PLANE|INSTALL_MY_DATA_HUB_CONTROL_PLANE|INSTALL_MY_DATA_HUB_CONTROL_PLANE_OPERATOR" >&2
   exit 2
 fi
 
@@ -77,7 +82,7 @@ if [[ "$action" == "PREPARE_CONTROL_PLANE" ]]; then
   exit 0
 fi
 
-for command_name in curl loginctl stat systemctl; do
+for command_name in curl loginctl python3 stat systemctl; do
   require_command "$command_name"
 done
 if [[ "${MY_DATA_HUB_APPROVED_CONTROL_COMMIT:-}" != "$commit" ]]; then
@@ -100,10 +105,13 @@ mcp_env="${MY_DATA_HUB_MCP_ENV_FILE:-$env_root/mcp-reader.env}"
 oauth_env="${MY_DATA_HUB_OAUTH_ENV_FILE:-$env_root/oauth.env}"
 oauth_key="${MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE:-$secret_root/oauth-signing-key.pem}"
 oauth_overlap_jwks="${MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE:-$runtime_root/oauth-public/overlap-jwks.json}"
+operator_provider_env="${MY_DATA_HUB_MCP_OPERATOR_PROVIDER_ENV_FILE:-$env_root/mcp-operator-provider.env}"
+operator_gate_receipt="${MY_DATA_HUB_OPERATOR_SECURITY_GATE_RECEIPT_FILE:-$runtime_root/operator-security-gate.json}"
+operator_gate_key="${MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE:-$secret_root/mcp-write-gate.key}"
 tunnel_broker_socket_dir="${MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR:-/run/my-data-hub/tunnel-broker}"
 for path_value in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$asset_dir" \
   "$tls_ca_file" "$provider_env" "$mcp_env" "$oauth_env" "$oauth_key" "$oauth_overlap_jwks" \
-  "$tunnel_broker_socket_dir"; do
+  "$operator_provider_env" "$operator_gate_receipt" "$operator_gate_key" "$tunnel_broker_socket_dir"; do
   case "$path_value" in
     *[$'\n\r\t ']* ) echo "deployment inputs may not contain whitespace" >&2; exit 2 ;;
   esac
@@ -174,6 +182,50 @@ reject_environment_keys "$mcp_env" "remote MCP environment" \
 reject_environment_keys "$oauth_env" "OAuth environment" \
   'KAGGLE_API_TOKEN|MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT|MY_DATA_HUB_KAGGLE_[A-Z0-9_]+'
 
+operator_override=""
+operator_compose_arg=""
+if [[ "$operator_profile" == true ]]; then
+  if [[ "${MY_DATA_HUB_ENABLE_OPERATOR_PROFILE:-}" != "I_ACKNOWLEDGE_REMOTE_CANONICAL_WRITES" ]]; then
+    echo "operator install requires the exact MY_DATA_HUB_ENABLE_OPERATOR_PROFILE acknowledgement" >&2
+    exit 2
+  fi
+  require_private_file "$operator_provider_env" "operator Kaggle provider environment"
+  require_private_file "$operator_gate_receipt" "operator security gate receipt"
+  require_private_file "$operator_gate_key" "operator write-gate signing key"
+  reject_data_plane_environment "$operator_provider_env" "operator Kaggle provider environment"
+  if grep -Ev '^[[:space:]]*(#.*)?$|^[[:space:]]*KAGGLE_API_TOKEN[[:space:]]*=[^[:space:]].*$' \
+      "$operator_provider_env" | grep -q .; then
+    echo "operator provider environment may contain only one modern KAGGLE_API_TOKEN assignment" >&2
+    exit 2
+  fi
+  if [[ "$(grep -Eic '^[[:space:]]*KAGGLE_API_TOKEN[[:space:]]*=[^[:space:]].*$' "$operator_provider_env")" != 1 ]]; then
+    echo "operator provider environment requires exactly one modern KAGGLE_API_TOKEN" >&2
+    exit 2
+  fi
+  python3 "$release/scripts/operator_profile_gate.py" verify \
+    --commit "$commit" --receipt "$operator_gate_receipt" --signing-key-file "$operator_gate_key"
+  operator_override="$runtime_root/operator-profile.$commit.yaml"
+  cat > "$operator_override" <<'YAML'
+services:
+  control-plane:
+    environment:
+      MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED: "true"
+  remote-mcp:
+    env_file:
+      - path: "${MY_DATA_HUB_MCP_OPERATOR_PROVIDER_ENV_FILE:?operator provider env is required}"
+        required: true
+    environment:
+      MY_DATA_HUB_MCP_WRITE_ENABLED: "true"
+      MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED: "true"
+      MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE: /run/secrets/mcp-write-gate.key
+      MY_DATA_HUB_MCP_SCOPES: platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,data:write,migration:operate,provider:write
+    volumes:
+      - "${MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE:?write gate key is required}:/run/secrets/mcp-write-gate.key:ro"
+YAML
+  chmod 600 "$operator_override"
+  operator_compose_arg=" -f $operator_override"
+fi
+
 compose_env="$runtime_root/compose.$commit.env"
 cat > "$compose_env" <<ENV
 MY_DATA_HUB_IMAGE_TAG=$commit
@@ -189,11 +241,17 @@ MY_DATA_HUB_OAUTH_ENV_FILE=$oauth_env
 MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE=$oauth_key
 MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE=$oauth_overlap_jwks
 MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR=$tunnel_broker_socket_dir
+MY_DATA_HUB_MCP_OPERATOR_PROVIDER_ENV_FILE=$operator_provider_env
+MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE=$operator_gate_key
 ENV
 chmod 600 "$compose_env"
 
+compose_files=(-f "$release/compose.control-plane.yaml")
+if [[ -n "$operator_override" ]]; then
+  compose_files+=(-f "$operator_override")
+fi
 compose=("$docker_path" compose --env-file "$compose_env" --profile remote-mcp \
-  --project-directory "$release" -f "$release/compose.control-plane.yaml")
+  --project-directory "$release" "${compose_files[@]}")
 "${compose[@]}" config --quiet
 
 unit="$HOME/.config/systemd/user/my-data-hub-control-plane.service"
@@ -227,9 +285,9 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=$compose_env
 ExecStartPre=$docker_path info
-ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml up --remove-orphans control-plane remote-mcp oauth-server
-ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml up -d --wait --remove-orphans control-plane remote-mcp oauth-server
-ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml down --remove-orphans
+ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg up --remove-orphans control-plane remote-mcp oauth-server
+ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg up -d --wait --remove-orphans control-plane remote-mcp oauth-server
+ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg down --remove-orphans
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=300
@@ -305,4 +363,4 @@ ln -sfn "$release" "$next_link"
 mv -Tf "$next_link" "$current"
 trap - ERR
 rm -f "$unit_backup"
-printf 'installed_control_plane_commit=%s\nservices=control-plane,remote-mcp,oauth-server\nmaster_state=ABSENT_or_durable_runtime_state\n' "$commit"
+printf 'installed_control_plane_commit=%s\nservices=control-plane,remote-mcp,oauth-server\noperator_profile=%s\nmaster_state=ABSENT_or_durable_runtime_state\n' "$commit" "$operator_profile"

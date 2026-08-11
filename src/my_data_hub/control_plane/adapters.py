@@ -7,7 +7,7 @@ import time
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -30,6 +30,11 @@ from my_data_hub.mcp.contracts import (
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.orchestrator.master import MasterCoordinator
 from my_data_hub.providers import ProviderPolicy
+from my_data_hub.providers.exchange import (
+    EXCHANGE_MANIFEST_PATH,
+    ExchangeManifest,
+    validate_exchange_manifest_for_mutation,
+)
 from my_data_hub.providers.kaggle import KaggleProviderAdapter, mapping_sha256
 from my_data_hub.providers.kaggle.contracts import (
     MutationAction,
@@ -371,7 +376,7 @@ class KaggleMCPProviderGateway:
         if not isinstance(payload, Mapping):
             raise ValueError("provider payload must be an exact object")
         if tool == "provider.resources.create":
-            return self._create(provider_ref, control_class, payload)
+            return self._create(provider_ref, control_class, payload, principal)
         if tool == "provider.resources.version":
             return self._version(provider_ref, control_class, payload, principal)
         if tool == "provider.resources.run":
@@ -383,15 +388,37 @@ class KaggleMCPProviderGateway:
         raise ValueError("unsupported provider gateway tool")
 
     def _create(
-        self, provider_ref: str, control_class: ControlClass, payload: Mapping[str, Any]
+        self,
+        provider_ref: str,
+        control_class: ControlClass,
+        payload: Mapping[str, Any],
+        principal: AccessIdentity,
     ) -> dict[str, Any]:
-        self._exact_keys(
-            payload,
-            {"kind", "task_id", "effect_id", "idempotency_key", "title", "disposable", "files"},
-        )
+        expected = {"kind", "task_id", "effect_id", "idempotency_key", "title", "disposable", "files"}
+        if control_class is ControlClass.MCP_EXCHANGE:
+            expected.add("exchange_manifest")
+        self._exact_keys(payload, expected)
         if payload["kind"] != "dataset":
             raise ValueError("provider create supports exact private datasets")
         files = self._files(payload["files"])
+        exchange_manifest: ExchangeManifest | None = None
+        if control_class is ControlClass.MCP_EXCHANGE:
+            if payload["disposable"] is not True:
+                raise PermissionError("exchange datasets require an authenticated creator and expiry cleanup")
+            manifest_payload = payload["exchange_manifest"]
+            if not isinstance(manifest_payload, Mapping):
+                raise ValueError("exchange manifest must be an exact object")
+            exchange_manifest = validate_exchange_manifest_for_mutation(
+                manifest_payload,
+                creator=principal.subject,
+                provider_ref=provider_ref,
+                provider_version=1,
+                file_contents=files,
+                now=self.ledger.clock.now(),
+            )
+            files[EXCHANGE_MANIFEST_PATH] = canonical_json_bytes(
+                exchange_manifest.model_dump(mode="json")
+            )
         arguments = {
             "content_tree_sha256": mapping_sha256(files),
             "control_class": control_class.value,
@@ -405,7 +432,7 @@ class KaggleMCPProviderGateway:
             control_class=control_class,
             disposable=bool(payload["disposable"]),
         )
-        self._register_dataset(result)
+        self._register_dataset(result, exchange_manifest=exchange_manifest)
         return self._dataset_response(result)
 
     def _version(
@@ -415,14 +442,33 @@ class KaggleMCPProviderGateway:
         payload: Mapping[str, Any],
         principal: AccessIdentity,
     ) -> dict[str, Any]:
-        self._exact_keys(
-            payload,
-            {"kind", "task_id", "effect_id", "idempotency_key", "claim_sha256", "version_notes", "files"},
-        )
+        expected = {
+            "kind", "task_id", "effect_id", "idempotency_key", "claim_sha256", "version_notes", "files"
+        }
+        if control_class is ControlClass.MCP_EXCHANGE:
+            expected.add("exchange_manifest")
+        self._exact_keys(payload, expected)
         if payload["kind"] != "dataset":
             raise ValueError("provider version supports exact private datasets")
         claim = self._claim(provider_ref, control_class, str(payload["claim_sha256"]), ProviderKind.DATASET)
         files = self._files(payload["files"])
+        exchange_manifest: ExchangeManifest | None = None
+        if control_class is ControlClass.MCP_EXCHANGE:
+            self._authorize_exchange_access(claim, principal, action="mutate")
+            manifest_payload = payload["exchange_manifest"]
+            if not isinstance(manifest_payload, Mapping):
+                raise ValueError("exchange manifest must be an exact object")
+            exchange_manifest = validate_exchange_manifest_for_mutation(
+                manifest_payload,
+                creator=principal.subject,
+                provider_ref=provider_ref,
+                provider_version=claim.provider_version + 1,
+                file_contents=files,
+                now=self.ledger.clock.now(),
+            )
+            files[EXCHANGE_MANIFEST_PATH] = canonical_json_bytes(
+                exchange_manifest.model_dump(mode="json")
+            )
         notes = str(payload["version_notes"])
         arguments = {
             "content_tree_sha256": mapping_sha256(files),
@@ -443,7 +489,7 @@ class KaggleMCPProviderGateway:
             )
         finally:
             self.ledger.release_resource_lease(str(lease.lease_id), principal.subject, lease.fencing_token)
-        self._register_dataset(result)
+        self._register_dataset(result, exchange_manifest=exchange_manifest)
         return self._dataset_response(result)
 
     def _run(
@@ -527,6 +573,8 @@ class KaggleMCPProviderGateway:
         kind = ProviderKind(str(payload["kind"]))
         claim = self._claim(provider_ref, control_class, str(payload["claim_sha256"]), kind)
         resource = self._resource(claim, state="recorded")
+        if control_class is ControlClass.MCP_EXCHANGE:
+            self._authorize_exchange_access(claim, principal, action="read")
         self.policy.authorize(
             resource,
             ProviderAction.DOWNLOAD if kind is ProviderKind.DATASET else ProviderAction.READ_SOURCE,
@@ -586,6 +634,8 @@ class KaggleMCPProviderGateway:
             kind,
             require_disposable=True,
         )
+        if control_class is ControlClass.MCP_EXCHANGE:
+            self._authorize_exchange_access(claim, principal, action="delete")
         arguments = {"claim_sha256": claim.claim_sha256, "provider_version": claim.provider_version}
         action = MutationAction.DELETE_DATASET if kind is ProviderKind.DATASET else MutationAction.DELETE_NOTEBOOK
         intent = self._intent(
@@ -711,7 +761,25 @@ class KaggleMCPProviderGateway:
             requested_at=self.ledger.clock.now(),
         )
 
-    def _register_dataset(self, result: Any) -> None:
+    def _register_dataset(
+        self, result: Any, *, exchange_manifest: ExchangeManifest | None = None
+    ) -> None:
+        metadata = {
+            "claim": result.claim.model_dump(mode="json"),
+            "identity": result.identity.model_dump(mode="json"),
+        }
+        if exchange_manifest is not None:
+            metadata["exchange_access"] = {
+                "contract_version": exchange_manifest.contract_version,
+                "package_id": str(exchange_manifest.package_id),
+                "manifest_sha256": exchange_manifest.manifest_sha256,
+                "created_at": exchange_manifest.created_at.isoformat(),
+                "expires_at": exchange_manifest.expires_at.isoformat(),
+                "created_by": exchange_manifest.created_by,
+                "target_project": exchange_manifest.target_project,
+                "intended_recipients": list(exchange_manifest.intended_recipients),
+                "sensitivity": exchange_manifest.sensitivity,
+            }
         self.ledger.register_provider_resource(
             provider="kaggle",
             resource_ref=result.identity.provider_ref,
@@ -721,11 +789,37 @@ class KaggleMCPProviderGateway:
             control_class=result.claim.control_class.value,
             private=True,
             state="complete",
-            metadata={
-                "claim": result.claim.model_dump(mode="json"),
-                "identity": result.identity.model_dump(mode="json"),
-            },
+            metadata=metadata,
         )
+
+    def _authorize_exchange_access(
+        self,
+        claim: TaskResourceClaim,
+        principal: AccessIdentity,
+        *,
+        action: str,
+    ) -> None:
+        resource = self.ledger.provider_resource(claim.provider_ref, str(claim.provider_version))
+        access = resource.get("metadata", {}).get("exchange_access") if resource else None
+        if not isinstance(access, Mapping):
+            raise PermissionError("exchange resource lacks an exact access manifest")
+        expires_at = str(access.get("expires_at", ""))
+        try:
+            expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise PermissionError("exchange access expiry is invalid") from exc
+        if expiry.tzinfo is None or self.ledger.clock.now() >= expiry:
+            raise PermissionError("exchange resource has expired")
+        creator = str(access.get("created_by", ""))
+        recipients = access.get("intended_recipients")
+        if action == "read":
+            if not isinstance(recipients, list) or principal.subject not in recipients:
+                raise PermissionError("principal is not an intended exchange recipient")
+        elif action in {"mutate", "delete"}:
+            if principal.subject != creator:
+                raise PermissionError("only the exchange creator may mutate or delete the package")
+        else:  # pragma: no cover - closed internal call set
+            raise ValueError("unsupported exchange access action")
 
     @staticmethod
     def _dataset_response(result: Any) -> dict[str, Any]:

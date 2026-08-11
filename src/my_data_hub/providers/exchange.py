@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from my_data_hub.hashing import canonical_json_bytes
 
 MAX_EXCHANGE_TTL = timedelta(days=7)
+EXCHANGE_MANIFEST_PATH = "exchange-manifest.v1.json"
 
 
 class ExchangeValidationError(ValueError):
@@ -145,4 +146,56 @@ def validate_exchange_manifest(
             raise ExchangeValidationError(f"payload file {path!r} has the wrong size")
         if hashlib.sha256(content).hexdigest() != entry.sha256:
             raise ExchangeValidationError(f"payload file {path!r} has the wrong hash")
+    return manifest
+
+
+def validate_exchange_manifest_for_mutation(
+    payload: Mapping[str, Any],
+    *,
+    creator: str,
+    provider_ref: str,
+    provider_version: int,
+    file_contents: Mapping[str, bytes],
+    now: datetime | None = None,
+) -> ExchangeManifest:
+    """Authorize one exact private exchange create/version payload.
+
+    This is deliberately stricter than recipient readback validation: the OAuth
+    principal must be the declared creator, the provider identity/version must
+    already be bound before upload, and confidential packages must contain only
+    non-executable ASCII-armored age ciphertext.
+    """
+
+    expected_manifest_hash = payload.get("manifest_sha256")
+    if not isinstance(expected_manifest_hash, str) or manifest_sha256(payload) != expected_manifest_hash:
+        raise ExchangeValidationError("manifest_sha256 does not match the canonical manifest")
+    manifest = ExchangeManifest.model_validate(payload)
+    clock = now or datetime.now(UTC)
+    if clock.tzinfo is None or clock.utcoffset() is None:
+        raise ExchangeValidationError("validation clock must include a timezone")
+    if clock < manifest.created_at or clock >= manifest.expires_at:
+        raise ExchangeValidationError("exchange mutation requires a currently active TTL")
+    if manifest.created_by != creator:
+        raise ExchangeValidationError("exchange creator differs from the authenticated principal")
+    if manifest.dataset_ref != provider_ref or manifest.dataset_version != provider_version:
+        raise ExchangeValidationError("exchange manifest differs from the exact provider version")
+
+    declared = {entry.path: entry for entry in manifest.files}
+    if EXCHANGE_MANIFEST_PATH in declared or set(file_contents) != set(declared):
+        raise ExchangeValidationError("payload file set differs from the manifest")
+    for path, content in file_contents.items():
+        if not isinstance(content, bytes):
+            raise ExchangeValidationError(f"payload file {path!r} is not bytes")
+        entry = declared[path]
+        if len(content) != entry.byte_size or hashlib.sha256(content).hexdigest() != entry.sha256:
+            raise ExchangeValidationError(f"payload file {path!r} has the wrong size or hash")
+        if manifest.sensitivity == "confidential_encrypted" and (
+            entry.executable
+            or not entry.path.endswith(".age")
+            or entry.media_type not in {"application/age-encrypted", "application/octet-stream"}
+            or not content.startswith(b"-----BEGIN AGE ENCRYPTED FILE-----\n")
+        ):
+            raise ExchangeValidationError(
+                "confidential exchange files must be non-executable armored age ciphertext"
+            )
     return manifest

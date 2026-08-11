@@ -37,3 +37,23 @@ def test_control_authoritative_epoch_can_reconcile_failed_attempt_gaps() -> None
     parse_sql(source)
     assert "requested_epoch <= state.highest_epoch" in source
     assert "requested_epoch <> state.highest_epoch + 1" not in source
+
+
+def test_operator_migration_requires_same_transaction_revision_outbox_and_audit() -> None:
+    source = (ROOT / "sql/migrations/0016_mcp_operator_transaction_boundary.sql").read_text()
+    parse_sql(source)
+    assert "operator_control.commit_mcp_change" in source
+    assert "master_control.assert_session_write_epoch" in source
+    assert "hub.advance_canonical_revision" in source
+    assert "INSERT INTO sync.audit_event" in source
+    assert "INSERT INTO sync.external_outbox" in source
+    assert "canonical.operator_change" in source
+    assert "DEFERRABLE INITIALLY DEFERRED" in source
+    assert "operator canonical change lacks transactional receipt/outbox" in source
+    assert "SET schema_revision = 16" in source
+
+    roles = (ROOT / "sql/admin/role_contract.sql").read_text()
+    assert "UPDATE (slug, name, description, status, metadata)" in roles
+    assert "UPDATE (\n        content_type, title, summary" in roles
+    assert "UPDATE (canonical_revision) ON hub.canonical_state" not in roles
+    assert "operator_control.commit_mcp_change" in roles

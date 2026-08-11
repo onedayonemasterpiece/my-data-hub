@@ -410,3 +410,45 @@ Alerts include:
 - Region Talk cutover remains impossible while accounting/quarantine/shadow/backup gates
   fail;
 - revoking OAuth access prevents new sessions without changing canonical DB ownership.
+
+## Implemented production opt-in boundary (2026-08-11)
+
+The checked-in production Compose remains reader-only: both MCP write settings and
+operator credential issuance are literal `false`. The only supported activation path is
+an explicit install using:
+
+```text
+deploy/control-plane/install.sh INSTALL_MY_DATA_HUB_CONTROL_PLANE_OPERATOR
+```
+
+That action additionally requires all of the following before Compose is evaluated:
+
+- `MY_DATA_HUB_ENABLE_OPERATOR_PROFILE=I_ACKNOWLEDGE_REMOTE_CANONICAL_WRITES`;
+- the exact approved release commit;
+- a mode-private HMAC-signed `my-data-hub-operator-security-gate.v1` receipt bound to
+  that commit, a verified checkpoint revision, database-role verification receipt and
+  security-test receipt, with a maximum 24-hour lifetime;
+- a separate mode-private write-gate key file;
+- a separate provider environment containing exactly one modern
+  `KAGGLE_API_TOKEN` assignment and no database/YDB/runtime/OAuth credentials.
+
+`scripts/operator_profile_gate.py` issues and verifies the bounded receipt. Activation
+uses a generated, release-specific Compose override outside the repository. It enables
+operator credential issuance in the control process and enables the write/operator
+profile, write-gate secret mount, full explicit scope catalog and single Kaggle adapter in
+the remote MCP process. A normal control-plane install removes that override from the
+systemd command and returns to the reader-only default.
+
+Migration `0016_mcp_operator_transaction_boundary.sql` makes the data-plane write path
+operational without granting generic SQL authority. `mdh_mcp_editor` has column-level
+INSERT/UPDATE plus DELETE only on `hub.project` and `hub.content_item`; generated,
+revision and timestamp columns remain denied. Transaction triggers count the exact target
+and action and reject commit unless the same transaction calls the bounded receipt
+function. That function rechecks the ACTIVE epoch, advances the canonical revision once,
+and inserts both `sync.audit_event` and a semantic `sync.external_outbox` operation before
+an immutable transaction receipt is accepted. Preview executes the same DML and rolls the
+whole transaction back. Apply refuses zero-row or over-limit effects and remains pending
+until a newer verified checkpoint protects its committed revision.
+
+This section documents a tested activation contract, not evidence that the operator
+profile has been enabled on a live host.

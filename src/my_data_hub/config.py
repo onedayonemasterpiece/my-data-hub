@@ -258,8 +258,11 @@ class Settings:
         }
         remote_write_scopes = {
             "master:ensure",
+            "master:rotate",
+            "recovery:request",
+            "acceptance:probe",
             "data:write",
-            "bloggers:write",
+            "migration:operate",
             "provider:write",
         }
         if self.mcp_remote_enabled and (
@@ -337,7 +340,7 @@ class Settings:
             )
         if self.mcp_write_enabled and not {
             "data:write",
-            "bloggers:write",
+            "migration:operate",
             "provider:write",
         }.intersection(self.mcp_scopes):
             raise ConfigurationError("MCP write mode requires an explicit write scope")

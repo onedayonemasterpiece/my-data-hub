@@ -114,13 +114,34 @@ GRANT SELECT ON auth.oauth_revocation TO mdh_authenticator;
 -- revocation authority to service roles.
 REVOKE ALL ON auth.oauth_revocation FROM mdh_mcp_reader, mdh_mcp_editor, mdh_connector_intake;
 
--- R1 editor production allowlist is intentionally empty. Disposable verification grants
--- are created and removed by scripts/verify_postgres_roles.py.
-GRANT USAGE ON SCHEMA operator_control, recovery, sync TO mdh_mcp_editor;
+-- The separately enabled operator profile is limited to two exact canonical
+-- relations. Migration 0016 adds per-transaction guards: these table grants
+-- cannot commit unless the same transaction records its revision, audit event,
+-- semantic outbox operation and immutable operator receipt.
+GRANT USAGE ON SCHEMA operator_control, recovery, sync, hub, master_control
+    TO mdh_mcp_editor;
 GRANT SELECT ON recovery.evidence TO mdh_mcp_editor;
 GRANT SELECT ON sync.checkpoint TO mdh_mcp_editor;
+GRANT SELECT ON hub.canonical_state, hub.project, hub.content_item TO mdh_mcp_editor;
+GRANT SELECT ON master_control.epoch_state TO mdh_mcp_editor;
+GRANT INSERT (project_id, slug, name, description, status, metadata),
+    UPDATE (slug, name, description, status, metadata), DELETE ON hub.project
+    TO mdh_mcp_editor;
+GRANT INSERT (
+        content_id, content_type, title, summary, body_excerpt, language,
+        canonical_url, normalized_url, content_hash, published_at,
+        first_observed_at, last_observed_at, status, metadata
+    ),
+    UPDATE (
+        content_type, title, summary, body_excerpt, language, canonical_url,
+        normalized_url, content_hash, published_at, first_observed_at,
+        last_observed_at, status, metadata
+    ), DELETE ON hub.content_item TO mdh_mcp_editor;
 GRANT SELECT, INSERT ON operator_control.preview_receipt,
     operator_control.apply_receipt TO mdh_mcp_editor;
+GRANT EXECUTE ON FUNCTION master_control.assert_session_write_epoch(),
+    operator_control.commit_mcp_change(text,bigint,text,text,integer,text,text,text,text)
+    TO mdh_mcp_editor;
 GRANT USAGE ON SCHEMA migration, hub, region_talk, sync TO mdh_migration_operator;
 GRANT SELECT ON ALL TABLES IN SCHEMA migration TO mdh_migration_operator;
 GRANT SELECT ON hub.canonical_state, hub.project TO mdh_migration_operator;

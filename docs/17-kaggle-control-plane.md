@@ -389,3 +389,18 @@ a risk until provider-account separation is implemented.
 11. backup resources remain protected even for a principal with normal Kaggle write
     scopes;
 12. orchestrator-created resources cannot be reclassified through rename or rediscovery.
+
+### 8.4 Implemented remote exchange mutation boundary
+
+For `mcp_exchange`, `provider.resources.create` and `provider.resources.version` now
+require an exact `my-data-hub-kaggle-exchange.v1` manifest before the single Kaggle
+adapter is called. The authenticated OAuth subject must equal `created_by`; dataset ref
+and version, current TTL, manifest hash, every file path/size/hash and disposable cleanup
+intent are bound to the operation. Confidential payloads are accepted only as
+non-executable ASCII-armored age ciphertext with an encrypted media type. A canonical
+manifest file is included in the private Dataset version.
+
+The devstand ledger stores only access metadata and provider receipts, never exchange
+payload bytes or instructions. Reads require a non-expired manifest and an exact intended
+recipient. Version/delete requires the original creator; expired reads fail closed.
+These are code and mock-provider proofs until a real modern Kaggle token run is recorded.

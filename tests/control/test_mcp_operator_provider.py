@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import hashlib
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
+
+import pytest
 
 from my_data_hub.control_plane.adapters import KaggleMCPProviderGateway, LedgerWriteGate
 from my_data_hub.control_plane.clock import DeterministicClock
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.mcp.contracts import MasterSnapshot, MasterState
 from my_data_hub.mcp.oauth import AccessIdentity
+from my_data_hub.providers.exchange import manifest_sha256
 from my_data_hub.providers.kaggle import ControlLedgerKaggleJournal
 from my_data_hub.providers.kaggle.contracts import (
     DatasetMutationResult,
@@ -24,9 +28,9 @@ from my_data_hub.providers.kaggle.contracts import (
 from my_data_hub.providers.models import ProviderFingerprint, ProviderKind
 
 
-def principal() -> AccessIdentity:
+def principal(subject: str = "owner") -> AccessIdentity:
     return AccessIdentity(
-        subject="owner",
+        subject=subject,
         client_id="owner-operator",
         scopes=frozenset({"data:write", "provider:write"}),
         audience="mcp",
@@ -275,7 +279,7 @@ def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_
     gateway = KaggleMCPProviderGateway(ledger, FakeAdapter(ledger))  # type: ignore[arg-type]
     common = {
         "resource_ref": "owner/mcp-data",
-        "control_class": "mcp_exchange",
+        "control_class": "mcp_managed",
         "private": True,
     }
     created = gateway.invoke(
@@ -372,3 +376,134 @@ def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_
         principal(),
     )
     assert deleted["outcome"] == "applied"
+
+
+def _exchange_manifest(
+    *,
+    content: str,
+    now: datetime,
+    version: int = 1,
+    creator: str = "owner",
+    recipients: list[str] | None = None,
+    sensitivity: str = "internal",
+    path: str = "payload.txt",
+    media_type: str = "text/plain",
+    provider_ref: str = "owner/mcp-exchange",
+) -> dict[str, object]:
+    encoded = content.encode()
+    payload: dict[str, object] = {
+        "contract_version": "my-data-hub-kaggle-exchange.v1",
+        "package_id": str(uuid4()),
+        "control_class": "mcp_exchange",
+        "private": True,
+        "dataset_ref": provider_ref,
+        "dataset_version": version,
+        "created_at": now.isoformat(),
+        "expires_at": (now + timedelta(days=1)).isoformat(),
+        "created_by": creator,
+        "purpose": "bounded provider gateway exchange",
+        "target_project": "my-data-hub",
+        "intended_recipients": recipients or ["recipient"],
+        "sensitivity": sensitivity,
+        "files": [
+            {
+                "path": path,
+                "media_type": media_type,
+                "byte_size": len(encoded),
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+                "executable": False,
+            }
+        ],
+    }
+    payload["manifest_sha256"] = manifest_sha256(payload)
+    return payload
+
+
+def test_exchange_gateway_binds_creator_recipients_ttl_manifest_and_encryption(
+    tmp_path: Path,
+) -> None:
+    clock = DeterministicClock(datetime(2026, 8, 11, 12, tzinfo=UTC))
+    ledger = ControlLedger(tmp_path / "exchange.sqlite3", clock=clock)
+    gateway = KaggleMCPProviderGateway(ledger, FakeAdapter(ledger))  # type: ignore[arg-type]
+    common = {
+        "resource_ref": "owner/mcp-exchange",
+        "control_class": "mcp_exchange",
+        "private": True,
+    }
+    content = "recipient-scoped content"
+    manifest = _exchange_manifest(content=content, now=clock.now())
+    created = gateway.invoke(
+        "provider.resources.create",
+        {
+            **common,
+            "payload": {
+                "kind": "dataset",
+                "task_id": str(uuid4()),
+                "effect_id": str(uuid4()),
+                "idempotency_key": "exchange-create-1",
+                "title": "MCP exchange",
+                "disposable": True,
+                "files": {"payload.txt": content},
+                "exchange_manifest": manifest,
+            },
+        },
+        principal(),
+    )
+    stored = ledger.provider_resource("owner/mcp-exchange", "1")
+    assert stored is not None
+    assert stored["metadata"]["exchange_access"]["manifest_sha256"] == manifest["manifest_sha256"]
+    assert content.encode() not in ledger.path.read_bytes()
+
+    with pytest.raises(PermissionError, match="intended exchange recipient"):
+        gateway.invoke(
+            "provider.resources.read",
+            {**common, "payload": {"kind": "dataset", "claim_sha256": created["claim_sha256"]}},
+            principal(),
+        )
+    readback = gateway.invoke(
+        "provider.resources.read",
+        {**common, "payload": {"kind": "dataset", "claim_sha256": created["claim_sha256"]}},
+        principal("recipient"),
+    )
+    assert readback["provider_version"] == 1
+
+    with pytest.raises(PermissionError, match="only the exchange creator"):
+        gateway.invoke(
+            "provider.resources.delete",
+            {
+                **common,
+                "payload": {
+                    "kind": "dataset",
+                    "task_id": created["task_id"],
+                    "effect_id": str(uuid4()),
+                    "idempotency_key": "exchange-delete-denied",
+                    "claim_sha256": created["claim_sha256"],
+                },
+            },
+            principal("recipient"),
+        )
+
+    plaintext_confidential = _exchange_manifest(
+        content="plaintext",
+        now=clock.now(),
+        sensitivity="confidential_encrypted",
+        provider_ref="owner/mcp-exchange-confidential",
+    )
+    with pytest.raises(ValueError, match="armored age ciphertext"):
+        gateway.invoke(
+            "provider.resources.create",
+            {
+                **{**common, "resource_ref": "owner/mcp-exchange-confidential"},
+                "payload": {
+                    "kind": "dataset",
+                    "task_id": str(uuid4()),
+                    "effect_id": str(uuid4()),
+                    "idempotency_key": "exchange-confidential-1",
+                    "title": "Encrypted exchange",
+                    "disposable": True,
+                    "files": {"payload.txt": "plaintext"},
+                    "exchange_manifest": plaintext_confidential,
+                },
+            },
+            principal(),
+        )
