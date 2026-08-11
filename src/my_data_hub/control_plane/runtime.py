@@ -231,12 +231,8 @@ class ControlPlaneMasterRuntime:
     def ensure(self, idempotency_key: str) -> tuple[MasterHandle, bool]:
         identity = MasterCoordinator.identity_for(idempotency_key)
         existed = self.ledger.get_operation(identity["operation_id"]) is not None
-        secret = derive_runtime_secret(
-            self.settings.runtime_token_root, identity["run_id"], identity["attempt_id"]
-        )
-        return self.coordinator.ensure_master(
-            self.intent(idempotency_key), runtime_secret=secret
-        ), existed
+        secret = derive_runtime_secret(self.settings.runtime_token_root, identity["run_id"], identity["attempt_id"])
+        return self.coordinator.ensure_master(self.intent(idempotency_key), runtime_secret=secret), existed
 
     def reconcile_startup(self) -> list[MasterHandle]:
         handles: list[MasterHandle] = []
@@ -248,9 +244,7 @@ class ControlPlaneMasterRuntime:
                 str(identity["attempt_id"]),
             )
             handles.append(
-                self.coordinator.ensure_master(
-                    self.intent(operation.idempotency_key), runtime_secret=secret
-                )
+                self.coordinator.ensure_master(self.intent(operation.idempotency_key), runtime_secret=secret)
             )
         return handles
 
@@ -279,10 +273,7 @@ class ControlPlaneMasterRuntime:
             return None
         operation = sorted(operations, key=lambda item: item.created_at)[0]
         timeout_seconds = int(operation.identity.get("timeout_seconds", 0))
-        if (
-            timeout_seconds < 60
-            or (self.ledger.clock.now() - operation.created_at).total_seconds() > timeout_seconds
-        ):
+        if timeout_seconds < 60 or (self.ledger.clock.now() - operation.created_at).total_seconds() > timeout_seconds:
             self.ledger.transition_operation(
                 operation.operation_id,
                 expected_state=operation.state,
@@ -303,13 +294,28 @@ class ControlPlaneMasterRuntime:
         if operation.operation_kind == "forced_master_rotation":
             head = self.ledger.checkpoint_head("postgres-master")
             manifest = candidate.get("manifest")
+            source_operation = self.ledger.get_operation(str(candidate.get("operation_id", "")))
+            source_identity = source_operation.identity if source_operation is not None else {}
+            replacement_identity = MasterCoordinator.identity_for(f"forced-rotation:{operation.operation_id}")
+            active_service = self.ledger.resolve_service("postgres-master")
+            replacement_is_active = active_service is not None and (
+                active_service.run_id == replacement_identity["run_id"]
+                and active_service.attempt_id == replacement_identity["attempt_id"]
+                and active_service.master_instance_id == replacement_identity["master_instance_id"]
+                and active_service.epoch > int(operation.identity.get("expected_active_epoch", 0))
+            )
             if (
                 head is None
                 or head.current_checkpoint_id != checkpoint_id
                 or head.generation != int(operation.identity.get("head_generation", -1))
                 or not isinstance(manifest, dict)
-                or manifest.get("canonical_revision")
-                != operation.identity.get("expected_canonical_revision")
+                or manifest.get("canonical_revision") != operation.identity.get("expected_canonical_revision")
+                or source_operation is None
+                or source_operation.state != "STOPPED"
+                or candidate.get("epoch") != operation.identity.get("expected_active_epoch")
+                or source_identity.get("epoch") != operation.identity.get("expected_active_epoch")
+                or candidate.get("master_instance_id") != source_identity.get("master_instance_id")
+                or (active_service is not None and not replacement_is_active)
             ):
                 self.ledger.transition_operation(
                     operation.operation_id,

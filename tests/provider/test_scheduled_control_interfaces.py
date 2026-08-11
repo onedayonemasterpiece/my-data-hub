@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from my_data_hub.control_plane.adapters import LedgerControlReader
 from my_data_hub.control_plane.ledger import ControlLedger
@@ -53,6 +56,40 @@ def _checkpoint(ledger: ControlLedger, checkpoint_id: str, parent: str | None, g
         checkpoint_id,
         expected_generation=generation,
         expected_parent_checkpoint_id=parent,
+    )
+
+
+def _stopped_master_checkpoint(ledger: ControlLedger) -> None:
+    operation_id = "stopped-master-operation"
+    ledger.ensure_operation(
+        operation_id=operation_id,
+        idempotency_key=operation_id,
+        operation_kind="ensure_master",
+        intent={"checkpoint_id": "cp-stopped"},
+        initial_state="STOPPED",
+        identity={"epoch": 1, "master_instance_id": "master-stopped"},
+    )
+    ledger.add_checkpoint_candidate(
+        checkpoint_id="cp-stopped",
+        operation_id=operation_id,
+        dataset_ref="owner/private-checkpoints",
+        version_ref=None,
+        manifest_sha256="c" * 64,
+        source_checkpoint_id=None,
+        source_head_generation=0,
+        master_instance_id="master-stopped",
+        epoch=1,
+        manifest_payload={"canonical_revision": 9},
+    )
+    ledger.mark_checkpoint_uploaded("cp-stopped", "owner/private-checkpoints/20")
+    ledger.mark_checkpoint_readback_verified("cp-stopped")
+    ledger.mark_checkpoint_restore_verified("cp-stopped")
+    ledger.mark_checkpoint_verified("cp-stopped")
+    ledger.promote_checkpoint(
+        "postgres-master",
+        "cp-stopped",
+        expected_generation=0,
+        expected_parent_checkpoint_id=None,
     )
 
 
@@ -110,6 +147,36 @@ def test_restore_request_is_exact_durable_and_idempotent_for_consumer(tmp_path: 
     assert ledger.incomplete_operations("checkpoint_restore_smoke") == []
 
 
+def test_rotation_requires_the_exact_source_master_to_be_stopped(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    ledger = ControlLedger(tmp_path / "control.sqlite3")
+    _stopped_master_checkpoint(ledger)
+    reader = LedgerControlReader(ledger, acceptance_consumer_available=True)
+    arguments = {
+        "idempotency_key": "blogger-cold-restore",
+        "checkpoint_id": "cp-stopped",
+        "exact_version_ref": "owner/private-checkpoints/20",
+        "expected_active_epoch": 1,
+        "expected_canonical_revision": 9,
+        "timeout_seconds": 1200,
+    }
+
+    accepted = reader.invoke_control("master.rotation.request", arguments, _identity())
+    assert accepted["accepted"] is True
+    assert accepted["execution_supported"] is True
+
+    other = ControlLedger(tmp_path / "other.sqlite3")
+    _stopped_master_checkpoint(other)
+    monkeypatch.setattr(
+        other,
+        "resolve_service",
+        lambda _kind: SimpleNamespace(epoch=1, canonical_revision=9),
+    )
+    with pytest.raises(ValueError, match="durably stopped"):
+        LedgerControlReader(other, acceptance_consumer_available=True).invoke_control(
+            "master.rotation.request", arguments, _identity()
+        )
+
+
 def test_protected_resource_probe_exercises_policy_without_provider_mutation(tmp_path: Path) -> None:
     ledger = ControlLedger(tmp_path / "control.sqlite3")
     ledger.register_provider_resource(
@@ -157,9 +224,7 @@ def test_connector_coverage_reads_only_bounded_heartbeat_metadata(tmp_path: Path
             observed_at=datetime(2026, 8, 12, 12, tzinfo=UTC),
         )
 
-    result = LedgerControlReader(ledger).invoke_control(
-        "connector.coverage", {}, _identity()
-    )
+    result = LedgerControlReader(ledger).invoke_control("connector.coverage", {}, _identity())
 
     assert result["available"] is True
     assert result["connector_count"] == 2
@@ -215,7 +280,9 @@ def test_active_runtime_produces_authenticated_connector_heartbeat(tmp_path: Pat
         latest_event_id="ready-1",
     )
     runtime = ControlPlaneMasterRuntime(
-        ledger, MasterCoordinator(ledger, FakeKaggleRuntime()), object()  # type: ignore[arg-type]
+        ledger,
+        MasterCoordinator(ledger, FakeKaggleRuntime()),
+        object(),  # type: ignore[arg-type]
     )
     observed_at = datetime.now(UTC)
 

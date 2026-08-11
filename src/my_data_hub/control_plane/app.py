@@ -464,6 +464,12 @@ def create_app(
                         "canonical_revision": record["import_receipt"]["canonical_revision"],
                     },
                 )
+                control_ledger.record_connector_coverage(
+                    connector_kind="region-talk-ydb-bloggers-v1",
+                    contract_version="my-data-hub-blogger-closure.v1",
+                    state="COMPLETE",
+                    observed_at=control_ledger.clock.now(),
+                )
         return {key: value for key, value in record.items() if key not in {"failure_code"} or value is not None}
 
     @app.get("/internal/runtime/blogger-migration/{run_id}/{attempt_id}")
@@ -601,6 +607,12 @@ def create_app(
             raise HTTPException(status_code=409, detail={"code": "blogger_checkpoint_not_verified"})
         stored = control_ledger.record_blogger_checkpoint_receipt(
             request_id=str(body["request_id"]), run_id=run_id, attempt_id=attempt_id, receipt=body
+        )
+        control_ledger.record_connector_coverage(
+            connector_kind="region-talk-ydb-bloggers-v1",
+            contract_version="my-data-hub-blogger-closure.v1",
+            state="COMPLETE",
+            observed_at=control_ledger.clock.now(),
         )
         return {"accepted": True, "state": stored["state"]}
 

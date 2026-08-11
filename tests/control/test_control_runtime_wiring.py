@@ -17,7 +17,10 @@ from my_data_hub.control_plane.runtime import (
 from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator
 from my_data_hub.providers.kaggle import KaggleMasterLaunchAssets, KaggleMasterRuntimeProvider, derive_runtime_secret
 from my_data_hub.runtime_sdk import RuntimeEvent, RuntimeEventType
-from my_data_hub.workloads.bloggers.master_stage import BloggerMigrationRequest
+from my_data_hub.workloads.bloggers.master_stage import (
+    BloggerImportStageReceipt,
+    BloggerMigrationRequest,
+)
 
 ROOT = "runtime-root-secret-long-enough-for-tests"
 
@@ -217,6 +220,67 @@ def test_active_runtime_claims_only_its_exact_blogger_request(tmp_path: Path) ->
     assert claim.status_code == 200
     assert claim.json()["available"] is True
     assert claim.json()["request_sha256"] == request.request_sha256
+
+    import_receipt = BloggerImportStageReceipt(
+        request_id=request.request_id,
+        operation_id=operation.operation_id,
+        master_instance_id=identity["master_instance_id"],
+        run_id=identity["run_id"],
+        epoch=identity["epoch"],
+        request_sha256=request.request_sha256,
+        export_batch_id=uuid4(),
+        row_count=266,
+        distinct_record_ids=266,
+        source_file_count=14,
+        dispositions={"imported": 266, "quarantined": 0},
+        record_id_set_sha256="b" * 64,
+        logical_sha256="c" * 64,
+        canonical_outcome_sha256="d" * 64,
+        actor_count=266,
+        account_count=266,
+        duplicate_group_count=0,
+        replayed_count=0,
+        canonical_revision=9,
+    )
+    imported = client.post(
+        f"/internal/runtime/blogger-migration/{identity['run_id']}/{identity['attempt_id']}/import-receipt",
+        json=import_receipt.model_dump(mode="json"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-MDH-Master-Instance-ID": str(identity["master_instance_id"]),
+            "X-MDH-Epoch": str(identity["epoch"]),
+        },
+    )
+    assert imported.status_code == 200
+    checkpoint_id = str(uuid4())
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=checkpoint_id,
+        operation_id=operation.operation_id,
+        dataset_ref="owner/checkpoints",
+        version_ref=None,
+        manifest_sha256="e" * 64,
+        source_checkpoint_id=None,
+        source_head_generation=0,
+        master_instance_id=str(identity["master_instance_id"]),
+        epoch=int(identity["epoch"]),
+        manifest_payload={"canonical_revision": 9},
+    )
+    ledger.mark_checkpoint_uploaded(checkpoint_id, "owner/checkpoints/1")
+    ledger.mark_checkpoint_readback_verified(checkpoint_id)
+    ledger.mark_checkpoint_restore_verified(checkpoint_id)
+    ledger.mark_checkpoint_verified(checkpoint_id)
+    ledger.promote_checkpoint(
+        "postgres-master",
+        checkpoint_id,
+        expected_generation=0,
+        expected_parent_checkpoint_id=None,
+    )
+    status = client.get(f"/control/v1/blogger-closure/requests/{request.request_id}")
+    assert status.status_code == 200
+    assert status.json()["state"] == "CHECKPOINT_VERIFIED"
+    coverage = ledger.connector_coverage_metadata()
+    assert coverage[0]["connector_kind"] == "region-talk-ydb-bloggers-v1"
+    assert coverage[0]["state"] == "COMPLETE"
 
 
 class RecordingRegistrar:

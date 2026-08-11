@@ -289,6 +289,12 @@ def run_blogger_closure(
         raise BloggerClosureError("import receipt does not bind the exact request/operation")
     checkpoint_status = mcp.call("checkpoint.status", {})
     checkpoint = _require_checkpoint(checkpoint_status, request_status)
+    _wait(
+        deadline,
+        config.poll_seconds,
+        lambda: mcp.call("master.status", {}),
+        lambda value: value.get("master_state") in {"ABSENT", "STOPPED"},
+    )
     rotation = mcp.call(
         "master.rotation.request",
         {

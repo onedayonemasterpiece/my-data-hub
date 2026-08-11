@@ -113,6 +113,7 @@ class FakeControl:
 class FakeMcp:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
+        self.master_status_calls = 0
 
     def call(self, tool: str, arguments: dict[str, object]) -> dict[str, object]:
         self.calls.append((tool, arguments))
@@ -135,6 +136,9 @@ class FakeMcp:
         if tool == "operation.get":
             return {"state": "DURABLE_COMPLETE"}
         if tool == "master.status":
+            self.master_status_calls += 1
+            if self.master_status_calls == 1:
+                return {"master_state": "ABSENT"}
             return {
                 "master_state": "ACTIVE",
                 "instance_id": "99999999-9999-4999-8999-999999999999",
@@ -233,6 +237,7 @@ def test_final_closure_reaches_durable_complete_only_after_restore_and_mcp() -> 
     assert receipt["cold_restore"]["epoch"] == 8
     assert [name for name, _ in mcp.calls] == [
         "checkpoint.status",
+        "master.status",
         "master.rotation.request",
         "operation.get",
         "master.status",

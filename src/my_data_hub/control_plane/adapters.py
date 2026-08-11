@@ -74,17 +74,14 @@ class LedgerControlReader(ControlPlaneReader):
         acceptance_consumer_available: bool = False,
     ) -> None:
         if deployed_commit is not None and (
-            len(deployed_commit) != 40
-            or any(character not in "0123456789abcdef" for character in deployed_commit)
+            len(deployed_commit) != 40 or any(character not in "0123456789abcdef" for character in deployed_commit)
         ):
             raise ValueError("deployed commit must be an exact lowercase Git SHA")
         self.ledger = ledger
         self.deployed_commit = deployed_commit
         self.acceptance_consumer_available = acceptance_consumer_available
 
-    def invoke_control(
-        self, tool: str, arguments: dict[str, Any], principal: AccessIdentity
-    ) -> dict[str, Any]:
+    def invoke_control(self, tool: str, arguments: dict[str, Any], principal: AccessIdentity) -> dict[str, Any]:
         if tool == "platform.status":
             return {
                 "control_plane_ready": True,
@@ -93,13 +90,17 @@ class LedgerControlReader(ControlPlaneReader):
             }
         if tool in {"operation.get", "data.change.status"}:
             record = self.ledger.get_operation(str(arguments.get("operation_id", "")))
-            return {"found": False} if record is None else {
-                "found": True,
-                "operation_id": record.operation_id,
-                "operation_kind": record.operation_kind,
-                "state": record.state,
-                "updated_at": record.updated_at.isoformat(),
-            }
+            return (
+                {"found": False}
+                if record is None
+                else {
+                    "found": True,
+                    "operation_id": record.operation_id,
+                    "operation_kind": record.operation_kind,
+                    "state": record.state,
+                    "updated_at": record.updated_at.isoformat(),
+                }
+            )
         if tool == "checkpoint.status":
             head = self.ledger.checkpoint_head("postgres-master")
             current = (
@@ -205,9 +206,7 @@ class LedgerControlReader(ControlPlaneReader):
             "verified_at": candidate["verified_at"],
             "status": candidate["status"],
             "canonical_revision": (
-                candidate["manifest"].get("canonical_revision")
-                if isinstance(candidate.get("manifest"), dict)
-                else None
+                candidate["manifest"].get("canonical_revision") if isinstance(candidate.get("manifest"), dict) else None
             ),
         }
 
@@ -230,29 +229,33 @@ class LedgerControlReader(ControlPlaneReader):
             target = str(arguments.get("target", ""))
             if target not in {"current", "previous"}:
                 raise ValueError("restore target must be current or previous")
-        checkpoint_id = (
-            head.previous_checkpoint_id if target == "previous" else head.current_checkpoint_id
-        )
+        checkpoint_id = head.previous_checkpoint_id if target == "previous" else head.current_checkpoint_id
         if checkpoint_id is None:
             raise ValueError("requested checkpoint generation is absent")
         candidate = self.ledger.checkpoint_candidate(checkpoint_id)
         if candidate is None or candidate.get("status") != "VERIFIED":
             raise ValueError("requested checkpoint is not verified")
         exact_version = str(candidate.get("version_ref") or "")
-        if (
-            arguments.get("checkpoint_id") != checkpoint_id
-            or arguments.get("exact_version_ref") != exact_version
-        ):
+        if arguments.get("checkpoint_id") != checkpoint_id or arguments.get("exact_version_ref") != exact_version:
             raise ValueError("request does not bind the exact checkpoint HEAD generation")
         if tool == "master.rotation.request":
             service = self.ledger.resolve_service("postgres-master")
             expected_epoch = arguments.get("expected_active_epoch")
-            if service is None or expected_epoch != service.epoch:
-                raise ValueError("rotation request does not bind the active epoch")
             manifest = candidate.get("manifest")
             expected_revision = arguments.get("expected_canonical_revision")
             if not isinstance(manifest, dict) or expected_revision != manifest.get("canonical_revision"):
                 raise ValueError("rotation request does not bind the checkpoint canonical revision")
+            source_operation = self.ledger.get_operation(str(candidate.get("operation_id", "")))
+            source_identity = source_operation.identity if source_operation is not None else {}
+            if (
+                service is not None
+                or source_operation is None
+                or source_operation.state != "STOPPED"
+                or expected_epoch != candidate.get("epoch")
+                or expected_epoch != source_identity.get("epoch")
+                or candidate.get("master_instance_id") != source_identity.get("master_instance_id")
+            ):
+                raise ValueError("rotation requires the exact checkpoint source master to be durably stopped")
         timeout = arguments.get("timeout_seconds")
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 60 <= timeout <= 3600:
             raise ValueError("acceptance request timeout_seconds must be between 60 and 3600")
@@ -268,9 +271,7 @@ class LedgerControlReader(ControlPlaneReader):
             intent["expected_active_epoch"] = arguments["expected_active_epoch"]
             intent["expected_canonical_revision"] = arguments["expected_canonical_revision"]
         digest = hashlib.sha256(
-            json.dumps(intent, sort_keys=True, separators=(",", ":")).encode()
-            + b":"
-            + request_key.encode()
+            json.dumps(intent, sort_keys=True, separators=(",", ":")).encode() + b":" + request_key.encode()
         ).hexdigest()
         if not self.acceptance_consumer_available:
             return {
