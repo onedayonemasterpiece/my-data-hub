@@ -16,10 +16,10 @@
   version refs, manifest hashes, verification times, and HEAD generation.
 - Append-only control migration 009 adds bounded connector heartbeat metadata only; no connector
   payloads or business rows are stored.
-- Current/previous isolated-restore and forced-rotation requests are exact-generation,
-  exact-version, timeout-bounded, durable, and idempotent. They remain externally `BLOCKED`
-  because no production operation consumer currently claims and executes these two operation
-  kinds.
+- Current/previous isolated-restore and forced-rotation requests validate exact generation,
+  exact version and timeout bounds, then remain `BLOCKED` because no production operation
+  consumer exists. They deliberately do not enqueue immortal `REQUESTED` rows on scheduled
+  runs; a future consumer must add a durable claim/execute contract first.
 - Stale-epoch and protected-resource probes validate bindings but explicitly remain `BLOCKED`;
   they do not synthesize denial evidence without a guaranteed non-mutating route through the
   real admission/policy path.
