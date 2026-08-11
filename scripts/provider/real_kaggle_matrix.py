@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,6 +28,29 @@ from my_data_hub.providers.kaggle.control_journal import ControlLedgerKaggleJour
 from my_data_hub.providers.models import ControlClass
 
 EXTERNAL_BLOCKED = 78
+
+
+def clean_repository_commit() -> str:
+    root = Path(__file__).resolve().parents[2]
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
+        raise RuntimeError("real provider receipt requires an exact Git commit")
+    if dirty:
+        raise RuntimeError("real provider mutation requires a clean repository worktree")
+    return commit
 
 
 class _AnonymousDatasetProbeError(RuntimeError):
@@ -116,6 +140,7 @@ Path("/kaggle/working/smoke-output.json").write_text(
 
 
 def run_dataset_canary(*, ledger_path: Path, receipt_path: Path) -> int:
+    commit_sha = clean_repository_commit()
     ledger = ControlLedger(ledger_path)
     adapter = KaggleProviderAdapter.from_environment(journal=ControlLedgerKaggleJournal(ledger))
     task_id = uuid4()
@@ -187,10 +212,11 @@ def run_dataset_canary(*, ledger_path: Path, receipt_path: Path) -> int:
     if result is None or proof is None or cleanup is None:
         raise RuntimeError("dataset canary has no exact create/privacy/cleanup receipt")
     receipt = {
-        "schema_version": "my-data-hub-real-kaggle-canary.v1",
+        "schema_version": "my-data-hub-real-kaggle-canary.v2",
         "scenario": "private_dataset_create_exact_readback_unauthenticated_denial_delete",
         "task_id": str(task_id),
         "run_id": str(run_id),
+        "commit_sha": commit_sha,
         "provider_ref": ref,
         "provider_version": result.identity.version,
         "package_sha256": result.identity.package_sha256,
@@ -199,6 +225,15 @@ def run_dataset_canary(*, ledger_path: Path, receipt_path: Path) -> int:
         "unauthenticated_http_status": proof.unauthenticated_http_status,
         "denial_class": proof.denial_class,
         "cleanup": cleanup.detail_code,
+        "cleanup_outcome": "complete",
+        "counts": {"created": 1, "exact_readback": 1, "deleted": 1},
+        "gate_results": [
+            {"name": "private_create", "outcome": "PASS"},
+            {"name": "exact_version_readback", "outcome": "PASS"},
+            {"name": "unauthenticated_access_denied", "outcome": "PASS"},
+            {"name": "claim_bound_cleanup", "outcome": "PASS"},
+        ],
+        "blockers": [],
         "started_at": started_at.isoformat(),
         "completed_at": datetime.now(UTC).isoformat(),
     }

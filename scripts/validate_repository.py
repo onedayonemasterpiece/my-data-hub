@@ -121,6 +121,9 @@ def validate_json_and_schemas(report: Report) -> None:
         "kaggle-real-canary-receipt.v1.example.json": (
             "kaggle-real-canary-receipt.v1.schema.json"
         ),
+        "kaggle-real-canary-receipt.v2.example.json": (
+            "kaggle-real-canary-receipt.v2.schema.json"
+        ),
         "workflow-receipt.v1.example.json": "workflow-receipt.v1.schema.json",
     }
     checker = FormatChecker()
