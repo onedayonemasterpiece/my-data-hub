@@ -86,8 +86,9 @@ provider_env="${MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE:-$env_root/provider.env}"
 mcp_env="${MY_DATA_HUB_MCP_ENV_FILE:-$env_root/mcp-reader.env}"
 oauth_env="${MY_DATA_HUB_OAUTH_ENV_FILE:-$env_root/oauth.env}"
 oauth_key="${MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE:-$secret_root/oauth-signing-key.pem}"
+oauth_overlap_jwks="${MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE:-$runtime_root/oauth-public/overlap-jwks.json}"
 for path_value in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$asset_dir" \
-  "$tls_ca_file" "$provider_env" "$mcp_env" "$oauth_env" "$oauth_key"; do
+  "$tls_ca_file" "$provider_env" "$mcp_env" "$oauth_env" "$oauth_key" "$oauth_overlap_jwks"; do
   case "$path_value" in
     *[$'\n\r\t ']* ) echo "deployment inputs may not contain whitespace" >&2; exit 2 ;;
   esac
@@ -140,6 +141,7 @@ require_private_file "$provider_env" "provider environment"
 require_private_file "$mcp_env" "remote MCP environment"
 require_private_file "$oauth_env" "OAuth environment"
 require_private_file "$oauth_key" "OAuth signing key"
+require_regular_file "$oauth_overlap_jwks" "OAuth overlap public JWKS"
 require_regular_file "$tls_ca_file" "master TLS CA"
 [[ -d "$asset_dir" && ! -L "$asset_dir" ]] || { echo "master asset directory is required" >&2; exit 2; }
 for env_file in "$provider_env" "$mcp_env" "$oauth_env"; do
@@ -165,6 +167,7 @@ MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE=$provider_env
 MY_DATA_HUB_MCP_ENV_FILE=$mcp_env
 MY_DATA_HUB_OAUTH_ENV_FILE=$oauth_env
 MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE=$oauth_key
+MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE=$oauth_overlap_jwks
 ENV
 chmod 600 "$compose_env"
 

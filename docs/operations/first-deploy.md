@@ -18,7 +18,8 @@ prove `master=ABSENT` readiness, the three loopback listeners (`8080`, `8765`, `
 process-kill recovery, login-independent reboot recovery and fail-closed data methods.
 
 The installer requires the exact approved merge commit, pre-enabled user lingering,
-private split provider/MCP/OAuth environments, a private OAuth signing key, master TLS CA
+private split provider/MCP/OAuth environments, a private OAuth signing key, a bounded
+overlap public JWKS file, master TLS CA
 and bounded release-owned master assets. It rejects PostgreSQL data-plane configuration and
 does not create PGDATA, a PostgreSQL volume or a database service.
 

@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
 
 from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.oauth_server import runtime as runtime_module
 from my_data_hub.oauth_server.runtime import build_authorization_runtime
 
 
@@ -107,3 +108,12 @@ def test_production_oauth_runtime_uses_durable_ledger_and_external_owner_login(
     )
     assert denied.status_code == 401
     assert denied.json() == {"error": "invalid_client"}
+
+
+def test_runtime_accepts_empty_overlap_jwks_for_initial_deployment(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    overlap = tmp_path / "overlap.json"
+    overlap.write_text('{"keys":[]}', encoding="utf-8")
+    monkeypatch.setenv("MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE", str(overlap))
+    assert runtime_module._overlap_public_jwks() == ()

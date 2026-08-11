@@ -110,6 +110,7 @@ def test_install_requires_private_split_inputs_without_static_master_credentials
         "MY_DATA_HUB_MCP_ENV_FILE",
         "MY_DATA_HUB_OAUTH_ENV_FILE",
         "MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE",
+        "MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE",
         "MY_DATA_HUB_MASTER_TLS_CA_FILE",
     ):
         assert variable in source
@@ -117,6 +118,7 @@ def test_install_requires_private_split_inputs_without_static_master_credentials
     assert "require_private_file \"$mcp_env\"" in source
     assert "require_private_file \"$oauth_env\"" in source
     assert "require_private_file \"$oauth_key\"" in source
+    assert "require_regular_file \"$oauth_overlap_jwks\"" in source
     assert "reject_data_plane_environment" in source
     assert "external DNS" not in source
     assert "yc " not in source.casefold()

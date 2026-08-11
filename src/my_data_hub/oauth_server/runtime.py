@@ -81,8 +81,8 @@ def _overlap_public_jwks() -> tuple[dict[str, object], ...]:
     if not isinstance(payload, dict) or set(payload) != {"keys"}:
         raise ValueError("OAuth overlap JWKS must contain only a keys array")
     keys = payload["keys"]
-    if not isinstance(keys, list) or not 1 <= len(keys) <= 4 or not all(isinstance(key, dict) for key in keys):
-        raise ValueError("OAuth overlap JWKS must contain one to four public keys")
+    if not isinstance(keys, list) or len(keys) > 4 or not all(isinstance(key, dict) for key in keys):
+        raise ValueError("OAuth overlap JWKS must contain zero to four public keys")
     return tuple(dict(key) for key in keys)
 
 

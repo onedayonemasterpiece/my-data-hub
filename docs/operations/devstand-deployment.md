@@ -80,6 +80,8 @@ The installation command additionally refuses to proceed unless:
 - provider, MCP-reader and OAuth environment files are distinct regular non-symlink
   files with no group/world permissions;
 - the OAuth signing key has the same private-file constraint;
+- the overlap JWKS is a bounded regular public-key file (`{"keys":[]}` before the first
+  rotation, then up to four previous public verification keys);
 - the master TLS CA is a regular non-symlink file;
 - the bounded master-asset root is a real non-symlink directory;
 - none of the static environments contains a PostgreSQL data-plane URL or crosses the
@@ -93,6 +95,7 @@ MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE
 MY_DATA_HUB_MCP_ENV_FILE
 MY_DATA_HUB_OAUTH_ENV_FILE
 MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE
+MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE
 MY_DATA_HUB_MASTER_TLS_CA_FILE
 MY_DATA_HUB_MASTER_ASSET_DIR
 MY_DATA_HUB_CONTROL_LEDGER_DIR
