@@ -1676,6 +1676,9 @@ def run_master(
                         from my_data_hub.master_runtime.acceptance_soak import (
                             build_notebook_soak_port,
                         )
+                        from my_data_hub.master_runtime.fm24_checkpoint_recovery import (
+                            RuntimeCheckpointRecoveryAdapter,
+                        )
 
                         if not isinstance(acceptance_effects, ProductionMasterAcceptanceEffects):
                             raise RuntimeError("FM24 requires production runtime acceptance effects")
@@ -1697,6 +1700,10 @@ def run_master(
                                     run_secret=run_secret,
                                     lease_until=expires_at,
                                 ),
+                                checkpoint_recovery=RuntimeCheckpointRecoveryAdapter(
+                                    coordinator=checkpoint_coordinator,
+                                    database_url=database_url,
+                                ) if checkpoint_coordinator is not None else None,
                             )
                             soak_ports[acceptance_command.task_id] = port
                         acceptance_effects.soak_sessions = port  # type: ignore[assignment]

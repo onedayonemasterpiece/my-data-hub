@@ -453,6 +453,23 @@ class SoakSessions:
     def exact_service_active(self, _binding) -> bool:
         return True
 
+    def checkpoint_recovery_evidence(self, _binding):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(
+            heartbeats_continuous=True,
+            heartbeat_count=12,
+            heartbeat_receipt_sha256s=("1" * 64,) * 12,
+            reads_succeeded=True,
+            read_query_count=12,
+            bounded_read_receipt_sha256s=("2" * 64,) * 12,
+            checkpoint_verified=True,
+            recovery_succeeded=True,
+            checkpoint_id=UUID(int=99),
+            exact_version_ref="owner/checkpoints/99",
+            manifest_sha256="3" * 64,
+            checkpoint_receipt_sha256="4" * 64,
+            recovery_receipt_sha256="5" * 64,
+        )
+
 
 def test_fm24_controller_has_fixed_3600_second_twelve_rotation_schedule(monkeypatch) -> None:
     times = iter((0, 3_600_000_000_000))

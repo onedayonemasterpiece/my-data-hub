@@ -595,6 +595,8 @@ class SoakSessionPort(Protocol):
 
     def exact_service_active(self, binding: MasterAcceptanceBinding) -> bool: ...
 
+    def checkpoint_recovery_evidence(self, binding: MasterAcceptanceBinding) -> Any: ...
+
     def completed_steps(self, binding: MasterAcceptanceBinding) -> int: ...
 
     def session_started_monotonic_ns(self, binding: MasterAcceptanceBinding) -> int: ...
@@ -738,6 +740,18 @@ class ProductionMasterAcceptanceEffects(MasterAcceptanceRuntimeEffects):
             raise ProductionAcceptanceBlocked("FM24_MONOTONIC_WINDOW_INVALID")
         if stale_denials != rotations or not self.soak_sessions.exact_service_active(command.binding):
             raise ProductionAcceptanceBlocked("FM24_SESSION_OR_SERVICE_ASSERTION_FAILED")
+        checkpoint_evidence = self.soak_sessions.checkpoint_recovery_evidence(command.binding)
+        if (
+            checkpoint_evidence.heartbeats_continuous is not True
+            or checkpoint_evidence.heartbeat_count != 12
+            or len(checkpoint_evidence.heartbeat_receipt_sha256s) != 12
+            or checkpoint_evidence.reads_succeeded is not True
+            or checkpoint_evidence.read_query_count != 12
+            or len(checkpoint_evidence.bounded_read_receipt_sha256s) != 12
+            or checkpoint_evidence.checkpoint_verified is not True
+            or checkpoint_evidence.recovery_succeeded is not True
+        ):
+            raise ProductionAcceptanceBlocked("FM24_CHECKPOINT_RECOVERY_UNVERIFIED")
         return RotationSoakEvidence(
             kind="SESSION_ROTATION_SOAK",
             monotonic_started_ns=started,
@@ -749,6 +763,19 @@ class ProductionMasterAcceptanceEffects(MasterAcceptanceRuntimeEffects):
             rejected_stale_sessions=stale_denials,
             remained_single_epoch=True,
             service_active_at_end=True,
+            heartbeats_continuous=True,
+            heartbeat_count=checkpoint_evidence.heartbeat_count,
+            heartbeat_receipt_sha256s=checkpoint_evidence.heartbeat_receipt_sha256s,
+            reads_succeeded=True,
+            read_query_count=checkpoint_evidence.read_query_count,
+            bounded_read_receipt_sha256s=checkpoint_evidence.bounded_read_receipt_sha256s,
+            checkpoint_verified=True,
+            recovery_succeeded=True,
+            checkpoint_id=checkpoint_evidence.checkpoint_id,
+            exact_version_ref=checkpoint_evidence.exact_version_ref,
+            manifest_sha256=checkpoint_evidence.manifest_sha256,
+            checkpoint_receipt_sha256=checkpoint_evidence.checkpoint_receipt_sha256,
+            recovery_receipt_sha256=checkpoint_evidence.recovery_receipt_sha256,
         )
 
     @staticmethod

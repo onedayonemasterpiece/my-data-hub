@@ -253,7 +253,10 @@ def build_notebook_soak_port(
     *, task_id: Any, binding: MasterAcceptanceBinding, journal_path: Path,
     runtime_client: Any, database_gate: Any, credential_authority: NotebookSoakCredentialAuthority,
     renew_tunnel: Callable[[datetime], None],
+    checkpoint_recovery: Any,
 ) -> ProductionSoakSessionPort:
+    if checkpoint_recovery is None:
+        raise ValueError("FM24 requires the fixed runtime checkpoint/recovery adapter")
     return ProductionSoakSessionPort(
         task_id=task_id,
         binding=binding,
@@ -264,4 +267,5 @@ def build_notebook_soak_port(
         credential_registrar=credential_authority,
         read_probe=NotebookSoakReadProbe(credential_authority, database_gate.connection),
         evidence_class="live",
+        checkpoint_recovery=checkpoint_recovery,
     )
