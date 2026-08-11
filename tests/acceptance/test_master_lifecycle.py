@@ -443,6 +443,178 @@ def test_owner_claim_exposes_only_exact_fm11_fm12_drain_directive(tmp_path: Path
         assert response.json()["directive"]["task_id"] == str(request.task_id)
 
 
+@pytest.mark.parametrize("scenario", ["FM08", "FM10"])
+def test_runtime_control_directive_is_exact_owner_claim_bound(
+    tmp_path: Path, scenario: str
+) -> None:
+    ledger, handle = _active_ledger(tmp_path)
+    request = _request(scenario, operation_id=handle.operation_id)
+    ledger.ensure_master_acceptance_task(
+        task_id=str(request.task_id),
+        scenario_id=scenario,
+        idempotency_key=request.idempotency_key,
+        request_sha256=request.request_sha256,
+        principal_id="owner",
+        client_id="acceptance-client",
+        source_revision=request.source_revision,
+        target_operation_id=handle.operation_id,
+    )
+    payload = ledger.claim_master_acceptance_host_command(
+        task_id=str(request.task_id),
+        expected_scenario=scenario,
+        principal_id="owner",
+        client_id="acceptance-client",
+    )
+    assert payload is not None
+    command = MasterAcceptanceCommand.model_validate(payload)
+    arguments = {
+        "task_id": str(command.task_id),
+        "command_id": str(command.command_id),
+        "command_sha256": command.command_sha256,
+        "run_id": str(command.binding.run_id),
+        "attempt_id": str(command.binding.attempt_id),
+        "master_instance_id": str(command.binding.master_instance_id),
+        "epoch": command.binding.epoch,
+    }
+    if scenario == "FM10":
+        control = ledger.suspend_master_acceptance_renewal(**arguments)
+        assert control["renewal_suspended"] == 1 and control["renewal_acknowledged"] == 0
+        ledger.acknowledge_master_acceptance_renewal_suspension(
+            run_id=arguments["run_id"],
+            attempt_id=arguments["attempt_id"],
+            master_instance_id=arguments["master_instance_id"],
+            epoch=command.binding.epoch,
+        )
+        assert ledger.master_acceptance_runtime_control(str(command.task_id))["renewal_acknowledged"] == 1  # type: ignore[index]
+    else:
+        control = ledger.arm_master_acceptance_callback_loss(**arguments)
+        assert control["callback_state"] == "ARMED"
+        event_id = str(uuid4())
+        ledger.capture_master_acceptance_callback(
+            task_id=str(command.task_id), event_id=event_id, body_sha256="b" * 64
+        )
+        before, after = str(uuid4()), str(uuid4())
+        ledger.record_master_acceptance_restart(
+            task_id=str(command.task_id), restart_from_id=before, restart_to_id=after
+        )
+        ledger.mark_master_acceptance_callback_replayed(
+            task_id=str(command.task_id), event_id=event_id, body_sha256="b" * 64
+        )
+        assert ledger.master_acceptance_runtime_control(str(command.task_id))["callback_state"] == "REPLAYED"  # type: ignore[index]
+    exact = ledger.master_acceptance_runtime_directive(
+        run_id=arguments["run_id"],
+        attempt_id=arguments["attempt_id"],
+        master_instance_id=arguments["master_instance_id"],
+        epoch=command.binding.epoch,
+    )
+    assert exact["available"] is True and exact["scenario_id"] == scenario
+    stale = ledger.master_acceptance_runtime_directive(
+        run_id=arguments["run_id"],
+        attempt_id=arguments["attempt_id"],
+        master_instance_id=arguments["master_instance_id"],
+        epoch=command.binding.epoch + 1,
+    )
+    assert stale == {
+        "available": False,
+        "renewal_suspended": False,
+        "soak_requested_step": 0,
+        "soak_completed_step": 0,
+    }
+
+
+def test_fm08_app_persists_exact_heartbeat_but_suppresses_projection_and_ack(
+    tmp_path: Path,
+) -> None:
+    ledger, handle = _active_ledger(tmp_path)
+    runtime = _control_runtime(ledger)
+    request = _request("FM08", operation_id=handle.operation_id)
+    ledger.ensure_master_acceptance_task(
+        task_id=str(request.task_id), scenario_id="FM08",
+        idempotency_key=request.idempotency_key, request_sha256=request.request_sha256,
+        principal_id="owner", client_id="acceptance-client", source_revision=request.source_revision,
+        target_operation_id=handle.operation_id,
+    )
+    payload = ledger.claim_master_acceptance_host_command(
+        task_id=str(request.task_id), expected_scenario="FM08",
+        principal_id="owner", client_id="acceptance-client",
+    )
+    assert payload is not None
+    command = MasterAcceptanceCommand.model_validate(payload)
+    ledger.arm_master_acceptance_callback_loss(
+        task_id=str(command.task_id), command_id=str(command.command_id),
+        command_sha256=command.command_sha256, run_id=str(command.binding.run_id),
+        attempt_id=str(command.binding.attempt_id),
+        master_instance_id=str(command.binding.master_instance_id), epoch=command.binding.epoch,
+    )
+    service_before = ledger.resolve_service("postgres-master")
+    assert service_before is not None
+    heartbeat = RuntimeEvent(
+        event_id=str(uuid4()), run_id=handle.run_id, attempt_id=handle.attempt_id,
+        service_instance_id=handle.service_instance_id,
+        source_identity="my-data-hub/postgres-master", source_version="git:0123456789abcdef",
+        event_type=RuntimeEventType.RUNTIME_HEARTBEAT, emitted_at=ledger.clock.now(),
+        local_sequence=2, epoch=handle.epoch,
+        data={"lease_until": (ledger.clock.now() + timedelta(minutes=6)).isoformat()},
+    )
+    app = create_app(
+        ControlPlaneSettings(ledger_path=ledger.path), ledger=ledger, master_runtime=runtime
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/internal/runtime/events", content=json_body(
+                heartbeat.model_dump(mode="json", by_alias=True, exclude_none=True)
+            ), headers={"Authorization": f"Bearer {SECRET}"},
+        )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "acceptance_callback_ack_suppressed"
+    control = ledger.master_acceptance_runtime_control(str(command.task_id))
+    assert control is not None and control["callback_state"] == "CAPTURED"
+    assert control["callback_event_id"] == heartbeat.event_id
+    service_after = ledger.resolve_service("postgres-master")
+    assert service_after is not None and service_after.latest_event_id == service_before.latest_event_id
+
+
+def test_fm10_runtime_control_endpoint_acknowledges_exact_suspension(tmp_path: Path) -> None:
+    ledger, handle = _active_ledger(tmp_path)
+    request = _request("FM10", operation_id=handle.operation_id)
+    ledger.ensure_master_acceptance_task(
+        task_id=str(request.task_id), scenario_id="FM10",
+        idempotency_key=request.idempotency_key, request_sha256=request.request_sha256,
+        principal_id="owner", client_id="acceptance-client", source_revision=request.source_revision,
+        target_operation_id=handle.operation_id,
+    )
+    payload = ledger.claim_master_acceptance_host_command(
+        task_id=str(request.task_id), expected_scenario="FM10",
+        principal_id="owner", client_id="acceptance-client",
+    )
+    assert payload is not None
+    command = MasterAcceptanceCommand.model_validate(payload)
+    ledger.suspend_master_acceptance_renewal(
+        task_id=str(command.task_id), command_id=str(command.command_id),
+        command_sha256=command.command_sha256, run_id=str(command.binding.run_id),
+        attempt_id=str(command.binding.attempt_id),
+        master_instance_id=str(command.binding.master_instance_id), epoch=command.binding.epoch,
+    )
+    app = create_app(
+        ControlPlaneSettings(ledger_path=ledger.path), ledger=ledger,
+        master_runtime=_control_runtime(ledger),
+    )
+    headers = {
+        "Authorization": f"Bearer {SECRET}",
+        "X-MDH-Master-Instance-ID": handle.master_instance_id,
+        "X-MDH-Epoch": str(handle.epoch),
+    }
+    url = f"/internal/runtime/master-acceptance/{handle.run_id}/{handle.attempt_id}"
+    with TestClient(app) as client:
+        directive = client.get(f"{url}/control-directive", headers=headers)
+        assert directive.status_code == 200
+        assert directive.json()["renewal_suspended"] is True
+        acknowledged = client.post(f"{url}/renewal-suspended", headers=headers)
+        assert acknowledged.json() == {"accepted": True, "renewal_suspended": True}
+    control = ledger.master_acceptance_runtime_control(str(command.task_id))
+    assert control is not None and control["renewal_acknowledged"] == 1
+
+
 def test_protected_ledger_replays_one_exact_acked_body_without_state_change(tmp_path: Path) -> None:
     ledger = ControlLedger(
         tmp_path / "stored-replay.sqlite3",

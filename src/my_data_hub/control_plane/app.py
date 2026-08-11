@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
 
@@ -65,6 +65,7 @@ from my_data_hub.providers.kaggle.contracts import (
     TaskResourceClaim,
 )
 from my_data_hub.providers.models import ControlClass, ProviderKind
+from my_data_hub.runtime_sdk import RuntimeEvent, RuntimeEventType
 from my_data_hub.tunnel_broker_ipc import TunnelBrokerClient
 from my_data_hub.workloads.bloggers.importer import batch_identity
 from my_data_hub.workloads.bloggers.master_stage import (
@@ -403,6 +404,9 @@ def create_app(
     app.state.tunnel_certificate_broker = tunnel_certificate_broker
     app.state.embedding_stage_runner = embedding_stage_runner or execute_embedding_production_stage
     app.state.provider_gateway = provider_gateway if runtime.provider_gateway_enabled else None
+    # Process invocation identity, not the host/kernel boot ID. A real control
+    # restart necessarily constructs a new application and therefore a new UUID.
+    app.state.control_boot_id = uuid4()
     app.state.reconcile_master_requests = (
         master_runtime.reconcile_requested_once if master_runtime is not None else None
     )
@@ -550,11 +554,15 @@ def create_app(
 
     @app.get("/health/live")
     def live() -> dict[str, Any]:
-        return {"ok": True, "component": "my-data-hub-control-plane"}
+        return {
+            "ok": True,
+            "component": "my-data-hub-control-plane",
+            "control_boot_id": str(app.state.control_boot_id),
+        }
 
     @app.get("/health/ready")
     def ready() -> dict[str, Any]:
-        return {"ok": True, **snapshot()}
+        return {"ok": True, "control_boot_id": str(app.state.control_boot_id), **snapshot()}
 
     if runtime.provider_gateway_enabled:
         provider_tools = frozenset(
@@ -1266,9 +1274,27 @@ def create_app(
         raw = await request.body()
         if len(raw) > 64 * 1024:
             raise HTTPException(status_code=413, detail={"code": "runtime_event_too_large"})
+        token = authorization.removeprefix("Bearer ").strip()
         try:
-            receipt = coordinator.accept_runtime_event(raw, header_token=authorization.removeprefix("Bearer ").strip())
-        except EventRejected as exc:
+            event = RuntimeEvent.model_validate_json(raw)
+            armed = control_ledger.armed_master_acceptance_callback_loss(
+                run_id=str(event.run_id), attempt_id=str(event.attempt_id), epoch=event.epoch
+            )
+            if armed is not None and event.event_type is RuntimeEventType.RUNTIME_HEARTBEAT:
+                # Persist/authenticate/deduplicate the exact body, but
+                # deliberately withhold its lifecycle projection and HTTP ACK.
+                # A restart-safe owner supervisor later replays this stored ID.
+                captured = control_ledger.ingest_runtime_event(raw, header_token=token)
+                control_ledger.capture_master_acceptance_callback(
+                    task_id=str(armed["task_id"]),
+                    event_id=str(captured.event_id),
+                    body_sha256=captured.body_sha256,
+                )
+                raise HTTPException(status_code=503, detail={"code": "acceptance_callback_ack_suppressed"})
+            receipt = coordinator.accept_runtime_event(raw, header_token=token)
+        except HTTPException:
+            raise
+        except (EventRejected, StaleRuntimeEvent, ValueError) as exc:
             raise HTTPException(status_code=400, detail={"code": "runtime_event_rejected"}) from exc
         return {
             "event_id": receipt.event_id,
@@ -1325,6 +1351,79 @@ def create_app(
             epoch=int(operation.identity["epoch"]),
         )
         return {"drain": directive is not None, "directive": directive}
+
+    @app.get("/internal/runtime/master-acceptance/{run_id}/{attempt_id}/control-directive")
+    def runtime_master_acceptance_control_directive(
+        run_id: str,
+        attempt_id: str,
+        authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        """Fixed FM10/FM24 booleans/counters; never a generic action body."""
+
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            allowed_states=frozenset({"ACTIVE"}),
+        )
+        exact_epoch = int(str(epoch))
+        identity = operation.identity
+        if (
+            identity.get("run_id") != run_id
+            or identity.get("attempt_id") != attempt_id
+            or identity.get("master_instance_id") != master_instance_id
+            or int(identity.get("epoch", 0)) != exact_epoch
+        ):
+            raise HTTPException(status_code=409, detail={"code": "master_acceptance_runtime_binding_stale"})
+        directive = control_ledger.master_acceptance_runtime_directive(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=str(master_instance_id),
+            epoch=exact_epoch,
+        )
+        return {
+            "available": bool(directive["available"]),
+            "renewal_suspended": bool(directive["renewal_suspended"]),
+            "soak_requested_step": int(directive["soak_requested_step"]),
+            "soak_completed_step": int(directive["soak_completed_step"]),
+        }
+
+    @app.post("/internal/runtime/master-acceptance/{run_id}/{attempt_id}/renewal-suspended")
+    def runtime_master_acceptance_renewal_suspended(
+        run_id: str,
+        attempt_id: str,
+        authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            allowed_states=frozenset({"ACTIVE"}),
+        )
+        exact_epoch = int(str(epoch))
+        if (
+            operation.identity.get("master_instance_id") != master_instance_id
+            or int(operation.identity.get("epoch", 0)) != exact_epoch
+        ):
+            raise HTTPException(status_code=409, detail={"code": "master_acceptance_runtime_binding_stale"})
+        try:
+            control_ledger.acknowledge_master_acceptance_renewal_suspension(
+                run_id=run_id,
+                attempt_id=attempt_id,
+                master_instance_id=str(master_instance_id),
+                epoch=exact_epoch,
+            )
+        except StaleRuntimeEvent as exc:
+            raise HTTPException(status_code=409, detail={"code": "renewal_suspension_not_armed"}) from exc
+        return {"accepted": True, "renewal_suspended": True}
 
     @app.post("/internal/runtime/master-acceptance/{run_id}/{attempt_id}/receipt")
     async def runtime_master_acceptance_receipt(

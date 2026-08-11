@@ -2682,6 +2682,219 @@ class ControlLedger:
             assert task is not None
             return self._master_acceptance_task_from_connection(connection, task)
 
+    def arm_master_acceptance_callback_loss(
+        self, *, task_id: str, command_id: str, command_sha256: str,
+        run_id: str, attempt_id: str, master_instance_id: str, epoch: int,
+    ) -> dict[str, Any]:
+        """Arm exactly one task-bound FM08 heartbeat response loss."""
+
+        return self._ensure_master_acceptance_runtime_control(
+            task_id=task_id, command_id=command_id, command_sha256=command_sha256,
+            scenario_id="FM08", run_id=run_id, attempt_id=attempt_id,
+            master_instance_id=master_instance_id, epoch=epoch,
+            callback_state="ARMED", renewal_suspended=False,
+        )
+
+    def suspend_master_acceptance_renewal(
+        self, *, task_id: str, command_id: str, command_sha256: str,
+        run_id: str, attempt_id: str, master_instance_id: str, epoch: int,
+    ) -> dict[str, Any]:
+        """Suspend both heartbeat and database-gate renewal for exact FM10."""
+
+        return self._ensure_master_acceptance_runtime_control(
+            task_id=task_id, command_id=command_id, command_sha256=command_sha256,
+            scenario_id="FM10", run_id=run_id, attempt_id=attempt_id,
+            master_instance_id=master_instance_id, epoch=epoch,
+            callback_state="DISARMED", renewal_suspended=True,
+        )
+
+    def _ensure_master_acceptance_runtime_control(
+        self, *, task_id: str, command_id: str, command_sha256: str,
+        scenario_id: str, run_id: str, attempt_id: str,
+        master_instance_id: str, epoch: int, callback_state: str,
+        renewal_suspended: bool,
+    ) -> dict[str, Any]:
+        try:
+            for value in (task_id, command_id, run_id, attempt_id, master_instance_id):
+                UUID(value)
+        except ValueError as exc:
+            raise ValueError("acceptance runtime control requires exact UUID identities") from exc
+        if len(command_sha256) != 64 or epoch < 1:
+            raise ValueError("acceptance runtime control binding is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            command = connection.execute(
+                "SELECT c.command_id,c.command_sha256,c.state,c.claim_authority,t.task_id,t.scenario_id,"
+                "t.target_run_id,t.target_attempt_id,t.target_master_instance_id,t.target_epoch "
+                "FROM master_acceptance_commands c JOIN master_acceptance_tasks t ON t.task_id=c.task_id "
+                "WHERE t.task_id=?", (task_id,),
+            ).fetchone()
+            if (
+                command is None or command["command_id"] != command_id
+                or command["command_sha256"] != command_sha256 or command["state"] != "CLAIMED"
+                or command["claim_authority"] != "owner_host" or command["scenario_id"] != scenario_id
+                or command["target_run_id"] != run_id or command["target_attempt_id"] != attempt_id
+                or command["target_master_instance_id"] != master_instance_id
+                or int(command["target_epoch"]) != epoch
+            ):
+                raise StaleRuntimeEvent("acceptance runtime control differs from the owner-host claim")
+            existing = connection.execute(
+                "SELECT * FROM master_acceptance_runtime_controls WHERE task_id=?", (task_id,)
+            ).fetchone()
+            exact = {
+                "task_id": task_id, "command_id": command_id, "command_sha256": command_sha256,
+                "scenario_id": scenario_id, "run_id": run_id, "attempt_id": attempt_id,
+                "master_instance_id": master_instance_id, "epoch": epoch,
+            }
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO master_acceptance_runtime_controls(task_id,command_id,command_sha256,"
+                    "scenario_id,run_id,attempt_id,master_instance_id,epoch,callback_state,renewal_suspended,"
+                    "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (task_id, command_id, command_sha256, scenario_id, run_id, attempt_id,
+                     master_instance_id, epoch, callback_state, int(renewal_suspended), now),
+                )
+            else:
+                if any(existing[key] != value for key, value in exact.items()):
+                    raise StaleRuntimeEvent("acceptance runtime control identity was reused")
+                if callback_state == "ARMED" and existing["callback_state"] == "DISARMED":
+                    connection.execute(
+                        "UPDATE master_acceptance_runtime_controls SET callback_state='ARMED',updated_at=? "
+                        "WHERE task_id=? AND callback_state='DISARMED'", (now, task_id),
+                    )
+                if renewal_suspended and not bool(existing["renewal_suspended"]):
+                    connection.execute(
+                        "UPDATE master_acceptance_runtime_controls SET renewal_suspended=1,updated_at=? "
+                        "WHERE task_id=?", (now, task_id),
+                    )
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_runtime_controls WHERE task_id=?", (task_id,)
+            ).fetchone()
+            assert row is not None
+            return dict(row)
+
+    def master_acceptance_runtime_directive(
+        self, *, run_id: str, attempt_id: str, master_instance_id: str, epoch: int,
+    ) -> dict[str, Any]:
+        """Return only fixed booleans/counters for the exact runtime."""
+
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT task_id,command_id,command_sha256,scenario_id,renewal_suspended,"
+                "soak_requested_step,soak_completed_step FROM master_acceptance_runtime_controls "
+                "WHERE run_id=? AND attempt_id=? AND master_instance_id=? AND epoch=?",
+                (run_id, attempt_id, master_instance_id, epoch),
+            ).fetchone()
+        return (
+            {"available": False, "renewal_suspended": False,
+             "soak_requested_step": 0, "soak_completed_step": 0}
+            if row is None else {"available": True, **dict(row)}
+        )
+
+    def acknowledge_master_acceptance_renewal_suspension(
+        self, *, run_id: str, attempt_id: str, master_instance_id: str, epoch: int,
+    ) -> None:
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            changed = connection.execute(
+                "UPDATE master_acceptance_runtime_controls SET renewal_acknowledged=1,updated_at=? "
+                "WHERE run_id=? AND attempt_id=? AND master_instance_id=? AND epoch=? "
+                "AND scenario_id='FM10' AND renewal_suspended=1",
+                (now, run_id, attempt_id, master_instance_id, epoch),
+            ).rowcount
+            if changed != 1:
+                raise StaleRuntimeEvent("FM10 renewal suspension acknowledgement is stale")
+
+    def armed_master_acceptance_callback_loss(
+        self, *, run_id: str, attempt_id: str, epoch: int,
+    ) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_runtime_controls WHERE run_id=? AND attempt_id=? "
+                "AND epoch=? AND scenario_id='FM08' AND callback_state='ARMED'",
+                (run_id, attempt_id, epoch),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def capture_master_acceptance_callback(
+        self, *, task_id: str, event_id: str, body_sha256: str,
+    ) -> dict[str, Any]:
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            connection.execute(
+                "UPDATE master_acceptance_runtime_controls SET callback_state='CAPTURED',"
+                "callback_event_id=?,callback_body_sha256=?,updated_at=? "
+                "WHERE task_id=? AND scenario_id='FM08' AND callback_state='ARMED'",
+                (event_id, body_sha256, now, task_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_runtime_controls WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if (row is None or row["callback_state"] != "CAPTURED"
+                    or row["callback_event_id"] != event_id or row["callback_body_sha256"] != body_sha256):
+                raise StaleRuntimeEvent("FM08 callback capture lost its exact CAS")
+            return dict(row)
+
+    def master_acceptance_runtime_control(self, task_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_runtime_controls WHERE task_id=?", (task_id,)
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def record_master_acceptance_restart(
+        self, *, task_id: str, restart_from_id: str, restart_to_id: str | None,
+    ) -> dict[str, Any]:
+        try:
+            UUID(restart_from_id)
+            if restart_to_id is not None:
+                UUID(restart_to_id)
+        except ValueError as exc:
+            raise ValueError("control process invocation identity is invalid") from exc
+        if restart_to_id == restart_from_id:
+            raise ValueError("control process restart must change invocation identity")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_runtime_controls WHERE task_id=? AND scenario_id='FM08'",
+                (task_id,),
+            ).fetchone()
+            if row is None or row["callback_state"] not in {"CAPTURED", "REPLAYED"}:
+                raise StaleRuntimeEvent("FM08 restart is not bound to a captured callback")
+            if row["restart_from_id"] not in {None, restart_from_id}:
+                raise StaleRuntimeEvent("FM08 restart origin changed")
+            if row["restart_to_id"] not in {None, restart_to_id}:
+                raise StaleRuntimeEvent("FM08 restart result changed")
+            connection.execute(
+                "UPDATE master_acceptance_runtime_controls SET restart_from_id=?,restart_to_id=?,updated_at=? "
+                "WHERE task_id=?", (restart_from_id, restart_to_id, now, task_id),
+            )
+            updated = connection.execute(
+                "SELECT * FROM master_acceptance_runtime_controls WHERE task_id=?", (task_id,)
+            ).fetchone()
+            assert updated is not None
+            return dict(updated)
+
+    def mark_master_acceptance_callback_replayed(
+        self, *, task_id: str, event_id: str, body_sha256: str,
+    ) -> None:
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            changed = connection.execute(
+                "UPDATE master_acceptance_runtime_controls SET callback_state='REPLAYED',updated_at=? "
+                "WHERE task_id=? AND callback_state='CAPTURED' AND callback_event_id=? "
+                "AND callback_body_sha256=? AND restart_to_id IS NOT NULL",
+                (now, task_id, event_id, body_sha256),
+            ).rowcount
+            if changed != 1:
+                row = connection.execute(
+                    "SELECT callback_state,callback_event_id,callback_body_sha256 "
+                    "FROM master_acceptance_runtime_controls WHERE task_id=?", (task_id,),
+                ).fetchone()
+                if (row is None or row["callback_state"] != "REPLAYED"
+                        or row["callback_event_id"] != event_id or row["callback_body_sha256"] != body_sha256):
+                    raise StaleRuntimeEvent("FM08 callback replay lost its exact CAS")
+
     def master_acceptance_drain_directive(
         self, *, run_id: str, attempt_id: str, epoch: int
     ) -> dict[str, Any] | None:

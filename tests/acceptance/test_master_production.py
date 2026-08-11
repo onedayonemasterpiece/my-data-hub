@@ -20,6 +20,7 @@ from my_data_hub.acceptance.master_lifecycle import (
 from my_data_hub.acceptance.master_production import (
     CallbackLossEvidence,
     ControlMasterAcceptanceExecutor,
+    ControlRestartReceipt,
     MasterAcceptanceOperatorAdapter,
     OldEpochDenials,
     PostgresH1ExpiredLeaseDenialProbe,
@@ -183,6 +184,8 @@ class ProbeConnection:
             return Cursor([(False, False, False, False, False, True, False)])
         if "lease_until<=clock_timestamp" in query:
             return Cursor([(True, self.command.binding.epoch, str(self.command.binding.master_instance_id))])
+        if "greatest(0,ceil(extract(EPOCH" in query:
+            return Cursor([(10, self.command.binding.epoch, str(self.command.binding.master_instance_id))])
         if "FROM master_control.epoch_state" in query:
             return Cursor(
                 [(self.command.binding.epoch, str(self.command.binding.master_instance_id), object(), "open", 10)]
@@ -224,7 +227,7 @@ def test_fm10_real_probe_observes_55000_rollback_only_and_revision_unchanged(mon
     command = _command("FM10")
     connection = ProbeConnection(command)
     renewal = Renewal()
-    monotonic_ns = iter((0, 60_000_000_000))
+    monotonic_ns = iter((0, 0, 60_000_000_000))
     monotonic = iter((0.0, 60.0))
     monkeypatch.setattr("my_data_hub.acceptance.master_production.time.monotonic_ns", lambda: next(monotonic_ns))
     monkeypatch.setattr("my_data_hub.acceptance.master_production.time.monotonic", lambda: next(monotonic))
@@ -268,16 +271,13 @@ class CallbackSupervisor:
         self.event = StoredCallbackRef(UUID(int=3), "b" * 64)
         self.calls: list[str] = []
 
-    def control_boot_id(self) -> UUID:
-        return self.after if "restart" in self.calls else self.before
-
     def suppress_next_task_callback(self, _command) -> StoredCallbackRef:
         self.calls.append("suppress")
         return self.event
 
-    def restart_control_process(self, _command) -> UUID:
+    def restart_control_process(self, _command) -> ControlRestartReceipt:
         self.calls.append("restart")
-        return self.after
+        return ControlRestartReceipt(self.before, self.after)
 
     def replay_stored_callback(self, _command, event_id: UUID) -> str:
         assert event_id == self.event.event_id

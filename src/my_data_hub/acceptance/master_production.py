@@ -13,6 +13,7 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, Protocol
 from urllib.parse import parse_qs, urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -20,6 +21,9 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from my_data_hub.control_plane.ledger import EventDisposition, EventRejected, StaleRuntimeEvent
 from my_data_hub.control_plane.runtime import ControlPlaneMasterRuntime
 from my_data_hub.hashing import canonical_json_bytes
+from my_data_hub.mcp.contracts import ExecutionLimits, SessionRequest
+from my_data_hub.mcp.oauth import AccessIdentity
+from my_data_hub.mcp.postgres_broker import DirectoryEpochCredentialSource
 from my_data_hub.orchestrator.master import MasterState
 from my_data_hub.providers.kaggle import KaggleMasterRuntimeProvider, derive_runtime_secret
 from my_data_hub.runtime_sdk import RuntimeEvent
@@ -90,8 +94,66 @@ class LeaseExpiryRenewalPort(Protocol):
     def suspend_exact_renewal(self, command: MasterAcceptanceCommand) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class ControlLedgerLeaseExpiryRenewal:
+    """Durable FM10 directive consumed only by the exact Kaggle runtime."""
+
+    runtime: ControlPlaneMasterRuntime
+
+    def suspend_exact_renewal(self, command: MasterAcceptanceCommand) -> None:
+        if command.command_kind is not MasterAcceptanceCommandKind.LEASE_EXPIRY_DENIAL:
+            raise MasterLifecycleAcceptanceError("renewal suspension received another command")
+        self.runtime.ledger.suspend_master_acceptance_renewal(
+            task_id=str(command.task_id),
+            command_id=str(command.command_id),
+            command_sha256=command.command_sha256,
+            run_id=str(command.binding.run_id),
+            attempt_id=str(command.binding.attempt_id),
+            master_instance_id=str(command.binding.master_instance_id),
+            epoch=command.binding.epoch,
+        )
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            control = self.runtime.ledger.master_acceptance_runtime_control(str(command.task_id))
+            if control is not None and bool(control["renewal_acknowledged"]):
+                return
+            time.sleep(1)
+        raise ProductionAcceptanceBlocked("FM10_RENEWAL_SUSPENSION_NOT_ACKNOWLEDGED")
+
+
 class FixedOperatorConnectionFactory(Protocol):
     def open(self, binding: MasterAcceptanceBinding) -> Any: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DirectoryOperatorConnectionFactory:
+    """Resolve the exact short-lived H1 operator envelope at probe time."""
+
+    source: DirectoryEpochCredentialSource
+
+    def open(self, binding: MasterAcceptanceBinding) -> Any:
+        principal = AccessIdentity(
+            subject="master-acceptance-fm10",
+            client_id="control-master-acceptance",
+            scopes=frozenset({"acceptance:operate"}),
+            audience="local-control",
+            token_id="owner-host-claim",
+            expires_at=2**63 - 1,
+            issuer="local-control",
+            issued_at=0,
+            resource="local-control",
+        )
+        credential = self.source.load(
+            SessionRequest(
+                principal=principal,
+                master_instance_id=str(binding.master_instance_id),
+                epoch=binding.epoch,
+                role="operator",
+                tool="acceptance.scenario.request",
+                limits=ExecutionLimits(max_rows=1, timeout_seconds=5, max_result_bytes=16 * 1024),
+            )
+        )
+        return PostgresOperatorConnectionFactory(credential.database_url).open(binding)
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,14 +233,28 @@ class PostgresH1ExpiredLeaseDenialProbe:
                 or str(epoch_row[3]) != "open"
             ):
                 raise ProductionAcceptanceBlocked("FM10_ACTIVE_BINDING_MISMATCH")
-            remaining = int(epoch_row[4])
-            wait_seconds = max(60, remaining + 1)
-            if wait_seconds > 900:
+            initial_remaining = int(epoch_row[4])
+            if initial_remaining > 840:
                 raise ProductionAcceptanceBlocked("FM10_LEASE_EXPIRY_EXCEEDS_BOUND")
             revision_before = int(revision_row[0])
             connection.commit()
             # Admission and all read-only checks precede the task-owned fault.
             self.renewal.suspend_exact_renewal(command)
+            suspended_row = connection.execute(
+                "SELECT greatest(0,ceil(extract(EPOCH FROM (lease_until-clock_timestamp()))))::bigint,"
+                "current_epoch,master_instance_id::text FROM master_control.epoch_state WHERE singleton=true"
+            ).fetchone()
+            if (
+                suspended_row is None
+                or int(suspended_row[1]) != command.binding.epoch
+                or str(suspended_row[2]) != str(command.binding.master_instance_id)
+            ):
+                raise ProductionAcceptanceBlocked("FM10_SUSPENDED_LEASE_BINDING_CHANGED")
+            connection.commit()
+            elapsed_before_wait = (time.monotonic_ns() - started) / 1_000_000_000
+            wait_seconds = max(60, int(suspended_row[0]) + 1)
+            if elapsed_before_wait + wait_seconds > 900:
+                raise ProductionAcceptanceBlocked("FM10_LEASE_EXPIRY_EXCEEDS_BOUND")
             deadline = time.monotonic() + wait_seconds
             while True:
                 remaining_wait = deadline - time.monotonic()
@@ -321,14 +397,22 @@ class StoredCallbackRef:
             raise ValueError("stored callback hash is not SHA-256")
 
 
+@dataclass(frozen=True, slots=True)
+class ControlRestartReceipt:
+    before_boot_id: UUID
+    after_boot_id: UUID
+
+    def __post_init__(self) -> None:
+        if self.before_boot_id == self.after_boot_id:
+            raise ValueError("control process restart receipt did not change boot identity")
+
+
 class CallbackLossSupervisorPort(Protocol):
     """Task-owned callback suppression and real control-process supervisor."""
 
-    def control_boot_id(self) -> UUID: ...
-
     def suppress_next_task_callback(self, command: MasterAcceptanceCommand) -> StoredCallbackRef: ...
 
-    def restart_control_process(self, command: MasterAcceptanceCommand) -> UUID: ...
+    def restart_control_process(self, command: MasterAcceptanceCommand) -> ControlRestartReceipt: ...
 
     def replay_stored_callback(
         self, command: MasterAcceptanceCommand, event_id: UUID
@@ -511,6 +595,12 @@ class SoakSessionPort(Protocol):
 
     def exact_service_active(self, binding: MasterAcceptanceBinding) -> bool: ...
 
+    def completed_steps(self, binding: MasterAcceptanceBinding) -> int: ...
+
+    def session_started_monotonic_ns(self, binding: MasterAcceptanceBinding) -> int: ...
+
+    def session_deadline_monotonic_ns(self, binding: MasterAcceptanceBinding) -> int: ...
+
 
 EMPTY_CANONICAL_RELATIONS = (
     "hub.project",
@@ -592,10 +682,33 @@ class ProductionMasterAcceptanceEffects(MasterAcceptanceRuntimeEffects):
         self._kind(command, MasterAcceptanceCommandKind.SESSION_ROTATION_SOAK)
         if self.soak_sessions is None:
             raise ProductionAcceptanceBlocked("FM24_SOAK_SESSION_PORT_UNAVAILABLE")
-        started = time.monotonic_ns()
-        rotations = renewals = tunnel_renewals = stale_denials = 0
-        for _step in range(SOAK_SECONDS // SOAK_STEP_SECONDS):
-            time.sleep(SOAK_STEP_SECONDS)
+        persisted_started = getattr(self.soak_sessions, "session_started_monotonic_ns", None)
+        persisted_deadline = getattr(self.soak_sessions, "session_deadline_monotonic_ns", None)
+        persisted_steps = getattr(self.soak_sessions, "completed_steps", None)
+        resumable = all(callable(item) for item in (persisted_started, persisted_deadline, persisted_steps))
+        started = (
+            int(persisted_started(command.binding))
+            if resumable
+            else time.monotonic_ns()
+        )
+        deadline = (
+            int(persisted_deadline(command.binding))
+            if resumable
+            else started + 5_400_000_000_000
+        )
+        completed = int(persisted_steps(command.binding)) if resumable else 0
+        if not 0 <= completed <= 12 or deadline != started + 5_400_000_000_000:
+            raise ProductionAcceptanceBlocked("FM24_DURABLE_SCHEDULE_INVALID")
+        rotations = renewals = tunnel_renewals = stale_denials = completed
+        for step in range(completed, SOAK_SECONDS // SOAK_STEP_SECONDS):
+            if resumable:
+                target = started + (step + 1) * SOAK_STEP_SECONDS * 1_000_000_000
+                now_ns = time.monotonic_ns()
+                if now_ns > deadline:
+                    raise ProductionAcceptanceBlocked("FM24_MONOTONIC_WINDOW_INVALID")
+                time.sleep(max(0.0, (target - now_ns) / 1_000_000_000))
+            else:
+                time.sleep(SOAK_STEP_SECONDS)
             self.soak_sessions.renew_lease_and_tunnel(command.binding)
             renewals += 1
             tunnel_renewals += 1
@@ -603,6 +716,8 @@ class ProductionMasterAcceptanceEffects(MasterAcceptanceRuntimeEffects):
             rotations += 1
             self.soak_sessions.bounded_read(command.binding)
             stale_denials += int(self.soak_sessions.stale_session_reconnect_denied(command.binding))
+            if resumable and int(persisted_steps(command.binding)) != step + 1:
+                raise ProductionAcceptanceBlocked("FM24_DURABLE_STEP_ACK_MISSING")
         finished = time.monotonic_ns()
         observed = (finished - started) // 1_000_000_000
         if not SOAK_SECONDS <= observed <= 5400:
@@ -675,11 +790,8 @@ class ProductionControlHostEffects:
         supervisor = self.callback_supervisor
         if supervisor is None:
             raise ProductionAcceptanceBlocked("FM08_CALLBACK_SUPERVISOR_UNAVAILABLE")
-        before = supervisor.control_boot_id()
         stored = supervisor.suppress_next_task_callback(command)
-        after = supervisor.restart_control_process(command)
-        if before == after or after != supervisor.control_boot_id():
-            raise ProductionAcceptanceBlocked("FM08_REAL_CONTROL_RESTART_NOT_OBSERVED")
+        restart = supervisor.restart_control_process(command)
         disposition = supervisor.replay_stored_callback(command, stored.event_id)
         if not supervisor.exact_service_active(command.binding):
             raise ProductionAcceptanceBlocked("FM08_SERVICE_NOT_ACTIVE_AFTER_RECOVERY")
@@ -688,8 +800,8 @@ class ProductionControlHostEffects:
             callback_suppressed_once=True,
             exact_event_id=stored.event_id,
             exact_body_sha256=stored.body_sha256,
-            control_boot_id_before=before,
-            control_boot_id_after=after,
+            control_boot_id_before=restart.before_boot_id,
+            control_boot_id_after=restart.after_boot_id,
             replay_disposition=disposition,
             service_active_after_recovery=True,
         )
@@ -798,8 +910,17 @@ class ProductionControlAcceptanceContext:
     old_epoch_denials: OldEpochDenialPort | None = None
     h1_denial: H1ExpiredLeaseDenialPort | None = None
     soak_sessions: SoakSessionPort | None = None
+    session_directory: Path | None = None
 
     def build(self, runtime: ControlPlaneMasterRuntime) -> ControlMasterAcceptanceExecutor:
+        h1_denial = self.h1_denial
+        if h1_denial is None and self.session_directory is not None:
+            h1_denial = PostgresH1ExpiredLeaseDenialProbe(
+                connections=DirectoryOperatorConnectionFactory(
+                    DirectoryEpochCredentialSource(self.session_directory)
+                ),
+                renewal=ControlLedgerLeaseExpiryRenewal(runtime),
+            )
         return ControlMasterAcceptanceExecutor(
             runtime=runtime,
             host_claims=ControlLedgerOwnerAcceptanceClaims(runtime),
@@ -808,7 +929,7 @@ class ProductionControlAcceptanceContext:
                 callback_supervisor=self.callback_supervisor,
                 stored_replay=self.stored_replay or ControlLedgerStoredReplay(runtime),
                 old_epoch_denials=self.old_epoch_denials,
-                h1_denial=self.h1_denial,
+                h1_denial=h1_denial,
                 soak_sessions=self.soak_sessions,
             ),
         )

@@ -29,6 +29,7 @@ from my_data_hub.master_runtime.notebook_entrypoint import (
     _EmbeddingLeaseMaintainer,
     _emit_service_ready,
     _fresh_canonical_committer_connection,
+    _master_acceptance_renewal_suspended,
     _register_reader_credential,
     _register_session_credentials,
     _runtime_deadlines,
@@ -92,6 +93,7 @@ def test_master_notebook_config_requires_exact_fields_and_source_binding(tmp_pat
     with pytest.raises(ValueError, match="exactly 10800"):
         NotebookMasterConfig.load(path)
 
+
     payload = _payload()
     payload["checkpoint_directory"] = "/kaggle/input/checkpoint"
     path.write_text(json.dumps(payload))
@@ -109,6 +111,51 @@ def test_master_notebook_config_requires_exact_fields_and_source_binding(tmp_pat
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="provider timeout"):
         NotebookMasterConfig.load(path)
+
+def test_fm10_observed_directive_stays_suspended_when_ack_response_is_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = _payload()
+    payload["run_id"] = "11111111-1111-4111-8111-111111111112"
+    payload["attempt_id"] = "11111111-1111-4111-8111-111111111113"
+    path = tmp_path / "master.json"
+    path.write_text(json.dumps(payload))
+    config = NotebookMasterConfig.load(path)
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def read(self, _limit):  # type: ignore[no-untyped-def]
+            return json.dumps(
+                {
+                    "available": True,
+                    "renewal_suspended": True,
+                    "soak_requested_step": 0,
+                    "soak_completed_step": 0,
+                }
+            ).encode()
+
+    calls = 0
+
+    def urlopen(_request, timeout):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        assert timeout == 10
+        calls += 1
+        if calls == 1:
+            return Response()
+        raise OSError("ack response lost")
+
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.urllib.request.urlopen", urlopen)
+    assert _master_acceptance_renewal_suspended(
+        config=config,
+        callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
+        run_secret="r" * 32,
+    ) is True
+    assert calls == 2
 
 
 def test_checkpoint_component_allocations_fit_one_admitted_attempt() -> None:

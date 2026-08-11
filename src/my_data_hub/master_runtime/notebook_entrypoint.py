@@ -902,6 +902,62 @@ def _master_acceptance_drain_requested(
     return True
 
 
+def _master_acceptance_renewal_suspended(
+    *, config: NotebookMasterConfig, callback_url: str, run_secret: str
+) -> bool:
+    """Acknowledge the fixed FM10 directive before stopping both renewals."""
+
+    request = urllib.request.Request(
+        _master_acceptance_url(callback_url, config.run_id, config.attempt_id, "/control-directive"),
+        headers=_runtime_metadata_headers(config, run_secret),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read(16 * 1024 + 1)
+    except urllib.error.HTTPError as exc:
+        if exc.code in {502, 503, 504}:
+            return False
+        raise
+    except OSError:
+        return False
+    if len(raw) > 16 * 1024:
+        raise RuntimeError("master acceptance control directive exceeds 16 KiB")
+    body = json.loads(raw)
+    if not isinstance(body, dict) or set(body) != {
+        "available", "renewal_suspended", "soak_requested_step", "soak_completed_step"
+    }:
+        raise RuntimeError("master acceptance control directive differs from its exact contract")
+    if (
+        not isinstance(body["available"], bool)
+        or not isinstance(body["renewal_suspended"], bool)
+        or not isinstance(body["soak_requested_step"], int)
+        or isinstance(body["soak_requested_step"], bool)
+        or not 0 <= body["soak_requested_step"] <= 12
+        or not isinstance(body["soak_completed_step"], int)
+        or isinstance(body["soak_completed_step"], bool)
+        or not 0 <= body["soak_completed_step"] <= body["soak_requested_step"]
+    ):
+        raise RuntimeError("master acceptance control directive values are invalid")
+    if not body["available"] or not body["renewal_suspended"]:
+        return False
+    acknowledgement = urllib.request.Request(
+        _master_acceptance_url(callback_url, config.run_id, config.attempt_id, "/renewal-suspended"),
+        data=b"",
+        headers=_runtime_metadata_headers(config, run_secret),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(acknowledgement, timeout=10) as response:
+            accepted = json.loads(response.read(16 * 1024 + 1))
+    except (urllib.error.HTTPError, OSError):
+        # Once the authenticated directive was observed, fail closed: never
+        # renew merely because the acknowledgement response was ambiguous.
+        return True
+    if accepted != {"accepted": True, "renewal_suspended": True}:
+        raise RuntimeError("renewal suspension acknowledgement differs from its exact contract")
+    return True
+
+
 def _post_master_acceptance_receipt(
     *,
     config: NotebookMasterConfig,
@@ -1545,6 +1601,11 @@ def run_master(
             remaining_active = active_deadline - time.monotonic()
             if remaining_active <= 0:
                 break
+            renewal_suspended = _master_acceptance_renewal_suspended(
+                config=config,
+                callback_url=callback_url,
+                run_secret=run_secret,
+            )
             if _master_acceptance_drain_requested(
                 config=config,
                 callback_url=callback_url,
@@ -1678,35 +1739,36 @@ def run_master(
             time.sleep(min(30.0, remaining_active))
             if time.monotonic() >= active_deadline:
                 break
-            tunnel.poll(now=datetime.now(UTC))
-            proposed = datetime.now(UTC) + timedelta(seconds=config.lease_seconds)
-            delivery = runtime.emit(
-                RuntimeEventType.RUNTIME_HEARTBEAT,
-                phase="active",
-                status="healthy",
-                data={"lease_until": proposed.isoformat().replace("+00:00", "Z")},
-            )
-            if delivery.status == "delivered":
-                gate.renew(identity, proposed)
-                current_lease = proposed
-                observed_now = datetime.now(UTC)
-                if reader_expires_at <= observed_now + timedelta(seconds=75):
-                    next_expiry = min(observed_now + timedelta(minutes=4), proposed)
-                    if next_expiry <= observed_now + timedelta(seconds=15):
-                        raise TimeoutError("renewed lease is too short for a broker credential")
-                    session_principals, reader_expires_at = _register_session_credentials(
-                        connection=gate_connection,
-                        gate=gate,
-                        config=config,
-                        callback_url=callback_url,
-                        run_secret=run_secret,
-                        roles=credential_roles,
-                        expires_at=next_expiry,
-                        now=observed_now,
-                    )
-                    issued_principals.update(session_principals)
-            if datetime.now(UTC) + timedelta(seconds=15) >= current_lease:
-                raise CallbackLeaseClosingError("callback unavailable; write lease is closing")
+            if not renewal_suspended:
+                tunnel.poll(now=datetime.now(UTC))
+                proposed = datetime.now(UTC) + timedelta(seconds=config.lease_seconds)
+                delivery = runtime.emit(
+                    RuntimeEventType.RUNTIME_HEARTBEAT,
+                    phase="active",
+                    status="healthy",
+                    data={"lease_until": proposed.isoformat().replace("+00:00", "Z")},
+                )
+                if delivery.status == "delivered":
+                    gate.renew(identity, proposed)
+                    current_lease = proposed
+                    observed_now = datetime.now(UTC)
+                    if reader_expires_at <= observed_now + timedelta(seconds=75):
+                        next_expiry = min(observed_now + timedelta(minutes=4), proposed)
+                        if next_expiry <= observed_now + timedelta(seconds=15):
+                            raise TimeoutError("renewed lease is too short for a broker credential")
+                        session_principals, reader_expires_at = _register_session_credentials(
+                            connection=gate_connection,
+                            gate=gate,
+                            config=config,
+                            callback_url=callback_url,
+                            run_secret=run_secret,
+                            roles=credential_roles,
+                            expires_at=next_expiry,
+                            now=observed_now,
+                        )
+                        issued_principals.update(session_principals)
+                if datetime.now(UTC) + timedelta(seconds=15) >= current_lease:
+                    raise CallbackLeaseClosingError("callback unavailable; write lease is closing")
     except BaseException as exc:
         active_error = exc
 
