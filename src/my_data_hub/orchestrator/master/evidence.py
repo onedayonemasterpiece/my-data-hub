@@ -48,6 +48,7 @@ class MasterTerminalOutput:
     current_checkpoint_id: str
     recovered_events: tuple[bytes, ...]
     output_tree_sha256: str
+    output_receipt_sha256: str
 
     def __post_init__(self) -> None:
         identities = (
@@ -76,6 +77,8 @@ class MasterTerminalOutput:
             raise ValueError("master terminal manifest hash is invalid")
         if not re.fullmatch(r"[a-f0-9]{64}", self.output_tree_sha256):
             raise ValueError("master terminal output-tree hash is invalid")
+        if not re.fullmatch(r"[a-f0-9]{64}", self.output_receipt_sha256):
+            raise ValueError("master terminal output receipt hash is invalid")
         if not 1 <= len(self.recovered_events) <= 8:
             raise ValueError("master terminal recovered event count is invalid")
         if any(not 2 <= len(event) <= 64 * 1024 for event in self.recovered_events):

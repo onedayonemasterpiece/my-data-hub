@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -83,6 +84,8 @@ class FakeKaggleApi:
         self.outputs: dict[str, dict[str, bytes]] = {}
         self.statuses: dict[str, str] = {}
         self.calls: list[tuple[object, ...]] = []
+        self.output_file_patterns: list[str | None] = []
+        self.ignore_output_file_pattern = False
 
     def authenticate(self) -> None:
         self.calls.append(("authenticate",))
@@ -248,8 +251,12 @@ class FakeKaggleApi:
         exact_run_ref = kernel
         kernel = "/".join(kernel.split("/")[:2])
         self.calls.append(("kernels_output", exact_run_ref))
-        write_tree(Path(path), self.outputs[kernel])
-        return [str(Path(path) / name) for name in self.outputs[kernel]], ""
+        self.output_file_patterns.append(file_pattern)
+        outputs = self.outputs[kernel]
+        if file_pattern is not None and not self.ignore_output_file_pattern:
+            outputs = {name: body for name, body in outputs.items() if re.fullmatch(file_pattern, name)}
+        write_tree(Path(path), outputs)
+        return [str(Path(path) / name) for name in outputs], ""
 
     def kernels_delete(self, kernel: str, no_confirm: bool = False) -> None:
         assert self.journal.intents
@@ -582,6 +589,101 @@ def test_output_rejects_stale_run_receipt() -> None:
     }
     with pytest.raises(KaggleIdentityError, match="stale"):
         client.read_exact_run_output(pushed.run)
+
+
+def test_exact_single_output_file_uses_anchored_pattern_and_never_downloads_broad_tree(tmp_path: Path) -> None:
+    client, api, _journal = adapter()
+    task_id = uuid4()
+    run_id = uuid4()
+    source = f'RUN_ID = "{run_id}"\n'.encode()
+    pushed = client.push_private_notebook(
+        intent=effect(
+            MutationAction.PUSH_NOTEBOOK,
+            "owner/single-output-kernel",
+            task_id=task_id,
+            arguments={
+                "task_run_id": str(run_id),
+                "source_sha256": hashlib.sha256(source).hexdigest(),
+                "dataset_sources": (),
+                "control_class": "mcp_managed",
+                "disposable": True,
+            },
+        ),
+        task_run_id=run_id,
+        source=source,
+        title="single-output-kernel",
+        code_file="run.py",
+        kernel_type="script",
+        language="python",
+        control_class=ControlClass.MCP_MANAGED,
+        disposable=True,
+    )
+    terminal_name = "my-data-hub-master-terminal.json"
+    api.outputs[pushed.run.provider_ref] = {
+        terminal_name: b'{"status":"succeeded"}',
+        "private-business-bytes.bin": b"must never reach the devstand",
+    }
+
+    receipt = client.download_exact_run_output_file(
+        pushed.run,
+        destination=tmp_path / "single-output",
+        file_name=terminal_name,
+        max_bytes=256 * 1024,
+    )
+
+    assert receipt.file_count == 1
+    assert api.output_file_patterns[-1] == r"^my\-data\-hub\-master\-terminal\.json$"
+    assert [path.name for path in (tmp_path / "single-output").iterdir()] == [terminal_name]
+    assert b"business" not in (tmp_path / "single-output" / terminal_name).read_bytes()
+
+
+def test_exact_single_output_file_fails_closed_when_missing_or_api_ignores_pattern(tmp_path: Path) -> None:
+    client, api, _journal = adapter()
+    run_id = uuid4()
+    source = f'RUN_ID = "{run_id}"\n'.encode()
+    pushed = client.push_private_notebook(
+        intent=effect(
+            MutationAction.PUSH_NOTEBOOK,
+            "owner/single-output-denial",
+            task_id=run_id,
+            arguments={
+                "task_run_id": str(run_id),
+                "source_sha256": hashlib.sha256(source).hexdigest(),
+                "dataset_sources": (),
+                "control_class": "mcp_managed",
+                "disposable": True,
+            },
+        ),
+        task_run_id=run_id,
+        source=source,
+        title="single-output-denial",
+        code_file="run.py",
+        kernel_type="script",
+        language="python",
+        control_class=ControlClass.MCP_MANAGED,
+        disposable=True,
+    )
+    api.outputs[pushed.run.provider_ref] = {"private-business-bytes.bin": b"never copy broadly"}
+    destination = tmp_path / "missing-output"
+    with pytest.raises(KaggleIdentityError, match="missing or extra"):
+        client.download_exact_run_output_file(
+            pushed.run,
+            destination=destination,
+            file_name="my-data-hub-master-terminal.json",
+            max_bytes=256 * 1024,
+        )
+    assert not destination.exists()
+
+    api.outputs[pushed.run.provider_ref]["my-data-hub-master-terminal.json"] = b"{}"
+    api.ignore_output_file_pattern = True
+    with pytest.raises(KaggleIdentityError, match="missing or extra"):
+        client.download_exact_run_output_file(
+            pushed.run,
+            destination=destination,
+            file_name="my-data-hub-master-terminal.json",
+            max_bytes=256 * 1024,
+        )
+    assert not destination.exists()
 
 
 def test_unknown_names_are_external_read_only_and_never_cleanup_authority() -> None:

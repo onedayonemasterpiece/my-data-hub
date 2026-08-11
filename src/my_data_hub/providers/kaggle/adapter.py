@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import re
 import shutil
 import tempfile
 import time
@@ -1178,6 +1179,64 @@ class KaggleProviderAdapter:
             terminal_state=KernelState.COMPLETE,
             output_tree_sha256=output_sha,
             file_count=len(entries),
+            observed_at=self.clock(),
+        )
+
+    def download_exact_run_output_file(
+        self,
+        run: KaggleKernelRunIdentity,
+        *,
+        destination: Path,
+        file_name: str,
+        max_bytes: int,
+    ) -> KaggleKernelOutputTreeIdentity:
+        """Download one exact top-level output without copying the run's broad tree.
+
+        Kaggle resolves output against the current session even when given the
+        numeric run ref.  As with broad checkpoint output, fence the source/run
+        before and after the official ``kernels_output`` call.  Unlike that
+        path, this method supplies an anchored file pattern and rejects any API
+        implementation that writes a missing, nested, symlinked, or extra file.
+        """
+
+        if not file_name or Path(file_name).name != file_name or "/" in file_name or "\\" in file_name:
+            raise KaggleContractError("exact output file name must be one top-level basename")
+        _validate_relative_path(file_name)
+        if not 1 <= max_bytes <= 64 * 1024 * 1024:
+            raise KaggleContractError("exact output file size bound is invalid")
+        status = self.read_run_status(run)
+        if status.state != KernelState.COMPLETE:
+            raise KaggleContractError("run output is unavailable before exact terminal completion")
+        _prepare_destination(destination)
+        pattern = rf"^{re.escape(file_name)}$"
+        try:
+            self.retry.call(
+                "kernels_output",
+                lambda: self.api.kernels_output(
+                    run.provider_run_ref,
+                    path=str(destination),
+                    file_pattern=pattern,
+                    force=True,
+                    quiet=True,
+                    page_token=None,
+                    page_size=100,
+                ),
+            )
+            entries = _tree_entries(destination)
+            if len(entries) != 1 or entries[0]["path"] != file_name:
+                raise KaggleIdentityError("Kaggle exact output file selection returned a missing or extra path")
+            if int(entries[0]["byte_size"]) > max_bytes:
+                raise KaggleContractError("Kaggle exact output file exceeds its bounded size")
+            output_sha = sha256_value({"files": entries})
+        except Exception:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
+        self._assert_current_run(run)
+        return KaggleKernelOutputTreeIdentity(
+            run=run,
+            terminal_state=KernelState.COMPLETE,
+            output_tree_sha256=output_sha,
+            file_count=1,
             observed_at=self.clock(),
         )
 

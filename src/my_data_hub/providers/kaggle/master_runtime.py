@@ -43,8 +43,6 @@ from .contracts import (
 
 MASTER_TERMINAL_OUTPUT_NAME = "my-data-hub-master-terminal.json"
 MAX_MASTER_TERMINAL_OUTPUT_BYTES = 256 * 1024
-MAX_MASTER_OUTPUT_TREE_BYTES = 64 * 1024 * 1024
-MAX_MASTER_OUTPUT_TREE_FILES = 256
 
 
 class MasterLaunchContractError(ValueError):
@@ -355,8 +353,12 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             return MasterTerminalEvidence(platform_status)
         with tempfile.TemporaryDirectory(prefix="my-data-hub-terminal-") as folder:
             destination = Path(folder)
-            output_tree = self.adapter.download_exact_run_output_tree(run, destination=destination)
-            self._validate_bounded_output_tree(destination, expected_file_count=output_tree.file_count)
+            output_tree = self.adapter.download_exact_run_output_file(
+                run,
+                destination=destination,
+                file_name=MASTER_TERMINAL_OUTPUT_NAME,
+                max_bytes=MAX_MASTER_TERMINAL_OUTPUT_BYTES,
+            )
             output = self._read_terminal_output(
                 destination / MASTER_TERMINAL_OUTPUT_NAME,
                 output_tree_sha256=output_tree.output_tree_sha256,
@@ -470,25 +472,10 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
                 current_checkpoint_id=checkpoint["current_checkpoint_id"],
                 recovered_events=encoded_events,
                 output_tree_sha256=output_tree_sha256,
+                output_receipt_sha256=hashlib.sha256(encoded).hexdigest(),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise MasterLaunchContractError("master terminal output values are invalid") from exc
-
-    @staticmethod
-    def _validate_bounded_output_tree(root: Path, *, expected_file_count: int) -> None:
-        total_bytes = 0
-        file_count = 0
-        for path in root.rglob("*"):
-            if path.is_symlink():
-                raise MasterLaunchContractError("master output tree contains a symbolic link")
-            if not path.is_file():
-                continue
-            file_count += 1
-            total_bytes += path.stat().st_size
-            if file_count > MAX_MASTER_OUTPUT_TREE_FILES or total_bytes > MAX_MASTER_OUTPUT_TREE_BYTES:
-                raise MasterLaunchContractError("master output tree exceeds the bounded recovery contract")
-        if file_count != expected_file_count:
-            raise MasterLaunchContractError("master output tree changed after exact provider readback")
 
     def _validate_effect(self, effect: PlannedProviderEffect) -> None:
         expected = {

@@ -1751,6 +1751,97 @@ class ControlLedger:
             )
         return audit_id
 
+    def record_master_terminal_recovery_evidence(
+        self,
+        *,
+        operation_id: str,
+        epoch: int,
+        output_receipt_sha256: str,
+        provider_status: str,
+        metadata: Mapping[str, Any],
+    ) -> str:
+        """Persist one idempotent, metadata-only provider recovery receipt."""
+
+        if (
+            epoch < 1
+            or len(output_receipt_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in output_receipt_sha256)
+            or provider_status not in {"queued", "running", "complete", "error", "unknown"}
+        ):
+            raise ValueError("master terminal recovery evidence identity is invalid")
+        expected_keys = {
+            "schema_version",
+            "run_id",
+            "attempt_id",
+            "service_instance_id",
+            "master_instance_id",
+            "source_identity",
+            "source_version",
+            "checkpoint_id",
+            "manifest_sha256",
+            "output_tree_sha256",
+            "output_receipt_sha256",
+            "provider_status",
+            "events",
+        }
+        events = metadata.get("events")
+        if (
+            set(metadata) != expected_keys
+            or metadata.get("schema_version") != "my-data-hub-master-terminal-recovery-evidence.v1"
+            or metadata.get("provider_status") != provider_status
+            or metadata.get("output_receipt_sha256") != output_receipt_sha256
+            or not isinstance(events, list)
+            or len(events) != 4
+            or any(
+                not isinstance(event, Mapping)
+                or set(event) != {"event_id", "body_sha256"}
+                or not isinstance(event.get("event_id"), str)
+                or not 1 <= len(str(event["event_id"])) <= 200
+                or not isinstance(event.get("body_sha256"), str)
+                or len(str(event["body_sha256"])) != 64
+                or any(character not in "0123456789abcdef" for character in str(event["body_sha256"]))
+                for event in events
+            )
+            or len({str(event["event_id"]) for event in events}) != 4
+            or any(
+                not isinstance(metadata[key], str) or not metadata[key] or len(str(metadata[key])) > 500
+                for key in expected_keys - {"events"}
+            )
+        ):
+            raise ValueError("master terminal recovery metadata contract is invalid")
+        metadata_json = _safe_json(metadata, max_bytes=MAX_METADATA_BYTES)
+        audit_ref = f"kaggle-terminal-output-sha256:{output_receipt_sha256}"
+        audit_id = hashlib.sha256(
+            f"master-terminal-recovery-v1:{operation_id}:{epoch}:{output_receipt_sha256}".encode()
+        ).hexdigest()
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            connection.execute(
+                "INSERT INTO audit_log(audit_id,principal_id,client_id,action,operation_id,epoch,revision,audit_ref,"
+                "recorded_at,metadata_json) VALUES (?,NULL,NULL,'master.terminal_recovery',?,?,NULL,?,?,?) "
+                "ON CONFLICT(audit_id) DO NOTHING",
+                (audit_id, operation_id, epoch, audit_ref, now, metadata_json),
+            )
+            row = connection.execute(
+                "SELECT action,operation_id,epoch,audit_ref,metadata_json FROM audit_log WHERE audit_id=?",
+                (audit_id,),
+            ).fetchone()
+            if row is None or (
+                row["action"],
+                row["operation_id"],
+                int(row["epoch"]),
+                row["audit_ref"],
+                row["metadata_json"],
+            ) != (
+                "master.terminal_recovery",
+                operation_id,
+                epoch,
+                audit_ref,
+                metadata_json,
+            ):
+                raise IdempotencyConflict("master terminal recovery evidence identity collision")
+        return audit_id
+
     @staticmethod
     def _operation_from_row(row: sqlite3.Row) -> OperationRecord:
         return OperationRecord(

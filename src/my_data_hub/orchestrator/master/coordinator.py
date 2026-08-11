@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -224,6 +225,8 @@ class MasterCoordinator:
             ):
                 raise ValueError("recovered master terminal event identity is stale or reordered")
             previous_sequence = event.local_sequence
+        if len({event.event_id for event in events}) != len(events):
+            raise ValueError("recovered master terminal event IDs are not unique")
         draining, started, verified, terminal = events
         if (
             (draining.phase, draining.status, draining.data) != ("draining", "closed", {})
@@ -241,6 +244,33 @@ class MasterCoordinator:
             or set(terminal.data) != {"checkpoint_id"}
         ):
             raise ValueError("recovered terminal events disagree with exact checkpoint output")
+        self.ledger.record_master_terminal_recovery_evidence(
+            operation_id=operation.operation_id,
+            epoch=output.epoch,
+            output_receipt_sha256=output.output_receipt_sha256,
+            provider_status=evidence.platform_status.value,
+            metadata={
+                "schema_version": "my-data-hub-master-terminal-recovery-evidence.v1",
+                "run_id": output.run_id,
+                "attempt_id": output.attempt_id,
+                "service_instance_id": output.service_instance_id,
+                "master_instance_id": output.master_instance_id,
+                "source_identity": output.source_identity,
+                "source_version": output.source_version,
+                "checkpoint_id": output.checkpoint_id,
+                "manifest_sha256": output.manifest_sha256,
+                "output_tree_sha256": output.output_tree_sha256,
+                "output_receipt_sha256": output.output_receipt_sha256,
+                "provider_status": evidence.platform_status.value,
+                "events": [
+                    {
+                        "event_id": event.event_id,
+                        "body_sha256": hashlib.sha256(raw).hexdigest(),
+                    }
+                    for event, raw in zip(events, output.recovered_events, strict=True)
+                ],
+            },
+        )
         for event in events:
             self._project_recovered_terminal_event(operation.operation_id, event)
         self.ledger.revoke_runtime_token(output.run_id, output.attempt_id)

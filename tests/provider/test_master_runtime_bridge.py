@@ -77,13 +77,15 @@ class FakeKaggleAdapter:
         self.calls["run_reconcile"] += 1
         return SimpleNamespace(state=self.status_state)
 
-    def download_exact_run_output_tree(self, run, *, destination):  # type: ignore[no-untyped-def]
+    def download_exact_run_output_file(  # type: ignore[no-untyped-def]
+        self, run, *, destination, file_name, max_bytes
+    ):
         assert self.run == run
         assert self.terminal_payload is not None
+        assert file_name == "my-data-hub-master-terminal.json"
+        assert max_bytes == 256 * 1024
         self.calls["output_download"] += 1
-        (destination / "my-data-hub-master-terminal.json").write_text(
-            json.dumps(self.terminal_payload, sort_keys=True, separators=(",", ":"))
-        )
+        (destination / file_name).write_text(json.dumps(self.terminal_payload, sort_keys=True, separators=(",", ":")))
         return SimpleNamespace(output_tree_sha256="d" * 64, file_count=1)
 
     def reconcile_private_notebook_run(self, **kwargs):  # type: ignore[no-untyped-def]
@@ -305,6 +307,35 @@ def test_exact_terminal_output_recovers_callbacks_lost_through_process_exit(tmp_
     assert row == (MasterState.STOPPED.value,)
     assert not ledger.runtime_token_valid(handle.run_id, handle.attempt_id, SECRET)
     assert adapter.calls["output_download"] == 1
+    audit = (
+        sqlite3.connect(ledger.path)
+        .execute(
+            "SELECT action,audit_ref,metadata_json FROM audit_log WHERE operation_id=?",
+            (handle.operation_id,),
+        )
+        .fetchone()
+    )
+    assert audit is not None and audit[0] == "master.terminal_recovery"
+    metadata = json.loads(audit[2])
+    assert audit[1] == f"kaggle-terminal-output-sha256:{metadata['output_receipt_sha256']}"
+    assert metadata["provider_status"] == "complete"
+    assert metadata["checkpoint_id"] == adapter.terminal_payload["checkpoint"]["checkpoint_id"]  # type: ignore[index]
+    recovered_event_ids = tuple(event["event_id"] for event in adapter.terminal_payload["events"])  # type: ignore[index]
+    assert tuple(item["event_id"] for item in metadata["events"]) == recovered_event_ids
+    assert all(set(item) == {"event_id", "body_sha256"} for item in metadata["events"])
+    placeholders = ",".join("?" for _ in recovered_event_ids)
+    stored_recovered_bodies = (
+        sqlite3.connect(ledger.path)
+        .execute(f"SELECT count(*) FROM runtime_events WHERE event_id IN ({placeholders})", recovered_event_ids)
+        .fetchone()
+    )
+    assert stored_recovered_bodies == (0,)
+    service_latest = (
+        sqlite3.connect(ledger.path)
+        .execute("SELECT latest_event_id FROM services WHERE service_instance_id=?", (handle.service_instance_id,))
+        .fetchone()
+    )
+    assert service_latest == (recovered_event_ids[-1],)
     assert restarted.reconcile_all({request.idempotency_key: request}) == []
 
 
@@ -344,6 +375,44 @@ def test_terminal_reconciliation_completes_from_each_durable_shutdown_state(
     )
     assert row == (MasterState.STOPPED.value,)
     assert not ledger.runtime_token_valid(handle.run_id, handle.attempt_id, SECRET)
+
+
+def test_terminal_recovery_evidence_is_durable_before_any_lifecycle_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, ledger, coordinator, request, handle = _active_master_with_terminal_output(tmp_path)
+
+    def reject_projection(**kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        raise RuntimeError("projection unavailable after evidence commit")
+
+    project = ledger.project_master_lifecycle
+    monkeypatch.setattr(ledger, "project_master_lifecycle", reject_projection)
+    with pytest.raises(RuntimeError, match="after evidence commit"):
+        coordinator.reconcile_operation(handle.operation_id, request)
+
+    operation = ledger.get_operation(handle.operation_id)
+    assert operation is not None and operation.state == MasterState.ACTIVE.value
+    audit = (
+        sqlite3.connect(ledger.path)
+        .execute("SELECT action,metadata_json FROM audit_log WHERE operation_id=?", (handle.operation_id,))
+        .fetchone()
+    )
+    assert audit is not None and audit[0] == "master.terminal_recovery"
+    metadata = json.loads(audit[1])
+    assert metadata["provider_status"] == "complete"
+    assert len(metadata["events"]) == 4
+    monkeypatch.setattr(ledger, "project_master_lifecycle", project)
+    assert coordinator.reconcile_operation(handle.operation_id, request).state == MasterState.STOPPED
+    audit_count = (
+        sqlite3.connect(ledger.path)
+        .execute(
+            "SELECT count(*) FROM audit_log WHERE operation_id=? AND action='master.terminal_recovery'",
+            (handle.operation_id,),
+        )
+        .fetchone()
+    )
+    assert audit_count == (1,)
 
 
 @pytest.mark.parametrize(
