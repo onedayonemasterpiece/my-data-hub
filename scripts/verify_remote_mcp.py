@@ -27,7 +27,24 @@ READ_ONLY_TOOLS = {
 FORBIDDEN_FRAGMENTS = ("write", "enqueue", "submit", "delete", "create", "update", "operator")
 
 
-async def verify(endpoint: str, token: str) -> dict[str, object]:
+def _structured_status(result: object) -> dict[str, object]:
+    structured = getattr(result, "structuredContent", None)
+    if isinstance(structured, dict):
+        return structured
+    for block in getattr(result, "content", ()):
+        text = getattr(block, "text", None)
+        if not isinstance(text, str):
+            continue
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    raise RuntimeError("remote platform.status has no structured JSON result")
+
+
+async def verify(endpoint: str, token: str, expected_commit: str) -> dict[str, object]:
     import httpx2
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
@@ -59,11 +76,16 @@ async def verify(endpoint: str, token: str) -> dict[str, object]:
             result = await session.call_tool("platform.status", {})
             if result.isError:
                 raise RuntimeError("remote platform.status returned an MCP error")
+            status = _structured_status(result)
+            observed_commit = status.get("deployed_commit")
+            if observed_commit != expected_commit:
+                raise RuntimeError("remote platform.status commit differs from the requested deployment")
             return {
                 "ok": True,
                 "endpoint": endpoint,
                 "tools": sorted(names),
                 "health_content_blocks": len(result.content),
+                "deployed_commit": observed_commit,
                 "writes_discoverable": False,
             }
 
@@ -78,13 +100,27 @@ def main() -> int:
         ),
     )
     parser.add_argument("--token", default=os.getenv("MY_DATA_HUB_MCP_CANARY_TOKEN", ""))
+    parser.add_argument(
+        "--expected-commit",
+        default=os.getenv("MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT", ""),
+    )
     args = parser.parse_args()
     parsed = urlsplit(args.endpoint)
     if parsed.scheme != "https" or parsed.path != "/mcp" or parsed.query or parsed.fragment:
         parser.error("endpoint must be an exact HTTPS /mcp resource without query or fragment")
     if not args.token:
         parser.error("MY_DATA_HUB_MCP_CANARY_TOKEN or --token is required")
-    print(json.dumps(asyncio.run(verify(args.endpoint, args.token)), indent=2, sort_keys=True))
+    if len(args.expected_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in args.expected_commit
+    ):
+        parser.error("MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT must be an exact lowercase Git SHA")
+    print(
+        json.dumps(
+            asyncio.run(verify(args.endpoint, args.token, args.expected_commit)),
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0
 
 

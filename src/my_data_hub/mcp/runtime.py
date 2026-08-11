@@ -85,7 +85,10 @@ def build_remote_runtime(
                 Path(os.getenv("MY_DATA_HUB_MASTER_SESSION_DIRECTORY", "/state/master-sessions"))
             )
         ),
-        control=LedgerControlReader(control_ledger),
+        control=LedgerControlReader(
+            control_ledger,
+            deployed_commit=os.getenv("MY_DATA_HUB_DEPLOY_COMMIT") or None,
+        ),
         audit=authority,
     )
     app = create_streamable_http_app(

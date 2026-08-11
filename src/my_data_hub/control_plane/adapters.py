@@ -63,14 +63,24 @@ class ControlLedgerOAuthAuthority:
 
 
 class LedgerControlReader(ControlPlaneReader):
-    def __init__(self, ledger: ControlLedger) -> None:
+    def __init__(self, ledger: ControlLedger, *, deployed_commit: str | None = None) -> None:
+        if deployed_commit is not None and (
+            len(deployed_commit) != 40
+            or any(character not in "0123456789abcdef" for character in deployed_commit)
+        ):
+            raise ValueError("deployed commit must be an exact lowercase Git SHA")
         self.ledger = ledger
+        self.deployed_commit = deployed_commit
 
     def invoke_control(
         self, tool: str, arguments: dict[str, Any], principal: AccessIdentity
     ) -> dict[str, Any]:
         if tool == "platform.status":
-            return {"control_plane_ready": True, "control_ledger": "sqlite-wal"}
+            return {
+                "control_plane_ready": True,
+                "control_ledger": "sqlite-wal",
+                **({"deployed_commit": self.deployed_commit} if self.deployed_commit else {}),
+            }
         if tool in {"operation.get", "data.change.status"}:
             record = self.ledger.get_operation(str(arguments.get("operation_id", "")))
             return {"found": False} if record is None else {
