@@ -8,6 +8,9 @@ from pathlib import Path
 
 import pytest
 
+from my_data_hub.control_plane.clock import DeterministicClock
+from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator, MasterIntent, MasterState
 from my_data_hub.tunnel_broker import (
     DEFAULT_ACCOUNT,
     TunnelBroker,
@@ -179,6 +182,16 @@ def test_deactivate_revokes_certificate_blanks_principal_and_terminates_account(
     state = json.loads(broker.state_path.read_text(encoding="utf-8"))
     assert state["active"] is None
     assert state["revoked_serials"] == [1]
+    with pytest.raises(TunnelBrokerError, match="fenced"):
+        broker.issue_public_key(
+            master_instance_id=INSTANCE,
+            run_id=RUN_ID,
+            attempt_id=ATTEMPT_ID,
+            epoch=3,
+            public_key=client_public.read_text(encoding="ascii"),
+            valid_before=NOW + timedelta(minutes=4),
+            now=NOW + timedelta(seconds=10),
+        )
 
 
 def test_exact_serial_revocation_is_immediate_and_wrong_serial_is_only_denied(tmp_path: Path) -> None:
@@ -320,16 +333,137 @@ def test_stale_epoch_wrong_identity_and_overlong_certificate_are_denied(tmp_path
         now=NOW,
     )
     assert replay.principal == active_principal.strip()
+    shorter_replay = broker.activate(
+        master_instance_id=INSTANCE,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        epoch=2,
+        lease_until=NOW + timedelta(minutes=4),
+        listen_port=25432,
+        now=NOW + timedelta(seconds=10),
+    )
+    assert shorter_replay.lease_until == NOW + timedelta(minutes=5)
     with pytest.raises(TunnelBrokerError, match="advance"):
         broker.activate(
             master_instance_id=INSTANCE,
             run_id=RUN_ID,
-            attempt_id=ATTEMPT_ID,
+            attempt_id="different-attempt",
             epoch=2,
             lease_until=NOW + timedelta(minutes=4),
             listen_port=25432,
             now=NOW,
         )
+
+
+def test_activation_response_loss_advances_same_identity_without_reviving_expired_epoch(tmp_path: Path) -> None:
+    broker, terminated, _ca = _broker(tmp_path)
+    first = broker.activate(
+        master_instance_id=INSTANCE,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        epoch=5,
+        lease_until=NOW + timedelta(minutes=2),
+        listen_port=25432,
+        now=NOW,
+    )
+    advanced = broker.activate(
+        master_instance_id=INSTANCE,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        epoch=5,
+        lease_until=NOW + timedelta(minutes=3),
+        listen_port=25432,
+        now=NOW + timedelta(seconds=30),
+    )
+    assert first.lease_until == NOW + timedelta(minutes=2)
+    assert advanced.lease_until == NOW + timedelta(minutes=3)
+    assert advanced.principal == first.principal
+    assert terminated == [DEFAULT_ACCOUNT]
+    durable = json.loads(broker.state_path.read_text(encoding="utf-8"))
+    assert durable["highest_epoch"] == 5
+    assert durable["active"]["lease_until"] == "2026-08-11T12:03:00Z"
+    delayed_replay = broker.activate(
+        master_instance_id=INSTANCE,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        epoch=5,
+        lease_until=NOW + timedelta(seconds=10),
+        listen_port=25432,
+        now=NOW + timedelta(minutes=1),
+    )
+    assert delayed_replay.lease_until == NOW + timedelta(minutes=3)
+
+    with pytest.raises(TunnelBrokerError, match="listener"):
+        broker.activate(
+            master_instance_id=INSTANCE,
+            run_id=RUN_ID,
+            attempt_id=ATTEMPT_ID,
+            epoch=5,
+            lease_until=NOW + timedelta(minutes=4),
+            listen_port=25433,
+            now=NOW + timedelta(minutes=1),
+        )
+    with pytest.raises(TunnelBrokerError, match="cannot be revived"):
+        broker.activate(
+            master_instance_id=INSTANCE,
+            run_id=RUN_ID,
+            attempt_id=ATTEMPT_ID,
+            epoch=5,
+            lease_until=NOW + timedelta(minutes=8),
+            listen_port=25432,
+            now=NOW + timedelta(minutes=3),
+        )
+    expired_state = json.loads(broker.state_path.read_text(encoding="utf-8"))
+    assert expired_state["active"] is None
+    assert expired_state["highest_epoch"] == 5
+    assert broker.principals_path.read_bytes() == b""
+    assert terminated == [DEFAULT_ACCOUNT, DEFAULT_ACCOUNT]
+    with pytest.raises(TunnelBrokerError, match="advance"):
+        broker.activate(
+            master_instance_id=INSTANCE,
+            run_id=RUN_ID,
+            attempt_id=ATTEMPT_ID,
+            epoch=5,
+            lease_until=NOW + timedelta(minutes=9),
+            listen_port=25432,
+            now=NOW + timedelta(minutes=4),
+        )
+
+
+def test_coordinator_absent_reconciliation_reuses_epoch_and_monotonically_extends_broker_lease(
+    tmp_path: Path,
+) -> None:
+    broker, terminated, _ca = _broker(tmp_path)
+    clock = DeterministicClock(NOW)
+    ledger = ControlLedger(tmp_path / "control.sqlite3", clock=clock)
+    provider = FakeKaggleRuntime({"trigger_run": [RuntimeError("lost-before-provider-effect")]})
+    coordinator = MasterCoordinator(ledger, provider, tunnel_authority=broker)
+    request = MasterIntent(
+        idempotency_key="tunnel-activation-response-loss",
+        source_identity="my-data-hub/postgres-master",
+        source_version="git:0123456789abcdef",
+        checkpoint_ref="EMPTY_BASELINE",
+        dataset_ref="private/checkpoint-dataset",
+        notebook_ref="private/postgres-master",
+    )
+
+    with pytest.raises(RuntimeError, match="lost-before-provider-effect"):
+        coordinator.ensure_master(request, runtime_secret="correct-horse-battery-staple")
+    first = json.loads(broker.state_path.read_text(encoding="utf-8"))["active"]
+    assert first["lease_until"] == "2026-08-11T12:05:00Z"
+
+    clock.advance(30)
+    recovered = coordinator.ensure_master(request, runtime_secret="correct-horse-battery-staple")
+    second = json.loads(broker.state_path.read_text(encoding="utf-8"))["active"]
+    assert recovered.state is MasterState.REGISTERING
+    assert recovered.epoch == 1
+    assert second["master_instance_id"] == first["master_instance_id"]
+    assert second["run_id"] == first["run_id"]
+    assert second["attempt_id"] == first["attempt_id"]
+    assert second["epoch"] == first["epoch"] == 1
+    assert second["lease_until"] == "2026-08-11T12:05:30Z"
+    assert provider.physical_effect_counts["trigger_run"] == 1
+    assert terminated == [DEFAULT_ACCOUNT]
 
 
 def test_root_installer_is_explicitly_gated_and_does_not_add_listener_or_vpn(tmp_path: Path) -> None:

@@ -65,9 +65,12 @@ The authenticated control lifecycle maps to these broker calls:
 | every five seconds and at boot | `reconcile(now)` |
 
 The principal, certificate key ID, and broker record bind the exact run/attempt as
-well as the instance/epoch. Activation must strictly advance the durable epoch high-water mark. A rotation
-revokes every older serial and terminates only sshd children owned by the dedicated
-tunnel account. Deactivation first blanks `authorized_principals`, adds the epoch's
+well as the instance/epoch. A new identity must strictly advance the durable epoch
+high-water mark. A response-loss retry for the still-active exact identity may keep or
+monotonically extend its lease, but cannot shorten it, change its listener, or revive it
+after expiry/deactivation. A rotation revokes every older serial and terminates only
+sshd children owned by the dedicated tunnel account. Deactivation first blanks
+`authorized_principals`, adds the epoch's
 serials to the OpenSSH KRL, persists `active=null`, and then terminates those sessions.
 The systemd timer performs the same denial when the lease expires. Missing, malformed,
 oversized, or unreadable state blanks principals, revokes the CA in the KRL, terminates

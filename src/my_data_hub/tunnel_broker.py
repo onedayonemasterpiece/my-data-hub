@@ -486,14 +486,59 @@ class TunnelBroker:
             listen_host=DEFAULT_LISTEN_HOST,
             listen_port=listen_port,
         )
-        if active.lease_until <= observed or active.lease_until - observed > MAX_LEASE:
-            raise TunnelBrokerError("tunnel lease must be positive and no more than 10 minutes")
         with self._lock():
             state = self._load_or_fail_closed()
-            if state.active == active:
-                self._write_krl(state.revoked_serials)
-                self._write_principal(active)
-                return active
+            current = state.active
+            same_identity = bool(
+                current is not None
+                and current.master_instance_id == active.master_instance_id
+                and current.run_id == active.run_id
+                and current.attempt_id == active.attempt_id
+                and current.epoch == active.epoch
+            )
+            if same_identity:
+                assert current is not None
+                if current.listen_host != active.listen_host or current.listen_port != active.listen_port:
+                    raise TunnelBrokerError("activation replay cannot widen or change the tunnel listener")
+                if current.lease_until <= observed:
+                    try:
+                        self._write_principal(None)
+                        state.revoked_serials = sorted(
+                            {
+                                *state.revoked_serials,
+                                *(
+                                    cast(int, item["serial"])
+                                    for item in state.issued
+                                    if item["master_instance_id"] == current.master_instance_id
+                                    and item["run_id"] == current.run_id
+                                    and item["attempt_id"] == current.attempt_id
+                                    and item["epoch"] == current.epoch
+                                ),
+                            }
+                        )
+                        self._write_krl(state.revoked_serials)
+                        state.active = None
+                        self._save(state)
+                        self.session_terminator(self.account)
+                    except Exception:
+                        self._fail_closed(state)
+                        raise
+                    raise TunnelBrokerError("expired tunnel activation cannot be revived at the same epoch")
+                if active.lease_until > current.lease_until and active.lease_until - observed > MAX_LEASE:
+                    raise TunnelBrokerError("extended activation lease exceeds the 10 minute bound")
+                replay = current if active.lease_until <= current.lease_until else active
+                try:
+                    if replay != current:
+                        state.active = replay
+                        self._save(state)
+                    self._write_krl(state.revoked_serials)
+                    self._write_principal(replay)
+                    return replay
+                except Exception:
+                    self._fail_closed(state)
+                    raise
+            if active.lease_until <= observed or active.lease_until - observed > MAX_LEASE:
+                raise TunnelBrokerError("tunnel lease must be positive and no more than 10 minutes")
             if active.epoch <= state.highest_epoch:
                 raise TunnelBrokerError("activation epoch must advance the durable high-water mark")
             try:
@@ -542,9 +587,13 @@ class TunnelBroker:
             ):
                 raise TunnelBrokerError("only the current unexpired tunnel epoch may renew")
             if requested <= active.lease_until:
-                self._write_krl(state.revoked_serials)
-                self._write_principal(active)
-                return active
+                try:
+                    self._write_krl(state.revoked_serials)
+                    self._write_principal(active)
+                    return active
+                except Exception:
+                    self._fail_closed(state)
+                    raise
             if requested - observed > MAX_LEASE:
                 raise TunnelBrokerError("renewed lease must advance within the 10 minute bound")
             renewed = ActiveTunnelLease.create(
@@ -640,7 +689,7 @@ class TunnelBroker:
                 self._write_principal(None)
                 self._write_krl(state.revoked_serials)
                 self.session_terminator(self.account)
-                return
+                raise TunnelBrokerError("certificate request targets a fenced tunnel epoch")
             if (
                 active is None
                 or active.master_instance_id != instance
