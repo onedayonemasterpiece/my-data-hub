@@ -40,6 +40,17 @@ contains only the lightweight control ledger/process and no canonical rows.
   hashes. PostgreSQL master fencing, typed blogger import, separate E5/BGE spaces,
   deterministic RRF, and checkpoint verification have executable unit/integration
   contracts. They have **not** yet passed the required real Kaggle matrix.
+- The checkpoint execution path is now wired end to end in code: the master uses
+  the single official adapter inside Kaggle, streams physical/WAL/logical backup
+  artifacts only below `/kaggle/working`, publishes a permanent private exact
+  Dataset version, performs exact numeric-version readback, launches a separate
+  restore verifier Notebook, and advances metadata-only current/previous HEAD by
+  compare-and-swap. A later master boots only from that exact verified HEAD.
+  These statements describe tested code contracts, not a completed real checkpoint.
+- At integration commit `c177469`, local validation reports 2,850 repository
+  checks with zero errors, the full test suite is green, the opt-in disposable
+  PostgreSQL 18 fencing test passes separately, and hosted CI run `31453164971`
+  has both jobs green.
 
 ## Exact external blocker
 
@@ -58,7 +69,7 @@ Sanitized evidence:
 Owner closure command (run locally without sharing the token):
 
 ```bash
-cd /home/dev/projects/my-data-hub
+cd /home/dev/.codex/worktrees/my-data-hub/operational-mvp
 .venv/bin/kaggle auth login
 ```
 
