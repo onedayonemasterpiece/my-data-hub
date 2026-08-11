@@ -1097,6 +1097,9 @@ def _register_session_credentials(
     roles: tuple[Literal["reader", "operator"], ...],
     expires_at: datetime,
     now: datetime,
+    registration_observer: Callable[
+        [tuple[str, ...], tuple[dict[str, str], ...]], None
+    ] | None = None,
 ) -> tuple[tuple[str, ...], datetime]:
     """Issue only the roles explicitly authorized by activation, in one envelope."""
 
@@ -1182,7 +1185,11 @@ def _register_session_credentials(
         except Exception:
             gate.fence(identity, "credential_handoff_failed")
         raise
-    return tuple(principals), expires_at
+    exact_principals = tuple(principals)
+    exact_credentials = tuple(credentials)
+    if registration_observer is not None:
+        registration_observer(exact_principals, exact_credentials)
+    return exact_principals, expires_at
 
 
 @contextmanager
@@ -1563,6 +1570,12 @@ def run_master(
     reader_expires_at = min(credential_now + timedelta(minutes=4), ready.lease_until)
     if reader_expires_at <= credential_now + timedelta(seconds=15):
         raise RuntimeError("ACTIVE lease is too short to issue a bounded reader credential")
+    from my_data_hub.master_runtime.acceptance_soak import NotebookSoakCredentialAuthority
+
+    soak_credentials = NotebookSoakCredentialAuthority(
+        provisioner=CredentialProvisioner(gate_connection, gate),
+        local_postgres_port=config.postgres_port,
+    )
     try:
         session_principals, reader_expires_at = _register_session_credentials(
             connection=gate_connection,
@@ -1573,6 +1586,7 @@ def run_master(
             roles=credential_roles,
             expires_at=reader_expires_at,
             now=credential_now,
+            registration_observer=soak_credentials.observe_registration,
         )
     except Exception:
         gate.fence(identity, "reader_credential_registration_failed")
@@ -1581,6 +1595,23 @@ def run_master(
         gate_connection.close()
         raise
     issued_principals = set(session_principals)
+
+    def rotate_soak_credentials(expires_at: datetime) -> tuple[str, ...]:
+        principals, _expiry = _register_session_credentials(
+            connection=gate_connection,
+            gate=gate,
+            config=config,
+            callback_url=callback_url,
+            run_secret=run_secret,
+            roles=credential_roles,
+            expires_at=expires_at,
+            now=datetime.now(UTC),
+            registration_observer=soak_credentials.observe_registration,
+        )
+        issued_principals.update(principals)
+        return principals
+
+    soak_credentials.rotate = rotate_soak_credentials
     if acceptance_effects is not None and acceptance_effects_factory is not None:
         raise ValueError("provide either acceptance effects or its production factory, not both")
     if acceptance_effects_factory is not None:
@@ -1596,6 +1627,7 @@ def run_master(
     blogger_receipt: BloggerImportStageReceipt | None = None
     embedding_receipt: EmbeddingProductionStageReceipt | None = None
     active_error: BaseException | None = None
+    soak_ports: dict[UUID, object] = {}
     try:
         while True:
             remaining_active = active_deadline - time.monotonic()
@@ -1617,9 +1649,52 @@ def run_master(
                     config=config, callback_url=callback_url, run_secret=run_secret
                 )
                 if acceptance_command is not None:
-                    acceptance_receipt = execute_master_acceptance_command(
-                        acceptance_command, acceptance_effects
-                    )
+                    if acceptance_command.command_kind.value == "SESSION_ROTATION_SOAK":
+                        from my_data_hub.acceptance.master_production import (
+                            ProductionMasterAcceptanceEffects,
+                        )
+                        from my_data_hub.master_runtime.acceptance_soak import (
+                            build_notebook_soak_port,
+                        )
+
+                        if not isinstance(acceptance_effects, ProductionMasterAcceptanceEffects):
+                            raise RuntimeError("FM24 requires production runtime acceptance effects")
+                        port = soak_ports.get(acceptance_command.task_id)
+                        if port is None:
+                            port = build_notebook_soak_port(
+                                task_id=acceptance_command.task_id,
+                                binding=acceptance_command.binding,
+                                journal_path=(
+                                    paths.working / ".master-acceptance"
+                                    / f"fm24-{acceptance_command.task_id}.json"
+                                ),
+                                runtime_client=runtime,
+                                database_gate=gate,
+                                credential_authority=soak_credentials,
+                                renew_tunnel=lambda expires_at: _renew_registration_tunnel_lease(
+                                    config=config,
+                                    callback_url=callback_url,
+                                    run_secret=run_secret,
+                                    lease_until=expires_at,
+                                ),
+                            )
+                            soak_ports[acceptance_command.task_id] = port
+                        acceptance_effects.soak_sessions = port  # type: ignore[assignment]
+                    try:
+                        acceptance_receipt = execute_master_acceptance_command(
+                            acceptance_command, acceptance_effects
+                        )
+                    except Exception as exc:
+                        from my_data_hub.acceptance.soak_session import SoakSessionNotDue
+
+                        if not isinstance(exc, SoakSessionNotDue):
+                            raise
+                        # FM24 deliberately yields between its twelve real
+                        # five-minute steps.  Keep the ordinary active loop,
+                        # heartbeat, drain, and renewal paths running; the same
+                        # runtime-owned command is reconciled on the next poll.
+                        time.sleep(min(30.0, remaining_active))
+                        continue
                     _post_master_acceptance_receipt(
                         config=config,
                         callback_url=callback_url,

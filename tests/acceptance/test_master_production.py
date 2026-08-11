@@ -469,6 +469,47 @@ def test_fm24_controller_has_fixed_3600_second_twelve_rotation_schedule(monkeypa
     assert evidence.observed_duration_seconds == 3600
 
 
+class ResumableSoakSessions(SoakSessions):
+    def __init__(self, completed: int) -> None:
+        super().__init__()
+        self.completed = completed
+
+    def completed_steps(self, _binding) -> int:
+        return self.completed
+
+    def session_started_monotonic_ns(self, _binding) -> int:
+        return 0
+
+    def session_deadline_monotonic_ns(self, _binding) -> int:
+        return 5_400_000_000_000
+
+    def stale_session_reconnect_denied(self, binding) -> bool:
+        result = super().stale_session_reconnect_denied(binding)
+        self.completed += 1
+        return result
+
+
+def test_fm24_resumable_controller_executes_only_one_due_step(monkeypatch) -> None:
+    from my_data_hub.acceptance.soak_session import SoakSessionNotDue
+
+    monkeypatch.setattr(
+        "my_data_hub.acceptance.master_production.time.monotonic_ns",
+        lambda: 300_000_000_000,
+    )
+    monkeypatch.setattr(
+        "my_data_hub.acceptance.master_production.time.sleep",
+        lambda _seconds: pytest.fail("resumable FM24 must not block an HTTP/runtime loop"),
+    )
+    sessions = ResumableSoakSessions(completed=0)
+    effects = ProductionMasterAcceptanceEffectsFactory(soak_sessions=sessions).build(
+        connection=RecordingConnection(), boot_source="verified_checkpoint"
+    )
+    with pytest.raises(SoakSessionNotDue, match="FM24_NEXT_STEP_NOT_DUE"):
+        effects.session_rotation_soak(_command("FM24"))
+    assert sessions.completed == 1
+    assert (sessions.renewals, sessions.rotations, sessions.reads, sessions.denials) == (1, 1, 1, 1)
+
+
 def test_operator_adapter_schemas_are_closed_and_adapter_requires_scope() -> None:
     schemas = MasterAcceptanceOperatorAdapter.tool_schemas()
     assert set(schemas) == {"master.acceptance.request", "master.acceptance.status"}

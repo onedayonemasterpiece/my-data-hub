@@ -2459,7 +2459,7 @@ class ControlLedger:
                 "t.target_service_instance_id FROM master_acceptance_commands c "
                 "JOIN master_acceptance_tasks t ON t.task_id=c.task_id "
                 "WHERE t.target_run_id=? AND t.target_attempt_id=? AND t.target_epoch=? "
-                "AND t.scenario_id='FM04' AND t.state IN ('BOUND','CLAIMED') "
+                "AND t.scenario_id IN ('FM04','FM24') AND t.state IN ('BOUND','CLAIMED') "
                 "AND (c.state='PENDING' OR (c.state='CLAIMED' AND c.claim_authority='runtime')) "
                 "ORDER BY t.created_at LIMIT 1",
                 (run_id, attempt_id, epoch),
@@ -2522,7 +2522,7 @@ class ControlLedger:
         principal/client claim.
         """
 
-        host_scenarios = {"FM07", "FM08", "FM09", "FM10", "FM11", "FM12", "FM24"}
+        host_scenarios = {"FM07", "FM08", "FM09", "FM10", "FM11", "FM12"}
         if expected_scenario not in host_scenarios or not principal_id or not client_id:
             raise ValueError("master acceptance host claim identity is invalid")
         now = _format_time(self.clock.now())

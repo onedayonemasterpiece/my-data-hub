@@ -289,6 +289,9 @@ def create_app(
     provider_gateway: KaggleMCPProviderGateway | None = None,
     provider_gateway_token: bytes | None = None,
     acceptance_scenario_adapter: object | None = None,
+    checkpoint_acceptance_launcher: object | None = None,
+    checkpoint_acceptance_catalog: object | None = None,
+    old_epoch_denials: object | None = None,
 ) -> FastAPI:
     runtime = settings or ControlPlaneSettings.from_env()
     if operator_credential_enabled is None:
@@ -347,8 +350,42 @@ def create_app(
         ):
             raise ControlPlaneConfigurationError("provider gateway token violates the bounded contract")
     if runtime.acceptance_scenarios_enabled and acceptance_scenario_adapter is None:
-        raise ControlPlaneConfigurationError(
-            "acceptance scenario opt-in requires a concrete unified executor"
+        if (
+            master_runtime is None
+            or checkpoint_acceptance_launcher is None
+            or checkpoint_acceptance_catalog is None
+        ):
+            raise ControlPlaneConfigurationError(
+                "acceptance scenario opt-in requires concrete master and checkpoint executors"
+            )
+        from my_data_hub.acceptance.master_production import ProductionControlAcceptanceContext
+        from my_data_hub.acceptance.scenario_operator import (
+            AcceptanceScenarioOperatorAdapter,
+            UnifiedAcceptanceScenarioExecutor,
+        )
+        from my_data_hub.control_plane.acceptance_supervisor import (
+            callback_loss_supervisor_from_environment,
+        )
+
+        callback_supervisor = callback_loss_supervisor_from_environment(control_ledger)
+        if (
+            callback_supervisor is None
+            or old_epoch_denials is None
+            or runtime.session_credentials_path is None
+        ):
+            raise ControlPlaneConfigurationError(
+                "acceptance scenario opt-in requires concrete FM08/FM10/FM11 adapters"
+            )
+        acceptance_scenario_adapter = AcceptanceScenarioOperatorAdapter(
+            UnifiedAcceptanceScenarioExecutor(
+                master=ProductionControlAcceptanceContext(
+                    callback_supervisor=callback_supervisor,
+                    old_epoch_denials=old_epoch_denials,  # type: ignore[arg-type]
+                    session_directory=runtime.session_credentials_path,
+                ).build(master_runtime),
+                checkpoint=checkpoint_acceptance_launcher,  # type: ignore[arg-type]
+                checkpoint_catalog=checkpoint_acceptance_catalog,  # type: ignore[arg-type]
+            )
         )
     resolver = LedgerMasterResolver(control_ledger)
     provider_journal = ControlLedgerKaggleJournal(control_ledger)

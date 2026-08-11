@@ -640,6 +640,31 @@ def test_fm10_runtime_control_endpoint_acknowledges_exact_suspension(tmp_path: P
     assert control is not None and control["renewal_acknowledged"] == 1
 
 
+def test_fm24_is_claimed_only_by_the_exact_active_runtime(tmp_path: Path) -> None:
+    ledger, handle = _active_ledger(tmp_path)
+    request = _request("FM24", operation_id=handle.operation_id)
+    ledger.ensure_master_acceptance_task(
+        task_id=str(request.task_id), scenario_id="FM24",
+        idempotency_key=request.idempotency_key, request_sha256=request.request_sha256,
+        principal_id="owner", client_id="acceptance-client",
+        source_revision=request.source_revision, target_operation_id=handle.operation_id,
+    )
+    with pytest.raises(ValueError, match="host claim identity"):
+        ledger.claim_master_acceptance_host_command(
+            task_id=str(request.task_id), expected_scenario="FM24",
+            principal_id="owner", client_id="acceptance-client",
+        )
+    payload = ledger.claim_master_acceptance_command(
+        run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch
+    )
+    assert payload is not None
+    assert payload["command_kind"] == "SESSION_ROTATION_SOAK"
+    assert payload["task_id"] == str(request.task_id)
+    assert ledger.claim_master_acceptance_command(
+        run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch + 1
+    ) is None
+
+
 def test_protected_ledger_replays_one_exact_acked_body_without_state_change(tmp_path: Path) -> None:
     ledger = ControlLedger(
         tmp_path / "stored-replay.sqlite3",

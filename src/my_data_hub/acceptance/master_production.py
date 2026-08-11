@@ -700,24 +700,38 @@ class ProductionMasterAcceptanceEffects(MasterAcceptanceRuntimeEffects):
         if not 0 <= completed <= 12 or deadline != started + 5_400_000_000_000:
             raise ProductionAcceptanceBlocked("FM24_DURABLE_SCHEDULE_INVALID")
         rotations = renewals = tunnel_renewals = stale_denials = completed
-        for step in range(completed, SOAK_SECONDS // SOAK_STEP_SECONDS):
-            if resumable:
-                target = started + (step + 1) * SOAK_STEP_SECONDS * 1_000_000_000
-                now_ns = time.monotonic_ns()
-                if now_ns > deadline:
-                    raise ProductionAcceptanceBlocked("FM24_MONOTONIC_WINDOW_INVALID")
-                time.sleep(max(0.0, (target - now_ns) / 1_000_000_000))
-            else:
+        if resumable:
+            if time.monotonic_ns() > deadline:
+                raise ProductionAcceptanceBlocked("FM24_MONOTONIC_WINDOW_INVALID")
+            if completed < SOAK_SECONDS // SOAK_STEP_SECONDS:
+                # The production port owns the persisted not-before schedule.
+                # Execute at most one due step so the normal runtime heartbeat,
+                # drain checks, and other control polling remain live for the
+                # entire real-hour soak.
+                self.soak_sessions.renew_lease_and_tunnel(command.binding)
+                self.soak_sessions.rotate_credentials(command.binding)
+                self.soak_sessions.bounded_read(command.binding)
+                if not self.soak_sessions.stale_session_reconnect_denied(command.binding):
+                    raise ProductionAcceptanceBlocked("FM24_STALE_SESSION_NOT_DENIED")
+                observed_completed = int(persisted_steps(command.binding))
+                if observed_completed != completed + 1:
+                    raise ProductionAcceptanceBlocked("FM24_DURABLE_STEP_ACK_MISSING")
+                completed = observed_completed
+            if completed < SOAK_SECONDS // SOAK_STEP_SECONDS:
+                from .soak_session import SoakSessionNotDue
+
+                raise SoakSessionNotDue("FM24_NEXT_STEP_NOT_DUE")
+            rotations = renewals = tunnel_renewals = stale_denials = completed
+        else:
+            for _step in range(completed, SOAK_SECONDS // SOAK_STEP_SECONDS):
                 time.sleep(SOAK_STEP_SECONDS)
-            self.soak_sessions.renew_lease_and_tunnel(command.binding)
-            renewals += 1
-            tunnel_renewals += 1
-            self.soak_sessions.rotate_credentials(command.binding)
-            rotations += 1
-            self.soak_sessions.bounded_read(command.binding)
-            stale_denials += int(self.soak_sessions.stale_session_reconnect_denied(command.binding))
-            if resumable and int(persisted_steps(command.binding)) != step + 1:
-                raise ProductionAcceptanceBlocked("FM24_DURABLE_STEP_ACK_MISSING")
+                self.soak_sessions.renew_lease_and_tunnel(command.binding)
+                renewals += 1
+                tunnel_renewals += 1
+                self.soak_sessions.rotate_credentials(command.binding)
+                rotations += 1
+                self.soak_sessions.bounded_read(command.binding)
+                stale_denials += int(self.soak_sessions.stale_session_reconnect_denied(command.binding))
         finished = time.monotonic_ns()
         observed = (finished - started) // 1_000_000_000
         if not SOAK_SECONDS <= observed <= 5400:
@@ -990,6 +1004,10 @@ class ControlMasterAcceptanceExecutor:
             task = self._ensure_empty(request, task)
         elif request.scenario is MasterAcceptanceScenario.FM07:
             task = self._ensure_twenty(request, task, principal)
+        elif request.scenario is MasterAcceptanceScenario.FM24:
+            # FM24 executes cooperatively inside the exact ACTIVE runtime.  It
+            # must not be owner-host claimed and block one HTTP request for an hour.
+            return {**task, "created": created, "live_pass": False}
         else:
             task = self._reconcile_host(request.task_id, request.scenario, task, principal)
         return {**task, "created": created, "live_pass": task["state"] == "PASSED"}
@@ -1011,7 +1029,7 @@ class ControlMasterAcceptanceExecutor:
                 task,
                 principal,
             )
-        elif scenario in HOST_SCENARIOS:
+        elif scenario in HOST_SCENARIOS and scenario is not MasterAcceptanceScenario.FM24:
             task = self._reconcile_host(task_id, scenario, task, principal)
         return {"found": True, **task, "live_pass": task["state"] == "PASSED"}
 
