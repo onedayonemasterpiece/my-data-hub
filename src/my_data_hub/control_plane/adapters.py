@@ -19,6 +19,7 @@ from my_data_hub.mcp.contracts import (
     MasterState,
 )
 from my_data_hub.mcp.oauth import AccessIdentity
+from my_data_hub.orchestrator.master import MasterCoordinator
 
 
 def _revocation_reference(query: OAuthRevocationQuery) -> str:
@@ -118,22 +119,27 @@ class LedgerMasterResolver(MasterResolver):
             except ValueError:
                 state = MasterState.REQUESTED
             return MasterSnapshot(state=state, operation_id=latest.operation_id)
+        request = self.ledger.latest_master_request()
+        if request is not None:
+            return MasterSnapshot(
+                state=MasterState.REQUESTED,
+                operation_id=str(request["operation_id"]),
+            )
         return MasterSnapshot(state=MasterState.ABSENT)
 
     def ensure_master(self, principal: AccessIdentity, *, intent: str) -> EnsureMasterReceipt:
         key = f"mcp:{principal.subject}:{intent}"
-        operation_id = hashlib.sha256(key.encode()).hexdigest()[:32]
-        record, created = self.ledger.ensure_operation(
-            operation_id=operation_id,
+        identity = MasterCoordinator.identity_for(key)
+        request, created = self.ledger.request_master(
+            request_id=hashlib.sha256(f"request:{key}".encode()).hexdigest(),
             idempotency_key=key,
-            operation_kind="ensure_master",
-            intent={"intent": intent, "principal": principal.subject},
-            initial_state=MasterState.REQUESTED.value,
-            identity={"requested_by": principal.subject},
+            requested_by=principal.subject,
+            intent=intent,
+            operation_id=identity["operation_id"],
         )
         return EnsureMasterReceipt(
-            operation_id=record.operation_id,
-            state=MasterState(record.state),
+            operation_id=str(request["operation_id"]),
+            state=MasterState.REQUESTED,
             duplicate=not created,
             intent=intent,
         )

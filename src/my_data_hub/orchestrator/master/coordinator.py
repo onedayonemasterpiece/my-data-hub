@@ -57,7 +57,7 @@ class MasterCoordinator:
         self.lease_ttl = lease_ttl
 
     def ensure_master(self, intent: MasterIntent, *, runtime_secret: str) -> MasterHandle:
-        identity = self._identity(intent.idempotency_key)
+        identity = self.identity_for(intent.idempotency_key)
         record, _ = self.ledger.ensure_operation(
             operation_id=identity["operation_id"],
             idempotency_key=intent.idempotency_key,
@@ -264,7 +264,7 @@ class MasterCoordinator:
         return operation
 
     @staticmethod
-    def _identity(idempotency_key: str) -> dict[str, str]:
+    def identity_for(idempotency_key: str) -> dict[str, str]:
         return {
             "operation_id": str(uuid5(NAMESPACE_URL, f"mdh:operation:{idempotency_key}")),
             "run_id": str(uuid5(NAMESPACE_URL, f"mdh:run:{idempotency_key}")),
@@ -272,6 +272,8 @@ class MasterCoordinator:
             "service_instance_id": str(uuid5(NAMESPACE_URL, f"mdh:service:{idempotency_key}:1")),
             "master_instance_id": str(uuid5(NAMESPACE_URL, f"mdh:master:{idempotency_key}:1")),
         }
+
+    _identity = identity_for
 
     @staticmethod
     def _handle(operation) -> MasterHandle:  # type: ignore[no-untyped-def]

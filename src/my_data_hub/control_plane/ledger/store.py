@@ -8,7 +8,7 @@ import sqlite3
 import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -902,6 +902,95 @@ class ControlLedger:
             "allowed_scopes": frozenset(json.loads(row["allowed_scopes_json"])["scopes"]),
             "principal_id": row["principal_id"], "profile_kind": row["profile_kind"],
         }
+
+    def request_master(
+        self,
+        *,
+        request_id: str,
+        idempotency_key: str,
+        requested_by: str,
+        intent: str,
+        operation_id: str,
+    ) -> tuple[dict[str, Any], bool]:
+        if not all((request_id, idempotency_key, requested_by, intent, operation_id)):
+            raise ValueError("master request identity is incomplete")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_requests WHERE idempotency_key=?", (idempotency_key,)
+            ).fetchone()
+            if row is not None:
+                expected = (request_id, requested_by, intent, operation_id)
+                actual = (row["request_id"], row["requested_by"], row["intent"], row["operation_id"])
+                if actual != expected:
+                    raise IdempotencyConflict("master request key was reused with different identity")
+                return dict(row), False
+            connection.execute(
+                "INSERT INTO master_requests(request_id,idempotency_key,requested_by,intent,operation_id,state,"
+                "attempts,claim_until,created_at,updated_at) VALUES (?,?,?,?,?,'PENDING',0,NULL,?,?)",
+                (request_id, idempotency_key, requested_by, intent, operation_id, now, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM master_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            assert row is not None
+            return dict(row), True
+
+    def latest_master_request(self) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_requests WHERE state<>'DONE' ORDER BY created_at DESC,request_id DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def claim_master_request(self, *, claim_seconds: int = 900) -> dict[str, Any] | None:
+        if not 30 <= claim_seconds <= 3_600:
+            raise ValueError("master request claim lifetime is outside policy")
+        now = self.clock.now()
+        claim_until = _format_time(now + timedelta(seconds=claim_seconds))
+        now_text = _format_time(now)
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_requests WHERE state='PENDING' OR "
+                "(state='IN_PROGRESS' AND claim_until<=?) ORDER BY created_at,request_id LIMIT 1",
+                (now_text,),
+            ).fetchone()
+            if row is None:
+                return None
+            changed = connection.execute(
+                "UPDATE master_requests SET state='IN_PROGRESS',attempts=attempts+1,claim_until=?,updated_at=? "
+                "WHERE request_id=? AND (state='PENDING' OR (state='IN_PROGRESS' AND claim_until<=?))",
+                (claim_until, now_text, row["request_id"], now_text),
+            ).rowcount
+            if changed != 1:
+                return None
+            claimed = connection.execute(
+                "SELECT * FROM master_requests WHERE request_id=?", (row["request_id"],)
+            ).fetchone()
+            assert claimed is not None
+            return dict(claimed)
+
+    def complete_master_request(self, request_id: str, operation_id: str) -> None:
+        with self._transaction() as connection:
+            changed = connection.execute(
+                "UPDATE master_requests SET state='DONE',claim_until=NULL,updated_at=? "
+                "WHERE request_id=? AND operation_id=? AND state='IN_PROGRESS'",
+                (_format_time(self.clock.now()), request_id, operation_id),
+            ).rowcount
+            if changed != 1:
+                row = connection.execute(
+                    "SELECT state,operation_id FROM master_requests WHERE request_id=?", (request_id,)
+                ).fetchone()
+                if row is None or row["state"] != "DONE" or row["operation_id"] != operation_id:
+                    raise StaleRuntimeEvent("master request completion lost its claim")
+
+    def release_master_request(self, request_id: str) -> None:
+        with self._transaction() as connection:
+            connection.execute(
+                "UPDATE master_requests SET state='PENDING',claim_until=NULL,updated_at=? "
+                "WHERE request_id=? AND state='IN_PROGRESS'",
+                (_format_time(self.clock.now()), request_id),
+            )
 
     def create_oauth_authorization_grant(self, grant: Mapping[str, Any]) -> bool:
         scopes_json = _safe_json({"scopes": list(grant["scopes"])})

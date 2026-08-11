@@ -108,7 +108,7 @@ class ControlPlaneMasterRuntime:
         )
 
     def ensure(self, idempotency_key: str) -> tuple[MasterHandle, bool]:
-        identity = MasterCoordinator._identity(idempotency_key)
+        identity = MasterCoordinator.identity_for(idempotency_key)
         existed = self.ledger.get_operation(identity["operation_id"]) is not None
         secret = derive_runtime_secret(
             self.settings.runtime_token_root, identity["run_id"], identity["attempt_id"]
@@ -132,6 +132,22 @@ class ControlPlaneMasterRuntime:
                 )
             )
         return handles
+
+    def reconcile_requested_once(self) -> MasterHandle | None:
+        """Claim one MCP cold-start request and drive the real provider lifecycle."""
+
+        request = self.ledger.claim_master_request()
+        if request is None:
+            return None
+        try:
+            handle, _duplicate = self.ensure(str(request["idempotency_key"]))
+            if handle.operation_id != str(request["operation_id"]):
+                raise RuntimeError("master request operation identity differs from coordinator")
+            self.ledger.complete_master_request(str(request["request_id"]), handle.operation_id)
+            return handle
+        except Exception:
+            self.ledger.release_master_request(str(request["request_id"]))
+            raise
 
 
 @dataclass(frozen=True, slots=True)

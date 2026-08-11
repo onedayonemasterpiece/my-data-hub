@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -173,12 +175,47 @@ def create_app(
             raise ControlPlaneConfigurationError("master runtime and app must share one control ledger")
         provider_status = "available"
     resolver = LedgerMasterResolver(control_ledger)
-    app = FastAPI(title="my-data-hub lightweight control plane", docs_url=None, redoc_url=None)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        stopped = asyncio.Event()
+        task: asyncio.Task[None] | None = None
+
+        async def reconcile_requests() -> None:
+            while not stopped.is_set():
+                if master_runtime is not None:
+                    with suppress(Exception):
+                        await asyncio.to_thread(master_runtime.reconcile_requested_once)
+                        # The durable request remains PENDING; provider details
+                        # never enter logs/responses and bounded retry resumes.
+                try:
+                    await asyncio.wait_for(stopped.wait(), timeout=5.0)
+                except TimeoutError:
+                    continue
+
+        if master_runtime is not None:
+            task = asyncio.create_task(reconcile_requests())
+        try:
+            yield
+        finally:
+            stopped.set()
+            if task is not None:
+                await task
+
+    app = FastAPI(
+        title="my-data-hub lightweight control plane",
+        docs_url=None,
+        redoc_url=None,
+        lifespan=lifespan,
+    )
     app.state.control_ledger = control_ledger
     app.state.master_runtime = master_runtime
     app.state.master_coordinator = master_runtime.coordinator if master_runtime is not None else None
     app.state.master_provider_status = provider_status
     app.state.session_registrar = session_registrar
+    app.state.reconcile_master_requests = (
+        master_runtime.reconcile_requested_once if master_runtime is not None else None
+    )
 
     def snapshot() -> dict[str, Any]:
         master = resolver.resolve_master(_system_identity())
