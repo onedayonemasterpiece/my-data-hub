@@ -173,9 +173,22 @@ def create_server(
     async def bloggers_get(blogger_id: str) -> dict[str, Any]:
         return await service.invoke("bloggers.get", {"blogger_id": blogger_id})
 
-    async def bloggers_search(query: str, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
+    async def bloggers_search(
+        query: str,
+        cursor: str | None = None,
+        limit: int = 20,
+        e5_query_vector: list[float] | None = None,
+        bge_m3_query_vector: list[float] | None = None,
+    ) -> dict[str, Any]:
         return await service.invoke(
-            "bloggers.search", {"query": query, "cursor": cursor, "limit": limit}
+            "bloggers.search",
+            {
+                "query": query,
+                "cursor": cursor,
+                "limit": limit,
+                "e5_query_vector": e5_query_vector,
+                "bge_m3_query_vector": bge_m3_query_vector,
+            },
         )
 
     async def bloggers_provenance(blogger_id: str, limit: int = 50) -> dict[str, Any]:

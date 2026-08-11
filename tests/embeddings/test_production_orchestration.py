@@ -18,6 +18,7 @@ from my_data_hub.embeddings.production import (
     EmbeddingProductionConfig,
     EmbeddingProductionError,
     LocalEmbeddingProductionControl,
+    embedding_provider_authority,
     run_embedding_production_closure,
 )
 from my_data_hub.hashing import canonical_json_bytes
@@ -138,6 +139,19 @@ def _capabilities() -> dict[str, object]:
     ).model_dump(mode="json")
 
 
+def test_embedding_provider_authority_is_exact_and_distinct() -> None:
+    request_id = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    first = embedding_provider_authority("owner", request_id)
+    second = embedding_provider_authority("owner", request_id)
+    assert first == second
+    assert len(first) == 4
+    assert len({task for _ref, task in first.values()}) == 2
+    assert {ref for key, (ref, _task) in first.items() if key.endswith("_worker")} == {
+        f"owner/{asset.notebook_slug}" for asset in WORKER_ASSETS
+    }
+    assert all(ref.startswith("owner/mdh-embed-") for key, (ref, _task) in first.items() if key.endswith("_input"))
+
+
 def _worker(asset_index: int) -> dict[str, object]:
     asset = WORKER_ASSETS[asset_index]
     number = asset_index + 1
@@ -148,7 +162,8 @@ def _worker(asset_index: int) -> dict[str, object]:
         "provider_run_ref": f"owner/{asset.notebook_slug}/{number}",
         "provider_kernel_id": 100 + number,
         "source_version": number,
-        "source_sha256": asset.primary_source_sha256,
+        "source_sha256": f"{number}" * 64,
+        "primary_source_sha256": asset.primary_source_sha256,
         "provider_status": "complete",
         "privacy": "private",
         "control_class": "orchestrator_protected",
@@ -327,7 +342,7 @@ def test_fake_full_closure_binds_workers_imports_checkpoint_restore_and_hybrid_s
 @pytest.mark.parametrize(
     ("field", "invalid"),
     [
-        ("source_sha256", "1" * 64),
+        ("primary_source_sha256", "1" * 64),
         ("provider_ref", "owner/wrong-worker"),
     ],
 )

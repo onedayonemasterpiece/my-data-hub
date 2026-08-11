@@ -25,6 +25,13 @@ from my_data_hub.control_plane.runtime import (
     SessionCredentialRegistrar,
     build_production_runtime,
 )
+from my_data_hub.embeddings.production import (
+    WORKER_ASSETS,
+    EmbeddingProductionCapabilities,
+    EmbeddingProductionRequest,
+    EmbeddingProductionStageReceipt,
+    embedding_provider_authority,
+)
 from my_data_hub.providers.kaggle import ControlLedgerKaggleJournal
 from my_data_hub.providers.kaggle.contracts import (
     MutationAction,
@@ -170,6 +177,7 @@ def create_app(
     ledger: ControlLedger | None = None,
     master_runtime: ControlPlaneMasterRuntime | None = None,
     session_registrar: SessionCredentialRegistrar | None = None,
+    embedding_stage_runner: object | None = None,
 ) -> FastAPI:
     runtime = settings or ControlPlaneSettings.from_env()
     ledger_path = runtime.ledger_path or Path(tempfile.mkdtemp(prefix="mdh-control-")) / "control.sqlite3"
@@ -230,6 +238,7 @@ def create_app(
     app.state.master_coordinator = master_runtime.coordinator if master_runtime is not None else None
     app.state.master_provider_status = provider_status
     app.state.session_registrar = session_registrar
+    app.state.embedding_stage_runner = embedding_stage_runner
     app.state.reconcile_master_requests = (
         master_runtime.reconcile_requested_once if master_runtime is not None else None
     )
@@ -245,6 +254,14 @@ def create_app(
             control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
         )
         return TaskResourceClaim.model_validate(payload) if payload else None
+
+    def _embedding_provider_authority(operation_id: str) -> dict[str, tuple[str, UUID]]:
+        record = control_ledger.embedding_production_request_for_operation(operation_id)
+        assets = _configured_master_assets()
+        if record is None or record["state"] != "CLAIMED" or assets is None:
+            return {}
+        owner = assets.checkpoint_ref.split("/", 1)[0]
+        return embedding_provider_authority(owner, UUID(record["request_id"]))
 
     def _runtime_authority(
         *,
@@ -481,6 +498,144 @@ def create_app(
                     observed_at=control_ledger.clock.now(),
                 )
         return {key: value for key, value in record.items() if key not in {"failure_code"} or value is not None}
+
+    @app.get("/control/v1/embedding-production/capabilities")
+    def embedding_production_capabilities() -> dict[str, Any]:
+        if app.state.embedding_stage_runner is None:
+            raise HTTPException(status_code=503, detail={"code": "embedding_production_unavailable"})
+        return EmbeddingProductionCapabilities(
+            ready=True,
+            execution_location="active_kaggle_master",
+            provider_adapter_package="kaggle",
+            provider_adapter_version="2.2.4",
+            provider_adapter_implementation="my_data_hub.providers.kaggle.KaggleProviderAdapter",
+            single_provider_adapter=True,
+            transactional_import=True,
+            verified_checkpoint_restore=True,
+            mcp_hybrid_search=True,
+            worker_assets=WORKER_ASSETS,
+        ).model_dump(mode="json")
+
+    @app.post("/control/v1/embedding-production/requests")
+    async def request_embedding_production(request: Request) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            embedding = EmbeddingProductionRequest.model_validate(body)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail={"code": "embedding_request_invalid"}) from exc
+        existing = control_ledger.embedding_production_request(str(embedding.request_id))
+        if existing is not None:
+            if existing["request_sha256"] != embedding.request_sha256:
+                raise HTTPException(status_code=409, detail={"code": "embedding_request_conflict"})
+            return {
+                "request_id": existing["request_id"], "request_sha256": existing["request_sha256"],
+                "state": existing["state"], "created": False,
+            }
+        service = control_ledger.resolve_service("postgres-master")
+        operation = (
+            control_ledger.operation_for_attempt(service.run_id, service.attempt_id) if service else None
+        )
+        head = control_ledger.checkpoint_head("postgres-master")
+        if (
+            service is None
+            or service.state != "ACTIVE"
+            or service.canonical_revision != embedding.blogger_canonical_revision
+            or operation is None
+            or operation.state != "ACTIVE"
+            or head is None
+            or head.current_checkpoint_id != str(embedding.blogger_checkpoint_id)
+        ):
+            raise HTTPException(status_code=409, detail={"code": "embedding_prerequisite_not_active"})
+        record, created = control_ledger.ensure_embedding_production_request(
+            request_id=str(embedding.request_id),
+            operation_id=operation.operation_id,
+            idempotency_key_sha256=embedding.idempotency_key_sha256,
+            request_sha256=embedding.request_sha256,
+            request=embedding.model_dump(mode="json"),
+        )
+        return {
+            "request_id": record["request_id"], "request_sha256": record["request_sha256"],
+            "state": record["state"], "created": created,
+        }
+
+    @app.get("/control/v1/embedding-production/requests/{request_id}")
+    def embedding_production_status(request_id: str) -> dict[str, Any]:
+        try:
+            exact_id = str(UUID(request_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail={"code": "embedding_request_not_found"}) from exc
+        record = control_ledger.embedding_production_request(exact_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail={"code": "embedding_request_not_found"})
+        if record["state"] == "STAGE_COMMITTED":
+            recovered = control_ledger.verified_checkpoint_for_operation(record["operation_id"])
+            if recovered is not None:
+                receipt = record["stage_receipt"]
+                record = control_ledger.record_embedding_checkpoint_receipt(
+                    request_id=exact_id,
+                    run_id=str(record["claimed_run_id"]),
+                    attempt_id=str(record["claimed_attempt_id"]),
+                    receipt={
+                        "request_id": exact_id,
+                        "checkpoint_id": recovered["checkpoint_id"],
+                        "manifest_sha256": recovered["manifest_sha256"],
+                        "exact_version_ref": recovered["version_ref"],
+                        "canonical_revision": receipt["canonical_revision"],
+                    },
+                )
+        stage = record["stage_receipt"] or {}
+        return {
+            "request_id": record["request_id"], "request_sha256": record["request_sha256"],
+            "state": record["state"], "claimed_run_id": record["claimed_run_id"],
+            "claimed_attempt_id": record["claimed_attempt_id"], "claimed_epoch": record["claimed_epoch"],
+            "workers": stage.get("workers"), "imports": stage.get("imports"),
+            "coverage": stage.get("coverage"), "canonical_revision": stage.get("canonical_revision"),
+            "checkpoint_receipt": record["checkpoint_receipt"],
+            **({"failure_code": record["failure_code"]} if record["failure_code"] else {}),
+        }
+
+    @app.get("/internal/runtime/embedding-production/{run_id}/{attempt_id}")
+    def claim_embedding_production(
+        run_id: str, attempt_id: str, authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        operation = _runtime_authority(
+            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
+            master_instance_id=master_instance_id, epoch=epoch, allowed_states=frozenset({"ACTIVE"}),
+        )
+        record = control_ledger.claim_embedding_production_request(
+            operation_id=operation.operation_id, run_id=run_id, attempt_id=attempt_id,
+            master_instance_id=str(operation.identity["master_instance_id"]), epoch=int(operation.identity["epoch"]),
+        )
+        return {"available": False} if record is None or record["state"] != "CLAIMED" else {
+            "available": True, "request": record["request"], "request_sha256": record["request_sha256"],
+        }
+
+    @app.post("/internal/runtime/embedding-production/{run_id}/{attempt_id}/stage-receipt")
+    async def embedding_stage_receipt(
+        run_id: str, attempt_id: str, request: Request,
+        authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        _runtime_authority(
+            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
+            master_instance_id=master_instance_id, epoch=epoch, allowed_states=frozenset({"ACTIVE"}),
+        )
+        try:
+            receipt = EmbeddingProductionStageReceipt.model_validate(await _bounded_json(request))
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail={"code": "embedding_receipt_invalid"}) from exc
+        if (str(receipt.run_id), str(receipt.master_instance_id), receipt.epoch) != (
+            run_id, str(master_instance_id), int(epoch or 0)
+        ):
+            raise HTTPException(status_code=409, detail={"code": "embedding_receipt_epoch_mismatch"})
+        stored = control_ledger.record_embedding_stage_receipt(
+            request_id=str(receipt.request_id), run_id=run_id, attempt_id=attempt_id,
+            receipt=receipt.model_dump(mode="json"),
+        )
+        return {"accepted": True, "state": stored["state"], "receipt_sha256": receipt.receipt_sha256}
 
     @app.get("/internal/runtime/blogger-migration/{run_id}/{attempt_id}")
     def claim_blogger_migration(
@@ -849,11 +1004,20 @@ def create_app(
             raise HTTPException(status_code=403, detail={"code": "provider_authority_mismatch"})
         assets = _configured_master_assets()
         current_run = str(operation.identity["run_id"])
+        embedding_authority = _embedding_provider_authority(operation.operation_id)
+        embedding_datasets = {value for key, value in embedding_authority.items() if key.endswith("_input")}
+        embedding_workers = {value for key, value in embedding_authority.items() if key.endswith("_worker")}
         authorized = False
         if assets is not None and intent.action is MutationAction.CREATE_DATASET:
-            authorized = intent.provider_ref == assets.checkpoint_ref and str(intent.task_id) == current_run
+            authorized = (
+                (intent.provider_ref == assets.checkpoint_ref and str(intent.task_id) == current_run)
+                or (intent.provider_ref, intent.task_id) in embedding_datasets
+            )
         elif assets is not None and intent.action is MutationAction.PUSH_NOTEBOOK:
-            authorized = intent.provider_ref == assets.checkpoint_verifier_ref and str(intent.task_id) == current_run
+            authorized = (
+                (intent.provider_ref == assets.checkpoint_verifier_ref and str(intent.task_id) == current_run)
+                or (intent.provider_ref, intent.task_id) in embedding_workers
+            )
         elif assets is not None and intent.action is MutationAction.VERSION_DATASET:
             prior = _current_checkpoint_claim(intent.provider_ref)
             authorized = bool(
@@ -937,7 +1101,9 @@ def create_app(
         else:
             exact_replay = True
         current_run = str(operation.identity["run_id"])
-        task_authorized = str(claim.task_id) == current_run
+        embedding_authority = _embedding_provider_authority(operation.operation_id)
+        embedding_pairs = set(embedding_authority.values())
+        task_authorized = str(claim.task_id) == current_run or (claim.provider_ref, claim.task_id) in embedding_pairs
         if authority and authority["action"] == MutationAction.VERSION_DATASET.value:
             task_authorized = bool(
                 exact_replay
@@ -967,7 +1133,10 @@ def create_app(
             or claim.disposable
             or claim.kind.value != expected_kind
             or assets is None
-            or claim.provider_ref not in {assets.checkpoint_ref, assets.checkpoint_verifier_ref}
+            or claim.provider_ref not in {
+                assets.checkpoint_ref, assets.checkpoint_verifier_ref,
+                *(provider_ref for provider_ref, _task_id in embedding_pairs),
+            }
         ):
             raise HTTPException(status_code=403, detail={"code": "provider_authority_mismatch"})
         provider_journal.persist_resource_claim(claim)

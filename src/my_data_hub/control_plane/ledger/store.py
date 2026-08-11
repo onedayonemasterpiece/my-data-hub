@@ -2030,6 +2030,148 @@ class ControlLedger:
             value["claimed_epoch"] = int(value["claimed_epoch"])
         return value
 
+    def ensure_embedding_production_request(
+        self,
+        *,
+        request_id: str,
+        operation_id: str,
+        idempotency_key_sha256: str,
+        request_sha256: str,
+        request: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        """Append one secret-free Gate-K request, or return its exact replay."""
+
+        request_json = _safe_json(request)
+        if any(len(value) != 64 for value in (idempotency_key_sha256, request_sha256)):
+            raise ValueError("embedding request hashes must be exact SHA-256 values")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            changed = connection.execute(
+                "INSERT INTO embedding_production_requests(request_id,operation_id,idempotency_key_sha256,"
+                "request_sha256,request_json,state,created_at,updated_at) VALUES (?,?,?,?,?,'REQUESTED',?,?) "
+                "ON CONFLICT(request_id) DO NOTHING",
+                (request_id, operation_id, idempotency_key_sha256, request_sha256, request_json, now, now),
+            ).rowcount
+            row = connection.execute(
+                "SELECT * FROM embedding_production_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if row is None or (
+                row["operation_id"], row["idempotency_key_sha256"], row["request_sha256"], row["request_json"]
+            ) != (operation_id, idempotency_key_sha256, request_sha256, request_json):
+                raise IdempotencyConflict("embedding request identity was reused for different metadata")
+            return self._embedding_request_from_row(row), bool(changed)
+
+    def claim_embedding_production_request(
+        self, *, operation_id: str, run_id: str, attempt_id: str, master_instance_id: str, epoch: int
+    ) -> dict[str, Any] | None:
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM embedding_production_requests WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            if row["state"] == "REQUESTED":
+                connection.execute(
+                    "UPDATE embedding_production_requests SET state='CLAIMED',claimed_run_id=?,"
+                    "claimed_attempt_id=?,claimed_master_instance_id=?,claimed_epoch=?,updated_at=? "
+                    "WHERE request_id=? AND state='REQUESTED'",
+                    (run_id, attempt_id, master_instance_id, epoch, now, row["request_id"]),
+                )
+                row = connection.execute(
+                    "SELECT * FROM embedding_production_requests WHERE request_id=?", (row["request_id"],)
+                ).fetchone()
+            assert row is not None
+            if (
+                row["claimed_run_id"],
+                row["claimed_attempt_id"],
+                row["claimed_master_instance_id"],
+                row["claimed_epoch"],
+            ) != (run_id, attempt_id, master_instance_id, epoch):
+                raise StaleRuntimeEvent("embedding request belongs to another runtime epoch")
+            return self._embedding_request_from_row(row)
+
+    def record_embedding_stage_receipt(
+        self, *, request_id: str, run_id: str, attempt_id: str, receipt: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        receipt_json = _safe_json(receipt)
+        with self._transaction() as connection:
+            changed = connection.execute(
+                "UPDATE embedding_production_requests SET state='STAGE_COMMITTED',stage_receipt_json=?,updated_at=? "
+                "WHERE request_id=? AND state='CLAIMED' AND claimed_run_id=? AND claimed_attempt_id=?",
+                (receipt_json, _format_time(self.clock.now()), request_id, run_id, attempt_id),
+            ).rowcount
+            row = connection.execute(
+                "SELECT * FROM embedding_production_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if row is None or (changed != 1 and row["stage_receipt_json"] != receipt_json):
+                raise StaleRuntimeEvent("embedding receipt does not bind the claimed runtime")
+            return self._embedding_request_from_row(row)
+
+    def record_embedding_checkpoint_receipt(
+        self, *, request_id: str, run_id: str, attempt_id: str, receipt: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        receipt_json = _safe_json(receipt)
+        with self._transaction() as connection:
+            changed = connection.execute(
+                "UPDATE embedding_production_requests SET state='CHECKPOINT_VERIFIED',checkpoint_receipt_json=?,"
+                "updated_at=? WHERE request_id=? AND state='STAGE_COMMITTED' AND claimed_run_id=? "
+                "AND claimed_attempt_id=?",
+                (receipt_json, _format_time(self.clock.now()), request_id, run_id, attempt_id),
+            ).rowcount
+            row = connection.execute(
+                "SELECT * FROM embedding_production_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if row is None or (changed != 1 and row["checkpoint_receipt_json"] != receipt_json):
+                raise StaleRuntimeEvent("embedding checkpoint does not follow committed imports")
+            return self._embedding_request_from_row(row)
+
+    def fail_embedding_production_request(
+        self, *, request_id: str, run_id: str, attempt_id: str, failure_code: str
+    ) -> None:
+        if not failure_code or len(failure_code) > 100:
+            raise ValueError("embedding failure code is invalid")
+        with self._transaction() as connection:
+            changed = connection.execute(
+                "UPDATE embedding_production_requests SET state='FAILED',failure_code=?,updated_at=? "
+                "WHERE request_id=? AND state='CLAIMED' AND stage_receipt_json IS NULL "
+                "AND claimed_run_id=? AND claimed_attempt_id=?",
+                (failure_code, _format_time(self.clock.now()), request_id, run_id, attempt_id),
+            ).rowcount
+            row = connection.execute(
+                "SELECT state,failure_code FROM embedding_production_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if changed != 1 and (row is None or row["state"] != "FAILED" or row["failure_code"] != failure_code):
+                raise StaleRuntimeEvent("committed embedding imports cannot be downgraded to failed")
+
+    def embedding_production_request(self, request_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM embedding_production_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+        return self._embedding_request_from_row(row) if row else None
+
+    def embedding_production_request_for_operation(self, operation_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM embedding_production_requests WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+        return self._embedding_request_from_row(row) if row else None
+
+    @staticmethod
+    def _embedding_request_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["request"] = json.loads(value.pop("request_json"))
+        for source, target in (
+            ("stage_receipt_json", "stage_receipt"),
+            ("checkpoint_receipt_json", "checkpoint_receipt"),
+        ):
+            raw = value.pop(source)
+            value[target] = json.loads(raw) if raw else None
+        if value["claimed_epoch"] is not None:
+            value["claimed_epoch"] = int(value["claimed_epoch"])
+        return value
+
     def revoke_oauth_reference(
         self,
         *,

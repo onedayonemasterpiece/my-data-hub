@@ -36,6 +36,7 @@ REQUEST_SCHEMA = "my-data-hub-embedding-production-request.v1"
 RECEIPT_SCHEMA = "my-data-hub-embedding-production-closure.v1"
 MAX_METADATA_BYTES = 256 * 1024
 _NAMESPACE = UUID("537f0c8e-c46a-54dd-8f18-ff4275a069f0")
+_PROVIDER_NAMESPACE = UUID("fa58e1cb-dcf5-5c35-acf2-7ba79ef2ffb5")
 
 
 class EmbeddingProductionError(RuntimeError):
@@ -118,6 +119,61 @@ class EmbeddingProductionRequest(BaseModel):
 
     @property
     def request_sha256(self) -> str:
+        return hashlib.sha256(canonical_json_bytes(self.model_dump(mode="json"))).hexdigest()
+
+
+def embedding_provider_authority(owner: str, request_id: UUID) -> dict[str, tuple[str, UUID]]:
+    """Exact protected refs/tasks; never a prefix or caller-selected resource."""
+
+    if not owner or "/" in owner:
+        raise ValueError("Kaggle owner is invalid")
+    short = request_id.hex[:12]
+    result: dict[str, tuple[str, UUID]] = {}
+    for alias, asset in zip(("e5", "bge"), WORKER_ASSETS, strict=True):
+        task_id = uuid5(_PROVIDER_NAMESPACE, f"{request_id}:{asset.model.exact_id}")
+        result[f"{alias}_input"] = (f"{owner}/mdh-embed-{short}-{alias}", task_id)
+        result[f"{alias}_worker"] = (f"{owner}/{asset.notebook_slug}", task_id)
+    return result
+
+
+class EmbeddingProductionStageReceipt(BaseModel):
+    """Bounded metadata proof returned by the ACTIVE master; never vectors/documents."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["my-data-hub-embedding-production-stage-receipt.v1"] = (
+        "my-data-hub-embedding-production-stage-receipt.v1"
+    )
+    request_id: UUID
+    request_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    master_instance_id: UUID
+    run_id: UUID
+    epoch: int = Field(ge=1)
+    workers: tuple[dict[str, Any], dict[str, Any]]
+    imports: tuple[dict[str, Any], dict[str, Any]]
+    coverage: tuple[dict[str, Any], dict[str, Any]]
+    canonical_revision: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def metadata_only_complete(self) -> EmbeddingProductionStageReceipt:
+        if len(canonical_json_bytes(self.model_dump(mode="json"))) > MAX_METADATA_BYTES:
+            raise ValueError("embedding stage receipt exceeds metadata bound")
+        if {row.get("model_exact_id") for row in self.workers} != {
+            asset.model.exact_id for asset in WORKER_ASSETS
+        }:
+            raise ValueError("embedding worker receipt does not cover both exact models")
+        if {row.get("model_exact_id") for row in self.imports} != {
+            asset.model.exact_id for asset in WORKER_ASSETS
+        }:
+            raise ValueError("embedding import receipt does not cover both exact models")
+        if any(row.get("expected_documents") != EXPECTED_BLOGGER_ROWS for row in self.coverage):
+            raise ValueError("embedding coverage expected count differs from imported corpus")
+        if any(row.get("completed_documents") != EXPECTED_BLOGGER_ROWS for row in self.coverage):
+            raise ValueError("embedding stage is not at 100 percent coverage")
+        return self
+
+    @property
+    def receipt_sha256(self) -> str:
         return hashlib.sha256(canonical_json_bytes(self.model_dump(mode="json"))).hexdigest()
 
 
@@ -379,6 +435,7 @@ def _validate_stage_status(
         "provider_kernel_id",
         "source_version",
         "source_sha256",
+        "primary_source_sha256",
         "provider_status",
         "privacy",
         "control_class",
@@ -412,7 +469,7 @@ def _validate_stage_status(
         if (
             asset is None
             or provider_ref.split("/", 1)[-1] != asset.notebook_slug
-            or item.get("source_sha256") != asset.primary_source_sha256
+            or item.get("primary_source_sha256") != asset.primary_source_sha256
         ):
             raise EmbeddingProductionError("embedding worker source differs from the pinned generated asset")
         input_dataset = item["input_dataset"]

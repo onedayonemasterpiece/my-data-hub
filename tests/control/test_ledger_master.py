@@ -90,7 +90,7 @@ def test_sqlite_pragmas_permissions_and_append_only_logs(tmp_path: Path) -> None
         .execute("SELECT version FROM control_schema_migrations ORDER BY version")
         .fetchall()
     )
-    assert migrations == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
+    assert migrations == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,), (13,)]
 
     operation, _ = ledger.ensure_operation(
         operation_id=str(uuid4()),
@@ -105,6 +105,58 @@ def test_sqlite_pragmas_permissions_and_append_only_logs(tmp_path: Path) -> None
         connection.execute("UPDATE operation_log SET to_state='BROKEN'")
     connection.close()
     assert ledger.get_operation(operation.operation_id) is not None
+
+
+def test_embedding_request_is_durable_exactly_once_and_epoch_bound(tmp_path: Path) -> None:
+    ledger = ledger_at(tmp_path)
+    request_id = str(uuid4())
+    operation_id = str(uuid4())
+    body = {"schema_version": "my-data-hub-embedding-production-request.v1", "request_id": request_id}
+    stored, created = ledger.ensure_embedding_production_request(
+        request_id=request_id,
+        operation_id=operation_id,
+        idempotency_key_sha256="a" * 64,
+        request_sha256="b" * 64,
+        request=body,
+    )
+    assert created and stored["state"] == "REQUESTED"
+    replay, created = ledger.ensure_embedding_production_request(
+        request_id=request_id,
+        operation_id=operation_id,
+        idempotency_key_sha256="a" * 64,
+        request_sha256="b" * 64,
+        request=body,
+    )
+    assert not created and replay == stored
+    claimed = ledger.claim_embedding_production_request(
+        operation_id=operation_id,
+        run_id="run-1",
+        attempt_id="attempt-1",
+        master_instance_id=str(uuid4()),
+        epoch=9,
+    )
+    assert claimed is not None and claimed["state"] == "CLAIMED"
+    with pytest.raises(StaleRuntimeEvent):
+        ledger.claim_embedding_production_request(
+            operation_id=operation_id,
+            run_id="run-2",
+            attempt_id="attempt-2",
+            master_instance_id=str(uuid4()),
+            epoch=10,
+        )
+    receipt = {"request_id": request_id, "canonical_revision": 12}
+    committed = ledger.record_embedding_stage_receipt(
+        request_id=request_id, run_id="run-1", attempt_id="attempt-1", receipt=receipt
+    )
+    assert committed["state"] == "STAGE_COMMITTED"
+    replay = ledger.record_embedding_stage_receipt(
+        request_id=request_id, run_id="run-1", attempt_id="attempt-1", receipt=receipt
+    )
+    assert replay["stage_receipt"] == receipt
+    with pytest.raises(StaleRuntimeEvent):
+        ledger.fail_embedding_production_request(
+            request_id=request_id, run_id="run-1", attempt_id="attempt-1", failure_code="late"
+        )
 
 
 def test_mode_tightening_tolerates_a_wal_unlinked_during_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

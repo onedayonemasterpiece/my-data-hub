@@ -51,11 +51,11 @@
     "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "worker": {
       "type": "object", "additionalProperties": false,
-      "required": ["model_exact_id", "task_run_id", "provider_ref", "provider_run_ref", "provider_kernel_id", "source_version", "source_sha256", "provider_status", "privacy", "control_class", "output_tree_sha256", "artifact_sha256", "artifact_id", "artifact_run_id", "input_dataset"],
+      "required": ["model_exact_id", "task_run_id", "provider_ref", "provider_run_ref", "provider_kernel_id", "source_version", "source_sha256", "primary_source_sha256", "provider_status", "privacy", "control_class", "output_tree_sha256", "artifact_sha256", "artifact_id", "artifact_run_id", "input_dataset"],
       "properties": {
         "model_exact_id": {"type": "string", "minLength": 42}, "task_run_id": {"type": "string", "format": "uuid"},
         "provider_ref": {"type": "string", "pattern": "^[^/]+/[^/]+$"}, "provider_run_ref": {"type": "string", "pattern": "^[^/]+/[^/]+/[1-9][0-9]*$"},
-        "provider_kernel_id": {"type": "integer", "minimum": 1}, "source_version": {"type": "integer", "minimum": 1}, "source_sha256": {"$ref": "#/$defs/sha256"},
+        "provider_kernel_id": {"type": "integer", "minimum": 1}, "source_version": {"type": "integer", "minimum": 1}, "source_sha256": {"$ref": "#/$defs/sha256"}, "primary_source_sha256": {"$ref": "#/$defs/sha256"},
         "provider_status": {"const": "complete"}, "privacy": {"const": "private"}, "control_class": {"const": "orchestrator_protected"},
         "output_tree_sha256": {"$ref": "#/$defs/sha256"}, "artifact_sha256": {"$ref": "#/$defs/sha256"},
         "artifact_id": {"type": "string", "format": "uuid"}, "artifact_run_id": {"type": "string", "format": "uuid"},

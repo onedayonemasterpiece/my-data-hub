@@ -27,7 +27,10 @@ class SearchDocument(BaseModel):
 
     schema_version: str = Field(default="blogger-search-document.v1", frozen=True)
     document_id: UUID
-    representation_kind: str = Field(default="blogger_public_profile", frozen=True)
+    # This value is part of the append-only PostgreSQL contract in migration
+    # 0012.  Keeping a different Python default made every otherwise valid
+    # production document impossible to persist.
+    representation_kind: str = Field(default="blogger_compact_v1", frozen=True)
     actor_kind: str = Field(min_length=1, max_length=100)
     display_name: str = Field(min_length=1, max_length=1000)
     description: str = Field(default="", max_length=12_000)

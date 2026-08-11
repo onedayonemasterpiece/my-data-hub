@@ -1,0 +1,81 @@
+mode: serial_integrator_after_read_only_parallel
+repo: /home/dev/projects/my-data-hub
+base_ref: 97c40e4e0ba28b38c69a5f028748432d3475092f
+base_branch: main
+integration_branch: agent/operational-mvp/final-embed-live
+global_constraints:
+  - one mandated branch/worktree; no parallel writes
+  - no provider-real matrix or blogger importer/workflow edits
+  - no bytes or local PostgreSQL on devstand
+  - no provider mutation before modern-token and imported-corpus proof
+verification_owner: /root/fix_lifecycle_wiring
+stop_conditions:
+  - exact live contract cannot be satisfied without forbidden-scope edits
+lanes:
+  - id: map-control-master
+    role: planner
+    requirement_ids: [R01, R05, R08]
+    target: durable control request and ACTIVE-master consumer/checkpoint lifecycle mapping
+    depends_on: []
+    execution_mode: parallel
+    branch: read-only
+    worktree: shared read-only inspection
+    writable_files: []
+    forbidden_files: [all]
+    expected_output: concrete integration map
+    verification_scope: inspection_only
+    status: completed
+  - id: map-provider-import
+    role: planner
+    requirement_ids: [R02, R03, R04]
+    target: compact documents, worker dispatch, artifacts, transactional import mapping
+    depends_on: []
+    execution_mode: parallel
+    branch: read-only
+    worktree: shared read-only inspection
+    writable_files: []
+    forbidden_files: [all]
+    expected_output: concrete integration map
+    verification_scope: inspection_only
+    status: completed
+  - id: map-mcp-search
+    role: planner
+    requirement_ids: [R06, R07]
+    target: MCP capabilities, coverage, vector hybrid/RRF mapping
+    depends_on: []
+    execution_mode: parallel
+    branch: read-only
+    worktree: shared read-only inspection
+    writable_files: []
+    forbidden_files: [all]
+    expected_output: concrete integration map
+    verification_scope: inspection_only
+    status: blocked-thread-limit
+  - id: integrate-live-gate-k
+    role: worker
+    requirement_ids: [R01, R02, R03, R04, R05, R06, R07, R08, R09]
+    target: actual production Gate K implementation and integration
+    depends_on: [map-control-master, map-provider-import, map-mcp-search]
+    execution_mode: serial_after_dependency
+    branch: agent/operational-mvp/final-embed-live
+    worktree: /home/dev/.codex/worktrees/my-data-hub/final-embed-live
+    writable_files:
+      - src/my_data_hub/embeddings/**
+      - src/my_data_hub/control_plane/**
+      - src/my_data_hub/mcp/**
+      - src/my_data_hub/master_runtime/**
+      - scripts/embeddings/**
+      - schemas/embeddings/**
+      - examples/embeddings/**
+      - tests/embeddings/**
+      - tests/control/**
+      - tests/mcp/**
+      - docs/operations/final-embedding-closure.md
+      - .codex/lanes/final-embed-live/**
+    forbidden_files:
+      - scripts/provider/real_kaggle_matrix.py
+      - .github/workflows/provider-real.yml
+      - src/my_data_hub/workloads/bloggers/importer.py
+    expected_output: clean committed production implementation
+    verification_scope: full_local
+    status: partial

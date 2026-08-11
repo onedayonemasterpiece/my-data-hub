@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -18,12 +19,42 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qs, urlsplit
 
+from my_data_hub.embeddings.rrf import (
+    RankedRetrieverResult,
+    UnavailableRetriever,
+    reciprocal_rank_fusion,
+)
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.contracts import MasterSession, MasterSessionBroker, SessionRequest
 
 
 class SessionBrokerError(RuntimeError):
     """The exact master session could not be issued or safely executed."""
+
+
+_EMBEDDING_COVERAGE_SQL = """
+SELECT model.provider_model_id || '@' || model.exact_revision AS model_exact_id,
+       count(document.search_document_id) AS expected_documents,
+       count(document.search_document_id) FILTER (
+           WHERE job.status='succeeded' AND CASE model.dimensions
+             WHEN 768 THEN e768.search_document_id IS NOT NULL
+             WHEN 1024 THEN e1024.search_document_id IS NOT NULL END
+       ) AS completed_documents
+FROM search.embedding_model model
+CROSS JOIN search.document document
+LEFT JOIN search.embedding_job job
+ ON job.search_document_id=document.search_document_id
+AND job.representation_kind=document.representation_kind AND job.model_id=model.model_id
+LEFT JOIN search.embedding_768 e768
+ ON model.dimensions=768 AND e768.search_document_id=job.search_document_id
+AND e768.model_id=job.model_id AND e768.input_hash=job.input_hash
+LEFT JOIN search.embedding_1024 e1024
+ ON model.dimensions=1024 AND e1024.search_document_id=job.search_document_id
+AND e1024.model_id=job.model_id AND e1024.input_hash=job.input_hash
+WHERE document.is_current
+GROUP BY model.model_key,model.provider_model_id,model.exact_revision,model.dimensions
+ORDER BY model.model_key
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,34 +319,130 @@ class PostgresMasterSession(MasterSession):
             if row is None:
                 return {"found": False, "export_batch_id": exact_batch_id}
             return {"found": True, "accounting": row}
+        if tool == "embedding.coverage":
+            rows = cursor.execute(
+                "SELECT model_exact_id,expected_documents,completed_documents,"
+                "CASE WHEN expected_documents=0 THEN 0.0 "
+                "ELSE completed_documents::double precision/expected_documents END AS coverage "
+                f"FROM ({_EMBEDDING_COVERAGE_SQL}) coverage"
+            ).fetchall()
+            revision = cursor.execute(
+                "SELECT canonical_revision FROM hub.canonical_state WHERE singleton=true"
+            ).fetchone()
+            return {
+                "models": rows,
+                "canonical_revision": int(revision["canonical_revision"]),
+                "complete": bool(rows) and all(float(row["coverage"]) == 1.0 for row in rows),
+            }
         if tool == "bloggers.search":
             query = str(arguments.get("query", "")).strip()
             if not 1 <= len(query) <= 500:
                 raise SessionBrokerError("blogger search query is empty or oversized")
             requested = min(int(arguments.get("limit", 20)), limit)
-            rows = cursor.execute(
-                "SELECT b.*,ts_rank_cd(d.search_vector,websearch_to_tsquery('pg_catalog.russian',%s)) AS fts_rank "
-                "FROM region_talk.bloggers_ru_v1 b "
-                "LEFT JOIN search.document d ON d.actor_id=b.blogger_id AND d.is_current "
-                "WHERE b.display_name ILIKE '%%'||%s||'%%' "
-                "OR d.search_vector @@ websearch_to_tsquery('pg_catalog.russian',%s) "
-                "ORDER BY (lower(b.display_name)=lower(%s)) DESC,fts_rank DESC NULLS LAST,b.blogger_id LIMIT %s",
-                (query, query, query, query, requested),
-            ).fetchall()
+            candidate_limit = min(max(requested * 5, 50), 500)
+            exact_ids = tuple(
+                str(row["blogger_id"])
+                for row in cursor.execute(
+                    "SELECT blogger_id FROM region_talk.bloggers_ru_v1 "
+                    "WHERE display_name ILIKE '%%'||%s||'%%' "
+                    "ORDER BY (lower(display_name)=lower(%s)) DESC,lower(display_name),blogger_id LIMIT %s",
+                    (query, query, candidate_limit),
+                ).fetchall()
+            )
+            fts_ids = tuple(
+                str(row["actor_id"])
+                for row in cursor.execute(
+                    "SELECT actor_id FROM search.document WHERE is_current "
+                    "AND search_vector @@ websearch_to_tsquery('pg_catalog.russian',%s) "
+                    "ORDER BY ts_rank_cd(search_vector,websearch_to_tsquery('pg_catalog.russian',%s)) DESC,"
+                    "actor_id LIMIT %s",
+                    (query, query, candidate_limit),
+                ).fetchall()
+            )
             coverage = cursor.execute(
-                "SELECT model_key,exact_revision,dimensions,expected_documents,completed_documents "
-                "FROM search.embedding_coverage ORDER BY model_key"
+                "SELECT model_exact_id,expected_documents,completed_documents,"
+                "CASE WHEN expected_documents=0 THEN 0.0 "
+                "ELSE completed_documents::double precision/expected_documents END AS coverage "
+                f"FROM ({_EMBEDDING_COVERAGE_SQL}) coverage"
             ).fetchall()
+            rankings = [
+                RankedRetrieverResult(name="exact", document_ids=exact_ids),
+                RankedRetrieverResult(name="fts", document_ids=fts_ids),
+            ]
+            index_revision_row = cursor.execute(
+                "SELECT canonical_revision FROM hub.canonical_state WHERE singleton=true"
+            ).fetchone()
+            index_revision = int(index_revision_row["canonical_revision"])
+            unavailable: list[UnavailableRetriever] = []
+            vector_specs = (
+                ("e5", "e5_query_vector", 768, "embedding_768", "e5_multilingual_base_v1"),
+                ("bge_m3", "bge_m3_query_vector", 1024, "embedding_1024", "bge_m3_dense_v1"),
+            )
+            for name, argument_name, dimensions, table, vector_space in vector_specs:
+                vector = arguments.get(argument_name)
+                if vector is None:
+                    unavailable.append(
+                        UnavailableRetriever(name=name, reason="exact_query_vector_absent", retryable=False)
+                    )
+                    continue
+                if (
+                    not isinstance(vector, list)
+                    or len(vector) != dimensions
+                    or any(not isinstance(item, (int, float)) or not math.isfinite(float(item)) for item in vector)
+                ):
+                    raise SessionBrokerError(f"{name} query vector violates its exact vector space")
+                norm = math.sqrt(sum(float(item) ** 2 for item in vector))
+                if not 0.999 <= norm <= 1.001:
+                    raise SessionBrokerError(f"{name} query vector is not L2-normalized")
+                halfvec = "[" + ",".join(format(float(item), ".9g") for item in vector) + "]"
+                vector_rows = cursor.execute(
+                    f"SELECT d.actor_id,m.exact_revision FROM search.{table} e "
+                    "JOIN search.document d ON d.search_document_id=e.search_document_id AND d.is_current "
+                    "JOIN search.embedding_model m ON m.model_id=e.model_id "
+                    "JOIN search.embedding_job j ON j.search_document_id=e.search_document_id "
+                    "AND j.model_id=e.model_id AND j.input_hash=e.input_hash AND j.status='succeeded' "
+                    "ORDER BY e.embedding <=> %s::halfvec,d.actor_id LIMIT %s",
+                    (halfvec, candidate_limit),
+                ).fetchall()
+                rankings.append(
+                    RankedRetrieverResult(
+                        name=name,
+                        document_ids=tuple(str(row["actor_id"]) for row in vector_rows),
+                        index_revision=index_revision,
+                        vector_space=vector_space,
+                    )
+                )
+            fused = reciprocal_rank_fusion(
+                requested_retrievers=("exact", "fts", "e5", "bge_m3"),
+                rankings=tuple(rankings),
+                unavailable=tuple(unavailable),
+            )
+            selected = [hit.document_id for hit in fused.hits[:requested]]
+            rows_by_id: dict[str, Any] = {}
+            if selected:
+                detail_rows = cursor.execute(
+                    "SELECT * FROM region_talk.bloggers_ru_v1 WHERE blogger_id=ANY(%s::uuid[])",
+                    (selected,),
+                ).fetchall()
+                rows_by_id = {str(row["blogger_id"]): row for row in detail_rows}
+            rows = [
+                {**rows_by_id[hit.document_id], "rrf": hit.model_dump(mode="json")}
+                for hit in fused.hits[:requested]
+                if hit.document_id in rows_by_id
+            ]
             return {
                 "items": rows,
                 "cursor": None,
+                "canonical_revision": index_revision,
                 "retrievers": {
-                    "requested": ["exact", "fts", "e5", "bge_m3"],
-                    "completed": ["exact", "fts"],
-                    "unavailable": ["e5", "bge_m3"],
+                    "requested": list(fused.coverage.retrievers_requested),
+                    "completed": list(fused.coverage.retrievers_completed),
+                    "unavailable": [item.name for item in fused.coverage.retrievers_unavailable],
+                    "details": fused.coverage.model_dump(mode="json"),
+                    "rrf_k": fused.rrf_k,
                 },
                 "embedding_coverage": coverage,
-                "complete": False,
+                "complete": fused.coverage.is_complete,
             }
         if tool == "data.query":
             parameters = arguments.get("parameters", [])
