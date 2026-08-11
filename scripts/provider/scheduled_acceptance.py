@@ -28,6 +28,11 @@ from my_data_hub.providers import BoundedInventory, ProviderKind, ProviderRegist
 from my_data_hub.providers.kaggle import KaggleProviderAdapter
 from my_data_hub.providers.kaggle.control_journal import ControlLedgerKaggleJournal
 
+try:
+    from scripts.provider.kaggle_credential_preflight import kaggle_credentials_configured
+except ModuleNotFoundError:  # direct ``python scripts/provider/...`` execution
+    from kaggle_credential_preflight import kaggle_credentials_configured
+
 PASS = 0
 FAIL = 1
 EXTERNAL_BLOCKED = 78
@@ -66,11 +71,9 @@ class Outcome(StrEnum):
 
 
 def modern_token_configured() -> bool:
-    configured = bool(os.environ.get("KAGGLE_API_TOKEN", "").strip())
-    token_path = Path(os.environ.get("KAGGLE_CONFIG_DIR", "~/.kaggle")).expanduser() / "access_token"
-    return configured or (
-        token_path.is_file() and not token_path.is_symlink() and token_path.stat().st_size > 20
-    )
+    """Backward-compatible name for the pinned SDK credential preflight."""
+
+    return kaggle_credentials_configured()
 
 
 @dataclass(frozen=True, slots=True)

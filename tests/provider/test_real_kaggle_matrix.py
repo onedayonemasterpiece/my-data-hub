@@ -81,7 +81,7 @@ def test_real_dataset_canary_fails_before_mutation_without_modern_token(
     assert not (tmp_path / "ledger.sqlite3").exists()
 
 
-def test_modern_token_preflight_accepts_only_supported_nonempty_sources(
+def test_kaggle_credential_preflight_accepts_only_supported_private_sources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
@@ -90,6 +90,7 @@ def test_modern_token_preflight_accepts_only_supported_nonempty_sources(
 
     token = tmp_path / "access_token"
     token.write_text("x" * 32, encoding="utf-8")
+    token.chmod(0o600)
     assert modern_token_configured() is True
 
     token.unlink()

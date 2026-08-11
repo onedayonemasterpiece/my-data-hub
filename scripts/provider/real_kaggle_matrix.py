@@ -37,6 +37,11 @@ from my_data_hub.providers.kaggle.contracts import (
 from my_data_hub.providers.kaggle.control_journal import ControlLedgerKaggleJournal
 from my_data_hub.providers.models import ControlClass
 
+try:
+    from scripts.provider.kaggle_credential_preflight import kaggle_credentials_configured
+except ModuleNotFoundError:  # direct ``python scripts/provider/...`` execution
+    from kaggle_credential_preflight import kaggle_credentials_configured
+
 EXTERNAL_BLOCKED = 78
 MATRIX_SCHEMA = "my-data-hub-real-kaggle-matrix.v1"
 SCENARIO_SCHEMA = "my-data-hub-real-kaggle-matrix-scenario.v1"
@@ -96,9 +101,9 @@ class AnonymousDatasetProbe:
 
 
 def modern_token_configured() -> bool:
-    configured = bool(os.environ.get("KAGGLE_API_TOKEN", "").strip())
-    token_path = Path(os.environ.get("KAGGLE_CONFIG_DIR", "~/.kaggle")).expanduser() / "access_token"
-    return configured or (token_path.is_file() and not token_path.is_symlink() and token_path.stat().st_size > 20)
+    """Backward-compatible name for the pinned SDK credential preflight."""
+
+    return kaggle_credentials_configured()
 
 
 def _effect(
