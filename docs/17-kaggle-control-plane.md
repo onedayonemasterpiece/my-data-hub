@@ -1,6 +1,6 @@
 # Kaggle control plane
 
-Status: `CORE ARCHITECTURE / REAL PROVIDER IMPLEMENTATION DEFERRED`
+Status: `CORE IMPLEMENTED / REAL OPERATIONAL MATRIX BLOCKED`
 
 Kaggle has two distinct roles:
 
@@ -16,25 +16,30 @@ Resource control classes remain: `orchestrator_protected`, `mcp_managed`, `mcp_e
 and `external_read_only`. Names never grant authorization. Master and checkpoint resources
 are orchestrator-protected. Public creation is absent.
 
-PR-A makes no provider call. Next are donor compatibility and FakeKaggle; real lifecycle and
-master Notebook are later PRs.
+PR-A made no provider call. The implementation PR now contains the single official
+provider adapter, durable provider-effect journal, FakeKaggle/state-machine contracts,
+protected master launch, callback reconciliation and an in-Notebook checkpoint pipeline.
+A disposable private Dataset canary passed, but the required private Notebook and master
+run matrix remains blocked on modern owner authentication; no permanent protected resource
+or production master is claimed.
 
 ## Preserved detailed contract — bound by ADR-0016
 
 The detailed material below is retained where topology-neutral. Any reference to a database, role, committer, backup or connector application is executed inside/against the latest ACTIVE Kaggle master; devstand execution claims are superseded.
 
-Status: `R1 POLICY/REGISTRY CONTRACT IMPLEMENTED / PROVIDER ADAPTER BLOCKED`
+Status: `POLICY/REGISTRY/ADAPTER IMPLEMENTED / REAL ACCEPTANCE BLOCKED`
 Date: 2026-08-09
 Related decision: ADR-0011
 Exchange contract: [`../schemas/kaggle-exchange-manifest.v1.schema.json`](../schemas/kaggle-exchange-manifest.v1.schema.json)
 
-Implemented in R1: provider-neutral control-class models, bounded pagination,
+Implemented: provider-neutral control-class models, bounded pagination,
 unknown-resource classification, immutable protected-class database enforcement,
 fingerprint/lease mutation policy, private exchange validation, private lifecycle
-receipt contracts, protected-resource negative tests, and a minimal remote status tool.
-No concrete Kaggle create/readback/delete adapter, account inventory, resource ID, or
-cleanup receipt is claimed; the provider workflow fails closed until those primitives
-and dedicated credentials exist.
+receipt contracts, protected-resource negative tests, one concrete `kaggle==2.2.4`
+adapter and a minimal remote status tool. A task-owned disposable private Dataset has an
+exact create/readback/privacy-denial/delete receipt. Existing account resources remain
+`external_read_only`; permanent protected resource identities and real master/checkpoint
+receipts are not yet claimed.
 
 ## 1. Role of Kaggle
 
