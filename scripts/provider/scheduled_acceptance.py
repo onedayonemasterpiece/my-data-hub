@@ -152,14 +152,13 @@ def _resource_checks(observations: Observations, *, now: datetime, freshness: ti
         Outcome.PASS if len(live) <= MAX_INVENTORY_RESOURCES else Outcome.FAIL,
         {"bounded": len(live) <= MAX_INVENTORY_RESOURCES, "resource_count": len(live)},
     )
-    public_count = sum(item.get("private") is not True for item in live)
-    public = Check(
-        "provider_public_scan",
-        "PROVIDER_KAGGLE",
-        Outcome.PASS if public_count == 0 else Outcome.FAIL,
-        {"public_or_unproven_count": public_count},
-    )
     if observations.registered_resources is None:
+        public = _component_blocker(
+            observations,
+            "provider_registry",
+            "provider_public_scan",
+            "PROVIDER_KAGGLE",
+        )
         orphan = _component_blocker(
             observations,
             "provider_registry",
@@ -174,17 +173,40 @@ def _resource_checks(observations: Observations, *, now: datetime, freshness: ti
         )
     else:
         registered = observations.registered_resources
-        refs = {
+        registered_refs = {
             str(item.get("resource_ref"))
             for item in registered
             if isinstance(item.get("resource_ref"), str)
         }
-        orphan_count = sum(str(item.get("provider_ref")) not in refs for item in live)
+        live_by_ref = {
+            str(item.get("provider_ref")): item
+            for item in live
+            if isinstance(item.get("provider_ref"), str)
+        }
+        public_count = sum(
+            live_by_ref[ref].get("private") is not True
+            for ref in registered_refs & live_by_ref.keys()
+        )
+        public = Check(
+            "provider_public_scan",
+            "PROVIDER_KAGGLE",
+            Outcome.PASS if public_count == 0 else Outcome.FAIL,
+            {
+                "registered_public_or_unproven_count": public_count,
+                "registered_count": len(registered_refs),
+            },
+        )
+        missing_registered = registered_refs - live_by_ref.keys()
+        external_read_only = live_by_ref.keys() - registered_refs
         orphan = Check(
             "provider_orphan_scan",
             "PROVIDER_KAGGLE",
-            Outcome.PASS if orphan_count == 0 else Outcome.FAIL,
-            {"orphan_count": orphan_count, "registered_count": len(registered)},
+            Outcome.PASS if not missing_registered else Outcome.FAIL,
+            {
+                "missing_registered_count": len(missing_registered),
+                "external_read_only_count": len(external_read_only),
+                "registered_count": len(registered_refs),
+            },
         )
         stale_count = 0
         invalid_time_count = 0

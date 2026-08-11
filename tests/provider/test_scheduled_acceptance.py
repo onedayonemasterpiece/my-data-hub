@@ -132,7 +132,8 @@ def test_weekly_adds_rotation_previous_restore_denial_and_real_lifecycle_evidenc
 def test_failures_outrank_blockers_without_emitting_resource_or_business_rows() -> None:
     observations = complete_observations()
     observations.live_resources = [
-        {"provider_ref": "owner/unregistered", "kind": "dataset", "private": False}
+        {"provider_ref": "owner/other", "kind": "dataset", "private": False},
+        {"provider_ref": "owner/unregistered", "kind": "dataset", "private": False},
     ]
     observations.registered_resources = [
         {
@@ -174,7 +175,31 @@ def test_failures_outrank_blockers_without_emitting_resource_or_business_rows() 
     assert "owner/unregistered" not in encoded
     assert '"rows":' not in encoded
     assert by_name(checks)["provider_public_scan"].outcome is acceptance.Outcome.FAIL
-    assert by_name(checks)["provider_orphan_scan"].outcome is acceptance.Outcome.FAIL
+
+
+def test_unknown_account_resources_remain_external_read_only_not_system_orphans() -> None:
+    observations = complete_observations()
+    observations.live_resources = [
+        {"provider_ref": "owner/managed", "kind": "dataset", "private": True},
+        {"provider_ref": "owner/unrelated-public", "kind": "dataset", "private": False},
+    ]
+    observations.registered_resources = [
+        {
+            "resource_ref": "owner/managed",
+            "observed_at": NOW.isoformat(),
+        }
+    ]
+
+    checks = acceptance._resource_checks(
+        observations,
+        now=NOW,
+        freshness=timedelta(hours=26),
+    )
+
+    assert by_name(checks)["provider_public_scan"].outcome is acceptance.Outcome.PASS
+    orphan = by_name(checks)["provider_orphan_scan"]
+    assert orphan.outcome is acceptance.Outcome.PASS
+    assert orphan.observed["external_read_only_count"] == 1
 
 
 def test_existing_checkpoint_status_blocks_when_exact_refs_and_freshness_interface_are_absent() -> None:

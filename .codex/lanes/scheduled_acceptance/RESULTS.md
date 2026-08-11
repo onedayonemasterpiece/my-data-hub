@@ -66,3 +66,11 @@ No success is claimed for these scenarios.
 - A reader token with broader/operator scopes fails the exact reader-catalog gate.
 - A provider registry response at the 100-row bound blocks orphan/freshness claims because the current MCP response has no completeness cursor/`has_more` contract.
 - The live PostgreSQL proof remains opt-in and was not run; this lane creates no PostgreSQL or canonical data locally.
+
+## Integration correction
+
+The integration owner narrowed public/orphan evaluation to exact registered
+my-data-hub refs. Unknown account resources remain `external_read_only`; they are
+reported as a bounded count and are never mislabeled as task orphans or used to
+fail the system-private-resource gate. A focused regression test covers an
+unrelated public account resource alongside one private registered resource.
