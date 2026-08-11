@@ -272,6 +272,17 @@ class FakeControl:
         assert self.captured is not None and event_id == self.captured.event_id
         return self.dispositions.pop(0) if self.dispositions else None
 
+    def project_stored_callback(
+        self,
+        value: MasterAcceptanceCommand,
+        armed: CallbackLossDirective,
+        event_id: UUID,
+    ) -> Literal["duplicate"]:
+        assert value == command()
+        assert armed == self.directive
+        assert self.captured is not None and event_id == self.captured.event_id
+        return "duplicate"
+
     def disarm_expired_callback_loss(
         self, value: MasterAcceptanceCommand, armed: CallbackLossDirective
     ) -> None:
@@ -406,7 +417,7 @@ class FakeLedger:
     row: dict[str, Any] | None = None
 
     def arm_master_acceptance_callback_loss(self, **values: Any) -> dict[str, Any]:
-        expires = (NOW + timedelta(seconds=120)).isoformat().replace("+00:00", "Z")
+        expires = (NOW + timedelta(seconds=900)).isoformat().replace("+00:00", "Z")
         receipt = {
             "schema_version": "my-data-hub-fm08-callback-directive.v1",
             "task_id": values["task_id"],
@@ -451,6 +462,16 @@ class FakeLedger:
         self.row["restart_to_id"] = values["restart_to_id"]
         return self.row
 
+    def project_master_acceptance_callback_replay(self, **values: Any) -> Literal["duplicate"]:
+        assert self.row is not None
+        assert values == {
+            "task_id": self.row["task_id"],
+            "event_id": self.row["callback_event_id"],
+            "body_sha256": self.row["callback_body_sha256"],
+        }
+        self.row["callback_state"] = "REPLAYED"
+        return "duplicate"
+
 
 def test_control_ledger_adapter_reconciles_exact_directive_and_restart() -> None:
     ledger = FakeLedger()
@@ -461,11 +482,11 @@ def test_control_ledger_adapter_reconciles_exact_directive_and_restart() -> None
         allowed_event_types=ALLOWED_CALLBACK_EVENT_TYPES,
         max_callbacks=1,
         armed_at=NOW,
-        expires_at=NOW + timedelta(seconds=180),
+        expires_at=NOW + timedelta(seconds=900),
         before_boot_id=BEFORE,
     )
     assert armed.command_sha256 == value.command_sha256
-    assert armed.expires_at == NOW + timedelta(seconds=120)
+    assert armed.expires_at == NOW + timedelta(seconds=900)
     assert adapter.callback_loss_directive(value) == armed
 
     assert ledger.row is not None
@@ -478,6 +499,8 @@ def test_control_ledger_adapter_reconciles_exact_directive_and_restart() -> None
     assert adapter.captured_callback(value, armed) == CallbackCapture(
         event_id=UUID(int=99), body_sha256=BODY_HASH
     )
+    ledger.row["restart_to_id"] = str(AFTER)
+    assert adapter.project_stored_callback(value, armed, UUID(int=99)) == "duplicate"
     adapter.record_control_restart(
         value, armed, before_boot_id=BEFORE, after_boot_id=AFTER
     )

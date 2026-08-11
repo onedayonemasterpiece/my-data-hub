@@ -410,10 +410,39 @@ class ControlRestartReceipt:
             raise ValueError("control process restart receipt did not change boot identity")
 
 
+@dataclass(frozen=True, slots=True)
+class AbruptMasterRecoveryReceipt:
+    old_binding: MasterAcceptanceBinding
+    recovery_binding: MasterAcceptanceBinding
+    old_provider_run_ref: str
+    old_provider_kernel_id: int
+    recovery_provider_run_ref: str
+    recovery_provider_kernel_id: int
+    termination_receipt_sha256: str
+    recovery_receipt_sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.old_binding.operation_id == self.recovery_binding.operation_id
+            or self.recovery_binding.epoch != self.old_binding.epoch + 1
+            or self.old_provider_run_ref == self.recovery_provider_run_ref
+            or self.old_provider_kernel_id < 1
+            or self.recovery_provider_kernel_id < 1
+        ):
+            raise ValueError("FM08 recovery receipt is not a distinct consecutive master run")
+        for value in (self.termination_receipt_sha256, self.recovery_receipt_sha256):
+            if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                raise ValueError("FM08 recovery receipt hash is invalid")
+
+
 class CallbackLossSupervisorPort(Protocol):
     """Task-owned callback suppression and real control-process supervisor."""
 
     def suppress_next_task_callback(self, command: MasterAcceptanceCommand) -> StoredCallbackRef: ...
+
+    def abrupt_master_recovery(
+        self, command: MasterAcceptanceCommand, stored: StoredCallbackRef
+    ) -> AbruptMasterRecoveryReceipt: ...
 
     def restart_control_process(self, command: MasterAcceptanceCommand) -> ControlRestartReceipt: ...
 
@@ -831,9 +860,10 @@ class ProductionControlHostEffects:
         if supervisor is None:
             raise ProductionAcceptanceBlocked("FM08_CALLBACK_SUPERVISOR_UNAVAILABLE")
         stored = supervisor.suppress_next_task_callback(command)
+        recovery = supervisor.abrupt_master_recovery(command, stored)
         restart = supervisor.restart_control_process(command)
         disposition = supervisor.replay_stored_callback(command, stored.event_id)
-        if not supervisor.exact_service_active(command.binding):
+        if not supervisor.exact_service_active(recovery.recovery_binding):
             raise ProductionAcceptanceBlocked("FM08_SERVICE_NOT_ACTIVE_AFTER_RECOVERY")
         return CallbackLossEvidence(
             kind="CALLBACK_LOSS_RECOVERY",
@@ -844,6 +874,17 @@ class ProductionControlHostEffects:
             control_boot_id_after=restart.after_boot_id,
             replay_disposition=disposition,
             service_active_after_recovery=True,
+            old_master_abruptly_terminated=True,
+            old_operation_id=recovery.old_binding.operation_id,
+            new_operation_id=recovery.recovery_binding.operation_id,
+            old_epoch=recovery.old_binding.epoch,
+            new_epoch=recovery.recovery_binding.epoch,
+            old_provider_run_ref=recovery.old_provider_run_ref,
+            old_provider_kernel_id=recovery.old_provider_kernel_id,
+            new_provider_run_ref=recovery.recovery_provider_run_ref,
+            new_provider_kernel_id=recovery.recovery_provider_kernel_id,
+            termination_receipt_sha256=recovery.termination_receipt_sha256,
+            recovery_receipt_sha256=recovery.recovery_receipt_sha256,
         )
 
     def _stale_replay(self, command: MasterAcceptanceCommand) -> StaleReplayEvidence:
@@ -1166,6 +1207,8 @@ class ControlMasterAcceptanceExecutor:
             evidence = self.host_effects.execute(command)
         except ProductionAcceptanceBlocked as exc:
             if exc.code in {
+                "FM08_RECOVERY_NOT_ACTIVE",
+                "FM08_RECOVERY_PROVIDER_RUN_PENDING",
                 "FM11_OLD_RUNTIME_NOT_STOPPED",
                 "FM11_REPLACEMENT_NOT_ACTIVE",
                 "FM12_TERMINAL_CHECKPOINT_NOT_READY",

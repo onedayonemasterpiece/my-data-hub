@@ -169,7 +169,35 @@ protected pre-STOPPED context capture is the remaining internal assembly gap.
   into the PostgreSQL master Notebook.
 
 This is implementation and local-gate evidence only. No live provider mutation
-or scenario `LIVE_PASS` was performed. FM08 remains BLOCKED on real abrupt
-master termination plus distinct recovery run/epoch evidence. FM09 exact
+or scenario `LIVE_PASS` was performed. At that checkpoint FM08 remained blocked
+on abrupt termination/recovery; the corrective section below closes its
+internal action path while live evidence remains absent. FM09 exact
 revoked-token replay now requires a runtime-owned exact replay capability; the
 control plane intentionally does not persist or reconstruct raw bearer tokens.
+
+## 2026-08-11 FM08 abrupt-master recovery implementation
+
+- control migration 023 persists one task-owned old/recovery plan before any
+  termination: exact old operation/run/epoch, deterministic distinct recovery
+  Notebook ref/idempotency key, termination receipt, replacement operation/run,
+  recovery receipt, and terminal state;
+- the official central Kaggle adapter issues exactly one delete for the exact
+  numeric source-attested old run. A lost response is reconciled by exact
+  absence and never causes a second destructive call;
+- after provider absence, one ledger transaction fences the old operation,
+  service and attempt and revokes the old callback token. Only then may a
+  distinct task-derived Notebook ref enter the next consecutive epoch;
+- the recovery uses the normal protected status Dataset and mandatory runtime
+  source attestation. Startup reconciliation selects the recovery-specific
+  assets from the durable migration row, so it does not revive the deleted run;
+- after the real host control-process restart, the already-authenticated
+  captured heartbeat is projected by exact task/event/body-hash identity. Raw
+  body bytes and the revoked Bearer are neither reconstructed nor exposed;
+- typed FM08 evidence now requires distinct old/new operation IDs, provider run
+  refs and kernel IDs, consecutive epochs, abrupt-termination and recovery
+  receipt hashes, and distinct control boot UUIDs before it can validate.
+
+Focused unit/integration gates cover one-shot lost-response reconciliation,
+fence/retry idempotency, revoked-token stored-event projection, supervisor call
+ordering, schemas and migration continuity. No live provider mutation or host
+restart was performed, so no FM08 `LIVE_PASS` is claimed here.

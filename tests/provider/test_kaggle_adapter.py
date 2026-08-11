@@ -17,6 +17,7 @@ from my_data_hub.providers.kaggle import (
     KaggleAmbiguousMutation,
     KaggleContractError,
     KaggleIdentityError,
+    KaggleKernelRunIdentity,
     KagglePolicyError,
     KaggleProviderAdapter,
     KaggleProviderIdentity,
@@ -657,6 +658,55 @@ def test_master_pending_attestation_never_blind_retries_lost_push_response(
     assert len(journal.receipts) == 1
     assert journal.receipts[0].detail_code == "master_push_response_ambiguous"
     assert journal.claims == {}
+
+
+def test_fm08_termination_reconciles_lost_delete_response_without_second_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, api, journal = adapter()
+    task_run_id = uuid4()
+    provider_ref = "owner/fm08-old-master"
+    api.kernels[provider_ref] = {1: b"source"}
+    run = KaggleKernelRunIdentity(
+        provider_ref=provider_ref,
+        provider_run_ref=f"{provider_ref}/1",
+        source_version=1,
+        provider_kernel_id=1000,
+        source_sha256="e" * 64,
+        task_run_id=task_run_id,
+        started_at=NOW,
+    )
+    arguments = {
+        "task_run_id": str(task_run_id),
+        "source_version": 1,
+        "source_sha256": "e" * 64,
+        "provider_kernel_id": 1000,
+        "provider_run_ref": f"{provider_ref}/1",
+        "termination_kind": "fm08_abrupt_master",
+    }
+    intent = effect(
+        MutationAction.DELETE_NOTEBOOK,
+        provider_ref,
+        task_id=task_run_id,
+        arguments=arguments,
+    )
+    original = api.kernels_delete
+    calls = 0
+
+    def lost_response(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        original(*args, **kwargs)
+        raise ConnectionError("response lost after exact delete")
+
+    monkeypatch.setattr(api, "kernels_delete", lost_response)
+    first = client.terminate_attested_master_run(intent=intent, run=run)
+    second = client.terminate_attested_master_run(intent=intent, run=run)
+    assert first.outcome is EffectOutcome.APPLIED
+    assert second.outcome is EffectOutcome.ALREADY_APPLIED
+    assert calls == 1
+    assert journal.intents == [intent, intent]
+    assert len(journal.receipts) == 2
 
 
 def test_output_rejects_stale_run_receipt() -> None:

@@ -29,6 +29,7 @@ from .master_lifecycle import (
     require_acceptance_operator,
 )
 from .master_production import (
+    AbruptMasterRecoveryReceipt,
     ControlLedgerLeaseExpiryRenewal,
     ControlLedgerOwnerAcceptanceClaims,
     ControlLedgerStoredReplay,
@@ -68,6 +69,7 @@ from .scenario_operator import (
 __all__ = [
     "ACCEPTANCE_OPERATE_SCOPE",
     "COMMAND_FOR_SCENARIO",
+    "AbruptMasterRecoveryReceipt",
     "AcceptanceScenarioId",
     "AcceptanceScenarioOperatorAdapter",
     "AcceptanceScenarioRequest",

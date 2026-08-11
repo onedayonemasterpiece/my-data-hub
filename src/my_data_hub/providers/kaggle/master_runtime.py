@@ -43,6 +43,9 @@ from .contracts import (
     ProviderEffectIntent,
     TaskResourceClaim,
 )
+from .contracts import (
+    ProviderEffectReceipt as KaggleProviderEffectReceipt,
+)
 from .source_attestation import executable_source_sha256
 
 MASTER_TERMINAL_OUTPUT_NAME = "my-data-hub-master-terminal.json"
@@ -356,6 +359,37 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             ),
             claim=claim,
         )
+
+    def terminate_run_for_fm08(
+        self,
+        *,
+        task_id: UUID,
+        operation_id: UUID,
+        run: KaggleKernelRunIdentity,
+        requested_at: datetime,
+    ) -> KaggleProviderEffectReceipt:
+        """Execute the fixed task-owned abrupt termination for one old run."""
+
+        if run.provider_ref != self.assets.notebook_ref:
+            raise MasterLaunchContractError("FM08 old run differs from the configured master ref")
+        intent = ProviderEffectIntent.create(
+            operation_id=operation_id,
+            effect_id=uuid5(NAMESPACE_URL, f"fm08-abrupt-terminate:{task_id}"),
+            idempotency_key=f"fm08-abrupt-terminate:{task_id}",
+            task_id=task_id,
+            action=MutationAction.DELETE_NOTEBOOK,
+            provider_ref=run.provider_ref,
+            arguments={
+                "task_run_id": str(run.task_run_id),
+                "source_version": run.source_version,
+                "source_sha256": run.source_sha256,
+                "provider_kernel_id": run.provider_kernel_id,
+                "provider_run_ref": run.provider_run_ref,
+                "termination_kind": "fm08_abrupt_master",
+            },
+            requested_at=requested_at,
+        )
+        return self.adapter.terminate_attested_master_run(intent=intent, run=run)
 
     def execute(self, effect: PlannedProviderEffect) -> ProviderEffectReceipt:
         self._validate_effect(effect)

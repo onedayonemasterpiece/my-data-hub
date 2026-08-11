@@ -241,11 +241,12 @@ owns the second `clean_rotation` gate. FM24 remains a single-epoch
 session/credential rotation soak and proves 12 heartbeats, 12 bounded reads,
 checkpoint/recovery receipts, and the 3,600–5,400 second duration.
 
-FM08 remains pre-action BLOCKED with zero mutations. Its current typed callback
-receipt has distinct control boot IDs but no exact terminated/recovery provider
-run identities, so it cannot satisfy the abrupt-master lifecycle gate without
-fabrication. It may be enabled only after those identities are part of the
-durable control contract.
+FM08 now has a default-off production action path: one exact persisted old
+provider run is terminated and fenced, one distinct next-epoch run is admitted,
+and the typed receipt binds both numeric run/kernel identities plus the real
+control-process restart. This is implementation readiness, not live evidence;
+the matrix remains BLOCKED until a deployed run returns that validated durable
+receipt and independent provider reconciliation confirms both run identities.
 
 ## What counts as PASS
 

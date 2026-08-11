@@ -19,6 +19,7 @@ from my_data_hub.acceptance.master_lifecycle import (
     command_for,
 )
 from my_data_hub.acceptance.master_production import (
+    AbruptMasterRecoveryReceipt,
     CallbackLossEvidence,
     ControlMasterAcceptanceExecutor,
     ControlRestartReceipt,
@@ -280,6 +281,28 @@ class CallbackSupervisor:
         self.calls.append("restart")
         return ControlRestartReceipt(self.before, self.after)
 
+    def abrupt_master_recovery(self, command, stored) -> AbruptMasterRecoveryReceipt:
+        assert stored == self.event
+        self.calls.append("recover")
+        recovery = MasterAcceptanceBinding(
+            operation_id=uuid4(),
+            run_id=uuid4(),
+            attempt_id=uuid4(),
+            service_instance_id=str(uuid4()),
+            master_instance_id=uuid4(),
+            epoch=command.binding.epoch + 1,
+        )
+        return AbruptMasterRecoveryReceipt(
+            old_binding=command.binding,
+            recovery_binding=recovery,
+            old_provider_run_ref="owner/old/1",
+            old_provider_kernel_id=1,
+            recovery_provider_run_ref="owner/recovery/1",
+            recovery_provider_kernel_id=2,
+            termination_receipt_sha256="c" * 64,
+            recovery_receipt_sha256="d" * 64,
+        )
+
     def replay_stored_callback(self, _command, event_id: UUID) -> str:
         assert event_id == self.event.event_id
         self.calls.append("replay")
@@ -298,7 +321,7 @@ def test_fm08_control_effect_requires_real_restart_and_replays_stored_id() -> No
     assert evidence.control_boot_id_before == UUID(int=1)
     assert evidence.control_boot_id_after == UUID(int=2)
     assert evidence.exact_event_id == UUID(int=3)
-    assert supervisor.calls == ["suppress", "restart", "replay", "active"]
+    assert supervisor.calls == ["suppress", "recover", "restart", "replay", "active"]
 
 
 class OwnerClaims:

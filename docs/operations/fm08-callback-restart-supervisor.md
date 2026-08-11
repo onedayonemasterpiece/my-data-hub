@@ -3,9 +3,10 @@
 FM08 uses a private host authority, not an MCP or HTTP fault endpoint. The owner-only
 `acceptance:operate` claim binds one command to the exact task, operation, run,
 attempt, master instance, and epoch. Control migration 020 persists a fixed
-`runtime.heartbeat`, maximum-one directive with a 120-second expiry, the control
+`runtime.heartbeat`, maximum-one directive with a 900-second expiry, the control
 process boot UUID, and a canonical directive receipt hash before the callback can
-be suppressed.
+be suppressed. The fixed expiry lets one legitimate provider
+termination/recovery call cannot be mistaken for a crashed owner claim.
 
 ## Callback sequence
 
@@ -19,19 +20,28 @@ be suppressed.
    Kaggle runtime retains the exact body in its fsync-backed local JSONL spool.
    Exact retries remain 503 until a restart receipt exists; altered events are not
    captured as the task callback.
-4. The separately enabled host daemon accepts only a HMAC-authenticated,
+4. The control-owned Kaggle adapter terminates the exact persisted numeric old
+   run with one provider delete call. Exact absence reconciles a lost response;
+   it never blindly repeats the destructive call. The ledger then atomically
+   fences the old operation/service/attempt, revokes its token, and admits one
+   task-derived Notebook ref at exactly the next epoch. Runtime source
+   attestation is required before that recovery becomes ACTIVE. The old and new
+   operation IDs, provider run refs, kernel IDs, consecutive epochs, and
+   termination/recovery receipt hashes are durable.
+5. The separately enabled host daemon accepts only a HMAC-authenticated,
    task-derived `RESTART_CONTROL_PLANE` envelope over its mode-0600 Unix socket.
    Its immutable command is `docker compose ... restart --no-deps control-plane`.
    The Docker socket is never mounted in a container, and neither `remote-mcp` nor
    `oauth-server` is a selectable restart target.
-5. The host journal fsyncs `INTENT` before restart, waits for the fixed loopback
+6. The host journal fsyncs `INTENT` before restart, waits for the fixed loopback
    health endpoint to report a different process boot UUID, then fsyncs the exact
    before/after receipt. A deterministic request ID makes a lost response
    resumable without a second restart.
-6. The new control process records the before/after UUIDs in the control ledger.
-   The runtime's exact spool retry is then admitted as a duplicate, atomically
-   changes the directive to `REPLAYED`, and can complete FM08 only while the exact
-   service remains ACTIVE.
+7. The new control process records the before/after UUIDs in the control ledger.
+   Because the old master is intentionally dead and its raw Bearer is gone, the
+   immutable already-authenticated event row is replayed only by its task/event/
+   body-hash identity. This atomically changes the directive to `REPLAYED` and
+   can complete FM08 only while the distinct recovery binding remains ACTIVE.
 
 Expired ARMED or CAPTURED directives disarm and clear capture metadata. Missing
 host/socket permission blocks before arming. The daemon never accepts arbitrary
@@ -56,8 +66,9 @@ stops the supervisor.
 
 ## Evidence status
 
-Unit and integration tests prove the contract, IPC authentication, persist-before-
-effect journal, same-request recovery, expiry, and immutable restart target. They
-are not live FM08 evidence. A live PASS still requires a real Kaggle heartbeat,
-real container restart with different boot UUIDs, exact duplicate replay, and an
-ACTIVE service receipt.
+Unit and integration tests prove the contract, one-shot exact termination,
+atomic old-epoch fencing, distinct consecutive recovery identity, IPC
+authentication, persist-before-effect journals, stored-event replay by identity,
+expiry, and immutable restart target. They are not live FM08 evidence. A live
+PASS still requires the real Kaggle old/recovery runs, real container restart,
+and the resulting durable typed receipt.

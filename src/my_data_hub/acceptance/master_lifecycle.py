@@ -195,11 +195,32 @@ class CallbackLossEvidence(_Evidence):
     control_boot_id_after: UUID
     replay_disposition: Literal["accepted", "duplicate"]
     service_active_after_recovery: Literal[True]
+    old_master_abruptly_terminated: Literal[True]
+    old_operation_id: UUID
+    new_operation_id: UUID
+    old_epoch: int = Field(ge=1)
+    new_epoch: int = Field(ge=2)
+    old_provider_run_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$", max_length=320
+    )
+    old_provider_kernel_id: int = Field(ge=1)
+    new_provider_run_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$", max_length=320
+    )
+    new_provider_kernel_id: int = Field(ge=1)
+    termination_receipt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    recovery_receipt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def real_restart(self) -> CallbackLossEvidence:
         if self.control_boot_id_before == self.control_boot_id_after:
             raise ValueError("FM08 requires a real control process restart")
+        if self.old_operation_id == self.new_operation_id:
+            raise ValueError("FM08 requires a distinct recovery master operation")
+        if self.new_epoch != self.old_epoch + 1:
+            raise ValueError("FM08 recovery epoch is not consecutive")
+        if self.old_provider_run_ref == self.new_provider_run_ref:
+            raise ValueError("FM08 requires a distinct recovery provider run")
         return self
 
 

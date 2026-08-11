@@ -7,9 +7,9 @@ import json
 import os
 import secrets
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -28,7 +28,7 @@ from my_data_hub.checkpoints.kaggle_runtime import (
     KaggleCheckpointVerifierAssets,
 )
 from my_data_hub.control_plane.ledger import ControlLedger
-from my_data_hub.hashing import sha256_value
+from my_data_hub.hashing import canonical_json_bytes, sha256_value
 from my_data_hub.orchestrator.master import MasterCoordinator, MasterHandle, MasterIntent, MasterState
 from my_data_hub.providers.kaggle import (
     ControlLedgerKaggleJournal,
@@ -379,15 +379,179 @@ class ControlPlaneMasterRuntime:
     def reconcile_startup(self) -> list[MasterHandle]:
         handles: list[MasterHandle] = []
         for operation in self.ledger.incomplete_operations("ensure_master"):
-            if not self._status_dataset_ready(operation.operation_id, operation.identity):
+            recovery = self.ledger.fm08_recovery_for_operation(operation.operation_id)
+            owner = self._fm08_recovery_runtime(recovery) if recovery is not None else self
+            if not owner._status_dataset_ready(operation.operation_id, operation.identity):
                 current = self.ledger.get_operation(operation.operation_id)
                 assert current is not None
-                handles.append(self._handle(current))
+                handles.append(owner._handle(current))
                 continue
-            handle = self.coordinator.ensure_master(self.intent(operation.idempotency_key))
-            self._cleanup_terminal_status_dataset(handle)
+            handle = owner.coordinator.ensure_master(owner.intent(operation.idempotency_key))
+            owner._cleanup_terminal_status_dataset(handle)
             handles.append(handle)
         return handles
+
+    def recover_abrupt_master(self, command: Any, capture: Any) -> Any:
+        """Terminate the exact FM08 old run and start one distinct next epoch.
+
+        The command/capture types are imported lazily to keep the control
+        runtime independent of the acceptance assembly cycle. All identities
+        are derived from the already owner-claimed task; no provider ref,
+        payload, clock, token, or command is caller supplied.
+        """
+
+        from my_data_hub.acceptance.master_lifecycle import (
+            MasterAcceptanceBinding,
+            MasterAcceptanceCommandKind,
+        )
+        from my_data_hub.acceptance.master_production import (
+            AbruptMasterRecoveryReceipt,
+            ProductionAcceptanceBlocked,
+        )
+        from my_data_hub.providers.kaggle.contracts import KaggleKernelRunIdentity
+
+        if command.command_kind is not MasterAcceptanceCommandKind.CALLBACK_LOSS_RECOVERY:
+            raise ValueError("abrupt master recovery received another command")
+        provider = self.coordinator.provider
+        if not isinstance(provider, KaggleMasterRuntimeProvider):
+            raise ProductionAcceptanceBlocked("FM08_OFFICIAL_KAGGLE_ADAPTER_REQUIRED")
+        trigger = self.ledger.get_effect_by_idempotency_key(
+            f"{command.binding.operation_id}:trigger_run"
+        )
+        try:
+            old_run = KaggleKernelRunIdentity.model_validate(
+                trigger.receipt["exact_identity"] if trigger is not None and trigger.receipt else None
+            )
+        except (TypeError, ValueError) as exc:
+            raise ProductionAcceptanceBlocked("FM08_OLD_PROVIDER_RUN_RECEIPT_INVALID") from exc
+        if (
+            old_run.task_run_id != command.binding.run_id
+            or old_run.provider_ref != self.settings.assets.notebook_ref
+        ):
+            raise ProductionAcceptanceBlocked("FM08_OLD_PROVIDER_RUN_BINDING_MISMATCH")
+        owner = self.settings.assets.notebook_ref.split("/", 1)[0]
+        replacement_key = f"fm08-recovery:{command.task_id}"
+        replacement_ref = f"{owner}/mdh-master-fm08-{command.task_id.hex}"
+        row, _created = self.ledger.ensure_fm08_abrupt_recovery(
+            task_id=str(command.task_id),
+            command_id=str(command.command_id),
+            command_sha256=command.command_sha256,
+            old_operation_id=str(command.binding.operation_id),
+            old_run=old_run.model_dump(mode="json"),
+            old_epoch=command.binding.epoch,
+            replacement_idempotency_key=replacement_key,
+            replacement_notebook_ref=replacement_ref,
+        )
+        if row["state"] == "INTENT":
+            old_operation = self.ledger.get_operation(str(command.binding.operation_id))
+            if old_operation is None:
+                raise ProductionAcceptanceBlocked("FM08_OLD_OPERATION_MISSING")
+            termination = provider.terminate_run_for_fm08(
+                task_id=command.task_id,
+                operation_id=command.binding.operation_id,
+                run=old_run,
+                requested_at=old_operation.created_at,
+            )
+            termination_payload = termination.model_dump(mode="json")
+            termination_sha256 = hashlib.sha256(canonical_json_bytes(termination_payload)).hexdigest()
+            row = self.ledger.fence_fm08_abrupt_master(
+                task_id=str(command.task_id),
+                termination_receipt=termination_payload,
+                termination_receipt_sha256=termination_sha256,
+            )
+            self.coordinator.deactivate_terminal_operation(
+                str(command.binding.operation_id), "fm08_abrupt_master_terminated"
+            )
+            current_old = self.ledger.get_operation(str(command.binding.operation_id))
+            assert current_old is not None
+            self._cleanup_terminal_status_dataset(self._handle(current_old))
+        recovery_runtime = self._fm08_recovery_runtime(row)
+        replacement, _duplicate = recovery_runtime.ensure(replacement_key)
+        self.ledger.bind_fm08_replacement(
+            task_id=str(command.task_id),
+            replacement_operation_id=replacement.operation_id,
+            replacement_run=None,
+            recovery_receipt_sha256=None,
+            active=False,
+        )
+        replacement_trigger = self.ledger.get_effect_by_idempotency_key(
+            f"{replacement.operation_id}:trigger_run"
+        )
+        try:
+            replacement_run = KaggleKernelRunIdentity.model_validate(
+                replacement_trigger.receipt["exact_identity"]
+                if replacement_trigger is not None and replacement_trigger.receipt
+                else None
+            )
+        except (TypeError, ValueError) as exc:
+            raise ProductionAcceptanceBlocked("FM08_RECOVERY_PROVIDER_RUN_PENDING") from exc
+        recovery_payload = {
+            "schema_version": "my-data-hub-fm08-abrupt-recovery.v1",
+            "task_id": str(command.task_id),
+            "old_operation_id": str(command.binding.operation_id),
+            "old_provider_run_ref": old_run.provider_run_ref,
+            "old_provider_kernel_id": old_run.provider_kernel_id,
+            "old_epoch": command.binding.epoch,
+            "replacement_operation_id": replacement.operation_id,
+            "replacement_provider_run_ref": replacement_run.provider_run_ref,
+            "replacement_provider_kernel_id": replacement_run.provider_kernel_id,
+            "replacement_epoch": replacement.epoch,
+            "captured_event_id": str(capture.event_id),
+            "captured_body_sha256": capture.body_sha256,
+        }
+        recovery_sha256 = hashlib.sha256(canonical_json_bytes(recovery_payload)).hexdigest()
+        row = self.ledger.bind_fm08_replacement(
+            task_id=str(command.task_id),
+            replacement_operation_id=replacement.operation_id,
+            replacement_run=replacement_run.model_dump(mode="json"),
+            recovery_receipt_sha256=recovery_sha256,
+            active=replacement.state is MasterState.ACTIVE,
+        )
+        if replacement.state is not MasterState.ACTIVE:
+            raise ProductionAcceptanceBlocked("FM08_RECOVERY_NOT_ACTIVE")
+        binding = MasterAcceptanceBinding(
+            operation_id=UUID(replacement.operation_id),
+            run_id=UUID(replacement.run_id),
+            attempt_id=UUID(replacement.attempt_id),
+            service_instance_id=replacement.service_instance_id,
+            master_instance_id=UUID(replacement.master_instance_id),
+            epoch=replacement.epoch,
+        )
+        return AbruptMasterRecoveryReceipt(
+            old_binding=command.binding,
+            recovery_binding=binding,
+            old_provider_run_ref=old_run.provider_run_ref,
+            old_provider_kernel_id=old_run.provider_kernel_id,
+            recovery_provider_run_ref=replacement_run.provider_run_ref,
+            recovery_provider_kernel_id=replacement_run.provider_kernel_id,
+            termination_receipt_sha256=str(row["termination_receipt_sha256"]),
+            recovery_receipt_sha256=str(row["recovery_receipt_sha256"]),
+        )
+
+    def _fm08_recovery_runtime(self, row: Mapping[str, Any]) -> ControlPlaneMasterRuntime:
+        provider = self.coordinator.provider
+        if not isinstance(provider, KaggleMasterRuntimeProvider):
+            raise MasterProviderUnavailable("FM08 recovery requires the official Kaggle adapter")
+        assets = replace(
+            self.settings.assets,
+            notebook_ref=str(row["replacement_notebook_ref"]),
+        )
+        recovery_provider = KaggleMasterRuntimeProvider(
+            provider.adapter, assets, status_authority=self.ledger
+        )
+        recovery_coordinator = MasterCoordinator(
+            self.ledger,
+            recovery_provider,
+            lease_ttl=self.coordinator.lease_ttl,
+            tunnel_authority=self.coordinator.tunnel_authority,
+            tunnel_listen_port=self.coordinator.tunnel_listen_port,
+        )
+        return ControlPlaneMasterRuntime(
+            ledger=self.ledger,
+            coordinator=recovery_coordinator,
+            settings=MasterRuntimeSettings(assets),
+            acceptance_executor=self.acceptance_executor,
+        )
 
     def _status_dataset_ready(self, operation_id: str, identity: dict[str, Any]) -> bool:
         provider = self.coordinator.provider

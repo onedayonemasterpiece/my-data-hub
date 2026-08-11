@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from my_data_hub.control_plane.ledger import StaleRuntimeEvent
 from my_data_hub.hashing import canonical_json_bytes
 
 if TYPE_CHECKING:
@@ -41,7 +42,7 @@ MAX_MESSAGE_BYTES = 16 * 1024
 MAX_RESPONSE_BYTES = 16 * 1024
 CALLBACK_CAPTURE_SECONDS = 90
 CALLBACK_REPLAY_SECONDS = 120
-DIRECTIVE_TTL_SECONDS = 180
+DIRECTIVE_TTL_SECONDS = 900
 HEALTH_TIMEOUT_SECONDS = 120
 ALLOWED_CALLBACK_EVENT_TYPES = ("runtime.heartbeat",)
 RESTART_ACTION = "RESTART_CONTROL_PLANE"
@@ -160,6 +161,13 @@ class CallbackLossControlPort(Protocol):
         directive: CallbackLossDirective,
         event_id: UUID,
     ) -> Literal["accepted", "duplicate"] | None: ...
+
+    def project_stored_callback(
+        self,
+        command: MasterAcceptanceCommand,
+        directive: CallbackLossDirective,
+        event_id: UUID,
+    ) -> Literal["duplicate"]: ...
 
     def record_control_restart(
         self,
@@ -721,6 +729,7 @@ class LedgerCallbackLossSupervisor:
     control: CallbackLossControlPort
     host: UnixHostRestartClient
     health: ControlHealthProbe
+    master_recovery: Any | None = None
     now: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
     monotonic: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
@@ -774,6 +783,23 @@ class LedgerCallbackLossSupervisor:
             after_boot_id=receipt.after_boot_id,
         )
 
+    def abrupt_master_recovery(self, command: MasterAcceptanceCommand, stored: Any) -> Any:
+        self._assert_fm08(command)
+        if self.master_recovery is None:
+            raise CallbackSupervisorBlocked("FM08_ABRUPT_MASTER_RECOVERY_UNAVAILABLE")
+        directive = self.control.callback_loss_directive(command)
+        if directive is None:
+            raise CallbackSupervisorBlocked("FM08_DIRECTIVE_MISSING")
+        directive.assert_command(command)
+        capture = self.control.captured_callback(command, directive)
+        if (
+            capture is None
+            or capture.event_id != stored.event_id
+            or capture.body_sha256 != stored.body_sha256
+        ):
+            raise CallbackSupervisorBlocked("FM08_CALLBACK_CAPTURE_MISMATCH")
+        return self.master_recovery.recover_abrupt_master(command, capture)
+
     def replay_stored_callback(
         self, command: MasterAcceptanceCommand, event_id: UUID
     ) -> Literal["accepted", "duplicate"]:
@@ -793,6 +819,10 @@ class LedgerCallbackLossSupervisor:
             disposition = self.control.replay_disposition(command, directive, event_id)
             if disposition is not None:
                 return disposition
+            # The old runtime was deliberately terminated and its raw Bearer
+            # discarded. Project the immutable, already-authenticated body by
+            # task/event/hash identity; no callback bytes or token cross here.
+            return self.control.project_stored_callback(command, directive, event_id)
             self.sleep(0.5)
         self.control.disarm_expired_callback_loss(command, directive)
         raise CallbackSupervisorBlocked("FM08_CALLBACK_REPLAY_TIMEOUT")
@@ -932,6 +962,24 @@ class ControlLedgerCallbackLossPort:
             return None
         return "duplicate"
 
+    def project_stored_callback(
+        self,
+        command: MasterAcceptanceCommand,
+        directive: CallbackLossDirective,
+        event_id: UUID,
+    ) -> Literal["duplicate"]:
+        capture = self.captured_callback(command, directive)
+        if capture is None or capture.event_id != event_id:
+            raise CallbackSupervisorBlocked("FM08_CALLBACK_CAPTURE_MISMATCH")
+        try:
+            return self.ledger.project_master_acceptance_callback_replay(
+                task_id=str(command.task_id),
+                event_id=str(event_id),
+                body_sha256=capture.body_sha256,
+            )
+        except (KeyError, StaleRuntimeEvent, ValueError) as exc:
+            raise CallbackSupervisorBlocked("FM08_CALLBACK_REPLAY_REJECTED") from exc
+
     def disarm_expired_callback_loss(
         self, command: MasterAcceptanceCommand, directive: CallbackLossDirective
     ) -> None:
@@ -999,7 +1047,9 @@ class ControlLedgerCallbackLossPort:
             raise CallbackSupervisorBlocked("FM08_DIRECTIVE_RECEIPT_INVALID") from exc
 
 
-def callback_loss_supervisor_from_environment(ledger: Any) -> LedgerCallbackLossSupervisor | None:
+def callback_loss_supervisor_from_environment(
+    ledger: Any, *, master_recovery: Any | None = None
+) -> LedgerCallbackLossSupervisor | None:
     """Build the private supervisor only when both installer-owned paths exist."""
 
     socket_value = os.getenv("MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_SOCKET", "").strip()
@@ -1014,6 +1064,7 @@ def callback_loss_supervisor_from_environment(ledger: Any) -> LedgerCallbackLoss
         control=ControlLedgerCallbackLossPort(ledger),
         host=UnixHostRestartClient(socket_path=socket_path, key_path=key_path),
         health=HttpControlHealthProbe(),
+        master_recovery=master_recovery,
     )
 
 

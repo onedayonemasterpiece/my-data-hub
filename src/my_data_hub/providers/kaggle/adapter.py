@@ -1141,6 +1141,76 @@ class KaggleProviderAdapter:
 
         return self._read_run_status(run, require_source_readback=False)
 
+    def terminate_attested_master_run(
+        self, *, intent: ProviderEffectIntent, run: KaggleKernelRunIdentity
+    ) -> ProviderEffectReceipt:
+        """Abruptly terminate one exact source-attested master run.
+
+        This is not a general provider delete.  The control-owned FM08 path
+        supplies a fixed DELETE_NOTEBOOK intent bound to the persisted numeric
+        run identity.  No source pull, credential, command, or caller payload is
+        accepted; legacy automated credentials therefore retain the same
+        pending-runtime-attestation boundary as launch.
+        """
+
+        arguments = {
+            "task_run_id": str(run.task_run_id),
+            "source_version": run.source_version,
+            "source_sha256": run.source_sha256,
+            "provider_kernel_id": run.provider_kernel_id,
+            "provider_run_ref": run.provider_run_ref,
+            "termination_kind": "fm08_abrupt_master",
+        }
+        if intent.action is not MutationAction.DELETE_NOTEBOOK or intent.provider_ref != run.provider_ref:
+            raise KaggleContractError("FM08 termination intent differs from the exact master run")
+        self._validate_intent(intent, arguments=arguments)
+        self.journal.persist_intent(intent)
+        if self._is_absent(run.provider_ref, ProviderKind.NOTEBOOK):
+            receipt = ProviderEffectReceipt(
+                operation_id=intent.operation_id,
+                effect_id=intent.effect_id,
+                action=intent.action,
+                provider_ref=intent.provider_ref,
+                outcome=EffectOutcome.ALREADY_APPLIED,
+                attempts=0,
+                provider_version=run.source_version,
+                observed_at=self.clock(),
+                detail_code="fm08_master_run_already_absent",
+            )
+            self.journal.persist_receipt(receipt)
+            return receipt
+        _resource, source_version, provider_kernel_id = self._find_resource(
+            run.provider_ref, ProviderKind.NOTEBOOK
+        )
+        if source_version != run.source_version or provider_kernel_id != run.provider_kernel_id:
+            raise KagglePolicyError("FM08 termination target differs from the persisted numeric run")
+        try:
+            # Deletion is intentionally one-shot: a lost provider response is
+            # reconciled by exact absence, never by a second destructive call.
+            self.api.kernels_delete(run.provider_ref, no_confirm=True)
+            attempts = 1
+        except Exception as exc:
+            if not self._is_absent(run.provider_ref, ProviderKind.NOTEBOOK):
+                self._persist_uncertain(intent, detail="fm08_master_termination_ambiguous")
+                raise KaggleAmbiguousMutation("FM08 master termination is not exactly reconcilable") from exc
+            attempts = 0
+        if not self._is_absent(run.provider_ref, ProviderKind.NOTEBOOK):
+            self._persist_uncertain(intent, detail="fm08_master_still_present")
+            raise KaggleAmbiguousMutation("FM08 master run remains after termination")
+        receipt = ProviderEffectReceipt(
+            operation_id=intent.operation_id,
+            effect_id=intent.effect_id,
+            action=intent.action,
+            provider_ref=intent.provider_ref,
+            outcome=EffectOutcome.APPLIED,
+            attempts=attempts,
+            provider_version=run.source_version,
+            observed_at=self.clock(),
+            detail_code="fm08_master_run_absent",
+        )
+        self.journal.persist_receipt(receipt)
+        return receipt
+
     def _read_run_status(
         self,
         run: KaggleKernelRunIdentity,

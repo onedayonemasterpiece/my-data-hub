@@ -385,7 +385,9 @@ def create_app(
             callback_loss_supervisor_from_environment,
         )
 
-        callback_supervisor = callback_loss_supervisor_from_environment(control_ledger)
+        callback_supervisor = callback_loss_supervisor_from_environment(
+            control_ledger, master_recovery=master_runtime
+        )
         acceptance_scenario_adapter = AcceptanceScenarioOperatorAdapter(
             UnifiedAcceptanceScenarioExecutor(
                 master=ProductionControlAcceptanceContext(

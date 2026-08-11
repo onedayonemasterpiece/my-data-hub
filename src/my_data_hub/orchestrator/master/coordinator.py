@@ -793,6 +793,21 @@ class MasterCoordinator:
             now=self.ledger.clock.now(),
         )
 
+    def deactivate_terminal_operation(self, operation_id: str, reason: str) -> None:
+        """Revoke tunnel authority only for an already durable terminal operation."""
+
+        if reason != "fm08_abrupt_master_terminated":
+            raise ValueError("terminal tunnel deactivation reason is not task-owned")
+        operation = self.ledger.get_operation(operation_id)
+        if operation is None or MasterState(operation.state) not in {
+            MasterState.FENCED,
+            MasterState.FAILED,
+            MasterState.ORPHANED,
+            MasterState.STOPPED,
+        }:
+            raise ValueError("tunnel authority cannot be revoked before durable terminal fencing")
+        self._deactivate_tunnel_authority(operation.identity, reason)
+
     def _deactivate_tunnel_authority(self, identity: dict[str, Any], reason: str) -> None:
         authority = self.tunnel_authority
         if authority is None:

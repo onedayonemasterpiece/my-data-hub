@@ -33,6 +33,58 @@
           "title": "Kind",
           "type": "string"
         },
+        "new_epoch": {
+          "minimum": 2,
+          "title": "New Epoch",
+          "type": "integer"
+        },
+        "new_operation_id": {
+          "format": "uuid",
+          "title": "New Operation Id",
+          "type": "string"
+        },
+        "new_provider_kernel_id": {
+          "minimum": 1,
+          "title": "New Provider Kernel Id",
+          "type": "integer"
+        },
+        "new_provider_run_ref": {
+          "maxLength": 320,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "New Provider Run Ref",
+          "type": "string"
+        },
+        "old_epoch": {
+          "minimum": 1,
+          "title": "Old Epoch",
+          "type": "integer"
+        },
+        "old_master_abruptly_terminated": {
+          "const": true,
+          "title": "Old Master Abruptly Terminated",
+          "type": "boolean"
+        },
+        "old_operation_id": {
+          "format": "uuid",
+          "title": "Old Operation Id",
+          "type": "string"
+        },
+        "old_provider_kernel_id": {
+          "minimum": 1,
+          "title": "Old Provider Kernel Id",
+          "type": "integer"
+        },
+        "old_provider_run_ref": {
+          "maxLength": 320,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Old Provider Run Ref",
+          "type": "string"
+        },
+        "recovery_receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Recovery Receipt Sha256",
+          "type": "string"
+        },
         "replay_disposition": {
           "enum": [
             "accepted",
@@ -45,6 +97,11 @@
           "const": true,
           "title": "Service Active After Recovery",
           "type": "boolean"
+        },
+        "termination_receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Termination Receipt Sha256",
+          "type": "string"
         }
       },
       "required": [
@@ -55,7 +112,18 @@
         "control_boot_id_before",
         "control_boot_id_after",
         "replay_disposition",
-        "service_active_after_recovery"
+        "service_active_after_recovery",
+        "old_master_abruptly_terminated",
+        "old_operation_id",
+        "new_operation_id",
+        "old_epoch",
+        "new_epoch",
+        "old_provider_run_ref",
+        "old_provider_kernel_id",
+        "new_provider_run_ref",
+        "new_provider_kernel_id",
+        "termination_receipt_sha256",
+        "recovery_receipt_sha256"
       ],
       "title": "CallbackLossEvidence",
       "type": "object"

@@ -12,7 +12,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from my_data_hub.control_plane.clock import Clock, SystemClock
@@ -2935,6 +2935,273 @@ class ControlLedger:
             assert task is not None
             return self._master_acceptance_task_from_connection(connection, task)
 
+    def ensure_fm08_abrupt_recovery(
+        self,
+        *,
+        task_id: str,
+        command_id: str,
+        command_sha256: str,
+        old_operation_id: str,
+        old_run: Mapping[str, Any],
+        old_epoch: int,
+        replacement_idempotency_key: str,
+        replacement_notebook_ref: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist the exact old/recovery run plan before terminating Kaggle."""
+
+        for value in (task_id, command_id, old_operation_id):
+            try:
+                UUID(value)
+            except ValueError as exc:
+                raise ValueError("FM08 abrupt recovery requires exact UUID identities") from exc
+        if (
+            len(command_sha256) != 64
+            or old_epoch < 1
+            or not 8 <= len(replacement_idempotency_key) <= 200
+            or len(replacement_notebook_ref.split("/")) != 2
+            or any(not part for part in replacement_notebook_ref.split("/"))
+        ):
+            raise ValueError("FM08 abrupt recovery identity is invalid")
+        old_run_json = _safe_json(old_run, max_bytes=16 * 1024)
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            command = connection.execute(
+                "SELECT c.command_id,c.command_sha256,c.state,c.claim_authority,t.scenario_id,"
+                "t.target_operation_id,t.target_epoch FROM master_acceptance_commands c "
+                "JOIN master_acceptance_tasks t ON t.task_id=c.task_id WHERE c.task_id=?",
+                (task_id,),
+            ).fetchone()
+            operation = connection.execute(
+                "SELECT state,identity_json FROM operations WHERE operation_id=?",
+                (old_operation_id,),
+            ).fetchone()
+            if (
+                command is None
+                or operation is None
+                or command["command_id"] != command_id
+                or command["command_sha256"] != command_sha256
+                or command["state"] != "CLAIMED"
+                or command["claim_authority"] != "owner_host"
+                or command["scenario_id"] != "FM08"
+                or command["target_operation_id"] != old_operation_id
+                or int(command["target_epoch"]) != old_epoch
+            ):
+                raise StaleRuntimeEvent("FM08 abrupt recovery differs from its owner-host claim")
+            existing = connection.execute(
+                "SELECT * FROM master_acceptance_abrupt_recoveries WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if existing is not None:
+                value = self._fm08_abrupt_recovery_from_row(existing)
+                expected = {
+                    "command_id": command_id,
+                    "command_sha256": command_sha256,
+                    "old_operation_id": old_operation_id,
+                    "old_epoch": old_epoch,
+                    "replacement_idempotency_key": replacement_idempotency_key,
+                    "replacement_notebook_ref": replacement_notebook_ref,
+                }
+                if any(value[key] != item for key, item in expected.items()) or value["old_run"] != json.loads(
+                    old_run_json
+                ):
+                    raise IdempotencyConflict("FM08 abrupt recovery plan changed")
+                return value, False
+            identity = json.loads(str(operation["identity_json"]))
+            if operation["state"] != "ACTIVE" or int(identity.get("epoch", 0)) != old_epoch:
+                raise StaleRuntimeEvent("FM08 abrupt recovery requires the exact ACTIVE old master")
+            connection.execute(
+                "INSERT INTO master_acceptance_abrupt_recoveries(task_id,command_id,command_sha256,"
+                "old_operation_id,old_run_json,old_epoch,replacement_idempotency_key,"
+                "replacement_notebook_ref,state,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,'INTENT',?,?)",
+                (
+                    task_id,
+                    command_id,
+                    command_sha256,
+                    old_operation_id,
+                    old_run_json,
+                    old_epoch,
+                    replacement_idempotency_key,
+                    replacement_notebook_ref,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_abrupt_recoveries WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            assert row is not None
+            return self._fm08_abrupt_recovery_from_row(row), True
+
+    def fence_fm08_abrupt_master(
+        self,
+        *,
+        task_id: str,
+        termination_receipt: Mapping[str, Any],
+        termination_receipt_sha256: str,
+    ) -> dict[str, Any]:
+        """Fence the exact old epoch only after its provider run is absent."""
+
+        payload = _safe_json(termination_receipt, max_bytes=32 * 1024)
+        if hashlib.sha256(payload.encode()).hexdigest() != termination_receipt_sha256:
+            raise ValueError("FM08 termination receipt hash is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_abrupt_recoveries WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["termination_receipt_json"] is not None:
+                if (
+                    row["termination_receipt_json"] != payload
+                    or row["termination_receipt_sha256"] != termination_receipt_sha256
+                ):
+                    raise IdempotencyConflict("FM08 termination receipt changed")
+                return self._fm08_abrupt_recovery_from_row(row)
+            operation = connection.execute(
+                "SELECT state,identity_json FROM operations WHERE operation_id=?",
+                (row["old_operation_id"],),
+            ).fetchone()
+            if operation is None or operation["state"] != "ACTIVE":
+                raise StaleRuntimeEvent("FM08 old master is no longer atomically fenceable")
+            identity = json.loads(str(operation["identity_json"]))
+            epoch = int(row["old_epoch"])
+            connection.execute(
+                "UPDATE operations SET state='FENCED',updated_at=? WHERE operation_id=? AND state='ACTIVE'",
+                (now, row["old_operation_id"]),
+            )
+            connection.execute(
+                "INSERT INTO operation_log(operation_id,from_state,to_state,recorded_at,metadata_json) "
+                "VALUES (?,'ACTIVE','FENCED',?,?)",
+                (
+                    row["old_operation_id"],
+                    now,
+                    _safe_json({"code": "FM08_ABRUPT_MASTER_TERMINATED", "task_id": task_id}),
+                ),
+            )
+            connection.execute(
+                "UPDATE services SET state='FENCED',updated_at=? WHERE service_instance_id=? "
+                "AND epoch=? AND state IN ('ACTIVE','DRAINING','REGISTERING')",
+                (now, identity["service_instance_id"], epoch),
+            )
+            connection.execute(
+                "UPDATE run_attempts SET state='FENCED',updated_at=? WHERE run_id=? AND attempt_id=? AND epoch=?",
+                (now, identity["run_id"], identity["attempt_id"], epoch),
+            )
+            connection.execute(
+                "UPDATE runtime_token_hashes SET revoked_at=? WHERE run_id=? AND attempt_id=?",
+                (now, identity["run_id"], identity["attempt_id"]),
+            )
+            connection.execute(
+                "UPDATE master_acceptance_abrupt_recoveries SET state='TERMINATED',"
+                "termination_receipt_json=?,termination_receipt_sha256=?,updated_at=? WHERE task_id=?",
+                (payload, termination_receipt_sha256, now, task_id),
+            )
+            current = connection.execute(
+                "SELECT * FROM master_acceptance_abrupt_recoveries WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            assert current is not None
+            return self._fm08_abrupt_recovery_from_row(current)
+
+    def bind_fm08_replacement(
+        self,
+        *,
+        task_id: str,
+        replacement_operation_id: str,
+        replacement_run: Mapping[str, Any] | None,
+        recovery_receipt_sha256: str | None,
+        active: bool,
+    ) -> dict[str, Any]:
+        run_json = (
+            _safe_json(replacement_run, max_bytes=16 * 1024)
+            if replacement_run is not None
+            else None
+        )
+        if active and (run_json is None or recovery_receipt_sha256 is None):
+            raise ValueError("FM08 active recovery requires its exact provider receipt")
+        if recovery_receipt_sha256 is not None and (
+            len(recovery_receipt_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in recovery_receipt_sha256)
+        ):
+            raise ValueError("FM08 recovery receipt hash is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_abrupt_recoveries WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            operation = connection.execute(
+                "SELECT state,identity_json,idempotency_key FROM operations WHERE operation_id=?",
+                (replacement_operation_id,),
+            ).fetchone()
+            if row is None or operation is None or row["state"] not in {"TERMINATED", "RECOVERING", "ACTIVE"}:
+                raise StaleRuntimeEvent("FM08 replacement has no terminated old master")
+            identity = json.loads(str(operation["identity_json"]))
+            if (
+                operation["idempotency_key"] != row["replacement_idempotency_key"]
+                or int(identity.get("epoch", 0)) != int(row["old_epoch"]) + 1
+                or (active and operation["state"] != "ACTIVE")
+            ):
+                raise StaleRuntimeEvent("FM08 replacement identity is not consecutive/current")
+            if row["replacement_operation_id"] not in {None, replacement_operation_id}:
+                raise IdempotencyConflict("FM08 replacement operation changed")
+            if run_json is not None and row["replacement_run_json"] not in {None, run_json}:
+                raise IdempotencyConflict("FM08 replacement provider run changed")
+            if recovery_receipt_sha256 is not None and row["recovery_receipt_sha256"] not in {
+                None,
+                recovery_receipt_sha256,
+            }:
+                raise IdempotencyConflict("FM08 recovery receipt changed")
+            connection.execute(
+                "UPDATE master_acceptance_abrupt_recoveries SET replacement_operation_id=?,"
+                "replacement_run_json=COALESCE(?,replacement_run_json),"
+                "recovery_receipt_sha256=COALESCE(?,recovery_receipt_sha256),"
+                "state=CASE WHEN state='ACTIVE' THEN 'ACTIVE' ELSE ? END,updated_at=? WHERE task_id=?",
+                (
+                    replacement_operation_id,
+                    run_json,
+                    recovery_receipt_sha256,
+                    "ACTIVE" if active else "RECOVERING",
+                    now,
+                    task_id,
+                ),
+            )
+            current = connection.execute(
+                "SELECT * FROM master_acceptance_abrupt_recoveries WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            assert current is not None
+            return self._fm08_abrupt_recovery_from_row(current)
+
+    def fm08_abrupt_recovery(self, task_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_abrupt_recoveries WHERE task_id=?", (task_id,)
+            ).fetchone()
+        return self._fm08_abrupt_recovery_from_row(row) if row is not None else None
+
+    def fm08_recovery_for_operation(self, operation_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_abrupt_recoveries WHERE replacement_operation_id=?",
+                (operation_id,),
+            ).fetchone()
+        return self._fm08_abrupt_recovery_from_row(row) if row is not None else None
+
+    @staticmethod
+    def _fm08_abrupt_recovery_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["old_run"] = json.loads(str(value.pop("old_run_json")))
+        replacement = value.pop("replacement_run_json")
+        termination = value.pop("termination_receipt_json")
+        value["replacement_run"] = json.loads(str(replacement)) if replacement is not None else None
+        value["termination_receipt"] = json.loads(str(termination)) if termination is not None else None
+        return value
+
     def arm_master_acceptance_callback_loss(
         self, *, task_id: str, command_id: str, command_sha256: str,
         run_id: str, attempt_id: str, master_instance_id: str, epoch: int,
@@ -2982,7 +3249,7 @@ class ControlLedger:
         now = _format_time(self.clock.now())
         armed_at = now if callback_state == "ARMED" else None
         expires_at = (
-            _format_time(self.clock.now() + timedelta(seconds=120))
+            _format_time(self.clock.now() + timedelta(seconds=900))
             if callback_state == "ARMED" else None
         )
         directive_receipt_sha256 = (
@@ -3211,6 +3478,62 @@ class ControlLedger:
                 if (row is None or row["callback_state"] != "REPLAYED"
                         or row["callback_event_id"] != event_id or row["callback_body_sha256"] != body_sha256):
                     raise StaleRuntimeEvent("FM08 callback replay lost its exact CAS")
+
+    def project_master_acceptance_callback_replay(
+        self, *, task_id: str, event_id: str, body_sha256: str
+    ) -> Literal["duplicate"]:
+        """Acknowledge an already-authenticated captured body by durable identity.
+
+        FM08 deliberately kills and fences the old runtime after its callback
+        was ingested, so neither its raw Bearer nor body is reconstructable.
+        This fixed internal replay verifies the immutable event row and the
+        task-bound capture before projecting only the duplicate disposition.
+        """
+
+        try:
+            UUID(task_id)
+            UUID(event_id)
+        except ValueError as exc:
+            raise ValueError("FM08 callback replay requires exact UUID identities") from exc
+        if len(body_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in body_sha256
+        ):
+            raise ValueError("FM08 callback replay body hash is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            control = connection.execute(
+                "SELECT * FROM master_acceptance_runtime_controls WHERE task_id=? "
+                "AND scenario_id='FM08'",
+                (task_id,),
+            ).fetchone()
+            event = connection.execute(
+                "SELECT event_id,run_id,attempt_id,epoch,body_sha256 FROM runtime_events "
+                "WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            if (
+                control is None
+                or event is None
+                or control["callback_state"] not in {"CAPTURED", "REPLAYED"}
+                or control["restart_to_id"] is None
+                or control["callback_event_id"] != event_id
+                or control["callback_body_sha256"] != body_sha256
+                or event["body_sha256"] != body_sha256
+                or event["run_id"] != control["run_id"]
+                or event["attempt_id"] != control["attempt_id"]
+                or int(event["epoch"]) != int(control["epoch"])
+            ):
+                raise StaleRuntimeEvent("FM08 stored callback replay binding is invalid")
+            if control["callback_state"] == "CAPTURED":
+                changed = connection.execute(
+                    "UPDATE master_acceptance_runtime_controls SET callback_state='REPLAYED',updated_at=? "
+                    "WHERE task_id=? AND callback_state='CAPTURED' AND callback_event_id=? "
+                    "AND callback_body_sha256=? AND restart_to_id IS NOT NULL",
+                    (now, task_id, event_id, body_sha256),
+                ).rowcount
+                if changed != 1:
+                    raise StaleRuntimeEvent("FM08 stored callback replay lost its exact CAS")
+        return "duplicate"
 
     def master_acceptance_drain_directive(
         self, *, run_id: str, attempt_id: str, epoch: int

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -682,20 +683,76 @@ def test_fm08_app_persists_exact_heartbeat_but_suppresses_projection_and_ack(
             task_id=str(command.task_id), restart_from_id=str(control["before_boot_id"]),
             restart_to_id=str(uuid4()),
         )
-        replay = client.post(
-            "/internal/runtime/events", content=json_body(
-                heartbeat.model_dump(mode="json", by_alias=True, exclude_none=True)
-            ), headers={"Authorization": f"Bearer {SECRET}"},
-        )
     assert response.status_code == 503
     assert retry.status_code == 503
-    assert replay.status_code == 200
     assert response.json()["detail"]["code"] == "acceptance_callback_ack_suppressed"
+    ledger.revoke_runtime_token(handle.run_id, handle.attempt_id)
+    assert ledger.project_master_acceptance_callback_replay(
+        task_id=str(command.task_id),
+        event_id=str(heartbeat.event_id),
+        body_sha256=hashlib.sha256(
+            json_body(heartbeat.model_dump(mode="json", by_alias=True, exclude_none=True))
+        ).hexdigest(),
+    ) == "duplicate"
     control = ledger.master_acceptance_runtime_control(str(command.task_id))
     assert control is not None and control["callback_state"] == "REPLAYED"
     assert control["callback_event_id"] == heartbeat.event_id
     service_after = ledger.resolve_service("postgres-master")
-    assert service_after is not None and service_after.latest_event_id == heartbeat.event_id
+    assert service_after is not None and service_after.latest_event_id == service_before.latest_event_id
+
+
+def test_fm08_recovery_plan_survives_old_epoch_fencing_without_second_intent(
+    tmp_path: Path,
+) -> None:
+    ledger, handle = _active_ledger(tmp_path)
+    request = _request("FM08", operation_id=handle.operation_id)
+    ledger.ensure_master_acceptance_task(
+        task_id=str(request.task_id), scenario_id="FM08",
+        idempotency_key=request.idempotency_key, request_sha256=request.request_sha256,
+        principal_id="owner", client_id="acceptance-client", source_revision=request.source_revision,
+        target_operation_id=handle.operation_id,
+    )
+    payload = ledger.claim_master_acceptance_host_command(
+        task_id=str(request.task_id), expected_scenario="FM08",
+        principal_id="owner", client_id="acceptance-client",
+    )
+    assert payload is not None
+    command = MasterAcceptanceCommand.model_validate(payload)
+    old_run = {
+        "schema_version": "my-data-hub-kaggle-kernel-run-identity.v1",
+        "provider_ref": "owner/old-master",
+        "provider_run_ref": "owner/old-master/1",
+        "source_version": 1,
+        "provider_kernel_id": 123,
+        "source_sha256": "e" * 64,
+        "task_run_id": str(command.binding.run_id),
+    }
+    kwargs = {
+        "task_id": str(command.task_id),
+        "command_id": str(command.command_id),
+        "command_sha256": command.command_sha256,
+        "old_operation_id": str(command.binding.operation_id),
+        "old_run": old_run,
+        "old_epoch": command.binding.epoch,
+        "replacement_idempotency_key": f"fm08-recovery:{command.task_id}",
+        "replacement_notebook_ref": f"owner/mdh-master-fm08-{command.task_id.hex}",
+    }
+    plan, created = ledger.ensure_fm08_abrupt_recovery(**kwargs)
+    assert created and plan["state"] == "INTENT"
+    receipt = {"schema_version": "my-data-hub-fm08-termination-test.v1", "outcome": "APPLIED"}
+    receipt_sha256 = hashlib.sha256(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    fenced = ledger.fence_fm08_abrupt_master(
+        task_id=str(command.task_id),
+        termination_receipt=receipt,
+        termination_receipt_sha256=receipt_sha256,
+    )
+    assert fenced["state"] == "TERMINATED"
+    operation = ledger.get_operation(handle.operation_id)
+    assert operation is not None and operation.state == "FENCED"
+    replay, created_again = ledger.ensure_fm08_abrupt_recovery(**kwargs)
+    assert not created_again and replay == fenced
 
 
 def test_fm10_runtime_control_endpoint_acknowledges_exact_suspension(tmp_path: Path) -> None:
@@ -864,6 +921,17 @@ class FixedEffects:
                 control_boot_id_after=UUID(int=4),
                 replay_disposition="accepted",
                 service_active_after_recovery=True,
+                old_master_abruptly_terminated=True,
+                old_operation_id=UUID(int=10),
+                new_operation_id=UUID(int=11),
+                old_epoch=1,
+                new_epoch=2,
+                old_provider_run_ref="owner/old/1",
+                old_provider_kernel_id=10,
+                new_provider_run_ref="owner/new/1",
+                new_provider_kernel_id=11,
+                termination_receipt_sha256="c" * 64,
+                recovery_receipt_sha256="d" * 64,
             ),
         ),
         (
