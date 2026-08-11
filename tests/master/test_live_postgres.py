@@ -361,7 +361,7 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
             ).fetchone()[0] == 5
             assert admin.execute(
                 "SELECT count(*) FROM migration.row_disposition WHERE disposition='quarantined'"
-            ).fetchone()[0] == 3
+            ).fetchone()[0] == 4
             assert admin.execute(
                 "SELECT count(*) FROM migration.row_disposition "
                 "WHERE disposition='quarantined' "
@@ -375,6 +375,7 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
                 "SELECT array_agg(reason_code ORDER BY reason_code) "
                 "FROM migration.row_disposition WHERE disposition='quarantined'"
             ).fetchone()[0] == [
+                "duplicate_account_requires_explicit_resolution",
                 "oversized_source_value",
                 "same_source_key_different_payload",
                 "unknown_source_value",
@@ -393,7 +394,7 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
             assert state == (3, 3, "open")
             assert admin.execute(
                 "SELECT schema_revision FROM hub.canonical_state WHERE singleton"
-            ).fetchone()[0] == 14
+            ).fetchone()[0] == 15
             assert admin.execute(
                 "SELECT canonical_revision FROM hub.canonical_state WHERE singleton"
             ).fetchone()[0] == first_import.canonical_revision
