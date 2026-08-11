@@ -336,6 +336,18 @@ class KaggleKernelOutputIdentity(BaseModel):
     observed_at: datetime
 
 
+class KaggleKernelOutputTreeIdentity(BaseModel):
+    """Exact numeric run output copied into a caller-owned provider-side directory."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run: KaggleKernelRunIdentity
+    terminal_state: Literal[KernelState.COMPLETE]
+    output_tree_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    file_count: int = Field(ge=1, le=10000)
+    observed_at: datetime
+
+
 class DatasetMutationResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 

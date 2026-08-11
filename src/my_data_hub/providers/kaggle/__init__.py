@@ -1,6 +1,8 @@
 """Single official Kaggle 2.2.4 provider boundary and private canary contracts."""
 
-from .adapter import KaggleProviderAdapter, mapping_sha256, tree_sha256
+from typing import TYPE_CHECKING, Any
+
+from .adapter import KaggleProviderAdapter, directory_sha256, mapping_sha256, tree_sha256
 from .canary import (
     CanaryCleanupReceipt,
     DatasetCanaryReceipt,
@@ -23,6 +25,7 @@ from .contracts import (
     KaggleDependencyError,
     KaggleIdentityError,
     KaggleKernelOutputIdentity,
+    KaggleKernelOutputTreeIdentity,
     KaggleKernelRunIdentity,
     KaggleKernelSourceIdentity,
     KaggleKernelStatus,
@@ -45,26 +48,37 @@ from .contracts import (
     TaskResourceClaim,
     UnauthenticatedDatasetProbe,
 )
-from .control_journal import ControlLedgerKaggleJournal
-from .master_runtime import (
-    KaggleMasterLaunchAssets,
-    KaggleMasterRuntimeProvider,
-    MasterLaunchContractError,
-    derive_runtime_secret,
-    render_notebook_source,
+from .control_journal import (
+    AuthenticatedControlPlaneClient,
+    ControlLedgerKaggleJournal,
+    ControlPlaneMetadataError,
+    ControlPlaneRuntimeIdentity,
+    MetadataHttpResponse,
+    MetadataHttpsTransport,
+    RemoteControlLedgerKaggleJournal,
 )
 from .provenance import DonorCompatibilityPin, compatibility_inventory
 from .retry import BoundedRetry, ClassifiedFailure, RetryPolicy, classify_failure, parse_retry_after
+
+if TYPE_CHECKING:
+    from .master_runtime import (
+        KaggleMasterLaunchAssets,
+        KaggleMasterRuntimeProvider,
+        MasterLaunchContractError,
+    )
 
 __all__ = [
     "CONTROL_MANIFEST_NAME",
     "KAGGLE_API_PACKAGE",
     "KAGGLE_API_VERSION",
     "RUN_RECEIPT_NAME",
+    "AuthenticatedControlPlaneClient",
     "BoundedRetry",
     "CanaryCleanupReceipt",
     "ClassifiedFailure",
     "ControlLedgerKaggleJournal",
+    "ControlPlaneMetadataError",
+    "ControlPlaneRuntimeIdentity",
     "DatasetCanaryReceipt",
     "DatasetMutationResult",
     "DonorCompatibilityPin",
@@ -76,6 +90,7 @@ __all__ = [
     "KaggleDependencyError",
     "KaggleIdentityError",
     "KaggleKernelOutputIdentity",
+    "KaggleKernelOutputTreeIdentity",
     "KaggleKernelRunIdentity",
     "KaggleKernelSourceIdentity",
     "KaggleKernelStatus",
@@ -92,6 +107,8 @@ __all__ = [
     "KaggleTerminalFailure",
     "KernelState",
     "MasterLaunchContractError",
+    "MetadataHttpResponse",
+    "MetadataHttpsTransport",
     "MutationAction",
     "NotebookCanaryReceipt",
     "NotebookMutationResult",
@@ -102,6 +119,7 @@ __all__ = [
     "ProviderEffectIntent",
     "ProviderEffectJournal",
     "ProviderEffectReceipt",
+    "RemoteControlLedgerKaggleJournal",
     "RetryClass",
     "RetryPolicy",
     "TaskResourceClaim",
@@ -109,8 +127,23 @@ __all__ = [
     "classify_failure",
     "compatibility_inventory",
     "derive_runtime_secret",
+    "directory_sha256",
     "mapping_sha256",
     "parse_retry_after",
     "render_notebook_source",
     "tree_sha256",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name in {
+        "KaggleMasterLaunchAssets",
+        "KaggleMasterRuntimeProvider",
+        "MasterLaunchContractError",
+        "derive_runtime_secret",
+        "render_notebook_source",
+    }:
+        from . import master_runtime
+
+        return getattr(master_runtime, name)
+    raise AttributeError(name)

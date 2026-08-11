@@ -158,6 +158,7 @@ class FakeKaggleApi:
         licenses: list[str] | None = None,
     ) -> None:
         owner, slug, version = dataset.split("/")
+        self.calls.append(("dataset_download_files", dataset, path))
         write_tree(Path(path or "."), self.datasets[f"{owner}/{slug}"][int(version)])
 
     def dataset_delete(self, owner_slug: str | None, dataset_slug: str, no_confirm: bool = False) -> bool:
@@ -218,6 +219,9 @@ class FakeKaggleApi:
         page_token: str | None = None,
         page_size: int = 20,
     ) -> tuple[list[str], str]:
+        exact_run_ref = kernel
+        kernel = "/".join(kernel.split("/")[:2])
+        self.calls.append(("kernels_output", exact_run_ref))
         write_tree(Path(path), self.outputs[kernel])
         return [str(Path(path) / name) for name in self.outputs[kernel]], ""
 
@@ -288,7 +292,7 @@ def adapter() -> tuple[KaggleProviderAdapter, FakeKaggleApi, FakeJournal]:
     )
 
 
-def test_official_224_calls_are_private_and_exact() -> None:
+def test_official_224_calls_are_private_and_exact(tmp_path: Path) -> None:
     client, api, journal = adapter()
     task_id = uuid4()
     files = {"payload/value.txt": b"exact bytes"}
@@ -316,6 +320,18 @@ def test_official_224_calls_are_private_and_exact() -> None:
     assert created.effect.outcome == EffectOutcome.APPLIED
     assert journal.claims[created.claim.claim_sha256] == created.claim
     assert ("dataset_create_new", "owner/private-canary", False, "zip") in api.calls
+    destination = tmp_path / "exact-v1"
+    downloaded = client.download_private_dataset_exact(
+        provider_ref="owner/private-canary",
+        version=1,
+        destination=destination,
+    )
+    assert downloaded.version == 1
+    assert (destination / "payload/value.txt").read_bytes() == b"exact bytes"
+    assert any(
+        call[:2] == ("dataset_download_files", "owner/private-canary/1")
+        for call in api.calls
+    )
 
     replacement = {"payload/value.txt": b"version two"}
     version_intent = effect(
@@ -338,6 +354,37 @@ def test_official_224_calls_are_private_and_exact() -> None:
     assert versioned.identity.version == 2
     assert versioned.identity.package_sha256 != created.identity.package_sha256
     assert api.datasets[created.claim.provider_ref][1] != api.datasets[created.claim.provider_ref][2]
+
+
+def test_checkpoint_directory_upload_streams_without_bytes_mapping(tmp_path: Path) -> None:
+    client, api, _journal = adapter()
+    task_id = uuid4()
+    source = tmp_path / "checkpoint"
+    (source / "physical").mkdir(parents=True)
+    (source / "physical/base.tar.gz").write_bytes(b"checkpoint bytes")
+    (source / "checkpoint-manifest.json").write_bytes(b'{"manifest":"metadata"}')
+    from my_data_hub.providers.kaggle import directory_sha256
+
+    intent = effect(
+        MutationAction.CREATE_DATASET,
+        "owner/private-checkpoints",
+        task_id=task_id,
+        arguments={
+            "content_tree_sha256": directory_sha256(source),
+            "control_class": "orchestrator_protected",
+            "disposable": False,
+        },
+    )
+    created = client.create_private_dataset_from_directory(
+        intent=intent,
+        source_directory=source,
+        title="Private checkpoints",
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=False,
+    )
+    assert created.identity.version == 1
+    assert api.datasets[created.identity.provider_ref][1]["physical/base.tar.gz"] == b"checkpoint bytes"
+    assert (source / "physical/base.tar.gz").is_file()
 
 
 def test_notebook_source_run_and_output_are_bound_to_exact_version() -> None:
@@ -388,6 +435,7 @@ def test_notebook_source_run_and_output_are_bound_to_exact_version() -> None:
     output = client.read_exact_run_output(result.run)
     assert output.file_count == 2
     assert output.output_tree_sha256
+    assert ("kernels_output", "owner/private-kernel/1") in api.calls
 
 
 def test_output_rejects_stale_run_receipt() -> None:

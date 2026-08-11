@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import shutil
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
@@ -34,6 +35,7 @@ from .contracts import (
     KaggleDependencyError,
     KaggleIdentityError,
     KaggleKernelOutputIdentity,
+    KaggleKernelOutputTreeIdentity,
     KaggleKernelRunIdentity,
     KaggleKernelSourceIdentity,
     KaggleKernelStatus,
@@ -94,6 +96,17 @@ def _normalized_ref(value: object) -> str:
     if len(parts) != 2 or not all(parts):
         raise KaggleIdentityError("Kaggle resource ref must be exact owner/slug")
     return ref
+
+
+def _normalized_dataset_source(value: object) -> str:
+    source = str(value or "").strip().removeprefix("/")
+    parts = source.split("/")
+    if len(parts) not in {2, 3} or not parts[0] or not parts[1]:
+        raise KaggleIdentityError("Kaggle dataset source must be exact owner/slug[/version]")
+    _normalized_ref("/".join(parts[:2]))
+    if len(parts) == 3 and (not parts[2].isdigit() or int(parts[2]) < 1):
+        raise KaggleIdentityError("Kaggle dataset source version must be an exact positive integer")
+    return source
 
 
 def _version(value: object) -> int | None:
@@ -165,12 +178,56 @@ def mapping_sha256(files: Mapping[str, bytes]) -> str:
     return sha256_value({"files": entries})
 
 
+def directory_sha256(root: Path) -> str:
+    """Hash a caller-owned tree without reading the whole checkpoint into memory."""
+
+    if not root.is_dir() or root.is_symlink():
+        raise KaggleContractError("artifact source must be a real directory")
+    entries = _tree_entries(
+        root,
+        excluded=frozenset({CONTROL_MANIFEST_NAME, "dataset-metadata.json"}),
+    )
+    if not entries:
+        raise KaggleContractError("artifact source directory must not be empty")
+    reserved = {CONTROL_MANIFEST_NAME, "dataset-metadata.json"}
+    if any((root / name).exists() for name in reserved):
+        raise KaggleContractError("provider-owned metadata paths cannot be supplied by callers")
+    return sha256_value({"files": entries})
+
+
 def _write_files(root: Path, files: Mapping[str, bytes]) -> None:
     for relative, content in files.items():
         _validate_relative_path(relative)
         path = root.joinpath(*relative.split("/"))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
+
+
+def _copy_files(source: Path, destination: Path) -> None:
+    # directory_sha256 performs the complete safety walk first.  Copy each
+    # regular file independently so a multi-gigabyte checkpoint is never
+    # materialized as a bytes mapping in the Kaggle runtime.
+    directory_sha256(source)
+    for path in sorted(source.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(source).as_posix()
+        target = destination.joinpath(*relative.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+
+
+def _prepare_destination(destination: Path) -> None:
+    if destination.is_symlink():
+        raise KaggleContractError("artifact destination must not be a symbolic link")
+    if destination.exists():
+        if not destination.is_dir() or any(destination.iterdir()):
+            raise KaggleContractError("artifact destination must be an empty real directory")
+        return
+    parent = destination.parent
+    if not parent.is_dir() or parent.is_symlink():
+        raise KaggleContractError("artifact destination parent must be a real directory")
+    destination.mkdir(mode=0o700)
 
 
 def _canonical_notebook_source(source: bytes, *, kernel_type: str) -> bytes:
@@ -402,6 +459,67 @@ class KaggleProviderAdapter:
                 outcome = EffectOutcome.ALREADY_APPLIED
         return self._dataset_result(intent, identity, control_class, disposable, attempts, outcome)
 
+    def create_private_dataset_from_directory(
+        self,
+        *,
+        intent: ProviderEffectIntent,
+        source_directory: Path,
+        title: str,
+        control_class: ControlClass,
+        disposable: bool,
+    ) -> DatasetMutationResult:
+        """Create a private dataset by streaming a provider-side directory.
+
+        This is the checkpoint path: it deliberately never converts archive
+        files to a ``Mapping[str, bytes]`` and therefore cannot accidentally
+        relay checkpoint bytes through the devstand control plane.
+        """
+
+        if intent.action != MutationAction.CREATE_DATASET:
+            raise KaggleContractError("effect intent action does not authorize dataset creation")
+        self._validate_control_class(control_class, kind=ProviderKind.DATASET)
+        if not 6 <= len(title) <= 50 or not 6 <= len(intent.provider_ref.split("/", 1)[1]) <= 50:
+            raise KaggleContractError("Kaggle dataset title and slug must contain 6 to 50 characters")
+        content_sha = directory_sha256(source_directory)
+        self._validate_intent(
+            intent,
+            arguments={
+                "content_tree_sha256": content_sha,
+                "control_class": control_class.value,
+                "disposable": disposable,
+            },
+        )
+        with tempfile.TemporaryDirectory(prefix="my-data-hub-kaggle-dataset-") as temporary:
+            folder = Path(temporary)
+            _copy_files(source_directory, folder)
+            self._write_control_manifest(folder, intent, ProviderKind.DATASET, control_class, disposable)
+            expected_package_sha = tree_sha256(folder)
+            self._write_dataset_metadata(folder, intent.provider_ref, title)
+            self.journal.persist_intent(intent)
+            try:
+                _response, attempts = self.retry.call(
+                    "dataset_create_new",
+                    lambda: self.api.dataset_create_new(
+                        str(folder),
+                        public=False,
+                        quiet=True,
+                        convert_to_csv=False,
+                        dir_mode="zip",
+                        ignore_patterns=None,
+                    ),
+                )
+                identity = self._wait_for_dataset(intent.provider_ref, expected_package_sha, expected_version=1)
+                outcome = EffectOutcome.APPLIED
+            except Exception as exc:
+                recovered = self._recover_dataset(intent.provider_ref, expected_package_sha, expected_version=1)
+                if recovered is None:
+                    self._persist_uncertain(intent, detail="dataset_create_ambiguous")
+                    raise KaggleAmbiguousMutation("dataset creation outcome is not exactly reconcilable") from exc
+                identity = recovered
+                attempts = 0
+                outcome = EffectOutcome.ALREADY_APPLIED
+        return self._dataset_result(intent, identity, control_class, disposable, attempts, outcome)
+
     def create_private_dataset_version(
         self,
         *,
@@ -462,7 +580,93 @@ class KaggleProviderAdapter:
                 outcome = EffectOutcome.ALREADY_APPLIED
         return self._dataset_result(intent, identity, claim.control_class, claim.disposable, attempts, outcome)
 
+    def create_private_dataset_version_from_directory(
+        self,
+        *,
+        intent: ProviderEffectIntent,
+        claim: TaskResourceClaim,
+        source_directory: Path,
+        version_notes: str,
+    ) -> DatasetMutationResult:
+        """Create the next exact dataset version from a provider-side tree."""
+
+        self._validate_claim(intent, claim, ProviderKind.DATASET, require_disposable=False)
+        if intent.action != MutationAction.VERSION_DATASET:
+            raise KaggleContractError("effect intent action does not authorize dataset versioning")
+        if not version_notes.strip() or len(version_notes) > 1000:
+            raise KaggleContractError("dataset version notes must be bounded and non-empty")
+        current = self.read_private_dataset(provider_ref=claim.provider_ref, version=claim.provider_version)
+        if current.fingerprint != claim.fingerprint or intent.expected_fingerprint != claim.fingerprint:
+            raise KagglePolicyError("dataset changed after its exact task claim")
+        content_sha = directory_sha256(source_directory)
+        self._validate_intent(
+            intent,
+            arguments={
+                "content_tree_sha256": content_sha,
+                "previous_version": claim.provider_version,
+                "version_notes_sha256": hashlib.sha256(version_notes.encode()).hexdigest(),
+            },
+        )
+        expected_version = claim.provider_version + 1
+        with tempfile.TemporaryDirectory(prefix="my-data-hub-kaggle-version-") as temporary:
+            folder = Path(temporary)
+            _copy_files(source_directory, folder)
+            self._write_control_manifest(
+                folder,
+                intent,
+                ProviderKind.DATASET,
+                claim.control_class,
+                claim.disposable,
+            )
+            expected_package_sha = tree_sha256(folder)
+            self._write_dataset_metadata(folder, intent.provider_ref, intent.provider_ref.split("/", 1)[1])
+            self.journal.persist_intent(intent)
+            try:
+                _response, attempts = self.retry.call(
+                    "dataset_create_version",
+                    lambda: self.api.dataset_create_version(
+                        str(folder),
+                        version_notes,
+                        quiet=True,
+                        convert_to_csv=False,
+                        delete_old_versions=False,
+                        dir_mode="zip",
+                        ignore_patterns=None,
+                    ),
+                )
+                identity = self._wait_for_dataset(
+                    intent.provider_ref,
+                    expected_package_sha,
+                    expected_version=expected_version,
+                )
+                outcome = EffectOutcome.APPLIED
+            except Exception as exc:
+                recovered = self._recover_dataset(intent.provider_ref, expected_package_sha, expected_version)
+                if recovered is None:
+                    self._persist_uncertain(intent, detail="dataset_version_ambiguous")
+                    raise KaggleAmbiguousMutation("dataset version outcome is not exactly reconcilable") from exc
+                identity = recovered
+                attempts = 0
+                outcome = EffectOutcome.ALREADY_APPLIED
+        return self._dataset_result(intent, identity, claim.control_class, claim.disposable, attempts, outcome)
+
     def read_private_dataset(self, *, provider_ref: str, version: int) -> KaggleDatasetIdentity:
+        with tempfile.TemporaryDirectory(prefix="my-data-hub-kaggle-readback-") as temporary:
+            return self.download_private_dataset_exact(
+                provider_ref=provider_ref,
+                version=version,
+                destination=Path(temporary),
+            )
+
+    def download_private_dataset_exact(
+        self,
+        *,
+        provider_ref: str,
+        version: int,
+        destination: Path,
+    ) -> KaggleDatasetIdentity:
+        """Download one exact numeric private dataset version to ``destination``."""
+
         ref = _normalized_ref(provider_ref)
         if version < 1:
             raise KaggleContractError("dataset version must be positive")
@@ -471,15 +675,23 @@ class KaggleProviderAdapter:
             raise KagglePolicyError("dataset privacy was not explicitly proven private")
         if observed_version is not None and version > observed_version:
             raise KaggleNotFound("requested dataset version is newer than the provider current version")
-        with tempfile.TemporaryDirectory(prefix="my-data-hub-kaggle-readback-") as temporary:
-            folder = Path(temporary)
+        _prepare_destination(destination)
+        try:
             self.retry.call(
                 "dataset_download_files",
                 lambda: self.api.dataset_download_files(
-                    f"{ref}/{version}", path=str(folder), force=True, quiet=True, unzip=True, licenses=[]
+                    f"{ref}/{version}",
+                    path=str(destination),
+                    force=True,
+                    quiet=True,
+                    unzip=True,
+                    licenses=[],
                 ),
             )
-            package_sha = tree_sha256(folder)
+            package_sha = tree_sha256(destination)
+        except Exception:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
         fingerprint = ProviderFingerprint(
             value=sha256_value(
                 {"provider_ref": ref, "version": version, "privacy": "private", "package_sha256": package_sha}
@@ -528,7 +740,7 @@ class KaggleProviderAdapter:
         if str(task_run_id).encode("ascii") not in canonical_source:
             raise KaggleContractError("notebook source must embed the exact task_run_id")
         source_sha = hashlib.sha256(canonical_source).hexdigest()
-        normalized_sources = tuple(_normalized_ref(item) for item in dataset_sources)
+        normalized_sources = tuple(_normalized_dataset_source(item) for item in dataset_sources)
         self._validate_intent(
             intent,
             arguments={
@@ -768,23 +980,9 @@ class KaggleProviderAdapter:
         raise KagglePollingTimeout(f"Kaggle run {run.provider_run_ref} exceeded its bounded polling policy")
 
     def read_exact_run_output(self, run: KaggleKernelRunIdentity) -> KaggleKernelOutputIdentity:
-        status = self.read_run_status(run)
-        if status.state != KernelState.COMPLETE:
-            raise KaggleContractError("run output is unavailable before exact terminal completion")
         with tempfile.TemporaryDirectory(prefix="my-data-hub-kaggle-output-") as temporary:
             folder = Path(temporary)
-            self.retry.call(
-                "kernels_output",
-                lambda: self.api.kernels_output(
-                    run.provider_ref,
-                    path=str(folder),
-                    file_pattern=None,
-                    force=True,
-                    quiet=True,
-                    page_token=None,
-                    page_size=100,
-                ),
-            )
+            downloaded = self.download_exact_run_output_tree(run, destination=folder)
             receipt_path = folder / RUN_RECEIPT_NAME
             if not receipt_path.is_file():
                 raise KaggleIdentityError("Kaggle output lacks the exact runtime identity receipt")
@@ -804,15 +1002,58 @@ class KaggleProviderAdapter:
             }
             if not isinstance(runtime_receipt, dict) or any(runtime_receipt.get(k) != v for k, v in expected.items()):
                 raise KaggleIdentityError("Kaggle output receipt belongs to a stale or different run")
-            entries = _tree_entries(folder)
-            output_sha = sha256_value({"files": entries})
             receipt_sha = hashlib.sha256(receipt_bytes).hexdigest()
-        self._assert_current_run(run)
         return KaggleKernelOutputIdentity(
             run=run,
             terminal_state=KernelState.COMPLETE,
-            output_tree_sha256=output_sha,
+            output_tree_sha256=downloaded.output_tree_sha256,
             receipt_sha256=receipt_sha,
+            file_count=downloaded.file_count,
+            observed_at=self.clock(),
+        )
+
+    def download_exact_run_output_tree(
+        self,
+        run: KaggleKernelRunIdentity,
+        *,
+        destination: Path,
+    ) -> KaggleKernelOutputTreeIdentity:
+        """Copy current output while fencing it to the exact numeric run identity.
+
+        Kaggle's 2.2.4 output endpoint internally resolves the current session
+        even when a numeric version is supplied.  The adapter therefore asserts
+        the numeric source/run before *and* after the destination-preserving
+        download and calls the official API with ``provider_run_ref``.  A
+        concurrent source advance fails closed rather than mislabelling bytes.
+        """
+
+        status = self.read_run_status(run)
+        if status.state != KernelState.COMPLETE:
+            raise KaggleContractError("run output is unavailable before exact terminal completion")
+        _prepare_destination(destination)
+        try:
+            self.retry.call(
+                "kernels_output",
+                lambda: self.api.kernels_output(
+                    run.provider_run_ref,
+                    path=str(destination),
+                    file_pattern=None,
+                    force=True,
+                    quiet=True,
+                    page_token=None,
+                    page_size=100,
+                ),
+            )
+            entries = _tree_entries(destination)
+            output_sha = sha256_value({"files": entries})
+        except Exception:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
+        self._assert_current_run(run)
+        return KaggleKernelOutputTreeIdentity(
+            run=run,
+            terminal_state=KernelState.COMPLETE,
+            output_tree_sha256=output_sha,
             file_count=len(entries),
             observed_at=self.clock(),
         )
