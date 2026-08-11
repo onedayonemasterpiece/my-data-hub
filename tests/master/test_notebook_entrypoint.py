@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -14,6 +15,8 @@ from my_data_hub.master_runtime.notebook_entrypoint import (
     NotebookMasterConfig,
     _activation_url,
     _checkpoint_before_stop,
+    _credential_registration_url,
+    _register_reader_credential,
 )
 from my_data_hub.runtime_sdk import RuntimeEventType
 
@@ -60,6 +63,90 @@ def test_activation_url_is_https_and_exact() -> None:
     ) == "https://control.example/internal/runtime/activation/run-1/attempt-1"
     with pytest.raises(ValueError, match="exact HTTPS"):
         _activation_url("http://control.example/internal/runtime/events", "run", "attempt")
+
+
+def test_reader_credential_handoff_is_epoch_bound_tls_and_not_returned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Provisioner:
+        def __init__(self, connection, gate) -> None:  # type: ignore[no-untyped-def]
+            captured["connection"] = connection
+            captured["gate"] = gate
+
+        def create(self, **kwargs) -> str:  # type: ignore[no-untyped-def]
+            captured["create"] = kwargs
+            return str(kwargs["principal"])
+
+        def drop(self, principal: str) -> None:
+            captured["drop"] = principal
+
+    class Response:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *args) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def read(self, limit: int) -> bytes:
+            assert limit == 16 * 1024
+            return b'{"registered":1,"credential_refs":["opaque.json"]}'
+
+    def open_request(request, timeout):  # type: ignore[no-untyped-def]
+        captured["url"] = request.full_url
+        captured["authorization"] = request.headers["Authorization"]
+        captured["body"] = json.loads(request.data)
+        assert timeout == 10
+        return Response()
+
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint.CredentialProvisioner", Provisioner
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint.urllib.request.urlopen", open_request
+    )
+    config = NotebookMasterConfig(
+        master_instance_id=UUID("11111111-1111-4111-8111-111111111111"),
+        run_id="run-1",
+        attempt_id="attempt-1",
+        service_instance_id="service-1",
+        epoch=7,
+        boot_source=BootSource.EMPTY_BASELINE,
+        checkpoint_directory=None,
+        lease_seconds=120,
+        postgres_bin=Path("/kaggle/input/postgresql-18/bin"),
+        postgres_port=15432,
+        tunnel_gateway_host="gateway.example.test",
+        tunnel_gateway_port=22,
+        tunnel_gateway_user="mdh-tunnel",
+        tunnel_remote_port=25432,
+        maximum_runtime_seconds=3600,
+        source_identity="owner/postgres-master",
+        source_version="1",
+    )
+    now = datetime.now(UTC)
+    principal, expiry = _register_reader_credential(
+        connection=object(),
+        gate=object(),  # type: ignore[arg-type]
+        config=config,
+        callback_url="https://control.example/internal/runtime/events",
+        run_secret="runtime-secret-long-enough",
+        expires_at=now + timedelta(minutes=3),
+        now=now,
+    )
+    assert principal.startswith("mdh_e7_reader_") and expiry == now + timedelta(minutes=3)
+    assert captured["url"] == _credential_registration_url(
+        "https://control.example/internal/runtime/events", "run-1", "attempt-1"
+    )
+    assert captured["authorization"] == "Bearer runtime-secret-long-enough"
+    body = captured["body"]
+    assert isinstance(body, dict) and body["epoch"] == 7
+    database_url = body["credentials"][0]["database_url"]
+    assert "sslmode=verify-ca" in database_url
+    assert "sslrootcert=%2Fstate%2Fmaster-tls%2Fca.pem" in database_url
+    assert "connect_timeout=5" in database_url
+    assert "runtime-secret-long-enough" not in json.dumps(body)
 
 
 @dataclass

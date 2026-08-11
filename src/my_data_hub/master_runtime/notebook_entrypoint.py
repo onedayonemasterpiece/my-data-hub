@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from my_data_hub.runtime_sdk import RuntimeClient, RuntimeEventType
 
 from .bootstrap import BootstrapRequest, MasterBootstrap
 from .contracts import BootSource, MasterIdentity, MasterPaths
+from .credentials import CredentialProvisioner
 from .database_gate import DatabaseGate
 from .postgres import PostgresBinaries, PostgresConfig, PostgresSupervisor
 from .tunnel import ReverseTunnelSpec, TunnelSupervisor
@@ -124,6 +126,92 @@ def _activation_url(callback_url: str, run_id: str, attempt_id: str) -> str:
     if not callback_url.startswith("https://") or not callback_url.endswith(suffix):
         raise ValueError("callback URL does not match the exact HTTPS runtime endpoint")
     return f"{callback_url.removesuffix(suffix)}/internal/runtime/activation/{run_id}/{attempt_id}"
+
+
+def _credential_registration_url(callback_url: str, run_id: str, attempt_id: str) -> str:
+    suffix = "/internal/runtime/events"
+    if not callback_url.startswith("https://") or not callback_url.endswith(suffix):
+        raise ValueError("callback URL does not match the exact HTTPS runtime endpoint")
+    return (
+        f"{callback_url.removesuffix(suffix)}/internal/runtime/session-credentials/"
+        f"{run_id}/{attempt_id}"
+    )
+
+
+def _register_reader_credential(
+    *,
+    connection: Any,
+    gate: DatabaseGate,
+    config: NotebookMasterConfig,
+    callback_url: str,
+    run_secret: str,
+    expires_at: datetime,
+    now: datetime,
+) -> tuple[str, datetime]:
+    """Create and hand off one epoch-bound reader without logging its secret."""
+
+    from urllib.parse import quote, urlencode
+
+    if expires_at <= now or expires_at - now > timedelta(minutes=5):
+        raise ValueError("reader credential expiry is outside the broker bound")
+    credential_id = UUID(bytes=secrets.token_bytes(16), version=4)
+    principal = f"mdh_e{config.epoch}_reader_{credential_id.hex[:8]}"
+    password = secrets.token_urlsafe(36)
+    identity = MasterIdentity(config.master_instance_id, config.run_id, config.epoch)
+    CredentialProvisioner(connection, gate).create(
+        principal=principal,
+        password=password,
+        group="mdh_mcp_reader",
+        identity=identity,
+        credential_id=credential_id,
+        expires_at=expires_at,
+        now=now,
+    )
+    query = urlencode(
+        {
+            "sslmode": "verify-ca",
+            # Fixed path in the remote MCP container, not a Kaggle filesystem path.
+            "sslrootcert": "/state/master-tls/ca.pem",
+            "connect_timeout": "5",
+        }
+    )
+    database_url = (
+        f"postgresql://{quote(principal, safe='')}:{quote(password, safe='')}@"
+        f"127.0.0.1:{config.tunnel_remote_port}/postgres?{query}"
+    )
+    body = json.dumps(
+        {
+            "master_instance_id": str(config.master_instance_id),
+            "epoch": config.epoch,
+            "credentials": [
+                {
+                    "role": "reader",
+                    "database_url": database_url,
+                    "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+                }
+            ],
+        },
+        separators=(",", ":"),
+    ).encode()
+    request = urllib.request.Request(
+        _credential_registration_url(callback_url, config.run_id, config.attempt_id),
+        data=body,
+        headers={"Authorization": f"Bearer {run_secret}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            receipt = json.loads(response.read(16 * 1024))
+        if receipt.get("registered") != 1:
+            raise RuntimeError("control plane did not accept the reader credential")
+    except Exception:
+        # No usable login may survive a failed broker handoff.
+        try:
+            CredentialProvisioner(connection, gate).drop(principal)
+        except Exception:
+            gate.fence(identity, "credential_handoff_failed")
+        raise
+    return principal, expires_at
 
 
 def _wait_for_activation(url: str, token: str, identity: MasterIdentity, timeout_seconds: int = 90) -> None:
@@ -292,6 +380,26 @@ def run_master(
     assert gate_connection is not None
     gate = DatabaseGate(gate_connection)
     gate.activate(identity)
+    credential_now = datetime.now(UTC)
+    reader_expires_at = min(credential_now + timedelta(minutes=4), ready.lease_until)
+    if reader_expires_at <= credential_now + timedelta(seconds=15):
+        raise RuntimeError("ACTIVE lease is too short to issue a bounded reader credential")
+    try:
+        _reader_principal, reader_expires_at = _register_reader_credential(
+            connection=gate_connection,
+            gate=gate,
+            config=config,
+            callback_url=callback_url,
+            run_secret=run_secret,
+            expires_at=reader_expires_at,
+            now=credential_now,
+        )
+    except Exception:
+        gate.fence(identity, "reader_credential_registration_failed")
+        tunnel.stop()
+        supervisor.stop(immediate=True)
+        gate_connection.close()
+        raise
     deadline = time.monotonic() + config.maximum_runtime_seconds
     current_lease = ready.lease_until
     active_error: BaseException | None = None
@@ -309,6 +417,20 @@ def run_master(
             if delivery.status == "delivered":
                 gate.renew(identity, proposed)
                 current_lease = proposed
+                observed_now = datetime.now(UTC)
+                if reader_expires_at <= observed_now + timedelta(seconds=75):
+                    next_expiry = min(observed_now + timedelta(minutes=4), proposed)
+                    if next_expiry <= observed_now + timedelta(seconds=15):
+                        raise TimeoutError("renewed lease is too short for a broker credential")
+                    _reader_principal, reader_expires_at = _register_reader_credential(
+                        connection=gate_connection,
+                        gate=gate,
+                        config=config,
+                        callback_url=callback_url,
+                        run_secret=run_secret,
+                        expires_at=next_expiry,
+                        now=observed_now,
+                    )
             if datetime.now(UTC) + timedelta(seconds=15) >= current_lease:
                 raise TimeoutError("callback unavailable; write lease is closing")
     except BaseException as exc:

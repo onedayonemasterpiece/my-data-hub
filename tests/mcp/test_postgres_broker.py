@@ -48,7 +48,8 @@ def credential(*, expires_at: datetime | None = None) -> EpochDatabaseCredential
         role="reader",
         database_url=(
             "postgresql://reader:opaque-password@postgres-master.internal:15432/postgres"
-            "?hostaddr=127.0.0.1&sslmode=verify-full&sslrootcert=/run/secrets/master-ca.pem"
+            "?hostaddr=127.0.0.1&sslmode=verify-full&sslrootcert=/state/master-tls/ca.pem"
+            "&connect_timeout=5"
         ),
         expires_at=expires_at or datetime.now(UTC) + timedelta(minutes=3),
     )

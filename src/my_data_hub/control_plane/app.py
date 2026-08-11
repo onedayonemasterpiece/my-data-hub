@@ -77,6 +77,8 @@ def _session_credential(
         or not parsed.username
         or not parsed.password
         or query.get("sslmode", [""])[0] not in {"verify-ca", "verify-full"}
+        or query.get("sslrootcert", [""])[0] != "/state/master-tls/ca.pem"
+        or query.get("connect_timeout", [""])[0] != "5"
     ):
         raise HTTPException(status_code=422, detail={"code": "credential_database_url_invalid"})
     return SessionCredential(

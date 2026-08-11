@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.contracts import MasterSession, MasterSessionBroker, SessionRequest
@@ -56,9 +56,13 @@ class EpochDatabaseCredential:
             raise SessionBrokerError("master credential is not a password-bound PostgreSQL URL")
         if parsed.hostname not in {"127.0.0.1", "::1", "localhost", "postgres-master.internal"}:
             raise SessionBrokerError("master credential must target the loopback tunnel")
-        query = {part.split("=", 1)[0]: part.split("=", 1)[1] for part in parsed.query.split("&") if "=" in part}
-        if query.get("sslmode") not in {"verify-ca", "verify-full"}:
+        query = parse_qs(parsed.query)
+        if query.get("sslmode", [""])[0] not in {"verify-ca", "verify-full"}:
             raise SessionBrokerError("master PostgreSQL session must verify TLS")
+        if query.get("sslrootcert", [""])[0] != "/state/master-tls/ca.pem":
+            raise SessionBrokerError("master PostgreSQL session must use the fixed task CA path")
+        if query.get("connect_timeout", [""])[0] != "5":
+            raise SessionBrokerError("master PostgreSQL session connect timeout differs from policy")
 
 
 class EpochCredentialSource(Protocol):

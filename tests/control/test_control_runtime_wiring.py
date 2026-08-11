@@ -185,7 +185,10 @@ def test_runtime_can_register_bounded_reader_credential_without_echoing_secret(t
     assert operation is not None
     identity = operation.identity
     token = derive_runtime_secret(ROOT, str(identity["run_id"]), str(identity["attempt_id"]))
-    secret_url = "postgresql://reader:opaque-password@127.0.0.1:55432/hub?sslmode=verify-full"
+    secret_url = (
+        "postgresql://reader:opaque-password@127.0.0.1:55432/hub"
+        "?sslmode=verify-full&sslrootcert=/state/master-tls/ca.pem&connect_timeout=5"
+    )
     response = TestClient(app).post(
         f"/internal/runtime/session-credentials/{identity['run_id']}/{identity['attempt_id']}",
         json={
