@@ -861,9 +861,21 @@ def test_protected_ledger_replays_one_exact_acked_body_without_state_change(tmp_
         tmp_path / "stored-replay.sqlite3",
         clock=DeterministicClock(datetime(2026, 8, 11, 11, 0, tzinfo=UTC)),
     )
+    old = _activate_ledger(ledger, key="fm09-retired-predecessor")
+    ledger.project_master_lifecycle(
+        operation_id=old.operation_id,
+        service_instance_id=old.service_instance_id,
+        epoch=old.epoch,
+        expected_operation_state="ACTIVE",
+        operation_state="FENCED",
+        service_state="FENCED",
+        event_id=str(uuid4()),
+    )
+    ledger.revoke_runtime_token(old.run_id, old.attempt_id)
     runtime = _control_runtime(ledger)
     handle, _duplicate = runtime.ensure("fm09-stored-replay")
-    token = SECRET
+    assert handle.epoch == 2
+    token = "c" * 64
     ledger.store_runtime_token_hash(handle.run_id, handle.attempt_id, token)
     event = RuntimeEvent(
         event_id=str(uuid4()),
@@ -905,12 +917,25 @@ def test_protected_ledger_replays_one_exact_acked_body_without_state_change(tmp_
         master_instance_id=UUID(handle.master_instance_id),
         epoch=handle.epoch,
     )
-    replay = ControlLedgerStoredReplay(runtime, token, retired_token)
+    replay = ControlLedgerStoredReplay(runtime)
     stored = replay.exact_acked_callback(binding)
+    protected = ledger.exact_stored_runtime_event_identity(
+        run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch
+    )
+    assert protected == {"event_id": str(stored.event_id), "body_sha256": stored.body_sha256}
+    assert "body" not in protected
     before = replay.control_state_sha256(binding)
     assert replay.replay_stored_callback(stored.event_id) == "duplicate"
     assert replay.replay_with_retired_runtime_auth(stored.event_id)
+    assert replay.replay_with_stale_epoch(stored.event_id)
     assert replay.control_state_sha256(binding) == before
+    assert "runtime_token" not in replay.__dataclass_fields__
+    assert "retired_runtime_token" not in replay.__dataclass_fields__
+    with pytest.raises(StaleRuntimeEvent):
+        ledger.replay_stored_runtime_event_identity(
+            event_id=str(stored.event_id), body_sha256="f" * 64,
+            run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch,
+        )
 
 
 class FixedEffects:

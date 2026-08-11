@@ -228,3 +228,22 @@ Focused tests cover capture-before-STOPPED ordering, opaque handle persistence,
 same-task reuse, structured broker revocation, migration continuity and the
 existing fixed H1 rollback probe. No real rotation was executed, so this is not
 live FM11 PASS evidence.
+
+## 2026-08-11 FM09 hash-only stored replay
+
+- `ControlLedgerStoredReplay` no longer has current or retired bearer fields and
+  never asks the event ledger for callback bytes;
+- the protected selector returns only one exact ACKed event UUID/body SHA-256;
+  immutable `runtime_events` plus `runtime_event_dedup` yield the canonical
+  `duplicate` disposition by exact run/attempt/epoch identity;
+- the fixed denial projection compares canonical current and revoked token hashes
+  internally, verifies the selected operation/current service epoch is ACTIVE,
+  and proves both a genuinely retired token and the same attempt at epoch-1 are
+  rejected. Hashes, bodies and bearer values are not returned;
+- state is hashed before and after all three observations, so a successful FM09
+  receipt still requires exact equality and cannot disguise a projection change.
+
+Focused tests use an actual epoch-2 active ledger plus a genuinely revoked prior
+identity, validate duplicate/retired/stale results, reject an altered body hash,
+and assert the production adapter has no raw-token fields. This is local
+implementation evidence only, not live FM09 PASS evidence.

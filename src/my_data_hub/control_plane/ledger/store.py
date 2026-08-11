@@ -4468,14 +4468,10 @@ class ControlLedger:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def exact_stored_runtime_event(
+    def exact_stored_runtime_event_identity(
         self, *, run_id: str, attempt_id: str, epoch: int
-    ) -> dict[str, Any] | None:
-        """Return one protected canonical ACKed body for fixed acceptance replay.
-
-        This is an internal control primitive, not a reader/API surface.  It
-        accepts only the exact bound attempt and never accepts body bytes.
-        """
+    ) -> dict[str, str] | None:
+        """Select one immutable ACKed event without returning its stored body."""
 
         try:
             UUID(run_id)
@@ -4491,14 +4487,109 @@ class ControlLedger:
                 (run_id, attempt_id, epoch),
             ).fetchall()
         for row in rows:
-            body = str(row["sanitized_json"]).encode()
-            if hmac.compare_digest(hashlib.sha256(body).hexdigest(), str(row["body_sha256"])):
+            canonical_sha256 = hashlib.sha256(str(row["sanitized_json"]).encode()).hexdigest()
+            if hmac.compare_digest(canonical_sha256, str(row["body_sha256"])):
                 return {
                     "event_id": str(row["event_id"]),
                     "body_sha256": str(row["body_sha256"]),
-                    "body": body,
                 }
         return None
+
+    def replay_stored_runtime_event_identity(
+        self,
+        *,
+        event_id: str,
+        body_sha256: str,
+        run_id: str,
+        attempt_id: str,
+        epoch: int,
+    ) -> Literal["duplicate"]:
+        """Return the dedup result for one already-authenticated immutable row."""
+
+        try:
+            UUID(event_id)
+            UUID(run_id)
+            UUID(attempt_id)
+        except ValueError as exc:
+            raise ValueError("FM09 replay requires exact UUID identities") from exc
+        with self._reader() as connection:
+            event = connection.execute(
+                "SELECT event_id,run_id,attempt_id,epoch,body_sha256 FROM runtime_events WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            dedup = connection.execute(
+                "SELECT body_sha256 FROM runtime_event_dedup WHERE event_id=?", (event_id,)
+            ).fetchone()
+        if (
+            event is None
+            or dedup is None
+            or event["run_id"] != run_id
+            or event["attempt_id"] != attempt_id
+            or int(event["epoch"]) != epoch
+            or event["body_sha256"] != body_sha256
+            or dedup["body_sha256"] != body_sha256
+        ):
+            raise StaleRuntimeEvent("FM09 exact stored replay identity changed")
+        return "duplicate"
+
+    def fm09_runtime_replay_denials(
+        self,
+        *,
+        event_id: str,
+        body_sha256: str,
+        run_id: str,
+        attempt_id: str,
+        epoch: int,
+    ) -> dict[str, bool]:
+        """Prove retired-token and stale-epoch rejection without raw bearers."""
+
+        self.replay_stored_runtime_event_identity(
+            event_id=event_id,
+            body_sha256=body_sha256,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            epoch=epoch,
+        )
+        with self._reader() as connection:
+            current = connection.execute(
+                "SELECT token_sha256,revoked_at FROM runtime_token_hashes WHERE run_id=? AND attempt_id=?",
+                (run_id, attempt_id),
+            ).fetchone()
+            retired = connection.execute(
+                "SELECT token_sha256 FROM runtime_token_hashes WHERE revoked_at IS NOT NULL "
+                "AND NOT (run_id=? AND attempt_id=?) ORDER BY revoked_at DESC LIMIT 1",
+                (run_id, attempt_id),
+            ).fetchone()
+            attempt = connection.execute(
+                "SELECT operation_id,epoch FROM run_attempts WHERE run_id=? AND attempt_id=?",
+                (run_id, attempt_id),
+            ).fetchone()
+            operation = (
+                connection.execute(
+                    "SELECT state FROM operations WHERE operation_id=?", (attempt["operation_id"],)
+                ).fetchone()
+                if attempt is not None
+                else None
+            )
+            current_epoch = connection.execute(
+                "SELECT current_epoch FROM service_epochs WHERE service_kind='postgres-master'"
+            ).fetchone()
+        if (
+            current is None
+            or current["revoked_at"] is not None
+            or retired is None
+            or hmac.compare_digest(str(current["token_sha256"]), str(retired["token_sha256"]))
+            or attempt is None
+            or operation is None
+            or operation["state"] != "ACTIVE"
+            or int(attempt["epoch"]) != epoch
+            or current_epoch is None
+            or int(current_epoch["current_epoch"]) != epoch
+        ):
+            raise StaleRuntimeEvent("FM09 runtime authentication state is not exact/current")
+        if epoch <= 1:
+            raise StaleRuntimeEvent("FM09 has no older epoch to submit")
+        return {"retired_runtime_auth_rejected": True, "stale_epoch_rejected": True}
 
     def latest_revoked_runtime_identity(
         self, *, exclude_run_id: str, exclude_attempt_id: str
