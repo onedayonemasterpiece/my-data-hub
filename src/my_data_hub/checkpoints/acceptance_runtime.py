@@ -65,6 +65,7 @@ _JOURNAL_KIND_PREFIX = "checkpoint_acceptance"
 _JOURNAL_SCHEMA = "my-data-hub-checkpoint-acceptance-journal.v1"
 _EFFECT_NAMESPACE = UUID("012bb305-cad2-5236-9f7e-33774492a721")
 _FIXED_CORRUPTION_PATH = "physical/base.tar.gz"
+_FM15_RECEIPT_NAME = "checkpoint-acceptance-fm15-failure.json"
 _RUNTIME_ROOT = Path("/kaggle/working")
 
 _STAGES: dict[Scenario, tuple[str, ...]] = {
@@ -616,6 +617,7 @@ class KaggleTaskOwnedCheckpointEffects:
     def ensure_fm15_restore_failure_candidate(
         self, intent: CheckpointAcceptanceIntent
     ) -> CheckpointAcceptanceStageReceipt:
+        self._assert_fm15_capability(intent)
         manifest, package = self._ensure_candidate(intent, corrupt=False)
         self.registry.add_candidate(manifest)
         exact_ref, mutation = self._upload_disposable(intent, package)
@@ -715,6 +717,24 @@ class KaggleTaskOwnedCheckpointEffects:
         try:
             self._provider_call(lambda: self.adapter.poll_run(launched.run, self._poll_policy()))
         except KaggleTerminalFailure:
+            destination = self.binding.working_directory / f"fm15-failure-{run_id}"
+            if destination.exists():
+                shutil.rmtree(destination)
+            failed_output = self.adapter.download_exact_failed_run_output_file  # type: ignore[attr-defined]
+            self._provider_call(
+                lambda: failed_output(
+                    launched.run,
+                    destination=destination,
+                    file_name=_FM15_RECEIPT_NAME,
+                    max_bytes=64 * 1024,
+                )
+            )
+            failure_receipt = self._load_fm15_failure_receipt(
+                destination / _FM15_RECEIPT_NAME,
+                intent=intent,
+                run_id=run_id,
+                exact_ref=exact_ref,
+            )
             self.registry.reject(intent.candidate_checkpoint_id, "FM15_FORCED_RESTORE_SMOKE_FAILURE")
         else:
             raise CheckpointAcceptanceError("FM15 fixed failing verifier unexpectedly completed")
@@ -723,6 +743,7 @@ class KaggleTaskOwnedCheckpointEffects:
             "source_version": launched.run.source_version,
             "source_sha256": launched.run.source_sha256,
             "effect_receipt": launched.effect.model_dump(mode="json"),
+            "failure_receipt_sha256": _metadata_sha256(failure_receipt),
         }
         return self._stage(
             intent,
@@ -745,6 +766,14 @@ class KaggleTaskOwnedCheckpointEffects:
         ):
             raise CheckpointAcceptanceError("acceptance intent is outside the fixed runtime binding")
         self._remaining()
+
+    def _assert_fm15_capability(self, intent: CheckpointAcceptanceIntent) -> None:
+        self._assert_intent(intent, "FM15")
+        if not callable(getattr(self.adapter, "download_exact_failed_run_output_file", None)):
+            raise CheckpointAcceptanceCapabilityError(
+                "KAGGLE_FAILED_RUN_EXACT_OUTPUT_UNAVAILABLE: KaggleProviderAdapter needs a bounded exact-run "
+                "failed-output read seam before FM15 can mutate a disposable candidate"
+            )
 
     def _ensure_candidate(
         self, intent: CheckpointAcceptanceIntent, *, corrupt: bool
@@ -894,14 +923,47 @@ class KaggleTaskOwnedCheckpointEffects:
     def _fm15_source(self, intent: CheckpointAcceptanceIntent, run_id: UUID, exact_ref: str) -> bytes:
         prefix = (
             f"# fixed FM15 isolated restore-smoke fixture\n"
-            f"TASK_RUN_ID = {str(run_id)!r}\nCANDIDATE_ID = {str(intent.candidate_checkpoint_id)!r}\n"
-            f"EXACT_DATASET = {exact_ref!r}\n"
+            "import os as _mdh_os\n"
+            "_mdh_os.environ.update({\n"
+            f"    'MY_DATA_HUB_FM15_TASK_RUN_ID': {str(run_id)!r},\n"
+            f"    'MY_DATA_HUB_FM15_CANDIDATE_ID': {str(intent.candidate_checkpoint_id)!r},\n"
+            f"    'MY_DATA_HUB_FM15_EXACT_DATASET': {exact_ref!r},\n"
+            f"    'MY_DATA_HUB_FM15_SOURCE_REVISION': {intent.source_revision!r},\n"
+            f"    'MY_DATA_HUB_FM15_RECEIPT_NAME': {_FM15_RECEIPT_NAME!r},\n"
+            "})\n"
         ).encode()
         # The owner-reviewed verifier performs its normal package/restore setup;
         # the fixed terminal raise is appended here and cannot be caller-selected.
         return (
             prefix + self.binding.verifier_source + b"\nraise RuntimeError('MY_DATA_HUB_FIXED_FM15_RESTORE_FAILURE')\n"
         )
+
+    @staticmethod
+    def _load_fm15_failure_receipt(
+        path: Path,
+        *,
+        intent: CheckpointAcceptanceIntent,
+        run_id: UUID,
+        exact_ref: str,
+    ) -> dict[str, object]:
+        if not path.is_file() or path.is_symlink() or path.stat().st_size > 64 * 1024:
+            raise CheckpointAcceptanceError("FM15 failed verifier lacks its bounded exact receipt")
+        try:
+            value = json.loads(path.read_bytes())
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CheckpointAcceptanceError("FM15 failed verifier receipt is invalid JSON") from exc
+        expected = {
+            "schema_version": "my-data-hub-checkpoint-acceptance-fm15-failure.v1",
+            "task_run_id": str(run_id),
+            "candidate_checkpoint_id": str(intent.candidate_checkpoint_id),
+            "exact_version_ref": exact_ref,
+            "source_revision": intent.source_revision,
+            "detail_code": "FORCED_DISPOSABLE_RESTORE_FAILURE",
+            "restore_ok": False,
+        }
+        if not isinstance(value, dict) or value != expected:
+            raise CheckpointAcceptanceError("FM15 failed verifier receipt differs from the fixed identity")
+        return value
 
     def _stage(
         self,

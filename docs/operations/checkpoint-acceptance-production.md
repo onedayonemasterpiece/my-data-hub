@@ -54,10 +54,16 @@ terminal failure, and final receipt from the ledger alone.
   task-owned disposable Dataset through a persisted provider effect, download
   exact version 1, prove manifest hash differs from the read byte hash, reject
   the registry candidate, and never call promotion.
-- **FM15:** upload a valid private task-owned disposable candidate, prove exact
-  readback, push/reconcile the fixed isolated verifier source bound to the exact
-  Dataset version, require its terminal failure, reject the candidate, and
-  never call promotion.
+- **FM15:** the production operation is fail-closed before candidate/registry
+  mutation today. The existing adapter refuses output reads for failed runs, so
+  a generic terminal `failed` status cannot prove the fixed restore-smoke fault
+  rather than an unrelated infrastructure failure. The exact blocker is
+  `KAGGLE_FAILED_RUN_EXACT_OUTPUT_UNAVAILABLE`. The minimal missing seam is a
+  bounded `download_exact_failed_run_output_file` on the single adapter that
+  fences the exact numeric run before and after the official output call. Once
+  present, the implemented continuation requires the strict
+  `checkpoint-acceptance-fm15-failure.v1` receipt, rejects the disposable
+  candidate, and never calls promotion.
 
 Dataset and Notebook mutations call the adapter's reconcile operation before a
 create/push. Provider effect IDs and request hashes are deterministic and the
@@ -73,3 +79,8 @@ Injected/fake APIs remain `injected` and can produce only `CONTRACT_PASS`.
 Checked-in tests are contract evidence, not Kaggle evidence. No live receipt is
 claimed without the official adapter receipts, exact readbacks, verifier run,
 and durable registry/ledger state.
+
+The FM15 failed-verifier metadata contract is defined by
+`schemas/checkpoint-acceptance-fm15-failure.v1.schema.json` with a sanitized
+example under `examples/contracts/`. It contains identities and hashes/status
+only, never checkpoint or business bytes.

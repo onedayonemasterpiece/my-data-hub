@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from jsonschema import Draft202012Validator, FormatChecker
 
 import my_data_hub.checkpoints.acceptance_runtime as acceptance_runtime
 from my_data_hub.checkpoints.acceptance import (
@@ -16,6 +18,7 @@ from my_data_hub.checkpoints.acceptance import (
     CheckpointAcceptanceStageReceipt,
 )
 from my_data_hub.checkpoints.acceptance_runtime import (
+    CheckpointAcceptanceCapabilityError,
     CheckpointAcceptanceRuntimeBinding,
     ControlLedgerCheckpointAcceptanceJournal,
     KaggleTaskOwnedCheckpointEffects,
@@ -135,6 +138,9 @@ class _Registry:
     def head(self) -> CheckpointHead:
         return CheckpointHead()
 
+    def add_candidate(self, _manifest: object) -> None:
+        raise AssertionError("capability blocker must precede registry mutation")
+
 
 class _InjectedAdapter:
     def __init__(self) -> None:
@@ -185,3 +191,43 @@ def test_expired_absolute_deadline_blocks_before_provider_mutation(
     with pytest.raises(CheckpointAcceptanceError, match="deadline expired"):
         effects.ensure_fm14_corrupted_candidate(_intent())
     assert adapter.calls == 0
+
+
+def test_fm15_missing_failed_output_seam_blocks_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_root = tmp_path / "kaggle-working"
+    template = runtime_root / "template"
+    template.mkdir(parents=True)
+    monkeypatch.setattr(acceptance_runtime, "_RUNTIME_ROOT", runtime_root)
+    intent = _intent("FM15")
+    adapter = _InjectedAdapter()
+    registry = _Registry()
+    binding = CheckpointAcceptanceRuntimeBinding(
+        scenario="FM15",
+        operation_id=intent.operation_id,
+        task_run_id=intent.task_run_id,
+        source_revision=intent.source_revision,
+        started_at=NOW,
+        dataset_ref="owner/fm14-evidence",
+        notebook_ref="owner/fm15-verifier",
+        template_directory=template,
+        working_directory=runtime_root / "working",
+        verifier_source=b"# owner-reviewed restore fixture\n",
+    )
+    effects = KaggleTaskOwnedCheckpointEffects(
+        adapter=adapter,  # type: ignore[arg-type]
+        registry=registry,  # type: ignore[arg-type]
+        binding=binding,
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+    with pytest.raises(CheckpointAcceptanceCapabilityError, match="KAGGLE_FAILED_RUN_EXACT_OUTPUT_UNAVAILABLE"):
+        effects.ensure_fm15_restore_failure_candidate(intent)
+    assert adapter.calls == 0
+
+
+def test_fm15_failed_verifier_example_validates() -> None:
+    root = Path(__file__).resolve().parents[2]
+    schema = json.loads((root / "schemas/checkpoint-acceptance-fm15-failure.v1.schema.json").read_text())
+    example = json.loads((root / "examples/contracts/checkpoint-acceptance-fm15-failure.v1.example.json").read_text())
+    Draft202012Validator(schema, format_checker=FormatChecker()).validate(example)
