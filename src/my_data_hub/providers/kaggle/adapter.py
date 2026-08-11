@@ -896,7 +896,7 @@ class KaggleProviderAdapter:
             disposable=disposable,
             fingerprint=source_identity.fingerprint,
             provider_version=source_identity.source_version,
-            registered_at=self.clock(),
+            registered_at=intent.requested_at,
         )
         self.journal.persist_receipt(receipt)
         self.journal.persist_resource_claim(claim)
@@ -1078,7 +1078,7 @@ class KaggleProviderAdapter:
             disposable=disposable,
             fingerprint=source.fingerprint,
             provider_version=source.source_version,
-            registered_at=self.clock(),
+            registered_at=intent.requested_at,
         )
         self.journal.persist_intent(intent)
         self.journal.persist_receipt(receipt)
@@ -1517,7 +1517,7 @@ class KaggleProviderAdapter:
             disposable=disposable,
             fingerprint=identity.fingerprint,
             provider_version=identity.version,
-            registered_at=self.clock(),
+            registered_at=intent.requested_at,
         )
         self.journal.persist_receipt(receipt)
         self.journal.persist_resource_claim(claim)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -34,6 +34,8 @@ class FakeJournal:
         self.claims: dict[str, TaskResourceClaim] = {}
         self.fail_receipts = 0
         self.fail_claims = 0
+        self.commit_then_fail_claims = 0
+        self.claim_attempts: list[TaskResourceClaim] = []
 
     def persist_intent(self, intent: ProviderEffectIntent) -> None:
         self.intents.append(intent)
@@ -45,10 +47,26 @@ class FakeJournal:
         self.receipts.append(receipt)
 
     def persist_resource_claim(self, claim: TaskResourceClaim) -> None:
+        self.claim_attempts.append(claim)
         if self.fail_claims:
             self.fail_claims -= 1
             raise RuntimeError("simulated lost claim response")
+        for existing in self.claims.values():
+            if (
+                existing.effect_id == claim.effect_id
+                or (
+                    existing.provider_ref == claim.provider_ref
+                    and existing.kind == claim.kind
+                    and existing.provider_version == claim.provider_version
+                )
+            ):
+                if existing != claim:
+                    raise KagglePolicyError("claim effect/version already has different authority")
+                break
         self.claims[claim.claim_sha256] = claim
+        if self.commit_then_fail_claims:
+            self.commit_then_fail_claims -= 1
+            raise RuntimeError("simulated lost claim response after commit")
 
     def assert_resource_claim(self, claim: TaskResourceClaim) -> None:
         if self.claims.get(claim.claim_sha256) != claim:
@@ -437,8 +455,16 @@ def test_dataset_directory_reconciliation_repairs_lost_journal_without_second_ve
         expected=created.claim.fingerprint,
         arguments=arguments,
     )
-    journal.fail_claims = 1
-    with pytest.raises(RuntimeError, match="lost claim"):
+    ticks = 0
+
+    def advancing_clock() -> datetime:
+        nonlocal ticks
+        ticks += 1
+        return NOW + timedelta(seconds=ticks)
+
+    client.clock = advancing_clock
+    journal.commit_then_fail_claims = 1
+    with pytest.raises(RuntimeError, match="after commit"):
         client.create_private_dataset_version_from_directory(
             intent=version_intent,
             claim=created.claim,
@@ -459,6 +485,10 @@ def test_dataset_directory_reconciliation_repairs_lost_journal_without_second_ve
     assert reconciled.effect.outcome == EffectOutcome.ALREADY_APPLIED
     assert sum(call[0] == "dataset_create_version" for call in api.calls) == 1
     assert journal.claims[reconciled.claim.claim_sha256] == reconciled.claim
+    attempts = [item for item in journal.claim_attempts if item.effect_id == version_intent.effect_id]
+    assert len(attempts) == 2
+    assert attempts[0] == attempts[1] == reconciled.claim
+    assert reconciled.claim.registered_at == version_intent.requested_at
 
 
 def test_notebook_source_run_and_output_are_bound_to_exact_version() -> None:

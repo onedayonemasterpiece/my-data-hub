@@ -639,13 +639,25 @@ def create_app(
         authority = control_ledger.provider_effect_authority(str(claim.effect_id))
         assets = _configured_master_assets()
         prior = _current_checkpoint_claim(claim.provider_ref)
+        try:
+            control_ledger.assert_provider_resource_claim(
+                claim.claim_sha256,
+                claim.model_dump(mode="json"),
+            )
+        except PermissionError:
+            exact_replay = False
+        else:
+            exact_replay = True
         current_run = str(operation.identity["run_id"])
         task_authorized = str(claim.task_id) == current_run
         if authority and authority["action"] == MutationAction.VERSION_DATASET.value:
             task_authorized = bool(
-                prior is not None
-                and claim.task_id == prior.task_id
-                and claim.provider_version == prior.provider_version + 1
+                exact_replay
+                or (
+                    prior is not None
+                    and claim.task_id == prior.task_id
+                    and claim.provider_version == prior.provider_version + 1
+                )
             )
         expected_kind = (
             ProviderKind.DATASET.value

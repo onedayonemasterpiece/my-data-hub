@@ -263,6 +263,34 @@ def test_remote_journal_requires_exact_runtime_identity(tmp_path: Path) -> None:
         headers=headers_2,
     )
     assert persisted_v2.status_code == 200, persisted_v2.text
+    replayed_v2 = client.post(
+        "/internal/provider-journal/resource-claims",
+        json={"claim": claim_v2.model_dump(mode="json")},
+        headers=headers_2,
+    )
+    assert replayed_v2.status_code == 200, replayed_v2.text
+    conflicting_v2 = TaskResourceClaim.create(
+        task_id=claim.task_id,
+        effect_id=version_intent.effect_id,
+        provider_ref=claim.provider_ref,
+        kind=ProviderKind.DATASET,
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=False,
+        fingerprint=ProviderFingerprint(value="c" * 64),
+        provider_version=2,
+        registered_at=version_intent.requested_at,
+    )
+    rejected_conflict = client.post(
+        "/internal/provider-journal/resource-claims",
+        json={"claim": conflicting_v2.model_dump(mode="json")},
+        headers=headers_2,
+    )
+    assert rejected_conflict.status_code == 403
+    assert ledger.latest_provider_resource_claim(
+        provider_ref=claim.provider_ref,
+        resource_kind=ProviderKind.DATASET.value,
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
+    ) == claim_v2.model_dump(mode="json")
 
 
 def test_checkpoint_api_promotes_only_after_exact_stages_and_returns_numeric_head(tmp_path: Path) -> None:

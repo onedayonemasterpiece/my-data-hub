@@ -45,7 +45,21 @@ def test_control_journal_persists_intent_receipt_and_exact_cleanup_claim(tmp_pat
         registered_at=datetime.now(UTC),
     )
     journal.persist_resource_claim(claim)
+    journal.persist_resource_claim(claim)
     journal.assert_resource_claim(claim)
+    conflicting_claim = TaskResourceClaim.create(
+        task_id=claim.task_id,
+        effect_id=claim.effect_id,
+        provider_ref=claim.provider_ref,
+        kind=claim.kind,
+        control_class=claim.control_class,
+        disposable=claim.disposable,
+        fingerprint=ProviderFingerprint(value="b" * 64),
+        provider_version=claim.provider_version,
+        registered_at=claim.registered_at,
+    )
+    with pytest.raises(IdempotencyConflict):
+        journal.persist_resource_claim(conflicting_claim)
     with pytest.raises(PermissionError):
         journal.assert_resource_claim(claim.model_copy(update={"provider_version": 2}))
 

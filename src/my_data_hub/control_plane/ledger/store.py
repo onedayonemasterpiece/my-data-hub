@@ -1239,6 +1239,22 @@ class ControlLedger:
         if not required.issubset(payload):
             raise ValueError("provider resource claim is missing durable identity fields")
         with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT claim_json FROM provider_resource_claims "
+                "WHERE effect_id=? OR (provider_ref=? AND resource_kind=? AND provider_version=?)",
+                (
+                    str(payload["effect_id"]),
+                    str(payload["provider_ref"]),
+                    str(payload["kind"]),
+                    int(payload["provider_version"]),
+                ),
+            ).fetchall()
+            if existing:
+                if any(hmac.compare_digest(str(row["claim_json"]), claim_json) for row in existing):
+                    return
+                raise IdempotencyConflict(
+                    "provider effect/resource version already has different claim authority"
+                )
             try:
                 connection.execute(
                     "INSERT INTO provider_resource_claims(claim_sha256,task_id,effect_id,provider_ref,resource_kind,"
