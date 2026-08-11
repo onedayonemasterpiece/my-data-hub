@@ -2,6 +2,11 @@ name: my-data-hub-control-plane
 
 x-my-data-hub-profile: production-lightweight-control-plane
 x-my-data-hub-opt-in-profile: remote-mcp
+x-bounded-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
   control-plane:
@@ -10,6 +15,7 @@ services:
       context: .
       dockerfile: deploy/control-plane/Dockerfile
     restart: unless-stopped
+    logging: *bounded-logging
     user: "${MY_DATA_HUB_CONTROL_UID:-1000}:${MY_DATA_HUB_CONTROL_GID:-1000}"
     read_only: true
     tmpfs:
@@ -46,6 +52,7 @@ services:
       context: .
       dockerfile: deploy/control-plane/Dockerfile
     restart: unless-stopped
+    logging: *bounded-logging
     user: "${MY_DATA_HUB_CONTROL_UID:-1000}:${MY_DATA_HUB_CONTROL_GID:-1000}"
     read_only: true
     tmpfs:
@@ -97,6 +104,7 @@ services:
       context: .
       dockerfile: deploy/control-plane/Dockerfile
     restart: unless-stopped
+    logging: *bounded-logging
     # SQLite WAL is intentionally shared only among the three bounded control
     # processes; signing keys and epoch credentials remain separately mounted.
     user: "${MY_DATA_HUB_CONTROL_UID:-1000}:${MY_DATA_HUB_CONTROL_GID:-1000}"

@@ -111,3 +111,8 @@ systemd unit plus lingering reconciles all three after login-independent host bo
 changing the current pointer or enabling a unit. Only the separately gated
 `INSTALL_MY_DATA_HUB_CONTROL_PLANE` action reads the private inputs and installs the stack.
 Neither action provisions DNS, Yandex Cloud, certificates, VPN or a local database.
+
+Before even preparing an image, the installer requires at least 4 GiB free on the
+runtime/release filesystem (bounded override: `MY_DATA_HUB_CONTROL_MIN_FREE_KIB`). Each
+container uses Docker `json-file` rotation capped at five 10 MiB files; durable ledger
+retention is enforced separately by the control-ledger policy.

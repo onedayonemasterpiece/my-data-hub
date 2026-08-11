@@ -15,7 +15,7 @@ fi
 require_command() {
   command -v "$1" >/dev/null || { echo "$1 is required" >&2; exit 2; }
 }
-for command_name in docker flock git tar; do
+for command_name in awk df docker flock git tar; do
   require_command "$command_name"
 done
 docker_path="$(command -v docker)"
@@ -42,6 +42,19 @@ current="$release_root/current"
 mkdir -p "$runtime_root" "$release_root/releases"
 [[ ! -L "$release_root/releases" ]] || { echo "release directory may not be a symbolic link" >&2; exit 2; }
 chmod 700 "$runtime_root" "$release_root" "$release_root/releases"
+minimum_free_kib="${MY_DATA_HUB_CONTROL_MIN_FREE_KIB:-4194304}"
+[[ "$minimum_free_kib" =~ ^[0-9]+$ ]] && (( minimum_free_kib >= 1048576 && minimum_free_kib <= 104857600 )) || {
+  echo "MY_DATA_HUB_CONTROL_MIN_FREE_KIB must be 1..100 GiB expressed in KiB" >&2
+  exit 2
+}
+for disk_path in "$runtime_root" "$release_root"; do
+  available_kib="$(df -Pk "$disk_path" | awk 'NR==2 {print $4}')"
+  [[ "$available_kib" =~ ^[0-9]+$ ]] || { echo "disk headroom could not be measured" >&2; exit 2; }
+  if (( available_kib < minimum_free_kib )); then
+    echo "control-plane deployment requires at least ${minimum_free_kib} KiB free on $disk_path" >&2
+    exit 75
+  fi
+done
 exec 9>"$runtime_root/install.lock"
 flock -n 9 || { echo "another control-plane install is running" >&2; exit 75; }
 

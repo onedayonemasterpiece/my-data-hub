@@ -97,6 +97,10 @@ def test_compose_has_exact_opt_in_profile_split_secret_boundaries_and_loopback_p
 
     for service in services.values():
         assert service["restart"] == "unless-stopped"
+        assert service["logging"] == {
+            "driver": "json-file",
+            "options": {"max-size": "10m", "max-file": "5"},
+        }
         assert all(binding.startswith("127.0.0.1:") for binding in service["ports"])
     serialized = COMPOSE.read_text(encoding="utf-8").casefold()
     for forbidden in ("pgdata", "pg_dump", "db migrate", "connector-committer"):
@@ -123,3 +127,12 @@ def test_install_requires_private_split_inputs_without_static_master_credentials
     assert "external DNS" not in source
     assert "yc " not in source.casefold()
     assert "vpn" not in source.casefold()
+
+
+def test_prepare_checks_bounded_disk_headroom_before_building_release_image() -> None:
+    source = installer_source()
+    disk_check = source.index('minimum_free_kib="${MY_DATA_HUB_CONTROL_MIN_FREE_KIB:-4194304}"')
+    image_build = source.index('"$docker_path" build')
+    assert disk_check < image_build
+    assert 'df -Pk "$disk_path"' in source
+    assert "available_kib < minimum_free_kib" in source
