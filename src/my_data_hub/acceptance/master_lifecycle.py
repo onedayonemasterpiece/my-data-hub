@@ -253,12 +253,51 @@ class RotationSoakEvidence(_Evidence):
     rejected_stale_sessions: int = Field(ge=1, le=400)
     remained_single_epoch: Literal[True]
     service_active_at_end: Literal[True]
+    heartbeats_continuous: Literal[True] | None = None
+    heartbeat_count: Literal[12] | None = None
+    heartbeat_receipt_sha256s: tuple[
+        Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")], ...
+    ] | None = Field(default=None, min_length=12, max_length=12)
+    reads_succeeded: Literal[True] | None = None
+    read_query_count: Literal[12] | None = None
+    bounded_read_receipt_sha256s: tuple[
+        Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")], ...
+    ] | None = Field(default=None, min_length=12, max_length=12)
+    checkpoint_verified: Literal[True] | None = None
+    recovery_succeeded: Literal[True] | None = None
+    checkpoint_id: UUID | None = None
+    exact_version_ref: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+    )
+    manifest_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    checkpoint_receipt_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    recovery_receipt_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def monotonic_duration(self) -> RotationSoakEvidence:
         elapsed = (self.monotonic_finished_ns - self.monotonic_started_ns) // 1_000_000_000
         if elapsed != self.observed_duration_seconds:
             raise ValueError("FM24 duration does not match monotonic observations")
+        checkpoint_fields = (
+            self.heartbeats_continuous,
+            self.heartbeat_count,
+            self.heartbeat_receipt_sha256s,
+            self.reads_succeeded,
+            self.read_query_count,
+            self.bounded_read_receipt_sha256s,
+            self.checkpoint_verified,
+            self.recovery_succeeded,
+            self.checkpoint_id,
+            self.exact_version_ref,
+            self.manifest_sha256,
+            self.checkpoint_receipt_sha256,
+            self.recovery_receipt_sha256,
+        )
+        if any(value is not None for value in checkpoint_fields) and any(
+            value is None for value in checkpoint_fields
+        ):
+            raise ValueError("FM24 continuity/read/checkpoint evidence is only partially populated")
         return self
 
 
@@ -301,6 +340,27 @@ class MasterAcceptanceReceipt(BaseModel):
             raise ValueError("receipt evidence differs from its command")
         if self.outcome != "succeeded":
             raise ValueError("failed runs are terminal evidence, never acceptance receipts")
+        if self.scenario is MasterAcceptanceScenario.FM24 and (
+            not isinstance(self.evidence, RotationSoakEvidence)
+            or (
+                self.evidence.checkpoint_verified is not True
+                or self.evidence.heartbeats_continuous is not True
+                or self.evidence.heartbeat_count != 12
+                or self.evidence.heartbeat_receipt_sha256s is None
+                or self.evidence.reads_succeeded is not True
+                or self.evidence.read_query_count != 12
+                or self.evidence.bounded_read_receipt_sha256s is None
+                or self.evidence.recovery_succeeded is not True
+                or self.evidence.checkpoint_id is None
+                or self.evidence.exact_version_ref is None
+                or self.evidence.manifest_sha256 is None
+                or self.evidence.checkpoint_receipt_sha256 is None
+                or self.evidence.recovery_receipt_sha256 is None
+            )
+        ):
+            raise ValueError(
+                "FM24 live acceptance requires real checkpoint and recovery evidence"
+            )
         if len(canonical_json_bytes(self.model_dump(mode="json"))) > MAX_ACCEPTANCE_RECEIPT_BYTES:
             raise ValueError("master acceptance receipt exceeds 64 KiB")
         return self

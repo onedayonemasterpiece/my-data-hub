@@ -164,6 +164,7 @@ class SoakSessionState(BaseModel):
     bounded_reads: int = Field(default=0, ge=0, le=SOAK_STEP_COUNT)
     rejected_stale_sessions: int = Field(default=0, ge=0, le=SOAK_STEP_COUNT)
     steps: tuple[SoakStepRecord, ...] = Field(default=(), max_length=SOAK_STEP_COUNT)
+    checkpoint_recovery: CheckpointRecoveryRecord | None = None
     finished_monotonic_ns: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
@@ -185,7 +186,13 @@ class SoakSessionState(BaseModel):
         )
         if any(value != completed for value in counters):
             raise ValueError("FM24 durable counters differ from fully ACKed steps")
-        is_complete = completed == SOAK_STEP_COUNT
+        checkpoint_acked = (
+            self.checkpoint_recovery is not None
+            and self.checkpoint_recovery.state == "ACKED"
+        )
+        if self.checkpoint_recovery is not None and completed != SOAK_STEP_COUNT:
+            raise ValueError("FM24 checkpoint/recovery started before twelve durable steps")
+        is_complete = completed == SOAK_STEP_COUNT and checkpoint_acked
         if (self.status == "COMPLETE") != is_complete:
             raise ValueError("FM24 COMPLETE state differs from its twelve durable steps")
         if self.status == "RUNNING" and (self.terminal_code is not None or self.finished_monotonic_ns is not None):
@@ -271,6 +278,74 @@ class ActiveServiceReceipt(BaseModel):
     active: Literal[True]
     epoch: int = Field(ge=1)
     service_receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class FM24CheckpointRecoveryEvidence(BaseModel):
+    """Exact metadata proving the post-soak checkpoint and fixed recovery."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    evidence_class: EvidenceClass
+    checkpoint_verified: Literal[True]
+    recovery_succeeded: Literal[True]
+    checkpoint_id: UUID
+    exact_version_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$")
+    manifest_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    checkpoint_receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    recovery_receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class FM24SoakCompletionEvidence(FM24CheckpointRecoveryEvidence):
+    """Durable continuity/read ACKs plus the exact checkpoint/recovery proof."""
+
+    heartbeats_continuous: Literal[True]
+    heartbeat_count: Literal[12]
+    heartbeat_receipt_sha256s: tuple[str, ...] = Field(
+        min_length=SOAK_STEP_COUNT,
+        max_length=SOAK_STEP_COUNT,
+    )
+    reads_succeeded: Literal[True]
+    read_query_count: Literal[12]
+    bounded_read_receipt_sha256s: tuple[str, ...] = Field(
+        min_length=SOAK_STEP_COUNT,
+        max_length=SOAK_STEP_COUNT,
+    )
+
+    @model_validator(mode="after")
+    def exact_receipt_hashes(self) -> FM24SoakCompletionEvidence:
+        hashes = (*self.heartbeat_receipt_sha256s, *self.bounded_read_receipt_sha256s)
+        if any(not _is_sha256(value) for value in hashes):
+            raise ValueError("FM24 heartbeat/read receipt list contains a non-SHA-256 value")
+        return self
+
+
+class CheckpointRecoveryRecord(BaseModel):
+    """Persisted intent/ACK projection for the single post-soak effect."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    intent_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    state: Literal["INTENT_COMMITTED", "ACKED"]
+    evidence: FM24CheckpointRecoveryEvidence | None = None
+    acknowledged_monotonic_ns: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def ack_shape(self) -> CheckpointRecoveryRecord:
+        acknowledged = self.evidence is not None and self.acknowledged_monotonic_ns is not None
+        if (self.state == "ACKED") != acknowledged:
+            raise ValueError("FM24 checkpoint/recovery ACK fields differ from action state")
+        return self
+
+
+class SoakCheckpointRecoveryPort(Protocol):
+    """Runtime-local fixed checkpoint/recovery effect; no SQL, bytes, or clock input."""
+
+    def ensure_checkpoint_recovery(
+        self,
+        binding: MasterAcceptanceBinding,
+        *,
+        intent_sha256: str,
+    ) -> FM24CheckpointRecoveryEvidence: ...
 
 
 class SoakCredentialRegistrar(Protocol):
@@ -400,6 +475,7 @@ class ProductionSoakSessionPort:
     credential_registrar: SoakCredentialRegistrar
     read_probe: SoakReadProbe
     evidence_class: EvidenceClass
+    checkpoint_recovery: SoakCheckpointRecoveryPort | None = None
     clock: SoakClock = field(default_factory=SystemSoakClock)
     cancelled: Callable[[], bool] = _never_cancel
     _lock: threading.RLock = field(init=False, repr=False)
@@ -470,7 +546,7 @@ class ProductionSoakSessionPort:
         with self._lock:
             self._assert_binding(binding)
             state = self._running_state(allow_complete=True)
-            if state.status != "COMPLETE" or state.completed_steps != SOAK_STEP_COUNT:
+            if state.completed_steps != SOAK_STEP_COUNT:
                 return False
             now_ns = self.clock.monotonic_ns()
             if not (
@@ -479,9 +555,42 @@ class ProductionSoakSessionPort:
                 <= state.deadline_monotonic_ns
             ):
                 return False
+            self._ensure_checkpoint_recovery(binding)
             receipt = self.read_probe.exact_service_active(binding)
             self._receipt_class(receipt.evidence_class)
             return receipt.active and receipt.epoch == binding.epoch
+
+    def checkpoint_recovery_evidence(
+        self, binding: MasterAcceptanceBinding
+    ) -> FM24SoakCompletionEvidence:
+        """Return only a durable ACK from the real fixed post-soak effect."""
+
+        with self._lock:
+            self._assert_binding(binding)
+            state = self._state()
+            record = state.checkpoint_recovery
+            if state.status != "COMPLETE" or record is None or record.state != "ACKED":
+                raise SoakSessionError("FM24_CHECKPOINT_RECOVERY_ACK_REQUIRED")
+            assert record.evidence is not None
+            heartbeat_receipts = tuple(
+                step.actions[ACTION_ORDER.index(StepAction.HEARTBEAT_ACK)].receipt_sha256
+                for step in state.steps
+            )
+            bounded_read_receipts = tuple(
+                step.actions[ACTION_ORDER.index(StepAction.BOUNDED_READ)].receipt_sha256
+                for step in state.steps
+            )
+            if any(value is None for value in (*heartbeat_receipts, *bounded_read_receipts)):
+                raise SoakSessionError("FM24_HEARTBEAT_OR_READ_ACK_REQUIRED")
+            return FM24SoakCompletionEvidence(
+                **record.evidence.model_dump(mode="python"),
+                heartbeats_continuous=True,
+                heartbeat_count=SOAK_STEP_COUNT,
+                heartbeat_receipt_sha256s=heartbeat_receipts,
+                reads_succeeded=True,
+                read_query_count=SOAK_STEP_COUNT,
+                bounded_read_receipt_sha256s=bounded_read_receipts,
+            )
 
     def completed_steps(self, binding: MasterAcceptanceBinding) -> int:
         """Composition hook allowing the controller to resume at durable step N."""
@@ -511,6 +620,10 @@ class ProductionSoakSessionPort:
         self._assert_binding(binding)
         state = self._running_state(allow_complete=True)
         if state.status == "COMPLETE":
+            return None
+        if state.completed_steps == SOAK_STEP_COUNT:
+            # The step schedule is complete; only the fixed checkpoint/recovery
+            # hook may advance the remaining RUNNING state.
             return None
         if state.steps and not state.steps[-1].complete:
             return state.steps[-1]
@@ -591,11 +704,71 @@ class ProductionSoakSessionPort:
                 }
             )
             if completed == SOAK_STEP_COUNT:
-                finished = self.clock.monotonic_ns()
-                if finished - state.started_monotonic_ns < SOAK_MIN_SECONDS * _NS_PER_SECOND:
+                observed = self.clock.monotonic_ns() - state.started_monotonic_ns
+                if observed < SOAK_MIN_SECONDS * _NS_PER_SECOND:
                     raise SoakSessionError("FM24_REAL_HOUR_NOT_OBSERVED")
-                update.update({"status": "COMPLETE", "finished_monotonic_ns": finished})
         self.journal.save(state.model_copy(update=update))
+
+    def _ensure_checkpoint_recovery(self, binding: MasterAcceptanceBinding) -> None:
+        state = self._running_state(allow_complete=True)
+        if state.status == "COMPLETE":
+            return
+        if state.completed_steps != SOAK_STEP_COUNT:
+            raise SoakSessionError("FM24_CHECKPOINT_BEFORE_TWELVE_STEPS")
+        if self.checkpoint_recovery is None:
+            raise SoakSessionError("FM24_CHECKPOINT_RECOVERY_PORT_UNAVAILABLE")
+        record = state.checkpoint_recovery
+        if record is None:
+            intent_sha256 = _sha(
+                {
+                    "schema_version": "my-data-hub-fm24-checkpoint-recovery-intent.v1",
+                    "task_id_sha256": state.task_id_sha256,
+                    "binding_sha256": state.binding_sha256,
+                    "step_receipt_sha256s": tuple(
+                        action.receipt_sha256
+                        for step in state.steps
+                        for action in step.actions
+                    ),
+                }
+            )
+            record = CheckpointRecoveryRecord(
+                intent_sha256=intent_sha256,
+                state="INTENT_COMMITTED",
+            )
+            self.journal.save(state.model_copy(update={"checkpoint_recovery": record}))
+        elif record.state == "ACKED":
+            return
+
+        # Re-load the persisted intent before the checkpoint provider boundary.
+        state = self._running_state()
+        record = state.checkpoint_recovery
+        assert record is not None
+        evidence = self.checkpoint_recovery.ensure_checkpoint_recovery(
+            binding,
+            intent_sha256=record.intent_sha256,
+        )
+        self._receipt_class(evidence.evidence_class)
+        state = self._running_state()
+        record = state.checkpoint_recovery
+        if record is None or record.state != "INTENT_COMMITTED":
+            raise SoakSessionError("FM24 checkpoint/recovery durable intent changed")
+        finished = self.clock.monotonic_ns()
+        acknowledged = record.model_copy(
+            update={
+                "state": "ACKED",
+                "evidence": evidence,
+                "acknowledged_monotonic_ns": finished,
+            }
+        )
+        self.journal.save(
+            state.model_copy(
+                update={
+                    "checkpoint_recovery": acknowledged,
+                    "status": "COMPLETE",
+                    "finished_monotonic_ns": finished,
+                }
+            )
+        )
 
     def _heartbeat(self, _binding: MasterAcceptanceBinding, step: SoakStepRecord, intent: str) -> str:
         receipt = self.runtime_client.emit(
@@ -847,10 +1020,14 @@ __all__ = [
     "SOAK_STEP_SECONDS",
     "ActiveServiceReceipt",
     "BoundedReadReceipt",
+    "CheckpointRecoveryRecord",
     "CredentialExpiryReceipt",
     "CredentialRotationReceipt",
     "EvidenceClass",
+    "FM24CheckpointRecoveryEvidence",
+    "FM24SoakCompletionEvidence",
     "ProductionSoakSessionPort",
+    "SoakCheckpointRecoveryPort",
     "SoakCredentialRegistrar",
     "SoakReadProbe",
     "SoakSessionCancelled",

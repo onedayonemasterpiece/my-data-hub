@@ -1,6 +1,7 @@
 {
   "binding_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "bounded_reads": 0,
+  "checkpoint_recovery": null,
   "completed_steps": 0,
   "deadline_monotonic_ns": 5400000000000,
   "evidence_class": "injected",

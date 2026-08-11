@@ -22,6 +22,14 @@ this document and the tests are **not** live evidence.
 - each side effect has a task/binding/step/action-derived intent hash written before
   the call and a receipt hash written after the ACK. Production registrar/read-probe
   adapters must reconcile repeated intent hashes after response loss;
+- after the twelfth cooperative step, `exact_service_active` commits one additional
+  intent and does not mark the session `COMPLETE` until checkpoint/recovery ACK;
+- `RuntimeCheckpointRecoveryAdapter` assigns an intent-derived checkpoint ID, calls
+  the existing `RuntimeCheckpointCoordinator.create_and_publish`, requires the exact
+  Dataset version and independent restore-verifier receipt, and then performs a
+  separate `resolve_boot_checkpoint` readback from the durable verified HEAD;
+- the archive attempt is bounded to 1,800 seconds and the original 5,400-second FM24
+  deadline is checked again before the checkpoint/recovery ACK is accepted;
 - the journal is atomic, fsync-backed, at most 64 KiB, and mode `0600` below a mode
   `0700` task directory. Live state must remain below `/kaggle/working`;
 - state contains only hashes, counters, bounded timestamps, action names and status.
@@ -47,6 +55,10 @@ soak = ProductionSoakSessionPort(
     credential_registrar=fm24_credential_registrar,
     read_probe=fm24_read_probe,
     evidence_class="live",
+    checkpoint_recovery=RuntimeCheckpointRecoveryAdapter(
+        coordinator=runtime_checkpoint_coordinator,
+        database_url=runtime_private_database_url,
+    ),
     cancelled=task_cancelled,
 )
 ```
@@ -64,7 +76,15 @@ than starting a second 12-step/hour loop. Invoke the five `SoakSessionPort` meth
 their existing order only when the next 300-second hook is due. `SoakSessionNotDue` is
 a nonterminal yield back to the ordinary heartbeat loop; cancellation and deadline
 exceptions are terminal. After twelve durable steps, call `exact_service_active` and
-copy the durable counters into the FM24 evidence.
+copy the durable counters into the FM24 evidence. Then call
+`checkpoint_recovery_evidence(binding)` and copy its exact booleans, checkpoint ID,
+numeric version reference, manifest digest, checkpoint-receipt digest and
+recovery-receipt digest into `RotationSoakEvidence`. The same projection contains
+`heartbeats_continuous`, `heartbeat_count`, the exact 12 heartbeat receipt hashes,
+`reads_succeeded`, `read_query_count`, and the exact 12 bounded-read receipt hashes;
+these values are derived from the persisted ordered action ACKs. `MasterAcceptanceReceipt`
+rejects FM24 live success if any field is absent; twelve steps or scaffold alone
+cannot become `LIVE_PASS`.
 
 Do not call the current blocking `sleep(300)` loop from inside the notebook's normal
 heartbeat loop. Doing so would prevent the very callback/lease maintenance FM24 is
@@ -72,8 +92,10 @@ required to prove.
 
 ## What remains to prove live
 
-Deployment must assemble the real credential registrar and fixed read/session probe,
+Deployment must assemble the real credential registrar, fixed read/session probe and
+checkpoint/recovery adapter,
 run the exact source revision for 3,600–5,400 real seconds on one ACTIVE Kaggle master
-epoch, download the independently retained receipt, and verify twelve heartbeat,
+epoch, download the independently retained receipt, and verify a real checkpoint,
+exact recovery readback and twelve heartbeat,
 lease, tunnel, rotation, bounded-read, explicit-expiry and stale-denial ACKs. Until
 that occurs, FM24 remains blocked and no `live` result may be claimed.

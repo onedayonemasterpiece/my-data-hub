@@ -4,25 +4,20 @@
       "additionalProperties": false,
       "description": "One persisted intent/ACK pair; receipt contents stay at the authority.",
       "properties": {
-        "acknowledged_monotonic_ns": {
-          "anyOf": [
-            {
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Acknowledged Monotonic Ns"
-        },
         "action": {
           "$ref": "#/$defs/StepAction"
         },
         "intent_sha256": {
           "pattern": "^[a-f0-9]{64}$",
           "title": "Intent Sha256",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "INTENT_COMMITTED",
+            "ACKED"
+          ],
+          "title": "State",
           "type": "string"
         },
         "receipt_sha256": {
@@ -38,13 +33,18 @@
           "default": null,
           "title": "Receipt Sha256"
         },
-        "state": {
-          "enum": [
-            "INTENT_COMMITTED",
-            "ACKED"
+        "acknowledged_monotonic_ns": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "title": "State",
-          "type": "string"
+          "default": null,
+          "title": "Acknowledged Monotonic Ns"
         }
       },
       "required": [
@@ -55,10 +55,141 @@
       "title": "ActionRecord",
       "type": "object"
     },
+    "CheckpointRecoveryRecord": {
+      "additionalProperties": false,
+      "description": "Persisted intent/ACK projection for the single post-soak effect.",
+      "properties": {
+        "intent_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Intent Sha256",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "INTENT_COMMITTED",
+            "ACKED"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FM24CheckpointRecoveryEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "acknowledged_monotonic_ns": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Acknowledged Monotonic Ns"
+        }
+      },
+      "required": [
+        "intent_sha256",
+        "state"
+      ],
+      "title": "CheckpointRecoveryRecord",
+      "type": "object"
+    },
+    "FM24CheckpointRecoveryEvidence": {
+      "additionalProperties": false,
+      "description": "Exact metadata proving the post-soak checkpoint and fixed recovery.",
+      "properties": {
+        "evidence_class": {
+          "enum": [
+            "injected",
+            "live"
+          ],
+          "title": "Evidence Class",
+          "type": "string"
+        },
+        "checkpoint_verified": {
+          "const": true,
+          "title": "Checkpoint Verified",
+          "type": "boolean"
+        },
+        "recovery_succeeded": {
+          "const": true,
+          "title": "Recovery Succeeded",
+          "type": "boolean"
+        },
+        "checkpoint_id": {
+          "format": "uuid",
+          "title": "Checkpoint Id",
+          "type": "string"
+        },
+        "exact_version_ref": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Exact Version Ref",
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
+        },
+        "checkpoint_receipt_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Checkpoint Receipt Sha256",
+          "type": "string"
+        },
+        "recovery_receipt_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Recovery Receipt Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_class",
+        "checkpoint_verified",
+        "recovery_succeeded",
+        "checkpoint_id",
+        "exact_version_ref",
+        "manifest_sha256",
+        "checkpoint_receipt_sha256",
+        "recovery_receipt_sha256"
+      ],
+      "title": "FM24CheckpointRecoveryEvidence",
+      "type": "object"
+    },
     "SoakStepRecord": {
       "additionalProperties": false,
       "description": "Durable progress for one of the twelve fixed rotation steps.",
       "properties": {
+        "step": {
+          "maximum": 12,
+          "minimum": 1,
+          "title": "Step",
+          "type": "integer"
+        },
+        "not_before_monotonic_ns": {
+          "minimum": 0,
+          "title": "Not Before Monotonic Ns",
+          "type": "integer"
+        },
+        "lease_until": {
+          "format": "date-time",
+          "title": "Lease Until",
+          "type": "string"
+        },
+        "credential_expires_at": {
+          "format": "date-time",
+          "title": "Credential Expires At",
+          "type": "string"
+        },
         "actions": {
           "default": [],
           "items": {
@@ -67,27 +198,6 @@
           "maxItems": 7,
           "title": "Actions",
           "type": "array"
-        },
-        "credential_expires_at": {
-          "format": "date-time",
-          "title": "Credential Expires At",
-          "type": "string"
-        },
-        "lease_until": {
-          "format": "date-time",
-          "title": "Lease Until",
-          "type": "string"
-        },
-        "not_before_monotonic_ns": {
-          "minimum": 0,
-          "title": "Not Before Monotonic Ns",
-          "type": "integer"
-        },
-        "step": {
-          "maximum": 12,
-          "minimum": 1,
-          "title": "Step",
-          "type": "integer"
         }
       },
       "required": [
@@ -113,34 +223,24 @@
       "type": "string"
     }
   },
-  "$id": "https://schemas.my-data-hub.local/fm24-soak-state.v1.schema.json",
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "Bounded task-owned journal projection containing metadata only.",
   "properties": {
+    "schema_version": {
+      "const": "my-data-hub-fm24-soak-state.v1",
+      "default": "my-data-hub-fm24-soak-state.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_id_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Task Id Sha256",
+      "type": "string"
+    },
     "binding_sha256": {
       "pattern": "^[a-f0-9]{64}$",
       "title": "Binding Sha256",
       "type": "string"
-    },
-    "bounded_reads": {
-      "default": 0,
-      "maximum": 12,
-      "minimum": 0,
-      "title": "Bounded Reads",
-      "type": "integer"
-    },
-    "completed_steps": {
-      "default": 0,
-      "maximum": 12,
-      "minimum": 0,
-      "title": "Completed Steps",
-      "type": "integer"
-    },
-    "deadline_monotonic_ns": {
-      "minimum": 0,
-      "title": "Deadline Monotonic Ns",
-      "type": "integer"
     },
     "evidence_class": {
       "enum": [
@@ -150,49 +250,14 @@
       "title": "Evidence Class",
       "type": "string"
     },
-    "finished_monotonic_ns": {
-      "anyOf": [
-        {
-          "minimum": 0,
-          "type": "integer"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Finished Monotonic Ns"
-    },
-    "lease_renewals": {
-      "default": 0,
-      "maximum": 12,
-      "minimum": 0,
-      "title": "Lease Renewals",
-      "type": "integer"
-    },
-    "rejected_stale_sessions": {
-      "default": 0,
-      "maximum": 12,
-      "minimum": 0,
-      "title": "Rejected Stale Sessions",
-      "type": "integer"
-    },
-    "schema_version": {
-      "const": "my-data-hub-fm24-soak-state.v1",
-      "default": "my-data-hub-fm24-soak-state.v1",
-      "title": "Schema Version",
-      "type": "string"
-    },
-    "session_rotations": {
-      "default": 0,
-      "maximum": 12,
-      "minimum": 0,
-      "title": "Session Rotations",
-      "type": "integer"
-    },
     "started_monotonic_ns": {
       "minimum": 0,
       "title": "Started Monotonic Ns",
+      "type": "integer"
+    },
+    "deadline_monotonic_ns": {
+      "minimum": 0,
+      "title": "Deadline Monotonic Ns",
       "type": "integer"
     },
     "status": {
@@ -204,20 +269,6 @@
         "FAILED"
       ],
       "title": "Status",
-      "type": "string"
-    },
-    "steps": {
-      "default": [],
-      "items": {
-        "$ref": "#/$defs/SoakStepRecord"
-      },
-      "maxItems": 12,
-      "title": "Steps",
-      "type": "array"
-    },
-    "task_id_sha256": {
-      "pattern": "^[a-f0-9]{64}$",
-      "title": "Task Id Sha256",
       "type": "string"
     },
     "terminal_code": {
@@ -236,12 +287,80 @@
       "default": null,
       "title": "Terminal Code"
     },
+    "completed_steps": {
+      "default": 0,
+      "maximum": 12,
+      "minimum": 0,
+      "title": "Completed Steps",
+      "type": "integer"
+    },
+    "lease_renewals": {
+      "default": 0,
+      "maximum": 12,
+      "minimum": 0,
+      "title": "Lease Renewals",
+      "type": "integer"
+    },
     "tunnel_renewals": {
       "default": 0,
       "maximum": 12,
       "minimum": 0,
       "title": "Tunnel Renewals",
       "type": "integer"
+    },
+    "session_rotations": {
+      "default": 0,
+      "maximum": 12,
+      "minimum": 0,
+      "title": "Session Rotations",
+      "type": "integer"
+    },
+    "bounded_reads": {
+      "default": 0,
+      "maximum": 12,
+      "minimum": 0,
+      "title": "Bounded Reads",
+      "type": "integer"
+    },
+    "rejected_stale_sessions": {
+      "default": 0,
+      "maximum": 12,
+      "minimum": 0,
+      "title": "Rejected Stale Sessions",
+      "type": "integer"
+    },
+    "steps": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SoakStepRecord"
+      },
+      "maxItems": 12,
+      "title": "Steps",
+      "type": "array"
+    },
+    "checkpoint_recovery": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CheckpointRecoveryRecord"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "finished_monotonic_ns": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Finished Monotonic Ns"
     }
   },
   "required": [
@@ -252,5 +371,7 @@
     "deadline_monotonic_ns"
   ],
   "title": "SoakSessionState",
-  "type": "object"
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/fm24-soak-state.v1.schema.json"
 }

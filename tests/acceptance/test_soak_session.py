@@ -19,6 +19,7 @@ from my_data_hub.acceptance.soak_session import (
     BoundedReadReceipt,
     CredentialExpiryReceipt,
     CredentialRotationReceipt,
+    FM24CheckpointRecoveryEvidence,
     ProductionSoakSessionPort,
     SoakSessionCancelled,
     SoakSessionDeadlineExceeded,
@@ -182,6 +183,32 @@ class Probe:
         )
 
 
+class CheckpointRecovery:
+    def __init__(self, events: list[str], *, lose_first_response: bool = False) -> None:
+        self.events = events
+        self.lose_first_response = lose_first_response
+        self.calls = 0
+        self.intents: list[str] = []
+
+    def ensure_checkpoint_recovery(self, binding, *, intent_sha256):
+        self.calls += 1
+        self.intents.append(intent_sha256)
+        self.events.append("checkpoint-recovery")
+        if self.lose_first_response:
+            self.lose_first_response = False
+            raise ConnectionError("checkpoint response lost after verification")
+        return FM24CheckpointRecoveryEvidence(
+            evidence_class="injected",
+            checkpoint_verified=True,
+            recovery_succeeded=True,
+            checkpoint_id=UUID(int=6),
+            exact_version_ref="owner/checkpoints/7",
+            manifest_sha256=H,
+            checkpoint_receipt_sha256=H2,
+            recovery_receipt_sha256=H3,
+        )
+
+
 @dataclass
 class Rig:
     port: ProductionSoakSessionPort
@@ -191,6 +218,7 @@ class Rig:
     gate: Gate
     tunnel: Tunnel
     registrar: Registrar
+    checkpoint_recovery: CheckpointRecovery
     state_path: Path
 
 
@@ -216,6 +244,7 @@ def _rig(tmp_path: Path, *, registrar: Registrar | None = None, cancelled=lambda
     gate = Gate(events)
     tunnel = Tunnel(events)
     registrar = registrar or Registrar(events)
+    checkpoint_recovery = CheckpointRecovery(events)
     state_path = tmp_path / "task" / "fm24.json"
     runtime = RuntimeClient(
         callback_url="https://control.example/internal/runtime/events",
@@ -241,10 +270,11 @@ def _rig(tmp_path: Path, *, registrar: Registrar | None = None, cancelled=lambda
         credential_registrar=registrar,
         read_probe=Probe(events),
         evidence_class="injected",
+        checkpoint_recovery=checkpoint_recovery,
         clock=clock,
         cancelled=cancelled,
     )
-    return Rig(port, binding, clock, events, gate, tunnel, registrar, state_path)
+    return Rig(port, binding, clock, events, gate, tunnel, registrar, checkpoint_recovery, state_path)
 
 
 def _run_step(rig: Rig) -> None:
@@ -273,6 +303,7 @@ def test_fixed_twelve_step_hour_persists_intents_acks_and_metadata_only_state(tm
     assert state.rejected_stale_sessions == SOAK_STEP_COUNT
     assert rig.gate.renewals == rig.tunnel.renewals == SOAK_STEP_COUNT
     assert rig.registrar.rotation_effects == rig.registrar.expiry_effects == SOAK_STEP_COUNT
+    assert rig.checkpoint_recovery.calls == 1
     assert rig.events[:7] == ["heartbeat", "database", "tunnel", "rotate", "read", "expire", "deny"]
     assert rig.events[-1] == "active"
     assert rig.state_path.stat().st_mode & 0o777 == 0o600
@@ -280,6 +311,16 @@ def test_fixed_twelve_step_hour_persists_intents_acks_and_metadata_only_state(tm
     assert all(secret not in persisted for secret in ("postgresql://", "password", "secret", "row-value"))
     assert str(rig.binding.run_id) not in persisted
     assert str(rig.binding.master_instance_id) not in persisted
+    evidence = rig.port.checkpoint_recovery_evidence(rig.binding)
+    assert evidence.checkpoint_id == UUID(int=6)
+    assert evidence.exact_version_ref == "owner/checkpoints/7"
+    assert evidence.manifest_sha256 == H
+    assert evidence.checkpoint_receipt_sha256 == H2
+    assert evidence.recovery_receipt_sha256 == H3
+    assert evidence.heartbeats_continuous and evidence.heartbeat_count == SOAK_STEP_COUNT
+    assert evidence.reads_succeeded and evidence.read_query_count == SOAK_STEP_COUNT
+    assert len(evidence.heartbeat_receipt_sha256s) == SOAK_STEP_COUNT
+    assert len(evidence.bounded_read_receipt_sha256s) == SOAK_STEP_COUNT
 
 
 def test_rotation_response_loss_resumes_same_intent_without_double_counting(tmp_path: Path) -> None:
@@ -309,6 +350,7 @@ def test_rotation_response_loss_resumes_same_intent_without_double_counting(tmp_
         credential_registrar=registrar,
         read_probe=rig.port.read_probe,
         evidence_class="injected",
+        checkpoint_recovery=rig.checkpoint_recovery,
         clock=rig.clock,
     )
     resumed.renew_lease_and_tunnel(rig.binding)
@@ -320,6 +362,28 @@ def test_rotation_response_loss_resumes_same_intent_without_double_counting(tmp_
     assert registrar.rotation_effects == 1
     assert final.steps[0].actions[3].intent_sha256 == intent
     assert rig.gate.renewals == rig.tunnel.renewals == 1
+
+
+def test_checkpoint_response_loss_reuses_persisted_intent_before_live_pass(tmp_path: Path) -> None:
+    rig = _rig(tmp_path)
+    recovery = CheckpointRecovery(rig.events, lose_first_response=True)
+    rig.port.checkpoint_recovery = recovery
+    for _ in range(SOAK_STEP_COUNT):
+        _run_step(rig)
+
+    with pytest.raises(ConnectionError, match="response lost"):
+        rig.port.exact_service_active(rig.binding)
+    state = rig.port.durable_state(rig.binding)
+    assert state.status == "RUNNING"
+    assert state.checkpoint_recovery is not None
+    assert state.checkpoint_recovery.state == "INTENT_COMMITTED"
+    with pytest.raises(SoakSessionError, match="ACK_REQUIRED"):
+        rig.port.checkpoint_recovery_evidence(rig.binding)
+
+    assert rig.port.exact_service_active(rig.binding)
+    assert recovery.calls == 2
+    assert recovery.intents[0] == recovery.intents[1]
+    assert rig.port.durable_state(rig.binding).status == "COMPLETE"
 
 
 def test_cancel_is_durable_and_prevents_any_side_effect(tmp_path: Path) -> None:

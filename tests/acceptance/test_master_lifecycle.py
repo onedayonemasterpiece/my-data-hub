@@ -20,6 +20,7 @@ from my_data_hub.acceptance.master_lifecycle import (
     LeaseExpiryEvidence,
     MasterAcceptanceBinding,
     MasterAcceptanceCommand,
+    MasterAcceptanceReceipt,
     MasterAcceptanceRequest,
     OldEpochEvidence,
     RotationSoakEvidence,
@@ -52,6 +53,20 @@ def test_request_example_and_all_generated_schemas_validate() -> None:
     MasterAcceptanceRequest.model_validate(example)
     for path in sorted((root / "schemas/acceptance").glob("*.schema.json")):
         Draft202012Validator.check_schema(json.loads(path.read_text()))
+
+
+def test_fm24_live_receipt_example_requires_exact_checkpoint_recovery_hashes() -> None:
+    root = Path(__file__).resolve().parents[2]
+    example = json.loads(
+        (root / "examples/acceptance/master-lifecycle-receipt-fm24.v1.example.json").read_text()
+    )
+    schema = json.loads(
+        (root / "schemas/acceptance/master-lifecycle-receipt.v1.schema.json").read_text()
+    )
+    Draft202012Validator(schema, format_checker=FormatChecker()).validate(example)
+    receipt = MasterAcceptanceReceipt.model_validate(example)
+    assert receipt.evidence.checkpoint_verified is True
+    assert receipt.evidence.recovery_succeeded is True
 
 
 @dataclass(frozen=True)
@@ -887,6 +902,19 @@ class FixedEffects:
                 rejected_stale_sessions=1,
                 remained_single_epoch=True,
                 service_active_at_end=True,
+                heartbeats_continuous=True,
+                heartbeat_count=12,
+                heartbeat_receipt_sha256s=("5" * 64,) * 12,
+                reads_succeeded=True,
+                read_query_count=12,
+                bounded_read_receipt_sha256s=("6" * 64,) * 12,
+                checkpoint_verified=True,
+                recovery_succeeded=True,
+                checkpoint_id=UUID(int=11),
+                exact_version_ref="owner/checkpoints/7",
+                manifest_sha256="2" * 64,
+                checkpoint_receipt_sha256="3" * 64,
+                recovery_receipt_sha256="4" * 64,
             ),
         ),
     ],
@@ -955,3 +983,29 @@ def test_fm10_fm11_and_fm24_cannot_overstate_partial_checks() -> None:
             remained_single_epoch=True,
             service_active_at_end=True,
         )
+
+
+def test_fm24_live_receipt_rejects_soak_without_real_checkpoint_recovery() -> None:
+    operation = uuid4()
+    command = command_for(_request("FM24", operation_id=str(operation)), MasterAcceptanceBinding(
+        operation_id=operation,
+        run_id=uuid4(),
+        attempt_id=uuid4(),
+        service_instance_id="service-1",
+        master_instance_id=uuid4(),
+        epoch=1,
+    ))
+    evidence = RotationSoakEvidence(
+        kind="SESSION_ROTATION_SOAK",
+        monotonic_started_ns=0,
+        monotonic_finished_ns=3_600_000_000_000,
+        observed_duration_seconds=3600,
+        session_rotations=12,
+        lease_renewals=12,
+        tunnel_renewals=12,
+        rejected_stale_sessions=12,
+        remained_single_epoch=True,
+        service_active_at_end=True,
+    )
+    with pytest.raises(ValidationError, match="real checkpoint and recovery evidence"):
+        execute_master_acceptance_command(command, FixedEffects(evidence))
