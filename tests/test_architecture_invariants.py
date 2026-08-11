@@ -67,6 +67,18 @@ def test_owner_approved_architecture_values_are_constant() -> None:
         "legacy_same_host_install": "forbidden",
         "dns_vpn_443_changes_in_pr_a": "forbidden",
     }
+    assert values["remote_mcp"] == {
+        "default_profile": "read_only",
+        "owner_operator_profile": "enabled_after_all_write_checkpoint_security_gates",
+    }
+    assert values["region_talk"] == {
+        "production_pipeline": "paused",
+        "production_publication": "disabled",
+        "bounded_bloggers_import": "completed_or_exact_blocker",
+    }
+    assert values["operational_state_adr"] == (
+        "docs/adr/0017-operational-mvp-gated-profiles.md"
+    )
 
 
 def test_production_control_profile_has_no_local_database_path() -> None:

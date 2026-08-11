@@ -10,6 +10,7 @@ canonical_source:
   path: docs/source-material/idea-hub/idea-20260809-content-platform-current-design.md
   sha256: c7efb28231223caa6fd02fcc001a38e0f16bcc3fa4c4cd53e744721b2eac0852
 corrective_adr: docs/adr/0016-kaggle-postgresql-master-architecture-reset.md
+operational_state_adr: docs/adr/0017-operational-mvp-gated-profiles.md
 architecture:
   final_project_name: my-data-hub
   legacy_alias: content-platform
@@ -30,6 +31,13 @@ safety:
   remote_mcp_writes: disabled
   legacy_same_host_install: forbidden
   dns_vpn_443_changes_in_pr_a: forbidden
+remote_mcp:
+  default_profile: read_only
+  owner_operator_profile: enabled_after_all_write_checkpoint_security_gates
+region_talk:
+  production_pipeline: paused
+  production_publication: disabled
+  bounded_bloggers_import: completed_or_exact_blocker
 master_lifecycle:
   states: [ABSENT, REQUESTED, STARTING, RESTORING, REGISTERING, ACTIVE, DRAINING, CHECKPOINTING, STOPPED]
   error_states: [FAILED, FENCED, CHECKPOINT_FAILED, ORPHANED]

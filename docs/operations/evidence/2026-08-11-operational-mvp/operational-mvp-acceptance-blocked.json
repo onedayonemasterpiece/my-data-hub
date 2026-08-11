@@ -1,0 +1,30 @@
+{
+  "schema_version": "my-data-hub-operational-mvp-acceptance.v1",
+  "verdict": "MY_DATA_HUB_OPERATIONAL_MVP_BLOCKED",
+  "evaluated_source_commit": "52749d85cdd8fadf69622fb47fd7f17788c9d125",
+  "architecture_source_sha256": "c7efb28231223caa6fd02fcc001a38e0f16bcc3fa4c4cd53e744721b2eac0852",
+  "completed_at": "2026-08-11T05:02:00Z",
+  "summary": "Code and disposable integration gates pass, but real Kaggle, import, embedding and deployment acceptance are incomplete.",
+  "counts": {
+    "real_kaggle_run_ids": 0,
+    "ydb_bloggers_observed": 266,
+    "bloggers_imported": 0,
+    "e5_coverage": 0,
+    "bge_m3_coverage": 0
+  },
+  "gate_results": [
+    {"name": "architecture", "outcome": "PASS", "evidence": "Kaggle-only canonical PostgreSQL and DB-free devstand invariants validated"},
+    {"name": "code_and_disposable_integration", "outcome": "PASS", "evidence": "600 tests passed plus separate disposable PostgreSQL fencing proof"},
+    {"name": "readonly_ydb_inventory", "outcome": "PASS", "evidence": "266 distinct records observed; zero-row write denied; no rows persisted on devstand"},
+    {"name": "real_kaggle_run_matrix", "outcome": "BLOCKED", "evidence": "No qualifying Notebook run IDs; legacy credential cannot perform exact private Notebook readback"},
+    {"name": "bounded_blogger_import", "outcome": "BLOCKED", "evidence": "Canonical Kaggle master import/checkpoint/restore not executed"},
+    {"name": "embedding_coverage", "outcome": "BLOCKED", "evidence": "E5 and BGE-M3 real corpus runs not executed"},
+    {"name": "public_mcp_deployment", "outcome": "BLOCKED", "evidence": "DNS, TLS, OAuth issuer, signed host evidence and reboot acceptance absent"}
+  ],
+  "blockers": [
+    {"code": "KAGGLE_MODERN_API_TOKEN_REQUIRED", "missing": "Modern Kaggle OAuth token required for exact private Notebook source/status/output", "closure_command": ".venv/bin/kaggle auth login"},
+    {"code": "REAL_KAGGLE_MATRIX_INCOMPLETE", "missing": "At least 15 qualifying real Kaggle Notebook run IDs and scenario receipts", "closure_command": ".venv/bin/python scripts/provider/real_kaggle_matrix.py notebook-canary"},
+    {"code": "BLOGGER_IMPORT_NOT_EXECUTED", "missing": "Transactional import of the 266-row bounded YDB snapshot into an ACTIVE master plus verified restore", "closure_command": ".venv/bin/python scripts/provider/scheduled_acceptance.py run --mode manual --receipt /tmp/manual-acceptance.json"},
+    {"code": "PUBLIC_EDGE_NOT_DEPLOYED", "missing": "Merge-commit control/MCP/OAuth deployment, DNS/TLS, signed host receipt and reboot proof", "closure_command": "gh workflow run post-deploy.yml -f expected_commit=<approved-merge-sha>"}
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/operational-mvp-acceptance-receipt.v1.schema.json",
+  "title": "Operational MVP acceptance receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "verdict", "evaluated_source_commit", "architecture_source_sha256",
+    "completed_at", "summary", "counts", "gate_results", "blockers"
+  ],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-operational-mvp-acceptance.v1"},
+    "verdict": {"enum": ["MY_DATA_HUB_OPERATIONAL_MVP_BLOCKED", "MY_DATA_HUB_OPERATIONAL_MVP_COMPLETE"]},
+    "evaluated_source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "architecture_source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 500},
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["real_kaggle_run_ids", "ydb_bloggers_observed", "bloggers_imported", "e5_coverage", "bge_m3_coverage"],
+      "properties": {
+        "real_kaggle_run_ids": {"type": "integer", "minimum": 0},
+        "ydb_bloggers_observed": {"type": "integer", "minimum": 0},
+        "bloggers_imported": {"type": "integer", "minimum": 0},
+        "e5_coverage": {"type": "number", "minimum": 0, "maximum": 1},
+        "bge_m3_coverage": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "gate_results": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "outcome", "evidence"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^[a-z0-9_.-]{1,100}$"},
+          "outcome": {"enum": ["PASS", "FAIL", "BLOCKED"]},
+          "evidence": {"type": "string", "minLength": 1, "maxLength": 500}
+        }
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "missing", "closure_command"],
+        "properties": {
+          "code": {"type": "string", "pattern": "^[A-Z0-9_]{3,100}$"},
+          "missing": {"type": "string", "minLength": 1, "maxLength": 500},
+          "closure_command": {"type": "string", "minLength": 1, "maxLength": 500}
+        }
+      }
+    }
+  }
+}

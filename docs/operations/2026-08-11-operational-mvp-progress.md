@@ -49,13 +49,27 @@ contains only the lightweight control ledger/process and no canonical rows.
   checkpoint/master/provider/embedding evaluations.  Their current
   credential-free receipt exits `78` with 14 explicit `BLOCKED` checks; it does
   not turn absent live interfaces or credentials into a pass.
-- The post-deploy workflow now requires an exact checked-out deployment commit,
+- Scheduled acceptance now has schema-validated receipts, exact current/previous
+  checkpoint metadata and bounded control-ledger connector coverage.  Safe
+  same-admission-path stale-epoch/protected-resource probes and production
+  restore/rotation consumers remain absent, so those checks stay `BLOCKED` and
+  do not enqueue unconsumed operations.
+- The post-deploy workflow runs only trusted default-branch verifier code and
+  evidence-binds an exact approved reachable merge commit without checking out
+  or executing that deployed revision. It also requires
   DNS and CA-valid TLS, OAuth metadata/JWKS, Host/Origin/authentication negatives,
   a cold `ABSENT` to fenced `ACTIVE` master read, forbidden-public-port probes,
   and fresh Ed25519-signed metadata-only host evidence for the three supervised
   services, absence of local database state, process replacement and reboot
   recovery.  This is tested automation only: no public endpoint or signed live
   host receipt exists yet.
+- A three-stage host-derived evidence collector and schemas now cover immutable
+  image IDs, equal source/installed release tree hashes, loopback listeners,
+  absence of local database state and process/reboot recovery.  GitHub's
+  `devstand` Environment was observed through the GitHub API at 2026-08-11
+  05:03 UTC with one custom deployment branch policy, `main`, and zero
+  Environment secrets. Required-reviewer protection and live credentials have
+  not been installed, so no workflow success is claimed.
 - Operational notebook sources are deterministic and bind exact wheel/source
   hashes. PostgreSQL master fencing, typed blogger import, separate E5/BGE spaces,
   deterministic RRF, and checkpoint verification have executable unit/integration
@@ -68,12 +82,14 @@ contains only the lightweight control ledger/process and no canonical rows.
   compare-and-swap. A later master boots only from that exact verified HEAD.
   These statements describe tested code contracts, not a completed real checkpoint.
 - At pre-documentation integration commit
-  `c600fd41d68d78787decb889cbdbc997332afbda`, local validation reports 2,891
-  repository checks with zero errors and 561 tests pass with only the separately
-  opt-in live PostgreSQL test skipped (562 collected). That disposable PostgreSQL
-  18 fencing test passes when explicitly enabled. Hosted contracts and PostgreSQL
-  integration jobs also pass at that exact commit. These results are code and
-  disposable-integration evidence, not real-provider or deployment acceptance.
+  `52749d85cdd8fadf69622fb47fd7f17788c9d125`, local validation reports 2,944
+  repository checks with zero errors and 600 tests pass with only the separately
+  opt-in live PostgreSQL test skipped (601 collected). That disposable PostgreSQL
+  18 fencing test passes when explicitly enabled. Strict type checks cover the
+  high-risk protocol/manifest modules and a reachable-history secret scan passes.
+  These results are code and disposable-integration evidence, not real-provider
+  or deployment acceptance; exact-head hosted checks follow the final evidence
+  commit.
 
 ## Exact external blocker
 

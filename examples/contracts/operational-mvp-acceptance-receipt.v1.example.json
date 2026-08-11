@@ -1,0 +1,26 @@
+{
+  "schema_version": "my-data-hub-operational-mvp-acceptance.v1",
+  "verdict": "MY_DATA_HUB_OPERATIONAL_MVP_BLOCKED",
+  "evaluated_source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "architecture_source_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "completed_at": "2026-08-11T05:00:00Z",
+  "summary": "Synthetic example: external real-provider and deployment gates are blocked.",
+  "counts": {
+    "real_kaggle_run_ids": 0,
+    "ydb_bloggers_observed": 266,
+    "bloggers_imported": 0,
+    "e5_coverage": 0,
+    "bge_m3_coverage": 0
+  },
+  "gate_results": [
+    {"name": "code_contracts", "outcome": "PASS", "evidence": "synthetic example"},
+    {"name": "real_kaggle_matrix", "outcome": "BLOCKED", "evidence": "modern token absent"}
+  ],
+  "blockers": [
+    {
+      "code": "KAGGLE_MODERN_API_TOKEN_REQUIRED",
+      "missing": "Modern Kaggle OAuth access token",
+      "closure_command": ".venv/bin/kaggle auth login"
+    }
+  ]
+}

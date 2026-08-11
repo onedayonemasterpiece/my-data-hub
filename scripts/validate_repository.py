@@ -132,6 +132,9 @@ def validate_json_and_schemas(report: Report) -> None:
         "post-deploy-verification.v1.example.json": (
             "post-deploy-verification.v1.schema.json"
         ),
+        "operational-mvp-acceptance-receipt.v1.example.json": (
+            "operational-mvp-acceptance-receipt.v1.schema.json"
+        ),
     }
     checker = FormatChecker()
     for example_name, schema_name in mappings.items():
@@ -148,6 +151,32 @@ def validate_json_and_schemas(report: Report) -> None:
             not errors,
             f"{path.relative_to(ROOT)} violates {schema_name}: "
             + "; ".join(error.message for error in errors[:5]),
+        )
+
+    blocked_receipt = (
+        ROOT
+        / "docs"
+        / "operations"
+        / "evidence"
+        / "2026-08-11-operational-mvp"
+        / "operational-mvp-acceptance-blocked.json"
+    )
+    blocked_schema = schemas.get("operational-mvp-acceptance-receipt.v1.schema.json")
+    report.check(blocked_receipt.is_file(), "final blocked operational MVP receipt is absent")
+    if blocked_receipt.is_file() and blocked_schema is not None:
+        raw = load_json(blocked_receipt)
+        errors = sorted(
+            Draft202012Validator(blocked_schema, format_checker=checker).iter_errors(raw),
+            key=lambda item: list(item.path),
+        )
+        report.check(
+            not errors,
+            "final blocked operational MVP receipt violates its schema: "
+            + "; ".join(error.message for error in errors[:5]),
+        )
+        report.check(
+            raw.get("verdict") == "MY_DATA_HUB_OPERATIONAL_MVP_BLOCKED",
+            "final operational MVP receipt must remain BLOCKED until every live gate passes",
         )
 
     evidence_path = (
@@ -627,9 +656,31 @@ def validate_deployment(report: Report) -> None:
         "legacy_same_host_install": "forbidden",
         "dns_vpn_443_changes_in_pr_a": "forbidden",
     }
+    expected_remote_mcp = {
+        "default_profile": "read_only",
+        "owner_operator_profile": "enabled_after_all_write_checkpoint_security_gates",
+    }
+    expected_region_talk = {
+        "production_pipeline": "paused",
+        "production_publication": "disabled",
+        "bounded_bloggers_import": "completed_or_exact_blocker",
+    }
     report.check(invariants.get("authority_order") == expected_authority, "owner-approved authority order drifted")
     report.check(invariants.get("architecture") == expected_architecture, "owner-approved architecture invariants drifted")
     report.check(invariants.get("safety") == expected_safety, "owner-approved safety invariants drifted")
+    report.check(
+        invariants.get("remote_mcp") == expected_remote_mcp,
+        "owner-approved remote MCP profile invariants drifted",
+    )
+    report.check(
+        invariants.get("region_talk") == expected_region_talk,
+        "owner-approved Region Talk workload invariants drifted",
+    )
+    report.check(
+        invariants.get("operational_state_adr")
+        == "docs/adr/0017-operational-mvp-gated-profiles.md",
+        "operational owner-decision ADR binding drifted",
+    )
 
     source_relative = "docs/source-material/idea-hub/idea-20260809-content-platform-current-design.md"
     source_path = ROOT / source_relative
