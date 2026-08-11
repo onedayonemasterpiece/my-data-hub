@@ -28,13 +28,15 @@ from my_data_hub.acceptance.master_lifecycle import (
     execute_master_acceptance_command,
     require_acceptance_operator,
 )
+from my_data_hub.acceptance.master_production import ControlLedgerStoredReplay
 from my_data_hub.control_plane.app import ControlPlaneSettings, create_app
 from my_data_hub.control_plane.clock import DeterministicClock
 from my_data_hub.control_plane.ledger import ControlLedger, IdempotencyConflict, StaleRuntimeEvent
 from my_data_hub.control_plane.runtime import ControlPlaneMasterRuntime, MasterRuntimeSettings
 from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator, MasterIntent
-from my_data_hub.providers.kaggle import KaggleMasterLaunchAssets
+from my_data_hub.providers.kaggle import KaggleMasterLaunchAssets, derive_runtime_secret
 from my_data_hub.runtime_sdk import RuntimeEvent, RuntimeEventType
+from my_data_hub.runtime_sdk.transport import json_body
 
 SECRET = "correct-horse-battery-staple"
 SOURCE_REVISION = "a" * 40
@@ -439,6 +441,62 @@ def test_owner_claim_exposes_only_exact_fm11_fm12_drain_directive(tmp_path: Path
         assert response.status_code == 200
         assert response.json()["drain"] is True
         assert response.json()["directive"]["task_id"] == str(request.task_id)
+
+
+def test_protected_ledger_replays_one_exact_acked_body_without_state_change(tmp_path: Path) -> None:
+    ledger = ControlLedger(
+        tmp_path / "stored-replay.sqlite3",
+        clock=DeterministicClock(datetime(2026, 8, 11, 11, 0, tzinfo=UTC)),
+    )
+    runtime = _control_runtime(ledger)
+    handle, _duplicate = runtime.ensure("fm09-stored-replay")
+    token = derive_runtime_secret(runtime.settings.runtime_token_root, handle.run_id, handle.attempt_id)
+    event = RuntimeEvent(
+        event_id=str(uuid4()),
+        run_id=handle.run_id,
+        attempt_id=handle.attempt_id,
+        service_instance_id=handle.service_instance_id,
+        source_identity="owner/postgres-master",
+        source_version="git:0123456789abcdef",
+        event_type=RuntimeEventType.SERVICE_READY,
+        emitted_at=ledger.clock.now(),
+        local_sequence=1,
+        epoch=handle.epoch,
+        data={
+            "service_kind": "postgres-master",
+            "endpoint": "tunnel://fm09",
+            "protocol": "postgresql+tls",
+            "tls_fingerprint": "sha256:" + "9" * 64,
+            "capabilities": ["sql"],
+            "canonical_revision": 0,
+            "schema_version": "1",
+            "lease_until": (ledger.clock.now() + timedelta(minutes=5)).isoformat(),
+            "master_instance_id": handle.master_instance_id,
+            "epoch": handle.epoch,
+        },
+    )
+    runtime.coordinator.accept_runtime_event(
+        json_body(event.model_dump(mode="json", by_alias=True, exclude_none=True)), header_token=token
+    )
+    retired_run = str(UUID(int=91))
+    retired_attempt = str(UUID(int=92))
+    retired_token = derive_runtime_secret(runtime.settings.runtime_token_root, retired_run, retired_attempt)
+    ledger.store_runtime_token_hash(retired_run, retired_attempt, retired_token)
+    ledger.revoke_runtime_token(retired_run, retired_attempt)
+    binding = MasterAcceptanceBinding(
+        operation_id=UUID(handle.operation_id),
+        run_id=UUID(handle.run_id),
+        attempt_id=UUID(handle.attempt_id),
+        service_instance_id=handle.service_instance_id,
+        master_instance_id=UUID(handle.master_instance_id),
+        epoch=handle.epoch,
+    )
+    replay = ControlLedgerStoredReplay(runtime)
+    stored = replay.exact_acked_callback(binding)
+    before = replay.control_state_sha256(binding)
+    assert replay.replay_stored_callback(stored.event_id) == "duplicate"
+    assert replay.replay_with_retired_runtime_auth(stored.event_id)
+    assert replay.control_state_sha256(binding) == before
 
 
 class FixedEffects:

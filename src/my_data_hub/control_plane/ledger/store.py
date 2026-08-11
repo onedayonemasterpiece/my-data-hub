@@ -2927,6 +2927,52 @@ class ControlLedger:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def exact_stored_runtime_event(
+        self, *, run_id: str, attempt_id: str, epoch: int
+    ) -> dict[str, Any] | None:
+        """Return one protected canonical ACKed body for fixed acceptance replay.
+
+        This is an internal control primitive, not a reader/API surface.  It
+        accepts only the exact bound attempt and never accepts body bytes.
+        """
+
+        try:
+            UUID(run_id)
+            UUID(attempt_id)
+        except ValueError as exc:
+            raise ValueError("stored runtime replay requires exact UUID identities") from exc
+        if epoch < 1:
+            raise ValueError("stored runtime replay epoch is invalid")
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT event_id,body_sha256,sanitized_json FROM runtime_events "
+                "WHERE run_id=? AND attempt_id=? AND epoch=? ORDER BY local_sequence DESC LIMIT 20",
+                (run_id, attempt_id, epoch),
+            ).fetchall()
+        for row in rows:
+            body = str(row["sanitized_json"]).encode()
+            if hmac.compare_digest(hashlib.sha256(body).hexdigest(), str(row["body_sha256"])):
+                return {
+                    "event_id": str(row["event_id"]),
+                    "body_sha256": str(row["body_sha256"]),
+                    "body": body,
+                }
+        return None
+
+    def latest_revoked_runtime_identity(
+        self, *, exclude_run_id: str, exclude_attempt_id: str
+    ) -> dict[str, str] | None:
+        """Return a retired token identity only; no token hash or secret leaves."""
+
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT run_id,attempt_id FROM runtime_token_hashes "
+                "WHERE revoked_at IS NOT NULL AND NOT (run_id=? AND attempt_id=?) "
+                "ORDER BY revoked_at DESC LIMIT 1",
+                (exclude_run_id, exclude_attempt_id),
+            ).fetchone()
+        return dict(row) if row else None
+
     def provider_resource(self, provider_ref: str, source_version: str) -> dict[str, Any] | None:
         with self._reader() as connection:
             row = connection.execute(

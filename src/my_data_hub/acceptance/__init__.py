@@ -30,6 +30,7 @@ from .master_lifecycle import (
 )
 from .master_production import (
     ControlLedgerOwnerAcceptanceClaims,
+    ControlLedgerStoredReplay,
     ControlMasterAcceptanceExecutor,
     MasterAcceptanceOperatorAdapter,
     OwnerBoundAcceptanceClaimPort,
@@ -44,6 +45,7 @@ __all__ = [
     "COMMAND_FOR_SCENARIO",
     "AtomicJsonStateStore",
     "ControlLedgerOwnerAcceptanceClaims",
+    "ControlLedgerStoredReplay",
     "ControlMasterAcceptanceExecutor",
     "ControlPlaneDataWorkloadGateway",
     "DataWorkloadEvidenceBundle",

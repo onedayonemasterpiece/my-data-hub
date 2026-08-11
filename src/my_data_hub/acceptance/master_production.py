@@ -17,10 +17,13 @@ from typing import Any, Literal, Protocol
 from urllib.parse import parse_qs, urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from my_data_hub.control_plane.ledger import EventDisposition, EventRejected, StaleRuntimeEvent
 from my_data_hub.control_plane.runtime import ControlPlaneMasterRuntime
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.orchestrator.master import MasterState
-from my_data_hub.providers.kaggle import KaggleMasterRuntimeProvider
+from my_data_hub.providers.kaggle import KaggleMasterRuntimeProvider, derive_runtime_secret
+from my_data_hub.runtime_sdk import RuntimeEvent
+from my_data_hub.runtime_sdk.transport import json_body
 
 from .master_lifecycle import (
     AcceptanceEvidence,
@@ -346,6 +349,132 @@ class StoredReplayPort(Protocol):
     def replay_with_retired_runtime_auth(self, event_id: UUID) -> bool: ...
 
     def replay_with_stale_epoch(self, event_id: UUID) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ControlLedgerStoredReplay:
+    """Production FM09 adapter over the protected event ledger/coordinator."""
+
+    runtime: ControlPlaneMasterRuntime
+    _bindings: dict[UUID, MasterAcceptanceBinding] = field(default_factory=dict, init=False, repr=False)
+
+    def exact_acked_callback(self, binding: MasterAcceptanceBinding) -> StoredCallbackRef:
+        stored = self.runtime.ledger.exact_stored_runtime_event(
+            run_id=str(binding.run_id),
+            attempt_id=str(binding.attempt_id),
+            epoch=binding.epoch,
+        )
+        if stored is None:
+            raise ProductionAcceptanceBlocked("FM09_EXACT_ACKED_CALLBACK_UNAVAILABLE")
+        event_id = UUID(str(stored["event_id"]))
+        self._bindings[event_id] = binding
+        return StoredCallbackRef(event_id, str(stored["body_sha256"]))
+
+    def control_state_sha256(self, binding: MasterAcceptanceBinding) -> str:
+        operation = self.runtime.ledger.get_operation(str(binding.operation_id))
+        service = self.runtime.ledger.resolve_service(MASTER_SERVICE_KIND)
+        history = self.runtime.ledger.runtime_event_history(
+            run_id=str(binding.run_id),
+            attempt_id=str(binding.attempt_id),
+            epoch=binding.epoch,
+            limit=200,
+        )
+        if operation is None:
+            raise ProductionAcceptanceBlocked("FM09_CONTROL_STATE_UNAVAILABLE")
+        value = {
+            "operation": {
+                "operation_id": operation.operation_id,
+                "state": operation.state,
+                "identity": operation.identity,
+            },
+            "service": (
+                None
+                if service is None
+                else {
+                    "service_instance_id": service.service_instance_id,
+                    "run_id": service.run_id,
+                    "attempt_id": service.attempt_id,
+                    "epoch": service.epoch,
+                    "state": service.state,
+                    "latest_event_id": service.latest_event_id,
+                    "canonical_revision": service.canonical_revision,
+                }
+            ),
+            "events": history,
+        }
+        return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+    def replay_stored_callback(self, event_id: UUID) -> Literal["duplicate"]:
+        binding, body = self._body(event_id)
+        receipt = self.runtime.coordinator.accept_runtime_event(
+            body,
+            header_token=derive_runtime_secret(
+                self.runtime.settings.runtime_token_root,
+                str(binding.run_id),
+                str(binding.attempt_id),
+            ),
+        )
+        if receipt.disposition is not EventDisposition.DUPLICATE:
+            raise ProductionAcceptanceBlocked("FM09_EXACT_REPLAY_NOT_DUPLICATE")
+        return "duplicate"
+
+    def replay_with_retired_runtime_auth(self, event_id: UUID) -> bool:
+        binding, body = self._body(event_id)
+        retired = self.runtime.ledger.latest_revoked_runtime_identity(
+            exclude_run_id=str(binding.run_id),
+            exclude_attempt_id=str(binding.attempt_id),
+        )
+        if retired is None:
+            raise ProductionAcceptanceBlocked("FM09_RETIRED_TOKEN_UNAVAILABLE")
+        try:
+            self.runtime.coordinator.accept_runtime_event(
+                body,
+                header_token=derive_runtime_secret(
+                    self.runtime.settings.runtime_token_root,
+                    retired["run_id"],
+                    retired["attempt_id"],
+                ),
+            )
+        except (EventRejected, StaleRuntimeEvent):
+            return True
+        return False
+
+    def replay_with_stale_epoch(self, event_id: UUID) -> bool:
+        binding, body = self._body(event_id)
+        if binding.epoch <= 1:
+            raise ProductionAcceptanceBlocked("FM09_NO_OLDER_EPOCH_AVAILABLE")
+        event = RuntimeEvent.model_validate_json(body)
+        stale = event.model_copy(
+            update={
+                "event_id": str(uuid5(NAMESPACE_URL, f"fm09-stale-epoch:{event_id}")),
+                "epoch": binding.epoch - 1,
+            }
+        )
+        try:
+            self.runtime.coordinator.accept_runtime_event(
+                json_body(stale.model_dump(mode="json", by_alias=True, exclude_none=True)),
+                header_token=derive_runtime_secret(
+                    self.runtime.settings.runtime_token_root,
+                    str(binding.run_id),
+                    str(binding.attempt_id),
+                ),
+            )
+        except (EventRejected, StaleRuntimeEvent):
+            return True
+        return False
+
+    def _body(self, event_id: UUID) -> tuple[MasterAcceptanceBinding, bytes]:
+        binding = self._bindings.get(event_id)
+        if binding is None:
+            raise ProductionAcceptanceBlocked("FM09_EVENT_NOT_TASK_SELECTED")
+        stored = self.runtime.ledger.exact_stored_runtime_event(
+            run_id=str(binding.run_id),
+            attempt_id=str(binding.attempt_id),
+            epoch=binding.epoch,
+        )
+        if stored is None or str(stored["event_id"]) != str(event_id):
+            raise ProductionAcceptanceBlocked("FM09_STORED_EVENT_CHANGED")
+        return binding, bytes(stored["body"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -677,7 +806,7 @@ class ProductionControlAcceptanceContext:
             host_effects=ProductionControlHostEffects(
                 runtime=runtime,
                 callback_supervisor=self.callback_supervisor,
-                stored_replay=self.stored_replay,
+                stored_replay=self.stored_replay or ControlLedgerStoredReplay(runtime),
                 old_epoch_denials=self.old_epoch_denials,
                 h1_denial=self.h1_denial,
                 soak_sessions=self.soak_sessions,
