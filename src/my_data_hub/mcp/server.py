@@ -190,6 +190,7 @@ def create_server(
         ],
         idempotency_key: str,
         source_revision: str,
+        target_operation_id: str | None = None,
     ) -> dict[str, Any]:
         return await service.invoke("acceptance.scenario.request", locals())
 

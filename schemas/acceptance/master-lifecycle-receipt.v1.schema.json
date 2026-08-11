@@ -3,24 +3,14 @@
     "CallbackLossEvidence": {
       "additionalProperties": false,
       "properties": {
-        "kind": {
-          "const": "CALLBACK_LOSS_RECOVERY",
-          "title": "Kind",
-          "type": "string"
-        },
         "callback_suppressed_once": {
           "const": true,
           "title": "Callback Suppressed Once",
           "type": "boolean"
         },
-        "exact_event_id": {
+        "control_boot_id_after": {
           "format": "uuid",
-          "title": "Exact Event Id",
-          "type": "string"
-        },
-        "exact_body_sha256": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Exact Body Sha256",
+          "title": "Control Boot Id After",
           "type": "string"
         },
         "control_boot_id_before": {
@@ -28,9 +18,19 @@
           "title": "Control Boot Id Before",
           "type": "string"
         },
-        "control_boot_id_after": {
+        "exact_body_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Exact Body Sha256",
+          "type": "string"
+        },
+        "exact_event_id": {
           "format": "uuid",
-          "title": "Control Boot Id After",
+          "title": "Exact Event Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "CALLBACK_LOSS_RECOVERY",
+          "title": "Kind",
           "type": "string"
         },
         "replay_disposition": {
@@ -63,29 +63,9 @@
     "CleanDrainEvidence": {
       "additionalProperties": false,
       "properties": {
-        "kind": {
-          "const": "CLEAN_DRAIN",
-          "title": "Kind",
-          "type": "string"
-        },
-        "write_gate_closed": {
-          "const": true,
-          "title": "Write Gate Closed",
-          "type": "boolean"
-        },
         "checkpoint_id": {
           "format": "uuid",
           "title": "Checkpoint Id",
-          "type": "string"
-        },
-        "exact_version_ref": {
-          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
-          "title": "Exact Version Ref",
-          "type": "string"
-        },
-        "manifest_sha256": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Manifest Sha256",
           "type": "string"
         },
         "exact_readback_verified": {
@@ -93,20 +73,40 @@
           "title": "Exact Readback Verified",
           "type": "boolean"
         },
-        "restore_smoke_verified": {
-          "const": true,
-          "title": "Restore Smoke Verified",
-          "type": "boolean"
+        "exact_version_ref": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Exact Version Ref",
+          "type": "string"
         },
         "head_promoted": {
           "const": true,
           "title": "Head Promoted",
           "type": "boolean"
         },
+        "kind": {
+          "const": "CLEAN_DRAIN",
+          "title": "Kind",
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
+        },
+        "restore_smoke_verified": {
+          "const": true,
+          "title": "Restore Smoke Verified",
+          "type": "boolean"
+        },
         "terminal_state": {
           "const": "STOPPED",
           "title": "Terminal State",
           "type": "string"
+        },
+        "write_gate_closed": {
+          "const": true,
+          "title": "Write Gate Closed",
+          "type": "boolean"
         }
       },
       "required": [
@@ -126,15 +126,19 @@
     "ConcurrentEnsureEvidence": {
       "additionalProperties": false,
       "properties": {
+        "epochs": {
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 20,
+          "minItems": 20,
+          "title": "Epochs",
+          "type": "array"
+        },
         "kind": {
           "const": "CONCURRENT_ENSURE_SINGLE_RUN",
           "title": "Kind",
           "type": "string"
-        },
-        "request_count": {
-          "const": 20,
-          "title": "Request Count",
-          "type": "integer"
         },
         "operation_ids": {
           "items": {
@@ -146,15 +150,6 @@
           "title": "Operation Ids",
           "type": "array"
         },
-        "provider_run_refs": {
-          "items": {
-            "type": "string"
-          },
-          "maxItems": 20,
-          "minItems": 20,
-          "title": "Provider Run Refs",
-          "type": "array"
-        },
         "provider_kernel_ids": {
           "items": {
             "type": "integer"
@@ -164,14 +159,19 @@
           "title": "Provider Kernel Ids",
           "type": "array"
         },
-        "epochs": {
+        "provider_run_refs": {
           "items": {
-            "type": "integer"
+            "type": "string"
           },
           "maxItems": 20,
           "minItems": 20,
-          "title": "Epochs",
+          "title": "Provider Run Refs",
           "type": "array"
+        },
+        "request_count": {
+          "const": 20,
+          "title": "Request Count",
+          "type": "integer"
         }
       },
       "required": [
@@ -188,11 +188,6 @@
     "EmptyBootstrapEvidence": {
       "additionalProperties": false,
       "properties": {
-        "kind": {
-          "const": "EMPTY_MASTER_BOOTSTRAP",
-          "title": "Kind",
-          "type": "string"
-        },
         "boot_source": {
           "const": "empty_baseline",
           "title": "Boot Source",
@@ -207,6 +202,11 @@
           "const": 0,
           "title": "Canonical Row Count",
           "type": "integer"
+        },
+        "kind": {
+          "const": "EMPTY_MASTER_BOOTSTRAP",
+          "title": "Kind",
+          "type": "string"
         },
         "service_active": {
           "const": true,
@@ -227,31 +227,46 @@
     "LeaseExpiryEvidence": {
       "additionalProperties": false,
       "properties": {
+        "bounded_operator_dml_denied": {
+          "const": true,
+          "title": "Bounded Operator Dml Denied",
+          "type": "boolean"
+        },
+        "canonical_revision_after": {
+          "minimum": 0,
+          "title": "Canonical Revision After",
+          "type": "integer"
+        },
+        "canonical_revision_before": {
+          "minimum": 0,
+          "title": "Canonical Revision Before",
+          "type": "integer"
+        },
+        "credentials_invalidated": {
+          "const": true,
+          "title": "Credentials Invalidated",
+          "type": "boolean"
+        },
+        "denial_code": {
+          "const": "MDH_EPOCH_LEASE_EXPIRED",
+          "title": "Denial Code",
+          "type": "string"
+        },
         "kind": {
           "const": "LEASE_EXPIRY_DENIAL",
           "title": "Kind",
           "type": "string"
-        },
-        "observed_wait_seconds": {
-          "maximum": 900,
-          "minimum": 60,
-          "title": "Observed Wait Seconds",
-          "type": "integer"
         },
         "lease_expired": {
           "const": true,
           "title": "Lease Expired",
           "type": "boolean"
         },
-        "bounded_operator_dml_denied": {
-          "const": true,
-          "title": "Bounded Operator Dml Denied",
-          "type": "boolean"
-        },
-        "transaction_state": {
-          "const": "rollback_only",
-          "title": "Transaction State",
-          "type": "string"
+        "observed_wait_seconds": {
+          "maximum": 900,
+          "minimum": 60,
+          "title": "Observed Wait Seconds",
+          "type": "integer"
         },
         "operator_operation_id": {
           "format": "uuid",
@@ -263,26 +278,17 @@
           "title": "Operator Receipt Sha256",
           "type": "string"
         },
-        "denial_code": {
-          "const": "MDH_EPOCH_LEASE_EXPIRED",
-          "title": "Denial Code",
+        "transaction_state": {
+          "const": "rollback_only",
+          "title": "Transaction State",
           "type": "string"
-        },
-        "canonical_revision_before": {
-          "minimum": 0,
-          "title": "Canonical Revision Before",
-          "type": "integer"
-        },
-        "canonical_revision_after": {
-          "minimum": 0,
-          "title": "Canonical Revision After",
-          "type": "integer"
         }
       },
       "required": [
         "kind",
         "observed_wait_seconds",
         "lease_expired",
+        "credentials_invalidated",
         "bounded_operator_dml_denied",
         "transaction_state",
         "operator_operation_id",
@@ -297,6 +303,21 @@
     "MasterAcceptanceBinding": {
       "additionalProperties": false,
       "properties": {
+        "attempt_id": {
+          "format": "uuid",
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "epoch": {
+          "minimum": 1,
+          "title": "Epoch",
+          "type": "integer"
+        },
+        "master_instance_id": {
+          "format": "uuid",
+          "title": "Master Instance Id",
+          "type": "string"
+        },
         "operation_id": {
           "format": "uuid",
           "title": "Operation Id",
@@ -307,26 +328,11 @@
           "title": "Run Id",
           "type": "string"
         },
-        "attempt_id": {
-          "format": "uuid",
-          "title": "Attempt Id",
-          "type": "string"
-        },
         "service_instance_id": {
           "maxLength": 200,
           "minLength": 1,
           "title": "Service Instance Id",
           "type": "string"
-        },
-        "master_instance_id": {
-          "format": "uuid",
-          "title": "Master Instance Id",
-          "type": "string"
-        },
-        "epoch": {
-          "minimum": 1,
-          "title": "Epoch",
-          "type": "integer"
         }
       },
       "required": [
@@ -371,9 +377,45 @@
     "OldEpochEvidence": {
       "additionalProperties": false,
       "properties": {
+        "bounded_write_denied": {
+          "const": true,
+          "title": "Bounded Write Denied",
+          "type": "boolean"
+        },
+        "handoff_checkpoint_id": {
+          "format": "uuid",
+          "title": "Handoff Checkpoint Id",
+          "type": "string"
+        },
         "kind": {
           "const": "OLD_EPOCH_RETURN_DENIAL",
           "title": "Kind",
+          "type": "string"
+        },
+        "new_epoch": {
+          "minimum": 2,
+          "title": "New Epoch",
+          "type": "integer"
+        },
+        "new_epoch_active": {
+          "const": true,
+          "title": "New Epoch Active",
+          "type": "boolean"
+        },
+        "new_operation_id": {
+          "format": "uuid",
+          "title": "New Operation Id",
+          "type": "string"
+        },
+        "new_provider_kernel_id": {
+          "minimum": 1,
+          "title": "New Provider Kernel Id",
+          "type": "integer"
+        },
+        "new_provider_run_ref": {
+          "maxLength": 320,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "New Provider Run Ref",
           "type": "string"
         },
         "old_epoch": {
@@ -381,19 +423,25 @@
           "title": "Old Epoch",
           "type": "integer"
         },
-        "new_epoch": {
-          "minimum": 2,
-          "title": "New Epoch",
+        "old_operation_id": {
+          "format": "uuid",
+          "title": "Old Operation Id",
+          "type": "string"
+        },
+        "old_provider_kernel_id": {
+          "minimum": 1,
+          "title": "Old Provider Kernel Id",
           "type": "integer"
+        },
+        "old_provider_run_ref": {
+          "maxLength": 320,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Old Provider Run Ref",
+          "type": "string"
         },
         "old_runtime_draining_before_rotation": {
           "const": true,
           "title": "Old Runtime Draining Before Rotation",
-          "type": "boolean"
-        },
-        "renew_denied": {
-          "const": true,
-          "title": "Renew Denied",
           "type": "boolean"
         },
         "register_denied": {
@@ -401,44 +449,29 @@
           "title": "Register Denied",
           "type": "boolean"
         },
-        "bounded_write_denied": {
+        "registry_resolves_new": {
           "const": true,
-          "title": "Bounded Write Denied",
+          "title": "Registry Resolves New",
           "type": "boolean"
+        },
+        "renew_denied": {
+          "const": true,
+          "title": "Renew Denied",
+          "type": "boolean"
+        },
+        "tunnel_denial_receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Tunnel Denial Receipt Sha256",
+          "type": "string"
         },
         "tunnel_denied": {
           "const": true,
           "title": "Tunnel Denied",
           "type": "boolean"
         },
-        "new_epoch_active": {
-          "const": true,
-          "title": "New Epoch Active",
-          "type": "boolean"
-        },
-        "old_operation_id": {
-          "format": "uuid",
-          "title": "Old Operation Id",
-          "type": "string"
-        },
-        "new_operation_id": {
-          "format": "uuid",
-          "title": "New Operation Id",
-          "type": "string"
-        },
-        "handoff_checkpoint_id": {
-          "format": "uuid",
-          "title": "Handoff Checkpoint Id",
-          "type": "string"
-        },
         "write_denial_receipt_sha256": {
           "pattern": "^[0-9a-f]{64}$",
           "title": "Write Denial Receipt Sha256",
-          "type": "string"
-        },
-        "tunnel_denial_receipt_sha256": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Tunnel Denial Receipt Sha256",
           "type": "string"
         }
       },
@@ -452,8 +485,13 @@
         "bounded_write_denied",
         "tunnel_denied",
         "new_epoch_active",
+        "registry_resolves_new",
         "old_operation_id",
         "new_operation_id",
+        "old_provider_run_ref",
+        "old_provider_kernel_id",
+        "new_provider_run_ref",
+        "new_provider_kernel_id",
         "handoff_checkpoint_id",
         "write_denial_receipt_sha256",
         "tunnel_denial_receipt_sha256"
@@ -464,62 +502,51 @@
     "RotationSoakEvidence": {
       "additionalProperties": false,
       "properties": {
-        "kind": {
-          "const": "SESSION_ROTATION_SOAK",
-          "title": "Kind",
-          "type": "string"
+        "bounded_read_receipt_sha256s": {
+          "anyOf": [
+            {
+              "items": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bounded Read Receipt Sha256S"
         },
-        "monotonic_started_ns": {
-          "minimum": 0,
-          "title": "Monotonic Started Ns",
-          "type": "integer"
+        "checkpoint_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint Id"
         },
-        "monotonic_finished_ns": {
-          "minimum": 0,
-          "title": "Monotonic Finished Ns",
-          "type": "integer"
+        "checkpoint_receipt_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint Receipt Sha256"
         },
-        "observed_duration_seconds": {
-          "maximum": 5400,
-          "minimum": 3600,
-          "title": "Observed Duration Seconds",
-          "type": "integer"
-        },
-        "session_rotations": {
-          "maximum": 200,
-          "minimum": 12,
-          "title": "Session Rotations",
-          "type": "integer"
-        },
-        "lease_renewals": {
-          "maximum": 400,
-          "minimum": 12,
-          "title": "Lease Renewals",
-          "type": "integer"
-        },
-        "tunnel_renewals": {
-          "maximum": 400,
-          "minimum": 12,
-          "title": "Tunnel Renewals",
-          "type": "integer"
-        },
-        "rejected_stale_sessions": {
-          "maximum": 400,
-          "minimum": 1,
-          "title": "Rejected Stale Sessions",
-          "type": "integer"
-        },
-        "remained_single_epoch": {
-          "const": true,
-          "title": "Remained Single Epoch",
-          "type": "boolean"
-        },
-        "service_active_at_end": {
-          "const": true,
-          "title": "Service Active At End",
-          "type": "boolean"
-        },
-        "heartbeats_continuous": {
+        "checkpoint_verified": {
           "anyOf": [
             {
               "const": true,
@@ -530,7 +557,20 @@
             }
           ],
           "default": null,
-          "title": "Heartbeats Continuous"
+          "title": "Checkpoint Verified"
+        },
+        "exact_version_ref": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exact Version Ref"
         },
         "heartbeat_count": {
           "anyOf": [
@@ -563,7 +603,7 @@
           "default": null,
           "title": "Heartbeat Receipt Sha256S"
         },
-        "reads_succeeded": {
+        "heartbeats_continuous": {
           "anyOf": [
             {
               "const": true,
@@ -574,90 +614,18 @@
             }
           ],
           "default": null,
-          "title": "Reads Succeeded"
+          "title": "Heartbeats Continuous"
         },
-        "read_query_count": {
-          "anyOf": [
-            {
-              "const": 12,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Read Query Count"
+        "kind": {
+          "const": "SESSION_ROTATION_SOAK",
+          "title": "Kind",
+          "type": "string"
         },
-        "bounded_read_receipt_sha256s": {
-          "anyOf": [
-            {
-              "items": {
-                "pattern": "^[0-9a-f]{64}$",
-                "type": "string"
-              },
-              "maxItems": 12,
-              "minItems": 12,
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Bounded Read Receipt Sha256S"
-        },
-        "checkpoint_verified": {
-          "anyOf": [
-            {
-              "const": true,
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Checkpoint Verified"
-        },
-        "recovery_succeeded": {
-          "anyOf": [
-            {
-              "const": true,
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Recovery Succeeded"
-        },
-        "checkpoint_id": {
-          "anyOf": [
-            {
-              "format": "uuid",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Checkpoint Id"
-        },
-        "exact_version_ref": {
-          "anyOf": [
-            {
-              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Exact Version Ref"
+        "lease_renewals": {
+          "maximum": 400,
+          "minimum": 12,
+          "title": "Lease Renewals",
+          "type": "integer"
         },
         "manifest_sha256": {
           "anyOf": [
@@ -672,18 +640,47 @@
           "default": null,
           "title": "Manifest Sha256"
         },
-        "checkpoint_receipt_sha256": {
+        "monotonic_finished_ns": {
+          "minimum": 0,
+          "title": "Monotonic Finished Ns",
+          "type": "integer"
+        },
+        "monotonic_started_ns": {
+          "minimum": 0,
+          "title": "Monotonic Started Ns",
+          "type": "integer"
+        },
+        "observed_duration_seconds": {
+          "maximum": 5400,
+          "minimum": 3600,
+          "title": "Observed Duration Seconds",
+          "type": "integer"
+        },
+        "read_query_count": {
           "anyOf": [
             {
-              "pattern": "^[0-9a-f]{64}$",
-              "type": "string"
+              "const": 12,
+              "type": "integer"
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "title": "Checkpoint Receipt Sha256"
+          "title": "Read Query Count"
+        },
+        "reads_succeeded": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reads Succeeded"
         },
         "recovery_receipt_sha256": {
           "anyOf": [
@@ -697,6 +694,47 @@
           ],
           "default": null,
           "title": "Recovery Receipt Sha256"
+        },
+        "recovery_succeeded": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recovery Succeeded"
+        },
+        "rejected_stale_sessions": {
+          "maximum": 400,
+          "minimum": 1,
+          "title": "Rejected Stale Sessions",
+          "type": "integer"
+        },
+        "remained_single_epoch": {
+          "const": true,
+          "title": "Remained Single Epoch",
+          "type": "boolean"
+        },
+        "service_active_at_end": {
+          "const": true,
+          "title": "Service Active At End",
+          "type": "boolean"
+        },
+        "session_rotations": {
+          "maximum": 200,
+          "minimum": 12,
+          "title": "Session Rotations",
+          "type": "integer"
+        },
+        "tunnel_renewals": {
+          "maximum": 400,
+          "minimum": 12,
+          "title": "Tunnel Renewals",
+          "type": "integer"
         }
       },
       "required": [
@@ -717,14 +755,9 @@
     "StaleReplayEvidence": {
       "additionalProperties": false,
       "properties": {
-        "kind": {
-          "const": "STALE_REPLAY_REJECTION",
-          "title": "Kind",
-          "type": "string"
-        },
-        "exact_event_id": {
-          "format": "uuid",
-          "title": "Exact Event Id",
+        "duplicate_disposition": {
+          "const": "duplicate",
+          "title": "Duplicate Disposition",
           "type": "string"
         },
         "exact_body_sha256": {
@@ -732,29 +765,34 @@
           "title": "Exact Body Sha256",
           "type": "string"
         },
-        "duplicate_disposition": {
-          "const": "duplicate",
-          "title": "Duplicate Disposition",
+        "exact_event_id": {
+          "format": "uuid",
+          "title": "Exact Event Id",
           "type": "string"
         },
-        "stale_runtime_auth_rejected": {
-          "const": true,
-          "title": "Stale Runtime Auth Rejected",
-          "type": "boolean"
+        "kind": {
+          "const": "STALE_REPLAY_REJECTION",
+          "title": "Kind",
+          "type": "string"
         },
         "stale_epoch_rejected": {
           "const": true,
           "title": "Stale Epoch Rejected",
           "type": "boolean"
         },
-        "state_sha256_before": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "State Sha256 Before",
-          "type": "string"
+        "stale_runtime_auth_rejected": {
+          "const": true,
+          "title": "Stale Runtime Auth Rejected",
+          "type": "boolean"
         },
         "state_sha256_after": {
           "pattern": "^[0-9a-f]{64}$",
           "title": "State Sha256 After",
+          "type": "string"
+        },
+        "state_sha256_before": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "State Sha256 Before",
           "type": "string"
         }
       },
@@ -774,47 +812,25 @@
   },
   "additionalProperties": false,
   "properties": {
-    "schema_version": {
-      "const": "my-data-hub-master-lifecycle-receipt.v1",
-      "default": "my-data-hub-master-lifecycle-receipt.v1",
-      "title": "Schema Version",
-      "type": "string"
+    "binding": {
+      "$ref": "#/$defs/MasterAcceptanceBinding"
     },
     "command_id": {
       "format": "uuid",
       "title": "Command Id",
       "type": "string"
     },
+    "command_kind": {
+      "$ref": "#/$defs/MasterAcceptanceCommandKind"
+    },
     "command_sha256": {
       "pattern": "^[0-9a-f]{64}$",
       "title": "Command Sha256",
       "type": "string"
     },
-    "task_id": {
-      "format": "uuid",
-      "title": "Task Id",
-      "type": "string"
-    },
-    "scenario": {
-      "$ref": "#/$defs/MasterAcceptanceScenario"
-    },
-    "command_kind": {
-      "$ref": "#/$defs/MasterAcceptanceCommandKind"
-    },
-    "binding": {
-      "$ref": "#/$defs/MasterAcceptanceBinding"
-    },
-    "evidence_class": {
-      "const": "live",
-      "title": "Evidence Class",
-      "type": "string"
-    },
-    "outcome": {
-      "enum": [
-        "succeeded",
-        "failed"
-      ],
-      "title": "Outcome",
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
       "type": "string"
     },
     "evidence": {
@@ -859,9 +875,31 @@
       ],
       "title": "Evidence"
     },
-    "completed_at": {
-      "format": "date-time",
-      "title": "Completed At",
+    "evidence_class": {
+      "const": "live",
+      "title": "Evidence Class",
+      "type": "string"
+    },
+    "outcome": {
+      "enum": [
+        "succeeded",
+        "failed"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "scenario": {
+      "$ref": "#/$defs/MasterAcceptanceScenario"
+    },
+    "schema_version": {
+      "const": "my-data-hub-master-lifecycle-receipt.v1",
+      "default": "my-data-hub-master-lifecycle-receipt.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_id": {
+      "format": "uuid",
+      "title": "Task Id",
       "type": "string"
     }
   },
@@ -878,7 +916,5 @@
     "completed_at"
   ],
   "title": "MasterAcceptanceReceipt",
-  "type": "object",
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.my-data-hub.local/acceptance/master-lifecycle-receipt.v1.schema.json"
+  "type": "object"
 }

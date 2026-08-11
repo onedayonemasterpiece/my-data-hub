@@ -314,6 +314,7 @@ class PostgresH1ExpiredLeaseDenialProbe:
             kind="LEASE_EXPIRY_DENIAL",
             observed_wait_seconds=observed,
             lease_expired=True,
+            credentials_invalidated=True,
             bounded_operator_dml_denied=True,
             transaction_state="rollback_only",
             operator_operation_id=operation_id,
@@ -894,8 +895,20 @@ class ProductionControlHostEffects:
         if checkpoint is None:
             raise ProductionAcceptanceBlocked("FM11_HANDOFF_CHECKPOINT_UNAVAILABLE")
         replacement, _duplicate = self.runtime.ensure(f"master-acceptance-fm11:{command.task_id}")
-        if replacement.state is not MasterState.ACTIVE or replacement.epoch <= command.binding.epoch:
-            raise ProductionAcceptanceBlocked("FM11_REPLACEMENT_NOT_ACTIVE")
+        if replacement.state is not MasterState.ACTIVE or replacement.epoch != command.binding.epoch + 1:
+            raise ProductionAcceptanceBlocked("FM11_REPLACEMENT_NOT_CONSECUTIVE_ACTIVE")
+        service = self.runtime.ledger.resolve_service(MASTER_SERVICE_KIND)
+        if (
+            service is None
+            or service.state != MasterState.ACTIVE.value
+            or service.run_id != replacement.run_id
+            or service.attempt_id != replacement.attempt_id
+            or service.master_instance_id != replacement.master_instance_id
+            or service.epoch != replacement.epoch
+        ):
+            raise ProductionAcceptanceBlocked("FM11_REGISTRY_DID_NOT_RESOLVE_REPLACEMENT")
+        old_run = self._exact_provider_run(command.binding.operation_id)
+        new_run = self._exact_provider_run(UUID(replacement.operation_id))
         if self.old_epoch_denials is None:
             raise ProductionAcceptanceBlocked("FM11_OLD_EPOCH_PROBE_UNAVAILABLE")
         bind_replacement = getattr(self.old_epoch_denials, "bind_replacement", None)
@@ -930,12 +943,33 @@ class ProductionControlHostEffects:
             bounded_write_denied=denial.bounded_write_denied,
             tunnel_denied=denial.tunnel_denied,
             new_epoch_active=True,
+            registry_resolves_new=True,
             old_operation_id=command.binding.operation_id,
             new_operation_id=UUID(replacement.operation_id),
+            old_provider_run_ref=old_run.provider_run_ref,
+            old_provider_kernel_id=old_run.provider_kernel_id,
+            new_provider_run_ref=new_run.provider_run_ref,
+            new_provider_kernel_id=new_run.provider_kernel_id,
             handoff_checkpoint_id=UUID(str(checkpoint["checkpoint_id"])),
             write_denial_receipt_sha256=denial.write_receipt_sha256,
             tunnel_denial_receipt_sha256=denial.tunnel_receipt_sha256,
         )
+
+    def _exact_provider_run(self, operation_id: UUID) -> Any:
+        from my_data_hub.providers.kaggle.contracts import KaggleKernelRunIdentity
+
+        effect = self.runtime.ledger.get_effect_by_idempotency_key(f"{operation_id}:trigger_run")
+        if effect is None or effect.state.value != "APPLIED" or not isinstance(effect.receipt, dict):
+            raise ProductionAcceptanceBlocked("FM11_PROVIDER_RUN_RECEIPT_MISSING")
+        exact = effect.receipt.get("exact_identity")
+        try:
+            run = KaggleKernelRunIdentity.model_validate(exact)
+        except (TypeError, ValueError) as exc:
+            raise ProductionAcceptanceBlocked("FM11_PROVIDER_RUN_RECEIPT_INVALID") from exc
+        operation = self.runtime.ledger.get_operation(str(operation_id))
+        if operation is None or run.task_run_id != UUID(str(operation.identity["run_id"])):
+            raise ProductionAcceptanceBlocked("FM11_PROVIDER_RUN_BINDING_MISMATCH")
+        return run
 
     def _clean_drain(self, command: MasterAcceptanceCommand) -> CleanDrainEvidence:
         operation = self.runtime.ledger.get_operation(str(command.binding.operation_id))

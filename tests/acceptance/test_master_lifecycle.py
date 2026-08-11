@@ -271,6 +271,7 @@ def test_ledger_claim_is_exact_epoch_bound_and_replay_safe(tmp_path: Path) -> No
                 kind="LEASE_EXPIRY_DENIAL",
                 observed_wait_seconds=60,
                 lease_expired=True,
+                credentials_invalidated=True,
                 bounded_operator_dml_denied=True,
                 transaction_state="rollback_only",
                 operator_operation_id=uuid4(),
@@ -310,6 +311,43 @@ def test_ledger_claim_is_exact_epoch_bound_and_replay_safe(tmp_path: Path) -> No
         "output_file_sha256": None,
         "output_tree_sha256": None,
         "output_receipt_sha256": None,
+    }
+    ledger.record_master_terminal_recovery_evidence(
+        operation_id=handle.operation_id,
+        epoch=handle.epoch,
+        output_receipt_sha256="9" * 64,
+        provider_status="complete",
+        metadata={
+            "schema_version": "my-data-hub-master-terminal-recovery-evidence.v1",
+            "run_id": handle.run_id,
+            "attempt_id": handle.attempt_id,
+            "service_instance_id": handle.service_instance_id,
+            "master_instance_id": handle.master_instance_id,
+            "source_identity": "my-data-hub/postgres-master",
+            "source_version": "git:0123456789abcdef",
+            "checkpoint_id": str(UUID(int=99)),
+            "manifest_sha256": "7" * 64,
+            "output_tree_sha256": "8" * 64,
+            "output_receipt_sha256": "9" * 64,
+            "provider_status": "complete",
+            "events": [
+                {"event_id": f"terminal-event-{index}", "body_sha256": str(index) * 64}
+                for index in range(1, 5)
+            ],
+        },
+    )
+    observed = ledger.master_acceptance_task(str(request.task_id))
+    assert observed is not None
+    assert observed["provider_carrier"] == {
+        "provider_ref": "private/postgres-master",
+        "provider_run_ref": "private/postgres-master/7",
+        "provider_kernel_id": 71,
+        "source_version": 7,
+        "source_sha256": "f" * 64,
+        "output_file_name": "master-terminal-output.json",
+        "output_file_sha256": "9" * 64,
+        "output_tree_sha256": "8" * 64,
+        "output_receipt_sha256": "9" * 64,
     }
 
 
@@ -847,6 +885,7 @@ class FixedEffects:
                 kind="LEASE_EXPIRY_DENIAL",
                 observed_wait_seconds=60,
                 lease_expired=True,
+                credentials_invalidated=True,
                 bounded_operator_dml_denied=True,
                 transaction_state="rollback_only",
                 operator_operation_id=UUID(int=7),
@@ -868,8 +907,13 @@ class FixedEffects:
                 bounded_write_denied=True,
                 tunnel_denied=True,
                 new_epoch_active=True,
+                registry_resolves_new=True,
                 old_operation_id=UUID(int=8),
                 new_operation_id=UUID(int=9),
+                old_provider_run_ref="owner/old-master/1",
+                old_provider_kernel_id=81,
+                new_provider_run_ref="owner/new-master/2",
+                new_provider_kernel_id=82,
                 handoff_checkpoint_id=UUID(int=10),
                 write_denial_receipt_sha256="f" * 64,
                 tunnel_denial_receipt_sha256="1" * 64,
@@ -945,6 +989,7 @@ def test_fm10_fm11_and_fm24_cannot_overstate_partial_checks() -> None:
             kind="LEASE_EXPIRY_DENIAL",
             observed_wait_seconds=59,
             lease_expired=True,
+            credentials_invalidated=True,
             bounded_operator_dml_denied=True,
             transaction_state="rollback_only",
             operator_operation_id=uuid4(),
@@ -964,8 +1009,13 @@ def test_fm10_fm11_and_fm24_cannot_overstate_partial_checks() -> None:
             bounded_write_denied=True,
             tunnel_denied=True,
             new_epoch_active=True,
+            registry_resolves_new=True,
             old_operation_id=UUID(int=8),
             new_operation_id=UUID(int=9),
+            old_provider_run_ref="owner/old-master/1",
+            old_provider_kernel_id=81,
+            new_provider_run_ref="owner/new-master/2",
+            new_provider_kernel_id=82,
             handoff_checkpoint_id=UUID(int=10),
             write_denial_receipt_sha256="f" * 64,
             tunnel_denial_receipt_sha256="1" * 64,

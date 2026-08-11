@@ -71,7 +71,11 @@ def _safe_json(value: Mapping[str, Any] | None, *, max_bytes: int = MAX_METADATA
         if isinstance(candidate, Mapping):
             for key, nested in candidate.items():
                 lowered = str(key).lower()
-                if any(fragment in lowered for fragment in _SECRET_FRAGMENTS):
+                safe_boolean_observation = lowered == "credentials_invalidated" and nested is True
+                if (
+                    any(fragment in lowered for fragment in _SECRET_FRAGMENTS)
+                    and not safe_boolean_observation
+                ):
                     raise EventRejected(f"secret-bearing field is forbidden in the control ledger: {key}")
                 inspect(nested)
         elif isinstance(candidate, (list, tuple)):
@@ -3184,17 +3188,40 @@ class ControlLedger:
                 run_identity = launch_receipt.get("exact_identity")
                 if isinstance(run_identity, dict):
                     run = KaggleKernelRunIdentity.model_validate(run_identity)
-                    value["provider_carrier"] = {
-                        "provider_ref": run.provider_ref,
-                        "provider_run_ref": run.provider_run_ref,
-                        "provider_kernel_id": run.provider_kernel_id,
-                        "source_version": run.source_version,
-                        "source_sha256": run.source_sha256,
+                    terminal = connection.execute(
+                        "SELECT metadata_json FROM audit_log WHERE action='master.terminal_recovery' "
+                        "AND operation_id=? ORDER BY recorded_at DESC LIMIT 1",
+                        (operation_id,),
+                    ).fetchone()
+                    output: dict[str, Any] = {
                         "output_file_name": None,
                         "output_file_sha256": None,
                         "output_tree_sha256": None,
                         "output_receipt_sha256": None,
                     }
+                    if terminal is not None:
+                        terminal_metadata = json.loads(str(terminal["metadata_json"]))
+                        if (
+                            terminal_metadata.get("run_id") != str(run.task_run_id)
+                            or terminal_metadata.get("output_receipt_sha256") is None
+                        ):
+                            raise StaleRuntimeEvent("terminal carrier differs from the exact provider run")
+                        output = {
+                            "output_file_name": "master-terminal-output.json",
+                            "output_file_sha256": terminal_metadata["output_receipt_sha256"],
+                            "output_tree_sha256": terminal_metadata["output_tree_sha256"],
+                            "output_receipt_sha256": terminal_metadata["output_receipt_sha256"],
+                        }
+                    from my_data_hub.acceptance.master_lifecycle import MasterProviderCarrierObservation
+
+                    value["provider_carrier"] = MasterProviderCarrierObservation(
+                        provider_ref=run.provider_ref,
+                        provider_run_ref=run.provider_run_ref,
+                        provider_kernel_id=run.provider_kernel_id,
+                        source_version=run.source_version,
+                        source_sha256=run.source_sha256,
+                        **output,
+                    ).model_dump(mode="json")
         value["events"] = [
             {
                 **{key: event[key] for key in ("sequence", "event_type", "evidence_sha256", "recorded_at")},

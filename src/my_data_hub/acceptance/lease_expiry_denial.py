@@ -414,6 +414,7 @@ class BrokeredH1ExpiredLeaseDenial:
             kind="LEASE_EXPIRY_DENIAL",
             observed_wait_seconds=observed_wait_seconds,
             lease_expired=True,
+            credentials_invalidated=True,
             bounded_operator_dml_denied=True,
             transaction_state="rollback_only",
             operator_operation_id=operation_id,

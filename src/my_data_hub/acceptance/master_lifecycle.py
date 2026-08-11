@@ -154,6 +154,38 @@ class ConcurrentEnsureEvidence(_Evidence):
         return self
 
 
+class MasterProviderCarrierObservation(BaseModel):
+    """Exact official-adapter carrier; terminal output stays metadata-only."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=300)
+    provider_run_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$", max_length=320
+    )
+    provider_kernel_id: int = Field(ge=1)
+    source_version: int = Field(ge=1)
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    output_file_name: Literal["master-terminal-output.json"] | None = None
+    output_file_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    output_tree_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    output_receipt_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def exact_carrier(self) -> MasterProviderCarrierObservation:
+        if self.provider_run_ref != f"{self.provider_ref}/{self.source_version}":
+            raise ValueError("provider carrier run is not its exact numeric source version")
+        outputs = (
+            self.output_file_name, self.output_file_sha256, self.output_tree_sha256,
+            self.output_receipt_sha256,
+        )
+        if any(value is not None for value in outputs) != all(value is not None for value in outputs):
+            raise ValueError("provider carrier terminal output is incomplete")
+        if self.output_file_sha256 is not None and self.output_file_sha256 != self.output_receipt_sha256:
+            raise ValueError("terminal output file hash differs from its canonical receipt hash")
+        return self
+
+
 class CallbackLossEvidence(_Evidence):
     kind: Literal["CALLBACK_LOSS_RECOVERY"]
     callback_suppressed_once: Literal[True]
@@ -192,6 +224,7 @@ class LeaseExpiryEvidence(_Evidence):
     kind: Literal["LEASE_EXPIRY_DENIAL"]
     observed_wait_seconds: int = Field(ge=60, le=900)
     lease_expired: Literal[True]
+    credentials_invalidated: Literal[True]
     bounded_operator_dml_denied: Literal[True]
     transaction_state: Literal["rollback_only"]
     operator_operation_id: UUID
@@ -217,16 +250,30 @@ class OldEpochEvidence(_Evidence):
     bounded_write_denied: Literal[True]
     tunnel_denied: Literal[True]
     new_epoch_active: Literal[True]
+    registry_resolves_new: Literal[True]
     old_operation_id: UUID
     new_operation_id: UUID
+    old_provider_run_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$", max_length=320
+    )
+    old_provider_kernel_id: int = Field(ge=1)
+    new_provider_run_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$", max_length=320
+    )
+    new_provider_kernel_id: int = Field(ge=1)
     handoff_checkpoint_id: UUID
     write_denial_receipt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     tunnel_denial_receipt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def monotonic_epoch(self) -> OldEpochEvidence:
-        if self.new_epoch <= self.old_epoch or self.new_operation_id == self.old_operation_id:
-            raise ValueError("replacement epoch did not advance")
+        if (
+            self.new_epoch != self.old_epoch + 1
+            or self.new_operation_id == self.old_operation_id
+            or self.new_provider_run_ref == self.old_provider_run_ref
+            or self.new_provider_kernel_id == self.old_provider_kernel_id
+        ):
+            raise ValueError("replacement epoch/run is not the exact consecutive rotation")
         return self
 
 

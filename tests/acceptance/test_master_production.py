@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -396,8 +397,41 @@ def test_fm12_finalizer_uses_real_stopped_operation_and_verified_head() -> None:
 
 
 class RotationLedger(CleanLedger):
+    new_operation_id = UUID(int=12)
+    old_run_id: UUID | None = None
+    new_run_id = UUID(int=14)
+
     def runtime_event_history(self, **_identity):
         return [{"event_type": "runtime.draining"}, {"event_type": "runtime.terminal"}]
+
+    def get_operation(self, operation_id: str):
+        if operation_id == str(self.operation_id):
+            return SimpleNamespace(state="STOPPED", identity={"run_id": str(self.old_run_id)})
+        assert operation_id == str(self.new_operation_id)
+        return SimpleNamespace(state="ACTIVE", identity={"run_id": str(self.new_run_id)})
+
+    def resolve_service(self, _kind: str):
+        return SimpleNamespace(
+            state="ACTIVE", run_id=str(self.new_run_id), attempt_id=str(UUID(int=15)),
+            master_instance_id=str(UUID(int=13)), epoch=4,
+        )
+
+    def get_effect_by_idempotency_key(self, key: str):
+        operation_id = UUID(key.split(":", 1)[0])
+        old = operation_id == self.operation_id
+        run_id = self.old_run_id if old else self.new_run_id
+        return SimpleNamespace(
+            state=SimpleNamespace(value="APPLIED"),
+            receipt={"exact_identity": {
+                "task_run_id": str(run_id),
+                "provider_ref": "owner/postgres-master",
+                "source_version": 1 if old else 2,
+                "source_sha256": ("a" if old else "b") * 64,
+                "provider_kernel_id": 81 if old else 82,
+                "provider_run_ref": f"owner/postgres-master/{1 if old else 2}",
+                "started_at": datetime(2026, 8, 11, tzinfo=UTC).isoformat(),
+            }},
+        )
 
 
 class OldDenialProbe:
@@ -414,11 +448,14 @@ class OldDenialProbe:
 def test_fm11_waits_for_old_stopped_checkpoint_then_activates_new_epoch() -> None:
     command = _command("FM11")
     ledger = RotationLedger(command.binding.operation_id)
+    ledger.old_run_id = command.binding.run_id
     replacement = SimpleNamespace(
         state=MasterState.ACTIVE,
         epoch=command.binding.epoch + 1,
         operation_id=str(UUID(int=12)),
         master_instance_id=str(UUID(int=13)),
+        run_id=str(ledger.new_run_id),
+        attempt_id=str(UUID(int=15)),
     )
     runtime = SimpleNamespace(ledger=ledger, ensure=lambda _key: (replacement, False))
     denial_probe = OldDenialProbe()
@@ -430,6 +467,9 @@ def test_fm11_waits_for_old_stopped_checkpoint_then_activates_new_epoch() -> Non
     assert evidence.new_operation_id == UUID(int=12)
     assert evidence.renew_denied and evidence.register_denied
     assert evidence.bounded_write_denied and evidence.tunnel_denied
+    assert evidence.registry_resolves_new
+    assert evidence.old_provider_run_ref == "owner/postgres-master/1"
+    assert evidence.new_provider_run_ref == "owner/postgres-master/2"
     assert denial_probe.replacement.master_instance_id == UUID(int=13)
 
 

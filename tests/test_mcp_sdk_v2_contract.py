@@ -79,10 +79,14 @@ async def test_acceptance_scenario_tools_require_explicit_executor_opt_in(
         settings,
         dependencies=MCPDependencies(acceptance_scenarios_enabled=True),
     )
+    enabled_tools = {tool.name: tool for tool in await enabled.list_tools()}
     assert {
         "acceptance.scenario.request",
         "acceptance.scenario.status",
-    } <= {tool.name for tool in await enabled.list_tools()}
+    } <= set(enabled_tools)
+    request_schema = enabled_tools["acceptance.scenario.request"].input_schema
+    assert "target_operation_id" in request_schema["properties"]
+    assert "target_operation_id" not in request_schema["required"]
 
 
 def test_mcp_v2_streamable_http_builder_accepts_security_limits(

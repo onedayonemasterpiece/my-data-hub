@@ -18,6 +18,11 @@
           "title": "Canonical Revision Before",
           "type": "integer"
         },
+        "credentials_invalidated": {
+          "const": true,
+          "title": "Credentials Invalidated",
+          "type": "boolean"
+        },
         "denial_code": {
           "const": "MDH_EPOCH_LEASE_EXPIRED",
           "title": "Denial Code",
@@ -59,6 +64,7 @@
         "kind",
         "observed_wait_seconds",
         "lease_expired",
+        "credentials_invalidated",
         "bounded_operator_dml_denied",
         "transaction_state",
         "operator_operation_id",
