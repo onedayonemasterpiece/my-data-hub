@@ -68,10 +68,9 @@ lane worktree intentionally has no duplicate virtual environment.
   existing workflow assertion requiring the literal upload path
   `artifacts/operational-kaggle-scenarios/`; that upload path was restored.
 - The exact two workflow tests, including the formerly failing test: PASS after the fix.
-- A second full pytest run was attempted, but concurrent test work exhausted the shared
-  filesystem (`OSError: [Errno 28] No space left on device`, `/dev/vda2` at 100%) and
-  the run was stopped. This is recorded as an environmental full-suite blocker rather
-  than represented as a product failure.
+- A second full pytest run initially encountered concurrent shared-runner disk
+  exhaustion. After stale test storage was cleared, the final full pytest run passed:
+  **1,077 passed, 2 skipped, 2 warnings in 77.12 seconds**.
 
 ## Risks
 
@@ -82,9 +81,7 @@ lane worktree intentionally has no duplicate virtual environment.
   authorized FM16 continuation) the owner envelope secret.
 - Continuation intentionally rejects commit/config drift and requires an exact prior
   run ID plus run attempt. Operators must retain/select that immutable artifact.
-- The full post-fix suite could not complete only because the shared runner had zero
-  free disk. Focused regression coverage, repository validation, compileall, and Ruff
-  all passed after the final changes.
+- No known test or repository-validation blocker remains.
 
 ## Merge notes
 
