@@ -24,6 +24,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from my_data_hub.checkpoints import load_and_verify, restore_physical_archive
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.db.migrations import migrate
+from my_data_hub.workloads.bloggers.master_stage import (
+    BloggerImportStageReceipt,
+    BloggerMigrationRequest,
+    BloggerStageContext,
+    execute_blogger_migration_stage,
+)
 from my_data_hub.runtime_sdk import (
     CHECKPOINT_ATTEMPT_BUDGET_SECONDS,
     CHECKPOINT_TRANSITION_GUARD_SECONDS,
@@ -423,6 +429,61 @@ def _activation_url(callback_url: str, run_id: str, attempt_id: str) -> str:
     return f"{callback_url.removesuffix(suffix)}/internal/runtime/activation/{run_id}/{attempt_id}"
 
 
+def _blogger_migration_url(callback_url: str, run_id: str, attempt_id: str, suffix: str = "") -> str:
+    events_suffix = "/internal/runtime/events"
+    if not callback_url.startswith("https://") or not callback_url.endswith(events_suffix):
+        raise ValueError("callback URL does not match the exact HTTPS runtime endpoint")
+    base = callback_url.removesuffix(events_suffix)
+    return f"{base}/internal/runtime/blogger-migration/{run_id}/{attempt_id}{suffix}"
+
+
+def _runtime_metadata_headers(config: NotebookMasterConfig, run_secret: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {run_secret}",
+        "Content-Type": "application/json",
+        "X-MDH-Master-Instance-ID": str(config.master_instance_id),
+        "X-MDH-Epoch": str(config.epoch),
+    }
+
+
+def _claim_blogger_migration(
+    *, config: NotebookMasterConfig, callback_url: str, run_secret: str
+) -> BloggerMigrationRequest | None:
+    request = urllib.request.Request(
+        _blogger_migration_url(callback_url, config.run_id, config.attempt_id),
+        headers=_runtime_metadata_headers(config, run_secret),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            body = json.loads(response.read(32 * 1024))
+    except Exception:
+        # Claim observation is optional while no request exists, but an actual
+        # claimed request is durable and will be returned on the next heartbeat.
+        return None
+    if body.get("available") is not True:
+        return None
+    migration = BloggerMigrationRequest.model_validate(body.get("request"))
+    if body.get("request_sha256") != migration.request_sha256:
+        raise RuntimeError("blogger work request hash differs from its exact body")
+    return migration
+
+
+def _post_blogger_runtime_receipt(
+    *, config: NotebookMasterConfig, callback_url: str, run_secret: str, suffix: str, payload: dict[str, Any]
+) -> None:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    if len(encoded) > 64 * 1024:
+        raise RuntimeError("blogger runtime metadata receipt exceeds 64 KiB")
+    request = urllib.request.Request(
+        _blogger_migration_url(callback_url, config.run_id, config.attempt_id, suffix),
+        data=encoded, headers=_runtime_metadata_headers(config, run_secret), method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        body = json.loads(response.read(16 * 1024))
+    if body.get("accepted") is not True:
+        raise RuntimeError("control plane did not accept blogger runtime metadata")
+
+
 def _credential_registration_url(callback_url: str, run_id: str, attempt_id: str) -> str:
     suffix = "/internal/runtime/events"
     if not callback_url.startswith("https://") or not callback_url.endswith(suffix):
@@ -714,11 +775,42 @@ def run_master(
         gate_connection.close()
         raise
     current_lease = ready.lease_until
+    blogger_receipt: BloggerImportStageReceipt | None = None
     active_error: BaseException | None = None
     try:
         while True:
             remaining_active = active_deadline - time.monotonic()
             if remaining_active <= 0:
+                break
+            migration_request = _claim_blogger_migration(
+                config=config, callback_url=callback_url, run_secret=run_secret
+            )
+            if migration_request is not None:
+                if remaining_active < 240:
+                    raise RuntimeError("blogger stage was not admitted without its bounded active-time allocation")
+                try:
+                    blogger_receipt = execute_blogger_migration_stage(
+                        BloggerStageContext(
+                            identity=identity, request=migration_request,
+                            local_database_url=database_url, lease_until=current_lease,
+                        ),
+                        owner_connection=gate_connection,
+                    )
+                    _post_blogger_runtime_receipt(
+                        config=config, callback_url=callback_url, run_secret=run_secret,
+                        suffix="/import-receipt", payload=blogger_receipt.model_dump(mode="json"),
+                    )
+                except Exception as exc:
+                    with suppress(Exception):
+                        _post_blogger_runtime_receipt(
+                            config=config, callback_url=callback_url, run_secret=run_secret,
+                            suffix="/failed",
+                            payload={
+                                "request_id": str(migration_request.request_id),
+                                "failure_code": type(exc).__name__[:100],
+                            },
+                        )
+                    raise
                 break
             time.sleep(min(30.0, remaining_active))
             if time.monotonic() >= active_deadline:
@@ -766,6 +858,23 @@ def run_master(
         deadline=session_deadline,
         terminal_output_path=terminal_output_path,
     )
+    if blogger_receipt is not None:
+        checkpoint_payload = {
+            "request_id": str(blogger_receipt.request_id),
+            "checkpoint_id": checkpoint_receipt.checkpoint_id,
+            "manifest_sha256": checkpoint_receipt.manifest_sha256,
+            "current_checkpoint_id": checkpoint_receipt.current_checkpoint_id,
+            "canonical_revision": blogger_receipt.canonical_revision,
+        }
+        with suppress(Exception):
+            # Promotion is already durable.  A callback outage must not turn a
+            # recoverable COMPLETE provider run into FAILED; the command can
+            # reconcile the exact operation/checkpoint from ledger metadata.
+            _post_blogger_runtime_receipt(
+                config=config, callback_url=callback_url, run_secret=run_secret,
+                suffix="/checkpoint-receipt", payload=checkpoint_payload,
+            )
+
     if active_error is not None:
         callback_closure_recovered = isinstance(
             active_error, CallbackLeaseClosingError

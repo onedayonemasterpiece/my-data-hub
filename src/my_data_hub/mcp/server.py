@@ -186,6 +186,11 @@ def create_server(
     async def bloggers_statistics() -> dict[str, Any]:
         return await service.invoke("bloggers.statistics", {})
 
+    async def bloggers_migration_accounting(export_batch_id: str) -> dict[str, Any]:
+        return await service.invoke(
+            "bloggers.migration.accounting", {"export_batch_id": export_batch_id}
+        )
+
     async def data_query(
         sql: str,
         parameters: list[Any] | None = None,
@@ -268,6 +273,7 @@ def create_server(
         "bloggers.search": bloggers_search,
         "bloggers.provenance": bloggers_provenance,
         "bloggers.statistics": bloggers_statistics,
+        "bloggers.migration.accounting": bloggers_migration_accounting,
         "data.query": data_query,
         "data.change.preview": data_change_preview,
         "data.change.apply": data_change_apply,

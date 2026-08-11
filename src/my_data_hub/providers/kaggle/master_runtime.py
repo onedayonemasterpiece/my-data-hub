@@ -111,7 +111,7 @@ class KaggleMasterLaunchAssets:
         for environment_name, secret_name in self.runtime_secret_bindings.items():
             if (
                 (
-                    environment_name not in {"KAGGLE_API_TOKEN"}
+                    environment_name not in {"KAGGLE_API_TOKEN", "YDB_ACCESS_TOKEN_CREDENTIALS"}
                     and not environment_name.startswith("MY_DATA_HUB_")
                 )
                 or environment_name == "MY_DATA_HUB_RUN_SECRET"

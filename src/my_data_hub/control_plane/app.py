@@ -32,6 +32,10 @@ from my_data_hub.providers.kaggle.contracts import (
     TaskResourceClaim,
 )
 from my_data_hub.providers.models import ControlClass, ProviderKind
+from my_data_hub.workloads.bloggers.master_stage import (
+    BloggerImportStageReceipt,
+    BloggerMigrationRequest,
+)
 
 DATABASE_ENVIRONMENT_NAMES = (
     "MY_DATA_HUB_DATABASE_URL",
@@ -195,6 +199,9 @@ def create_app(
                 if master_runtime is not None:
                     with suppress(Exception):
                         await asyncio.to_thread(master_runtime.reconcile_requested_once)
+                        reconcile_acceptance = getattr(master_runtime, "reconcile_acceptance_once", None)
+                        if reconcile_acceptance is not None:
+                            await asyncio.to_thread(reconcile_acceptance)
                         # The durable request remains PENDING; provider details
                         # never enter logs/responses and bounded retry resumes.
                 try:
@@ -399,6 +406,164 @@ def create_app(
             "terminal": handle.state.value in {"ACTIVE", "STOPPED", "FAILED", "FENCED", "ORPHANED"},
         }
 
+    @app.post("/control/v1/blogger-closure/requests")
+    async def request_blogger_closure(request: Request) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            migration = BloggerMigrationRequest.model_validate(body)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail={"code": "blogger_request_invalid"}) from exc
+        operation = control_ledger.get_operation(str(migration.operation_id))
+        if operation is None or operation.operation_kind != "ensure_master":
+            raise HTTPException(status_code=409, detail={"code": "master_operation_invalid"})
+        identity = operation.identity
+        if operation.state != "ACTIVE" or control_ledger.current_epoch("postgres-master") != int(identity["epoch"]):
+            raise HTTPException(status_code=409, detail={"code": "master_not_active"})
+        record, created = control_ledger.ensure_blogger_migration_request(
+            request_id=str(migration.request_id),
+            operation_id=str(migration.operation_id),
+            request_sha256=migration.request_sha256,
+            request=migration.model_dump(mode="json"),
+        )
+        return {
+            "request_id": record["request_id"],
+            "request_sha256": record["request_sha256"],
+            "state": record["state"],
+            "created": created,
+        }
+
+    @app.get("/control/v1/blogger-closure/requests/{request_id}")
+    def blogger_closure_status(request_id: str) -> dict[str, Any]:
+        try:
+            exact_id = str(UUID(request_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail={"code": "blogger_request_not_found"}) from exc
+        record = control_ledger.blogger_migration_request(exact_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail={"code": "blogger_request_not_found"})
+        if record["state"] == "IMPORT_COMMITTED":
+            recovered = control_ledger.verified_checkpoint_for_operation(record["operation_id"])
+            if recovered is not None:
+                record = control_ledger.record_blogger_checkpoint_receipt(
+                    request_id=exact_id, run_id=str(record["claimed_run_id"]),
+                    attempt_id=str(record["claimed_attempt_id"]),
+                    receipt={
+                        "request_id": exact_id,
+                        "checkpoint_id": recovered["checkpoint_id"],
+                        "manifest_sha256": recovered["manifest_sha256"],
+                        "current_checkpoint_id": recovered["checkpoint_id"],
+                        "canonical_revision": record["import_receipt"]["canonical_revision"],
+                    },
+                )
+        return {
+            key: value for key, value in record.items()
+            if key not in {"failure_code"} or value is not None
+        }
+
+    @app.get("/internal/runtime/blogger-migration/{run_id}/{attempt_id}")
+    def claim_blogger_migration(
+        run_id: str,
+        attempt_id: str,
+        authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        operation = _runtime_authority(
+            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
+            master_instance_id=master_instance_id, epoch=epoch,
+            allowed_states=frozenset({"ACTIVE"}),
+        )
+        record = control_ledger.claim_blogger_migration_request(
+            operation_id=operation.operation_id,
+            run_id=run_id, attempt_id=attempt_id,
+            master_instance_id=str(operation.identity["master_instance_id"]),
+            epoch=int(operation.identity["epoch"]),
+        )
+        return {"available": False} if record is None or record["state"] != "CLAIMED" else {
+            "available": True,
+            "request": record["request"],
+            "request_sha256": record["request_sha256"],
+            "state": record["state"],
+        }
+
+    @app.post("/internal/runtime/blogger-migration/{run_id}/{attempt_id}/import-receipt")
+    async def blogger_import_receipt(
+        run_id: str, attempt_id: str, request: Request,
+        authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        _runtime_authority(
+            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
+            master_instance_id=master_instance_id, epoch=epoch,
+            allowed_states=frozenset({"ACTIVE"}),
+        )
+        body = await _bounded_json(request)
+        try:
+            receipt = BloggerImportStageReceipt.model_validate(body)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail={"code": "blogger_receipt_invalid"}) from exc
+        if (str(receipt.run_id), receipt.epoch, str(receipt.master_instance_id)) != (
+            run_id, int(epoch or 0), str(master_instance_id)
+        ):
+            raise HTTPException(status_code=409, detail={"code": "blogger_receipt_epoch_mismatch"})
+        record = control_ledger.record_blogger_import_receipt(
+            request_id=str(receipt.request_id), run_id=run_id, attempt_id=attempt_id,
+            receipt=receipt.model_dump(mode="json"),
+        )
+        return {"accepted": True, "state": record["state"], "receipt_sha256": receipt.receipt_sha256}
+
+    @app.post("/internal/runtime/blogger-migration/{run_id}/{attempt_id}/failed")
+    async def blogger_migration_failed(
+        run_id: str, attempt_id: str, request: Request,
+        authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        _runtime_authority(
+            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
+            master_instance_id=master_instance_id, epoch=epoch,
+            allowed_states=frozenset({"ACTIVE"}),
+        )
+        body = await _bounded_json(request)
+        if set(body) != {"request_id", "failure_code"}:
+            raise HTTPException(status_code=422, detail={"code": "blogger_failure_invalid"})
+        control_ledger.fail_blogger_migration_request(
+            request_id=str(body["request_id"]), run_id=run_id, attempt_id=attempt_id,
+            failure_code=str(body["failure_code"]),
+        )
+        return {"accepted": True, "state": "FAILED"}
+
+    @app.post("/internal/runtime/blogger-migration/{run_id}/{attempt_id}/checkpoint-receipt")
+    async def blogger_checkpoint_receipt(
+        run_id: str, attempt_id: str, request: Request,
+        authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        _runtime_authority(
+            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
+            master_instance_id=master_instance_id, epoch=epoch,
+            allowed_states=frozenset({"DRAINING", "CHECKPOINTING", "STOPPED"}),
+        )
+        body = await _bounded_json(request)
+        required = {"request_id", "checkpoint_id", "manifest_sha256", "current_checkpoint_id", "canonical_revision"}
+        if set(body) != required:
+            raise HTTPException(status_code=422, detail={"code": "blogger_checkpoint_receipt_invalid"})
+        record = control_ledger.blogger_migration_request(str(body["request_id"]))
+        if record is None or record["import_receipt"]["canonical_revision"] != body["canonical_revision"]:
+            raise HTTPException(status_code=409, detail={"code": "blogger_checkpoint_revision_mismatch"})
+        head = control_ledger.checkpoint_head("postgres-master")
+        candidate = control_ledger.checkpoint_candidate(str(body["checkpoint_id"]))
+        if (head is None or head.current_checkpoint_id != body["checkpoint_id"] or candidate is None
+                or candidate["status"] != "VERIFIED" or candidate["manifest_sha256"] != body["manifest_sha256"]
+                or body["current_checkpoint_id"] != body["checkpoint_id"]):
+            raise HTTPException(status_code=409, detail={"code": "blogger_checkpoint_not_verified"})
+        stored = control_ledger.record_blogger_checkpoint_receipt(
+            request_id=str(body["request_id"]), run_id=run_id, attempt_id=attempt_id, receipt=body
+        )
+        return {"accepted": True, "state": stored["state"]}
+
     @app.get("/control/v1/operations/{operation_id}")
     def operation(operation_id: str) -> dict[str, Any]:
         record = control_ledger.get_operation(operation_id)
@@ -530,6 +695,52 @@ def create_app(
             reference = registrar.store(credential)
             references.append(Path(reference).name)
         return {"registered": len(references), "credential_refs": references}
+
+    @app.post("/internal/runtime/connector-coverage/{run_id}/{attempt_id}")
+    async def runtime_connector_coverage(
+        run_id: str, attempt_id: str, request: Request,
+        authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        if master_runtime is None:
+            raise HTTPException(status_code=503, detail={"code": "runtime_unavailable"})
+        raw = await request.body()
+        if len(raw) > 8 * 1024:
+            raise HTTPException(status_code=413, detail={"code": "connector_heartbeat_too_large"})
+        try:
+            body = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail={"code": "connector_heartbeat_invalid"}) from exc
+        if not isinstance(body, dict) or set(body) != {"connector_kind", "contract_version", "state", "observed_at"}:
+            raise HTTPException(status_code=422, detail={"code": "connector_heartbeat_invalid"})
+        operation = _runtime_authority(
+            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
+            master_instance_id=master_instance_id, epoch=epoch,
+            allowed_states=frozenset({"ACTIVE"}),
+        )
+        connector_kind = str(body["connector_kind"])
+        contract_version = str(body["contract_version"])
+        state = str(body["state"])
+        try:
+            observed_at = datetime.fromisoformat(str(body["observed_at"]).replace("Z", "+00:00")).astimezone(UTC)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail={"code": "connector_heartbeat_time_invalid"}) from exc
+        now = datetime.now(UTC)
+        if (not 3 <= len(connector_kind) <= 100 or not 1 <= len(contract_version) <= 100
+                or state not in {"PENDING", "COMPLETE", "FAILED"}
+                or observed_at < now - timedelta(days=1) or observed_at > now + timedelta(minutes=1)):
+            raise HTTPException(status_code=422, detail={"code": "connector_heartbeat_invalid"})
+        token = authorization.removeprefix("Bearer ").strip() if authorization else ""
+        master_runtime.record_connector_heartbeat(
+            run_id=run_id, attempt_id=attempt_id, runtime_token=token,
+            connector_kind=connector_kind, contract_version=contract_version,
+            state=state, observed_at=observed_at,
+        )
+        return {
+            "accepted": True, "connector_kind": connector_kind, "state": state,
+            "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+        }
 
     @app.post("/internal/provider-journal/intents")
     async def provider_journal_intent(
@@ -866,6 +1077,31 @@ def create_app(
             UUID(checkpoint_id), str(body["exact_version_ref"])
         )
         return {"persisted": True}
+
+    @app.post("/internal/checkpoints/{checkpoint_id}/package-identity")
+    async def checkpoint_package_identity(
+        checkpoint_id: str, request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, str]:
+        operation = _runtime_authority(
+            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
+            master_instance_id=master_instance_id, epoch=epoch,
+        )
+        body = await _checkpoint_transition_body(request)
+        package_sha256 = str(body.get("package_sha256", ""))
+        if (
+            set(body) != {"service_kind", "package_sha256"}
+            or len(package_sha256) != 64
+            or any(char not in "0123456789abcdef" for char in package_sha256)
+        ):
+            raise HTTPException(status_code=422, detail={"code": "checkpoint_package_identity_invalid"})
+        _assert_checkpoint_owner(checkpoint_id, operation.operation_id, "postgres-master")
+        control_ledger.record_checkpoint_package_sha256(checkpoint_id, package_sha256)
+        return {"checkpoint_id": checkpoint_id, "package_sha256": package_sha256}
 
     async def _simple_checkpoint_transition(
         checkpoint_id: str, request: Request, operation_id: str, action: str

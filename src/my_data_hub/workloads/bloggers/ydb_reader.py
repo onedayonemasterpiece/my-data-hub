@@ -31,6 +31,30 @@ class YdbBloggerSnapshot:
         self.driver = driver
         self.acquire_timeout_seconds = acquire_timeout_seconds
 
+    def assert_write_denied(self) -> None:
+        """Prove the live principal cannot execute even a zero-row UPDATE.
+
+        Only the SDK's exact UNAUTHORIZED status is accepted as evidence.
+        Connectivity, syntax, timeout, and generic failures fail closed.
+        """
+
+        import ydb
+
+        pool = ydb.QuerySessionPool(self.driver, size=1)
+        try:
+            with pool.checkout(timeout=self.acquire_timeout_seconds) as session:
+                try:
+                    session.transaction(ydb.SerializableReadWrite()).execute(
+                        ZERO_ROW_WRITE_DENIAL_PROBE, commit_tx=True
+                    )
+                except ydb.issues.Unauthorized:
+                    return
+                raise YdbSnapshotError(
+                    "YDB viewer write-denial probe unexpectedly succeeded"
+                )
+        finally:
+            pool.stop(timeout=5)
+
     @contextmanager
     def iter_rows(self) -> Iterator[Iterator[dict[str, object]]]:
         import ydb

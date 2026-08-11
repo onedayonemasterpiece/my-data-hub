@@ -259,6 +259,35 @@ class PostgresMasterSession(MasterSession):
                 "FROM region_talk.bloggers_ru_v1"
             ).fetchone()
             return {"statistics": row}
+        if tool == "bloggers.migration.accounting":
+            batch_id = str(arguments.get("export_batch_id", ""))
+            try:
+                from uuid import UUID
+
+                exact_batch_id = str(UUID(batch_id))
+            except ValueError as exc:
+                raise SessionBrokerError("export_batch_id is not an exact UUID") from exc
+            row = cursor.execute(
+                "SELECT b.export_batch_id,b.expected_row_count,b.status,b.logical_sha256,"
+                "b.metadata->>'record_id_set_sha256' AS record_id_set_sha256,"
+                "b.metadata->>'canonical_outcome_sha256' AS canonical_outcome_sha256,"
+                "(b.metadata->>'duplicate_groups_pending')::integer AS duplicate_groups_pending,"
+                "(b.metadata->>'canonical_revision')::bigint AS imported_canonical_revision,"
+                "a.raw_count,a.dispositioned_count,a.undispositioned_count,a.quarantined_count,"
+                "(SELECT count(*) FROM region_talk.blogger_profile p WHERE p.export_batch_id=b.export_batch_id) "
+                "AS actor_count,"
+                "(SELECT count(*) FROM hub.external_account x JOIN region_talk.blogger_profile p "
+                "ON p.actor_id=x.actor_id WHERE p.export_batch_id=b.export_batch_id) AS account_count,"
+                "EXISTS (SELECT 1 FROM sync.external_outbox o WHERE o.aggregate_type='blogger_import' "
+                "AND o.aggregate_id=b.export_batch_id AND o.effect_kind='verified_checkpoint_required' "
+                "AND o.required_revision=(b.metadata->>'canonical_revision')::bigint) AS checkpoint_required "
+                "FROM migration.export_batch b JOIN migration.batch_accounting a USING(export_batch_id) "
+                "WHERE b.export_batch_id=%s::uuid",
+                (exact_batch_id,),
+            ).fetchone()
+            if row is None:
+                return {"found": False, "export_batch_id": exact_batch_id}
+            return {"found": True, "accounting": row}
         if tool == "bloggers.search":
             query = str(arguments.get("query", "")).strip()
             if not 1 <= len(query) <= 500:

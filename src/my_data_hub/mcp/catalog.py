@@ -40,6 +40,7 @@ _READ = (
     ("bloggers.search", "bloggers:read"),
     ("bloggers.provenance", "bloggers:read"),
     ("bloggers.statistics", "bloggers:read"),
+    ("bloggers.migration.accounting", "bloggers:read"),
     ("data.query", "data:read"),
     ("data.change.status", "operation:read"),
 )

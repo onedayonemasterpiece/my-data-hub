@@ -1754,6 +1754,140 @@ class ControlLedger:
         result["manifest"] = json.loads(result.pop("manifest_json")) if result["manifest_json"] else None
         return result
 
+    def ensure_blogger_migration_request(
+        self, *, request_id: str, operation_id: str, request_sha256: str, request: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist one secret-free importer request before the master may claim it."""
+
+        if len(request_sha256) != 64:
+            raise ValueError("blogger request hash must be an exact SHA-256")
+        request_json = _safe_json(request)
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            changed = connection.execute(
+                "INSERT INTO blogger_migration_requests(request_id,operation_id,request_sha256,request_json,state,"
+                "created_at,updated_at) VALUES (?,?,?,?,'REQUESTED',?,?) ON CONFLICT(request_id) DO NOTHING",
+                (request_id, operation_id, request_sha256, request_json, now, now),
+            ).rowcount
+            row = connection.execute(
+                "SELECT * FROM blogger_migration_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if row is None or (row["operation_id"], row["request_sha256"], row["request_json"]) != (
+                operation_id, request_sha256, request_json
+            ):
+                raise IdempotencyConflict("blogger request identity was reused for different metadata")
+            return self._blogger_request_from_row(row), bool(changed)
+
+    def claim_blogger_migration_request(
+        self, *, operation_id: str, run_id: str, attempt_id: str, master_instance_id: str, epoch: int
+    ) -> dict[str, Any] | None:
+        """Atomically bind the pending request to the exact ACTIVE runtime attempt."""
+
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM blogger_migration_requests WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            if row["state"] == "REQUESTED":
+                connection.execute(
+                    "UPDATE blogger_migration_requests SET state='CLAIMED',claimed_run_id=?,claimed_attempt_id=?,"
+                    "claimed_master_instance_id=?,claimed_epoch=?,updated_at=? WHERE request_id=? AND state='REQUESTED'",
+                    (run_id, attempt_id, master_instance_id, epoch, now, row["request_id"]),
+                )
+                row = connection.execute(
+                    "SELECT * FROM blogger_migration_requests WHERE request_id=?", (row["request_id"],)
+                ).fetchone()
+            assert row is not None
+            claimed = (row["claimed_run_id"], row["claimed_attempt_id"], row["claimed_master_instance_id"], row["claimed_epoch"])
+            if claimed != (run_id, attempt_id, master_instance_id, epoch):
+                raise StaleRuntimeEvent("blogger migration request belongs to another runtime epoch")
+            return self._blogger_request_from_row(row)
+
+    def record_blogger_import_receipt(
+        self, *, request_id: str, run_id: str, attempt_id: str, receipt: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        receipt_json = _safe_json(receipt)
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            changed = connection.execute(
+                "UPDATE blogger_migration_requests SET state='IMPORT_COMMITTED',import_receipt_json=?,updated_at=? "
+                "WHERE request_id=? AND state='CLAIMED' AND claimed_run_id=? AND claimed_attempt_id=?",
+                (receipt_json, now, request_id, run_id, attempt_id),
+            ).rowcount
+            row = connection.execute(
+                "SELECT * FROM blogger_migration_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if row is None or (changed != 1 and row["import_receipt_json"] != receipt_json):
+                raise StaleRuntimeEvent("blogger import receipt does not bind the claimed runtime")
+            return self._blogger_request_from_row(row)
+
+    def record_blogger_checkpoint_receipt(
+        self, *, request_id: str, run_id: str, attempt_id: str, receipt: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        receipt_json = _safe_json(receipt)
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            changed = connection.execute(
+                "UPDATE blogger_migration_requests SET state='CHECKPOINT_VERIFIED',checkpoint_receipt_json=?,updated_at=? "
+                "WHERE request_id=? AND state='IMPORT_COMMITTED' AND claimed_run_id=? AND claimed_attempt_id=?",
+                (receipt_json, now, request_id, run_id, attempt_id),
+            ).rowcount
+            row = connection.execute(
+                "SELECT * FROM blogger_migration_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if row is None or (changed != 1 and row["checkpoint_receipt_json"] != receipt_json):
+                raise StaleRuntimeEvent("blogger checkpoint receipt does not follow committed import")
+            return self._blogger_request_from_row(row)
+
+    def fail_blogger_migration_request(
+        self, *, request_id: str, run_id: str, attempt_id: str, failure_code: str
+    ) -> None:
+        if not failure_code or len(failure_code) > 100:
+            raise ValueError("blogger failure code is invalid")
+        with self._transaction() as connection:
+            connection.execute(
+                "UPDATE blogger_migration_requests SET state='FAILED',failure_code=?,updated_at=? "
+                "WHERE request_id=? AND claimed_run_id=? AND claimed_attempt_id=? "
+                "AND state IN ('CLAIMED','IMPORT_COMMITTED')",
+                (failure_code, _format_time(self.clock.now()), request_id, run_id, attempt_id),
+            )
+
+    def verified_checkpoint_for_operation(self, operation_id: str) -> dict[str, Any] | None:
+        """Return the exact current VERIFIED candidate owned by one master operation."""
+
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT c.checkpoint_id,c.manifest_sha256,c.version_ref FROM checkpoint_candidates c "
+                "JOIN checkpoint_heads h ON h.service_kind=c.service_kind "
+                "AND h.current_checkpoint_id=c.checkpoint_id "
+                "WHERE c.operation_id=? AND c.status='VERIFIED' AND c.version_ref IS NOT NULL",
+                (operation_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def blogger_migration_request(self, request_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM blogger_migration_requests WHERE request_id=?", (request_id,)
+            ).fetchone()
+        return self._blogger_request_from_row(row) if row else None
+
+    @staticmethod
+    def _blogger_request_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["request"] = json.loads(value.pop("request_json"))
+        import_receipt_json = value.pop("import_receipt_json")
+        checkpoint_receipt_json = value.pop("checkpoint_receipt_json")
+        value["import_receipt"] = json.loads(import_receipt_json) if import_receipt_json else None
+        value["checkpoint_receipt"] = (
+            json.loads(checkpoint_receipt_json) if checkpoint_receipt_json else None
+        )
+        if value["claimed_epoch"] is not None:
+            value["claimed_epoch"] = int(value["claimed_epoch"])
+        return value
+
     def revoke_oauth_reference(
         self,
         *,

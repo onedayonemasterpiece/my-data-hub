@@ -19,6 +19,7 @@ READ_ONLY_TOOLS = {
     "bloggers.search",
     "bloggers.provenance",
     "bloggers.statistics",
+    "bloggers.migration.accounting",
     "data.query",
     "data.change.status",
 }

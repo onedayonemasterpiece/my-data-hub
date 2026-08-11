@@ -104,3 +104,50 @@ async def test_broker_issues_one_exact_epoch_session(monkeypatch: pytest.MonkeyP
     await session.close()
     with pytest.raises(SessionBrokerError, match="closed"):
         await session.execute({"limit": 10})
+
+
+def test_blogger_migration_accounting_is_typed_bounded_and_never_returns_rows() -> None:
+    exact = "11111111-1111-4111-8111-111111111111"
+    migration_request = SessionRequest(
+        principal=identity(),
+        master_instance_id=request().master_instance_id,
+        epoch=7,
+        role="reader",
+        tool="bloggers.migration.accounting",
+        limits=ExecutionLimits(),
+    )
+    session = PostgresMasterSession(migration_request, credential())
+
+    class Cursor:
+        statement = ""
+        parameters = ()
+
+        def execute(self, statement, parameters=()):  # type: ignore[no-untyped-def]
+            self.statement = statement
+            self.parameters = parameters
+            return self
+
+        def fetchone(self):  # type: ignore[no-untyped-def]
+            return {"export_batch_id": exact, "raw_count": 266, "undispositioned_count": 0}
+
+    cursor = Cursor()
+    result = session._dispatch(cursor, {"export_batch_id": exact})
+    assert result == {"found": True, "accounting": {"export_batch_id": exact, "raw_count": 266, "undispositioned_count": 0}}
+    assert cursor.parameters == (exact,)
+    assert "migration.raw_record" not in cursor.statement
+    assert "payload" not in cursor.statement
+    assert "verified_checkpoint_required" in cursor.statement
+
+
+def test_blogger_migration_accounting_rejects_non_uuid_without_query() -> None:
+    migration_request = SessionRequest(
+        principal=identity(), master_instance_id=request().master_instance_id, epoch=7,
+        role="reader", tool="bloggers.migration.accounting", limits=ExecutionLimits(),
+    )
+    session = PostgresMasterSession(migration_request, credential())
+
+    class Cursor:
+        def execute(self, *args, **kwargs): raise AssertionError("query must not execute")
+
+    with pytest.raises(SessionBrokerError, match="exact UUID"):
+        session._dispatch(Cursor(), {"export_batch_id": "not-a-uuid"})
