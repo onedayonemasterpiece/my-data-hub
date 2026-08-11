@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import UUID
 
 from FlagEmbedding import BGEM3FlagModel
+from huggingface_hub import snapshot_download
 
 from my_data_hub.embeddings.contracts import EmbeddingJob
 from my_data_hub.embeddings.models import BGE_M3
@@ -18,7 +19,17 @@ from my_data_hub.hashing import canonical_json_bytes
 
 class BgeM3Encoder:
     def __init__(self) -> None:
-        self.model = BGEM3FlagModel(BGE_M3.model_key, normalize_embeddings=True, use_fp16=False)
+        snapshot_path = Path(
+            snapshot_download(repo_id=BGE_M3.model_key, revision=BGE_M3.revision)
+        ).resolve()
+        if snapshot_path.name != BGE_M3.revision:
+            raise RuntimeError(
+                "resolved BGE-M3 snapshot does not match the receipt-bound exact revision"
+            )
+        self.snapshot_revision = snapshot_path.name
+        self.model = BGEM3FlagModel(
+            str(snapshot_path), normalize_embeddings=True, use_fp16=False
+        )
 
     def encode(self, texts, *, model, max_tokens, pooling, normalize, dense_only):  # type: ignore[no-untyped-def]
         if model != BGE_M3 or pooling != "model_native_dense" or not normalize or not dense_only:
