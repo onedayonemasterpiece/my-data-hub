@@ -591,7 +591,10 @@ def validate_deployment(report: Report) -> None:
     report.check(control_path.is_file(), "production control-plane Compose contract is missing")
     control = yaml.safe_load(control_path.read_text(encoding="utf-8")) if control_path.is_file() else {}
     report.check(control.get("x-my-data-hub-profile") == "production-lightweight-control-plane", "control profile marker drifted")
-    report.check(set(control.get("services", {})) == {"control-plane"}, "production profile must contain only control-plane service")
+    report.check(
+        set(control.get("services", {})) == {"control-plane", "remote-mcp"},
+        "production profile must contain only control API and opt-in remote MCP services",
+    )
     report.check(not control.get("volumes"), "production control plane must not declare volumes")
     control_serialized = json.dumps(control, sort_keys=True).lower()
     for token in ("postgres", "pgdata", "pg_dump", "database_url", "db migrate", "backup_postgres", "connector-committer"):
@@ -599,6 +602,16 @@ def validate_deployment(report: Report) -> None:
     environment = control.get("services", {}).get("control-plane", {}).get("environment", {})
     report.check(environment.get("MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED") == "false", "production publication gate is not false")
     report.check(environment.get("MY_DATA_HUB_MCP_WRITE_ENABLED") == "false", "remote MCP write gate is not false")
+    remote_mcp = control.get("services", {}).get("remote-mcp", {})
+    report.check(remote_mcp.get("profiles") == ["remote-mcp"], "remote MCP must remain an explicit opt-in profile")
+    report.check(
+        remote_mcp.get("environment", {}).get("MY_DATA_HUB_MCP_WRITE_ENABLED") == "false",
+        "remote MCP owner/operator writes are not fail-closed",
+    )
+    report.check(
+        remote_mcp.get("ports") == ["127.0.0.1:${MY_DATA_HUB_MCP_PORT:-8765}:8765"],
+        "remote MCP upstream must bind loopback only",
+    )
 
     legacy = (ROOT / "deploy/same-host/install.sh").read_text(encoding="utf-8")
     report.check("INSTALL_MY_DATA_HUB_SAME_HOST" in legacy and "exit 78" in legacy, "legacy same-host token is not hard-disabled")

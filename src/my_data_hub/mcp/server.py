@@ -354,11 +354,14 @@ def create_streamable_http_app(
 
 
 def serve(*, transport: str) -> None:
+    if transport == "streamable-http":
+        from my_data_hub.mcp.runtime import serve as serve_remote
+
+        serve_remote()
+        return
     settings = Settings.from_env()
     if transport != "stdio":
-        raise ConfigurationError(
-            "remote MCP requires injected control-ledger, resolver, broker and OAuth validator dependencies"
-        )
+        raise ConfigurationError(f"unsupported MCP transport: {transport}")
     create_server(settings).run(transport="stdio")
 
 

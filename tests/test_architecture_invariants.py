@@ -72,7 +72,7 @@ def test_owner_approved_architecture_values_are_constant() -> None:
 def test_production_control_profile_has_no_local_database_path() -> None:
     compose = load_yaml("compose.control-plane.yaml")
     assert compose["x-my-data-hub-profile"] == "production-lightweight-control-plane"
-    assert set(compose["services"]) == {"control-plane"}
+    assert set(compose["services"]) == {"control-plane", "remote-mcp"}
     assert not compose.get("volumes")
     serialized = json.dumps(compose, sort_keys=True).lower()
     for forbidden in (
@@ -88,6 +88,10 @@ def test_production_control_profile_has_no_local_database_path() -> None:
     environment = compose["services"]["control-plane"]["environment"]
     assert environment["MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED"] == "false"
     assert environment["MY_DATA_HUB_MCP_WRITE_ENABLED"] == "false"
+    remote_mcp = compose["services"]["remote-mcp"]
+    assert remote_mcp["profiles"] == ["remote-mcp"]
+    assert remote_mcp["environment"]["MY_DATA_HUB_MCP_WRITE_ENABLED"] == "false"
+    assert remote_mcp["ports"] == ["127.0.0.1:${MY_DATA_HUB_MCP_PORT:-8765}:8765"]
     installer = (ROOT / "deploy/control-plane/install.sh").read_text().lower()
     assert "compose.control-plane.yaml" in installer
     assert "database_url" not in installer

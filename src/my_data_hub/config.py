@@ -147,7 +147,8 @@ class Settings:
                 _csv(
                     os.getenv(
                         "MY_DATA_HUB_MCP_SCOPES",
-                        "hub:read,orchestrator:read,region-talk:read,migration:read",
+                        "platform:read,master:read,operation:read,checkpoint:read,"
+                        "embedding:read,provider:read,bloggers:read,data:read",
                     )
                 )
             ),
@@ -239,6 +240,15 @@ class Settings:
         if self.mcp_remote_enabled and self.mcp_auth_mode == "stdio-environment":
             raise ConfigurationError("remote MCP cannot use stdio-environment authentication")
         remote_read_scopes = {
+            "platform:read",
+            "master:read",
+            "operation:read",
+            "checkpoint:read",
+            "embedding:read",
+            "bloggers:read",
+            "data:read",
+            # Retained only for local compatibility with the pre-reset semantic
+            # catalog. Operational MCP tools use the explicit scopes above.
             "hub:read",
             "orchestrator:read",
             "region-talk:read",
@@ -246,11 +256,18 @@ class Settings:
             "connector:read",
             "provider:read",
         }
+        remote_write_scopes = {
+            "master:ensure",
+            "data:write",
+            "bloggers:write",
+            "provider:write",
+        }
         if self.mcp_remote_enabled and (
-            self.mcp_write_enabled or not self.mcp_scopes <= remote_read_scopes
+            (not self.mcp_write_enabled and not self.mcp_scopes <= remote_read_scopes)
+            or (self.mcp_write_enabled and not self.mcp_scopes <= remote_read_scopes | remote_write_scopes)
         ):
             raise ConfigurationError(
-                "R1 remote MCP is semantic read-only; write/operator/provider mutation scopes are forbidden"
+                "remote MCP scopes exceed the selected reader or guarded owner/operator profile"
             )
         if self.mcp_remote_enabled and self.mcp_auth_mode == "oauth":
             oauth_values = {
@@ -319,8 +336,9 @@ class Settings:
                 "remote network access requires the OAuth/TLS profile"
             )
         if self.mcp_write_enabled and not {
-            "hub:write",
-            "region-talk:write",
+            "data:write",
+            "bloggers:write",
+            "provider:write",
         }.intersection(self.mcp_scopes):
             raise ConfigurationError("MCP write mode requires an explicit write scope")
         if self.production_publish_enabled and self.environment not in {"prod", "production"}:
