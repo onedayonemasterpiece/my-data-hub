@@ -15,6 +15,7 @@ from my_data_hub.db.migrations import migrate
 from my_data_hub.master_runtime.contracts import MasterIdentity
 from my_data_hub.master_runtime.credentials import CredentialProvisioner
 from my_data_hub.master_runtime.database_gate import DatabaseGate
+from my_data_hub.workloads.bloggers.importer import BloggerSnapshotImporter
 
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE = "pgvector/pgvector:0.8.6-pg18-bookworm"
@@ -129,6 +130,15 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
                 expires_at=now + timedelta(minutes=4),
                 now=now,
             )
+            CredentialProvisioner(admin, gate).create(
+                principal="mdh_e2_migration_deadbeef",
+                password="migration-password-long-enough",
+                group="mdh_migration_operator",
+                identity=b,
+                credential_id=UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+                expires_at=now + timedelta(minutes=4),
+                now=now,
+            )
 
         # A remains connected and knows B's public epoch, but session_user is
         # immutably bound to epoch 1 and therefore remains fenced.
@@ -147,11 +157,88 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
                 "INSERT INTO sync.audit_event(actor_id,client_id,action,outcome) VALUES ('b','b','current','ok')"
             )
             current.commit()
+        migration_url = (
+            f"postgresql://mdh_e2_migration_deadbeef:migration-password-long-enough"
+            f"@127.0.0.1:{port}/postgres"
+        )
+        blogger_row = {
+            "record_id": "live-test-001",
+            "batch_id": "live-batch-001",
+            "list_order": 1,
+            "level": "regional",
+            "blogger_name": "Тестовый автор",
+            "segment": "культура",
+            "region_relation_status": "external",
+            "visit_period_text": "2025",
+            "locations_text": "Россия",
+            "confirmation_basis": "public profile",
+            "evidence_url": "https://example.test/evidence/live-test-001",
+            "telegram_url": "https://t.me/live_test_001",
+            "vk_public_url": None,
+            "vk_video_url": None,
+            "rutube_url": None,
+            "source_kind": "manual_external_confirmation",
+            "confirmation_status": "confirmed_external",
+            "pipeline_status": "stored_only",
+            "source_file_sha256": "a" * 64,
+            "ingested_at": "2026-08-03T13:30:00Z",
+            "updated_at": "2026-08-03T13:31:00Z",
+            "external_region_basis": None,
+            "external_region_evidence_url": None,
+            "submission_batch_ids_json": None,
+            "other_primary_url": None,
+            "social_links_type": None,
+            "evidence_type": None,
+        }
         with psycopg.connect(admin_url) as admin:
-            assert admin.execute("SELECT count(*) FROM sync.audit_event").fetchone()[0] == 2
+            project_id = admin.execute("SELECT project_id FROM hub.project WHERE slug='region-talk'").fetchone()[0]
+        with psycopg.connect(migration_url, autocommit=True) as migration:
+            migration.execute("SET ROLE mdh_migration_operator")
+            first_import = BloggerSnapshotImporter().import_rows(
+                migration,
+                project_id=project_id,
+                snapshot_at=datetime(2026, 8, 11, tzinfo=UTC),
+                expected_row_count=1,
+                rows=[blogger_row],
+                source_code_revision="fixture",
+            )
+            assert first_import.accounting_complete
+            assert not first_import.durable_complete
+            assert first_import.replayed_count == 0
+            replay = BloggerSnapshotImporter().import_rows(
+                migration,
+                project_id=project_id,
+                snapshot_at=datetime(2026, 8, 11, tzinfo=UTC),
+                expected_row_count=1,
+                rows=[blogger_row],
+                source_code_revision="fixture",
+            )
+            assert replay.replayed_count == 1
+            assert replay.canonical_revision == first_import.canonical_revision
+        with psycopg.connect(admin_url) as admin:
+            assert admin.execute("SELECT count(*) FROM sync.audit_event").fetchone()[0] == 3
+            assert admin.execute("SELECT count(*) FROM region_talk.bloggers_ru_v1").fetchone()[0] == 1
+            assert admin.execute(
+                "SELECT count(*) FROM sync.external_outbox "
+                "WHERE aggregate_type='blogger_import' AND effect_kind='verified_checkpoint_required'"
+            ).fetchone()[0] == 1
             state = admin.execute(
                 "SELECT highest_epoch,current_epoch,gate_state FROM master_control.epoch_state"
             ).fetchone()
             assert state == (2, 2, "open")
+            assert admin.execute(
+                "SELECT schema_revision FROM hub.canonical_state WHERE singleton"
+            ).fetchone()[0] == 12
+            assert admin.execute("SELECT count(*) FROM search.embedding_model").fetchone()[0] == 2
+            assert admin.execute(
+                "SELECT count(*) FROM pg_indexes WHERE schemaname='search' AND indexdef ILIKE '%hnsw%'"
+            ).fetchone()[0] == 0
+            assert admin.execute(
+                "SELECT has_table_privilege('mdh_mcp_reader','migration.raw_record','SELECT')"
+            ).fetchone()[0] is False
+            assert admin.execute(
+                "SELECT has_table_privilege('mdh_migration_operator','migration.raw_record','INSERT'), "
+                "has_table_privilege('mdh_migration_operator','migration.raw_record','UPDATE')"
+            ).fetchone() == (True, False)
     finally:
         subprocess.run(["docker", "rm", "--force", name], check=False, capture_output=True)

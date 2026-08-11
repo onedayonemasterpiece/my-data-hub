@@ -69,7 +69,7 @@ GRANT INSERT ON integration.batch, integration.batch_payload, integration.batch_
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA integration TO mdh_connector_intake;
 
 GRANT USAGE ON SCHEMA hub, analysis, orchestration, sync, region_talk, migration, joplin,
-    integration
+    integration, search
     TO mdh_mcp_reader;
 REVOKE INSERT, UPDATE, DELETE ON hub.canonical_state FROM mdh_mcp_reader, mdh_mcp_editor;
 
@@ -84,14 +84,30 @@ GRANT INSERT ON integration.daily_statistic, integration.batch_event,
     integration.watermark, integration.quarantine, sync.external_outbox
     TO mdh_canonical_committer;
 GRANT UPDATE ON integration.watermark TO mdh_canonical_committer;
+GRANT USAGE ON SCHEMA search TO mdh_canonical_committer;
+GRANT SELECT, INSERT, UPDATE ON search.document, search.embedding_job,
+    search.index_registry TO mdh_canonical_committer;
+GRANT SELECT, INSERT ON search.embedding_768, search.embedding_1024 TO mdh_canonical_committer;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA integration, sync TO mdh_canonical_committer;
 GRANT EXECUTE ON FUNCTION hub.advance_canonical_revision(bigint) TO mdh_canonical_committer;
-GRANT SELECT ON ALL TABLES IN SCHEMA hub, analysis, orchestration, sync, region_talk, migration, joplin
+GRANT SELECT ON ALL TABLES IN SCHEMA hub, analysis, orchestration, sync, region_talk, joplin
     TO mdh_mcp_reader;
+-- Raw migration payloads and exact artifact locators are migration-owner-only.
+-- Reader-visible migration evidence is an explicit sanitized accounting surface.
+GRANT SELECT ON migration.export_batch, migration.export_batch_kind,
+    migration.row_disposition, migration.reconciliation_run,
+    migration.reconciliation_finding, migration.row_accounting,
+    migration.batch_accounting TO mdh_mcp_reader;
+REVOKE ALL ON migration.raw_record, migration.export_file,
+    migration.legacy_identity_map, migration.cutover_receipt
+    FROM mdh_mcp_reader, mdh_mcp_editor;
 GRANT SELECT ON integration.connector, integration.data_product, integration.batch,
     integration.batch_event, integration.watermark, integration.quarantine, integration.receipt,
     integration.provider_resource, integration.provider_operation, integration.provider_event
     TO mdh_mcp_reader;
+GRANT SELECT ON search.document, search.embedding_model, search.embedding_job,
+    search.embedding_768, search.embedding_1024, search.index_registry,
+    search.embedding_coverage TO mdh_mcp_reader;
 GRANT USAGE ON SCHEMA auth TO mdh_authenticator;
 GRANT SELECT ON auth.oauth_revocation TO mdh_authenticator;
 -- Converge installations that applied an earlier draft which exposed the
@@ -105,13 +121,24 @@ GRANT SELECT ON recovery.evidence TO mdh_mcp_editor;
 GRANT SELECT ON sync.checkpoint TO mdh_mcp_editor;
 GRANT SELECT, INSERT ON operator_control.preview_receipt,
     operator_control.apply_receipt TO mdh_mcp_editor;
-GRANT USAGE ON SCHEMA migration, hub TO mdh_migration_operator;
+GRANT USAGE ON SCHEMA migration, hub, region_talk, sync TO mdh_migration_operator;
 GRANT SELECT ON ALL TABLES IN SCHEMA migration TO mdh_migration_operator;
 GRANT SELECT ON hub.canonical_state, hub.project TO mdh_migration_operator;
-GRANT INSERT, UPDATE ON migration.export_batch, migration.export_batch_kind,
+GRANT SELECT, INSERT ON hub.actor, hub.external_account, hub.project_actor,
+    hub.provenance_event, region_talk.blogger_profile,
+    migration.duplicate_group, migration.duplicate_group_member
+    TO mdh_migration_operator;
+GRANT INSERT ON sync.external_outbox, sync.audit_event TO mdh_migration_operator;
+GRANT EXECUTE ON FUNCTION hub.advance_canonical_revision(bigint) TO mdh_migration_operator;
+GRANT INSERT ON migration.export_batch, migration.export_batch_kind,
     migration.export_file, migration.raw_record, migration.row_disposition,
     migration.legacy_identity_map, migration.reconciliation_run,
     migration.reconciliation_finding TO mdh_migration_operator;
+GRANT UPDATE ON migration.export_batch, migration.row_disposition,
+    migration.reconciliation_run, migration.reconciliation_finding
+    TO mdh_migration_operator;
+REVOKE UPDATE, DELETE ON migration.export_batch_kind, migration.export_file,
+    migration.raw_record, migration.legacy_identity_map FROM mdh_migration_operator;
 REVOKE INSERT, UPDATE, DELETE ON migration.cutover_receipt FROM mdh_migration_operator;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA migration TO mdh_migration_operator;
 
@@ -121,12 +148,12 @@ GRANT pg_read_all_data TO mdh_backup;
 -- upon at runtime. Enumerate the current backup surface and re-run this contract after
 -- every owner-scoped migration; new relations remain fail-closed until then.
 GRANT USAGE ON SCHEMA hub_meta, hub, analysis, orchestration, sync, region_talk,
-    migration, joplin, integration, recovery, operator_control, auth TO mdh_backup;
+    migration, joplin, integration, recovery, operator_control, auth, search TO mdh_backup;
 GRANT SELECT ON ALL TABLES IN SCHEMA hub_meta, hub, analysis, orchestration, sync,
-    region_talk, migration, joplin, integration, recovery, operator_control, auth
+    region_talk, migration, joplin, integration, recovery, operator_control, auth, search
     TO mdh_backup;
 GRANT SELECT ON ALL SEQUENCES IN SCHEMA hub_meta, hub, analysis, orchestration, sync,
-    region_talk, migration, joplin, integration, recovery, operator_control, auth
+    region_talk, migration, joplin, integration, recovery, operator_control, auth, search
     TO mdh_backup;
 GRANT pg_monitor TO mdh_monitoring;
 GRANT USAGE ON SCHEMA hub, orchestration, integration, recovery, sync TO mdh_monitoring;
