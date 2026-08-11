@@ -190,6 +190,8 @@ def test_single_adapter_launches_both_workers_and_imports_exact_artifacts(
         return SimpleNamespace(state=KernelState.COMPLETE)
 
     def download(run, *, destination, **kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["file_name"] == "embedding-result.json"
+        assert kwargs["max_bytes"] == 32 * 1024 * 1024
         jobs = jobs_by_task[run.task_run_id]
         model = jobs[0].model
         now = datetime(2026, 8, 11, tzinfo=UTC)
