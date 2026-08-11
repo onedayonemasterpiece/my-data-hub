@@ -59,6 +59,8 @@ from .contracts import (
 )
 from .retry import BoundedRetry, RetryPolicy, classify_failure
 
+MAX_EXACT_OUTPUT_PROVIDER_LOG_BYTES = 1024 * 1024
+
 _CONTROLLED_CLASSES = {
     ControlClass.ORCHESTRATOR_PROTECTED,
     ControlClass.MCP_MANAGED,
@@ -1223,11 +1225,23 @@ class KaggleProviderAdapter:
                 ),
             )
             entries = _tree_entries(destination)
-            if len(entries) != 1 or entries[0]["path"] != file_name:
+            kernel_slug = run.provider_ref.split("/", 1)[1]
+            provider_log_name = f"{kernel_slug}.log"
+            paths = {str(entry["path"]) for entry in entries}
+            if file_name not in paths or paths - {file_name, provider_log_name}:
                 raise KaggleIdentityError("Kaggle exact output file selection returned a missing or extra path")
-            if int(entries[0]["byte_size"]) > max_bytes:
+            receipt_entry = next(entry for entry in entries if entry["path"] == file_name)
+            if int(receipt_entry["byte_size"]) > max_bytes:
                 raise KaggleContractError("Kaggle exact output file exceeds its bounded size")
-            output_sha = sha256_value({"files": entries})
+            if provider_log_name in paths:
+                log_entry = next(entry for entry in entries if entry["path"] == provider_log_name)
+                if int(log_entry["byte_size"]) > MAX_EXACT_OUTPUT_PROVIDER_LOG_BYTES:
+                    raise KaggleContractError("Kaggle provider output log exceeds its bounded size")
+                (destination / provider_log_name).unlink()
+            remaining = _tree_entries(destination)
+            if len(remaining) != 1 or remaining[0]["path"] != file_name:
+                raise KaggleIdentityError("Kaggle exact output destination retained an unexpected path")
+            output_sha = sha256_value({"files": remaining})
         except Exception:
             shutil.rmtree(destination, ignore_errors=True)
             raise

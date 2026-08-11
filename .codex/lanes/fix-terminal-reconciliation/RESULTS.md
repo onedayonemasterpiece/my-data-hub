@@ -62,9 +62,14 @@ commit-then-lost HTTP response replay draining the durable RuntimeClient spool.
   the same official adapter through `download_exact_run_output_file`, which passes the
   anchored pattern `^my\-data\-hub\-master\-terminal\.json$` to Kaggle
   `kernels_output`, fences the exact numeric run/source before and after, and requires the
-  destination to contain exactly one top-level regular non-symlink file no larger than
-  256 KiB. Missing output or an API that ignores the pattern fails closed; there is no
-  fallback that could copy PGDATA/checkpoints/business bytes to the devstand.
+  final destination to contain exactly one top-level regular non-symlink file no larger
+  than 256 KiB. Pinned Kaggle 2.2.4 also writes `<kernel-slug>.log` independently of the
+  pattern; the adapter permits only that deterministic extra path, bounds it to 1 MiB,
+  and unlinks it before returning. Any other path, missing receipt, oversized receipt/log,
+  or API that ignores the pattern fails closed; there is no broad-output fallback.
+  Kaggle 2.2.4 buffers the exact matched receipt before the post-download 256 KiB check;
+  this is a recorded SDK residual, bounded by the producer contract and rejected locally
+  before parsing. A realistic nonempty-provider-log test covers the pinned behavior.
 - Before projecting recovered lifecycle state, the coordinator writes an idempotent
   append-only audit receipt containing only provider status, exact identities,
   checkpoint/output hashes, and the four event IDs/body hashes. Runtime event bodies are
@@ -77,5 +82,5 @@ commit-then-lost HTTP response replay draining the durable RuntimeClient spool.
   or missing terminal evidence still fails.
 
 Follow-up validation: focused provider/control tests pass (37 tests); full `pytest -q`
-passes with two existing skips; compileall, repository validation (2,867 checks), full
-Ruff, and `git diff --check` pass.
+passes with one remaining opt-in skip when pinned Kaggle 2.2.4 is installed; compileall,
+repository validation (2,867 checks), full Ruff, and `git diff --check` pass.

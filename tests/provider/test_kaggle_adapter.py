@@ -14,6 +14,7 @@ from my_data_hub.providers import BoundedInventory, ControlClass, ProviderKind, 
 from my_data_hub.providers.kaggle import (
     RUN_RECEIPT_NAME,
     EffectOutcome,
+    KaggleContractError,
     KaggleIdentityError,
     KagglePolicyError,
     KaggleProviderAdapter,
@@ -86,6 +87,7 @@ class FakeKaggleApi:
         self.calls: list[tuple[object, ...]] = []
         self.output_file_patterns: list[str | None] = []
         self.ignore_output_file_pattern = False
+        self.output_logs: dict[str, bytes] = {}
 
     def authenticate(self) -> None:
         self.calls.append(("authenticate",))
@@ -256,6 +258,9 @@ class FakeKaggleApi:
         if file_pattern is not None and not self.ignore_output_file_pattern:
             outputs = {name: body for name, body in outputs.items() if re.fullmatch(file_pattern, name)}
         write_tree(Path(path), outputs)
+        provider_log = self.output_logs.get(kernel)
+        if provider_log:
+            (Path(path) / f"{kernel.split('/', 1)[1]}.log").write_bytes(provider_log)
         return [str(Path(path) / name) for name in outputs], ""
 
     def kernels_delete(self, kernel: str, no_confirm: bool = False) -> None:
@@ -623,6 +628,7 @@ def test_exact_single_output_file_uses_anchored_pattern_and_never_downloads_broa
         terminal_name: b'{"status":"succeeded"}',
         "private-business-bytes.bin": b"must never reach the devstand",
     }
+    api.output_logs[pushed.run.provider_ref] = b"normal nonempty provider log"
 
     receipt = client.download_exact_run_output_file(
         pushed.run,
@@ -675,6 +681,18 @@ def test_exact_single_output_file_fails_closed_when_missing_or_api_ignores_patte
     assert not destination.exists()
 
     api.outputs[pushed.run.provider_ref]["my-data-hub-master-terminal.json"] = b"{}"
+    api.ignore_output_file_pattern = False
+    api.output_logs[pushed.run.provider_ref] = b"x" * (1024 * 1024 + 1)
+    with pytest.raises(KaggleContractError, match="provider output log exceeds"):
+        client.download_exact_run_output_file(
+            pushed.run,
+            destination=destination,
+            file_name="my-data-hub-master-terminal.json",
+            max_bytes=256 * 1024,
+        )
+    assert not destination.exists()
+
+    api.output_logs[pushed.run.provider_ref] = b""
     api.ignore_output_file_pattern = True
     with pytest.raises(KaggleIdentityError, match="missing or extra"):
         client.download_exact_run_output_file(
