@@ -36,10 +36,12 @@ from my_data_hub.providers.kaggle import (
     KaggleKernelRunIdentity,
     MetadataHttpResponse,
     MutationAction,
+    PollPolicy,
     ProviderEffectReceipt,
     TaskResourceClaim,
 )
 from my_data_hub.providers.models import ControlClass, ProviderFingerprint, ProviderKind
+from my_data_hub.runtime_sdk import CHECKPOINT_VERIFIER_TIMEOUT_SECONDS
 
 NOW = datetime(2026, 8, 11, tzinfo=UTC)
 RUN_ID = UUID("11111111-1111-4111-8111-111111111111")
@@ -253,6 +255,33 @@ def test_verifier_launch_binds_exact_dataset_version_and_typed_restore_receipt(
     assert adapter.dataset_sources == ("owner/private-checkpoints/7",)
     assert receipt["provider_run_ref"] == "owner/checkpoint-verifier/4"
     assert receipt["checkpoint_id"] == str(CHECKPOINT_ID)
+
+
+def test_verifier_rejects_runtime_or_polling_beyond_checkpoint_attempt_allocation(
+    kaggle_working: Path,
+) -> None:
+    notebook = json.dumps({"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}).encode()
+    with pytest.raises(ValueError, match="timeout exceeds"):
+        KaggleCheckpointVerifierAssets(
+            notebook_ref="owner/checkpoint-verifier",
+            notebook_source=notebook,
+            timeout_seconds=CHECKPOINT_VERIFIER_TIMEOUT_SECONDS + 1,
+        )
+
+    output_root = kaggle_working / "bounded-verifier-output"
+    output_root.mkdir()
+    with pytest.raises(ValueError, match="polling exceeds"):
+        KaggleCheckpointRestoreVerifier(
+            object(),  # type: ignore[arg-type]
+            KaggleCheckpointVerifierAssets(
+                notebook_ref="owner/checkpoint-verifier",
+                notebook_source=notebook,
+            ),
+            output_directory=output_root,
+            operation_id=UUID("66666666-6666-4666-8666-666666666666"),
+            authorization_task_id=ATTEMPT_ID,
+            poll_policy=PollPolicy(timeout_seconds=CHECKPOINT_VERIFIER_TIMEOUT_SECONDS + 1),
+        )
 
 
 def test_verifier_retry_reconciles_deterministic_run_without_second_push(

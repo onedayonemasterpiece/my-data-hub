@@ -15,7 +15,20 @@ MAX_NOTEBOOK_PROCESS_SECONDS = KAGGLE_PROVIDER_TIMEOUT_SECONDS - MIN_PROCESS_EXI
 # an already-started third-party call can be interrupted at the deadline.  The
 # full reserve admits at most two attempts; each attempt must independently
 # have its whole allocation left before it may start or resume publication.
-# Provider/archive/verifier stage maxima must fit within one attempt allocation.
-CHECKPOINT_ATTEMPT_BUDGET_SECONDS = 5_400
+#
+# One production attempt is bounded by two sequential archive commands, one
+# independently scheduled verifier run, and a conservative allocation for the
+# remaining provider/control-plane upload, readback, and metadata calls.  Keep
+# this arithmetic explicit: changing a component without changing the total is
+# an architecture-contract failure, not an innocuous timeout tweak.
+CHECKPOINT_ARCHIVE_COMMAND_COUNT = 2
+CHECKPOINT_ARCHIVE_COMMAND_TIMEOUT_SECONDS = 1_200
+CHECKPOINT_VERIFIER_TIMEOUT_SECONDS = 1_800
+CHECKPOINT_PROVIDER_IO_BUDGET_SECONDS = 1_200
+CHECKPOINT_ATTEMPT_BUDGET_SECONDS = (
+    CHECKPOINT_ARCHIVE_COMMAND_COUNT * CHECKPOINT_ARCHIVE_COMMAND_TIMEOUT_SECONDS
+    + CHECKPOINT_VERIFIER_TIMEOUT_SECONDS
+    + CHECKPOINT_PROVIDER_IO_BUDGET_SECONDS
+)
 MIN_CHECKPOINT_RESERVE_SECONDS = 2 * CHECKPOINT_ATTEMPT_BUDGET_SECONDS
 CHECKPOINT_TRANSITION_GUARD_SECONDS = 60

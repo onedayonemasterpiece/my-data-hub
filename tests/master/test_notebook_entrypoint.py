@@ -25,8 +25,12 @@ from my_data_hub.master_runtime.notebook_entrypoint import (
     main,
 )
 from my_data_hub.runtime_sdk import (
+    CHECKPOINT_ARCHIVE_COMMAND_COUNT,
+    CHECKPOINT_ARCHIVE_COMMAND_TIMEOUT_SECONDS,
     CHECKPOINT_ATTEMPT_BUDGET_SECONDS,
+    CHECKPOINT_PROVIDER_IO_BUDGET_SECONDS,
     CHECKPOINT_TRANSITION_GUARD_SECONDS,
+    CHECKPOINT_VERIFIER_TIMEOUT_SECONDS,
     KAGGLE_PROVIDER_TIMEOUT_SECONDS,
     MIN_CHECKPOINT_RESERVE_SECONDS,
     RuntimeEventType,
@@ -87,6 +91,16 @@ def test_master_notebook_config_requires_exact_fields_and_source_binding(tmp_pat
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="provider timeout"):
         NotebookMasterConfig.load(path)
+
+
+def test_checkpoint_component_allocations_fit_one_admitted_attempt() -> None:
+    assert CHECKPOINT_ARCHIVE_COMMAND_COUNT == 2
+    assert CHECKPOINT_ATTEMPT_BUDGET_SECONDS == (
+        CHECKPOINT_ARCHIVE_COMMAND_COUNT * CHECKPOINT_ARCHIVE_COMMAND_TIMEOUT_SECONDS
+        + CHECKPOINT_VERIFIER_TIMEOUT_SECONDS
+        + CHECKPOINT_PROVIDER_IO_BUDGET_SECONDS
+    )
+    assert MIN_CHECKPOINT_RESERVE_SECONDS == 2 * CHECKPOINT_ATTEMPT_BUDGET_SECONDS
 
 
 def test_runtime_deadlines_are_fixed_at_process_entry_and_charge_boot_time(tmp_path: Path) -> None:

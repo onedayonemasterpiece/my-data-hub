@@ -42,6 +42,10 @@ from my_data_hub.providers.kaggle.control_journal import (
     RemoteControlLedgerKaggleJournal,
 )
 from my_data_hub.providers.models import ControlClass, ProviderKind
+from my_data_hub.runtime_sdk.lifetime import (
+    CHECKPOINT_ARCHIVE_COMMAND_TIMEOUT_SECONDS,
+    CHECKPOINT_VERIFIER_TIMEOUT_SECONDS,
+)
 
 from .archive import ArchiveCreator, BackupTools, write_probe_receipt
 from .manifest import (
@@ -252,7 +256,7 @@ class KaggleCheckpointCandidateBuilder:
         connection: Any,
         package_directory: Path,
         identity: CheckpointBuildIdentity,
-        timeout_seconds: int = 1800,
+        timeout_seconds: int = CHECKPOINT_ARCHIVE_COMMAND_TIMEOUT_SECONDS,
     ) -> tuple[Path, Path, CheckpointManifest]:
         _assert_kaggle_working_path(package_directory)
         if package_directory.exists():
@@ -605,13 +609,15 @@ class KaggleCheckpointVerifierAssets:
     code_file: str = "worker.ipynb"
     kernel_type: str = "notebook"
     language: str = "python"
-    timeout_seconds: int = 3600
+    timeout_seconds: int = CHECKPOINT_VERIFIER_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         if len(self.notebook_ref.split("/")) != 2 or not self.notebook_source:
             raise ValueError("checkpoint verifier notebook identity/source is incomplete")
         if self.kernel_type not in {"notebook", "script"}:
             raise ValueError("checkpoint verifier kernel type is invalid")
+        if not 60 <= self.timeout_seconds <= CHECKPOINT_VERIFIER_TIMEOUT_SECONDS:
+            raise ValueError("checkpoint verifier timeout exceeds its attempt allocation")
 
 
 class KaggleCheckpointRestoreVerifier:
@@ -639,7 +645,12 @@ class KaggleCheckpointRestoreVerifier:
         self.authorization_task_id = authorization_task_id
         self.clock = clock
         self.run_id_factory = run_id_factory
-        self.poll_policy = poll_policy or PollPolicy(timeout_seconds=3600, max_polls=240)
+        self.poll_policy = poll_policy or PollPolicy(
+            timeout_seconds=CHECKPOINT_VERIFIER_TIMEOUT_SECONDS,
+            max_polls=120,
+        )
+        if self.poll_policy.timeout_seconds > CHECKPOINT_VERIFIER_TIMEOUT_SECONDS:
+            raise ValueError("checkpoint verifier polling exceeds its attempt allocation")
 
     def verify_restore(
         self,
@@ -940,12 +951,14 @@ class RuntimeCheckpointCoordinator:
         connect: Any | None = None,
         clock: Any = lambda: datetime.now(UTC),
         checkpoint_id_factory: Any | None = None,
-        timeout_seconds: int = 1800,
+        timeout_seconds: int = CHECKPOINT_ARCHIVE_COMMAND_TIMEOUT_SECONDS,
     ) -> None:
         if not probe_relations or len(probe_relations) > 100:
             raise ValueError("runtime checkpoint probe relation set is invalid")
         if not source_identity:
             raise ValueError("runtime checkpoint source identity is required")
+        if not 60 <= timeout_seconds <= CHECKPOINT_ARCHIVE_COMMAND_TIMEOUT_SECONDS:
+            raise ValueError("checkpoint archive timeout exceeds its attempt allocation")
         if connect is None:
             import psycopg
 
@@ -1186,6 +1199,7 @@ def build_runtime_checkpoint_coordinator_from_environment(
         KaggleCheckpointVerifierAssets(
             notebook_ref=verifier_ref,
             notebook_source=verifier_source,
+            timeout_seconds=CHECKPOINT_VERIFIER_TIMEOUT_SECONDS,
         ),
         output_directory=output_directory,
         operation_id=operation_id,
@@ -1210,6 +1224,7 @@ def build_runtime_checkpoint_coordinator_from_environment(
         probe_relations=probe_relations,
         source_identity=_required_environment("MY_DATA_HUB_SOURCE_IDENTITY"),
         claim_source=journal,
+        timeout_seconds=CHECKPOINT_ARCHIVE_COMMAND_TIMEOUT_SECONDS,
     )
 
 
