@@ -69,6 +69,8 @@ jobs:
           MY_DATA_HUB_DEPLOY_EVIDENCE_JSON: ${{ inputs.deployment_evidence_receipt }}
           MY_DATA_HUB_DEPLOY_EVIDENCE_KEY_ID: ${{ inputs.deployment_evidence_key_id }}
           MY_DATA_HUB_DEPLOY_EVIDENCE_PUBLIC_KEY_PEM: ${{ vars.MY_DATA_HUB_DEPLOY_EVIDENCE_PUBLIC_KEY_PEM }}
+          MY_DATA_HUB_EXPECTED_DEPLOY_SOURCE_TREE_SHA256: ${{ vars.MY_DATA_HUB_EXPECTED_DEPLOY_SOURCE_TREE_SHA256 }}
+          MY_DATA_HUB_EXPECTED_DEPLOY_SERVICE_IMAGE_IDS_JSON: ${{ vars.MY_DATA_HUB_EXPECTED_DEPLOY_SERVICE_IMAGE_IDS_JSON }}
         run: >-
           python trusted/scripts/verify_post_deploy.py
           --cold-start-timeout-seconds "${{ inputs.cold_start_timeout_seconds }}"

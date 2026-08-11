@@ -39,6 +39,12 @@ unless all of these facts are observed:
 - a later collection sees a different kernel boot ID, a kernel boot time after the
   prepared gate, the enabled/active unit and the exact three healthy services.
 
+The current signed `my-data-hub-deployment-evidence.v2` receipt records both the
+pre-reboot and post-reboot boot-ID hashes. The validator requires them to be distinct and
+can bind each observed per-service immutable image ID to an independently supplied
+expected image map. Historical v1 receipts remain verifiable, but do not contain the
+signed before/after boot pair and are therefore not accepted for FM20.
+
 Only hashes of host, boot and process identity are recorded. Environment values, command
 output, hostnames, raw process arguments, credentials, private keys, database URLs and
 production data are never written to state or receipt files.
@@ -68,8 +74,13 @@ openssl pkey \
 Store only the public PEM in the GitHub repository variable
 `MY_DATA_HUB_DEPLOY_EVIDENCE_PUBLIC_KEY_PEM`. Set the repository variable
 `MY_DATA_HUB_APPROVED_DEPLOY_COMMIT` to the exact reviewed default-branch merge commit
-before dispatching post-deploy acceptance. Rotate the key ID deliberately and supply the
-same non-secret ID to collection and workflow dispatch.
+before dispatching post-deploy acceptance. In the protected `devstand` Environment, also
+set `MY_DATA_HUB_EXPECTED_DEPLOY_SOURCE_TREE_SHA256` to the independently reviewed source
+manifest and `MY_DATA_HUB_EXPECTED_DEPLOY_SERVICE_IMAGE_IDS_JSON` to an exact three-key
+`control-plane`/`oauth-server`/`remote-mcp` image-ID map. These trusted values must come
+from the approved deployment inputs, not by copying mutable endpoint claims during
+verification. Rotate the key ID deliberately and supply the same non-secret ID to
+collection and workflow dispatch.
 
 ## Controlled process failure
 
@@ -115,7 +126,7 @@ python deploy/control-plane/collect_deployment_evidence.py \
   --source-root "$PWD" \
   --signing-key-file "$HOME/.local/state/my-data-hub-control-plane/secrets/deployment-evidence-ed25519.pem" \
   --key-id devstand-evidence-2026-08 \
-  --output "$HOME/.local/state/my-data-hub-control-plane/deployment-evidence.v1.json" \
+  --output "$HOME/.local/state/my-data-hub-control-plane/deployment-evidence.v2.json" \
   --ttl-seconds 3600
 ```
 
@@ -124,10 +135,11 @@ ID did not change, observations are stale or out of order, the release/source ha
 a running container differs from the one immutable image ID, the key is unsafe, or any
 DB-free/service/listener/unit gate fails.
 
-The receipt and its precursor are validated by
-`schemas/deployment-evidence.v1.schema.json` and
+The current receipt and its precursor are validated by
+`schemas/deployment-evidence.v2.schema.json` and
 `schemas/deployment-evidence-state.v1.schema.json`. The committed examples contain only
 synthetic hashes and a placeholder signature; they cannot authenticate a deployment.
+`schemas/deployment-evidence.v1.schema.json` is retained for historical receipts only.
 
 ## Dispatch post-deploy acceptance
 
@@ -144,11 +156,16 @@ default branch and require the repository's deployment approval policy before ad
 credentials. The workflow's default-branch and approved-merge gates are defense in depth,
 not a substitute for Environment protection.
 
-Supply the fresh signed JSON as `deployment_evidence_receipt`, its key ID as
+Supply the fresh signed v2 JSON as `deployment_evidence_receipt`, its key ID as
 `deployment_evidence_key_id`, and the exact deployed merge SHA as `expected_commit`. The
 remote verifier independently checks the signature, exact source/commit, equal
-source/release SHA-256 manifests, one immutable image ID for all three services, recovery
-ordering and every other receipt field before performing public acceptance.
+source/release SHA-256 manifests against the trusted expected source hash, exact expected
+per-service immutable image IDs, distinct signed before/after boot identities, recovery
+ordering and every other receipt field before performing public acceptance. The current
+workflow accepts v2 only; the v1 validator remains available solely for historical
+receipt inspection. The resulting remote report uses
+`my-data-hub-post-deploy-verification.v2`; its v1 schema/example are also retained as
+historical contracts.
 
 Do not describe a successful local command, schema-valid example or generated unsigned
 state as deployment proof. Archive only the signed receipt and the sanitized post-deploy

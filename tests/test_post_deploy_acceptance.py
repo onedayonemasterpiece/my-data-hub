@@ -17,6 +17,7 @@ from scripts.verify_post_deploy import (
     PublicEndpoint,
     main,
     validate_deployment_evidence,
+    validate_deployment_evidence_v2,
     verify_all,
     verify_dns_tls,
     verify_forbidden_public_ports,
@@ -31,9 +32,14 @@ NOW = datetime(2026, 8, 11, 4, 0, tzinfo=UTC)
 ENDPOINT = PublicEndpoint.parse("https://mcp-datahub.kenigevents.ru/mcp")
 
 
-def _evidence(private_key: Ed25519PrivateKey, **changes: object) -> str:
+def _evidence(private_key: Ed25519PrivateKey, *, v2: bool = False, **changes: object) -> str:
+    reboot_identity = (
+        {"before_boot_id_sha256": "3" * 64, "after_boot_id_sha256": "4" * 64}
+        if v2
+        else {"boot_id_sha256": "4" * 64}
+    )
     receipt: dict[str, object] = {
-        "schema_version": "my-data-hub-deployment-evidence.v1",
+        "schema_version": f"my-data-hub-deployment-evidence.v{2 if v2 else 1}",
         "source_identity": SOURCE,
         "deployed_commit": COMMIT,
         "source_tree_sha256": "8" * 64,
@@ -68,7 +74,7 @@ def _evidence(private_key: Ed25519PrivateKey, **changes: object) -> str:
             "reboot_autostart": {
                 "rebooted_at": (NOW - timedelta(minutes=3)).isoformat().replace("+00:00", "Z"),
                 "verified_at": (NOW - timedelta(minutes=2)).isoformat().replace("+00:00", "Z"),
-                "boot_id_sha256": "4" * 64,
+                **reboot_identity,
                 "systemd_unit": "my-data-hub-control-plane.service",
                 "unit_enabled": True,
                 "linger_enabled": True,
@@ -112,6 +118,90 @@ def test_signed_host_evidence_binds_identity_absence_and_recovery(
     assert result["process_kill_recovered"] is True
     assert result["reboot_autostart_verified"] is True
     assert len(str(result["evidence_sha256"])) == 64
+
+
+def test_v2_evidence_binds_exact_images_and_distinct_boots(
+    evidence_material: tuple[Ed25519PrivateKey, str, str],
+) -> None:
+    private_key, public_pem, _ = evidence_material
+    raw = _evidence(private_key, v2=True)
+    expected_images = {
+        "control-plane": "sha256:" + "9" * 64,
+        "oauth-server": "sha256:" + "9" * 64,
+        "remote-mcp": "sha256:" + "9" * 64,
+    }
+
+    result = validate_deployment_evidence_v2(
+        raw,
+        public_pem,
+        expected_commit=COMMIT,
+        expected_source_identity=SOURCE,
+        expected_key_id=KEY_ID,
+        expected_source_tree_sha256="8" * 64,
+        expected_service_image_ids=expected_images,
+        now=NOW,
+    )
+
+    assert result["before_boot_id_sha256"] == "3" * 64
+    assert result["after_boot_id_sha256"] == "4" * 64
+
+
+def test_v2_evidence_rejects_same_boot_or_wrong_expected_image(
+    evidence_material: tuple[Ed25519PrivateKey, str, str],
+) -> None:
+    private_key, public_pem, _ = evidence_material
+    expected_images = {
+        "control-plane": "sha256:" + "9" * 64,
+        "oauth-server": "sha256:" + "9" * 64,
+        "remote-mcp": "sha256:" + "9" * 64,
+    }
+    parsed = json.loads(_evidence(private_key, v2=True))
+    reboot = parsed["checks"]["reboot_autostart"]
+    reboot["after_boot_id_sha256"] = reboot["before_boot_id_sha256"]
+    parsed.pop("signature")
+    canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    parsed["signature"] = {
+        "algorithm": "Ed25519",
+        "key_id": KEY_ID,
+        "value": base64.urlsafe_b64encode(private_key.sign(canonical)).rstrip(b"=").decode(),
+    }
+    with pytest.raises(ValueError, match="reboot/autostart"):
+        validate_deployment_evidence_v2(
+            json.dumps(parsed),
+            public_pem,
+            expected_commit=COMMIT,
+            expected_source_identity=SOURCE,
+            expected_key_id=KEY_ID,
+            expected_source_tree_sha256="8" * 64,
+            expected_service_image_ids=expected_images,
+            now=NOW,
+        )
+
+    wrong_images = dict(expected_images)
+    wrong_images["remote-mcp"] = "sha256:" + "8" * 64
+    with pytest.raises(ValueError, match="image identities differ"):
+        validate_deployment_evidence_v2(
+            _evidence(private_key, v2=True),
+            public_pem,
+            expected_commit=COMMIT,
+            expected_source_identity=SOURCE,
+            expected_key_id=KEY_ID,
+            expected_source_tree_sha256="8" * 64,
+            expected_service_image_ids=wrong_images,
+            now=NOW,
+        )
+
+    with pytest.raises(ValueError, match="source tree differs"):
+        validate_deployment_evidence_v2(
+            _evidence(private_key, v2=True),
+            public_pem,
+            expected_commit=COMMIT,
+            expected_source_identity=SOURCE,
+            expected_key_id=KEY_ID,
+            expected_source_tree_sha256="7" * 64,
+            expected_service_image_ids=expected_images,
+            now=NOW,
+        )
 
 
 @pytest.mark.parametrize(
@@ -459,13 +549,18 @@ async def test_real_verify_all_shape_matches_committed_report_schema(
     evidence_material: tuple[Ed25519PrivateKey, str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, public_pem, raw = evidence_material
-    evidence = validate_deployment_evidence(
-        raw,
+    private_key, public_pem, _ = evidence_material
+    evidence = validate_deployment_evidence_v2(
+        _evidence(private_key, v2=True),
         public_pem,
         expected_commit=COMMIT,
         expected_source_identity=SOURCE,
         expected_key_id=KEY_ID,
+        expected_source_tree_sha256="8" * 64,
+        expected_service_image_ids={
+            service: "sha256:" + "9" * 64
+            for service in ("control-plane", "oauth-server", "remote-mcp")
+        },
         now=NOW,
     )
     monkeypatch.setattr(
@@ -524,7 +619,7 @@ async def test_real_verify_all_shape_matches_committed_report_schema(
         cold_start_timeout_seconds=30,
     )
     schema = json.loads(
-        Path("schemas/post-deploy-verification.v1.schema.json").read_text(encoding="utf-8")
+        Path("schemas/post-deploy-verification.v2.schema.json").read_text(encoding="utf-8")
     )
     errors = list(
         Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(report)
@@ -633,6 +728,8 @@ def test_post_deploy_workflow_uses_trusted_verifier_and_scopes_secrets() -> None
     assert "inputs.endpoint" not in workflow
     assert "MY_DATA_HUB_DEPLOY_EVIDENCE_JSON" in workflow
     assert "MY_DATA_HUB_DEPLOY_EVIDENCE_PUBLIC_KEY_PEM" in workflow
+    assert "MY_DATA_HUB_EXPECTED_DEPLOY_SOURCE_TREE_SHA256" in workflow
+    assert "MY_DATA_HUB_EXPECTED_DEPLOY_SERVICE_IMAGE_IDS_JSON" in workflow
     assert "post-deploy-verification.json" in workflow
     job_environment = workflow.partition("    steps:")[0]
     assert "MY_DATA_HUB_MCP_CANARY_TOKEN" not in job_environment

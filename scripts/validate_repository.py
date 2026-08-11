@@ -126,11 +126,15 @@ def validate_json_and_schemas(report: Report) -> None:
         ),
         "workflow-receipt.v1.example.json": "workflow-receipt.v1.schema.json",
         "deployment-evidence.v1.example.json": "deployment-evidence.v1.schema.json",
+        "deployment-evidence.v2.example.json": "deployment-evidence.v2.schema.json",
         "deployment-evidence-state.v1.example.json": (
             "deployment-evidence-state.v1.schema.json"
         ),
         "post-deploy-verification.v1.example.json": (
             "post-deploy-verification.v1.schema.json"
+        ),
+        "post-deploy-verification.v2.example.json": (
+            "post-deploy-verification.v2.schema.json"
         ),
         "operational-mvp-acceptance-receipt.v1.example.json": (
             "operational-mvp-acceptance-receipt.v1.schema.json"

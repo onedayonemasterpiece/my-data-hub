@@ -14,6 +14,7 @@ import re
 import socket
 import ssl
 import sys
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -147,7 +148,64 @@ def validate_deployment_evidence(
     now: datetime | None = None,
     max_age_seconds: int = 86_400,
 ) -> dict[str, object]:
-    """Verify one fresh, signed and sanitized host-local deployment receipt."""
+    """Verify one historical v1 host-local deployment receipt."""
+
+    return _validate_deployment_evidence(
+        raw_receipt,
+        public_key_pem,
+        expected_commit=expected_commit,
+        expected_source_identity=expected_source_identity,
+        expected_key_id=expected_key_id,
+        expected_schema_version="my-data-hub-deployment-evidence.v1",
+        expected_source_tree_sha256=None,
+        expected_service_image_ids=None,
+        now=now,
+        max_age_seconds=max_age_seconds,
+    )
+
+
+def validate_deployment_evidence_v2(
+    raw_receipt: str,
+    public_key_pem: str,
+    *,
+    expected_commit: str,
+    expected_source_identity: str,
+    expected_key_id: str,
+    expected_source_tree_sha256: str,
+    expected_service_image_ids: Mapping[str, str],
+    now: datetime | None = None,
+    max_age_seconds: int = 86_400,
+) -> dict[str, object]:
+    """Verify fresh v2 evidence with exact image and boot identity binding."""
+
+    return _validate_deployment_evidence(
+        raw_receipt,
+        public_key_pem,
+        expected_commit=expected_commit,
+        expected_source_identity=expected_source_identity,
+        expected_key_id=expected_key_id,
+        expected_schema_version="my-data-hub-deployment-evidence.v2",
+        expected_source_tree_sha256=expected_source_tree_sha256,
+        expected_service_image_ids=expected_service_image_ids,
+        now=now,
+        max_age_seconds=max_age_seconds,
+    )
+
+
+def _validate_deployment_evidence(
+    raw_receipt: str,
+    public_key_pem: str,
+    *,
+    expected_commit: str,
+    expected_source_identity: str,
+    expected_key_id: str,
+    expected_schema_version: str,
+    expected_source_tree_sha256: str | None,
+    expected_service_image_ids: Mapping[str, str] | None,
+    now: datetime | None,
+    max_age_seconds: int,
+) -> dict[str, object]:
+    """Shared signature, freshness, release and host recovery policy."""
 
     if not 300 <= max_age_seconds <= 604_800:
         raise ValueError("deployment evidence maximum age must be between 5 minutes and 7 days")
@@ -174,7 +232,7 @@ def validate_deployment_evidence(
         "root",
     )
     _reject_secret_material({key: value for key, value in receipt.items() if key != "signature"})
-    if receipt["schema_version"] != "my-data-hub-deployment-evidence.v1":
+    if receipt["schema_version"] != expected_schema_version:
         raise ValueError("deployment evidence schema version is unsupported")
     if receipt["deployed_commit"] != expected_commit:
         raise ValueError("deployment evidence commit differs from the requested deployment")
@@ -188,6 +246,14 @@ def validate_deployment_evidence(
         or receipt["source_tree_sha256"] != receipt["installed_release_tree_sha256"]
     ):
         raise ValueError("deployment evidence installed release differs from its source tree")
+    if (
+        expected_source_tree_sha256 is not None
+        and (
+            not _SHA256.fullmatch(expected_source_tree_sha256)
+            or receipt["source_tree_sha256"] != expected_source_tree_sha256
+        )
+    ):
+        raise ValueError("deployment evidence source tree differs from the requested deployment")
     if not isinstance(receipt["host_id_sha256"], str) or not _SHA256.fullmatch(receipt["host_id_sha256"]):
         raise ValueError("deployment evidence host identity must be a sanitized SHA-256 reference")
 
@@ -239,6 +305,17 @@ def validate_deployment_evidence(
         or len(set(image_ids.values())) != 1
     ):
         raise ValueError("deployment evidence does not bind the exact immutable service image")
+    if expected_service_image_ids is not None:
+        expected_images = dict(expected_service_image_ids)
+        if (
+            set(expected_images) != _SERVICES
+            or any(
+                not isinstance(value, str) or not _IMAGE_ID.fullmatch(value)
+                for value in expected_images.values()
+            )
+            or image_ids != expected_images
+        ):
+            raise ValueError("deployment evidence image identities differ from the requested deployment")
     if any(
         checks[name] is not False
         for name in ("database_process_present", "pgdata_present", "database_environment_present")
@@ -277,26 +354,39 @@ def validate_deployment_evidence(
     killed_at = _utc(process_kill["killed_at"], "process_kill.killed_at")
     recovered_at = _utc(process_kill["recovered_at"], "process_kill.recovered_at")
 
-    reboot = _exact_keys(
-        checks["reboot_autostart"],
-        {
-            "rebooted_at",
-            "verified_at",
-            "boot_id_sha256",
-            "systemd_unit",
-            "unit_enabled",
-            "linger_enabled",
-            "autostart_services",
-        },
-        "reboot_autostart",
-    )
+    reboot_keys = {
+        "rebooted_at",
+        "verified_at",
+        "systemd_unit",
+        "unit_enabled",
+        "linger_enabled",
+        "autostart_services",
+    }
+    if expected_schema_version == "my-data-hub-deployment-evidence.v2":
+        reboot_keys.update({"before_boot_id_sha256", "after_boot_id_sha256"})
+    else:
+        reboot_keys.add("boot_id_sha256")
+    reboot = _exact_keys(checks["reboot_autostart"], reboot_keys, "reboot_autostart")
+    if expected_schema_version == "my-data-hub-deployment-evidence.v2":
+        before_boot = reboot["before_boot_id_sha256"]
+        after_boot = reboot["after_boot_id_sha256"]
+        boot_identity_valid = (
+            isinstance(before_boot, str)
+            and isinstance(after_boot, str)
+            and _SHA256.fullmatch(before_boot) is not None
+            and _SHA256.fullmatch(after_boot) is not None
+            and before_boot != after_boot
+        )
+    else:
+        before_boot = None
+        after_boot = reboot["boot_id_sha256"]
+        boot_identity_valid = isinstance(after_boot, str) and _SHA256.fullmatch(after_boot) is not None
     if (
         reboot["systemd_unit"] != "my-data-hub-control-plane.service"
         or reboot["unit_enabled"] is not True
         or reboot["linger_enabled"] is not True
         or reboot["autostart_services"] != sorted(_SERVICES)
-        or not isinstance(reboot["boot_id_sha256"], str)
-        or not _SHA256.fullmatch(reboot["boot_id_sha256"])
+        or not boot_identity_valid
     ):
         raise ValueError("deployment evidence reboot/autostart receipt differs from policy")
     rebooted_at = _utc(reboot["rebooted_at"], "reboot_autostart.rebooted_at")
@@ -308,7 +398,7 @@ def validate_deployment_evidence(
         raise ValueError("deployment evidence recovery timestamps are out of order")
 
     canonical = _canonical_unsigned(receipt)
-    return {
+    result: dict[str, object] = {
         "verified": True,
         "schema_version": receipt["schema_version"],
         "source_identity": expected_source_identity,
@@ -323,6 +413,12 @@ def validate_deployment_evidence(
         "reboot_autostart_verified": True,
         "local_database_absent": True,
     }
+    if expected_schema_version == "my-data-hub-deployment-evidence.v2":
+        result.update(
+            before_boot_id_sha256=before_boot,
+            after_boot_id_sha256=after_boot,
+        )
+    return result
 
 
 def resolve_global_addresses(endpoint: PublicEndpoint) -> tuple[str, ...]:
@@ -523,7 +619,7 @@ async def verify_all(
         timeout=cold_start_timeout_seconds + 120,
     )
     return {
-        "schema_version": "my-data-hub-post-deploy-verification.v1",
+        "schema_version": "my-data-hub-post-deploy-verification.v2",
         "ok": True,
         "endpoint": endpoint.url,
         "expected_commit": expected_commit,
@@ -545,6 +641,22 @@ def _read_argument(path_value: str, environment_name: str) -> str:
     return os.getenv(environment_name, "")
 
 
+def _expected_service_image_ids(raw: str) -> dict[str, str]:
+    if not raw or len(raw.encode("utf-8")) > 2048:
+        raise ValueError("expected deployment image identities are absent or oversized")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("expected deployment image identities are invalid JSON") from exc
+    if (
+        not isinstance(parsed, dict)
+        or set(parsed) != _SERVICES
+        or any(not isinstance(value, str) or not _IMAGE_ID.fullmatch(value) for value in parsed.values())
+    ):
+        raise ValueError("expected deployment image identities differ from policy")
+    return parsed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", default=os.getenv("MY_DATA_HUB_MCP_CANARY_ENDPOINT", ""))
@@ -553,6 +665,14 @@ def main() -> int:
     parser.add_argument(
         "--expected-source-identity",
         default=os.getenv("MY_DATA_HUB_EXPECTED_SOURCE_IDENTITY", ""),
+    )
+    parser.add_argument(
+        "--expected-source-tree-sha256",
+        default=os.getenv("MY_DATA_HUB_EXPECTED_DEPLOY_SOURCE_TREE_SHA256", ""),
+    )
+    parser.add_argument(
+        "--expected-service-image-ids-json",
+        default=os.getenv("MY_DATA_HUB_EXPECTED_DEPLOY_SERVICE_IMAGE_IDS_JSON", ""),
     )
     parser.add_argument("--evidence-file", default="")
     parser.add_argument("--evidence-public-key-file", default="")
@@ -572,6 +692,9 @@ def main() -> int:
             raise ValueError("expected commit must be an exact lowercase Git SHA")
         if not _SOURCE_IDENTITY.fullmatch(args.expected_source_identity):
             raise ValueError("expected source identity is invalid")
+        if not _SHA256.fullmatch(args.expected_source_tree_sha256):
+            raise ValueError("expected source tree SHA-256 is invalid")
+        expected_image_ids = _expected_service_image_ids(args.expected_service_image_ids_json)
         if not _KEY_ID.fullmatch(args.expected_evidence_key_id):
             raise ValueError("expected deployment evidence key id is invalid")
         if not 30 <= args.cold_start_timeout_seconds <= 1800:
@@ -584,12 +707,14 @@ def main() -> int:
             args.evidence_public_key_file,
             "MY_DATA_HUB_DEPLOY_EVIDENCE_PUBLIC_KEY_PEM",
         )
-        evidence = validate_deployment_evidence(
+        evidence = validate_deployment_evidence_v2(
             raw_evidence,
             public_key_pem,
             expected_commit=args.expected_commit,
             expected_source_identity=args.expected_source_identity,
             expected_key_id=args.expected_evidence_key_id,
+            expected_source_tree_sha256=args.expected_source_tree_sha256,
+            expected_service_image_ids=expected_image_ids,
             max_age_seconds=args.max_evidence_age_seconds,
         )
         report = asyncio.run(

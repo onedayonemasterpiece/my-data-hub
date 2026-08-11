@@ -34,7 +34,7 @@ LOOPBACK_PORTS = [8080, 8765, 8780]
 UNIT = "my-data-hub-control-plane.service"
 PROJECT = "my-data-hub-control-plane"
 STATE_SCHEMA_VERSION = "my-data-hub-deployment-evidence-state.v1"
-RECEIPT_SCHEMA_VERSION = "my-data-hub-deployment-evidence.v1"
+RECEIPT_SCHEMA_VERSION = "my-data-hub-deployment-evidence.v2"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -851,7 +851,8 @@ def collect_and_sign(
             "reboot_autostart": {
                 "rebooted_at": _utc_text(current.booted_at),
                 "verified_at": _utc_text(now),
-                "boot_id_sha256": current.boot_id_sha256,
+                "before_boot_id_sha256": state["pre_reboot_boot_id_sha256"],
+                "after_boot_id_sha256": current.boot_id_sha256,
                 "systemd_unit": UNIT,
                 "unit_enabled": current.unit_enabled,
                 "linger_enabled": current.linger_enabled,

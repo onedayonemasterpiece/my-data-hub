@@ -26,7 +26,7 @@ from my_data_hub.control_plane.deployment_evidence import (
     exercise_process_kill,
     prepare_reboot,
 )
-from scripts.verify_post_deploy import validate_deployment_evidence
+from scripts.verify_post_deploy import validate_deployment_evidence_v2
 
 COMMIT = "a" * 40
 SOURCE = "onedayonemasterpiece/my-data-hub"
@@ -152,7 +152,7 @@ def test_process_kill_reboot_and_sign_are_observed_not_asserted(tmp_path: Path) 
         )
     )
     key_file.chmod(0o600)
-    output = tmp_path / "deployment-evidence.v1.json"
+    output = tmp_path / "deployment-evidence.v2.json"
     receipt = collect_and_sign(
         paths,
         NoCommands(),
@@ -172,14 +172,18 @@ def test_process_kill_reboot_and_sign_are_observed_not_asserted(tmp_path: Path) 
         serialization.Encoding.PEM,
         serialization.PublicFormat.SubjectPublicKeyInfo,
     ).decode()
-    verified = validate_deployment_evidence(
+    verified = validate_deployment_evidence_v2(
         output.read_text(encoding="utf-8"),
         public_pem,
         expected_commit=COMMIT,
         expected_source_identity=SOURCE,
         expected_key_id="devstand-evidence-2026-08",
+        expected_source_tree_sha256=TREE,
+        expected_service_image_ids={service: IMAGE for service in ("control-plane", "oauth-server", "remote-mcp")},
         now=NOW + timedelta(minutes=4),
     )
+    assert verified["before_boot_id_sha256"] == BEFORE_BOOT
+    assert verified["after_boot_id_sha256"] == AFTER_BOOT
     assert verified["service_image_ids"]["remote-mcp"] == IMAGE
     assert "private" not in output.read_text(encoding="utf-8").casefold()
 
@@ -354,7 +358,7 @@ def test_proc_scan_detects_postgres_without_exposing_command(tmp_path: Path) -> 
 
 def test_committed_evidence_examples_validate_and_contain_no_key_material() -> None:
     checker = FormatChecker()
-    for name in ("deployment-evidence.v1", "deployment-evidence-state.v1"):
+    for name in ("deployment-evidence.v1", "deployment-evidence.v2", "deployment-evidence-state.v1"):
         schema = json.loads(Path(f"schemas/{name}.schema.json").read_text(encoding="utf-8"))
         example_text = Path(f"examples/contracts/{name}.example.json").read_text(encoding="utf-8")
         example = json.loads(example_text)
