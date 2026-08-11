@@ -52,10 +52,13 @@ contains only the lightweight control ledger/process and no canonical rows.
   restore verifier Notebook, and advances metadata-only current/previous HEAD by
   compare-and-swap. A later master boots only from that exact verified HEAD.
   These statements describe tested code contracts, not a completed real checkpoint.
-- At integration commit `c177469`, local validation reports 2,850 repository
-  checks with zero errors, the full test suite is green, the opt-in disposable
-  PostgreSQL 18 fencing test passes separately, and hosted CI run `31453164971`
-  has both jobs green.
+- At integration commit `b6e2ba8`, local validation reports 2,866 repository
+  checks with zero errors, 510 tests pass with only the separately opt-in live
+  PostgreSQL test skipped, and that disposable PostgreSQL 18 fencing test passes
+  when explicitly enabled. The previous exact-head security review findings on
+  checkpoint ambiguity, callback recovery, provider lifetime, OAuth admission,
+  disabled clients, signing-key overlap and three-process autostart are remediated
+  in code and await a new exact-head review. This is not real-provider evidence.
 
 ## Exact external blocker
 
