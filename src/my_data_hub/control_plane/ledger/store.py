@@ -248,6 +248,13 @@ class ControlLedger:
             row = connection.execute("SELECT * FROM operations WHERE operation_id = ?", (operation_id,)).fetchone()
         return self._operation_from_row(row) if row else None
 
+    def get_operation_by_idempotency_key(self, idempotency_key: str) -> OperationRecord | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM operations WHERE idempotency_key = ?", (idempotency_key,)
+            ).fetchone()
+        return self._operation_from_row(row) if row else None
+
     def incomplete_operations(self, operation_kind: str | None = None) -> list[OperationRecord]:
         if operation_kind == "ensure_master":
             # ACTIVE masters still require provider observation.  A STOPPED

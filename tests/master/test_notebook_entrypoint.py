@@ -13,6 +13,7 @@ import pytest
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.master_runtime.contracts import BootSource, MasterIdentity
 from my_data_hub.master_runtime.notebook_entrypoint import (
+    BloggerReceiptDeliveryError,
     CallbackLeaseClosingError,
     CheckpointAdmissionError,
     CheckpointRetryStage,
@@ -40,6 +41,10 @@ from my_data_hub.runtime_sdk import (
     RetryPolicy,
     RuntimeClient,
     RuntimeEventType,
+)
+from my_data_hub.workloads.bloggers.master_stage import (
+    BloggerImportStageReceipt,
+    BloggerMigrationRequest,
 )
 
 
@@ -769,6 +774,153 @@ def test_run_master_suppresses_only_callback_lease_closure_after_exact_terminal_
             run_master(config, checkpoint_coordinator=_Coordinator(events), process_started_at=started_at)
     assert (working / "my-data-hub-master-terminal.json").is_file()
     assert events.count("checkpoint.publish") == 1
+
+
+def test_run_master_never_checkpoints_unacknowledged_blogger_import_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    working = tmp_path / "kaggle" / "working"
+    working.mkdir(parents=True)
+    monkeypatch.setenv("KAGGLE_WORKING_DIR", str(working))
+    for name, value in {
+        "MY_DATA_HUB_CALLBACK_URL": "https://mcp-datahub.kenigevents.ru/internal/runtime/events",
+        "MY_DATA_HUB_RUN_SECRET": "run-secret-long-enough",
+        "MY_DATA_HUB_POSTGRES_TLS_CERT": str(tmp_path / "tls.crt"),
+        "MY_DATA_HUB_POSTGRES_TLS_KEY": str(tmp_path / "tls.key"),
+        "MY_DATA_HUB_TUNNEL_IDENTITY_FILE": str(tmp_path / "tunnel.key"),
+        "MY_DATA_HUB_TUNNEL_KNOWN_HOSTS": str(tmp_path / "known_hosts"),
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    class Connection:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = Connection()
+
+    class Gate(_Gate):
+        def __init__(self, _connection) -> None:  # type: ignore[no-untyped-def]
+            super().__init__(events)
+
+        def activate(self, identity) -> None:  # type: ignore[no-untyped-def]
+            events.append("gate.activate")
+
+        def fence(self, identity, reason) -> None:  # type: ignore[no-untyped-def]
+            events.append(f"gate.fence:{reason}")
+
+    tunnel = _Process(events, "tunnel")
+    postgres = _Process(events, "postgres")
+
+    class Bootstrap:
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            self.announce_ready = kwargs["announce_ready"]
+
+        def run(self, request):  # type: ignore[no-untyped-def]
+            ready = SimpleNamespace(
+                lease_until=datetime.now(UTC) + timedelta(seconds=120),
+                event_payload=lambda: {"epoch": 1},
+            )
+            self.announce_ready(ready)
+            return ready
+
+    migration_request = BloggerMigrationRequest(
+        request_id=UUID("22222222-2222-4222-8222-222222222222"),
+        operation_id=UUID("33333333-3333-4333-8333-333333333333"),
+        project_id=UUID("44444444-4444-4444-8444-444444444444"),
+        snapshot_at=datetime(2026, 8, 10, tzinfo=UTC),
+        source_revision="b" * 40,
+    )
+    import_receipt = BloggerImportStageReceipt(
+        request_id=migration_request.request_id,
+        operation_id=migration_request.operation_id,
+        master_instance_id=IDENTITY.master_instance_id,
+        run_id=IDENTITY.run_id,
+        epoch=IDENTITY.epoch,
+        request_sha256=migration_request.request_sha256,
+        export_batch_id=UUID("55555555-5555-4555-8555-555555555555"),
+        row_count=266,
+        distinct_record_ids=266,
+        source_file_count=14,
+        dispositions={"imported": 266, "quarantined": 0},
+        record_id_set_sha256="a" * 64,
+        logical_sha256="b" * 64,
+        canonical_outcome_sha256="c" * 64,
+        actor_count=266,
+        account_count=210,
+        duplicate_group_count=0,
+        replayed_count=0,
+        canonical_revision=9,
+    )
+    config = NotebookMasterConfig(
+        master_instance_id=IDENTITY.master_instance_id,
+        run_id=IDENTITY.run_id,
+        attempt_id="attempt-1",
+        service_instance_id="service-1",
+        epoch=IDENTITY.epoch,
+        boot_source=BootSource.EMPTY_BASELINE,
+        checkpoint_directory=None,
+        lease_seconds=120,
+        postgres_bin=tmp_path,
+        postgres_port=15432,
+        tunnel_gateway_host="gateway.example.test",
+        tunnel_gateway_port=22,
+        tunnel_gateway_user="mdh-tunnel",
+        tunnel_remote_port=25432,
+        maximum_runtime_seconds=21_600,
+        checkpoint_reserve_seconds=10_800,
+        source_identity="owner/postgres-master",
+        source_version="1",
+    )
+
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint.RuntimeClient",
+        lambda **kwargs: _Runtime(events),
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint.PostgresBinaries.discover",
+        lambda path: object(),
+    )
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.PostgresSupervisor", lambda **kwargs: postgres)
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.TunnelSupervisor", lambda spec: tunnel)
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.MasterBootstrap", Bootstrap)
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.DatabaseGate", Gate)
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint.psycopg.connect",
+        lambda *args, **kwargs: connection,
+    )
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint._wait_for_activation", lambda *args: None)
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._register_reader_credential",
+        lambda **kwargs: ("reader", kwargs["expires_at"]),
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._claim_blogger_migration",
+        lambda **kwargs: migration_request,
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint.execute_blogger_migration_stage",
+        lambda *args, **kwargs: import_receipt,
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._post_blogger_runtime_receipt",
+        lambda **kwargs: (_ for _ in ()).throw(BloggerReceiptDeliveryError("persistent receipt outage")),
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._checkpoint_until_deadline",
+        lambda **kwargs: pytest.fail("unacknowledged blogger receipt must never be checkpointed"),
+    )
+
+    with pytest.raises(BloggerReceiptDeliveryError, match="persistent receipt outage"):
+        run_master(config, checkpoint_coordinator=_Coordinator(events), process_started_at=time.monotonic())
+
+    assert "checkpoint.publish" not in events
+    assert "gate.fence:blogger_import_receipt_unacknowledged" in events
+    assert events[-2:] == ["tunnel.stop", "postgres.stop"]
+    assert connection.closed is True
 
 
 def test_first_checkpoint_attempt_requires_its_conservative_admission_without_overrun_claim(

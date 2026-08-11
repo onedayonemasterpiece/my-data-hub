@@ -16,6 +16,7 @@ from my_data_hub.embeddings.production import (
     EmbeddingInterfacesUnavailable,
     EmbeddingProductionCapabilities,
     EmbeddingProductionConfig,
+    EmbeddingProductionError,
     LocalEmbeddingProductionControl,
     run_embedding_production_closure,
 )
@@ -94,8 +95,31 @@ def _blogger_receipt() -> dict[str, object]:
             "epoch": 8,
             "canonical_revision": imported.canonical_revision,
         },
-        "mcp_accounting": {},
+        "mcp_accounting": {
+            "export_batch_id": str(imported.export_batch_id),
+            "expected_row_count": 266,
+            "status": "accepted",
+            "logical_sha256": imported.logical_sha256,
+            "record_id_set_sha256": imported.record_id_set_sha256,
+            "canonical_outcome_sha256": imported.canonical_outcome_sha256,
+            "duplicate_groups_pending": 0,
+            "imported_canonical_revision": imported.canonical_revision,
+            "raw_count": 266,
+            "dispositioned_count": 266,
+            "undispositioned_count": 0,
+            "quarantined_count": 0,
+            "actor_count": 266,
+            "account_count": imported.account_count,
+            "checkpoint_required": True,
+        },
         "mcp_statistics": {"bloggers": 266},
+        "mcp_projection": {
+            "listed_bloggers": 266,
+            "get_found": True,
+            "provenance_events": 1,
+            "search_matches": 1,
+            "completed_retrievers": ["exact", "fts"],
+        },
     }
 
 
@@ -124,7 +148,7 @@ def _worker(asset_index: int) -> dict[str, object]:
         "provider_run_ref": f"owner/{asset.notebook_slug}/{number}",
         "provider_kernel_id": 100 + number,
         "source_version": number,
-        "source_sha256": f"{number}" * 64,
+        "source_sha256": asset.primary_source_sha256,
         "provider_status": "complete",
         "privacy": "private",
         "control_class": "orchestrator_protected",
@@ -300,6 +324,51 @@ def test_fake_full_closure_binds_workers_imports_checkpoint_restore_and_hybrid_s
     assert mcp.calls.index("embedding.production.capabilities") < mcp.calls.index("checkpoint.status")
 
 
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("source_sha256", "1" * 64),
+        ("provider_ref", "owner/wrong-worker"),
+    ],
+)
+def test_worker_receipt_must_bind_the_pinned_generated_asset(field: str, invalid: object) -> None:
+    control = FakeControl()
+    original = control.request_status
+
+    def altered(request_id: UUID) -> dict[str, object]:
+        value = original(request_id)
+        workers = value["workers"]
+        assert isinstance(workers, list) and isinstance(workers[0], dict)
+        workers[0][field] = invalid
+        return value
+
+    control.request_status = altered  # type: ignore[method-assign]
+    with pytest.raises(EmbeddingProductionError, match="pinned generated asset"):
+        run_embedding_production_closure(_config(), blogger_receipt=_blogger_receipt(), control=control, mcp=FakeMcp())
+
+
+@pytest.mark.parametrize(
+    ("path", "invalid"),
+    [
+        (("checkpoint", "exact_version_ref"), "owner/blogger-checkpoints/latest"),
+        (("checkpoint", "manifest_sha256"), "not-a-hash"),
+        (("mcp_projection",), None),
+    ],
+)
+def test_partial_blogger_receipt_is_rejected_before_request(path: tuple[str, ...], invalid: object) -> None:
+    receipt = _blogger_receipt()
+    if len(path) == 1:
+        receipt.pop(path[0])
+    else:
+        nested = receipt[path[0]]
+        assert isinstance(nested, dict)
+        nested[path[1]] = invalid
+    control = FakeControl()
+    with pytest.raises(EmbeddingProductionError):
+        run_embedding_production_closure(_config(), blogger_receipt=receipt, control=control, mcp=FakeMcp())
+    assert control.created == 0
+
+
 def test_cli_missing_modern_token_exits_78_before_reading_prerequisite(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -373,6 +442,17 @@ def test_cli_absent_live_capability_exits_78_before_mutating_request(
     assert main() == EXTERNAL_BLOCKED
     assert mutation_attempted is False
     assert not receipt.exists()
+
+
+def test_cli_rejects_bearer_token_in_process_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_final_embedding_closure.py", "run", "--mcp-token", "must-not-appear-in-argv"],
+    )
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
 
 
 @pytest.mark.parametrize(

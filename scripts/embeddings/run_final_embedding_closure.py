@@ -29,7 +29,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("run", choices=("run",))
     parser.add_argument("--control-url", default=os.getenv("MY_DATA_HUB_CONTROL_URL", LOCAL_CONTROL_URL))
     parser.add_argument("--mcp-url", default=os.getenv("MY_DATA_HUB_MCP_CANARY_ENDPOINT", CANONICAL_MCP_URL))
-    parser.add_argument("--mcp-token", default=os.getenv("MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN", ""))
     parser.add_argument("--idempotency-key", required=True)
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--blogger-receipt", type=Path, required=True)
@@ -59,7 +58,10 @@ def main() -> int:
         )
         control = LocalEmbeddingProductionControl(config)
         try:
-            mcp = StreamableHttpClosureMcp(args.mcp_url, args.mcp_token)
+            mcp = StreamableHttpClosureMcp(
+                args.mcp_url,
+                os.getenv("MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN", ""),
+            )
         except ValueError:
             return EXTERNAL_BLOCKED
         receipt = run_embedding_production_closure(

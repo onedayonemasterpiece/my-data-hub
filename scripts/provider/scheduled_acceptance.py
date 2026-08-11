@@ -771,7 +771,32 @@ async def _collect_operator_session(
         result = await session.call_tool(tool, arguments)  # type: ignore[attr-defined]
         if _result_is_error(result):
             raise RuntimeError(f"MCP {tool} returned an error")
-        results[key] = _structured_result(result)
+        initial = _structured_result(result)
+        if initial.get("accepted") is not True or initial.get("execution_supported") is not True:
+            results[key] = initial
+            continue
+        operation_id = initial.get("operation_id")
+        if not isinstance(operation_id, str) or not operation_id:
+            raise RuntimeError(f"MCP {tool} returned no durable operation identity")
+        timeout_seconds = int(arguments["timeout_seconds"])
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        terminal = dict(initial)
+        while asyncio.get_running_loop().time() < deadline:
+            status_result = await session.call_tool(  # type: ignore[attr-defined]
+                "operation.get", {"operation_id": operation_id}
+            )
+            if _result_is_error(status_result):
+                raise RuntimeError("MCP operation.get returned an error")
+            status = _structured_result(status_result)
+            if status.get("found") is not True:
+                raise RuntimeError("MCP operation.get lost an accepted durable operation")
+            terminal["state"] = status.get("state")
+            if terminal["state"] in {"DURABLE_COMPLETE", "FAILED", "FENCED", "ORPHANED"}:
+                break
+            await asyncio.sleep(
+                min(5.0, max(0.0, deadline - asyncio.get_running_loop().time()))
+            )
+        results[key] = terminal
     return results
 
 

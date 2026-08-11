@@ -221,14 +221,52 @@ class LedgerControlReader(ControlPlaneReader):
         request_key = str(arguments.get("idempotency_key", ""))
         if not 8 <= len(request_key) <= 200 or any(ord(char) < 32 for char in request_key):
             raise ValueError("acceptance request idempotency_key is invalid")
-        head = self.ledger.checkpoint_head("postgres-master")
-        if head is None or head.current_checkpoint_id is None:
-            raise ValueError("checkpoint HEAD is absent")
         target = "current"
         if tool == "checkpoint.restore.request":
             target = str(arguments.get("target", ""))
             if target not in {"current", "previous"}:
                 raise ValueError("restore target must be current or previous")
+        timeout = arguments.get("timeout_seconds")
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 60 <= timeout <= 3600:
+            raise ValueError("acceptance request timeout_seconds must be between 60 and 3600")
+        operation_kind = (
+            "checkpoint_restore_smoke" if tool == "checkpoint.restore.request" else "forced_master_rotation"
+        )
+        idempotency_key = f"scheduled-acceptance:{tool}:{request_key}"
+        existing = self.ledger.get_operation_by_idempotency_key(idempotency_key)
+        if existing is not None:
+            stored = existing.identity
+            replay_fields: dict[str, object] = {
+                "tool": tool,
+                "target": target,
+                "checkpoint_id": arguments.get("checkpoint_id"),
+                "exact_version_ref": arguments.get("exact_version_ref"),
+                "timeout_seconds": timeout,
+            }
+            if tool == "master.rotation.request":
+                replay_fields["expected_active_epoch"] = arguments.get("expected_active_epoch")
+                replay_fields["expected_canonical_revision"] = arguments.get("expected_canonical_revision")
+            if (
+                existing.operation_kind != operation_kind
+                or stored.get("principal") != principal.subject
+                or any(stored.get(key) != value for key, value in replay_fields.items())
+            ):
+                raise ValueError("acceptance request identity was reused for different intent")
+            return {
+                "accepted": True,
+                "duplicate": True,
+                "request_sha256": stored.get("request_sha256"),
+                "operation_id": existing.operation_id,
+                "state": existing.state,
+                "target": stored.get("target"),
+                "checkpoint_id": stored.get("checkpoint_id"),
+                "exact_version_ref": stored.get("exact_version_ref"),
+                "head_generation": stored.get("head_generation"),
+                "execution_supported": True,
+            }
+        head = self.ledger.checkpoint_head("postgres-master")
+        if head is None or head.current_checkpoint_id is None:
+            raise ValueError("checkpoint HEAD is absent")
         checkpoint_id = head.previous_checkpoint_id if target == "previous" else head.current_checkpoint_id
         if checkpoint_id is None:
             raise ValueError("requested checkpoint generation is absent")
@@ -248,9 +286,6 @@ class LedgerControlReader(ControlPlaneReader):
             source_operation = self.ledger.get_operation(str(candidate.get("operation_id", "")))
             source_identity = source_operation.identity if source_operation is not None else {}
             rotation_binding = (expected_epoch, source_operation, source_identity)
-        timeout = arguments.get("timeout_seconds")
-        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 60 <= timeout <= 3600:
-            raise ValueError("acceptance request timeout_seconds must be between 60 and 3600")
         intent = {
             "tool": tool,
             "target": target,
@@ -265,33 +300,6 @@ class LedgerControlReader(ControlPlaneReader):
         digest = hashlib.sha256(
             json.dumps(intent, sort_keys=True, separators=(",", ":")).encode() + b":" + request_key.encode()
         ).hexdigest()
-        operation_kind = (
-            "checkpoint_restore_smoke" if tool == "checkpoint.restore.request" else "forced_master_rotation"
-        )
-        idempotency_key = f"scheduled-acceptance:{tool}:{request_key}"
-        existing = self.ledger.get_operation(digest)
-        if existing is not None:
-            expected_intent_hash = hashlib.sha256(
-                json.dumps(intent, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-            ).hexdigest()
-            if (
-                existing.operation_kind != operation_kind
-                or existing.idempotency_key != idempotency_key
-                or existing.intent_hash != expected_intent_hash
-            ):
-                raise ValueError("acceptance request identity was reused for different intent")
-            return {
-                "accepted": True,
-                "duplicate": True,
-                "request_sha256": digest,
-                "operation_id": existing.operation_id,
-                "state": existing.state,
-                "target": target,
-                "checkpoint_id": checkpoint_id,
-                "exact_version_ref": exact_version,
-                "head_generation": head.generation,
-                "execution_supported": True,
-            }
         if tool == "master.rotation.request":
             assert rotation_binding is not None
             expected_epoch, source_operation, source_identity = rotation_binding

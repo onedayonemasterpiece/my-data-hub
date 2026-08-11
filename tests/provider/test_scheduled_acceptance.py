@@ -43,6 +43,47 @@ class SnakeCaseMCPSession:
         )
 
 
+class TerminalOperatorSession:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.initialized = False
+
+    async def initialize(self) -> None:
+        self.initialized = True
+
+    async def call_tool(self, name: str, arguments: dict[str, object]) -> object:
+        assert self.initialized
+        self.calls.append((name, arguments))
+        if name == "connector.coverage":
+            return SnakeCaseMCPResult({"available": True})
+        if name == "runtime.stale_epoch.probe":
+            return SnakeCaseMCPResult({"evaluated": True, "denied": True, "mutation_attempted": False})
+        if name == "provider.protected_resource.probe":
+            return SnakeCaseMCPResult({"evaluated": True, "denied": True, "mutation_attempted": False})
+        if name in {"checkpoint.restore.request", "master.rotation.request"}:
+            key = str(arguments["idempotency_key"])
+            return SnakeCaseMCPResult(
+                {
+                    "accepted": True,
+                    "duplicate": False,
+                    "execution_supported": True,
+                    "operation_id": f"operation:{key}",
+                    "state": "REQUESTED",
+                    "checkpoint_id": arguments["checkpoint_id"],
+                    "exact_version_ref": arguments["exact_version_ref"],
+                }
+            )
+        if name == "operation.get":
+            return SnakeCaseMCPResult(
+                {
+                    "found": True,
+                    "operation_id": arguments["operation_id"],
+                    "state": "DURABLE_COMPLETE",
+                }
+            )
+        raise AssertionError(name)
+
+
 @pytest.mark.asyncio
 async def test_live_mcp_collection_accepts_pinned_sdk_snake_case_result_fields() -> None:
     values = await acceptance._collect_mcp_session(SnakeCaseMCPSession())
@@ -55,9 +96,51 @@ async def test_live_mcp_collection_accepts_pinned_sdk_snake_case_result_fields()
 @pytest.mark.asyncio
 async def test_live_mcp_collection_rejects_pinned_sdk_snake_case_error() -> None:
     with pytest.raises(RuntimeError, match=r"checkpoint\.status returned an error"):
-        await acceptance._collect_mcp_session(
-            SnakeCaseMCPSession(error_tool="checkpoint.status")
-        )
+        await acceptance._collect_mcp_session(SnakeCaseMCPSession(error_tool="checkpoint.status"))
+
+
+@pytest.mark.asyncio
+async def test_operator_collection_sequences_and_awaits_each_durable_action() -> None:
+    session = TerminalOperatorSession()
+    snapshot = {
+        "master": {"master_epoch": 8},
+        "checkpoint": {
+            "current_checkpoint_id": "cp-current",
+            "current_exact_version_ref": "owner/checkpoints/8",
+            "previous_checkpoint_id": "cp-previous",
+            "previous_exact_version_ref": "owner/checkpoints/7",
+            "current": {
+                "source_state": "STOPPED",
+                "source_epoch": 7,
+                "canonical_revision": 11,
+            },
+        },
+        "provider": {"resources": [{"resource_ref": "owner/protected", "control_class": "orchestrator_protected"}]},
+    }
+
+    values = await acceptance._collect_operator_session(
+        session,
+        mode=acceptance.Mode.WEEKLY,
+        snapshot=snapshot,
+        workflow_run_id="workflow-123",
+    )
+
+    assert values["current_restore"]["state"] == "DURABLE_COMPLETE"
+    assert values["previous_restore"]["state"] == "DURABLE_COMPLETE"
+    assert values["rotation"]["state"] == "DURABLE_COMPLETE"
+    action_calls = [
+        name
+        for name, _arguments in session.calls
+        if name in {"checkpoint.restore.request", "master.rotation.request", "operation.get"}
+    ]
+    assert action_calls == [
+        "checkpoint.restore.request",
+        "operation.get",
+        "checkpoint.restore.request",
+        "operation.get",
+        "master.rotation.request",
+        "operation.get",
+    ]
 
 
 def complete_observations() -> acceptance.Observations:
@@ -167,10 +250,7 @@ def test_nightly_runs_observable_gates_and_blocks_only_missing_runtime_interface
     }
     assert all(values[name].outcome is acceptance.Outcome.PASS for name in expected_passes)
     assert values["connector_coverage"].outcome is acceptance.Outcome.PASS
-    assert (
-        values["bounded_cold_restore_request"].blocker_code
-        == "ISOLATED_RESTORE_OPERATION_CONSUMER_MISSING"
-    )
+    assert values["bounded_cold_restore_request"].blocker_code == "ISOLATED_RESTORE_OPERATION_CONSUMER_MISSING"
     assert values["stale_epoch_rejection"].outcome is acceptance.Outcome.PASS
     receipt = acceptance.build_receipt(
         mode=acceptance.Mode.NIGHTLY,
@@ -318,9 +398,7 @@ def test_registry_only_negative_probe_remains_blocked_without_real_admission_pat
         "blocker_code": "STALE_EPOCH_ADMISSION_PATH_UNAVAILABLE",
     }
 
-    check = acceptance._negative_policy_check(
-        observations, kind="stale_epoch", name="stale_epoch_rejection"
-    )
+    check = acceptance._negative_policy_check(observations, kind="stale_epoch", name="stale_epoch_rejection")
 
     assert check.outcome is acceptance.Outcome.BLOCKED
     assert check.blocker_code == "STALE_EPOCH_ADMISSION_PATH_UNAVAILABLE"
@@ -434,12 +512,6 @@ def test_workflows_execute_scheduled_runner_and_upload_its_receipts() -> None:
 
 def test_scheduled_receipt_schema_validates_sanitized_example() -> None:
     root = Path(__file__).resolve().parents[2]
-    schema = json.loads(
-        (root / "schemas/scheduled-acceptance-receipt.v1.schema.json").read_text()
-    )
-    example = json.loads(
-        (root / "examples/contracts/scheduled-acceptance-receipt.v1.example.json").read_text()
-    )
-    jsonschema.Draft202012Validator(
-        schema, format_checker=jsonschema.FormatChecker()
-    ).validate(example)
+    schema = json.loads((root / "schemas/scheduled-acceptance-receipt.v1.schema.json").read_text())
+    example = json.loads((root / "examples/contracts/scheduled-acceptance-receipt.v1.example.json").read_text())
+    jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(example)

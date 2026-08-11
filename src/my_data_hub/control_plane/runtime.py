@@ -26,6 +26,7 @@ from my_data_hub.providers.kaggle import (
     KaggleMasterLaunchAssets,
     KaggleMasterRuntimeProvider,
     KaggleProviderAdapter,
+    PollPolicy,
     derive_runtime_secret,
 )
 from my_data_hub.providers.kaggle.contracts import KaggleDatasetIdentity
@@ -45,7 +46,15 @@ class KaggleAcceptanceOperationExecutor:
     assets: KaggleMasterLaunchAssets
     output_root: Path
 
-    def restore(self, operation_id: str, candidate: dict[str, Any]) -> dict[str, Any]:
+    def restore(
+        self,
+        operation_id: str,
+        candidate: dict[str, Any],
+        *,
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        if not 60 <= timeout_seconds <= 1800:
+            raise MasterProviderUnavailable("checkpoint restore timeout is outside the verifier allocation")
         manifest_payload = candidate.get("manifest")
         package_sha = candidate.get("package_sha256")
         exact_ref = str(candidate.get("version_ref") or "")
@@ -85,11 +94,13 @@ class KaggleAcceptanceOperationExecutor:
             KaggleCheckpointVerifierAssets(
                 notebook_ref=self.assets.checkpoint_verifier_ref,
                 notebook_source=source,
+                timeout_seconds=timeout_seconds,
             ),
             output_directory=self.output_root,
             operation_id=uuid5(NAMESPACE_URL, f"acceptance:{operation_id}"),
             authorization_task_id=UUID(manifest.source_run_id),
             metadata_only_output=True,
+            poll_policy=PollPolicy(timeout_seconds=timeout_seconds, max_polls=120),
         )
         receipt = verifier.verify_restore(
             exact_version_ref=exact_ref,
@@ -288,7 +299,9 @@ class ControlPlaneMasterRuntime:
             return None
         operation = sorted(operations, key=lambda item: item.created_at)[0]
         timeout_seconds = int(operation.identity.get("timeout_seconds", 0))
-        if timeout_seconds < 60 or (self.ledger.clock.now() - operation.created_at).total_seconds() > timeout_seconds:
+        elapsed_seconds = (self.ledger.clock.now() - operation.created_at).total_seconds()
+        remaining_seconds = int(timeout_seconds - elapsed_seconds)
+        if timeout_seconds < 60 or remaining_seconds < 60:
             self.ledger.transition_operation(
                 operation.operation_id,
                 expected_state=operation.state,
@@ -342,7 +355,19 @@ class ControlPlaneMasterRuntime:
         if operation.operation_kind == "checkpoint_restore_smoke":
             if self.acceptance_executor is None:
                 raise MasterProviderUnavailable("restore provider is unavailable")
-            receipt = self.acceptance_executor.restore(operation.operation_id, candidate)
+            receipt = self.acceptance_executor.restore(
+                operation.operation_id,
+                candidate,
+                timeout_seconds=min(remaining_seconds, 1800),
+            )
+            if (self.ledger.clock.now() - operation.created_at).total_seconds() > timeout_seconds:
+                self.ledger.transition_operation(
+                    operation.operation_id,
+                    expected_state=operation.state,
+                    new_state="FAILED",
+                    metadata={"code": "ACCEPTANCE_OPERATION_TIMEOUT"},
+                )
+                return {"operation_id": operation.operation_id, "state": "FAILED"}
             self.ledger.transition_operation(
                 operation.operation_id,
                 expected_state=operation.state,

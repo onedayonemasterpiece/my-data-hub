@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from my_data_hub.control_plane.adapters import LedgerControlReader
+from my_data_hub.control_plane.clock import DeterministicClock
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.control_plane.runtime import ControlPlaneMasterRuntime
 from my_data_hub.mcp.oauth import AccessIdentity
@@ -132,9 +133,16 @@ def test_restore_request_is_exact_durable_and_idempotent_for_consumer(tmp_path: 
     assert operation is not None and operation.operation_kind == "checkpoint_restore_smoke"
 
     class RestoreExecutor:
-        def restore(self, operation_id: str, candidate: dict[str, object]) -> dict[str, object]:
+        def restore(
+            self,
+            operation_id: str,
+            candidate: dict[str, object],
+            *,
+            timeout_seconds: int,
+        ) -> dict[str, object]:
             assert operation_id == first["operation_id"]
             assert candidate["checkpoint_id"] == "cp-1"
+            assert 60 <= timeout_seconds <= 1200
             return {"ok": True, "checkpoint_id": "cp-1"}
 
     runtime = ControlPlaneMasterRuntime(
@@ -146,6 +154,51 @@ def test_restore_request_is_exact_durable_and_idempotent_for_consumer(tmp_path: 
     terminal = runtime.reconcile_acceptance_once()
     assert terminal == {"operation_id": first["operation_id"], "state": "DURABLE_COMPLETE"}
     assert ledger.incomplete_operations("checkpoint_restore_smoke") == []
+
+
+def test_restore_executor_overrun_is_failed_after_return(tmp_path: Path) -> None:
+    clock = DeterministicClock(datetime(2026, 8, 11, tzinfo=UTC))
+    ledger = ControlLedger(tmp_path / "control.sqlite3", clock=clock)
+    _checkpoint(ledger, "cp-1", None, 0)
+    ledger.record_acceptance_consumer_heartbeat(True)
+    request = LedgerControlReader(ledger).invoke_control(
+        "checkpoint.restore.request",
+        {
+            "idempotency_key": "workflow-timeout:current",
+            "target": "current",
+            "checkpoint_id": "cp-1",
+            "exact_version_ref": "owner/private-checkpoints/10",
+            "timeout_seconds": 1200,
+        },
+        _identity(),
+    )
+
+    class SlowRestoreExecutor:
+        def restore(
+            self,
+            operation_id: str,
+            candidate: dict[str, object],
+            *,
+            timeout_seconds: int,
+        ) -> dict[str, object]:
+            assert operation_id == request["operation_id"]
+            assert candidate["checkpoint_id"] == "cp-1"
+            assert timeout_seconds == 1200
+            clock.advance(1201)
+            return {"ok": True, "checkpoint_id": "cp-1"}
+
+    runtime = ControlPlaneMasterRuntime(
+        ledger,
+        MasterCoordinator(ledger, FakeKaggleRuntime()),
+        object(),  # type: ignore[arg-type]
+        SlowRestoreExecutor(),  # type: ignore[arg-type]
+    )
+
+    terminal = runtime.reconcile_acceptance_once()
+
+    assert terminal == {"operation_id": request["operation_id"], "state": "FAILED"}
+    operation = ledger.get_operation(str(request["operation_id"]))
+    assert operation is not None and operation.state == "FAILED"
 
 
 def test_rotation_requires_the_exact_source_master_to_be_stopped(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -169,6 +222,11 @@ def test_rotation_requires_the_exact_source_master_to_be_stopped(tmp_path: Path,
         ledger,
         "resolve_service",
         lambda _kind: SimpleNamespace(epoch=2, canonical_revision=9),
+    )
+    monkeypatch.setattr(
+        ledger,
+        "checkpoint_head",
+        lambda _kind: (_ for _ in ()).throw(AssertionError("duplicate replay must not read current HEAD")),
     )
     replay = reader.invoke_control("master.rotation.request", arguments, _identity())
     assert replay["operation_id"] == accepted["operation_id"]

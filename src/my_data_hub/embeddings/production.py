@@ -217,7 +217,31 @@ def _wait(deadline: float, interval: float, function: Any, predicate: Any) -> di
 
 
 def _validated_blogger_prerequisite(value: dict[str, Any]) -> tuple[BloggerImportStageReceipt, str, UUID]:
-    if value.get("schema_version") != "my-data-hub-blogger-closure.v1" or value.get("status") != "DURABLE_COMPLETE":
+    required_keys = {
+        "schema_version",
+        "receipt_id",
+        "status",
+        "started_at",
+        "completed_at",
+        "closure_idempotency_key_sha256",
+        "request_id",
+        "request_sha256",
+        "ensure_operation_id",
+        "rotation_operation_id",
+        "import_runtime",
+        "import_receipt",
+        "import_receipt_sha256",
+        "checkpoint",
+        "cold_restore",
+        "mcp_accounting",
+        "mcp_statistics",
+        "mcp_projection",
+    }
+    if (
+        set(value) != required_keys
+        or value.get("schema_version") != "my-data-hub-blogger-closure.v1"
+        or value.get("status") != "DURABLE_COMPLETE"
+    ):
         raise EmbeddingProductionError("verified FINAL-BLOGGER closure receipt is required")
     imported = BloggerImportStageReceipt.model_validate(value.get("import_receipt"))
     raw_import = canonical_json_bytes(imported.model_dump(mode="json"))
@@ -225,16 +249,82 @@ def _validated_blogger_prerequisite(value: dict[str, Any]) -> tuple[BloggerImpor
         raise EmbeddingProductionError("blogger import receipt hash is mismatched")
     checkpoint = value.get("checkpoint")
     cold_restore = value.get("cold_restore")
-    if not isinstance(checkpoint, dict) or not isinstance(cold_restore, dict):
+    import_runtime = value.get("import_runtime")
+    accounting = value.get("mcp_accounting")
+    statistics = value.get("mcp_statistics")
+    projection = value.get("mcp_projection")
+    if not all(
+        isinstance(item, dict)
+        for item in (checkpoint, cold_restore, import_runtime, accounting, statistics, projection)
+    ):
         raise EmbeddingProductionError("blogger checkpoint/cold-restore evidence is absent")
+    assert isinstance(checkpoint, dict) and isinstance(cold_restore, dict)
+    assert isinstance(import_runtime, dict) and isinstance(accounting, dict)
+    assert isinstance(statistics, dict) and isinstance(projection, dict)
+    expected_accounting = {
+        "export_batch_id": str(imported.export_batch_id),
+        "expected_row_count": EXPECTED_BLOGGER_ROWS,
+        "status": "accepted",
+        "logical_sha256": imported.logical_sha256,
+        "record_id_set_sha256": imported.record_id_set_sha256,
+        "canonical_outcome_sha256": imported.canonical_outcome_sha256,
+        "duplicate_groups_pending": 0,
+        "imported_canonical_revision": imported.canonical_revision,
+        "raw_count": EXPECTED_BLOGGER_ROWS,
+        "dispositioned_count": EXPECTED_BLOGGER_ROWS,
+        "undispositioned_count": 0,
+        "quarantined_count": 0,
+        "actor_count": EXPECTED_BLOGGER_ROWS,
+        "account_count": imported.account_count,
+        "checkpoint_required": True,
+    }
     if (
-        cold_restore.get("canonical_revision") != imported.canonical_revision
+        set(checkpoint) != {"generation", "checkpoint_id", "exact_version_ref", "manifest_sha256"}
+        or set(cold_restore) != {"master_instance_id", "epoch", "canonical_revision"}
+        or set(import_runtime) != {"run_id", "attempt_id", "master_instance_id", "epoch"}
+        or int(checkpoint.get("generation") or 0) < 1
+        or not _exact_version_ref(checkpoint.get("exact_version_ref"))
+        or not _sha(checkpoint.get("manifest_sha256"))
+        or cold_restore.get("canonical_revision") != imported.canonical_revision
         or int(cold_restore.get("epoch") or 0) <= imported.epoch
+        or import_runtime.get("run_id") != imported.run_id
+        or import_runtime.get("master_instance_id") != str(imported.master_instance_id)
+        or import_runtime.get("epoch") != imported.epoch
+        or value.get("request_id") != str(imported.request_id)
+        or value.get("request_sha256") != imported.request_sha256
+        or value.get("ensure_operation_id") != str(imported.operation_id)
+        or not isinstance(value.get("rotation_operation_id"), str)
+        or not value["rotation_operation_id"]
+        or not _sha(value.get("closure_idempotency_key_sha256"))
+        or any(accounting.get(key) != expected for key, expected in expected_accounting.items())
+        or statistics.get("bloggers") != EXPECTED_BLOGGER_ROWS
         or imported.actor_count != EXPECTED_BLOGGER_ROWS
-        or checkpoint.get("checkpoint_id") is None
+        or projection.get("listed_bloggers") != EXPECTED_BLOGGER_ROWS
+        or projection.get("get_found") is not True
+        or not isinstance(projection.get("provenance_events"), int)
+        or int(projection.get("provenance_events") or 0) < 1
+        or not isinstance(projection.get("search_matches"), int)
+        or int(projection.get("search_matches") or 0) < 1
+        or not isinstance(projection.get("completed_retrievers"), list)
+        or not {"exact", "fts"}.issubset(set(projection.get("completed_retrievers", [])))
     ):
         raise EmbeddingProductionError("blogger prerequisite is not exact and cold-restored")
-    return imported, hashlib.sha256(canonical_json_bytes(value)).hexdigest(), UUID(str(checkpoint["checkpoint_id"]))
+    try:
+        UUID(str(value["receipt_id"]))
+        UUID(str(import_runtime["run_id"]))
+        UUID(str(import_runtime["attempt_id"]))
+        UUID(str(cold_restore["master_instance_id"]))
+        checkpoint_id = UUID(str(checkpoint["checkpoint_id"]))
+    except ValueError as exc:
+        raise EmbeddingProductionError("blogger prerequisite UUID identity is invalid") from exc
+    try:
+        started = datetime.fromisoformat(str(value["started_at"]).replace("Z", "+00:00"))
+        completed = datetime.fromisoformat(str(value["completed_at"]).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise EmbeddingProductionError("blogger prerequisite timestamps are invalid") from exc
+    if started.tzinfo is None or completed.tzinfo is None or completed < started:
+        raise EmbeddingProductionError("blogger prerequisite timestamps are invalid")
+    return imported, hashlib.sha256(canonical_json_bytes(value)).hexdigest(), checkpoint_id
 
 
 def _preflight_interfaces(
@@ -317,6 +407,14 @@ def _validate_stage_status(
             )
         ):
             raise EmbeddingProductionError("embedding worker lacks exact private terminal evidence")
+        asset = next((row for row in WORKER_ASSETS if row.model.exact_id == item.get("model_exact_id")), None)
+        provider_ref = str(item.get("provider_ref", ""))
+        if (
+            asset is None
+            or provider_ref.split("/", 1)[-1] != asset.notebook_slug
+            or item.get("source_sha256") != asset.primary_source_sha256
+        ):
+            raise EmbeddingProductionError("embedding worker source differs from the pinned generated asset")
         input_dataset = item["input_dataset"]
         if (
             set(input_dataset) != {"provider_ref", "provider_version", "package_sha256", "jobs_sha256"}
