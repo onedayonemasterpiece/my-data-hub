@@ -36,11 +36,11 @@ from my_data_hub.control_plane.ledger import ControlLedger, IdempotencyConflict,
 from my_data_hub.control_plane.runtime import ControlPlaneMasterRuntime, MasterRuntimeSettings
 from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator, MasterIntent
 from my_data_hub.orchestrator.master.provider import ProviderEffectReceipt
-from my_data_hub.providers.kaggle import KaggleMasterLaunchAssets, derive_runtime_secret
+from my_data_hub.providers.kaggle import KaggleMasterLaunchAssets
 from my_data_hub.runtime_sdk import RuntimeEvent, RuntimeEventType
 from my_data_hub.runtime_sdk.transport import json_body
 
-SECRET = "correct-horse-battery-staple"
+SECRET = "a" * 64
 SOURCE_REVISION = "a" * 40
 
 
@@ -107,7 +107,6 @@ def _control_runtime(ledger: ControlLedger) -> ControlPlaneMasterRuntime:
         dataset_files={"asset.txt": b"bounded", "checkpoint-verifier.ipynb": b"{}"},
         notebook_source=b"print('master')\n",
         callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
-        runtime_token_secret_name="MDH_RUNTIME_ROOT",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
         checkpoint_probe_relations=("hub.canonical_state",),
@@ -116,7 +115,7 @@ def _control_runtime(ledger: ControlLedger) -> ControlPlaneMasterRuntime:
     return ControlPlaneMasterRuntime(
         ledger,
         MasterCoordinator(ledger, FakeKaggleRuntime()),
-        MasterRuntimeSettings(assets=assets, runtime_token_root="runtime-root-secret-long-enough"),
+        MasterRuntimeSettings(assets=assets),
     )
 
 
@@ -772,7 +771,8 @@ def test_protected_ledger_replays_one_exact_acked_body_without_state_change(tmp_
     )
     runtime = _control_runtime(ledger)
     handle, _duplicate = runtime.ensure("fm09-stored-replay")
-    token = derive_runtime_secret(runtime.settings.runtime_token_root, handle.run_id, handle.attempt_id)
+    token = SECRET
+    ledger.store_runtime_token_hash(handle.run_id, handle.attempt_id, token)
     event = RuntimeEvent(
         event_id=str(uuid4()),
         run_id=handle.run_id,
@@ -802,7 +802,7 @@ def test_protected_ledger_replays_one_exact_acked_body_without_state_change(tmp_
     )
     retired_run = str(UUID(int=91))
     retired_attempt = str(UUID(int=92))
-    retired_token = derive_runtime_secret(runtime.settings.runtime_token_root, retired_run, retired_attempt)
+    retired_token = "b" * 64
     ledger.store_runtime_token_hash(retired_run, retired_attempt, retired_token)
     ledger.revoke_runtime_token(retired_run, retired_attempt)
     binding = MasterAcceptanceBinding(
@@ -813,7 +813,7 @@ def test_protected_ledger_replays_one_exact_acked_body_without_state_change(tmp_
         master_instance_id=UUID(handle.master_instance_id),
         epoch=handle.epoch,
     )
-    replay = ControlLedgerStoredReplay(runtime)
+    replay = ControlLedgerStoredReplay(runtime, token, retired_token)
     stored = replay.exact_acked_callback(binding)
     before = replay.control_state_sha256(binding)
     assert replay.replay_stored_callback(stored.event_id) == "duplicate"

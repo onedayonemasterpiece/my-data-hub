@@ -128,7 +128,6 @@ __all__ = [
     "UnauthenticatedDatasetProbe",
     "classify_failure",
     "compatibility_inventory",
-    "derive_runtime_secret",
     "directory_sha256",
     "mapping_sha256",
     "parse_retry_after",
@@ -142,7 +141,6 @@ def __getattr__(name: str) -> Any:
         "KaggleMasterLaunchAssets",
         "KaggleMasterRuntimeProvider",
         "MasterLaunchContractError",
-        "derive_runtime_secret",
         "render_notebook_source",
     }:
         from . import master_runtime

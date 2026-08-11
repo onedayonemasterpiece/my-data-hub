@@ -132,7 +132,7 @@ class FakeAdapter:
         if self.lose_status:
             raise RuntimeError("simulated status-input crash")
         assert self.ledger.checkpoint_acceptance_launch(str(TASK)) is not None
-        assert control_class is ControlClass.MCP_EXCHANGE and disposable is True
+        assert control_class is ControlClass.ORCHESTRATOR_PROTECTED and disposable is True
         self.status_files = dict(files)
         fingerprint = ProviderFingerprint(value="9" * 64)
         identity = KaggleDatasetIdentity(

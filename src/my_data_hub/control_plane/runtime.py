@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
 import tempfile
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
@@ -27,18 +29,22 @@ from my_data_hub.checkpoints.kaggle_runtime import (
 )
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.hashing import sha256_value
-from my_data_hub.orchestrator.master import MasterCoordinator, MasterHandle, MasterIntent
+from my_data_hub.orchestrator.master import MasterCoordinator, MasterHandle, MasterIntent, MasterState
 from my_data_hub.providers.kaggle import (
     ControlLedgerKaggleJournal,
     KaggleMasterLaunchAssets,
     KaggleMasterRuntimeProvider,
     KaggleProviderAdapter,
     PollPolicy,
-    derive_runtime_secret,
 )
-from my_data_hub.providers.kaggle.contracts import KaggleDatasetIdentity
+from my_data_hub.providers.kaggle.adapter import mapping_sha256
+from my_data_hub.providers.kaggle.contracts import (
+    KaggleDatasetIdentity,
+    ProviderEffectReceipt,
+    TaskResourceClaim,
+)
 from my_data_hub.providers.kaggle.credentials import kaggle_credentials_configured
-from my_data_hub.providers.models import ProviderFingerprint
+from my_data_hub.providers.models import ControlClass, ProviderFingerprint, ProviderKind
 from my_data_hub.runtime_sdk import CANONICAL_RUNTIME_CALLBACK_URL
 from my_data_hub.tunnel_broker_ipc import TunnelBrokerClient
 
@@ -187,11 +193,6 @@ class SessionCredential:
 @dataclass(frozen=True, slots=True)
 class MasterRuntimeSettings:
     assets: KaggleMasterLaunchAssets
-    runtime_token_root: str = field(repr=False)
-
-    def __post_init__(self) -> None:
-        # Validate at assembly time, without ever storing the token in ledger state.
-        derive_runtime_secret(self.runtime_token_root, "validation-run", "validation-attempt")
 
     @classmethod
     def from_env(cls) -> MasterRuntimeSettings | None:
@@ -204,10 +205,8 @@ class MasterRuntimeSettings:
             "dataset_dir": "MY_DATA_HUB_KAGGLE_MASTER_DATASET_DIR",
             "notebook_source": "MY_DATA_HUB_KAGGLE_MASTER_NOTEBOOK_SOURCE",
             "callback_url": "MY_DATA_HUB_CALLBACK_URL",
-            "runtime_token_secret_name": "MY_DATA_HUB_KAGGLE_RUNTIME_TOKEN_SECRET_NAME",
             "checkpoint_verifier_ref": "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_REF",
             "checkpoint_verifier_source_file": "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_SOURCE_FILE",
-            "runtime_token_root": "MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT",
         }
         raw = {key: os.getenv(name, "").strip() for key, name in names.items()}
         if not any(raw.values()):
@@ -231,7 +230,6 @@ class MasterRuntimeSettings:
         notebook_source = Path(raw.pop("notebook_source")).expanduser().resolve()
         files = _bounded_files(dataset_dir)
         source = _bounded_file(notebook_source, max_bytes=8 * 1024 * 1024)
-        root = raw.pop("runtime_token_root")
         probe_relations_raw = os.getenv("MY_DATA_HUB_KAGGLE_CHECKPOINT_PROBE_RELATIONS_JSON", "").strip()
         try:
             probe_relations_value = json.loads(probe_relations_raw)
@@ -257,7 +255,7 @@ class MasterRuntimeSettings:
             runtime_secret_bindings=bindings,
             checkpoint_probe_relations=tuple(probe_relations_value),
         )
-        return cls(assets=assets, runtime_token_root=root)
+        return cls(assets=assets)
 
 
 @dataclass(slots=True)
@@ -351,23 +349,259 @@ class ControlPlaneMasterRuntime:
 
     def ensure(self, idempotency_key: str) -> tuple[MasterHandle, bool]:
         identity = MasterCoordinator.identity_for(idempotency_key)
-        existed = self.ledger.get_operation(identity["operation_id"]) is not None
-        secret = derive_runtime_secret(self.settings.runtime_token_root, identity["run_id"], identity["attempt_id"])
-        return self.coordinator.ensure_master(self.intent(idempotency_key), runtime_secret=secret), existed
+        intent = self.intent(idempotency_key)
+        operation, created = self.ledger.ensure_master_operation(
+            operation_id=identity["operation_id"],
+            idempotency_key=idempotency_key,
+            intent=intent.as_dict(),
+            identity=identity,
+        )
+        durable = operation.identity
+        self.ledger.record_attempt(
+            attempt_id=str(durable["attempt_id"]),
+            run_id=str(durable["run_id"]),
+            operation_id=operation.operation_id,
+            source_identity=intent.source_identity,
+            source_version=intent.source_version,
+            service_instance_id=str(durable["service_instance_id"]),
+            master_instance_id=str(durable["master_instance_id"]),
+            epoch=int(durable["epoch"]),
+            state=MasterState.REQUESTED.value,
+        )
+        if not self._status_dataset_ready(operation.operation_id, durable):
+            current = self.ledger.get_operation(operation.operation_id)
+            assert current is not None
+            return self._handle(current), not created
+        handle = self.coordinator.ensure_master(intent)
+        self._cleanup_terminal_status_dataset(handle)
+        return handle, not created
 
     def reconcile_startup(self) -> list[MasterHandle]:
         handles: list[MasterHandle] = []
         for operation in self.ledger.incomplete_operations("ensure_master"):
-            identity = operation.identity
-            secret = derive_runtime_secret(
-                self.settings.runtime_token_root,
-                str(identity["run_id"]),
-                str(identity["attempt_id"]),
-            )
-            handles.append(
-                self.coordinator.ensure_master(self.intent(operation.idempotency_key), runtime_secret=secret)
-            )
+            if not self._status_dataset_ready(operation.operation_id, operation.identity):
+                current = self.ledger.get_operation(operation.operation_id)
+                assert current is not None
+                handles.append(self._handle(current))
+                continue
+            handle = self.coordinator.ensure_master(self.intent(operation.idempotency_key))
+            self._cleanup_terminal_status_dataset(handle)
+            handles.append(handle)
         return handles
+
+    def _status_dataset_ready(self, operation_id: str, identity: dict[str, Any]) -> bool:
+        provider = self.coordinator.provider
+        if not isinstance(provider, KaggleMasterRuntimeProvider):
+            return True
+        existing = self.ledger.master_status_dataset_authority(operation_id)
+        if existing is not None:
+            if existing["status_dataset"] is not None:
+                return existing["state"] in {"READY", "CLEANED"}
+            claim_until = datetime.fromisoformat(
+                str(existing["creator_claim_until"]).replace("Z", "+00:00")
+            )
+            if claim_until > self.ledger.clock.now():
+                return False
+            self.ledger.fail_ambiguous_master_status_dataset(operation_id)
+            self._cleanup_ambiguous_status_dataset(provider, operation_id, identity)
+            self._release_status_resource_lease(identity)
+            return False
+
+        token = secrets.token_hex(32)
+        deadline = self.ledger.clock.now() + timedelta(seconds=900)
+        lease = self.ledger.acquire_resource_lease(
+            lease_id=self._status_lease_id(operation_id),
+            resource_kind="kaggle_notebook",
+            resource_ref=self.settings.assets.notebook_ref,
+            holder_id=str(identity["run_id"]),
+            lease_until=self.ledger.clock.now()
+            + timedelta(seconds=self.settings.assets.notebook_timeout_seconds),
+        )
+        resource_lease = {
+            "lease_id": lease.lease_id,
+            "resource_kind": lease.resource_kind,
+            "resource_ref": lease.resource_ref,
+            "holder_id": lease.holder_id,
+            "epoch": lease.epoch,
+            "lease_until": lease.lease_until.isoformat(),
+        }
+        candidate_identity = {
+            **identity,
+            "operation_id": operation_id,
+            "status_resource_lease": resource_lease,
+        }
+        files = provider.status_files(candidate_identity, token)
+        authority, created = self.ledger.ensure_master_status_dataset_authority(
+            operation_id=operation_id,
+            run_id=str(identity["run_id"]),
+            attempt_id=str(identity["attempt_id"]),
+            token=token,
+            creator_claim_until=deadline,
+            expected_content_tree_sha256=mapping_sha256(files),
+            resource_lease=resource_lease,
+        )
+        if not created:
+            return authority["status_dataset"] is not None
+        exact_identity = {
+            **candidate_identity,
+            "status_requested_at": authority["created_at"],
+        }
+        result = provider.create_status_dataset(exact_identity, token)
+        claim = result.claim
+        self.ledger.record_master_status_dataset(
+            operation_id=operation_id,
+            status_dataset={
+                "provider_ref": claim.provider_ref,
+                "exact_version_ref": f"{claim.provider_ref}/{claim.provider_version}",
+                "claim": claim.model_dump(mode="json"),
+                "content_tree_sha256": mapping_sha256(files),
+                "status_config_sha256": hashlib.sha256(files["kaggle_run.json"]).hexdigest(),
+                "status_helper_sha256": hashlib.sha256(files["kaggle_status_client.py"]).hexdigest(),
+                "resource_lease": resource_lease,
+            },
+        )
+        return True
+
+    def _cleanup_terminal_status_dataset(self, handle: MasterHandle) -> None:
+        if handle.state not in {
+            MasterState.STOPPED,
+            MasterState.FAILED,
+            MasterState.FENCED,
+            MasterState.ORPHANED,
+        }:
+            return
+        stored = self.ledger.master_status_dataset_authority(handle.operation_id)
+        if stored is None or stored["cleanup_receipt"] is not None:
+            return
+        if not self.ledger.claim_master_status_dataset_cleanup(
+            handle.operation_id,
+            claim_until=self.ledger.clock.now() + timedelta(seconds=900),
+        ):
+            return
+        stored = self.ledger.master_status_dataset_authority(handle.operation_id)
+        assert stored is not None
+        status = stored["status_dataset"]
+        if not isinstance(status, dict):
+            return
+        provider = self.coordinator.provider
+        if not isinstance(provider, KaggleMasterRuntimeProvider):
+            raise MasterProviderUnavailable("master status Dataset provider is unavailable")
+        operation = self.ledger.get_operation(handle.operation_id)
+        assert operation is not None
+        receipt = provider.delete_status_dataset(
+            {
+                **operation.identity,
+                "operation_id": handle.operation_id,
+                "status_requested_at": stored["created_at"],
+            },
+            TaskResourceClaim.model_validate(status["claim"]),
+        )
+        lease = status["resource_lease"]
+        self.ledger.release_resource_lease_exact(
+            str(lease["lease_id"]), str(lease["holder_id"]), int(lease["epoch"])
+        )
+        self.ledger.complete_master_status_dataset_cleanup(
+            operation_id=handle.operation_id,
+            cleanup_receipt=receipt.model_dump(mode="json"),
+        )
+
+    def reconcile_status_cleanup_once(self) -> str | None:
+        candidates = self.ledger.terminal_master_status_dataset_authorities(limit=1)
+        if not candidates:
+            return None
+        operation = self.ledger.get_operation(str(candidates[0]["operation_id"]))
+        if operation is None:
+            raise RuntimeError("terminal master status authority lost its operation")
+        self._cleanup_terminal_status_dataset(self._handle(operation))
+        return operation.operation_id
+
+    def _release_status_resource_lease(self, identity: dict[str, Any]) -> None:
+        stored = self.ledger.master_status_dataset_authority(str(identity["operation_id"]))
+        if stored is None:
+            raise RuntimeError("master status authority disappeared before lease release")
+        lease = stored["resource_lease"]
+        self.ledger.release_resource_lease_exact(
+            str(lease["lease_id"]), str(lease["holder_id"]), int(lease["epoch"])
+        )
+
+    def _cleanup_ambiguous_status_dataset(
+        self,
+        provider: KaggleMasterRuntimeProvider,
+        operation_id: str,
+        identity: dict[str, Any],
+    ) -> None:
+        effect_id = str(uuid5(NAMESPACE_URL, f"master-status-create:{operation_id}"))
+        payload = self.ledger.provider_resource_claim_for_effect(effect_id)
+        claim: TaskResourceClaim | None = None
+        if payload is not None:
+            claim = TaskResourceClaim.model_validate(payload)
+        else:
+            receipt_payload = self.ledger.latest_provider_effect_receipt(effect_id)
+            if receipt_payload is not None:
+                receipt = ProviderEffectReceipt.model_validate(receipt_payload)
+                if (
+                    receipt.observed_fingerprint is not None
+                    and receipt.provider_version is not None
+                    and receipt.outcome.value in {"applied", "already_applied"}
+                ):
+                    stored = self.ledger.master_status_dataset_authority(operation_id)
+                    assert stored is not None
+                    claim = TaskResourceClaim.create(
+                        task_id=UUID(str(identity["run_id"])),
+                        effect_id=UUID(effect_id),
+                        provider_ref=provider.status_dataset_ref(identity),
+                        kind=ProviderKind.DATASET,
+                        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+                        disposable=True,
+                        fingerprint=receipt.observed_fingerprint,
+                        provider_version=receipt.provider_version,
+                        registered_at=datetime.fromisoformat(
+                            str(stored["created_at"]).replace("Z", "+00:00")
+                        ),
+                    )
+        if claim is None:
+            return
+        expected_ref = provider.status_dataset_ref(identity)
+        if (
+            claim.task_id != UUID(str(identity["run_id"]))
+            or claim.provider_ref != expected_ref
+            or claim.control_class is not ControlClass.ORCHESTRATOR_PROTECTED
+            or not claim.disposable
+            or claim.provider_version != 1
+        ):
+            raise RuntimeError("ambiguous master status claim differs from deterministic owner task")
+        stored = self.ledger.master_status_dataset_authority(operation_id)
+        assert stored is not None
+        if stored["cleanup_receipt"] is not None:
+            return
+        receipt = provider.delete_status_dataset(
+            {
+                **identity,
+                "operation_id": operation_id,
+                "status_requested_at": stored["created_at"],
+            },
+            claim,
+        )
+        self.ledger.complete_ambiguous_master_status_dataset_cleanup(
+            operation_id=operation_id,
+            cleanup_receipt=receipt.model_dump(mode="json"),
+        )
+
+    @staticmethod
+    def _status_lease_id(operation_id: str) -> str:
+        return str(uuid5(NAMESPACE_URL, f"master-status-lease:{operation_id}"))
+
+    @staticmethod
+    def _handle(operation: Any) -> MasterHandle:
+        return MasterHandle(
+            operation_id=operation.operation_id,
+            run_id=str(operation.identity["run_id"]),
+            attempt_id=str(operation.identity["attempt_id"]),
+            service_instance_id=str(operation.identity["service_instance_id"]),
+            master_instance_id=str(operation.identity["master_instance_id"]),
+            epoch=int(operation.identity["epoch"]),
+            state=MasterState(operation.state),
+        )
 
     def reconcile_requested_once(self) -> MasterHandle | None:
         """Claim one MCP cold-start request and drive the real provider lifecycle."""
@@ -513,7 +747,7 @@ def build_production_runtime(
         # Authentication/dependency failures do not make the stable control plane
         # unhealthy and must not leak provider exception/credential detail.
         return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None)
-    provider = KaggleMasterRuntimeProvider(adapter, settings.assets)
+    provider = KaggleMasterRuntimeProvider(adapter, settings.assets, status_authority=ledger)
     coordinator = MasterCoordinator(
         ledger,
         provider,

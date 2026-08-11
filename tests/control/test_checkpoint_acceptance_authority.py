@@ -296,7 +296,7 @@ def test_enabled_app_assembles_checkpoint_launcher_without_runtime_impersonation
     def build(ledger, *_args, **_kwargs):
         runtime = SimpleNamespace(
             ledger=ledger,
-            settings=SimpleNamespace(runtime_token_root="control-root-value-long-enough-123456"),
+            settings=SimpleNamespace(),
             coordinator=SimpleNamespace(),
             reconcile_requested_once=lambda: None,
             reconcile_acceptance_once=lambda: None,

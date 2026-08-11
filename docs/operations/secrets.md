@@ -6,8 +6,9 @@ The lightweight control plane receives exactly one automated Kaggle provider
 credential supported by the pinned official SDK: either `KAGGLE_API_TOKEN`, a
 private access-token file, or the established `KAGGLE_USERNAME`/`KAGGLE_KEY`
 profile used by events-bot/CherryFlash. OAuth signing and owner-auth material,
-the runtime-token derivation root and operational-ledger encryption keys are
-supplied only as needed. It receives no master PostgreSQL URL, owner/migrator
+and operational-ledger encryption keys are supplied only as needed. Per-attempt
+callback tokens are randomly generated and delivered only through exact private
+status Datasets; no derivation root exists. The devstand receives no master PostgreSQL URL, owner/migrator
 password, connector DB password or checkpoint package. Runtime events and audit
 records contain identities/locators, never credentials.
 
@@ -45,8 +46,10 @@ installed DNS/OAuth edge secrets and has not enabled remote MCP writes.
   User Secret for that fixed worker only; never introduce interactive browser
   sessions or refresh-cookie state. Re-run the applicable attestation/readback
   canary after rotation.
-- runtime-token derivation root: rotate only with a controlled drain; outstanding attempts
-  use tokens derived from the old root and otherwise fail closed.
+- runtime callback authority: each attempt has an independent random token. The
+  control ledger stores only its SHA-256; terminal cleanup revokes the hash and
+  deletes the exact protected status Dataset containing the raw value. There is
+  no shared root to rotate or reconstruct after a crash.
 - OAuth signing key: rotate by publishing the new JWK before issuance and retaining the old
   public key through the maximum token lifetime. Private key material never enters the MCP
   resource server response.

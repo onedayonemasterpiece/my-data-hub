@@ -43,7 +43,6 @@ def _runtime(ledger: ControlLedger) -> ControlPlaneMasterRuntime:
         dataset_files={"launch.txt": b"exact", "checkpoint-verifier.ipynb": b"{}"},
         notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
         callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
-        runtime_token_secret_name="MDH_RUNTIME_ROOT",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
         checkpoint_probe_relations=("hub.canonical_state",),
@@ -51,7 +50,7 @@ def _runtime(ledger: ControlLedger) -> ControlPlaneMasterRuntime:
     return ControlPlaneMasterRuntime(
         ledger,
         MasterCoordinator(ledger, FakeKaggleRuntime()),
-        MasterRuntimeSettings(assets, "runtime-root-secret-long-enough"),
+        MasterRuntimeSettings(assets),
     )
 
 

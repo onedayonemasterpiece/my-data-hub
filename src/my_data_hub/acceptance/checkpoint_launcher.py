@@ -262,7 +262,7 @@ class ControlCheckpointAcceptanceLauncher:
                 intent=self._status_create_intent(request, status_files),
                 files=status_files,
                 title=self._status_dataset_ref(request).split("/", 1)[1],
-                control_class=ControlClass.MCP_EXCHANGE,
+                control_class=ControlClass.ORCHESTRATOR_PROTECTED,
                 disposable=True,
             )
             stored = self.ledger.record_checkpoint_acceptance_status_dataset(
@@ -594,7 +594,7 @@ class ControlCheckpointAcceptanceLauncher:
             provider_ref=self._status_dataset_ref(request),
             arguments={
                 "content_tree_sha256": mapping_sha256(files),
-                "control_class": ControlClass.MCP_EXCHANGE.value,
+                "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
                 "disposable": True,
             },
             requested_at=request.started_at,

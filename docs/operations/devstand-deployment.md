@@ -43,23 +43,28 @@ MY_DATA_HUB_KAGGLE_MASTER_NOTEBOOK_REF
 MY_DATA_HUB_KAGGLE_MASTER_DATASET_DIR
 MY_DATA_HUB_KAGGLE_MASTER_NOTEBOOK_SOURCE
 MY_DATA_HUB_CALLBACK_URL
-MY_DATA_HUB_KAGGLE_RUNTIME_TOKEN_SECRET_NAME
 MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_REF
 MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_SOURCE_FILE
 MY_DATA_HUB_KAGGLE_CHECKPOINT_PROBE_RELATIONS_JSON
-MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT
 ```
 
 `MY_DATA_HUB_CALLBACK_URL` is not an arbitrary deployment input. Production
 assembly accepts only
 `https://mcp-datahub.kenigevents.ru/internal/runtime/events`, without userinfo,
 custom port, query or fragment, before a per-attempt runtime token can be
-delivered to a Notebook.
+delivered to a Notebook. The control process creates a random per-attempt
+callback token, stores only its SHA-256, and places the raw value only in an
+exact private `ORCHESTRATOR_PROTECTED` status Dataset attached by numeric
+version. There is no runtime-token root or callback-token Kaggle User Secret.
 
 `MY_DATA_HUB_KAGGLE_MASTER_SECRET_BINDINGS_JSON` is an optional exact mapping from
-Notebook environment names to Kaggle User Secret names. It may include the modern
-`KAGGLE_API_TOKEN` binding needed by the in-Notebook instance of the same official adapter.
-It must not bind the derived per-attempt runtime token back to itself.
+non-provider Notebook environment names to reviewed Kaggle User Secret names. It
+cannot include `KAGGLE_API_TOKEN`, `KAGGLE_USERNAME`, `KAGGLE_KEY`, or the
+per-attempt callback token: the control-owned automated Kaggle credential remains
+central and is never copied into the PostgreSQL master Notebook. The separate,
+fixed checkpoint-acceptance runtime may bind exact provider API secret names only
+under its narrower data-local contract; values never enter its source, Dataset
+metadata, callback, log, or receipt.
 
 The dataset directory and Notebook/verifier source paths are bounded regular files read
 from the reviewed release. The checkpoint and verifier provider references are permanent

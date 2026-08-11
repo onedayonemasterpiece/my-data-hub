@@ -380,12 +380,7 @@ class _EmbeddingLeaseMaintainer:
         try:
             self.tunnel.poll(now=observed)
             proposed = observed + timedelta(seconds=self.lease_seconds)
-            delivery = self.runtime.emit(
-                RuntimeEventType.RUNTIME_HEARTBEAT,
-                phase="active",
-                status="healthy",
-                data={"lease_until": proposed.isoformat().replace("+00:00", "Z")},
-            )
+            delivery = _emit_donor_alive(self.runtime, proposed)
             if delivery.status == "delivered":
                 with self.connection_factory() as connection:
                     DatabaseGate(connection).renew(self.identity, proposed)
@@ -490,6 +485,90 @@ def _emit_service_ready(
     )
     if receipt.status != "delivered":
         raise RuntimeError("service.ready was not acknowledged by the control plane")
+
+
+def _status_resource_leases() -> tuple[dict[str, Any], ...]:
+    raw = os.environ.get("MY_DATA_HUB_STATUS_RESOURCE_LEASES_JSON", "")
+    if not raw:
+        return ()
+    value = json.loads(raw)
+    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
+        raise RuntimeError("master status resource lease binding is invalid")
+    return (value[0],)
+
+
+def _emit_donor_bootstrap(runtime: RuntimeClient, executed_source_sha256: str) -> None:
+    emit_donor = getattr(runtime, "emit_donor_envelope", None)
+    if not callable(emit_donor):
+        return
+    run_id = runtime.run_id
+    receipts = [
+        emit_donor(
+            {
+                "run_id": run_id,
+                "event": "kernel_started",
+                "event_uid": f"{run_id}:kernel_started:0",
+                "phase": "bootstrap",
+                "status": "running",
+                "progress": {
+                    "sequence": 0,
+                    "completed_steps": 0,
+                    "runtime_source_sha256": executed_source_sha256,
+                },
+            }
+        ),
+        emit_donor(
+            {
+                "run_id": run_id,
+                "event": "preflight_ok",
+                "event_uid": f"{run_id}:preflight_ok:0",
+                "phase": "preflight",
+                "status": "ready",
+                "progress": {"sequence": 0, "completed_steps": 1},
+            }
+        ),
+    ]
+    leases = _status_resource_leases()
+    if leases:
+        receipts.append(
+            emit_donor(
+                {
+                    "run_id": run_id,
+                    "event": "resource_acquire",
+                    "event_uid": f"{run_id}:resource_acquire:0",
+                    "phase": "bootstrap",
+                    "status": "acquired",
+                    "progress": {"sequence": 0, "completed_steps": 1},
+                    "resource": leases[0],
+                }
+            )
+        )
+    if any(receipt.status != "delivered" for receipt in receipts):
+        raise RuntimeError("master donor bootstrap events were not acknowledged")
+
+
+def _emit_donor_alive(runtime: RuntimeClient, lease_until: datetime) -> Any:
+    value = lease_until.isoformat().replace("+00:00", "Z")
+    emit_donor = getattr(runtime, "emit_donor_envelope", None)
+    if not callable(emit_donor):
+        return runtime.emit(
+            RuntimeEventType.RUNTIME_HEARTBEAT,
+            phase="active",
+            status="healthy",
+            data={"lease_until": value},
+        )
+    envelope = {
+        "run_id": runtime.run_id,
+        "event": "alive",
+        "event_uid": f"{runtime.run_id}:alive:{value}",
+        "phase": "active",
+        "status": "healthy",
+        "progress": {"lease_until": value},
+    }
+    leases = _status_resource_leases()
+    if leases:
+        envelope["resource"] = leases[0]
+    return emit_donor(envelope)
 
 
 def _write_master_terminal(
@@ -1380,6 +1459,7 @@ def run_master(
         spool_path=paths.runtime_events,
         heartbeat_interval_seconds=30,
     )
+    _emit_donor_bootstrap(runtime, executed_source_sha256)
     tls_certificate = Path(_required("MY_DATA_HUB_POSTGRES_TLS_CERT"))
     tls_key = Path(_required("MY_DATA_HUB_POSTGRES_TLS_KEY"))
     supervisor = PostgresSupervisor(
@@ -1844,12 +1924,7 @@ def run_master(
             if not renewal_suspended:
                 tunnel.poll(now=datetime.now(UTC))
                 proposed = datetime.now(UTC) + timedelta(seconds=config.lease_seconds)
-                delivery = runtime.emit(
-                    RuntimeEventType.RUNTIME_HEARTBEAT,
-                    phase="active",
-                    status="healthy",
-                    data={"lease_until": proposed.isoformat().replace("+00:00", "Z")},
-                )
+                delivery = _emit_donor_alive(runtime, proposed)
                 if delivery.status == "delivered":
                     gate.renew(identity, proposed)
                     current_lease = proposed
@@ -2008,6 +2083,23 @@ def _checkpoint_before_stop(
             "current_checkpoint_id": receipt.current_checkpoint_id,
         },
     )
+    emit_donor = getattr(runtime, "emit_donor_envelope", None)
+    status_leases = _status_resource_leases()
+    released = (
+        emit_donor(
+            {
+                "run_id": runtime.run_id,
+                "event": "resource_release",
+                "event_uid": f"{runtime.run_id}:resource_release:0",
+                "phase": "cleanup",
+                "status": "released",
+                "progress": {"sequence": 0},
+                "resource": status_leases[0],
+            }
+        )
+        if callable(emit_donor) and status_leases
+        else None
+    )
     terminal = runtime.emit(
         RuntimeEventType.RUNTIME_TERMINAL,
         phase="stopped",
@@ -2026,7 +2118,11 @@ def _checkpoint_before_stop(
             executed_source_sha256=executed_source_sha256,
             blogger_import_receipt=blogger_import_receipt,
         )
-    if verified.status != "delivered" or terminal.status != "delivered":
+    if (
+        verified.status != "delivered"
+        or (released is not None and released.status != "delivered")
+        or terminal.status != "delivered"
+    ):
         # ``emit(terminal)`` already auto-replays older callbacks.  Check the
         # durable spool rather than trusting the earlier receipt snapshot.
         if runtime.flush_pending(max_events=100):

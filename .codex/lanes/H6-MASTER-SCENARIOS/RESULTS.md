@@ -136,3 +136,40 @@ protected pre-STOPPED context capture is the remaining internal assembly gap.
   acknowledgement plus a private deployment document. FM08 remains BLOCKED
   pending real abrupt-master termination/recovery identities; no synthetic
   lifecycle evidence was added.
+
+## 2026-08-11 PostgreSQL-master callback authority closure
+
+- control migration 022 atomically binds one admitted master operation/run/
+  attempt to a cryptographically random 256-bit callback token hash, a fixed
+  900-second creator claim, and the exact resource-lease fencing token before
+  any provider mutation. The raw token is written only to `kaggle_run.json` in
+  a private disposable `ORCHESTRATOR_PROTECTED` status Dataset;
+- the status Dataset is attached to the master Notebook by exact numeric
+  version alongside the reviewed asset Dataset. The single control-owned
+  Kaggle adapter uses the legacy-safe pending-runtime-attestation launch path;
+  credentials remain central and the runtime cannot become ACTIVE or receive
+  database authority until authenticated `service.ready` reports the exact
+  push-time executable source SHA-256;
+- twenty same-key callers produce one status Dataset and one provider run.
+  Followers observe the durable creator claim and never create a replacement
+  token or repeat either mutation. An expired create-side-effect ambiguity
+  revokes the actual token, fails the operation, releases the exact persisted
+  lease, and deletes only a deterministically proven task claim;
+- terminal callback processing and the five-second control loop both drive a
+  bounded claim-based cleanup reconciler. A lost delete response leaves a
+  durable `CLEANING` state and resumes the exact delete after claim expiry;
+- the runtime preserves the donor contract through stable `event_uid` values,
+  typed kernel/preflight/alive/resource events, ACK-bound heartbeat lease
+  renewal, header-only Bearer authentication, and the existing fsynced redacted
+  JSONL spool. Callback tokens are absent from source, ledger receipts, logs and
+  terminal output;
+- obsolete callback-root and callback-User-Secret configuration was removed.
+  Provider launch authentication remains the existing centralized automated
+  Kaggle access-token or complete legacy credential path and is never copied
+  into the PostgreSQL master Notebook.
+
+This is implementation and local-gate evidence only. No live provider mutation
+or scenario `LIVE_PASS` was performed. FM08 remains BLOCKED on real abrupt
+master termination plus distinct recovery run/epoch evidence. FM09 exact
+revoked-token replay now requires a runtime-owned exact replay capability; the
+control plane intentionally does not persist or reconstruct raw bearer tokens.

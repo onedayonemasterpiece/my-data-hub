@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections import Counter
@@ -28,7 +29,67 @@ from my_data_hub.runtime_sdk import (
 )
 from my_data_hub.workloads.bloggers.master_stage import BloggerImportStageReceipt, BloggerMigrationRequest
 
-SECRET = "runtime-secret-long-enough"
+SECRET = "a" * 64
+
+
+def _prepare_status_authority(
+    ledger: ControlLedger,
+    provider: KaggleMasterRuntimeProvider,
+    intent: MasterIntent,
+    token: str = SECRET,
+) -> None:
+    identity = MasterCoordinator.identity_for(intent.idempotency_key)
+    ledger.ensure_master_operation(
+        operation_id=identity["operation_id"],
+        idempotency_key=intent.idempotency_key,
+        intent=intent.as_dict(),
+        identity=identity,
+    )
+    lease = ledger.acquire_resource_lease(
+        lease_id=str(uuid4()),
+        resource_kind="kaggle_notebook",
+        resource_ref=intent.notebook_ref,
+        holder_id=identity["run_id"],
+        lease_until=datetime(2099, 1, 1, tzinfo=UTC),
+    )
+    resource_lease = {
+        "lease_id": lease.lease_id,
+        "resource_kind": lease.resource_kind,
+        "resource_ref": lease.resource_ref,
+        "holder_id": lease.holder_id,
+        "epoch": lease.epoch,
+        "lease_until": lease.lease_until.isoformat(),
+    }
+    exact = {**identity, "operation_id": identity["operation_id"], "status_resource_lease": resource_lease}
+    files = provider.status_files(exact, token)
+    stored, _ = ledger.ensure_master_status_dataset_authority(
+        operation_id=identity["operation_id"],
+        run_id=identity["run_id"],
+        attempt_id=identity["attempt_id"],
+        token=token,
+        creator_claim_until=datetime(2099, 1, 1, tzinfo=UTC),
+        expected_content_tree_sha256=provider._mapping_sha(files),
+        resource_lease=resource_lease,
+    )
+    ledger.record_master_status_dataset(
+        operation_id=identity["operation_id"],
+        status_dataset={
+            "provider_ref": provider.status_dataset_ref(identity),
+            "exact_version_ref": f"{provider.status_dataset_ref(identity)}/1",
+            "status_config_sha256": hashlib.sha256(files["kaggle_run.json"]).hexdigest(),
+            "status_helper_sha256": hashlib.sha256(files["kaggle_status_client.py"]).hexdigest(),
+            "content_tree_sha256": stored["expected_content_tree_sha256"],
+            "resource_lease": resource_lease,
+        },
+    )
+
+
+def _coordinator(
+    ledger: ControlLedger, adapter: FakeKaggleAdapter, launch: KaggleMasterLaunchAssets, intent: MasterIntent
+) -> MasterCoordinator:
+    provider = KaggleMasterRuntimeProvider(adapter, launch, status_authority=ledger)  # type: ignore[arg-type]
+    _prepare_status_authority(ledger, provider, intent)
+    return MasterCoordinator(ledger, provider)
 
 
 class FakeKaggleAdapter:
@@ -106,15 +167,12 @@ def test_concrete_bridge_launches_dataset_notebook_and_run_once(tmp_path: Path) 
         dataset_files={"config.json": b'{"run":"{{MY_DATA_HUB_RUN_ID}}"}', "checkpoint-verifier.ipynb": b"{}"},
         notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
         callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
-        runtime_token_secret_name="master-runtime-root",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
         checkpoint_probe_relations=("hub.canonical_state",),
     )
     adapter = FakeKaggleAdapter()
-    provider = KaggleMasterRuntimeProvider(adapter, launch)  # type: ignore[arg-type]
     ledger = ControlLedger(tmp_path / "control.sqlite3")
-    coordinator = MasterCoordinator(ledger, provider)
     intent = MasterIntent(
         idempotency_key="bridge-master",
         source_identity=launch.source_identity,
@@ -123,8 +181,9 @@ def test_concrete_bridge_launches_dataset_notebook_and_run_once(tmp_path: Path) 
         dataset_ref=launch.dataset_ref,
         notebook_ref=launch.notebook_ref,
     )
-    first = coordinator.ensure_master(intent, runtime_secret="runtime-secret-long-enough")
-    second = coordinator.ensure_master(intent, runtime_secret="runtime-secret-long-enough")
+    coordinator = _coordinator(ledger, adapter, launch, intent)
+    first = coordinator.ensure_master(intent, runtime_secret=SECRET)
+    second = coordinator.ensure_master(intent, runtime_secret=SECRET)
     assert first.state == second.state == MasterState.REGISTERING
     assert first.run_id == second.run_id == str(UUID(first.run_id))
     assert adapter.calls == {"dataset": 1, "notebook_run": 1, "run_reconcile": 2}
@@ -148,7 +207,6 @@ def _launch() -> KaggleMasterLaunchAssets:
         dataset_files={"checkpoint-verifier.ipynb": b"{}"},
         notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
         callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
-        runtime_token_secret_name="master-runtime-root",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
         checkpoint_probe_relations=("hub.canonical_state",),
@@ -177,7 +235,6 @@ def _active_master_with_terminal_output(tmp_path: Path):  # type: ignore[no-unty
     launch = _launch()
     adapter = FakeKaggleAdapter()
     ledger = ControlLedger(tmp_path / "control.sqlite3")
-    coordinator = MasterCoordinator(ledger, KaggleMasterRuntimeProvider(adapter, launch))  # type: ignore[arg-type]
     request = MasterIntent(
         idempotency_key="terminal-recovery",
         source_identity=launch.source_identity,
@@ -186,6 +243,7 @@ def _active_master_with_terminal_output(tmp_path: Path):  # type: ignore[no-unty
         dataset_ref=launch.dataset_ref,
         notebook_ref=launch.notebook_ref,
     )
+    coordinator = _coordinator(ledger, adapter, launch, request)
     handle = coordinator.ensure_master(request, runtime_secret=SECRET)
     assert adapter.run is not None
     source_sha256 = adapter.run.source_sha256
@@ -303,7 +361,6 @@ def test_service_ready_requires_runtime_computed_exact_push_source_and_replays_l
     launch = _launch()
     adapter = FakeKaggleAdapter()
     ledger = ControlLedger(tmp_path / "source-attestation.sqlite3")
-    coordinator = MasterCoordinator(ledger, KaggleMasterRuntimeProvider(adapter, launch))  # type: ignore[arg-type]
     request = MasterIntent(
         idempotency_key="source-attestation",
         source_identity=launch.source_identity,
@@ -312,6 +369,7 @@ def test_service_ready_requires_runtime_computed_exact_push_source_and_replays_l
         dataset_ref=launch.dataset_ref,
         notebook_ref=launch.notebook_ref,
     )
+    coordinator = _coordinator(ledger, adapter, launch, request)
     handle = coordinator.ensure_master(request, runtime_secret=SECRET)
     assert adapter.run is not None
     common = {

@@ -422,6 +422,11 @@ def create_app(
                         reconcile_acceptance = getattr(master_runtime, "reconcile_acceptance_once", None)
                         if reconcile_acceptance is not None:
                             await asyncio.to_thread(reconcile_acceptance)
+                        reconcile_status_cleanup = getattr(
+                            master_runtime, "reconcile_status_cleanup_once", None
+                        )
+                        if reconcile_status_cleanup is not None:
+                            await asyncio.to_thread(reconcile_status_cleanup)
                         # The durable request remains PENDING; provider details
                         # never enter logs/responses and bounded retry resumes.
                 try:
@@ -1483,6 +1488,16 @@ def create_app(
                 )
                 raise HTTPException(status_code=503, detail={"code": "acceptance_callback_ack_suppressed"})
             receipt = coordinator.accept_runtime_event(raw, header_token=token)
+            if event.event_type in {RuntimeEventType.RUNTIME_TERMINAL, RuntimeEventType.RUNTIME_FAILED}:
+                reconcile_status_cleanup = getattr(
+                    master_runtime, "reconcile_status_cleanup_once", None
+                )
+                if reconcile_status_cleanup is not None:
+                    # Cleanup failure never changes the already-durable runtime
+                    # ACK. The periodic bounded reconciler resumes the exact
+                    # delete intent after its cleanup claim expires.
+                    with suppress(Exception):
+                        await asyncio.to_thread(reconcile_status_cleanup)
             if event.event_type is RuntimeEventType.RUNTIME_HEARTBEAT:
                 observed_hash = hashlib.sha256(raw).hexdigest()
                 restarted = control_ledger.restarted_master_acceptance_callback(

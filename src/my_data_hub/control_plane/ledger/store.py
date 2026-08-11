@@ -793,6 +793,254 @@ class ControlLedger:
             if row is None or not hmac.compare_digest(str(row[0]), token_sha256):
                 raise IdempotencyConflict("runtime attempt already has a different per-run token hash")
 
+    def ensure_master_status_dataset_authority(
+        self,
+        *,
+        operation_id: str,
+        run_id: str,
+        attempt_id: str,
+        token: str,
+        creator_claim_until: datetime,
+        expected_content_tree_sha256: str,
+        resource_lease: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically bind one random callback token hash to one master attempt."""
+
+        token_sha256 = hashlib.sha256(token.encode()).hexdigest()
+        if (
+            creator_claim_until.tzinfo is None
+            or len(token) != 64
+            or len(expected_content_tree_sha256) != 64
+            or any(value not in "0123456789abcdef" for value in expected_content_tree_sha256)
+        ):
+            raise ValueError("master status Dataset authority is invalid")
+        now = _format_time(self.clock.now())
+        claim_until = _format_time(creator_claim_until)
+        resource_lease_json = _safe_json(resource_lease, max_bytes=8 * 1024)
+        with self._transaction() as connection:
+            operation = connection.execute(
+                "SELECT identity_json FROM operations WHERE operation_id=? AND operation_kind='ensure_master'",
+                (operation_id,),
+            ).fetchone()
+            if operation is None:
+                raise KeyError(operation_id)
+            identity = json.loads(str(operation["identity_json"]))
+            if str(identity.get("run_id")) != run_id or str(identity.get("attempt_id")) != attempt_id:
+                raise StaleRuntimeEvent("master status authority differs from admitted operation")
+            existing = connection.execute(
+                "SELECT * FROM master_status_dataset_authorities WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if existing is not None:
+                return self._master_status_dataset_from_row(existing), False
+            connection.execute(
+                "INSERT INTO master_status_dataset_authorities(operation_id,run_id,attempt_id,"
+                "token_sha256,creator_claim_until,expected_content_tree_sha256,resource_lease_json,"
+                "state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'CREATING',?,?)",
+                (operation_id, run_id, attempt_id, token_sha256, claim_until,
+                 expected_content_tree_sha256, resource_lease_json, now, now),
+            )
+            connection.execute(
+                "INSERT INTO runtime_token_hashes(run_id,attempt_id,token_sha256,created_at) "
+                "VALUES (?,?,?,?) ON CONFLICT(run_id,attempt_id) DO NOTHING",
+                (run_id, attempt_id, token_sha256, now),
+            )
+            token_row = connection.execute(
+                "SELECT token_sha256 FROM runtime_token_hashes WHERE run_id=? AND attempt_id=?",
+                (run_id, attempt_id),
+            ).fetchone()
+            if token_row is None or not hmac.compare_digest(str(token_row[0]), token_sha256):
+                raise IdempotencyConflict("master attempt already has another callback token hash")
+            row = connection.execute(
+                "SELECT * FROM master_status_dataset_authorities WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            assert row is not None
+            return self._master_status_dataset_from_row(row), True
+
+    def master_status_dataset_authority(self, operation_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_status_dataset_authorities WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+        return self._master_status_dataset_from_row(row) if row is not None else None
+
+    def record_master_status_dataset(
+        self, *, operation_id: str, status_dataset: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        payload = _safe_json(status_dataset, max_bytes=32 * 1024)
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_status_dataset_authorities WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(operation_id)
+            if row["status_dataset_json"] is not None and row["status_dataset_json"] != payload:
+                raise IdempotencyConflict("master status Dataset claim changed")
+            connection.execute(
+                "UPDATE master_status_dataset_authorities SET status_dataset_json=?,state='READY',"
+                "updated_at=? WHERE operation_id=? AND state IN ('CREATING','READY')",
+                (payload, now, operation_id),
+            )
+            current = connection.execute(
+                "SELECT * FROM master_status_dataset_authorities WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            assert current is not None
+            return self._master_status_dataset_from_row(current)
+
+    def complete_master_status_dataset_cleanup(
+        self, *, operation_id: str, cleanup_receipt: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        payload = _safe_json(cleanup_receipt, max_bytes=32 * 1024)
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_status_dataset_authorities WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if row is None or row["status_dataset_json"] is None:
+                raise StaleRuntimeEvent("master status Dataset cleanup lacks an exact claim")
+            if row["cleanup_receipt_json"] is not None and row["cleanup_receipt_json"] != payload:
+                raise IdempotencyConflict("master status Dataset cleanup receipt changed")
+            connection.execute(
+                "UPDATE master_status_dataset_authorities SET cleanup_receipt_json=?,state='CLEANED',"
+                "updated_at=? WHERE operation_id=? AND state IN ('CLEANING','CLEANED')",
+                (payload, now, operation_id),
+            )
+            current = connection.execute(
+                "SELECT * FROM master_status_dataset_authorities WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            assert current is not None
+            return self._master_status_dataset_from_row(current)
+
+    def complete_ambiguous_master_status_dataset_cleanup(
+        self, *, operation_id: str, cleanup_receipt: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        payload = _safe_json(cleanup_receipt, max_bytes=32 * 1024)
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_status_dataset_authorities WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if row is None or row["state"] != "AMBIGUOUS" or row["status_dataset_json"] is not None:
+                raise StaleRuntimeEvent("ambiguous master status cleanup binding changed")
+            if row["cleanup_receipt_json"] is not None and row["cleanup_receipt_json"] != payload:
+                raise IdempotencyConflict("ambiguous master status cleanup receipt changed")
+            connection.execute(
+                "UPDATE master_status_dataset_authorities SET cleanup_receipt_json=?,updated_at=? "
+                "WHERE operation_id=? AND state='AMBIGUOUS'",
+                (payload, now, operation_id),
+            )
+            current = connection.execute(
+                "SELECT * FROM master_status_dataset_authorities WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            assert current is not None
+            return self._master_status_dataset_from_row(current)
+
+    def claim_master_status_dataset_cleanup(
+        self, operation_id: str, *, claim_until: datetime
+    ) -> bool:
+        now = self.clock.now()
+        if claim_until <= now:
+            raise ValueError("master status cleanup claim must expire in the future")
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT state,cleanup_claim_until FROM master_status_dataset_authorities "
+                "WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(operation_id)
+            reclaim = row["state"] == "CLEANING" and (
+                row["cleanup_claim_until"] is not None
+                and _parse_time(str(row["cleanup_claim_until"])) <= now
+            )
+            if row["state"] != "READY" and not reclaim:
+                return False
+            changed = connection.execute(
+                "UPDATE master_status_dataset_authorities SET state='CLEANING',cleanup_claim_until=?,"
+                "updated_at=? WHERE operation_id=? AND state=?",
+                (_format_time(claim_until), _format_time(now), operation_id, row["state"]),
+            ).rowcount
+            return changed == 1
+
+    def terminal_master_status_dataset_authorities(
+        self, *, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 100:
+            raise ValueError("master status cleanup limit is invalid")
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT a.* FROM master_status_dataset_authorities a JOIN operations o "
+                "ON o.operation_id=a.operation_id WHERE o.state IN ('STOPPED','FAILED','FENCED','ORPHANED') "
+                "AND a.status_dataset_json IS NOT NULL AND a.cleanup_receipt_json IS NULL "
+                "AND a.state IN ('READY','CLEANING') ORDER BY a.updated_at,a.operation_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._master_status_dataset_from_row(row) for row in rows]
+
+    def fail_ambiguous_master_status_dataset(self, operation_id: str) -> dict[str, Any]:
+        """Fence a creator that outlived its fixed deadline without an exact claim."""
+
+        now = self.clock.now()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_status_dataset_authorities WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(operation_id)
+            if row["status_dataset_json"] is not None:
+                return self._master_status_dataset_from_row(row)
+            if _parse_time(str(row["creator_claim_until"])) > now:
+                return self._master_status_dataset_from_row(row)
+            connection.execute(
+                "UPDATE master_status_dataset_authorities SET state='AMBIGUOUS',updated_at=? "
+                "WHERE operation_id=? AND state='CREATING'",
+                (_format_time(now), operation_id),
+            )
+            operation = connection.execute(
+                "SELECT state FROM operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if operation is not None and operation["state"] in {"REQUESTED", "STARTING"}:
+                connection.execute(
+                    "UPDATE operations SET state='FAILED',updated_at=? WHERE operation_id=?",
+                    (_format_time(now), operation_id),
+                )
+                connection.execute(
+                    "INSERT INTO operation_log(operation_id,from_state,to_state,recorded_at,metadata_json) "
+                    "VALUES (?,?,?,?,?)",
+                    (operation_id, operation["state"], "FAILED", _format_time(now),
+                     _safe_json({"code": "MASTER_STATUS_DATASET_RESPONSE_AMBIGUOUS"})),
+                )
+            connection.execute(
+                "UPDATE runtime_token_hashes SET revoked_at=? WHERE run_id=? AND attempt_id=?",
+                (_format_time(now), row["run_id"], row["attempt_id"]),
+            )
+            current = connection.execute(
+                "SELECT * FROM master_status_dataset_authorities WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            assert current is not None
+            return self._master_status_dataset_from_row(current)
+
+    @staticmethod
+    def _master_status_dataset_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["resource_lease"] = json.loads(str(value.pop("resource_lease_json")))
+        status = value.pop("status_dataset_json")
+        cleanup = value.pop("cleanup_receipt_json")
+        value["status_dataset"] = json.loads(str(status)) if status is not None else None
+        value["cleanup_receipt"] = json.loads(str(cleanup)) if cleanup is not None else None
+        return value
+
     def revoke_runtime_token(self, run_id: str, attempt_id: str) -> None:
         with self._transaction() as connection:
             connection.execute(
@@ -3762,6 +4010,13 @@ class ControlLedger:
             row = connection.execute("SELECT * FROM resource_leases WHERE lease_id=?", (lease_id,)).fetchone()
             assert row is not None
             return self._resource_lease_from_row(row)
+
+    def resource_lease(self, lease_id: str) -> ResourceLeaseRecord | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM resource_leases WHERE lease_id=?", (lease_id,)
+            ).fetchone()
+        return self._resource_lease_from_row(row) if row is not None else None
 
     def renew_resource_lease(self, lease_id: str, holder_id: str, epoch: int, lease_until: datetime) -> None:
         now = self.clock.now()

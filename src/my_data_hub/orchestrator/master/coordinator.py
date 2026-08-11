@@ -109,7 +109,7 @@ class MasterCoordinator:
         self.tunnel_authority = tunnel_authority
         self.tunnel_listen_port = tunnel_listen_port
 
-    def ensure_master(self, intent: MasterIntent, *, runtime_secret: str) -> MasterHandle:
+    def ensure_master(self, intent: MasterIntent, *, runtime_secret: str | None = None) -> MasterHandle:
         identity = self.identity_for(intent.idempotency_key)
         record, _ = self.ledger.ensure_master_operation(
             operation_id=identity["operation_id"],
@@ -130,7 +130,10 @@ class MasterCoordinator:
             epoch=int(durable["epoch"]),
             state=MasterState.REQUESTED.value,
         )
-        self.ledger.store_runtime_token_hash(str(durable["run_id"]), str(durable["attempt_id"]), runtime_secret)
+        if runtime_secret is not None:
+            self.ledger.store_runtime_token_hash(
+                str(durable["run_id"]), str(durable["attempt_id"]), runtime_secret
+            )
         self.reconcile_operation(record.operation_id, intent)
         current = self.ledger.get_operation(record.operation_id)
         assert current is not None
@@ -429,6 +432,9 @@ class MasterCoordinator:
         projected_events = {
             RuntimeEventType.SERVICE_READY,
             RuntimeEventType.RUNTIME_HEARTBEAT,
+            RuntimeEventType.RESOURCE_ACQUIRE,
+            RuntimeEventType.RESOURCE_RENEW,
+            RuntimeEventType.RESOURCE_RELEASE,
             RuntimeEventType.RUNTIME_DRAINING,
             RuntimeEventType.CHECKPOINT_STARTED,
             RuntimeEventType.CHECKPOINT_VERIFIED,
@@ -503,6 +509,34 @@ class MasterCoordinator:
                     event.event_id,
                 )
                 self._renew_tunnel_authority(event, operation.identity, lease_until)
+                if event.data.get("resource") is not None:
+                    lease = self._exact_status_resource_lease(operation.operation_id, event)
+                    self.ledger.renew_resource_lease(
+                        str(lease["lease_id"]),
+                        str(lease["holder_id"]),
+                        int(lease["epoch"]),
+                        lease_until,
+                    )
+        elif event.event_type in {
+            RuntimeEventType.RESOURCE_ACQUIRE,
+            RuntimeEventType.RESOURCE_RENEW,
+            RuntimeEventType.RESOURCE_RELEASE,
+        }:
+            lease = self._exact_status_resource_lease(operation.operation_id, event)
+            if event.event_type == RuntimeEventType.RESOURCE_RENEW:
+                lease_until_raw = event.data.get("lease_until")
+                if not isinstance(lease_until_raw, str):
+                    raise ValueError("resource renewal lacks an exact deadline")
+                self.ledger.renew_resource_lease(
+                    str(lease["lease_id"]),
+                    str(lease["holder_id"]),
+                    int(lease["epoch"]),
+                    self._parse_time(lease_until_raw),
+                )
+            elif event.event_type == RuntimeEventType.RESOURCE_RELEASE:
+                self.ledger.release_resource_lease_exact(
+                    str(lease["lease_id"]), str(lease["holder_id"]), int(lease["epoch"])
+                )
         elif event.event_type == RuntimeEventType.RUNTIME_DRAINING:
             self.ledger.project_master_lifecycle(
                 operation_id=operation.operation_id,
@@ -583,6 +617,26 @@ class MasterCoordinator:
             self.ledger.revoke_runtime_token(event.run_id, event.attempt_id)
         return receipt
 
+    def _exact_status_resource_lease(self, operation_id: str, event: RuntimeEvent) -> dict[str, Any]:
+        resource = event.data.get("resource")
+        authority = self.ledger.master_status_dataset_authority(operation_id)
+        if not isinstance(resource, dict) or authority is None:
+            raise ValueError("runtime resource event lacks a durable status authority")
+        expected = authority.get("resource_lease")
+        if not isinstance(expected, dict):
+            raise ValueError("runtime resource event lacks a durable resource lease")
+        string_fields = ("lease_id", "resource_kind", "resource_ref", "holder_id")
+        if any(str(resource.get(key, "")) != str(expected.get(key, "")) for key in string_fields):
+            raise ValueError("runtime resource event differs from the owner-task lease")
+        try:
+            observed_epoch = int(resource.get("epoch"))
+            expected_epoch = int(expected.get("epoch"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("runtime resource event has an invalid fencing epoch") from exc
+        if observed_epoch != expected_epoch or str(expected["holder_id"]) != event.run_id:
+            raise ValueError("runtime resource event is stale or cross-task")
+        return expected
+
     def _expected_executed_source_sha256(self, operation_id: str) -> str | None:
         """Return the exact push response digest for an official Kaggle run.
 
@@ -612,8 +666,12 @@ class MasterCoordinator:
     ) -> ProviderEffectReceipt | None:
         key = f"{operation_id}:{effect_kind}"
         effect_id = str(uuid5(NAMESPACE_URL, key))
+        operation = self.ledger.get_operation(operation_id)
+        if operation is None:
+            raise KeyError(operation_id)
         exact_identity = {
             "operation_id": operation_id,
+            "operation_requested_at": operation.created_at.isoformat(),
             "exact_ref": exact_ref,
             "run_id": identity["run_id"],
             "attempt_id": identity["attempt_id"],
@@ -630,6 +688,14 @@ class MasterCoordinator:
                 return None
             assert source_effect.receipt is not None
             exact_identity["notebook_launch"] = source_effect.receipt.get("exact_identity")
+        if effect_kind == "push_notebook":
+            dataset_effect = self.ledger.get_effect_by_idempotency_key(
+                f"{operation_id}:ensure_dataset"
+            )
+            if dataset_effect is None or dataset_effect.state != EffectState.APPLIED:
+                return None
+            assert dataset_effect.receipt is not None
+            exact_identity["asset_dataset"] = dataset_effect.receipt.get("exact_identity")
         effect, _ = self.ledger.plan_effect(
             effect_id=effect_id,
             operation_id=operation_id,

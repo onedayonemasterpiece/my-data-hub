@@ -30,7 +30,6 @@ from my_data_hub.providers.kaggle import (
     KaggleMasterLaunchAssets,
     KaggleMasterRuntimeProvider,
     KaggleProviderAdapter,
-    derive_runtime_secret,
 )
 from my_data_hub.runtime_sdk import RuntimeEvent, RuntimeEventType
 from my_data_hub.workloads.bloggers.importer import batch_identity
@@ -46,7 +45,7 @@ from my_data_hub.workloads.bloggers.master_stage import (
     BloggerQuarantineReceipt,
 )
 
-ROOT = "runtime-root-secret-long-enough-for-tests"
+TOKEN = "a" * 64
 
 
 def test_duplicate_replay_requires_terminal_quarantine_and_exact_source_authorization() -> None:
@@ -149,11 +148,9 @@ def test_production_runtime_rejects_an_attacker_callback_audience(monkeypatch) -
         "MY_DATA_HUB_KAGGLE_MASTER_DATASET_DIR": "/does/not/matter",
         "MY_DATA_HUB_KAGGLE_MASTER_NOTEBOOK_SOURCE": "/does/not/matter.ipynb",
         "MY_DATA_HUB_CALLBACK_URL": "https://attacker.example/internal/runtime/events",
-        "MY_DATA_HUB_KAGGLE_RUNTIME_TOKEN_SECRET_NAME": "runtime-token",
-        "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_REF": "owner/verifier",
+                "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_REF": "owner/verifier",
         "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_SOURCE_FILE": "verifier.ipynb",
-        "MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT": ROOT,
-    }
+            }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
     with pytest.raises(ValueError, match="owner-approved canonical HTTPS audience"):
@@ -170,7 +167,6 @@ def assets() -> KaggleMasterLaunchAssets:
         dataset_files={"launch.txt": b"exact", "checkpoint-verifier.ipynb": b"{}"},
         notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
         callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
-        runtime_token_secret_name="MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
         checkpoint_probe_relations=("hub.canonical_state",),
@@ -181,7 +177,7 @@ def runtime(ledger: ControlLedger, provider: FakeKaggleRuntime) -> ControlPlaneM
     return ControlPlaneMasterRuntime(
         ledger,
         MasterCoordinator(ledger, provider),
-        MasterRuntimeSettings(assets(), ROOT),
+        MasterRuntimeSettings(assets()),
     )
 
 
@@ -192,7 +188,7 @@ def test_production_builder_constructs_single_adapter_journal_and_bridge(monkeyp
     seen = []
     built = build_production_runtime(
         ledger,
-        MasterRuntimeSettings(assets(), ROOT),
+        MasterRuntimeSettings(assets()),
         adapter_factory=lambda journal: seen.append(journal) or adapter,  # type: ignore[arg-type,return-value]
     )
     assert built.provider_status == "available"
@@ -211,7 +207,7 @@ def test_production_builder_accepts_central_legacy_kaggle_credentials(monkeypatc
     adapter = object()
     built = build_production_runtime(
         ledger,
-        MasterRuntimeSettings(assets(), ROOT),
+        MasterRuntimeSettings(assets()),
         adapter_factory=lambda _journal: adapter,  # type: ignore[arg-type,return-value]
     )
     assert built.provider_status == "available"
@@ -226,7 +222,7 @@ def test_production_builder_rejects_partial_legacy_kaggle_credentials(monkeypatc
     monkeypatch.delenv("KAGGLE_KEY", raising=False)
     built = build_production_runtime(
         ControlLedger(tmp_path / "partial-legacy.sqlite3"),
-        MasterRuntimeSettings(assets(), ROOT),
+        MasterRuntimeSettings(assets()),
         adapter_factory=lambda _journal: object(),  # type: ignore[arg-type,return-value]
     )
     assert built.provider_status == "provider_unavailable"
@@ -410,7 +406,8 @@ def test_runtime_callback_reaches_active_through_production_app_wiring(tmp_path:
             "epoch": int(identity["epoch"]),
         },
     )
-    token = derive_runtime_secret(ROOT, str(identity["run_id"]), str(identity["attempt_id"]))
+    token = TOKEN
+    ledger.store_runtime_token_hash(str(identity["run_id"]), str(identity["attempt_id"]), token)
     callback = TestClient(app).post(
         "/internal/runtime/events",
         content=event.model_dump_json(by_alias=True, exclude_none=True).encode(),
@@ -495,7 +492,8 @@ def test_active_runtime_claims_only_its_exact_blogger_request(tmp_path: Path) ->
             "epoch": int(identity["epoch"]),
         },
     )
-    token = derive_runtime_secret(ROOT, str(identity["run_id"]), str(identity["attempt_id"]))
+    token = TOKEN
+    ledger.store_runtime_token_hash(str(identity["run_id"]), str(identity["attempt_id"]), token)
     accepted = client.post(
         "/internal/runtime/events",
         content=ready.model_dump_json(by_alias=True, exclude_none=True).encode(),
@@ -645,7 +643,8 @@ def test_quarantine_callback_is_durable_public_and_alteration_denied(tmp_path: P
             "epoch": int(identity["epoch"]),
         },
     )
-    token = derive_runtime_secret(ROOT, str(identity["run_id"]), str(identity["attempt_id"]))
+    token = TOKEN
+    ledger.store_runtime_token_hash(str(identity["run_id"]), str(identity["attempt_id"]), token)
     assert client.post(
         "/internal/runtime/events",
         content=ready.model_dump_json(by_alias=True, exclude_none=True).encode(),
@@ -766,7 +765,8 @@ def test_runtime_can_register_bounded_reader_credential_without_echoing_secret(t
     operation = ledger.get_operation(ensured.json()["operation_id"])
     assert operation is not None
     identity = operation.identity
-    token = derive_runtime_secret(ROOT, str(identity["run_id"]), str(identity["attempt_id"]))
+    token = TOKEN
+    ledger.store_runtime_token_hash(str(identity["run_id"]), str(identity["attempt_id"]), token)
     secret_url = (
         "postgresql://reader:opaque-password@127.0.0.1:55432/hub"
         "?sslmode=verify-full&sslrootcert=/state/master-tls/ca.pem&connect_timeout=5"
@@ -845,7 +845,8 @@ def test_embedding_admission_accepts_first_request_and_replays_without_completio
     assert operation is not None
     identity = operation.identity
     now = datetime.now(UTC)
-    token = derive_runtime_secret(ROOT, str(identity["run_id"]), str(identity["attempt_id"]))
+    token = TOKEN
+    ledger.store_runtime_token_hash(str(identity["run_id"]), str(identity["attempt_id"]), token)
     ready = RuntimeEvent(
         event_id=str(uuid4()),
         run_id=str(identity["run_id"]),

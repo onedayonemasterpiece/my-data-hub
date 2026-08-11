@@ -14,18 +14,17 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import parse_qs, urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from my_data_hub.control_plane.ledger import EventDisposition, EventRejected, StaleRuntimeEvent
-from my_data_hub.control_plane.runtime import ControlPlaneMasterRuntime
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.contracts import ExecutionLimits, SessionRequest
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.mcp.postgres_broker import DirectoryEpochCredentialSource
 from my_data_hub.orchestrator.master import MasterState
-from my_data_hub.providers.kaggle import KaggleMasterRuntimeProvider, derive_runtime_secret
+from my_data_hub.providers.kaggle import KaggleMasterRuntimeProvider
 from my_data_hub.runtime_sdk import RuntimeEvent
 from my_data_hub.runtime_sdk.transport import json_body
 
@@ -51,6 +50,9 @@ from .master_lifecycle import (
     execute_master_acceptance_command,
     require_acceptance_operator,
 )
+
+if TYPE_CHECKING:
+    from my_data_hub.control_plane.runtime import ControlPlaneMasterRuntime
 
 MASTER_SERVICE_KIND = "postgres-master"
 HOST_SCENARIOS = frozenset(
@@ -441,6 +443,8 @@ class ControlLedgerStoredReplay:
     """Production FM09 adapter over the protected event ledger/coordinator."""
 
     runtime: ControlPlaneMasterRuntime
+    runtime_token: str | None = field(default=None, repr=False)
+    retired_runtime_token: str | None = field(default=None, repr=False)
     _bindings: dict[UUID, MasterAcceptanceBinding] = field(default_factory=dict, init=False, repr=False)
 
     def exact_acked_callback(self, binding: MasterAcceptanceBinding) -> StoredCallbackRef:
@@ -490,14 +494,12 @@ class ControlLedgerStoredReplay:
         return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
     def replay_stored_callback(self, event_id: UUID) -> Literal["duplicate"]:
-        binding, body = self._body(event_id)
+        _binding, body = self._body(event_id)
+        if self.runtime_token is None:
+            raise ProductionAcceptanceBlocked("FM09_RUNTIME_REPLAY_AUTH_UNAVAILABLE")
         receipt = self.runtime.coordinator.accept_runtime_event(
             body,
-            header_token=derive_runtime_secret(
-                self.runtime.settings.runtime_token_root,
-                str(binding.run_id),
-                str(binding.attempt_id),
-            ),
+            header_token=self.runtime_token,
         )
         if receipt.disposition is not EventDisposition.DUPLICATE:
             raise ProductionAcceptanceBlocked("FM09_EXACT_REPLAY_NOT_DUPLICATE")
@@ -511,14 +513,12 @@ class ControlLedgerStoredReplay:
         )
         if retired is None:
             raise ProductionAcceptanceBlocked("FM09_RETIRED_TOKEN_UNAVAILABLE")
+        if self.retired_runtime_token is None:
+            raise ProductionAcceptanceBlocked("FM09_RETIRED_TOKEN_UNAVAILABLE")
         try:
             self.runtime.coordinator.accept_runtime_event(
                 body,
-                header_token=derive_runtime_secret(
-                    self.runtime.settings.runtime_token_root,
-                    retired["run_id"],
-                    retired["attempt_id"],
-                ),
+                header_token=self.retired_runtime_token,
             )
         except (EventRejected, StaleRuntimeEvent):
             return True
@@ -535,14 +535,12 @@ class ControlLedgerStoredReplay:
                 "epoch": binding.epoch - 1,
             }
         )
+        if self.runtime_token is None:
+            raise ProductionAcceptanceBlocked("FM09_RUNTIME_REPLAY_AUTH_UNAVAILABLE")
         try:
             self.runtime.coordinator.accept_runtime_event(
                 json_body(stale.model_dump(mode="json", by_alias=True, exclude_none=True)),
-                header_token=derive_runtime_secret(
-                    self.runtime.settings.runtime_token_root,
-                    str(binding.run_id),
-                    str(binding.attempt_id),
-                ),
+                header_token=self.runtime_token,
             )
         except (EventRejected, StaleRuntimeEvent):
             return True

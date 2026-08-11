@@ -40,7 +40,6 @@ def test_mcp_cold_start_request_is_durably_bridged_to_one_provider_run(
         dataset_files={"asset.txt": b"bounded", "checkpoint-verifier.ipynb": b"{}"},
         notebook_source=b"print('master')\n",
         callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
-        runtime_token_secret_name="MDH_RUNTIME_ROOT",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
         checkpoint_probe_relations=("hub.canonical_state",),
@@ -49,7 +48,7 @@ def test_mcp_cold_start_request_is_durably_bridged_to_one_provider_run(
     runtime = ControlPlaneMasterRuntime(
         ledger,
         MasterCoordinator(ledger, provider),
-        MasterRuntimeSettings(assets=assets, runtime_token_root="runtime-root-secret-long-enough"),
+        MasterRuntimeSettings(assets=assets),
     )
     resolver = LedgerMasterResolver(ledger)
     first = resolver.ensure_master(identity(), intent="mcp-read:bloggers.search")

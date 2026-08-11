@@ -205,11 +205,11 @@ for env_file in "$provider_env" "$mcp_env" "$oauth_env"; do
   reject_data_plane_environment "$env_file" "$(basename "$env_file")"
 done
 reject_environment_keys "$provider_env" "provider environment" \
-  'MY_DATA_HUB_OAUTH_SIGNING_KEY|MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET'
+  'MY_DATA_HUB_OAUTH_SIGNING_KEY|MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)'
 reject_environment_keys "$mcp_env" "remote MCP environment" \
-  'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT|MY_DATA_HUB_OAUTH_SIGNING_KEY'
+  'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_OAUTH_SIGNING_KEY|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)'
 reject_environment_keys "$oauth_env" "OAuth environment" \
-  'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT|MY_DATA_HUB_KAGGLE_[A-Z0-9_]+'
+  'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)'
 
 operator_override=""
 operator_compose_arg=""

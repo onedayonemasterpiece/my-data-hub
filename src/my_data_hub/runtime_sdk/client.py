@@ -306,6 +306,11 @@ class RuntimeClient:
             "message": envelope.get("message"),
         }
         normalized_data = {key: value for key, value in data.items() if value is not None}
+        progress = normalized_data.get("progress")
+        if event_type is RuntimeEventType.RUNTIME_HEARTBEAT and isinstance(progress, Mapping):
+            lease_until = progress.get("lease_until")
+            if isinstance(lease_until, str):
+                normalized_data["lease_until"] = lease_until
         donor_body_sha256 = hashlib.sha256(
             json_body(
                 {
