@@ -23,8 +23,6 @@ from scripts.provider.operational_kaggle_matrix import (
     SCENARIOS,
     DriverResult,
     LifecycleEvent,
-    _driver_request,
-    _invoke_driver,
     _summary,
     build_plan,
     run_operational_matrix,
@@ -88,6 +86,9 @@ def test_lifecycle_contract_encodes_all_mandatory_real_gates() -> None:
     assert gates.count("soak") == 1
     assert MINIMUM_SOAK_SECONDS == 3600
     assert MAXIMUM_SOAK_SECONDS == 5400
+    rows_by_id = {row["requirement_id"]: row for row in rows}
+    assert rows_by_id["FM11"]["lifecycle_gates"] == ["clean_rotation"]
+    assert rows_by_id["FM24"]["lifecycle_gates"] == ["soak"]
 
 
 def test_soak_and_rotation_events_fail_closed() -> None:

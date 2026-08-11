@@ -1328,6 +1328,61 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "enum": [
+              "READY",
+              "PASS"
+            ]
+          },
+          "phase": {
+            "const": "EXECUTE"
+          }
+        },
+        "required": [
+          "phase",
+          "outcome"
+        ]
+      },
+      "then": {
+        "oneOf": [
+          {
+            "properties": {
+              "control_receipt": {
+                "type": "null"
+              },
+              "scenario_output": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
+            "required": [
+              "scenario_output",
+              "control_receipt"
+            ]
+          },
+          {
+            "properties": {
+              "control_receipt": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "scenario_output": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "scenario_output",
+              "control_receipt"
+            ]
+          }
+        ]
+      }
     }
   ],
   "properties": {

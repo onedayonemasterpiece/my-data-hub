@@ -157,7 +157,9 @@
     {
       "category": "fencing",
       "integration_dependency": "split-brain old-run resume injector and admission probes",
-      "lifecycle_gates": [],
+      "lifecycle_gates": [
+        "clean_rotation"
+      ],
       "name": "old-epoch-return-fenced",
       "ordinal": 11,
       "planned_task_run_id": "b244799f-c71e-5e45-b0e9-d536d4dc2268",
@@ -357,7 +359,6 @@
       "category": "soak",
       "integration_dependency": "60-90 minute soak controller with session rotation",
       "lifecycle_gates": [
-        "clean_rotation",
         "soak"
       ],
       "name": "accelerated-session-rotation-soak",

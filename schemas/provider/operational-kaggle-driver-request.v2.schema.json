@@ -137,7 +137,11 @@
                   "claim_task_id": {
                     "type": "string"
                   }
-                }
+                },
+                "required": [
+                  "claim_task_id",
+                  "claim_sha256"
+                ]
               }
             ]
           }

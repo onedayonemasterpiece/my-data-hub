@@ -2270,7 +2270,11 @@ async def _execute_master_acceptance_scenario(
                 return _failed(
                     request,
                     checks=[*checks, _check("acceptance.request", "FAIL", "ACCEPTANCE_REQUEST_INVALID")],
-                    observations={**observations, "response_sha256": _sha(launched), "failure_type": type(exc).__name__},
+                    observations={
+                        **observations,
+                        "response_sha256": _sha(launched),
+                        "failure_type": type(exc).__name__,
+                    },
                     mutations_started=1,
                 )
         status = launched
@@ -2551,7 +2555,6 @@ async def _execute_reconcile(
 ) -> TrustedDriverResult:
     binding = request.cleanup
     assert binding is not None
-    checks: list[CapabilityCheck] = []
     if request.requirement_id in {"FM08", "FM10", "FM11", "FM24"}:
         try:
             catalog = await gateway.catalog("operator")

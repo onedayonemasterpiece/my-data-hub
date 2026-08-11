@@ -1002,6 +1002,9 @@ def test_checkpoint_driver_json_schema_requires_exact_output_receipts(
     validator.validate(result)
     result["output_file_sha256"] = None
     assert list(validator.iter_errors(result))
+    result["output_file_sha256"] = "a" * 64
+    result["scenario_output"] = None
+    assert list(validator.iter_errors(result))
 
 
 def test_missing_profile_is_specific_and_precedes_safe_probe(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -7,30 +7,21 @@ smoke result into operational evidence.
 
 ## Fail-closed entry conditions
 
-The `run` command checks for a modern Kaggle API token before it creates a plan,
-ledger, adapter, invokes the operational driver, or performs a provider
-mutation. If the token is absent, it writes a bounded blocker with
-`mutations_started: 0` and exits 78. Legacy `kaggle.json` does not satisfy this
-gate.
-
-The repository includes the trusted bounded driver
-`scripts/provider/operational_kaggle_driver.py`. The provider workflow selects
-it by default:
-
-```text
-MY_DATA_HUB_OPERATIONAL_DRIVER_JSON=["python","scripts/provider/operational_kaggle_driver.py"]
-```
-
-The value is parsed as a JSON argv array, never as shell text. For each scenario
-the runner passes `--request REQUEST.json --result RESULT.json`. The v2 request is
+The matrix has no local Kaggle credential or adapter. Provider launch, status,
+output observation, claims, and cleanup all traverse the single deployed
+control-owned gateway. The workflow cannot override the driver command: the
+runner resolves the checked-in regular sibling
+`scripts/provider/operational_kaggle_driver.py` and invokes only that file.
+For each scenario the runner passes `--request REQUEST.json --result RESULT.json`.
+The v2 request is
 non-secret and binds the matrix/commit/scenario/task-run identity, required
 assertions, lifecycle gates, soak bounds, phase, and `resume_only`. The result
 validates as `my-data-hub-operational-kaggle-driver-result.v2` and either:
 
 - return `READY` with an exact run locator plus acceptance task/claim and
   output-read receipt for outer reconciliation;
-- return `PASS` only for a completed cleanup phase, or for an older scenario
-  whose evidence run was owner-managed and has no acceptance cleanup contract;
+- return `PASS` only with an exact typed control receipt/carrier, an independently
+  reconciled provider claim, or a completed cleanup phase;
 - return `FAIL` after an action may have started but cannot be reconciled; or
 - report `BLOCKED` with an uppercase blocker code and the concrete missing
   integration dependency.
@@ -58,8 +49,7 @@ scenario-specific code such as `CHECKPOINT_CORRUPTION_FAULT_API_MISSING` or
 driver. This remains a blocked operational state, not a readiness claim.
 
 The current internal gaps are explicit in the executor registry. They include
-empty-bootstrap selection, callback/lease/replay fault controls, drain control,
-and the accelerated soak controller. Privileged actions
+empty-bootstrap selection, stale replay controls, and drain control. Privileged actions
 are not attempted until their terminal exact-run evidence contract exists.
 
 ### Evidence-plane scenarios and two-phase cleanup
@@ -88,10 +78,9 @@ and `mutation_attempted=false` before its distinct evidence Notebook launches.
 For FM01, FM02, FM03, FM06, FM16--FM19, FM21--FM23 the driver returns `READY`, never
 PASS, after the acceptance claim is `SUCCEEDED/PENDING`. The outer matrix then:
 
-1. independently reconciles the exact numeric run with its one real
-   `KaggleProviderAdapter`;
-2. downloads only `operational-result.json` and compares its file and output
-   tree hashes with the durable `OUTPUT_READ` receipt;
+1. invokes the pinned driver's `RECONCILE` phase, which re-reads the exact
+   claim/run/output receipt through the same deployed control authority;
+2. compares every numeric run/source/output/claim field with the execute result;
 3. appends a mode-0600 reconciliation fence; and
 4. invokes the driver `CLEANUP` phase with the exact task claim, provider run,
    and output-read receipt.
@@ -102,7 +91,7 @@ PASS scenario receipt. A lost cleanup response is re-read through
 FAIL, never BLOCKED. A rerun consumes the append-only reconciliation fence and
 never launches a second logical run. The fence contains the already validated
 receipt draft, so a retry after successful deletion does not attempt to
-download the deleted Notebook again.
+re-read the deleted Notebook bytes. No provider output bytes enter the matrix host.
 
 ### Matrix-wide FM16--FM19/FM21 production data workflow
 
@@ -234,25 +223,34 @@ to reach ACTIVE, or malformed/empty search result is FAIL with
 
 ### Fault/action blockers retained intentionally
 
-- FM08/FM09: callback ingestion accepts exact replay from its per-run bearer,
-  but there is no safe callback-suppression or stale-output injection tool.
+- FM09: callback ingestion accepts exact replay from its per-run bearer, but
+  there is no stale-output injection tool.
 - FM12: the master drains itself at its natural lifecycle boundary; there is no
   authenticated clean-drain/checkpoint/stop request or credential revocation
   endpoint.
-- FM24: status polling alone cannot prove heartbeat, read, checkpoint, recovery,
-  or credential-rotation counts. No accelerated soak controller/event stream is
-  exposed, so the 3,600–5,400 second scenario remains BLOCKED before mutation.
+
+FM08, FM10, FM11, and FM24 use `acceptance.scenario.request/status` with an
+exact ACTIVE operation target. PASS requires a full validated
+`MasterAcceptanceReceipt`, its receipt hash, the numeric control-owned Kaggle
+carrier, runtime-attested source SHA, and all output receipt hashes. FM08 also
+requires distinct terminated/recovery provider runs plus distinct control boot
+IDs. FM11 owns the second `clean_rotation` gate and binds distinct provider runs
+with consecutive epochs. FM24 is a single-epoch session/credential rotation
+soak; it proves 12 heartbeats, 12 bounded reads, checkpoint/recovery receipts,
+and the 3,600–5,400 second duration, but does not pretend that session rotation
+is a provider-run rotation. If the deployed status projection omits any of
+these fields after acceptance, the result is FAIL, never a synthetic PASS.
 
 ## What counts as PASS
 
-A driver-reported READY/PASS is only a locator. The runner constructs exactly one
-`KaggleProviderAdapter` and reuses it for every scenario. It reconciles the
-planned task ID/ref/source hash, compares the exact numeric Kaggle run ref,
-kernel ID and source version, requires terminal `complete`, and downloads the
-exact `operational-result.json` from that run. The Notebook output must contain
-exactly the scenario's required assertions and lifecycle events. Every
-assertion is bound to an evidence SHA-256. For two-phase scenarios this is
-still insufficient: the exact acceptance cleanup must be durably COMPLETE.
+A driver-reported READY/PASS is only evidence pending independent control
+reconciliation. The runner sends an exact `RECONCILE` request to the pinned
+driver and compares task, numeric run, kernel, source, output, claim, typed
+receipt, and lifecycle bindings. It never constructs a local Kaggle adapter or
+accepts Notebook-authored arbitrary assertion bodies. Fixed master assertions
+are derived only from the typed control receipt. For disposable two-phase
+scenarios this is still insufficient: the exact acceptance cleanup must be
+durably COMPLETE.
 
 The summary counts unique numeric provider run refs and provider kernel IDs. It
 does **not** count internal task UUIDs. PASS requires all 24 scenario receipts,
