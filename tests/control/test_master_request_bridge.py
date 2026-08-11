@@ -33,13 +33,16 @@ def test_mcp_cold_start_request_is_durably_bridged_to_one_provider_run(
     assets = KaggleMasterLaunchAssets(
         source_identity="owner/postgres-master",
         source_version="git:exact",
-        checkpoint_ref="EMPTY_BASELINE",
+        checkpoint_ref="owner/checkpoints",
         dataset_ref="owner/master-assets",
         notebook_ref="owner/master-runtime",
-        dataset_files={"asset.txt": b"bounded"},
+        dataset_files={"asset.txt": b"bounded", "checkpoint-verifier.ipynb": b"{}"},
         notebook_source=b"print('master')\n",
         callback_url="https://control.example/internal/runtime/events",
         runtime_token_secret_name="MDH_RUNTIME_ROOT",
+        checkpoint_verifier_ref="owner/checkpoint-verifier",
+        checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
+        checkpoint_probe_relations=("hub.canonical_state",),
         notebook_kernel_type="script",
     )
     runtime = ControlPlaneMasterRuntime(

@@ -26,6 +26,10 @@ OPERATION = UUID("44444444-4444-4444-8444-444444444444")
 SERVICE = UUID("55555555-5555-4555-8555-555555555555")
 CHECKPOINT = UUID("66666666-6666-4666-8666-666666666666")
 TOKEN = "runtime-token-that-is-long-enough"
+RUN_2 = UUID("88888888-8888-4888-8888-888888888888")
+ATTEMPT_2 = UUID("99999999-9999-4999-8999-999999999999")
+MASTER_2 = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+OPERATION_2 = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
 
 
 def _runtime(ledger: ControlLedger) -> ControlPlaneMasterRuntime:
@@ -35,10 +39,13 @@ def _runtime(ledger: ControlLedger) -> ControlPlaneMasterRuntime:
         checkpoint_ref="owner/checkpoints",
         dataset_ref="owner/master-launch",
         notebook_ref="owner/master",
-        dataset_files={"launch.txt": b"exact"},
+        dataset_files={"launch.txt": b"exact", "checkpoint-verifier.ipynb": b"{}"},
         notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
         callback_url="https://control.example/internal/runtime/events",
         runtime_token_secret_name="MDH_RUNTIME_ROOT",
+        checkpoint_verifier_ref="owner/checkpoint-verifier",
+        checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
+        checkpoint_probe_relations=("hub.canonical_state",),
     )
     return ControlPlaneMasterRuntime(
         ledger,
@@ -181,6 +188,74 @@ def test_remote_journal_requires_exact_runtime_identity(tmp_path: Path) -> None:
     assert current.json() == {"claim": claim.model_dump(mode="json")}
     fenced = {**headers, "X-MDH-Epoch": "2"}
     assert client.post(path, json={"intent": intent.model_dump(mode="json")}, headers=fenced).status_code == 409
+
+    ledger.ensure_operation(
+        operation_id=str(OPERATION_2),
+        idempotency_key="checkpoint-api-operation-2",
+        operation_kind="ensure_master",
+        intent={"exact": True, "generation": 2},
+        initial_state="ACTIVE",
+        identity={
+            "run_id": str(RUN_2),
+            "attempt_id": str(ATTEMPT_2),
+            "service_instance_id": str(UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")),
+            "master_instance_id": str(MASTER_2),
+        },
+        allocate_epoch_for="postgres-master",
+    )
+    ledger.record_attempt(
+        attempt_id=str(ATTEMPT_2),
+        run_id=str(RUN_2),
+        operation_id=str(OPERATION_2),
+        source_identity="owner/postgres-master",
+        source_version="git:exact-2",
+        service_instance_id=str(UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")),
+        master_instance_id=str(MASTER_2),
+        epoch=2,
+        state="ACTIVE",
+    )
+    ledger.store_runtime_token_hash(str(RUN_2), str(ATTEMPT_2), TOKEN + "-2")
+    headers_2 = {
+        "Authorization": f"Bearer {TOKEN}-2",
+        "X-MDH-Run-ID": str(RUN_2),
+        "X-MDH-Attempt-ID": str(ATTEMPT_2),
+        "X-MDH-Master-Instance-ID": str(MASTER_2),
+        "X-MDH-Epoch": "2",
+    }
+    version_intent = ProviderEffectIntent.create(
+        operation_id=OPERATION_2,
+        effect_id=UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+        idempotency_key="remote-checkpoint-dataset-v2",
+        task_id=claim.task_id,
+        action=MutationAction.VERSION_DATASET,
+        provider_ref=claim.provider_ref,
+        expected_fingerprint=claim.fingerprint,
+        arguments={"previous_version": 1},
+        requested_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    accepted_version = client.post(
+        path,
+        json={"intent": version_intent.model_dump(mode="json")},
+        headers=headers_2,
+    )
+    assert accepted_version.status_code == 200, accepted_version.text
+    claim_v2 = TaskResourceClaim.create(
+        task_id=claim.task_id,
+        effect_id=version_intent.effect_id,
+        provider_ref=claim.provider_ref,
+        kind=ProviderKind.DATASET,
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=False,
+        fingerprint=ProviderFingerprint(value="b" * 64),
+        provider_version=2,
+        registered_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+    persisted_v2 = client.post(
+        "/internal/provider-journal/resource-claims",
+        json={"claim": claim_v2.model_dump(mode="json")},
+        headers=headers_2,
+    )
+    assert persisted_v2.status_code == 200, persisted_v2.text
 
 
 def test_checkpoint_api_promotes_only_after_exact_stages_and_returns_numeric_head(tmp_path: Path) -> None:

@@ -73,13 +73,16 @@ def test_concrete_bridge_launches_dataset_notebook_and_run_once(tmp_path: Path) 
     launch = KaggleMasterLaunchAssets(
         source_identity="owner/postgres-master",
         source_version="git:exact",
-        checkpoint_ref="EMPTY_BASELINE",
+        checkpoint_ref="owner/checkpoints",
         dataset_ref="owner/master-launch",
         notebook_ref="owner/postgres-master",
-        dataset_files={"config.json": b'{"run":"{{MY_DATA_HUB_RUN_ID}}"}'},
+        dataset_files={"config.json": b'{"run":"{{MY_DATA_HUB_RUN_ID}}"}', "checkpoint-verifier.ipynb": b"{}"},
         notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
         callback_url="https://control.example/internal/runtime/events",
         runtime_token_secret_name="master-runtime-root",
+        checkpoint_verifier_ref="owner/checkpoint-verifier",
+        checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
+        checkpoint_probe_relations=("hub.canonical_state",),
     )
     adapter = FakeKaggleAdapter()
     provider = KaggleMasterRuntimeProvider(adapter, launch)  # type: ignore[arg-type]

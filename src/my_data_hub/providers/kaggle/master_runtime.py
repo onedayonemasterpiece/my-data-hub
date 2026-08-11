@@ -57,6 +57,9 @@ class KaggleMasterLaunchAssets:
     notebook_source: bytes
     callback_url: str
     runtime_token_secret_name: str
+    checkpoint_verifier_ref: str
+    checkpoint_verifier_source_file: str
+    checkpoint_probe_relations: tuple[str, ...]
     runtime_secret_bindings: Mapping[str, str] = field(default_factory=dict)
     notebook_code_file: str = "worker.ipynb"
     notebook_kernel_type: str = "notebook"
@@ -69,7 +72,7 @@ class KaggleMasterLaunchAssets:
         object.__setattr__(
             self, "runtime_secret_bindings", MappingProxyType(dict(self.runtime_secret_bindings))
         )
-        for field_name in ("dataset_ref", "notebook_ref"):
+        for field_name in ("dataset_ref", "notebook_ref", "checkpoint_ref", "checkpoint_verifier_ref"):
             value = getattr(self, field_name)
             parts = value.split("/")
             if len(parts) != 2 or not all(parts):
@@ -84,6 +87,14 @@ class KaggleMasterLaunchAssets:
             raise MasterLaunchContractError("callback URL must be the exact HTTPS runtime endpoint")
         if not self.runtime_token_secret_name or len(self.runtime_token_secret_name) > 200:
             raise MasterLaunchContractError("runtime token secret name is invalid")
+        if (
+            self.checkpoint_verifier_source_file not in self.dataset_files
+            or not self.checkpoint_verifier_source_file.endswith(".ipynb")
+            or not self.checkpoint_probe_relations
+            or len(set(self.checkpoint_probe_relations)) != len(self.checkpoint_probe_relations)
+            or any(not value or len(value) > 200 for value in self.checkpoint_probe_relations)
+        ):
+            raise MasterLaunchContractError("checkpoint verifier/probe assets are incomplete")
         if self.notebook_kernel_type not in {"notebook", "script"}:
             raise MasterLaunchContractError("master notebook kernel type is invalid")
         for environment_name, secret_name in self.runtime_secret_bindings.items():
@@ -110,6 +121,25 @@ class KaggleMasterLaunchAssets:
         input_root = f"/kaggle/input/{self.dataset_ref.split('/', 1)[1]}"
         if "master-config.json" in self.dataset_files:
             values["MY_DATA_HUB_MASTER_CONFIG"] = f"{input_root}/master-config.json"
+        verifier_source = self.dataset_files[self.checkpoint_verifier_source_file]
+        values.update(
+            {
+                "MY_DATA_HUB_CONTROL_PLANE_URL": self.callback_url.removesuffix(
+                    "/internal/runtime/events"
+                ),
+                "MY_DATA_HUB_CHECKPOINT_DATASET_REF": self.checkpoint_ref,
+                "MY_DATA_HUB_CHECKPOINT_VERIFIER_REF": self.checkpoint_verifier_ref,
+                "MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_PATH": (
+                    f"{input_root}/{self.checkpoint_verifier_source_file}"
+                ),
+                "MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_SHA256": hashlib.sha256(
+                    verifier_source
+                ).hexdigest(),
+                "MY_DATA_HUB_CHECKPOINT_PROBE_RELATIONS_JSON": json.dumps(
+                    self.checkpoint_probe_relations, separators=(",", ":")
+                ),
+            }
+        )
         wheels = sorted(path for path in self.dataset_files if path.endswith(".whl"))
         if len(wheels) == 1:
             values["MY_DATA_HUB_WHEEL_PATH"] = f"{input_root}/{wheels[0]}"

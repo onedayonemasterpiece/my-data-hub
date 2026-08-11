@@ -25,13 +25,16 @@ def assets() -> KaggleMasterLaunchAssets:
     return KaggleMasterLaunchAssets(
         source_identity="owner/postgres-master",
         source_version="git:0123456789abcdef",
-        checkpoint_ref="EMPTY_BASELINE",
+        checkpoint_ref="owner/checkpoints",
         dataset_ref="owner/master-launch",
         notebook_ref="owner/postgres-master",
-        dataset_files={"launch.txt": b"exact"},
+        dataset_files={"launch.txt": b"exact", "checkpoint-verifier.ipynb": b"{}"},
         notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
         callback_url="https://control.example/internal/runtime/events",
         runtime_token_secret_name="MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT",
+        checkpoint_verifier_ref="owner/checkpoint-verifier",
+        checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
+        checkpoint_probe_relations=("hub.canonical_state",),
     )
 
 
@@ -43,9 +46,7 @@ def runtime(ledger: ControlLedger, provider: FakeKaggleRuntime) -> ControlPlaneM
     )
 
 
-def test_production_builder_constructs_single_adapter_journal_and_bridge(
-    monkeypatch, tmp_path: Path
-) -> None:  # type: ignore[no-untyped-def]
+def test_production_builder_constructs_single_adapter_journal_and_bridge(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("KAGGLE_API_TOKEN", "modern-token-present")
     ledger = ControlLedger(tmp_path / "builder.sqlite3")
     adapter = object()
@@ -110,9 +111,7 @@ def test_runtime_callback_reaches_active_through_production_app_wiring(tmp_path:
     path = tmp_path / "control.sqlite3"
     ledger = ControlLedger(path)
     wired = runtime(ledger, FakeKaggleRuntime())
-    app = create_app(
-        ControlPlaneSettings(ledger_path=path), ledger=ledger, master_runtime=wired
-    )
+    app = create_app(ControlPlaneSettings(ledger_path=path), ledger=ledger, master_runtime=wired)
     response = TestClient(app).post(
         "/control/v1/master/ensure",
         json={"idempotency_key": "callback-master", "intent": "test"},
@@ -194,11 +193,13 @@ def test_runtime_can_register_bounded_reader_credential_without_echoing_secret(t
         json={
             "master_instance_id": identity["master_instance_id"],
             "epoch": identity["epoch"],
-            "credentials": [{
-                "role": "reader",
-                "database_url": secret_url,
-                "expires_at": (datetime.now(UTC) + timedelta(minutes=2)).isoformat(),
-            }],
+            "credentials": [
+                {
+                    "role": "reader",
+                    "database_url": secret_url,
+                    "expires_at": (datetime.now(UTC) + timedelta(minutes=2)).isoformat(),
+                }
+            ],
         },
         headers={"Authorization": f"Bearer {token}"},
     )

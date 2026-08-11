@@ -59,6 +59,8 @@ class MasterRuntimeSettings:
             "notebook_source": "MY_DATA_HUB_KAGGLE_MASTER_NOTEBOOK_SOURCE",
             "callback_url": "MY_DATA_HUB_CALLBACK_URL",
             "runtime_token_secret_name": "MY_DATA_HUB_KAGGLE_RUNTIME_TOKEN_SECRET_NAME",
+            "checkpoint_verifier_ref": "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_REF",
+            "checkpoint_verifier_source_file": "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_SOURCE_FILE",
             "runtime_token_root": "MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT",
         }
         raw = {key: os.getenv(name, "").strip() for key, name in names.items()}
@@ -72,6 +74,15 @@ class MasterRuntimeSettings:
         files = _bounded_files(dataset_dir)
         source = _bounded_file(notebook_source, max_bytes=8 * 1024 * 1024)
         root = raw.pop("runtime_token_root")
+        probe_relations_raw = os.getenv("MY_DATA_HUB_KAGGLE_CHECKPOINT_PROBE_RELATIONS_JSON", "").strip()
+        try:
+            probe_relations_value = json.loads(probe_relations_raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("checkpoint probe relations must be a JSON array") from exc
+        if not isinstance(probe_relations_value, list) or not all(
+            isinstance(value, str) for value in probe_relations_value
+        ):
+            raise ValueError("checkpoint probe relations must be a JSON string array")
         bindings_raw = os.getenv("MY_DATA_HUB_KAGGLE_MASTER_SECRET_BINDINGS_JSON", "{}").strip()
         try:
             bindings = json.loads(bindings_raw)
@@ -86,6 +97,7 @@ class MasterRuntimeSettings:
             dataset_files=files,
             notebook_source=source,
             runtime_secret_bindings=bindings,
+            checkpoint_probe_relations=tuple(probe_relations_value),
         )
         return cls(assets=assets, runtime_token_root=root)
 

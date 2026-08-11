@@ -26,6 +26,7 @@ from my_data_hub.control_plane.runtime import (
 )
 from my_data_hub.providers.kaggle import ControlLedgerKaggleJournal
 from my_data_hub.providers.kaggle.contracts import (
+    MutationAction,
     ProviderEffectIntent,
     ProviderEffectReceipt,
     TaskResourceClaim,
@@ -224,6 +225,20 @@ def create_app(
     app.state.reconcile_master_requests = (
         master_runtime.reconcile_requested_once if master_runtime is not None else None
     )
+
+    def _configured_master_assets():  # type: ignore[no-untyped-def]
+        configured = runtime.master_runtime or (
+            master_runtime.settings if master_runtime is not None else None
+        )
+        return configured.assets if configured else None
+
+    def _current_checkpoint_claim(provider_ref: str) -> TaskResourceClaim | None:
+        payload = control_ledger.latest_provider_resource_claim(
+            provider_ref=provider_ref,
+            resource_kind=ProviderKind.DATASET.value,
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
+        )
+        return TaskResourceClaim.model_validate(payload) if payload else None
 
     def _runtime_authority(
         *,
@@ -539,10 +554,28 @@ def create_app(
             intent = ProviderEffectIntent.model_validate(body["intent"])
         except Exception as exc:
             raise HTTPException(status_code=422, detail={"code": "intent_invalid"}) from exc
-        if str(intent.operation_id) != operation.operation_id or str(intent.task_id) != str(
-            operation.identity["run_id"]
-        ):
+        if str(intent.operation_id) != operation.operation_id:
             raise HTTPException(status_code=403, detail={"code": "provider_authority_mismatch"})
+        assets = _configured_master_assets()
+        current_run = str(operation.identity["run_id"])
+        authorized = False
+        if assets is not None and intent.action is MutationAction.CREATE_DATASET:
+            authorized = intent.provider_ref == assets.checkpoint_ref and str(intent.task_id) == current_run
+        elif assets is not None and intent.action is MutationAction.PUSH_NOTEBOOK:
+            authorized = (
+                intent.provider_ref == assets.checkpoint_verifier_ref
+                and str(intent.task_id) == current_run
+            )
+        elif assets is not None and intent.action is MutationAction.VERSION_DATASET:
+            prior = _current_checkpoint_claim(intent.provider_ref)
+            authorized = bool(
+                intent.provider_ref == assets.checkpoint_ref
+                and prior is not None
+                and intent.task_id == prior.task_id
+                and intent.expected_fingerprint == prior.fingerprint
+            )
+        if not authorized:
+            raise HTTPException(status_code=403, detail={"code": "provider_effect_not_allowed"})
         provider_journal.persist_intent(intent)
         return {"persisted": True}
 
@@ -572,8 +605,9 @@ def create_app(
         authority = control_ledger.provider_effect_authority(str(receipt.effect_id))
         if authority is None or (
             authority["operation_id"] != operation.operation_id
-            or authority["task_id"] != str(operation.identity["run_id"])
             or str(receipt.operation_id) != operation.operation_id
+            or authority["provider_ref"] != receipt.provider_ref
+            or authority["action"] != receipt.action.value
         ):
             raise HTTPException(status_code=403, detail={"code": "provider_authority_mismatch"})
         provider_journal.persist_receipt(receipt)
@@ -603,13 +637,35 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=422, detail={"code": "claim_invalid"}) from exc
         authority = control_ledger.provider_effect_authority(str(claim.effect_id))
+        assets = _configured_master_assets()
+        prior = _current_checkpoint_claim(claim.provider_ref)
+        current_run = str(operation.identity["run_id"])
+        task_authorized = str(claim.task_id) == current_run
+        if authority and authority["action"] == MutationAction.VERSION_DATASET.value:
+            task_authorized = bool(
+                prior is not None
+                and claim.task_id == prior.task_id
+                and claim.provider_version == prior.provider_version + 1
+            )
+        expected_kind = (
+            ProviderKind.DATASET.value
+            if authority and authority["action"] in {
+                MutationAction.CREATE_DATASET.value,
+                MutationAction.VERSION_DATASET.value,
+            }
+            else ProviderKind.NOTEBOOK.value
+        )
         if (
             authority is None
             or authority["operation_id"] != operation.operation_id
             or authority["task_id"] != str(claim.task_id)
-            or str(claim.task_id) != str(operation.identity["run_id"])
+            or authority["provider_ref"] != claim.provider_ref
+            or not task_authorized
             or claim.control_class != ControlClass.ORCHESTRATOR_PROTECTED
             or claim.disposable
+            or claim.kind.value != expected_kind
+            or assets is None
+            or claim.provider_ref not in {assets.checkpoint_ref, assets.checkpoint_verifier_ref}
         ):
             raise HTTPException(status_code=403, detail={"code": "provider_authority_mismatch"})
         provider_journal.persist_resource_claim(claim)
@@ -637,11 +693,19 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=422, detail={"code": "claim_invalid"}) from exc
         authority = control_ledger.provider_effect_authority(str(claim.effect_id))
-        if (
-            authority is None
-            or authority["operation_id"] != operation.operation_id
-            or str(claim.task_id) != str(operation.identity["run_id"])
-        ):
+        assets = _configured_master_assets()
+        current_checkpoint_claim = _current_checkpoint_claim(claim.provider_ref)
+        is_current_checkpoint_authority = bool(
+            assets is not None
+            and claim.provider_ref == assets.checkpoint_ref
+            and current_checkpoint_claim == claim
+        )
+        is_current_operation_authority = bool(
+            authority is not None
+            and authority["operation_id"] == operation.operation_id
+            and str(claim.task_id) == str(operation.identity["run_id"])
+        )
+        if not (is_current_checkpoint_authority or is_current_operation_authority):
             raise HTTPException(status_code=403, detail={"code": "provider_authority_mismatch"})
         try:
             provider_journal.assert_resource_claim(claim)
@@ -667,10 +731,8 @@ def create_app(
             allowed_states=frozenset({"REGISTERING", "ACTIVE", "DRAINING", "CHECKPOINTING"}),
         )
         body = await _bounded_json(request)
-        configured_master = runtime.master_runtime or (
-            master_runtime.settings if master_runtime is not None else None
-        )
-        expected_ref = configured_master.assets.checkpoint_ref if configured_master else None
+        assets = _configured_master_assets()
+        expected_ref = assets.checkpoint_ref if assets else None
         if body != {
             "provider_ref": expected_ref,
             "kind": ProviderKind.DATASET.value,
@@ -726,10 +788,8 @@ def create_app(
             manifest = CheckpointManifest.from_payload(body["manifest"])
         except (ManifestError, TypeError) as exc:
             raise HTTPException(status_code=422, detail={"code": "checkpoint_manifest_invalid"}) from exc
-        configured_master = runtime.master_runtime or (
-            master_runtime.settings if master_runtime is not None else None
-        )
-        expected_dataset = configured_master.assets.checkpoint_ref if configured_master else None
+        assets = _configured_master_assets()
+        expected_dataset = assets.checkpoint_ref if assets else None
         if (
             body["operation_id"] != operation.operation_id
             or body["service_kind"] != "postgres-master"
