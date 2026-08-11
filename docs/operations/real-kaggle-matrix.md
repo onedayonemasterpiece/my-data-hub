@@ -23,7 +23,7 @@ A successful operational invocation writes:
 
 - one stable plan, created before provider mutation;
 - one receipt per scenario, binding task run ID, provider ref/run/kernel ID, source version/hash, private status, exact input Dataset version/package hash, manifest/result/output hashes, optional checkpoint identity, accounting, fault probe, and claim cleanup;
-- one summary requiring at least 15 distinct successful run IDs and the required coverage categories.
+- one summary requiring at least 15 distinct task run IDs, 15 distinct exact provider run refs, and the required coverage categories.
 
 Only the uninjected CLI path marks receipts `live_evidence: true`. Fake-adapter tests exercise planning, accounting, cleanup, fault probes, and restart receipt consumption with `live_evidence: false`. Files under `examples/contracts/` are synthetic schema illustrations, not observed provider evidence.
 
@@ -40,4 +40,4 @@ python scripts/provider/real_kaggle_matrix.py matrix \
   --receipt artifacts/kaggle-matrix.json
 ```
 
-Keep the plan, ledger, and completed scenario receipts together to resume after a process interruption. A completed exact receipt prevents relaunch of that scenario; an absent receipt is reconciled against the exact planned task run/source before a push. Stale or mismatched plans/receipts fail closed. Do not describe a matrix as passed unless its operational summary validates against `schemas/kaggle-real-matrix-receipt.v1.schema.json` and retains its referenced scenario receipts.
+Keep the plan, ledger, scenario launch fences, and completed scenario receipts together to resume after a process interruption. A completed exact receipt prevents relaunch of that scenario; an incomplete scenario is reconciled against the exact planned task run/source. A durable launch fence with no exact physical run fails closed and requires a new matrix identity rather than launching a second physical run under the same task run ID. Stale or mismatched state fails closed. Do not describe a matrix as passed unless its operational summary validates against `schemas/kaggle-real-matrix-receipt.v1.schema.json` and retains its referenced scenario receipts.

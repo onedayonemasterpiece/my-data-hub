@@ -483,6 +483,35 @@ def _load_or_create_plan(
     return plan
 
 
+def _persist_launch_fence(path: Path, payload: dict[str, Any]) -> None:
+    """Durably fence a task run before push so restart never launches it twice."""
+
+    encoded = canonical_json_bytes(payload)
+    if path.is_file():
+        if path.is_symlink() or path.read_bytes() != encoded:
+            raise RuntimeError("matrix launch fence differs from the exact planned provider run")
+        return
+    if path.exists():
+        raise RuntimeError("matrix launch fence path is not a regular file")
+    temporary = path.with_name(f".{path.name}.{uuid4()}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def _matrix_effect(
     *,
     matrix_id: UUID,
@@ -844,6 +873,8 @@ def run_real_matrix(
                 and existing_summary.get("outcome") == "PASS"
                 and existing_summary.get("live_evidence") is live_evidence
                 and set(existing_summary.get("distinct_real_run_ids", [])) == set(run_ids)
+                and set(existing_summary.get("distinct_provider_run_refs", []))
+                == {item["provider_run_ref"] for item in exact_receipts}
             ):
                 return 0
             raise RuntimeError("unsafe or stale completed matrix summary receipt")
@@ -968,6 +999,18 @@ def run_real_matrix(
                 task_id=task_id,
                 arguments=push_arguments,
             )
+            launch_path = scenario_receipt_dir / (
+                f"{scenario['ordinal']:02d}-{scenario['name']}.launch"
+            )
+            launch_fence = {
+                "schema_version": "my-data-hub-real-kaggle-matrix-launch.v1",
+                "matrix_id": str(matrix_uuid),
+                "commit_sha": exact_commit,
+                "task_run_id": str(task_run_id),
+                "provider_ref": ref,
+                "source_sha256": source_sha256,
+                "effect_id": str(push.effect_id),
+            }
             result = None
             cleanup = None
             fault = {"name": scenario.get("fault_probe") or "none", "outcome": "NOT_RUN"}
@@ -983,6 +1026,13 @@ def run_real_matrix(
                 )
                 resumed = result is not None
                 if result is None:
+                    if launch_path.exists():
+                        _persist_launch_fence(launch_path, launch_fence)
+                        raise RuntimeError(
+                            "exact provider run is absent after its durable launch fence; "
+                            "use a new matrix identity rather than launching it twice"
+                        )
+                    _persist_launch_fence(launch_path, launch_fence)
                     result = adapter.push_private_notebook(
                         intent=push,
                         task_run_id=task_run_id,
@@ -1109,17 +1159,26 @@ def run_real_matrix(
                 claim=input_result.claim,
             )
     distinct_run_ids = {item["task_run_id"] for item in summary_scenarios if item.get("outcome") == "PASS"}
+    distinct_provider_run_refs = {
+        item["provider_run_ref"] for item in summary_scenarios if item.get("outcome") == "PASS"
+    }
     if input_cleanup is None:
         raise RuntimeError("matrix input Dataset lacks claim-bound cleanup evidence")
     summary = {
         "schema_version": MATRIX_SCHEMA,
         "matrix_id": str(matrix_uuid),
         "commit_sha": exact_commit,
-        "outcome": "PASS" if len(distinct_run_ids) >= MATRIX_MINIMUM_RUNS else "FAIL",
+        "outcome": (
+            "PASS"
+            if len(distinct_run_ids) >= MATRIX_MINIMUM_RUNS
+            and len(distinct_provider_run_refs) >= MATRIX_MINIMUM_RUNS
+            else "FAIL"
+        ),
         "minimum_real_runs": MATRIX_MINIMUM_RUNS,
         "planned_runs": len(plan["scenarios"]),
         "completed_real_runs": len(distinct_run_ids),
         "distinct_real_run_ids": sorted(distinct_run_ids),
+        "distinct_provider_run_refs": sorted(distinct_provider_run_refs),
         "input_dataset": {
             "provider_ref": input_ref,
             "provider_version": input_result.identity.version,

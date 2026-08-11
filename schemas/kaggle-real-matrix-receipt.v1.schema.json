@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema_version", "matrix_id", "commit_sha", "outcome", "minimum_real_runs",
-    "planned_runs", "completed_real_runs", "distinct_real_run_ids", "input_dataset",
+    "planned_runs", "completed_real_runs", "distinct_real_run_ids", "distinct_provider_run_refs", "input_dataset",
     "scenario_receipts", "coverage", "started_at", "completed_at", "live_evidence", "blockers"
   ],
   "properties": {
@@ -20,6 +20,10 @@
     "distinct_real_run_ids": {
       "type": "array", "minItems": 15, "uniqueItems": true,
       "items": {"type": "string", "format": "uuid"}
+    },
+    "distinct_provider_run_refs": {
+      "type": "array", "minItems": 15, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$"}
     },
     "input_dataset": {
       "type": "object", "additionalProperties": false,

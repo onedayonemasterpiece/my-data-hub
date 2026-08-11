@@ -24,6 +24,24 @@
     "00000000-0000-4000-8000-000000000015",
     "00000000-0000-4000-8000-000000000016"
   ],
+  "distinct_provider_run_refs": [
+    "example-owner/mdh-matrix-01-example/1",
+    "example-owner/mdh-matrix-02-example/1",
+    "example-owner/mdh-matrix-03-example/1",
+    "example-owner/mdh-matrix-04-example/1",
+    "example-owner/mdh-matrix-05-example/1",
+    "example-owner/mdh-matrix-06-example/1",
+    "example-owner/mdh-matrix-07-example/1",
+    "example-owner/mdh-matrix-08-example/1",
+    "example-owner/mdh-matrix-09-example/1",
+    "example-owner/mdh-matrix-10-example/1",
+    "example-owner/mdh-matrix-11-example/1",
+    "example-owner/mdh-matrix-12-example/1",
+    "example-owner/mdh-matrix-13-example/1",
+    "example-owner/mdh-matrix-14-example/1",
+    "example-owner/mdh-matrix-15-example/1",
+    "example-owner/mdh-matrix-16-example/1"
+  ],
   "input_dataset": {
     "provider_ref": "example-owner/mdh-matrix-input-example",
     "provider_version": 1,

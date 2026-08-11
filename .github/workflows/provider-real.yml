@@ -78,7 +78,7 @@ jobs:
             artifacts/notebook-canary.json
             artifacts/kaggle-matrix.json
             artifacts/kaggle-matrix-plan.json
-            artifacts/kaggle-matrix-scenarios/*.json
+            artifacts/kaggle-matrix-scenarios/
             artifacts/scheduled-provider-real.json
           if-no-files-found: error
           retention-days: 30

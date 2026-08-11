@@ -307,6 +307,10 @@ class _FakeMatrixAdapter:
 
     def delete_task_created_resource(self, *, claim: TaskResourceClaim, **_: object) -> object:
         self.cleanups.append(claim.provider_ref)
+        if claim.kind == ProviderKind.NOTEBOOK:
+            for run_id, result in tuple(self.runs.items()):
+                if result.run.provider_ref == claim.provider_ref:  # type: ignore[attr-defined]
+                    self.runs.pop(run_id)
         return SimpleNamespace(detail_code="task_created_resource_absent")
 
 
@@ -363,7 +367,11 @@ def test_fake_matrix_proves_planning_accounting_cleanup_and_receipt_resume(
     assert summary["live_evidence"] is False
     assert summary["completed_real_runs"] == len(MATRIX_SCENARIOS)
     assert len(summary["distinct_real_run_ids"]) == len(MATRIX_SCENARIOS)
+    assert len(summary["distinct_provider_run_refs"]) == len(MATRIX_SCENARIOS)
     assert len(tuple((tmp_path / "scenarios").glob("*.json"))) == len(MATRIX_SCENARIOS)
+    launch_fences = tuple((tmp_path / "scenarios").glob("*.launch"))
+    assert len(launch_fences) == len(MATRIX_SCENARIOS)
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in launch_fences)
     assert adapter.notebook_pushes == len(MATRIX_SCENARIOS)
     assert len(adapter.cleanups) == len(MATRIX_SCENARIOS) + 2  # scenarios + replay + input
     assert all(
@@ -380,6 +388,14 @@ def test_fake_matrix_proves_planning_accounting_cleanup_and_receipt_resume(
     assert run_real_matrix(**kwargs) == 0
     assert adapter.notebook_pushes == len(MATRIX_SCENARIOS)
     assert len(adapter.cleanups) == cleanup_count
+
+    # If a successful cleanup committed but its final receipt was lost, the
+    # durable launch fence denies a second physical run under the same run ID.
+    (tmp_path / "summary.json").unlink()
+    next((tmp_path / "scenarios").glob("01-*.json")).unlink()
+    with pytest.raises(RuntimeError, match="durable launch fence"):
+        run_real_matrix(**kwargs)
+    assert adapter.notebook_pushes == len(MATRIX_SCENARIOS)
 
 
 @pytest.mark.parametrize(
@@ -413,4 +429,4 @@ def test_provider_real_workflow_runs_matrix_after_token_preflight() -> None:
         "real_kaggle_matrix.py matrix"
     )
     assert "timeout-minutes: 360" in workflow
-    assert "artifacts/kaggle-matrix-scenarios/*.json" in workflow
+    assert "artifacts/kaggle-matrix-scenarios/" in workflow

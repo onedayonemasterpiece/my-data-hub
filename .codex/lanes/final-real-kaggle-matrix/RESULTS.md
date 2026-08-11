@@ -10,7 +10,7 @@
 
 - One 16-scenario driver uses only the existing `KaggleProviderAdapter` and generated platform-smoke Notebook/runtime contracts.
 - A modern-token preflight occurs before ledger/adapter/plan/wheel construction or provider mutation. Dataset, Notebook, and matrix entry points return bounded blockers without a token.
-- Stable UUID5 planning provides distinct task/run/work/checkpoint identities. Exact completed receipts support zero-mutation restart; incomplete runs reconcile the exact source/run before push.
+- Stable UUID5 planning provides distinct task/run/work/checkpoint identities. Exact completed receipts support zero-mutation restart; incomplete runs reconcile the exact source/run before push. A fsynced mode-`0600` launch fence forbids a second physical push when a previously launched run is absent.
 - Each real scenario binds private input Dataset version/package, exact source version/hash, numeric provider run/kernel identity, exact selective result output, typed item accounting, optional checkpoint manifest identity, retry/fault observation, and claim-bound cleanup.
 - Coverage includes exact identity, retry observations, reconciliation/idempotency, stale identity denial, checkpoint manifest bindings, cleanup replay, and three sequential soak variants.
 - Operational receipts are marked live only on the uninjected CLI path. Fake-adapter tests mark their temporary receipts non-live and make no provider mutation/evidence claim.
