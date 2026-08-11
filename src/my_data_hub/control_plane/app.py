@@ -1305,6 +1305,17 @@ def create_app(
                 )
                 raise HTTPException(status_code=503, detail={"code": "acceptance_callback_ack_suppressed"})
             receipt = coordinator.accept_runtime_event(raw, header_token=token)
+            if event.event_type is RuntimeEventType.RUNTIME_HEARTBEAT:
+                observed_hash = hashlib.sha256(raw).hexdigest()
+                restarted = control_ledger.restarted_master_acceptance_callback(
+                    run_id=str(event.run_id), attempt_id=str(event.attempt_id), epoch=event.epoch,
+                    event_id=str(event.event_id), body_sha256=observed_hash,
+                )
+                if restarted is not None:
+                    control_ledger.mark_master_acceptance_callback_replayed(
+                        task_id=str(restarted["task_id"]), event_id=str(event.event_id),
+                        body_sha256=observed_hash,
+                    )
         except HTTPException:
             raise
         except (EventRejected, StaleRuntimeEvent, ValueError) as exc:

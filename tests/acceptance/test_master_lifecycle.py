@@ -574,14 +574,29 @@ def test_fm08_app_persists_exact_heartbeat_but_suppresses_projection_and_ack(
                 heartbeat.model_dump(mode="json", by_alias=True, exclude_none=True)
             ), headers={"Authorization": f"Bearer {SECRET}"},
         )
+        control = ledger.master_acceptance_runtime_control(str(command.task_id))
+        assert control is not None
+        service_suppressed = ledger.resolve_service("postgres-master")
+        assert service_suppressed is not None
+        assert service_suppressed.latest_event_id == service_before.latest_event_id
+        ledger.record_master_acceptance_restart(
+            task_id=str(command.task_id), restart_from_id=str(control["before_boot_id"]),
+            restart_to_id=str(uuid4()),
+        )
+        replay = client.post(
+            "/internal/runtime/events", content=json_body(
+                heartbeat.model_dump(mode="json", by_alias=True, exclude_none=True)
+            ), headers={"Authorization": f"Bearer {SECRET}"},
+        )
     assert response.status_code == 503
     assert retry.status_code == 503
+    assert replay.status_code == 200
     assert response.json()["detail"]["code"] == "acceptance_callback_ack_suppressed"
     control = ledger.master_acceptance_runtime_control(str(command.task_id))
-    assert control is not None and control["callback_state"] == "CAPTURED"
+    assert control is not None and control["callback_state"] == "REPLAYED"
     assert control["callback_event_id"] == heartbeat.event_id
     service_after = ledger.resolve_service("postgres-master")
-    assert service_after is not None and service_after.latest_event_id == service_before.latest_event_id
+    assert service_after is not None and service_after.latest_event_id == heartbeat.event_id
 
 
 def test_fm10_runtime_control_endpoint_acknowledges_exact_suspension(tmp_path: Path) -> None:

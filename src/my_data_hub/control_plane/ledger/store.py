@@ -2855,10 +2855,26 @@ class ControlLedger:
                 connection.execute(
                     "UPDATE master_acceptance_runtime_controls SET callback_state='DISARMED',"
                     "armed_at=NULL,expires_at=NULL,before_boot_id=NULL,directive_receipt_sha256=NULL,"
-                    "updated_at=? WHERE task_id=? AND callback_state='ARMED'",
+                    "callback_event_id=NULL,callback_body_sha256=NULL,callback_count=0,updated_at=? "
+                    "WHERE task_id=? AND callback_state IN ('ARMED','CAPTURED')",
                     (now, row["task_id"]),
                 )
                 return None
+        return dict(row) if row is not None else None
+
+    def restarted_master_acceptance_callback(
+        self, *, run_id: str, attempt_id: str, epoch: int,
+        event_id: str, body_sha256: str,
+    ) -> dict[str, Any] | None:
+        """Find one exact captured callback after its process restart is durable."""
+
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_runtime_controls WHERE run_id=? AND attempt_id=? "
+                "AND epoch=? AND scenario_id='FM08' AND callback_state='CAPTURED' "
+                "AND restart_to_id IS NOT NULL AND callback_event_id=? AND callback_body_sha256=?",
+                (run_id, attempt_id, epoch, event_id, body_sha256),
+            ).fetchone()
         return dict(row) if row is not None else None
 
     def capture_master_acceptance_callback(
