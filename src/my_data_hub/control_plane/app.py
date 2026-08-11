@@ -208,6 +208,46 @@ def create_app(
             "body_sha256": receipt.body_sha256,
         }
 
+    @app.get("/internal/runtime/activation/{run_id}/{attempt_id}")
+    def runtime_activation(
+        run_id: str,
+        attempt_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Return only the exact epoch activation decision to its notebook.
+
+        The database gate stays closed until the service.ready callback was
+        accepted atomically into the ACTIVE registry projection.  The same
+        per-run secret used for callback authentication authorizes this bounded
+        poll; no database credential or endpoint is returned.
+        """
+
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail={"code": "runtime_token_required"})
+        token = authorization.removeprefix("Bearer ").strip()
+        if not control_ledger.runtime_token_valid(run_id, attempt_id, token):
+            raise HTTPException(status_code=401, detail={"code": "runtime_token_invalid"})
+        operation = control_ledger.operation_for_attempt(run_id, attempt_id)
+        if operation is None:
+            raise HTTPException(status_code=404, detail={"code": "runtime_attempt_not_found"})
+        service = control_ledger.resolve_service("postgres-master")
+        identity = operation.identity
+        active = bool(
+            operation.state == "ACTIVE"
+            and service is not None
+            and service.run_id == run_id
+            and service.attempt_id == attempt_id
+            and service.service_instance_id == identity.get("service_instance_id")
+            and service.master_instance_id == identity.get("master_instance_id")
+            and service.epoch == int(identity.get("epoch", 0))
+        )
+        return {
+            "active": active,
+            "state": operation.state,
+            "master_instance_id": identity.get("master_instance_id"),
+            "epoch": int(identity.get("epoch", 0)),
+        }
+
     @app.api_route(
         "/{data_path:path}",
         methods=["GET", "POST", "PUT", "PATCH", "DELETE"],

@@ -15,11 +15,13 @@ EXPECTED_SCHEMAS = {
     "integration",
     "joplin",
     "migration",
+    "master_control",
     "operator_control",
     "orchestration",
     "recovery",
     "region_talk",
     "sync",
+    "search",
 }
 EXPECTED_EXTENSIONS = {"citext", "pg_trgm", "pgcrypto", "vector"}
 
@@ -83,7 +85,7 @@ def main() -> int:
             if state
             else None
         )
-        if state is None or int(state[0]) != 10 or int(state[1]) != 0:
+        if state is None or int(state[0]) != 12 or int(state[1]) != 0:
             findings.append(f"unexpected canonical state: {state}")
 
         cursor.execute(

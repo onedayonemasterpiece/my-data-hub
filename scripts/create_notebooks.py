@@ -14,6 +14,7 @@ import nbformat
 
 ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK_ROOT = ROOT / "notebooks"
+TEMPLATE_ROOT = NOTEBOOK_ROOT / "templates"
 
 NOTEBOOK_README = """# Notebook workers
 
@@ -28,7 +29,10 @@ A worker receives `MY_DATA_HUB_NOTEBOOK_INPUT_MANIFEST` and writes
 but it may not connect to canonical PostgreSQL, mutate YDB, publish to Telegram/VK or
 advance a queue cursor. The local reconciler validates and commits results.
 
-`00-platform-smoke` and `80-region-talk-migration-reconciliation` have implemented adapters.
+`01` through `06` are the operational MVP notebooks generated from reviewed Python templates.
+They remain marked `production_ready=false` until an exact real-provider receipt proves the
+source, input versions, privacy and terminal output. `00-platform-smoke` and
+`80-region-talk-migration-reconciliation` have implemented legacy typed-worker adapters.
 Other Region Talk notebooks contain complete contract, accounting, error and atomic-output
 plumbing; their `process_item()` adapters intentionally fail with
 `PROCESSOR_ADAPTER_NOT_PORTED` until code is adapted from an exact donor revision and covered
@@ -51,6 +55,90 @@ class NotebookSpec:
     contracts: dict[str, str]
     model: dict[str, str]
     adapter: Literal["smoke", "migration_reconciliation", "pending"] = "pending"
+
+
+@dataclass(frozen=True, slots=True)
+class OperationalNotebookSpec:
+    """One deterministic, private operational notebook built from Python source.
+
+    The Python module is the primary source.  The generated ipynb only installs
+    an exact task wheel from a private Kaggle input and invokes ``main()``.  This
+    keeps reviewable code out of notebook JSON and makes drift mechanically
+    detectable.
+    """
+
+    directory: str
+    title: str
+    purpose: str
+    template: str
+    runtime_contract: str
+    resource_class: Literal["orchestrator_protected"] = "orchestrator_protected"
+    enable_internet: bool = False
+    model_id: str | None = None
+    model_revision: str | None = None
+    timeout_seconds: int = 1_800
+    canonical_write_allowed: bool = False
+    external_side_effects_allowed: bool = True
+
+
+OPERATIONAL_SPECS: tuple[OperationalNotebookSpec, ...] = (
+    OperationalNotebookSpec(
+        "01-platform-runtime-smoke",
+        "01 Platform runtime smoke",
+        "Exercise callback retry, heartbeat, local JSONL replay and a bound terminal receipt.",
+        "runtime_smoke/runtime.py",
+        "my-data-hub-platform-runtime-smoke.v1",
+        timeout_seconds=600,
+    ),
+    OperationalNotebookSpec(
+        "02-postgres-master",
+        "02 PostgreSQL 18 master",
+        "Run the single epoch-fenced PostgreSQL primary inside /kaggle/working.",
+        "postgres_master/runtime.py",
+        "my-data-hub-postgres-master.v1",
+        timeout_seconds=43_200,
+        canonical_write_allowed=True,
+    ),
+    OperationalNotebookSpec(
+        "03-checkpoint-verifier-restore-smoke",
+        "03 Checkpoint verifier restore smoke",
+        "Independently verify and restore an exact private checkpoint candidate.",
+        "checkpoint_verifier/runtime.py",
+        "my-data-hub-checkpoint-restore-smoke.v1",
+        timeout_seconds=3_600,
+    ),
+    OperationalNotebookSpec(
+        "04-region-talk-ydb-bloggers-importer",
+        "04 Region Talk YDB bloggers importer",
+        "Stream the exact read-only YDB snapshot directly into the ACTIVE master.",
+        "blogger_importer/runtime.py",
+        "region-talk-ydb-bloggers-import.v1",
+        timeout_seconds=3_600,
+        canonical_write_allowed=True,
+    ),
+    OperationalNotebookSpec(
+        "05-e5-blogger-embedding-worker",
+        "05 E5 blogger embedding worker",
+        "Encode one exact job artifact in the isolated 768-dimensional E5 space.",
+        "embedding_workers/e5_runtime.py",
+        "my-data-hub-blogger-embedding-artifact.v1",
+        enable_internet=True,
+        model_id="intfloat/multilingual-e5-base",
+        model_revision="d128750597153bb5987e10b1c3493a34e5a4502a",
+        timeout_seconds=7_200,
+    ),
+    OperationalNotebookSpec(
+        "06-bge-m3-blogger-embedding-worker",
+        "06 BGE-M3 blogger embedding worker",
+        "Encode one exact job artifact in the isolated 1024-dimensional BGE-M3 space.",
+        "embedding_workers/bge_m3_runtime.py",
+        "my-data-hub-blogger-embedding-artifact.v1",
+        enable_internet=True,
+        model_id="BAAI/bge-m3",
+        model_revision="5617a9f61b028005a4858fdac845db406aefb181",
+        timeout_seconds=10_800,
+    ),
+)
 
 
 SPECS: tuple[NotebookSpec, ...] = (
@@ -382,8 +470,125 @@ def kernel_metadata(spec: NotebookSpec) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
+def _operational_source(spec: OperationalNotebookSpec) -> str:
+    path = TEMPLATE_ROOT / spec.template
+    source = path.read_text(encoding="utf-8")
+    if "def main(" not in source:
+        raise ValueError(f"operational template has no main(): {spec.template}")
+    return source
+
+
+def build_operational_notebook(spec: OperationalNotebookSpec):  # type: ignore[no-untyped-def]
+    source = _operational_source(spec)
+    source_sha256 = __import__("hashlib").sha256(source.encode()).hexdigest()
+    nb = nbformat.v4.new_notebook()
+    nb.nbformat = 4
+    nb.nbformat_minor = 5
+    nb.metadata = {
+        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+        "language_info": {"name": "python", "version": "3.12"},
+        "my_data_hub": {
+            "contracts": {},
+            "runtime_contract": spec.runtime_contract,
+            "primary_source": f"notebooks/templates/{spec.template}",
+            "primary_source_sha256": source_sha256,
+            "privacy": "private",
+            "resource_class": spec.resource_class,
+            "canonical_database_location": "kaggle-notebook-only",
+            "embedded_secrets": False,
+            "canonical_write_allowed": spec.canonical_write_allowed,
+            "external_side_effects_allowed": spec.external_side_effects_allowed,
+            "timeout_seconds": spec.timeout_seconds,
+            "model_id": spec.model_id,
+            "model_revision": spec.model_revision,
+        },
+    }
+    nb.cells = [
+        _cell(
+            "markdown",
+            f"# {spec.title}\n\n{spec.purpose}\n\n"
+            "This private `orchestrator_protected` notebook is generated from a reviewed Python "
+            "template. It receives exact input versions and secrets through Kaggle runtime inputs; "
+            "no credential is embedded in this notebook or written to its output.",
+            "intro",
+        ),
+        _cell(
+            "code",
+            "from __future__ import annotations\n\n"
+            "import hashlib\n"
+            "import os\n"
+            "import sys\n"
+            "from pathlib import Path\n\n"
+            f"EXPECTED_SOURCE_SHA256 = {source_sha256!r}\n"
+            f"RUNTIME_CONTRACT = {spec.runtime_contract!r}\n"
+            "wheel = Path(os.environ.get('MY_DATA_HUB_WHEEL_PATH', ''))\n"
+            "if not wheel.is_file() or wheel.suffix != '.whl':\n"
+            "    raise RuntimeError('exact private my-data-hub wheel input is required')\n"
+            "expected_wheel_sha = os.environ.get('MY_DATA_HUB_WHEEL_SHA256', '')\n"
+            "if (len(expected_wheel_sha) != 64 or \n"
+            "        hashlib.sha256(wheel.read_bytes()).hexdigest() != expected_wheel_sha):\n"
+            "    raise RuntimeError('my-data-hub wheel hash mismatch')\n"
+            "os.system(f\"{sys.executable} -m pip install --no-deps --disable-pip-version-check {wheel}\") == 0 "
+            "or (_ for _ in ()).throw(RuntimeError('exact wheel installation failed'))",
+            "install-exact-wheel",
+        ),
+        _cell(
+            "code",
+            f"PRIMARY_SOURCE = {source!r}\n"
+            "if hashlib.sha256(PRIMARY_SOURCE.encode()).hexdigest() != EXPECTED_SOURCE_SHA256:\n"
+            "    raise RuntimeError('embedded primary source hash mismatch')\n"
+            "exec(compile(PRIMARY_SOURCE, '<my-data-hub-primary-source>', 'exec'), globals())",
+            "primary-source",
+        ),
+        _cell("code", "raise SystemExit(globals()['main']())", "run"),
+    ]
+    nbformat.validate(nb)
+    return nb
+
+
+def operational_kernel_metadata(spec: OperationalNotebookSpec) -> str:
+    source = _operational_source(spec)
+    payload = {
+        "id": f"OWNER/{spec.directory}",
+        # The real provider adapter replaces OWNER and requires title == slug,
+        # which prevents Kaggle from silently rewriting the exact resource ref.
+        "title": spec.directory,
+        "code_file": "worker.ipynb",
+        "language": "python",
+        "kernel_type": "notebook",
+        "is_private": True,
+        "enable_gpu": False,
+        "enable_tpu": False,
+        "enable_internet": spec.enable_internet,
+        "dataset_sources": [],
+        "competition_sources": [],
+        "kernel_sources": [],
+        "model_sources": [],
+        "my_data_hub": {
+            "contracts": {},
+            "runtime_contract": spec.runtime_contract,
+            "primary_source": spec.template,
+            "primary_source_sha256": __import__("hashlib").sha256(source.encode()).hexdigest(),
+            "resource_class": spec.resource_class,
+            "privacy": "private",
+            "timeout_seconds": spec.timeout_seconds,
+            "model_id": spec.model_id,
+            "model_revision": spec.model_revision,
+            "production_ready": False,
+            "activation_requires_real_receipt": True,
+            "canonical_write_allowed": spec.canonical_write_allowed,
+            "external_side_effects_allowed": spec.external_side_effects_allowed,
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
 def expected_files() -> dict[Path, str]:
     files = {NOTEBOOK_ROOT / "README.md": NOTEBOOK_README}
+    for spec in OPERATIONAL_SPECS:
+        directory = NOTEBOOK_ROOT / spec.directory
+        files[directory / "worker.ipynb"] = serialize_notebook(build_operational_notebook(spec))
+        files[directory / "kernel-metadata.example.json"] = operational_kernel_metadata(spec)
     for spec in SPECS:
         directory = NOTEBOOK_ROOT / spec.directory
         files[directory / "worker.ipynb"] = serialize_notebook(build_notebook(spec))

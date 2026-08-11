@@ -297,6 +297,23 @@ def validate_notebooks(report: Report) -> None:
 
     forbidden_imports = ("import psycopg", "import sqlite3", "import ydb", "from ydb")
     forbidden_mutations = ("INSERT INTO", "UPDATE ", "DELETE FROM", "CREATE TABLE", "DROP TABLE")
+    operational = {
+        "01-platform-runtime-smoke": ("runtime_smoke/runtime.py", False, True, frozenset()),
+        "02-postgres-master": ("postgres_master/runtime.py", True, True, frozenset()),
+        "03-checkpoint-verifier-restore-smoke": (
+            "checkpoint_verifier/runtime.py", False, True, frozenset({"import psycopg"})
+        ),
+        "04-region-talk-ydb-bloggers-importer": (
+            "blogger_importer/runtime.py", True, True,
+            frozenset({"import psycopg", "import ydb"}),
+        ),
+        "05-e5-blogger-embedding-worker": (
+            "embedding_workers/e5_runtime.py", False, True, frozenset()
+        ),
+        "06-bge-m3-blogger-embedding-worker": (
+            "embedding_workers/bge_m3_runtime.py", False, True, frozenset()
+        ),
+    }
     for path in sorted((ROOT / "notebooks").glob("*/worker.ipynb")):
         try:
             nb = nbformat.read(path, as_version=4)
@@ -306,12 +323,52 @@ def validate_notebooks(report: Report) -> None:
             report.fail(f"invalid notebook {path.relative_to(ROOT)}: {exc}")
             continue
         metadata = nb.metadata.get("my_data_hub", {})
+        code = "\n".join(cell.source for cell in nb.cells if cell.cell_type == "code")
+        spec = operational.get(path.parent.name)
+        if spec is not None:
+            template, canonical_write, external_effects, allowed_imports = spec
+            source_path = ROOT / "notebooks" / "templates" / template
+            source = source_path.read_text(encoding="utf-8") if source_path.is_file() else ""
+            source_sha = hashlib.sha256(source.encode()).hexdigest()
+            report.check(source_path.is_file(), f"operational notebook template is absent: {template}")
+            report.check(
+                metadata.get("primary_source") == f"notebooks/templates/{template}",
+                f"operational notebook source path differs: {path.relative_to(ROOT)}",
+            )
+            report.check(
+                metadata.get("primary_source_sha256") == source_sha,
+                f"operational notebook source hash differs: {path.relative_to(ROOT)}",
+            )
+            report.check(
+                metadata.get("resource_class") == "orchestrator_protected"
+                and metadata.get("privacy") == "private"
+                and metadata.get("embedded_secrets") is False,
+                f"operational notebook safety metadata differs: {path.relative_to(ROOT)}",
+            )
+            report.check(
+                metadata.get("canonical_write_allowed") is canonical_write
+                and metadata.get("external_side_effects_allowed") is external_effects,
+                f"operational notebook capability contract differs: {path.relative_to(ROOT)}",
+            )
+            report.check(
+                repr(source) in code,
+                f"operational notebook does not embed exact primary source: {template}",
+            )
+            for token in forbidden_imports:
+                report.check(
+                    token not in source or token in allowed_imports,
+                    f"unapproved operational import {token!r} in {template}",
+                )
+            report.check(
+                not any(marker in source.casefold() for marker in ("kaggle_key =", "password =", "token =")),
+                f"operational notebook template may embed a credential: {template}",
+            )
+            continue
         report.check(metadata.get("canonical_write_allowed") is False, f"{path} allows canonical writes")
         report.check(
             metadata.get("external_side_effects_allowed") is False,
             f"{path} allows external side effects",
         )
-        code = "\n".join(cell.source for cell in nb.cells if cell.cell_type == "code")
         for token in forbidden_imports + forbidden_mutations:
             report.check(token not in code, f"forbidden notebook token {token!r} in {path.relative_to(ROOT)}")
 

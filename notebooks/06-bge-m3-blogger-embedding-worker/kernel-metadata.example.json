@@ -1,0 +1,30 @@
+{
+  "code_file": "worker.ipynb",
+  "competition_sources": [],
+  "dataset_sources": [],
+  "enable_gpu": false,
+  "enable_internet": true,
+  "enable_tpu": false,
+  "id": "OWNER/06-bge-m3-blogger-embedding-worker",
+  "is_private": true,
+  "kernel_sources": [],
+  "kernel_type": "notebook",
+  "language": "python",
+  "model_sources": [],
+  "my_data_hub": {
+    "activation_requires_real_receipt": true,
+    "canonical_write_allowed": false,
+    "contracts": {},
+    "external_side_effects_allowed": true,
+    "model_id": "BAAI/bge-m3",
+    "model_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "primary_source": "embedding_workers/bge_m3_runtime.py",
+    "primary_source_sha256": "5275030bd9c95a523541d751605971e57ed4386d32089db3651bd068822affb7",
+    "privacy": "private",
+    "production_ready": false,
+    "resource_class": "orchestrator_protected",
+    "runtime_contract": "my-data-hub-blogger-embedding-artifact.v1",
+    "timeout_seconds": 10800
+  },
+  "title": "06-bge-m3-blogger-embedding-worker"
+}

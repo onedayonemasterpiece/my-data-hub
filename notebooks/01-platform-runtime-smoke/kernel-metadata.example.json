@@ -1,0 +1,30 @@
+{
+  "code_file": "worker.ipynb",
+  "competition_sources": [],
+  "dataset_sources": [],
+  "enable_gpu": false,
+  "enable_internet": false,
+  "enable_tpu": false,
+  "id": "OWNER/01-platform-runtime-smoke",
+  "is_private": true,
+  "kernel_sources": [],
+  "kernel_type": "notebook",
+  "language": "python",
+  "model_sources": [],
+  "my_data_hub": {
+    "activation_requires_real_receipt": true,
+    "canonical_write_allowed": false,
+    "contracts": {},
+    "external_side_effects_allowed": true,
+    "model_id": null,
+    "model_revision": null,
+    "primary_source": "runtime_smoke/runtime.py",
+    "primary_source_sha256": "8fbc5444d058be867b762d2d8640780d61c188ea32bb37a2ae1034263ba5523b",
+    "privacy": "private",
+    "production_ready": false,
+    "resource_class": "orchestrator_protected",
+    "runtime_contract": "my-data-hub-platform-runtime-smoke.v1",
+    "timeout_seconds": 600
+  },
+  "title": "01-platform-runtime-smoke"
+}

@@ -5,7 +5,7 @@
   "database": {
     "engine": "PostgreSQL",
     "major": 18,
-    "pgvector": "0.8.1"
+    "pgvector": "0.8.6"
   },
   "network": {
     "database_listener": "127.0.0.1",

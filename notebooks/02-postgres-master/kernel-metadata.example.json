@@ -1,0 +1,30 @@
+{
+  "code_file": "worker.ipynb",
+  "competition_sources": [],
+  "dataset_sources": [],
+  "enable_gpu": false,
+  "enable_internet": false,
+  "enable_tpu": false,
+  "id": "OWNER/02-postgres-master",
+  "is_private": true,
+  "kernel_sources": [],
+  "kernel_type": "notebook",
+  "language": "python",
+  "model_sources": [],
+  "my_data_hub": {
+    "activation_requires_real_receipt": true,
+    "canonical_write_allowed": true,
+    "contracts": {},
+    "external_side_effects_allowed": true,
+    "model_id": null,
+    "model_revision": null,
+    "primary_source": "postgres_master/runtime.py",
+    "primary_source_sha256": "2cc2fcce313c09718f6e5c24a14067ebe8be9f4c87d12df4476bfce8ec9663b2",
+    "privacy": "private",
+    "production_ready": false,
+    "resource_class": "orchestrator_protected",
+    "runtime_contract": "my-data-hub-postgres-master.v1",
+    "timeout_seconds": 43200
+  },
+  "title": "02-postgres-master"
+}

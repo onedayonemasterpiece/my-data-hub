@@ -492,6 +492,22 @@ class ControlLedger:
                 (_format_time(self.clock.now()), run_id, attempt_id),
             )
 
+    def runtime_token_valid(self, run_id: str, attempt_id: str, token: str) -> bool:
+        """Validate one per-run bearer without disclosing the persisted hash."""
+
+        if not token or len(token) > 4096:
+            return False
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT token_sha256,revoked_at FROM runtime_token_hashes "
+                "WHERE run_id=? AND attempt_id=?",
+                (run_id, attempt_id),
+            ).fetchone()
+        if row is None or row["revoked_at"] is not None:
+            return False
+        observed = hashlib.sha256(token.encode()).hexdigest()
+        return hmac.compare_digest(str(row["token_sha256"]), observed)
+
     def ingest_runtime_event(self, raw_body: bytes, *, header_token: str) -> EventReceipt:
         if len(raw_body) > MAX_EVENT_BYTES:
             raise EventRejected("runtime event body exceeds 64 KiB")

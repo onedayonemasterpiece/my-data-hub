@@ -87,7 +87,7 @@ def test_control_plane_ensure_is_durable_idempotent_and_survives_restart(tmp_pat
     assert restarted.status_code == 200
     assert restarted.json()["duplicate"] is True
     assert restarted.json()["operation_id"] == first.json()["operation_id"]
-    ready = restarted = TestClient(create_app(settings)).get("/health/ready")
+    ready = TestClient(create_app(settings)).get("/health/ready")
     assert ready.json()["master_state"] == "REQUESTED"
 
 
@@ -96,3 +96,48 @@ def test_runtime_callback_is_fail_closed_without_provider_coordinator(tmp_path) 
         create_app(ControlPlaneSettings(ledger_path=tmp_path / "control.sqlite3"))
     ).post("/internal/runtime/events", content=b"{}", headers={"Authorization": "Bearer opaque"})
     assert response.status_code == 503
+
+
+def test_runtime_activation_requires_exact_nonrevoked_per_run_token(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    app = create_app(ControlPlaneSettings(ledger_path=tmp_path / "control.sqlite3"))
+    ledger = app.state.control_ledger
+    ledger.ensure_operation(
+        operation_id="op-activation",
+        idempotency_key="activation-key",
+        operation_kind="ensure_master",
+        intent={"intent": "test"},
+        initial_state="REGISTERING",
+        identity={
+            "run_id": "run-activation",
+            "attempt_id": "attempt-activation",
+            "service_instance_id": "service-activation",
+            "master_instance_id": "master-activation",
+            "epoch": 1,
+        },
+    )
+    ledger.record_attempt(
+        attempt_id="attempt-activation",
+        run_id="run-activation",
+        operation_id="op-activation",
+        source_identity="owner/notebook",
+        source_version="1",
+        service_instance_id="service-activation",
+        master_instance_id="master-activation",
+        epoch=1,
+        state="REGISTERING",
+    )
+    ledger.store_runtime_token_hash("run-activation", "attempt-activation", "opaque-run-secret")
+    client = TestClient(app)
+    path = "/internal/runtime/activation/run-activation/attempt-activation"
+    assert client.get(path).status_code == 401
+    assert client.get(path, headers={"Authorization": "Bearer wrong"}).status_code == 401
+    pending = client.get(path, headers={"Authorization": "Bearer opaque-run-secret"})
+    assert pending.status_code == 200
+    assert pending.json() == {
+        "active": False,
+        "state": "REGISTERING",
+        "master_instance_id": "master-activation",
+        "epoch": 1,
+    }
+    ledger.revoke_runtime_token("run-activation", "attempt-activation")
+    assert client.get(path, headers={"Authorization": "Bearer opaque-run-secret"}).status_code == 401

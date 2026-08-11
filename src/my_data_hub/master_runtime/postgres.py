@@ -155,8 +155,9 @@ class PostgresConfig:
     @staticmethod
     def render_hba() -> str:
         return (
-            "# Local bootstrap is socket-only; the tunnel reaches loopback TLS.\n"
-            "local all postgres peer\n"
+            "# Local bootstrap is socket-only and owned by the isolated notebook runtime; "
+            "the tunnel reaches loopback TLS.\n"
+            "local all postgres trust\n"
             "local all all scram-sha-256\n"
             "hostnossl all all 0.0.0.0/0 reject\n"
             "hostnossl all all ::0/0 reject\n"
