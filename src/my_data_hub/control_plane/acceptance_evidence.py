@@ -4,7 +4,7 @@ import hashlib
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Final, Literal, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -13,6 +13,10 @@ from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.providers.kaggle.contracts import KaggleKernelRunIdentity, PollPolicy
+
+ACCEPTANCE_EVIDENCE_SCENARIOS: Final = frozenset(
+    {"FM01", "FM02", "FM03", "FM06", "FM22", "FM23"}
+)
 
 
 class _ProviderGateway(Protocol):
@@ -62,7 +66,7 @@ class DatasetLifecycleRequest(BaseModel):
 class NotebookLifecycleRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    scenario_id: Literal["FM02", "FM06", "FM22", "FM23"]
+    scenario_id: Literal["FM01", "FM02", "FM03", "FM06", "FM22", "FM23"]
     task_id: UUID
     task_run_id: UUID
     idempotency_key: str = Field(min_length=8, max_length=260)
@@ -94,7 +98,7 @@ class NotebookLifecycleRequest(BaseModel):
 class AcceptanceCleanupRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    scenario_id: Literal["FM02", "FM06", "FM22", "FM23"]
+    scenario_id: Literal["FM01", "FM02", "FM03", "FM06", "FM22", "FM23"]
     task_id: UUID
     claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     provider_run_ref: str = Field(min_length=3, max_length=500)
@@ -388,7 +392,7 @@ class AcceptanceEvidenceController:
         return self.claim_get(request.scenario_id, str(request.task_id))
 
     def claim_get(self, scenario_id: str, task_id: str) -> dict[str, Any]:
-        if scenario_id not in {"FM01", "FM02", "FM03", "FM06", "FM22", "FM23"}:
+        if scenario_id not in ACCEPTANCE_EVIDENCE_SCENARIOS:
             raise ValueError("acceptance evidence scenario is invalid")
         UUID(task_id)
         task = self.ledger.acceptance_evidence_task(scenario_id=scenario_id, task_id=task_id)

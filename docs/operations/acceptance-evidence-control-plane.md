@@ -9,7 +9,7 @@ profile.
 | Tool | Exact purpose |
 |---|---|
 | `provider.acceptance.dataset.lifecycle` | FM01/FM22 private disposable Dataset create, version, exact readback, and inline cleanup. |
-| `provider.acceptance.notebook.lifecycle` | FM02/FM06/FM22/FM23 private disposable Notebook source push, numeric run, bounded terminal polling, and selective output fingerprint. The Notebook remains available with `cleanup_state=PENDING`. |
+| `provider.acceptance.notebook.lifecycle` | FM01/FM02/FM03/FM06/FM22/FM23 private disposable evidence Notebook source push, numeric run, bounded terminal polling, and selective output fingerprint. The Notebook remains available with `cleanup_state=PENDING`. |
 | `provider.acceptance.claim.get` | Read the exact metadata-only result for `(scenario_id, task_id)`. |
 | `provider.acceptance.claim.cleanup` | Delete an evidence Notebook only after the caller supplies the exact durable resource claim, numeric run reference, and output-read receipt. |
 
@@ -20,6 +20,12 @@ effect identity. The acceptance task is committed as `CLAIMED`, then
 existing effect journal and exact provider readback. An outcome that cannot be
 reconciled is terminal `FAILED`; it is never reported as `BLOCKED` after a
 mutation may have started.
+
+When one scenario needs both Dataset and evidence Notebook lifecycles (FM01
+and FM22), the caller derives distinct deterministic `task_id` values for the
+`dataset` and `notebook` subtasks. The ledger key remains
+`(scenario_id, task_id)`: a completed subtask therefore cannot mask the other,
+while reuse of either task ID with a different exact request is rejected.
 
 Notebook output selection is restricted to one top-level file and a caller
 supplied byte limit. The output is compared with the expected SHA-256 and is
