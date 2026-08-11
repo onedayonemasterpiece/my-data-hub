@@ -166,6 +166,32 @@ def validate_json_and_schemas(report: Report) -> None:
             + "; ".join(error.message for error in evidence_errors[:5]),
         )
 
+    exact_evidence_path = (
+        ROOT
+        / "docs"
+        / "operations"
+        / "evidence"
+        / "2026-08-11-operational-mvp"
+        / "kaggle-private-dataset-canary-3.json"
+    )
+    report.check(
+        exact_evidence_path.is_file(),
+        "missing exact-commit real Kaggle private Dataset canary receipt",
+    )
+    if exact_evidence_path.is_file():
+        exact_evidence_errors = sorted(
+            Draft202012Validator(
+                schemas["kaggle-real-canary-receipt.v2.schema.json"],
+                format_checker=checker,
+            ).iter_errors(load_json(exact_evidence_path)),
+            key=lambda item: list(item.path),
+        )
+        report.check(
+            not exact_evidence_errors,
+            f"{exact_evidence_path.relative_to(ROOT)} violates exact-commit Kaggle canary schema: "
+            + "; ".join(error.message for error in exact_evidence_errors[:5]),
+        )
+
     # These schemas are generated from runtime models. Drift is a correctness error.
     sys.path.insert(0, str(ROOT / "src"))
     from my_data_hub.domain.commands import Changeset, SemanticCommand
