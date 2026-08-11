@@ -37,7 +37,7 @@ def test_data_query_rejects_nonselect_system_and_unsafe_sql(
 
 def test_data_query_accepts_allowlisted_cte_join_and_parameters(policy: BoundedSQLPolicy) -> None:
     result = policy.classify_read(
-        "WITH selected AS (SELECT * FROM bloggers.bloggers_ru_v1 WHERE blogger_id=$1) "
+        "WITH selected AS (SELECT * FROM region_talk.bloggers_ru_v1 WHERE blogger_id=$1) "
         "SELECT count(*) FROM selected",
         ["b1"],
     )

@@ -56,6 +56,7 @@ services:
       MY_DATA_HUB_MCP_AUTH_MODE: oauth
       MY_DATA_HUB_MCP_HOST: 0.0.0.0
       MY_DATA_HUB_MCP_PORT: 8765
+      MY_DATA_HUB_MASTER_SESSION_DIRECTORY: /state/master-sessions
     ports:
       - "127.0.0.1:${MY_DATA_HUB_MCP_PORT:-8765}:8765"
     volumes:

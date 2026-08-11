@@ -56,6 +56,10 @@ jobs:
       MY_DATA_HUB_MCP_READER_DATABASE_URL: postgresql://ci_mcp_reader:ci-reader-password@127.0.0.1:5432/my_data_hub_test
       MY_DATA_HUB_MONITORING_DATABASE_URL: postgresql://ci_monitoring:ci-monitoring-password@127.0.0.1:5432/my_data_hub_test
       MY_DATA_HUB_OPERATOR_DATABASE_URL: postgresql://ci_editor:ci-editor-password@127.0.0.1:5432/my_data_hub_test
+      # Run the separate tmpfs-only Docker proof which holds an old transaction
+      # across a real fence/epoch rotation.  The container is --rm and has no
+      # named/bind volume, so it cannot become a production/local master.
+      MDH_RUN_DISPOSABLE_POSTGRES: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -23,6 +23,10 @@ from my_data_hub.control_plane.app import ControlPlaneSettings
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.mcp.oauth import OAuthBearerValidator, OAuthValidationPolicy, VerifiedTokenDecoder
 from my_data_hub.mcp.oauth_jwt import JwksJwtDecoder
+from my_data_hub.mcp.postgres_broker import (
+    DirectoryEpochCredentialSource,
+    PostgresMasterSessionBroker,
+)
 from my_data_hub.mcp.server import MCPDependencies, create_streamable_http_app
 
 
@@ -76,6 +80,11 @@ def build_remote_runtime(
     )
     dependencies = MCPDependencies(
         resolver=LedgerMasterResolver(control_ledger),
+        broker=PostgresMasterSessionBroker(
+            DirectoryEpochCredentialSource(
+                Path(os.getenv("MY_DATA_HUB_MASTER_SESSION_DIRECTORY", "/state/master-sessions"))
+            )
+        ),
         control=LedgerControlReader(control_ledger),
         audit=authority,
     )
