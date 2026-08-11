@@ -295,6 +295,7 @@ class FakeAdapter:
         self.run_dataset_sources: tuple[str, ...] | None = None
         self.run_calls = 0
         self.delete_calls = 0
+        self.delete_receipts: dict[str, ProviderEffectReceipt] = {}
 
     def _dataset_result(self, intent, control_class, disposable, version):  # type: ignore[no-untyped-def]
         fingerprint = ProviderFingerprint(value=("c" if version == 1 else "d") * 64)
@@ -402,6 +403,9 @@ class FakeAdapter:
         return self.sources[(provider_ref, source_version)]
 
     def delete_task_created_resource(self, *, intent, claim):  # type: ignore[no-untyped-def]
+        existing = self.delete_receipts.get(str(intent.effect_id))
+        if existing is not None:
+            return existing.model_copy(update={"outcome": EffectOutcome.ALREADY_APPLIED, "attempts": 0})
         self.delete_calls += 1
         receipt = ProviderEffectReceipt(
             operation_id=intent.operation_id,
@@ -415,6 +419,7 @@ class FakeAdapter:
         )
         self.journal.persist_intent(intent)
         self.journal.persist_receipt(receipt)
+        self.delete_receipts[str(intent.effect_id)] = receipt
         return receipt
 
     def poll_run(self, run, policy):  # type: ignore[no-untyped-def]
@@ -803,6 +808,53 @@ def test_exchange_gateway_binds_creator_recipients_ttl_manifest_and_encryption(
             principal("recipient"),
         )
     assert adapter.run_calls == 1
+    with pytest.raises(PermissionError, match="exchange resource has expired"):
+        gateway.invoke(
+            "provider.resources.read",
+            {**common, "payload": {"kind": "dataset", "claim_sha256": created["claim_sha256"]}},
+            principal("recipient"),
+        )
+    with pytest.raises(PermissionError, match="exchange resource has expired"):
+        gateway.invoke(
+            "provider.resources.version",
+            {
+                **common,
+                "payload": {
+                    "kind": "dataset",
+                    "task_id": created["task_id"],
+                    "effect_id": str(uuid4()),
+                    "idempotency_key": "exchange-expired-version-denied",
+                    "claim_sha256": created["claim_sha256"],
+                    "version_notes": "must remain denied",
+                    "files": {"payload.txt": "forbidden"},
+                    "exchange_manifest": {},
+                },
+            },
+            principal(),
+        )
+    assert adapter.version_calls == 0
+
+    expired_cleanup = {
+        **common,
+        "payload": {
+            "kind": "dataset",
+            "task_id": created["task_id"],
+            "effect_id": str(uuid4()),
+            "idempotency_key": "exchange-expired-retention-cleanup",
+            "claim_sha256": created["claim_sha256"],
+        },
+    }
+    with pytest.raises(PermissionError, match="only the exchange creator"):
+        gateway.invoke("provider.resources.delete", expired_cleanup, principal("recipient"))
+    cleaned = gateway.invoke("provider.resources.delete", expired_cleanup, principal())
+    replayed = gateway.invoke("provider.resources.delete", expired_cleanup, principal())
+    assert cleaned["outcome"] == "applied"
+    assert replayed["outcome"] == "applied"
+    assert adapter.delete_calls == 1
+    assert cleaned["retention_receipt"] == replayed["retention_receipt"]
+    assert cleaned["retention_receipt_sha256"] == replayed["retention_receipt_sha256"]
+    assert cleaned["retention_receipt"]["maximum_ttl_seconds"] == 7 * 24 * 60 * 60
+    assert cleaned["retention_receipt"]["resource_state"] == "absent"
 
     plaintext_confidential = _exchange_manifest(
         content="plaintext",

@@ -16,13 +16,16 @@ from my_data_hub.auth.control import ControlLedgerRevocationStore
 from my_data_hub.config import ConfigurationError, Settings
 from my_data_hub.control_plane.adapters import (
     ControlLedgerOAuthAuthority,
-    KaggleMCPProviderGateway,
     LedgerControlReader,
     LedgerMasterResolver,
     LedgerWriteGate,
 )
 from my_data_hub.control_plane.app import assert_no_database_environment
 from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.mcp.control_gateway import (
+    AuthenticatedProviderControlClient,
+    SplitControlPlaneReader,
+)
 from my_data_hub.mcp.oauth import OAuthBearerValidator, OAuthValidationPolicy, VerifiedTokenDecoder
 from my_data_hub.mcp.oauth_jwt import JwksJwtDecoder
 from my_data_hub.mcp.postgres_broker import (
@@ -31,7 +34,6 @@ from my_data_hub.mcp.postgres_broker import (
 )
 from my_data_hub.mcp.server import MCPDependencies, create_streamable_http_app
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
-from my_data_hub.providers.kaggle import ControlLedgerKaggleJournal, KaggleProviderAdapter
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +50,7 @@ def build_remote_runtime(
     ledger: ControlLedger | None = None,
     decoder: VerifiedTokenDecoder | None = None,
     write_gate: LedgerWriteGate | None = None,
-    provider_adapter: KaggleProviderAdapter | None = None,
+    provider_control: object | None = None,
     sql_policy: BoundedSQLPolicy | None = None,
 ) -> RemoteMCPRuntime:
     """Build the remote reader profile from explicit, fail-closed dependencies."""
@@ -56,6 +58,8 @@ def build_remote_runtime(
     # Reuse the control-plane environment guard so libpq variables cannot leak
     # into this long-running resource-server process.
     assert_no_database_environment()
+    if any(name.startswith("KAGGLE_") for name in os.environ):
+        raise ConfigurationError("remote MCP must not receive Kaggle provider credentials or configuration")
     runtime_settings = settings or Settings.from_env(require_database=False)
     if not runtime_settings.mcp_remote_enabled or runtime_settings.mcp_auth_mode != "oauth":
         raise ConfigurationError("remote MCP runtime requires the production OAuth profile")
@@ -76,13 +80,14 @@ def build_remote_runtime(
             if mode & 0o077 or not 32 <= len(secret) <= 256:
                 raise ConfigurationError("operator write-gate secret violates the bounded private-file contract")
             write_gate = LedgerWriteGate(control_ledger, signing_secret=secret)
-        if provider_adapter is None:
+        if provider_control is None:
             try:
-                provider_adapter = KaggleProviderAdapter.from_environment(
-                    journal=ControlLedgerKaggleJournal(control_ledger)
+                provider_control = AuthenticatedProviderControlClient.from_token_file(
+                    runtime_settings.mcp_control_gateway_url,
+                    runtime_settings.mcp_control_gateway_token_file or Path(""),
                 )
             except Exception as exc:
-                raise ConfigurationError("operator Kaggle adapter is unavailable") from exc
+                raise ConfigurationError("authenticated provider control gateway is unavailable") from exc
         sql_policy = sql_policy or BoundedSQLPolicy()
     authority = ControlLedgerOAuthAuthority(control_ledger)
     token_decoder = decoder or JwksJwtDecoder(
@@ -103,12 +108,17 @@ def build_remote_runtime(
         revocations=ControlLedgerRevocationStore(authority),
         control_ledger=authority,
     )
-    gateway = (
-        KaggleMCPProviderGateway(control_ledger, provider_adapter)
-        if runtime_settings.mcp_write_enabled and provider_adapter is not None
-        else None
-    )
     exact_sql_policy = sql_policy or BoundedSQLPolicy(change_targets=frozenset())
+    local_control = LedgerControlReader(
+        control_ledger,
+        deployed_commit=os.getenv("MY_DATA_HUB_DEPLOY_COMMIT") or None,
+        write_gate=write_gate,
+    )
+    control = (
+        SplitControlPlaneReader(local_control, provider_control)  # type: ignore[arg-type]
+        if runtime_settings.mcp_write_enabled and provider_control is not None
+        else local_control
+    )
     dependencies = MCPDependencies(
         resolver=LedgerMasterResolver(control_ledger),
         broker=PostgresMasterSessionBroker(
@@ -117,12 +127,7 @@ def build_remote_runtime(
             ),
             sql_policy=exact_sql_policy,
         ),
-        control=LedgerControlReader(
-            control_ledger,
-            deployed_commit=os.getenv("MY_DATA_HUB_DEPLOY_COMMIT") or None,
-            write_gate=write_gate,
-            provider_gateway=gateway,
-        ),
+        control=control,
         write_gate=write_gate,
         audit=authority,
         sql_policy=exact_sql_policy,

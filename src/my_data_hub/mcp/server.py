@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from my_data_hub.auth.context import current_identity
 from my_data_hub.auth.control import OAuthAuditEvent
@@ -17,6 +17,13 @@ from my_data_hub.mcp.contracts import (
     WriteGate,
 )
 from my_data_hub.mcp.oauth import AccessIdentity, OAuthBearerValidator
+from my_data_hub.mcp.provider_schemas import (
+    ProviderCreatePayload,
+    ProviderDeletePayload,
+    ProviderReadPayload,
+    ProviderRunPayload,
+    ProviderVersionPayload,
+)
 from my_data_hub.mcp.service import HubService
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
 from my_data_hub.mcp.transport import ToolSecurityMetadataMiddleware
@@ -340,24 +347,77 @@ def create_server(
     ) -> dict[str, Any]:
         return await service.invoke("bloggers.import.apply", locals())
 
-    def provider_function(tool: str):  # type: ignore[no-untyped-def]
-        async def invoke_provider(
-            resource_ref: str,
-            control_class: str,
-            private: bool,
-            payload: dict[str, Any] | None = None,
-        ) -> dict[str, Any]:
-            return await service.invoke(
-                tool,
-                {
-                    "resource_ref": resource_ref,
-                    "control_class": control_class,
-                    "private": private,
-                    "payload": payload or {},
-                },
-            )
+    def provider_arguments(
+        resource_ref: str,
+        control_class: str,
+        private: bool,
+        payload: ProviderCreatePayload
+        | ProviderVersionPayload
+        | ProviderRunPayload
+        | ProviderReadPayload
+        | ProviderDeletePayload,
+    ) -> dict[str, Any]:
+        return {
+            "resource_ref": resource_ref,
+            "control_class": control_class,
+            "private": private,
+            "payload": payload.model_dump(mode="json", exclude_none=True),
+        }
 
-        return invoke_provider
+    async def provider_resources_create(
+        resource_ref: str,
+        control_class: Literal["mcp_managed", "mcp_exchange"],
+        private: Literal[True],
+        payload: ProviderCreatePayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.resources.create",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
+    async def provider_resources_version(
+        resource_ref: str,
+        control_class: Literal["mcp_managed", "mcp_exchange"],
+        private: Literal[True],
+        payload: ProviderVersionPayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.resources.version",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
+    async def provider_resources_run(
+        resource_ref: str,
+        control_class: Literal["mcp_managed"],
+        private: Literal[True],
+        payload: ProviderRunPayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.resources.run",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
+    async def provider_resources_read(
+        resource_ref: str,
+        control_class: Literal["mcp_managed", "mcp_exchange"],
+        private: Literal[True],
+        payload: ProviderReadPayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.resources.read",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
+    async def provider_resources_delete(
+        resource_ref: str,
+        control_class: Literal["mcp_managed", "mcp_exchange"],
+        private: Literal[True],
+        payload: ProviderDeletePayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.resources.delete",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
 
     functions = {
         "platform.status": platform_status,
@@ -378,6 +438,11 @@ def create_server(
         "provider.acceptance.notebook.lifecycle": provider_acceptance_notebook_lifecycle,
         "provider.acceptance.claim.get": provider_acceptance_claim_get,
         "provider.acceptance.claim.cleanup": provider_acceptance_claim_cleanup,
+        "provider.resources.create": provider_resources_create,
+        "provider.resources.version": provider_resources_version,
+        "provider.resources.run": provider_resources_run,
+        "provider.resources.read": provider_resources_read,
+        "provider.resources.delete": provider_resources_delete,
         "bloggers.list": bloggers_list,
         "bloggers.get": bloggers_get,
         "bloggers.search": bloggers_search,
@@ -392,7 +457,7 @@ def create_server(
         "bloggers.import.apply": bloggers_import_apply,
     }
     for tool_name in TOOL_CONTRACTS:
-        register(tool_name, functions.get(tool_name) or provider_function(tool_name))
+        register(tool_name, functions[tool_name])
     return mcp
 
 

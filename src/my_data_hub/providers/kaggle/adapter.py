@@ -1300,6 +1300,20 @@ class KaggleProviderAdapter:
             intent,
             arguments={"claim_sha256": claim.claim_sha256, "provider_version": claim.provider_version},
         )
+        self.journal.persist_intent(intent)
+        if self._is_absent(claim.provider_ref, claim.kind):
+            receipt = ProviderEffectReceipt(
+                operation_id=intent.operation_id,
+                effect_id=intent.effect_id,
+                action=intent.action,
+                provider_ref=intent.provider_ref,
+                outcome=EffectOutcome.ALREADY_APPLIED,
+                attempts=0,
+                observed_at=self.clock(),
+                detail_code="task_created_resource_already_absent",
+            )
+            self.journal.persist_receipt(receipt)
+            return receipt
         if claim.kind == ProviderKind.DATASET:
             current = self.read_private_dataset(provider_ref=claim.provider_ref, version=claim.provider_version)
             current_fingerprint = current.fingerprint
@@ -1312,7 +1326,6 @@ class KaggleProviderAdapter:
             current_fingerprint = current_source.fingerprint
         if current_fingerprint != claim.fingerprint or intent.expected_fingerprint != claim.fingerprint:
             raise KagglePolicyError("cleanup target differs from the exact task-created fingerprint")
-        self.journal.persist_intent(intent)
         try:
             if claim.kind == ProviderKind.DATASET:
                 owner, slug = claim.provider_ref.split("/", 1)

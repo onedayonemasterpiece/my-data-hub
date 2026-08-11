@@ -104,6 +104,9 @@ def test_operator_install_is_explicit_gated_override_while_base_remains_reader_o
     assert 'MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED: "true"' in installer
     assert 'MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED: "true"' in installer
     assert "operator_profile_gate.py\" verify" in installer
-    assert "only one modern KAGGLE_API_TOKEN" in installer
+    assert "requires exactly one modern KAGGLE_API_TOKEN" in installer
     assert "mcp-write-gate.key:ro" in installer
+    assert "mcp-control-gateway.token:ro" in installer
+    assert 'MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED: "true"' in installer
+    assert "MY_DATA_HUB_MCP_OPERATOR_PROVIDER_ENV_FILE" not in installer
     assert "MY_DATA_HUB_DATABASE_URL" not in installer

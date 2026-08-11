@@ -197,8 +197,77 @@ def test_production_builder_constructs_single_adapter_journal_and_bridge(monkeyp
     )
     assert built.provider_status == "available"
     assert built.master is not None
+    assert built.provider_adapter is adapter
     assert len(seen) == 1
     assert isinstance(built.master.coordinator.provider, KaggleMasterRuntimeProvider)
+
+
+def test_control_provider_gateway_requires_service_auth_and_uses_injected_single_adapter(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "provider-gateway.sqlite3"
+    ledger = ControlLedger(path)
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def invoke(self, tool, arguments, principal):  # type: ignore[no-untyped-def]
+            self.calls.append((tool, dict(arguments), principal.subject, principal.token_id))
+            return {"provider_ref": arguments["resource_ref"], "outcome": "applied"}
+
+    gateway = Gateway()
+    app = create_app(
+        ControlPlaneSettings(
+            ledger_path=path,
+            operator_credentials_enabled=True,
+            provider_gateway_enabled=True,
+        ),
+        ledger=ledger,
+        master_runtime=runtime(ledger, FakeKaggleRuntime()),
+        provider_gateway=gateway,  # type: ignore[arg-type]
+        provider_gateway_token=b"g" * 32,
+    )
+    client = TestClient(app)
+    body = {
+        "tool": "provider.resources.delete",
+        "arguments": {
+            "resource_ref": "owner/disposable",
+            "control_class": "mcp_managed",
+            "private": True,
+            "payload": {},
+        },
+        "principal": {
+            "subject": "owner",
+            "client_id": "owner-operator",
+            "scopes": ["provider:write"],
+            "audience": "mcp",
+            "expires_at": int((datetime.now(UTC) + timedelta(minutes=2)).timestamp()),
+            "issuer": "https://issuer.example",
+            "issued_at": int((datetime.now(UTC) - timedelta(minutes=1)).timestamp()),
+            "resource": "https://mcp.example/mcp",
+        },
+    }
+    assert client.post("/internal/mcp-provider/invoke", json=body).status_code == 401
+    accepted = client.post(
+        "/internal/mcp-provider/invoke",
+        json=body,
+        headers={"Authorization": "Bearer " + "g" * 32},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json() == {"provider_ref": "owner/disposable", "outcome": "applied"}
+    assert gateway.calls == [
+        ("provider.resources.delete", body["arguments"], "owner", "internal-provider-gateway")
+    ]
+
+    secret = {**body, "arguments": {**body["arguments"], "password": "forbidden"}}
+    rejected = client.post(
+        "/internal/mcp-provider/invoke",
+        json=secret,
+        headers={"Authorization": "Bearer " + "g" * 32},
+    )
+    assert rejected.status_code == 422
+    assert len(gateway.calls) == 1
 
 
 def test_control_ensure_runs_one_physical_launch_under_concurrency_and_restart(tmp_path: Path) -> None:

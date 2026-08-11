@@ -767,6 +767,10 @@ def test_exact_task_claim_allows_only_disposable_resource_cleanup() -> None:
     assert receipt.outcome == EffectOutcome.APPLIED
     assert created.claim.provider_ref not in api.datasets
     assert api.calls[-1] == ("dataset_delete", created.claim.provider_ref, True)
+    reconciled = client.delete_task_created_resource(intent=delete, claim=created.claim)
+    assert reconciled.outcome == EffectOutcome.ALREADY_APPLIED
+    assert reconciled.effect_id == receipt.effect_id
+    assert sum(call[0] == "dataset_delete" for call in api.calls) == 1
 
 
 class DeniedProbe:

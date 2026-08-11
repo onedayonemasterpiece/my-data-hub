@@ -269,6 +269,71 @@ async def test_owner_catalog_has_per_tool_security_and_truthful_annotations() ->
 
 
 @pytest.mark.asyncio
+async def test_provider_tools_advertise_closed_action_specific_input_schemas() -> None:
+    settings = SimpleNamespace(
+        mcp_remote_enabled=True,
+        mcp_scopes=frozenset(),
+        mcp_oauth_resource=RESOURCE,
+    )
+    server = create_server(settings, default_identity=OWNER)  # type: ignore[arg-type]
+    tools = {tool.name: tool for tool in await server.list_tools()}
+
+    expected_payloads = {
+        "provider.resources.create": "ProviderCreatePayload",
+        "provider.resources.version": "ProviderVersionPayload",
+        "provider.resources.run": "ProviderRunPayload",
+        "provider.resources.read": "ProviderReadPayload",
+        "provider.resources.delete": "ProviderDeletePayload",
+    }
+    for name, definition in expected_payloads.items():
+        schema = tools[name].input_schema
+        assert schema["required"] == ["resource_ref", "control_class", "private", "payload"]
+        assert schema["properties"]["private"]["const"] is True
+        assert schema["properties"]["payload"] == {"$ref": f"#/$defs/{definition}"}
+        assert schema["$defs"][definition]["additionalProperties"] is False
+
+    run_schema = tools["provider.resources.run"].input_schema
+    assert run_schema["properties"]["control_class"]["const"] == "mcp_managed"
+    dataset_inputs = run_schema["$defs"]["ProviderRunPayload"]["properties"][
+        "dataset_inputs"
+    ]
+    assert dataset_inputs["maxItems"] == 16
+    assert dataset_inputs["items"] == {"$ref": "#/$defs/ProviderDatasetInput"}
+    assert run_schema["$defs"]["ProviderDatasetInput"] == {
+        "additionalProperties": False,
+        "properties": {
+            "resource_ref": {
+                "maxLength": 300,
+                "minLength": 3,
+                "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+                "title": "Resource Ref",
+                "type": "string",
+            },
+            "provider_version": {"minimum": 1, "title": "Provider Version", "type": "integer"},
+            "claim_sha256": {
+                "pattern": "^[a-f0-9]{64}$",
+                "title": "Claim Sha256",
+                "type": "string",
+            },
+            "control_class": {
+                "enum": ["mcp_managed", "mcp_exchange"],
+                "title": "Control Class",
+                "type": "string",
+            },
+        },
+        "required": ["resource_ref", "provider_version", "claim_sha256", "control_class"],
+        "title": "ProviderDatasetInput",
+        "type": "object",
+    }
+    create_schema = tools["provider.resources.create"].input_schema
+    exchange_ref = create_schema["$defs"]["ProviderCreatePayload"]["properties"][
+        "exchange_manifest"
+    ]["anyOf"][0]["$ref"]
+    assert exchange_ref.endswith("/ExchangeManifest")
+    assert create_schema["$defs"]["ExchangeManifest"]["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
 async def test_writes_fail_closed_without_injected_preview_checkpoint_gate() -> None:
     service = HubService(Resolver(active()), broker=Broker({}), fallback_identity=OWNER, clock=lambda: NOW)
     arguments = {

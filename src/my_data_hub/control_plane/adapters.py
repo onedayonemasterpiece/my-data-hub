@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from typing import Any
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from my_data_hub.auth.control import (
     OAuthAuditEvent,
@@ -34,13 +34,16 @@ from my_data_hub.orchestrator.master import MasterCoordinator
 from my_data_hub.providers import ProviderPolicy
 from my_data_hub.providers.exchange import (
     EXCHANGE_MANIFEST_PATH,
+    MAX_EXCHANGE_TTL,
     ExchangeManifest,
     validate_exchange_manifest_for_mutation,
 )
 from my_data_hub.providers.kaggle import KaggleProviderAdapter, mapping_sha256
 from my_data_hub.providers.kaggle.contracts import (
+    EffectOutcome,
     MutationAction,
     ProviderEffectIntent,
+    ProviderEffectReceipt,
     TaskResourceClaim,
 )
 from my_data_hub.providers.models import (
@@ -717,8 +720,9 @@ class KaggleMCPProviderGateway:
             kind,
             require_disposable=True,
         )
+        exchange_access: Mapping[str, Any] | None = None
         if control_class is ControlClass.MCP_EXCHANGE:
-            self._authorize_exchange_access(claim, principal, action="delete")
+            exchange_access = self._authorize_exchange_access(claim, principal, action="delete")
         arguments = {"claim_sha256": claim.claim_sha256, "provider_version": claim.provider_version}
         action = MutationAction.DELETE_DATASET if kind is ProviderKind.DATASET else MutationAction.DELETE_NOTEBOOK
         intent = self._intent(
@@ -728,12 +732,29 @@ class KaggleMCPProviderGateway:
             arguments=arguments,
             expected_fingerprint=claim.fingerprint,
         )
-        lease = self._authorize_mutation(claim, principal, ProviderAction.DELETE, intent.effect_id)
-        try:
-            result = self.adapter.delete_task_created_resource(intent=intent, claim=claim)
-        finally:
-            self.ledger.release_resource_lease(str(lease.lease_id), principal.subject, lease.fencing_token)
-        return {
+        self.ledger.persist_provider_effect_intent(intent.model_dump(mode="json"))
+        receipt_payload = self.ledger.latest_provider_effect_receipt(str(intent.effect_id))
+        result = ProviderEffectReceipt.model_validate(receipt_payload) if receipt_payload else None
+        if result is not None:
+            if (
+                result.operation_id != intent.operation_id
+                or result.action != intent.action
+                or result.provider_ref != intent.provider_ref
+            ):
+                raise PermissionError("provider delete receipt differs from the exact cleanup intent")
+            if result.outcome not in {
+                EffectOutcome.APPLIED,
+                EffectOutcome.ALREADY_APPLIED,
+                EffectOutcome.NOT_FOUND,
+            }:
+                result = None
+        if result is None:
+            lease = self._authorize_mutation(claim, principal, ProviderAction.DELETE, intent.effect_id)
+            try:
+                result = self.adapter.delete_task_created_resource(intent=intent, claim=claim)
+            finally:
+                self.ledger.release_resource_lease(str(lease.lease_id), principal.subject, lease.fencing_token)
+        response = {
             "operation_id": str(result.operation_id),
             "effect_id": str(result.effect_id),
             "task_id": str(claim.task_id),
@@ -743,6 +764,23 @@ class KaggleMCPProviderGateway:
             "outcome": result.outcome.value,
             "attempts": result.attempts,
         }
+        if exchange_access is not None:
+            retention_receipt = {
+                "contract_version": "mcp-exchange-cleanup-retention.v1",
+                "package_id": str(exchange_access.get("package_id", "")),
+                "manifest_sha256": str(exchange_access.get("manifest_sha256", "")),
+                "expires_at": str(exchange_access.get("expires_at", "")),
+                "maximum_ttl_seconds": int(MAX_EXCHANGE_TTL.total_seconds()),
+                "operation_id": str(result.operation_id),
+                "effect_id": str(result.effect_id),
+                "claim_sha256": claim.claim_sha256,
+                "resource_state": "absent",
+            }
+            response["retention_receipt"] = retention_receipt
+            response["retention_receipt_sha256"] = hashlib.sha256(
+                canonical_json_bytes(retention_receipt)
+            ).hexdigest()
+        return response
 
     def _authorize_mutation(
         self,
@@ -752,7 +790,10 @@ class KaggleMCPProviderGateway:
         effect_id: UUID,
     ) -> ResourceLease:
         now = self.ledger.clock.now()
-        lease_id = str(uuid5(NAMESPACE_URL, f"mcp-provider-lease:{effect_id}"))
+        # Leases fence concurrent attempts, not logical idempotency. A released
+        # lease must not prevent the same effect from reconciling an UNCERTAIN
+        # provider outcome, so every bounded attempt receives a fresh identity.
+        lease_id = str(uuid4())
         record = self.ledger.acquire_resource_lease(
             lease_id=lease_id,
             resource_kind=claim.kind.value,
@@ -987,7 +1028,7 @@ class KaggleMCPProviderGateway:
         principal: AccessIdentity,
         *,
         action: str,
-    ) -> None:
+    ) -> Mapping[str, Any]:
         resource = self.ledger.provider_resource(claim.provider_ref, str(claim.provider_version))
         access = resource.get("metadata", {}).get("exchange_access") if resource else None
         if not isinstance(access, Mapping):
@@ -997,18 +1038,27 @@ class KaggleMCPProviderGateway:
             expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
         except ValueError as exc:
             raise PermissionError("exchange access expiry is invalid") from exc
-        if expiry.tzinfo is None or self.ledger.clock.now() >= expiry:
-            raise PermissionError("exchange resource has expired")
+        expired = expiry.tzinfo is None or self.ledger.clock.now() >= expiry
         creator = str(access.get("created_by", ""))
         recipients = access.get("intended_recipients")
         if action == "read":
+            if expired:
+                raise PermissionError("exchange resource has expired")
             if not isinstance(recipients, list) or principal.subject not in recipients:
                 raise PermissionError("principal is not an intended exchange recipient")
-        elif action in {"mutate", "delete"}:
+        elif action == "mutate":
+            if expired:
+                raise PermissionError("exchange resource has expired")
+            if principal.subject != creator:
+                raise PermissionError("only the exchange creator may mutate or delete the package")
+        elif action == "delete":
+            # Expiry removes read/mutation authority but must never make the
+            # exact creator's idempotent retention cleanup impossible.
             if principal.subject != creator:
                 raise PermissionError("only the exchange creator may mutate or delete the package")
         else:  # pragma: no cover - closed internal call set
             raise ValueError("unsupported exchange access action")
+        return access
 
     @staticmethod
     def _dataset_response(result: Any) -> dict[str, Any]:

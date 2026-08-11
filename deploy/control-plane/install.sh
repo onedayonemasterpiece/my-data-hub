@@ -105,13 +105,13 @@ mcp_env="${MY_DATA_HUB_MCP_ENV_FILE:-$env_root/mcp-reader.env}"
 oauth_env="${MY_DATA_HUB_OAUTH_ENV_FILE:-$env_root/oauth.env}"
 oauth_key="${MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE:-$secret_root/oauth-signing-key.pem}"
 oauth_overlap_jwks="${MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE:-$runtime_root/oauth-public/overlap-jwks.json}"
-operator_provider_env="${MY_DATA_HUB_MCP_OPERATOR_PROVIDER_ENV_FILE:-$env_root/mcp-operator-provider.env}"
 operator_gate_receipt="${MY_DATA_HUB_OPERATOR_SECURITY_GATE_RECEIPT_FILE:-$runtime_root/operator-security-gate.json}"
 operator_gate_key="${MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE:-$secret_root/mcp-write-gate.key}"
+control_gateway_token="${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:-$secret_root/mcp-control-gateway.token}"
 tunnel_broker_socket_dir="${MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR:-/run/my-data-hub/tunnel-broker}"
 for path_value in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$asset_dir" \
   "$tls_ca_file" "$provider_env" "$mcp_env" "$oauth_env" "$oauth_key" "$oauth_overlap_jwks" \
-  "$operator_provider_env" "$operator_gate_receipt" "$operator_gate_key" "$tunnel_broker_socket_dir"; do
+  "$operator_gate_receipt" "$operator_gate_key" "$control_gateway_token" "$tunnel_broker_socket_dir"; do
   case "$path_value" in
     *[$'\n\r\t ']* ) echo "deployment inputs may not contain whitespace" >&2; exit 2 ;;
   esac
@@ -178,7 +178,7 @@ done
 reject_environment_keys "$provider_env" "provider environment" \
   'MY_DATA_HUB_OAUTH_SIGNING_KEY|MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET'
 reject_environment_keys "$mcp_env" "remote MCP environment" \
-  'KAGGLE_API_TOKEN|MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT|MY_DATA_HUB_OAUTH_SIGNING_KEY'
+  'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT|MY_DATA_HUB_OAUTH_SIGNING_KEY'
 reject_environment_keys "$oauth_env" "OAuth environment" \
   'KAGGLE_API_TOKEN|MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT|MY_DATA_HUB_KAGGLE_[A-Z0-9_]+'
 
@@ -189,17 +189,11 @@ if [[ "$operator_profile" == true ]]; then
     echo "operator install requires the exact MY_DATA_HUB_ENABLE_OPERATOR_PROFILE acknowledgement" >&2
     exit 2
   fi
-  require_private_file "$operator_provider_env" "operator Kaggle provider environment"
   require_private_file "$operator_gate_receipt" "operator security gate receipt"
   require_private_file "$operator_gate_key" "operator write-gate signing key"
-  reject_data_plane_environment "$operator_provider_env" "operator Kaggle provider environment"
-  if grep -Ev '^[[:space:]]*(#.*)?$|^[[:space:]]*KAGGLE_API_TOKEN[[:space:]]*=[^[:space:]].*$' \
-      "$operator_provider_env" | grep -q .; then
-    echo "operator provider environment may contain only one modern KAGGLE_API_TOKEN assignment" >&2
-    exit 2
-  fi
-  if [[ "$(grep -Eic '^[[:space:]]*KAGGLE_API_TOKEN[[:space:]]*=[^[:space:]].*$' "$operator_provider_env")" != 1 ]]; then
-    echo "operator provider environment requires exactly one modern KAGGLE_API_TOKEN" >&2
+  require_private_file "$control_gateway_token" "provider control gateway token"
+  if [[ "$(grep -Eic '^[[:space:]]*KAGGLE_API_TOKEN[[:space:]]*=[^[:space:]].*$' "$provider_env")" != 1 ]]; then
+    echo "single control provider environment requires exactly one modern KAGGLE_API_TOKEN" >&2
     exit 2
   fi
   python3 "$release/scripts/operator_profile_gate.py" verify \
@@ -210,17 +204,21 @@ services:
   control-plane:
     environment:
       MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED: "true"
+      MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED: "true"
+      MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE: /run/secrets/mcp-control-gateway.token
+    volumes:
+      - "${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:?provider control gateway token is required}:/run/secrets/mcp-control-gateway.token:ro"
   remote-mcp:
-    env_file:
-      - path: "${MY_DATA_HUB_MCP_OPERATOR_PROVIDER_ENV_FILE:?operator provider env is required}"
-        required: true
     environment:
       MY_DATA_HUB_MCP_WRITE_ENABLED: "true"
       MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED: "true"
       MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE: /run/secrets/mcp-write-gate.key
+      MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL: http://control-plane:8080/internal/mcp-provider/invoke
+      MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE: /run/secrets/mcp-control-gateway.token
       MY_DATA_HUB_MCP_SCOPES: platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,data:write,migration:operate,provider:write
     volumes:
       - "${MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE:?write gate key is required}:/run/secrets/mcp-write-gate.key:ro"
+      - "${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:?provider control gateway token is required}:/run/secrets/mcp-control-gateway.token:ro"
 YAML
   chmod 600 "$operator_override"
   operator_compose_arg=" -f $operator_override"
@@ -241,8 +239,8 @@ MY_DATA_HUB_OAUTH_ENV_FILE=$oauth_env
 MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE=$oauth_key
 MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE=$oauth_overlap_jwks
 MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR=$tunnel_broker_socket_dir
-MY_DATA_HUB_MCP_OPERATOR_PROVIDER_ENV_FILE=$operator_provider_env
 MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE=$operator_gate_key
+MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE=$control_gateway_token
 ENV
 chmod 600 "$compose_env"
 

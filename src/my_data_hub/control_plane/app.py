@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hmac
 import json
 import os
 import tempfile
@@ -18,7 +19,11 @@ from fastapi import FastAPI, Header, HTTPException, Request, status
 from my_data_hub.acceptance.master_lifecycle import MasterAcceptanceReceipt
 from my_data_hub.checkpoints import CheckpointManifest, ControlLedgerCheckpointRegistry
 from my_data_hub.checkpoints.manifest import ManifestError
-from my_data_hub.control_plane.adapters import LedgerMasterResolver
+from my_data_hub.control_plane.adapters import (
+    KaggleMCPProviderGateway,
+    LedgerControlReader,
+    LedgerMasterResolver,
+)
 from my_data_hub.control_plane.ledger import (
     ControlLedger,
     ControlLedgerError,
@@ -46,6 +51,8 @@ from my_data_hub.embeddings.production import (
     embedding_provider_authority,
 )
 from my_data_hub.hashing import canonical_json_bytes
+from my_data_hub.mcp.catalog import TOOL_CONTRACTS
+from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.providers.kaggle import (
     ControlLedgerKaggleJournal,
     KaggleMasterRuntimeProvider,
@@ -224,12 +231,15 @@ class ControlPlaneSettings:
     master_runtime: MasterRuntimeSettings | None = None
     session_credentials_path: Path | None = None
     operator_credentials_enabled: bool = False
+    provider_gateway_enabled: bool = False
 
     def __post_init__(self) -> None:
         if not self.host or not 1 <= self.port <= 65535:
             raise ControlPlaneConfigurationError("control-plane listener is invalid")
         if self.scheduler_enabled or self.production_publish_enabled or self.remote_mcp_writes_enabled:
             raise ControlPlaneConfigurationError("PR-A control-plane write and publication gates must remain false")
+        if self.provider_gateway_enabled and not self.operator_credentials_enabled:
+            raise ControlPlaneConfigurationError("provider gateway requires the explicit operator credential gate")
 
     @classmethod
     def from_env(cls) -> ControlPlaneSettings:
@@ -253,6 +263,7 @@ class ControlPlaneSettings:
                 os.getenv("MY_DATA_HUB_MASTER_SESSION_DIR", "/state/master-sessions")
             ).expanduser(),
             operator_credentials_enabled=_boolean("MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED"),
+            provider_gateway_enabled=_boolean("MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED"),
         )
 
 
@@ -265,6 +276,8 @@ def create_app(
     embedding_stage_runner: object | None = None,
     operator_credential_enabled: bool | None = None,
     tunnel_certificate_broker: TunnelCertificateBroker | None = None,
+    provider_gateway: KaggleMCPProviderGateway | None = None,
+    provider_gateway_token: bytes | None = None,
 ) -> FastAPI:
     runtime = settings or ControlPlaneSettings.from_env()
     if operator_credential_enabled is None:
@@ -281,6 +294,7 @@ def create_app(
         raise ControlPlaneConfigurationError("tunnel listen port is outside 1024..65535")
     ledger_path = runtime.ledger_path or Path(tempfile.mkdtemp(prefix="mdh-control-")) / "control.sqlite3"
     control_ledger = ledger or ControlLedger(ledger_path)
+    provider_adapter: KaggleProviderAdapter | None = None
     if master_runtime is None:
         production = build_production_runtime(
             control_ledger,
@@ -295,13 +309,39 @@ def create_app(
         )
         master_runtime = production.master
         provider_status = production.provider_status
+        provider_adapter = production.provider_adapter
         session_registrar = session_registrar or production.session_registrar
     else:
         if master_runtime.ledger.path != control_ledger.path:
             raise ControlPlaneConfigurationError("master runtime and app must share one control ledger")
         provider_status = "available"
+    if provider_gateway is None and provider_adapter is not None:
+        provider_gateway = KaggleMCPProviderGateway(control_ledger, provider_adapter)
+    if runtime.provider_gateway_enabled:
+        if not operator_credential_enabled or provider_gateway is None:
+            raise ControlPlaneConfigurationError(
+                "provider gateway requires the single authenticated control adapter"
+            )
+        if provider_gateway_token is None:
+            token_path = Path(
+                os.getenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE", "")
+            ).expanduser()
+            if not token_path.is_absolute() or token_path.is_symlink() or not token_path.is_file():
+                raise ControlPlaneConfigurationError("provider gateway token must be an absolute regular file")
+            if token_path.stat().st_mode & 0o077:
+                raise ControlPlaneConfigurationError("provider gateway token file must be private")
+            provider_gateway_token = token_path.read_bytes().strip()
+        if not 32 <= len(provider_gateway_token) <= 256 or any(
+            byte < 33 or byte > 126 for byte in provider_gateway_token
+        ):
+            raise ControlPlaneConfigurationError("provider gateway token violates the bounded contract")
     resolver = LedgerMasterResolver(control_ledger)
     provider_journal = ControlLedgerKaggleJournal(control_ledger)
+    provider_control = (
+        LedgerControlReader(control_ledger, provider_gateway=provider_gateway)
+        if runtime.provider_gateway_enabled and provider_gateway is not None
+        else None
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -345,6 +385,7 @@ def create_app(
     app.state.session_registrar = session_registrar
     app.state.tunnel_certificate_broker = tunnel_certificate_broker
     app.state.embedding_stage_runner = embedding_stage_runner or execute_embedding_production_stage
+    app.state.provider_gateway = provider_gateway if runtime.provider_gateway_enabled else None
     app.state.reconcile_master_requests = (
         master_runtime.reconcile_requested_once if master_runtime is not None else None
     )
@@ -497,6 +538,134 @@ def create_app(
     @app.get("/health/ready")
     def ready() -> dict[str, Any]:
         return {"ok": True, **snapshot()}
+
+    if runtime.provider_gateway_enabled:
+        provider_tools = frozenset(
+            {
+                "provider.resources.create",
+                "provider.resources.version",
+                "provider.resources.run",
+                "provider.resources.read",
+                "provider.resources.delete",
+                "provider.acceptance.dataset.lifecycle",
+                "provider.acceptance.notebook.lifecycle",
+                "provider.acceptance.claim.get",
+                "provider.acceptance.claim.cleanup",
+            }
+        )
+
+        @app.post("/internal/mcp-provider/invoke")
+        async def invoke_mcp_provider(
+            request: Request,
+            authorization: str | None = Header(default=None),
+        ) -> dict[str, Any]:
+            supplied = (
+                authorization.removeprefix("Bearer ").strip()
+                if authorization and authorization.startswith("Bearer ")
+                else ""
+            )
+            expected = provider_gateway_token.decode("ascii") if provider_gateway_token else ""
+            if not supplied or not hmac.compare_digest(supplied, expected):
+                raise HTTPException(status_code=401, detail={"code": "provider_gateway_token_invalid"})
+            raw = await request.body()
+            if len(raw) > 512 * 1024:
+                raise HTTPException(status_code=413, detail={"code": "provider_gateway_request_too_large"})
+            try:
+                body = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise HTTPException(status_code=400, detail={"code": "provider_gateway_json_invalid"}) from exc
+            if not isinstance(body, dict) or set(body) != {"tool", "arguments", "principal"}:
+                raise HTTPException(status_code=422, detail={"code": "provider_gateway_envelope_invalid"})
+            tool = body["tool"]
+            arguments = body["arguments"]
+            principal = body["principal"]
+            principal_keys = {
+                "subject",
+                "client_id",
+                "scopes",
+                "audience",
+                "expires_at",
+                "issuer",
+                "issued_at",
+                "resource",
+            }
+            principal_string_keys = {
+                "subject", "client_id", "audience", "issuer", "resource"
+            }
+            if (
+                not isinstance(tool, str)
+                or tool not in provider_tools
+                or not isinstance(arguments, dict)
+                or not isinstance(principal, dict)
+                or set(principal) != principal_keys
+                or not isinstance(principal["scopes"], list)
+                or len(principal["scopes"]) > 32
+                or not all(isinstance(value, str) and 1 <= len(value) <= 300 for value in principal["scopes"])
+                or not all(
+                    isinstance(principal[key], str) and 1 <= len(principal[key]) <= 1000
+                    for key in principal_string_keys
+                )
+                or not isinstance(principal["expires_at"], int)
+                or isinstance(principal["expires_at"], bool)
+                or not isinstance(principal["issued_at"], int)
+                or isinstance(principal["issued_at"], bool)
+            ):
+                raise HTTPException(status_code=422, detail={"code": "provider_gateway_contract_invalid"})
+            now = int(datetime.now(UTC).timestamp())
+            try:
+                identity = AccessIdentity(
+                    subject=str(principal["subject"]),
+                    client_id=str(principal["client_id"]),
+                    scopes=frozenset(principal["scopes"]),
+                    audience=str(principal["audience"]),
+                    token_id="internal-provider-gateway",
+                    expires_at=int(principal["expires_at"]),
+                    issuer=str(principal["issuer"]),
+                    issued_at=int(principal["issued_at"]),
+                    resource=str(principal["resource"]),
+                )
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail={"code": "provider_gateway_principal_invalid"}) from exc
+            contract = TOOL_CONTRACTS[tool]
+            if (
+                not identity.subject
+                or not identity.client_id
+                or identity.issued_at > now
+                or identity.expires_at <= now
+                or contract.scope not in identity.scopes
+            ):
+                raise HTTPException(status_code=403, detail={"code": "provider_gateway_principal_denied"})
+
+            forbidden = {"authorization", "database_url", "dsn", "password", "private_key", "secret", "token"}
+
+            def reject_secrets(value: object) -> None:
+                if isinstance(value, dict):
+                    for key, nested in value.items():
+                        if str(key).casefold() in forbidden:
+                            raise HTTPException(
+                                status_code=422, detail={"code": "provider_gateway_secret_forbidden"}
+                            )
+                        reject_secrets(nested)
+                elif isinstance(value, list):
+                    for nested in value:
+                        reject_secrets(nested)
+
+            reject_secrets(arguments)
+            assert provider_control is not None
+            try:
+                result = await asyncio.to_thread(
+                    provider_control.invoke_control, tool, arguments, identity
+                )
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail={"code": "provider_gateway_policy_denied"}) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail={"code": "provider_gateway_request_invalid"}) from exc
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail={"code": "provider_gateway_effect_failed"}) from exc
+            encoded = canonical_json_bytes(result)
+            if len(encoded) > 2 * 1024 * 1024:
+                raise HTTPException(status_code=502, detail={"code": "provider_gateway_response_too_large"})
+            return result
 
     @app.get("/control/v1/master")
     def master() -> dict[str, Any]:

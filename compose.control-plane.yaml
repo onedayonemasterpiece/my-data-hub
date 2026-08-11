@@ -34,6 +34,7 @@ services:
       MY_DATA_HUB_MCP_REMOTE_ENABLED: "false"
       MY_DATA_HUB_MCP_WRITE_ENABLED: "false"
       MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED: "false"
+      MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED: "false"
       MY_DATA_HUB_TUNNEL_BROKER_SOCKET: /run/mdh-tunnel/control.sock
     ports:
       - "127.0.0.1:${MY_DATA_HUB_CONTROL_PORT:-8080}:8080"

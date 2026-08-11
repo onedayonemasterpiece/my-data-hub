@@ -91,6 +91,8 @@ class Settings:
     mcp_trusted_proxies: tuple[str, ...] = ()
     mcp_token_max_lifetime_seconds: int = 3600
     mcp_operator_profile_enabled: bool = False
+    mcp_control_gateway_url: str = ""
+    mcp_control_gateway_token_file: Path | None = None
     application_database_url: str = ""
     connector_intake_database_url: str = ""
     orchestrator_database_url: str = ""
@@ -173,6 +175,14 @@ class Settings:
             ),
             mcp_operator_profile_enabled=_bool(
                 "MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED", False
+            ),
+            mcp_control_gateway_url=os.getenv(
+                "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL", ""
+            ).strip(),
+            mcp_control_gateway_token_file=(
+                Path(os.environ["MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE"]).expanduser()
+                if os.getenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE")
+                else None
             ),
             application_database_url=os.getenv(
                 "MY_DATA_HUB_APPLICATION_DATABASE_URL", ""
@@ -327,6 +337,18 @@ class Settings:
             raise ConfigurationError("OAuth access token maximum lifetime must be 60..86400 seconds")
         if self.mcp_operator_profile_enabled and not self.mcp_write_enabled:
             raise ConfigurationError("database operator profile requires the MCP write gate")
+        if self.mcp_control_gateway_url:
+            gateway = urlsplit(self.mcp_control_gateway_url)
+            if (
+                gateway.scheme not in {"http", "https"}
+                or not gateway.hostname
+                or gateway.username is not None
+                or gateway.password is not None
+                or gateway.query
+                or gateway.fragment
+                or gateway.path != "/internal/mcp-provider/invoke"
+            ):
+                raise ConfigurationError("provider control gateway URL is not the exact internal endpoint")
         if self.mcp_auth_mode == "development-token" and not self.mcp_development_token:
             raise ConfigurationError("development-token auth requires a token")
         if (

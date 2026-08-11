@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -127,6 +128,21 @@ def test_install_requires_private_split_inputs_without_static_master_credentials
     assert "external DNS" not in source
     assert "yc " not in source.casefold()
     assert "vpn" not in source.casefold()
+
+
+def test_operator_profile_keeps_kaggle_authority_only_in_control_process() -> None:
+    source = installer_source()
+    assert "MY_DATA_HUB_MCP_OPERATOR_PROVIDER_ENV_FILE" not in source
+    assert 'MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED: "true"' in source
+    assert "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL" in source
+    assert source.count("mcp-control-gateway.token:ro") == 2
+    assert 'grep -Eic \'^[[:space:]]*KAGGLE_API_TOKEN' in source
+
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    assert compose["services"]["control-plane"]["environment"][
+        "MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED"
+    ] == "false"
+    assert "KAGGLE_API_TOKEN" not in json.dumps(compose["services"]["remote-mcp"])
 
 
 def test_prepare_checks_bounded_disk_headroom_before_building_release_image() -> None:

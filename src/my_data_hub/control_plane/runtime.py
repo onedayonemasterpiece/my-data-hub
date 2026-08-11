@@ -495,6 +495,7 @@ class ProductionRuntimeBuild:
     master: ControlPlaneMasterRuntime | None
     provider_status: str
     session_registrar: SessionCredentialRegistrar | None = None
+    provider_adapter: KaggleProviderAdapter | None = None
 
 
 def build_production_runtime(
@@ -508,9 +509,9 @@ def build_production_runtime(
 ) -> ProductionRuntimeBuild:
     registrar = _build_session_registrar(session_credentials_path)
     if settings is None:
-        return ProductionRuntimeBuild(None, "provider_unavailable", registrar)
+        return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None)
     if not _modern_kaggle_token_available():
-        return ProductionRuntimeBuild(None, "provider_unavailable", registrar)
+        return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None)
     journal = ControlLedgerKaggleJournal(ledger)
     factory = adapter_factory or (lambda value: KaggleProviderAdapter.from_environment(journal=value))
     try:
@@ -518,7 +519,7 @@ def build_production_runtime(
     except Exception:
         # Authentication/dependency failures do not make the stable control plane
         # unhealthy and must not leak provider exception/credential detail.
-        return ProductionRuntimeBuild(None, "provider_unavailable", registrar)
+        return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None)
     provider = KaggleMasterRuntimeProvider(adapter, settings.assets)
     coordinator = MasterCoordinator(
         ledger,
@@ -537,7 +538,7 @@ def build_production_runtime(
         runtime.reconcile_startup()
     # Durable operations remain resumable; readiness is still control-plane
     # readiness, not an assertion that Kaggle accepted an effect.
-    return ProductionRuntimeBuild(runtime, "available", registrar)
+    return ProductionRuntimeBuild(runtime, "available", registrar, adapter)
 
 
 def _modern_kaggle_token_available() -> bool:

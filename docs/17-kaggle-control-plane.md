@@ -402,5 +402,9 @@ manifest file is included in the private Dataset version.
 
 The devstand ledger stores only access metadata and provider receipts, never exchange
 payload bytes or instructions. Reads require a non-expired manifest and an exact intended
-recipient. Version/delete requires the original creator; expired reads fail closed.
+recipient. Version requires the original creator and an active TTL. Expiry permanently
+denies reads and versions but deliberately does not strand retention cleanup: only the
+exact creator may replay the claim-bound, idempotent delete after expiry. Its stable
+bounded retention receipt binds the package/manifest expiry, seven-day maximum TTL,
+claim, operation/effect and observed absent resource state without storing payload bytes.
 These are code and mock-provider proofs until a real modern Kaggle token run is recorded.

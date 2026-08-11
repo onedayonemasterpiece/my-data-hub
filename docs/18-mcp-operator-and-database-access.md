@@ -429,15 +429,26 @@ That action additionally requires all of the following before Compose is evaluat
   that commit, a verified checkpoint revision, database-role verification receipt and
   security-test receipt, with a maximum 24-hour lifetime;
 - a separate mode-private write-gate key file;
-- a separate provider environment containing exactly one modern
-  `KAGGLE_API_TOKEN` assignment and no database/YDB/runtime/OAuth credentials.
+- the control process's private provider environment containing exactly one modern
+  `KAGGLE_API_TOKEN` assignment and no database/YDB/runtime/OAuth credentials;
+- a separate mode-private internal provider-gateway token shared only by the control
+  process and remote MCP process.
 
 `scripts/operator_profile_gate.py` issues and verifies the bounded receipt. Activation
 uses a generated, release-specific Compose override outside the repository. It enables
-operator credential issuance in the control process and enables the write/operator
-profile, write-gate secret mount, full explicit scope catalog and single Kaggle adapter in
-the remote MCP process. A normal control-plane install removes that override from the
-systemd command and returns to the reader-only default.
+operator credential issuance and the sole Kaggle adapter/policy/journal authority in the
+control process. The remote MCP process receives no Kaggle environment or adapter; it
+forwards exact provider semantic requests and OAuth-derived principal metadata through an
+authenticated, bounded internal gateway. The gateway never receives the user's OAuth
+token and never returns provider bytes or credentials. A normal control-plane install
+removes that override from the systemd command and returns to the reader-only default.
+
+Provider mutation discovery is closed per action rather than advertising an open
+`payload` object. Create, version, run, read and delete each expose a distinct
+`extra=forbid` model. Exchange create/version include the bounded manifest schema, and
+run inputs require an exact registered Dataset `resource_ref`, numeric
+`provider_version`, `claim_sha256` and allowed `control_class`; a slug using `latest` or
+an unregistered/protected source is not representable in the advertised contract.
 
 Migration `0016_mcp_operator_transaction_boundary.sql` makes the data-plane write path
 operational without granting generic SQL authority. `mdh_mcp_editor` has column-level
@@ -449,6 +460,13 @@ and inserts both `sync.audit_event` and a semantic `sync.external_outbox` operat
 an immutable transaction receipt is accepted. Preview executes the same DML and rolls the
 whole transaction back. Apply refuses zero-row or over-limit effects and remains pending
 until a newer verified checkpoint protects its committed revision.
+
+Migration `0017_mcp_operator_commit_reconciliation.sql` closes the acknowledgement-loss
+window after PostgreSQL commit. New immutable receipts bind request hash, master instance,
+epoch and revision. `data.change.status` or an exact apply retry performs only a bounded
+read-only receipt lookup through the current epoch credential and atomically projects the
+canonical receipt into the SQLite lifecycle. Absence keeps retry denied; no reconciliation
+path can resend the caller's DML.
 
 This section documents a tested activation contract, not evidence that the operator
 profile has been enabled on a live host.

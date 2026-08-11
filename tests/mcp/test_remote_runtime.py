@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -37,6 +38,9 @@ READER_SCOPES = frozenset(
 def _configure(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
     for name in DATABASE_ENVIRONMENT_NAMES:
         monkeypatch.delenv(name, raising=False)
+    for name in tuple(os.environ):
+        if name.startswith("KAGGLE_"):
+            monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("MY_DATA_HUB_ENVIRONMENT", "production")
     monkeypatch.setenv("MY_DATA_HUB_CONTROL_LEDGER_PATH", str(root / "control.sqlite3"))
     monkeypatch.setenv("MY_DATA_HUB_MCP_REMOTE_ENABLED", "true")
@@ -213,9 +217,23 @@ def test_remote_operator_runtime_requires_and_accepts_only_injected_dependencies
     runtime = build_remote_runtime(
         decoder=lambda _token: _claims(),
         write_gate=object(),  # type: ignore[arg-type]
-        provider_adapter=object(),  # type: ignore[arg-type]
+        provider_control=object(),
         sql_policy=BoundedSQLPolicy(change_targets=frozenset({"hub.project"})),
     )
 
     assert runtime.settings.mcp_write_enabled is True
     assert runtime.settings.mcp_operator_profile_enabled is True
+
+
+def test_remote_runtime_never_accepts_or_constructs_kaggle_provider_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "must-remain-control-only")
+    with pytest.raises(Exception, match="must not receive Kaggle"):
+        build_remote_runtime(decoder=lambda _token: _claims())
+
+    source = Path("src/my_data_hub/mcp/runtime.py").read_text(encoding="utf-8")
+    assert "KaggleProviderAdapter" not in source
+    assert "ControlLedgerKaggleJournal" not in source
+    assert "from_environment" not in source
