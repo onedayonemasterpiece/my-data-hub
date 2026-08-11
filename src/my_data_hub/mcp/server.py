@@ -18,6 +18,7 @@ from my_data_hub.mcp.contracts import (
 )
 from my_data_hub.mcp.oauth import AccessIdentity, OAuthBearerValidator
 from my_data_hub.mcp.service import HubService
+from my_data_hub.mcp.transport import ToolSecurityMetadataMiddleware
 
 
 def oauth_resource_metadata_url(resource: str) -> str:
@@ -326,7 +327,10 @@ def create_streamable_http_app(
             yield
 
     mounted = Starlette(
-        routes=[Route(metadata_path, metadata, methods=["GET"]), Mount("/", app=mcp_app)],
+        routes=[
+            Route(metadata_path, metadata, methods=["GET"]),
+            Mount("/", app=ToolSecurityMetadataMiddleware(mcp_app)),
+        ],
         lifespan=lifespan,
     )
     return OAuthAdmissionSecurity(
