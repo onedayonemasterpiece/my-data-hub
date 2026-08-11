@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import importlib.util
 import subprocess
 from pathlib import Path
 from types import ModuleType
@@ -15,11 +14,9 @@ EDGE = ROOT / "deploy" / "yandex-edge"
 
 def load_renderer() -> ModuleType:
     path = EDGE / "render_cloud_init.py"
-    spec = importlib.util.spec_from_file_location("my_data_hub_yandex_edge_renderer", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("renderer module could not be loaded")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = ModuleType("my_data_hub_yandex_edge_renderer")
+    module.__file__ = str(path)
+    exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
     return module
 
 
