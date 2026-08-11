@@ -44,7 +44,7 @@ class YdbBloggerSnapshot:
         try:
             with pool.checkout(timeout=self.acquire_timeout_seconds) as session:
                 try:
-                    session.transaction(ydb.SerializableReadWrite()).execute(
+                    session.transaction(ydb.QuerySerializableReadWrite()).execute(
                         ZERO_ROW_WRITE_DENIAL_PROBE, commit_tx=True
                     )
                 except ydb.issues.Unauthorized:

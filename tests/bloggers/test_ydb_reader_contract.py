@@ -38,7 +38,7 @@ def test_write_denial_probe_accepts_only_exact_unauthorized(monkeypatch) -> None
 
     fake = SimpleNamespace(
         QuerySessionPool=Pool,
-        SerializableReadWrite=lambda: object(),
+        QuerySerializableReadWrite=lambda: object(),
         issues=SimpleNamespace(Unauthorized=Unauthorized),
     )
     monkeypatch.setitem(sys.modules, "ydb", fake)
@@ -71,7 +71,7 @@ def test_write_denial_probe_rejects_non_authorization_failure(monkeypatch) -> No
 
     fake = SimpleNamespace(
         QuerySessionPool=Pool,
-        SerializableReadWrite=lambda: object(),
+        QuerySerializableReadWrite=lambda: object(),
         issues=SimpleNamespace(Unauthorized=Unauthorized),
     )
     monkeypatch.setitem(sys.modules, "ydb", fake)
