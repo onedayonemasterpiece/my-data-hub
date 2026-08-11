@@ -79,7 +79,8 @@ Do not install or enable the unit until all of these have evidence:
 
 1. the implementation PR exact head is XHigh-reviewed and merged;
 2. the pinned official Kaggle SDK authenticates through exactly one automated
-   control-side credential mode and a private runtime-attestation canary passes;
+   control-side credential mode, a private master runtime-attestation canary passes,
+   and any ordinary exact-GetKernel worker flow has its separately required API-token proof;
 3. task-owned permanent protected resources and their exact claims exist;
 4. the full real provider/checkpoint/fencing matrix is green;
 5. the edge is provisioned without changing the existing VPN and the owner OAuth

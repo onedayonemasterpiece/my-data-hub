@@ -429,8 +429,9 @@ That action additionally requires all of the following before Compose is evaluat
   that commit, a verified checkpoint revision, database-role verification receipt and
   security-test receipt, with a maximum 24-hour lifetime;
 - a separate mode-private write-gate key file;
-- the control process's private provider environment containing exactly one modern
-  `KAGGLE_API_TOKEN` assignment and no database/YDB/runtime/OAuth credentials;
+- the control process's private provider environment containing either one modern
+  `KAGGLE_API_TOKEN` assignment or one complete legacy `KAGGLE_USERNAME`/`KAGGLE_KEY`
+  pair, and no database/YDB/runtime/OAuth credentials;
 - a separate mode-private internal provider-gateway token shared only by the control
   process and remote MCP process.
 

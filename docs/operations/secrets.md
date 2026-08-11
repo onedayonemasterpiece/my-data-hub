@@ -37,11 +37,14 @@ installed DNS/OAuth edge secrets and has not enabled remote MCP writes.
 
 ## Rotation and retrieval boundary
 
-- Kaggle provider credential: keep exactly one complete control-side mode
+- Kaggle control credential: keep exactly one complete control-side mode
   (`KAGGLE_API_TOKEN`, private access-token file, or
-  `KAGGLE_USERNAME`/`KAGGLE_KEY`). Rotate it in the service secret store and
-  rerun the automated runtime-attestation canary. Never bind it into a protected
-  runtime Notebook.
+  `KAGGLE_USERNAME`/`KAGGLE_KEY`). Legacy values remain in the control process
+  and are never launch bindings. If a protected checkpoint worker genuinely
+  needs the narrower exact-read API, provision a separately reviewed API-token
+  User Secret for that fixed worker only; never introduce interactive browser
+  sessions or refresh-cookie state. Re-run the applicable attestation/readback
+  canary after rotation.
 - runtime-token derivation root: rotate only with a controlled drain; outstanding attempts
   use tokens derived from the old root and otherwise fail closed.
 - OAuth signing key: rotate by publishing the new JWK before issuance and retaining the old
