@@ -212,7 +212,11 @@ class ControlLedgerCheckpointRegistry:
             source_head_generation=initial.generation,
             master_instance_id=str(manifest.master_instance_id),
             epoch=manifest.epoch,
+            manifest_payload=manifest.payload(),
         )
+
+    def package_uploaded(self, checkpoint_id: UUID, package_sha256: str) -> None:
+        self.ledger.record_checkpoint_package_sha256(str(checkpoint_id), package_sha256)
 
     def uploaded(self, checkpoint_id: UUID, exact_version_ref: str) -> None:
         self.ledger.mark_checkpoint_uploaded(str(checkpoint_id), exact_version_ref)

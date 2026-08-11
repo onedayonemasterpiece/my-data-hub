@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from my_data_hub.control_plane.adapters import LedgerControlReader
 from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.control_plane.runtime import ControlPlaneMasterRuntime
 from my_data_hub.mcp.oauth import AccessIdentity
+from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator
 
 
 def _identity() -> AccessIdentity:
@@ -68,10 +70,10 @@ def test_checkpoint_status_exposes_exact_current_previous_metadata(tmp_path: Pat
     assert status["current"]["manifest_sha256"] == "b" * 64
 
 
-def test_restore_request_is_exact_but_does_not_enqueue_without_a_consumer(tmp_path: Path) -> None:
+def test_restore_request_is_exact_durable_and_idempotent_for_consumer(tmp_path: Path) -> None:
     ledger = ControlLedger(tmp_path / "control.sqlite3")
     _checkpoint(ledger, "cp-1", None, 0)
-    reader = LedgerControlReader(ledger)
+    reader = LedgerControlReader(ledger, acceptance_consumer_available=True)
     arguments = {
         "idempotency_key": "workflow-123:current",
         "target": "current",
@@ -80,20 +82,35 @@ def test_restore_request_is_exact_but_does_not_enqueue_without_a_consumer(tmp_pa
         "timeout_seconds": 1200,
     }
 
-    before = len(ledger.incomplete_operations())
     first = reader.invoke_control("checkpoint.restore.request", arguments, _identity())
     second = reader.invoke_control("checkpoint.restore.request", arguments, _identity())
 
-    assert first["accepted"] is False and first["duplicate"] is False
-    assert second == first
-    assert first["operation_id"] is None
-    assert first["state"] == "BLOCKED"
-    assert first["execution_supported"] is False
-    assert first["blocker_code"] == "ISOLATED_RESTORE_OPERATION_CONSUMER_MISSING"
-    assert len(ledger.incomplete_operations()) == before
+    assert first["accepted"] is True and first["duplicate"] is False
+    assert second["accepted"] is True and second["duplicate"] is True
+    assert first["operation_id"] == second["operation_id"]
+    assert first["state"] == "REQUESTED"
+    assert first["execution_supported"] is True
+    operation = ledger.get_operation(str(first["operation_id"]))
+    assert operation is not None and operation.operation_kind == "checkpoint_restore_smoke"
+
+    class RestoreExecutor:
+        def restore(self, operation_id: str, candidate: dict[str, object]) -> dict[str, object]:
+            assert operation_id == first["operation_id"]
+            assert candidate["checkpoint_id"] == "cp-1"
+            return {"ok": True, "checkpoint_id": "cp-1"}
+
+    runtime = ControlPlaneMasterRuntime(
+        ledger,
+        MasterCoordinator(ledger, FakeKaggleRuntime()),
+        object(),  # type: ignore[arg-type]
+        RestoreExecutor(),  # type: ignore[arg-type]
+    )
+    terminal = runtime.reconcile_acceptance_once()
+    assert terminal == {"operation_id": first["operation_id"], "state": "DURABLE_COMPLETE"}
+    assert ledger.incomplete_operations("checkpoint_restore_smoke") == []
 
 
-def test_protected_resource_probe_does_not_fabricate_admission_evidence(tmp_path: Path) -> None:
+def test_protected_resource_probe_exercises_policy_without_provider_mutation(tmp_path: Path) -> None:
     ledger = ControlLedger(tmp_path / "control.sqlite3")
     ledger.register_provider_resource(
         provider="kaggle",
@@ -112,12 +129,11 @@ def test_protected_resource_probe_does_not_fabricate_admission_evidence(tmp_path
         _identity(),
     )
 
-    assert result["evaluated"] is False
+    assert result["evaluated"] is True
     assert result["protected"] is True
-    assert result["denied"] is False
-    assert result["binding_valid"] is True
+    assert result["denied"] is True
     assert result["mutation_attempted"] is False
-    assert result["blocker_code"] == "PROTECTED_RESOURCE_ADMISSION_PATH_UNAVAILABLE"
+    assert result["reason_code"] == "PROTECTED_RESOURCE_DENIED"
 
 
 def test_connector_coverage_fails_closed_without_business_rows(tmp_path: Path) -> None:
@@ -149,3 +165,68 @@ def test_connector_coverage_reads_only_bounded_heartbeat_metadata(tmp_path: Path
     assert result["connector_count"] == 2
     assert result["complete_count"] == 2
     assert "rows" not in result
+
+
+def test_active_runtime_produces_authenticated_connector_heartbeat(tmp_path: Path) -> None:
+    ledger = ControlLedger(tmp_path / "control.sqlite3")
+    identity = {
+        "run_id": "run-1",
+        "attempt_id": "attempt-1",
+        "service_instance_id": "service-1",
+        "master_instance_id": "master-1",
+    }
+    operation, _ = ledger.ensure_operation(
+        operation_id="master-operation-1",
+        idempotency_key="master-operation-1",
+        operation_kind="ensure_master",
+        intent={"source": "test"},
+        initial_state="REGISTERING",
+        identity=identity,
+        allocate_epoch_for="postgres-master",
+    )
+    ledger.record_attempt(
+        attempt_id="attempt-1",
+        run_id="run-1",
+        operation_id=operation.operation_id,
+        source_identity="owner/master",
+        source_version="git:exact",
+        service_instance_id="service-1",
+        master_instance_id="master-1",
+        epoch=1,
+        state="REGISTERING",
+    )
+    ledger.store_runtime_token_hash("run-1", "attempt-1", "runtime-token-long-enough")
+    ledger.activate_service_operation(
+        operation_id=operation.operation_id,
+        expected_state="REGISTERING",
+        service_instance_id="service-1",
+        service_kind="postgres-master",
+        run_id="run-1",
+        attempt_id="attempt-1",
+        master_instance_id="master-1",
+        epoch=1,
+        endpoint="postgres-master.internal:5432",
+        protocol="postgresql+tls",
+        tls_fingerprint="a" * 64,
+        capabilities=("connector-intake",),
+        canonical_revision=1,
+        schema_version="13",
+        lease_until=datetime.now(UTC) + timedelta(minutes=5),
+        latest_event_id="ready-1",
+    )
+    runtime = ControlPlaneMasterRuntime(
+        ledger, MasterCoordinator(ledger, FakeKaggleRuntime()), object()  # type: ignore[arg-type]
+    )
+    observed_at = datetime.now(UTC)
+
+    runtime.record_connector_heartbeat(
+        run_id="run-1",
+        attempt_id="attempt-1",
+        runtime_token="runtime-token-long-enough",
+        connector_kind="ydb-bloggers",
+        contract_version="my-data-hub-data-connector.v1",
+        state="COMPLETE",
+        observed_at=observed_at,
+    )
+
+    assert ledger.connector_coverage_metadata()[0]["connector_kind"] == "ydb-bloggers"

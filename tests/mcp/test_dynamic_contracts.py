@@ -21,6 +21,7 @@ from my_data_hub.mcp.contracts import (
     WritePermit,
 )
 from my_data_hub.mcp.oauth import AccessIdentity
+from my_data_hub.mcp.postgres_broker import SessionBrokerError
 from my_data_hub.mcp.server import create_server
 from my_data_hub.mcp.service import HubPermissionError, HubService
 
@@ -94,6 +95,14 @@ class Broker:
         return self.session
 
 
+class RejectingStaleBroker(Broker):
+    async def issue_session(self, request: SessionRequest) -> Session:
+        self.requests.append(request)
+        if request.epoch < 7:
+            raise SessionBrokerError("credential is bound to a different master epoch")
+        return self.session
+
+
 class Control:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any], str]] = []
@@ -127,6 +136,26 @@ def active() -> MasterSnapshot:
         canonical_revision=41,
         capabilities=frozenset({"bloggers_ru_v1"}),
     )
+
+
+@pytest.mark.asyncio
+async def test_stale_epoch_probe_uses_real_broker_admission_without_session_mutation() -> None:
+    broker = RejectingStaleBroker({})
+    service = HubService(Resolver(active()), broker=broker, fallback_identity=OWNER)
+
+    result = await service.invoke(
+        "runtime.stale_epoch.probe",
+        {"expected_active_epoch": 7, "submitted_epoch": 6},
+    )
+
+    assert result == {
+        "evaluated": True,
+        "denied": True,
+        "mutation_attempted": False,
+        "reason_code": "STALE_EPOCH",
+    }
+    assert [request.epoch for request in broker.requests] == [7, 6]
+    assert all(request.tool == "runtime.stale_epoch.probe" for request in broker.requests)
 
 
 def permit(tool: str, **changes: Any) -> WritePermit:

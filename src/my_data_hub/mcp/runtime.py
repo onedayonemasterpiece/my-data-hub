@@ -88,6 +88,9 @@ def build_remote_runtime(
         control=LedgerControlReader(
             control_ledger,
             deployed_commit=os.getenv("MY_DATA_HUB_DEPLOY_COMMIT") or None,
+            acceptance_consumer_available=(
+                control.master_runtime is not None and _kaggle_credentials_present()
+            ),
         ),
         audit=authority,
     )
@@ -97,6 +100,16 @@ def build_remote_runtime(
         validator=validator,
     )
     return RemoteMCPRuntime(runtime_settings, control_ledger, validator, app)
+
+
+def _kaggle_credentials_present() -> bool:
+    if os.getenv("KAGGLE_API_TOKEN", "").strip():
+        return True
+    path = Path(os.getenv("KAGGLE_CONFIG_DIR", "~/.kaggle")).expanduser() / "access_token"
+    try:
+        return path.is_file() and not path.is_symlink() and path.stat().st_size > 20
+    except OSError:
+        return False
 
 
 def serve() -> None:

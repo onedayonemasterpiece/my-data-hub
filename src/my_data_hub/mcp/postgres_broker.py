@@ -215,6 +215,10 @@ class PostgresMasterSession(MasterSession):
     def _dispatch(self, cursor: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         tool = self.request.tool
         limit = self.request.limits.max_rows
+        if tool == "runtime.stale_epoch.probe":
+            cursor.execute("SELECT current_epoch FROM master_control.epoch_state WHERE singleton=true")
+            row = cursor.fetchone()
+            return {"observed_epoch": int(row["current_epoch"]) if row else None}
         if tool == "bloggers.list":
             requested = min(int(arguments.get("limit", 50)), limit)
             cursor_value = arguments.get("cursor")

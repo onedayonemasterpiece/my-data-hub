@@ -250,7 +250,7 @@ class ControlLedger:
             )
             with self._reader() as connection:
                 return [self._operation_from_row(row) for row in connection.execute(query, (operation_kind,))]
-        terminal = ("ACTIVE", "STOPPED", "FAILED", "FENCED", "ORPHANED")
+        terminal = ("ACTIVE", "STOPPED", "FAILED", "FENCED", "ORPHANED", "DURABLE_COMPLETE")
         placeholders = ",".join("?" for _ in terminal)
         query = f"SELECT * FROM operations WHERE state NOT IN ({placeholders})"
         params: tuple[str, ...] = terminal
@@ -1523,6 +1523,7 @@ class ControlLedger:
         source_head_generation: int | None = None,
         master_instance_id: str,
         epoch: int,
+        manifest_payload: Mapping[str, Any] | None = None,
     ) -> None:
         if len(manifest_sha256) != 64:
             raise ValueError("manifest_sha256 must be an exact SHA-256")
@@ -1554,9 +1555,9 @@ class ControlLedger:
             changed = connection.execute(
                 "INSERT INTO checkpoint_candidates(checkpoint_id,service_kind,operation_id,dataset_ref,version_ref,"
                 "manifest_sha256,source_checkpoint_id,source_head_generation,master_instance_id,epoch,status,"
-                "created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,'CANDIDATE',?) ON CONFLICT(checkpoint_id) DO NOTHING",
-                values,
+                "created_at,manifest_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,'CANDIDATE',?,?) ON CONFLICT(checkpoint_id) DO NOTHING",
+                (*values, _safe_json(manifest_payload) if manifest_payload is not None else None),
             ).rowcount
             if changed == 0:
                 existing = connection.execute(
@@ -1597,6 +1598,18 @@ class ControlLedger:
                     or row["version_ref"] != version_ref
                 ):
                     raise StaleRuntimeEvent("checkpoint candidate cannot be uploaded from its current state")
+
+    def record_checkpoint_package_sha256(self, checkpoint_id: str, package_sha256: str) -> None:
+        if len(package_sha256) != 64 or any(char not in "0123456789abcdef" for char in package_sha256):
+            raise ValueError("checkpoint package hash is invalid")
+        with self._transaction() as connection:
+            changed = connection.execute(
+                "UPDATE checkpoint_candidates SET package_sha256=coalesce(package_sha256,?) "
+                "WHERE checkpoint_id=? AND (package_sha256 IS NULL OR package_sha256=?)",
+                (package_sha256, checkpoint_id, package_sha256),
+            ).rowcount
+            if changed != 1:
+                raise StaleRuntimeEvent("checkpoint package hash conflicts with durable identity")
 
     def mark_checkpoint_readback_verified(self, checkpoint_id: str) -> None:
         self._checkpoint_transition(
@@ -1728,7 +1741,8 @@ class ControlLedger:
         with self._reader() as connection:
             row = connection.execute(
                 "SELECT checkpoint_id,service_kind,operation_id,dataset_ref,version_ref,manifest_sha256,"
-                "source_checkpoint_id,source_head_generation,master_instance_id,epoch,status,verified_at "
+                "source_checkpoint_id,source_head_generation,master_instance_id,epoch,status,verified_at,"
+                "manifest_json,package_sha256 "
                 "FROM checkpoint_candidates WHERE checkpoint_id=?",
                 (checkpoint_id,),
             ).fetchone()
@@ -1737,6 +1751,7 @@ class ControlLedger:
         result = dict(row)
         result["epoch"] = int(result["epoch"])
         result["source_head_generation"] = int(result["source_head_generation"])
+        result["manifest"] = json.loads(result.pop("manifest_json")) if result["manifest_json"] else None
         return result
 
     def revoke_oauth_reference(

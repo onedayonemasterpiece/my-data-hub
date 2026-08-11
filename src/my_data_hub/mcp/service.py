@@ -26,6 +26,7 @@ from my_data_hub.mcp.contracts import (
     WritePermit,
 )
 from my_data_hub.mcp.oauth import AccessIdentity
+from my_data_hub.mcp.postgres_broker import SessionBrokerError
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
 
 
@@ -152,6 +153,8 @@ class HubService:
                 result = (await self._resolve(identity)).public()
             elif tool == "master.ensure":
                 result = (await self._ensure(identity, intent="explicit-mcp-request")).public()
+            elif tool == "runtime.stale_epoch.probe":
+                result = await self._stale_epoch_probe(bounded_arguments, identity)
             elif tool in _CONTROL_TOOLS:
                 result = await self._control(tool, bounded_arguments, identity)
             elif tool.startswith("provider.resources.") and tool != "provider.resources.read":
@@ -225,6 +228,89 @@ class HubService:
             raise MasterUnavailableError("control-ledger reader is not configured")
         result = await _await(self.control.invoke_control(tool, arguments, identity))
         return dict(result)
+
+    async def _stale_epoch_probe(
+        self, arguments: Mapping[str, Any], identity: AccessIdentity
+    ) -> dict[str, Any]:
+        """Exercise the real credential/session/fencing path without a write."""
+
+        snapshot = await self._resolve(identity)
+        supplied = arguments.get("submitted_epoch")
+        expected = arguments.get("expected_active_epoch")
+        if (
+            snapshot.state is not MasterState.ACTIVE
+            or snapshot.epoch is None
+            or snapshot.instance_id is None
+            or expected != snapshot.epoch
+            or not isinstance(supplied, int)
+            or isinstance(supplied, bool)
+            or supplied >= snapshot.epoch
+            or self.broker is None
+        ):
+            return {
+                "evaluated": False,
+                "denied": False,
+                "mutation_attempted": False,
+                "blocker_code": "STALE_EPOCH_ADMISSION_PATH_UNAVAILABLE",
+            }
+        limits = ExecutionLimits(timeout_ms=3_000, max_rows=1, max_bytes=4_096)
+        current_request = SessionRequest(
+            principal=identity,
+            master_instance_id=snapshot.instance_id,
+            epoch=snapshot.epoch,
+            role="operator",
+            tool="runtime.stale_epoch.probe",
+            limits=limits,
+        )
+        current_session = None
+        try:
+            current_session = await _await(self.broker.issue_session(current_request))
+            await _await(current_session.execute({"expected_active_epoch": snapshot.epoch}))
+        except Exception:
+            return {
+                "evaluated": False,
+                "denied": False,
+                "mutation_attempted": False,
+                "blocker_code": "STALE_EPOCH_ADMISSION_PATH_UNAVAILABLE",
+            }
+        finally:
+            if current_session is not None:
+                await _await(current_session.close())
+        request = SessionRequest(
+            principal=identity,
+            master_instance_id=snapshot.instance_id,
+            epoch=supplied,
+            role="operator",
+            tool="runtime.stale_epoch.probe",
+            limits=limits,
+        )
+        session = None
+        try:
+            session = await _await(self.broker.issue_session(request))
+            await _await(session.execute({"expected_active_epoch": snapshot.epoch}))
+        except SessionBrokerError:
+            return {
+                "evaluated": True,
+                "denied": True,
+                "mutation_attempted": False,
+                "reason_code": "STALE_EPOCH",
+            }
+        except Exception:
+            return {
+                "evaluated": False,
+                "denied": False,
+                "mutation_attempted": False,
+                "blocker_code": "STALE_EPOCH_ADMISSION_PATH_UNAVAILABLE",
+            }
+        finally:
+            if session is not None:
+                await _await(session.close())
+        return {
+            "evaluated": True,
+            "denied": False,
+            "mutation_attempted": False,
+            "reason_code": "STALE_EPOCH_WAS_ADMITTED",
+        }
 
     async def _read(
         self,

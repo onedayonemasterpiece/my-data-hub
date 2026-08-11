@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import NAMESPACE_URL, UUID, uuid5
 
+from my_data_hub.checkpoints import CheckpointManifest
+from my_data_hub.checkpoints.kaggle_runtime import (
+    KaggleCheckpointRestoreVerifier,
+    KaggleCheckpointVerifierAssets,
+)
 from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.hashing import sha256_value
 from my_data_hub.orchestrator.master import MasterCoordinator, MasterHandle, MasterIntent
 from my_data_hub.providers.kaggle import (
     ControlLedgerKaggleJournal,
@@ -19,10 +27,79 @@ from my_data_hub.providers.kaggle import (
     KaggleProviderAdapter,
     derive_runtime_secret,
 )
+from my_data_hub.providers.kaggle.contracts import KaggleDatasetIdentity
+from my_data_hub.providers.models import ProviderFingerprint
 
 
 class MasterProviderUnavailable(RuntimeError):
     """The control plane is healthy but no authenticated provider is available."""
+
+
+@dataclass(slots=True)
+class KaggleAcceptanceOperationExecutor:
+    """Run isolated restore verification while retaining receipt metadata only."""
+
+    adapter: KaggleProviderAdapter
+    assets: KaggleMasterLaunchAssets
+    output_root: Path
+
+    def restore(self, operation_id: str, candidate: dict[str, Any]) -> dict[str, Any]:
+        manifest_payload = candidate.get("manifest")
+        package_sha = candidate.get("package_sha256")
+        exact_ref = str(candidate.get("version_ref") or "")
+        provider_ref, separator, version_text = exact_ref.rpartition("/")
+        if (
+            not isinstance(manifest_payload, dict)
+            or not isinstance(package_sha, str)
+            or len(package_sha) != 64
+            or not separator
+            or not version_text.isdigit()
+        ):
+            raise MasterProviderUnavailable("checkpoint restore metadata is incomplete")
+        manifest = CheckpointManifest.from_payload(manifest_payload)
+        version = int(version_text)
+        fingerprint = ProviderFingerprint(
+            value=sha256_value(
+                {
+                    "provider_ref": provider_ref,
+                    "version": version,
+                    "privacy": "private",
+                    "package_sha256": package_sha,
+                }
+            )
+        )
+        identity = KaggleDatasetIdentity(
+            provider_ref=provider_ref,
+            version=version,
+            privacy="private",
+            package_sha256=package_sha,
+            fingerprint=fingerprint,
+            observed_at=manifest.created_at,
+        )
+        source = self.assets.dataset_files[self.assets.checkpoint_verifier_source_file]
+        self.output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        verifier = KaggleCheckpointRestoreVerifier(
+            self.adapter,
+            KaggleCheckpointVerifierAssets(
+                notebook_ref=self.assets.checkpoint_verifier_ref,
+                notebook_source=source,
+            ),
+            output_directory=self.output_root,
+            operation_id=uuid5(NAMESPACE_URL, f"acceptance:{operation_id}"),
+            authorization_task_id=UUID(manifest.source_run_id),
+            metadata_only_output=True,
+        )
+        receipt = verifier.verify_restore(
+            exact_version_ref=exact_ref,
+            dataset_identity=identity,
+            manifest=manifest,
+        )
+        return {
+            "checkpoint_id": str(manifest.checkpoint_id),
+            "exact_version_ref": exact_ref,
+            "manifest_sha256": manifest.manifest_sha256,
+            "ok": receipt.get("ok") is True,
+        }
 
 
 class SessionCredentialRegistrar(Protocol):
@@ -107,6 +184,38 @@ class ControlPlaneMasterRuntime:
     ledger: ControlLedger
     coordinator: MasterCoordinator
     settings: MasterRuntimeSettings
+    acceptance_executor: KaggleAcceptanceOperationExecutor | None = None
+
+    def record_connector_heartbeat(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str,
+        runtime_token: str,
+        connector_kind: str,
+        contract_version: str,
+        state: str,
+        observed_at: Any,
+    ) -> None:
+        if not self.ledger.runtime_token_valid(run_id, attempt_id, runtime_token):
+            raise PermissionError("runtime token is invalid")
+        operation = self.ledger.operation_for_attempt(run_id, attempt_id)
+        service = self.ledger.resolve_service("postgres-master")
+        if (
+            operation is None
+            or service is None
+            or operation.state != "ACTIVE"
+            or service.run_id != run_id
+            or service.attempt_id != attempt_id
+            or int(operation.identity.get("epoch", 0)) != service.epoch
+        ):
+            raise PermissionError("runtime epoch is not ACTIVE")
+        self.ledger.record_connector_coverage(
+            connector_kind=connector_kind,
+            contract_version=contract_version,
+            state=state,
+            observed_at=observed_at,
+        )
 
     def intent(self, idempotency_key: str) -> MasterIntent:
         assets = self.settings.assets
@@ -161,6 +270,58 @@ class ControlPlaneMasterRuntime:
             self.ledger.release_master_request(str(request["request_id"]))
             raise
 
+    def reconcile_acceptance_once(self) -> dict[str, Any] | None:
+        operations = [
+            *self.ledger.incomplete_operations("checkpoint_restore_smoke"),
+            *self.ledger.incomplete_operations("forced_master_rotation"),
+        ]
+        if not operations:
+            return None
+        operation = sorted(operations, key=lambda item: item.created_at)[0]
+        timeout_seconds = int(operation.identity.get("timeout_seconds", 0))
+        if (
+            timeout_seconds < 60
+            or (self.ledger.clock.now() - operation.created_at).total_seconds() > timeout_seconds
+        ):
+            self.ledger.transition_operation(
+                operation.operation_id,
+                expected_state=operation.state,
+                new_state="FAILED",
+                metadata={"code": "ACCEPTANCE_OPERATION_TIMEOUT"},
+            )
+            return {"operation_id": operation.operation_id, "state": "FAILED"}
+        checkpoint_id = str(operation.identity.get("checkpoint_id", ""))
+        candidate = self.ledger.checkpoint_candidate(checkpoint_id)
+        if candidate is None or candidate.get("status") != "VERIFIED":
+            self.ledger.transition_operation(
+                operation.operation_id,
+                expected_state=operation.state,
+                new_state="FAILED",
+                metadata={"code": "CHECKPOINT_BINDING_INVALID"},
+            )
+            return {"operation_id": operation.operation_id, "state": "FAILED"}
+        if operation.operation_kind == "checkpoint_restore_smoke":
+            if self.acceptance_executor is None:
+                raise MasterProviderUnavailable("restore provider is unavailable")
+            receipt = self.acceptance_executor.restore(operation.operation_id, candidate)
+            self.ledger.transition_operation(
+                operation.operation_id,
+                expected_state=operation.state,
+                new_state="DURABLE_COMPLETE",
+                metadata=receipt,
+            )
+            return {"operation_id": operation.operation_id, "state": "DURABLE_COMPLETE"}
+        rotated, _duplicate = self.ensure(f"forced-rotation:{operation.operation_id}")
+        if rotated.state.value == "ACTIVE":
+            self.ledger.transition_operation(
+                operation.operation_id,
+                expected_state=operation.state,
+                new_state="DURABLE_COMPLETE",
+                metadata={"replacement_operation_id": rotated.operation_id, "epoch": rotated.epoch},
+            )
+            return {"operation_id": operation.operation_id, "state": "DURABLE_COMPLETE"}
+        return {"operation_id": operation.operation_id, "state": operation.state}
+
 
 @dataclass(frozen=True, slots=True)
 class ProductionRuntimeBuild:
@@ -191,7 +352,13 @@ def build_production_runtime(
         return ProductionRuntimeBuild(None, "provider_unavailable", registrar)
     provider = KaggleMasterRuntimeProvider(adapter, settings.assets)
     coordinator = MasterCoordinator(ledger, provider)
-    runtime = ControlPlaneMasterRuntime(ledger, coordinator, settings)
+    receipt_root = (session_credentials_path or Path(tempfile.gettempdir())) / "acceptance-receipts"
+    runtime = ControlPlaneMasterRuntime(
+        ledger,
+        coordinator,
+        settings,
+        KaggleAcceptanceOperationExecutor(adapter, settings.assets, receipt_root),
+    )
     with suppress(Exception):
         runtime.reconcile_startup()
     # Durable operations remain resumable; readiness is still control-plane

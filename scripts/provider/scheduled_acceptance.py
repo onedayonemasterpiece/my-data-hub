@@ -460,18 +460,27 @@ def _action_request_check(observations: Observations, *, kind: str, name: str) -
             blocker_code=str(result.get("blocker_code") or "ACTION_EXECUTOR_UNAVAILABLE"),
             missing_interface=f"consumer for durable {kind} operation",
         )
-    if result.get("accepted") is not True or result.get("state") != "REQUESTED":
+    if result.get("accepted") is not True:
         return Check(
             name,
             "BACKUP_RECOVERY" if "restore" in kind else "DEPLOYMENT",
             Outcome.FAIL,
             {"durable_request_accepted": False},
         )
+    if result.get("state") != "DURABLE_COMPLETE":
+        return Check(
+            name=name,
+            category="BACKUP_RECOVERY" if "restore" in kind else "DEPLOYMENT",
+            outcome=Outcome.BLOCKED,
+            observed={"durable_request_accepted": True, "execution_pending": True},
+            blocker_code="ACTION_EXECUTION_PENDING",
+            missing_interface=f"terminal receipt for durable {kind} operation",
+        )
     return Check(
         name,
         "BACKUP_RECOVERY" if "restore" in kind else "DEPLOYMENT",
         Outcome.PASS,
-        {"durable_request_accepted": True, "execution_supported": True},
+        {"durable_request_accepted": True, "execution_supported": True, "terminal": True},
     )
 
 
@@ -743,6 +752,11 @@ async def _collect_operator_session(
                         "checkpoint_id": checkpoint.get("current_checkpoint_id"),
                         "exact_version_ref": checkpoint.get("current_exact_version_ref"),
                         "expected_active_epoch": master.get("master_epoch", master.get("epoch")),
+                        "expected_canonical_revision": (
+                            checkpoint.get("current", {}).get("canonical_revision")
+                            if isinstance(checkpoint.get("current"), Mapping)
+                            else None
+                        ),
                         "timeout_seconds": 1800,
                     },
                 ),

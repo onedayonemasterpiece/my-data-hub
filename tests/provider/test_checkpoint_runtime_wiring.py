@@ -110,6 +110,27 @@ def test_remote_head_resolves_exact_numeric_current_and_previous_for_boot() -> N
     assert str(transport.calls[0]["url"]).endswith("/internal/checkpoints/postgres-master/head")
 
 
+def test_remote_registry_persists_metadata_only_package_identity() -> None:
+    transport = OneResponseTransport({"accepted": True})
+    registry = RemoteControlCheckpointRegistry(
+        _client(transport),
+        operation_id="checkpoint-operation",
+        dataset_ref="owner/private-checkpoints",
+    )
+
+    registry.package_uploaded(CHECKPOINT_ID, "c" * 64)
+
+    call = transport.calls[0]
+    assert str(call["url"]).endswith(
+        f"/internal/checkpoints/{CHECKPOINT_ID}/package-identity"
+    )
+    assert json.loads(call["body"]) == {
+        "service_kind": "postgres-master",
+        "package_sha256": "c" * 64,
+    }
+    assert call["headers"]["X-MDH-Epoch"] == "9"
+
+
 def _manifest(
     package: Path,
     *,

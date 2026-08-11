@@ -25,6 +25,7 @@ from my_data_hub.providers.kaggle.adapter import (
     KaggleProviderAdapter,
     _canonical_notebook_source,
     directory_sha256,
+    tree_sha256,
 )
 from my_data_hub.providers.kaggle.contracts import (
     DatasetMutationResult,
@@ -182,6 +183,11 @@ class RemoteControlCheckpointRegistry:
 
     def uploaded(self, checkpoint_id: UUID, exact_version_ref: str) -> None:
         self._transition(checkpoint_id, "uploaded", {"exact_version_ref": exact_version_ref})
+
+    def package_uploaded(self, checkpoint_id: UUID, package_sha256: str) -> None:
+        if len(package_sha256) != 64 or any(char not in "0123456789abcdef" for char in package_sha256):
+            raise ValueError("checkpoint package hash is invalid")
+        self._transition(checkpoint_id, "package-identity", {"package_sha256": package_sha256})
 
     def readback_verified(self, checkpoint_id: UUID) -> None:
         self._transition(checkpoint_id, "readback-verified", {})
@@ -634,8 +640,10 @@ class KaggleCheckpointRestoreVerifier:
         clock: Any = lambda: datetime.now(UTC),
         run_id_factory: Any | None = None,
         poll_policy: PollPolicy | None = None,
+        metadata_only_output: bool = False,
     ) -> None:
-        _assert_kaggle_working_path(output_directory)
+        if not metadata_only_output:
+            _assert_kaggle_working_path(output_directory)
         if not output_directory.is_dir() or output_directory.is_symlink():
             raise ValueError("verifier output root must be a real provider-side directory")
         self.adapter = adapter
@@ -649,6 +657,7 @@ class KaggleCheckpointRestoreVerifier:
             timeout_seconds=CHECKPOINT_VERIFIER_TIMEOUT_SECONDS,
             max_polls=120,
         )
+        self.metadata_only_output = metadata_only_output
         if self.poll_policy.timeout_seconds > CHECKPOINT_VERIFIER_TIMEOUT_SECONDS:
             raise ValueError("checkpoint verifier polling exceeds its attempt allocation")
 
@@ -753,7 +762,15 @@ class KaggleCheckpointRestoreVerifier:
                 shutil.rmtree(destination, ignore_errors=True)
                 receipt = None
         if receipt is None:
-            self.adapter.download_exact_run_output_tree(launched.run, destination=destination)
+            if self.metadata_only_output:
+                self.adapter.download_exact_run_output_file(
+                    launched.run,
+                    destination=destination,
+                    file_name=CHECKPOINT_RESTORE_RECEIPT_NAME,
+                    max_bytes=64 * 1024,
+                )
+            else:
+                self.adapter.download_exact_run_output_tree(launched.run, destination=destination)
             receipt = _load_restore_receipt(destination / CHECKPOINT_RESTORE_RECEIPT_NAME)
             _assert_restore_receipt(
                 receipt,
@@ -804,6 +821,9 @@ class KaggleCheckpointCoordinator:
             exact_ref = self.provider.upload_candidate(package, manifest)
             upload_seconds = monotonic() - started
             self.registry.uploaded(manifest.checkpoint_id, exact_ref)
+            package_recorder = getattr(self.registry, "package_uploaded", None)
+            if callable(package_recorder):
+                package_recorder(manifest.checkpoint_id, tree_sha256(package))
 
             started = monotonic()
             readback = self.provider.exact_readback(exact_ref, readback_directory)

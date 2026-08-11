@@ -20,6 +20,9 @@ from my_data_hub.mcp.contracts import (
 )
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.orchestrator.master import MasterCoordinator
+from my_data_hub.providers import ProviderPolicy
+from my_data_hub.providers.models import ProviderAction, ProviderResource
+from my_data_hub.providers.policy import PolicyDenied
 
 
 def _revocation_reference(query: OAuthRevocationQuery) -> str:
@@ -63,7 +66,13 @@ class ControlLedgerOAuthAuthority:
 
 
 class LedgerControlReader(ControlPlaneReader):
-    def __init__(self, ledger: ControlLedger, *, deployed_commit: str | None = None) -> None:
+    def __init__(
+        self,
+        ledger: ControlLedger,
+        *,
+        deployed_commit: str | None = None,
+        acceptance_consumer_available: bool = False,
+    ) -> None:
         if deployed_commit is not None and (
             len(deployed_commit) != 40
             or any(character not in "0123456789abcdef" for character in deployed_commit)
@@ -71,6 +80,7 @@ class LedgerControlReader(ControlPlaneReader):
             raise ValueError("deployed commit must be an exact lowercase Git SHA")
         self.ledger = ledger
         self.deployed_commit = deployed_commit
+        self.acceptance_consumer_available = acceptance_consumer_available
 
     def invoke_control(
         self, tool: str, arguments: dict[str, Any], principal: AccessIdentity
@@ -137,53 +147,45 @@ class LedgerControlReader(ControlPlaneReader):
                 "connector_count": 0,
                 "complete_count": 0,
             }
-        if tool == "runtime.stale_epoch.probe":
-            service = self.ledger.resolve_service("postgres-master")
-            supplied = arguments.get("submitted_epoch")
-            expected = arguments.get("expected_active_epoch")
-            binding_valid = (
-                service is not None
-                and isinstance(supplied, int)
-                and not isinstance(supplied, bool)
-                and isinstance(expected, int)
-                and not isinstance(expected, bool)
-                and expected == service.epoch
-                and supplied < service.epoch
-            )
-            return {
-                "evaluated": False,
-                "denied": False,
-                "binding_valid": binding_valid,
-                "reason_code": (
-                    "STALE_EPOCH_ADMISSION_PATH_UNAVAILABLE"
-                    if binding_valid
-                    else "PROBE_BINDING_INVALID"
-                ),
-                "blocker_code": "STALE_EPOCH_ADMISSION_PATH_UNAVAILABLE",
-                "active_epoch": service.epoch if service else None,
-                "submitted_epoch": supplied if isinstance(supplied, int) else None,
-                "mutation_attempted": False,
-            }
         if tool == "provider.protected_resource.probe":
             resource_ref = str(arguments.get("resource_ref", ""))
             rows = self.ledger.list_provider_resources(limit=500)
             resource = next((row for row in rows if row["resource_ref"] == resource_ref), None)
-            protected = bool(resource and resource.get("control_class") == "orchestrator_protected")
-            return {
-                "evaluated": False,
-                "protected": protected,
-                "denied": False,
-                "binding_valid": protected,
-                "reason_code": (
-                    "PROTECTED_RESOURCE_ADMISSION_PATH_UNAVAILABLE"
-                    if protected
-                    else "PROBE_BINDING_INVALID"
-                ),
-                "blocker_code": "PROTECTED_RESOURCE_ADMISSION_PATH_UNAVAILABLE",
-                "mutation_attempted": False,
-            }
+            if resource is None:
+                return {"evaluated": False, "denied": False, "mutation_attempted": False}
+            model = ProviderResource.model_validate(
+                {
+                    "provider": resource["provider"],
+                    "provider_ref": resource["resource_ref"],
+                    "kind": resource["resource_kind"],
+                    "owner": resource["resource_ref"].split("/", 1)[0],
+                    "origin": "orchestrator",
+                    "control_class": resource["control_class"],
+                    "private": resource["private"],
+                    "fingerprint": None,
+                    "state": resource["state"],
+                    "observed_at": resource["observed_at"],
+                    "workload": "scheduled-acceptance",
+                }
+            )
+            try:
+                ProviderPolicy().authorize(
+                    model,
+                    ProviderAction.DELETE,
+                    principal=principal.subject,
+                    now=self.ledger.clock.now(),
+                )
+            except PolicyDenied as exc:
+                return {
+                    "evaluated": True,
+                    "protected": True,
+                    "denied": exc.code == "PROTECTED_RESOURCE_DENIED",
+                    "reason_code": exc.code,
+                    "mutation_attempted": False,
+                }
+            return {"evaluated": True, "protected": True, "denied": False, "mutation_attempted": False}
         if tool in {"checkpoint.restore.request", "master.rotation.request"}:
-            return self._acceptance_action_request(tool, arguments)
+            return self._acceptance_action_request(tool, arguments, principal)
         if tool == "provider.resources.status":
             limit = min(int(arguments.get("limit", 100)), 100)
             resources = self.ledger.list_provider_resources(limit=limit)
@@ -202,20 +204,20 @@ class LedgerControlReader(ControlPlaneReader):
             "manifest_sha256": candidate["manifest_sha256"],
             "verified_at": candidate["verified_at"],
             "status": candidate["status"],
+            "canonical_revision": (
+                candidate["manifest"].get("canonical_revision")
+                if isinstance(candidate.get("manifest"), dict)
+                else None
+            ),
         }
 
     def _acceptance_action_request(
         self,
         tool: str,
         arguments: dict[str, Any],
+        principal: AccessIdentity,
     ) -> dict[str, Any]:
-        """Persist an exact request without pretending an executor exists.
-
-        These operations are intentionally metadata-only.  A production
-        consumer must atomically claim the operation before it may drain a
-        master or launch an isolated verifier; none is configured in the
-        control plane today.
-        """
+        """Persist an exact request for the production reconciliation worker."""
 
         request_key = str(arguments.get("idempotency_key", ""))
         if not 8 <= len(request_key) <= 200 or any(ord(char) < 32 for char in request_key):
@@ -247,6 +249,10 @@ class LedgerControlReader(ControlPlaneReader):
             expected_epoch = arguments.get("expected_active_epoch")
             if service is None or expected_epoch != service.epoch:
                 raise ValueError("rotation request does not bind the active epoch")
+            manifest = candidate.get("manifest")
+            expected_revision = arguments.get("expected_canonical_revision")
+            if not isinstance(manifest, dict) or expected_revision != manifest.get("canonical_revision"):
+                raise ValueError("rotation request does not bind the checkpoint canonical revision")
         timeout = arguments.get("timeout_seconds")
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 60 <= timeout <= 3600:
             raise ValueError("acceptance request timeout_seconds must be between 60 and 3600")
@@ -260,30 +266,47 @@ class LedgerControlReader(ControlPlaneReader):
         }
         if tool == "master.rotation.request":
             intent["expected_active_epoch"] = arguments["expected_active_epoch"]
+            intent["expected_canonical_revision"] = arguments["expected_canonical_revision"]
         digest = hashlib.sha256(
             json.dumps(intent, sort_keys=True, separators=(",", ":")).encode()
             + b":"
             + request_key.encode()
         ).hexdigest()
-        # Do not enqueue an operation that has no consumer. A scheduled probe
-        # must not create an immortal REQUESTED row on every run. The exact
-        # request fingerprint remains useful for a future consumer handshake.
+        if not self.acceptance_consumer_available:
+            return {
+                "accepted": False,
+                "duplicate": False,
+                "request_sha256": digest,
+                "operation_id": None,
+                "state": "BLOCKED",
+                "target": target,
+                "checkpoint_id": checkpoint_id,
+                "exact_version_ref": exact_version,
+                "head_generation": head.generation,
+                "execution_supported": False,
+                "blocker_code": "ACCEPTANCE_CONSUMER_OR_PROVIDER_UNAVAILABLE",
+            }
+        operation, created = self.ledger.ensure_operation(
+            operation_id=digest,
+            idempotency_key=f"scheduled-acceptance:{tool}:{request_key}",
+            operation_kind=(
+                "checkpoint_restore_smoke" if tool == "checkpoint.restore.request" else "forced_master_rotation"
+            ),
+            intent=intent,
+            initial_state="REQUESTED",
+            identity={"principal": principal.subject, "request_sha256": digest, **intent},
+        )
         return {
-            "accepted": False,
-            "duplicate": False,
+            "accepted": True,
+            "duplicate": not created,
             "request_sha256": digest,
-            "operation_id": None,
-            "state": "BLOCKED",
+            "operation_id": operation.operation_id,
+            "state": operation.state,
             "target": target,
             "checkpoint_id": checkpoint_id,
             "exact_version_ref": exact_version,
             "head_generation": head.generation,
-            "execution_supported": False,
-            "blocker_code": (
-                "ISOLATED_RESTORE_OPERATION_CONSUMER_MISSING"
-                if tool == "checkpoint.restore.request"
-                else "MASTER_ROTATION_OPERATION_CONSUMER_MISSING"
-            ),
+            "execution_supported": True,
         }
 
 
