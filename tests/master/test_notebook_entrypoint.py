@@ -38,6 +38,7 @@ def _payload() -> dict[str, object]:
         "tunnel_gateway_user": "mdh-tunnel",
         "tunnel_remote_port": 25432,
         "maximum_runtime_seconds": 3600,
+        "checkpoint_reserve_seconds": 900,
         "source_identity": "owner/postgres-master",
         "source_version": "1",
     }
@@ -54,6 +55,12 @@ def test_master_notebook_config_requires_exact_fields_and_source_binding(tmp_pat
     payload["checkpoint_directory"] = "/kaggle/input/checkpoint"
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="checkpoint source"):
+        NotebookMasterConfig.load(path)
+
+    payload = _payload()
+    payload["checkpoint_reserve_seconds"] = payload["maximum_runtime_seconds"]
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="checkpoint reserve"):
         NotebookMasterConfig.load(path)
 
 
@@ -122,6 +129,7 @@ def test_reader_credential_handoff_is_epoch_bound_tls_and_not_returned(
         tunnel_gateway_user="mdh-tunnel",
         tunnel_remote_port=25432,
         maximum_runtime_seconds=3600,
+        checkpoint_reserve_seconds=900,
         source_identity="owner/postgres-master",
         source_version="1",
     )

@@ -46,6 +46,7 @@ class NotebookMasterConfig:
     tunnel_gateway_user: str
     tunnel_remote_port: int
     maximum_runtime_seconds: int
+    checkpoint_reserve_seconds: int
     source_identity: str
     source_version: str
 
@@ -58,7 +59,8 @@ class NotebookMasterConfig:
             "master_instance_id", "run_id", "attempt_id", "service_instance_id", "epoch",
             "boot_source", "checkpoint_directory", "lease_seconds", "postgres_bin", "postgres_port",
             "tunnel_gateway_host", "tunnel_gateway_port", "tunnel_gateway_user",
-            "tunnel_remote_port", "maximum_runtime_seconds", "source_identity", "source_version",
+            "tunnel_remote_port", "maximum_runtime_seconds", "checkpoint_reserve_seconds",
+            "source_identity", "source_version",
         }
         if not isinstance(raw, dict) or set(raw) != required:
             raise ValueError("master config fields differ from the exact contract")
@@ -80,13 +82,19 @@ class NotebookMasterConfig:
             tunnel_gateway_user=str(raw["tunnel_gateway_user"]),
             tunnel_remote_port=int(raw["tunnel_remote_port"]),
             maximum_runtime_seconds=int(raw["maximum_runtime_seconds"]),
+            checkpoint_reserve_seconds=int(raw["checkpoint_reserve_seconds"]),
             source_identity=str(raw["source_identity"]),
             source_version=str(raw["source_version"]),
         )
         if not 60 <= config.lease_seconds <= 600:
             raise ValueError("master lease must be 60..600 seconds")
-        if not 60 <= config.maximum_runtime_seconds <= 43_200:
-            raise ValueError("maximum runtime must be 60..43200 seconds")
+        if not 1_800 <= config.maximum_runtime_seconds <= 43_200:
+            raise ValueError("maximum runtime must be 1800..43200 seconds")
+        if (
+            not 900 <= config.checkpoint_reserve_seconds <= 10_800
+            or config.checkpoint_reserve_seconds >= config.maximum_runtime_seconds
+        ):
+            raise ValueError("checkpoint reserve must be 900..10800 seconds and below maximum runtime")
         if (source is BootSource.EMPTY_BASELINE) != (checkpoint is None):
             raise ValueError("checkpoint source/config mismatch")
         return config
@@ -400,7 +408,12 @@ def run_master(
         supervisor.stop(immediate=True)
         gate_connection.close()
         raise
-    deadline = time.monotonic() + config.maximum_runtime_seconds
+    # The provider hard-stop applies to the whole Notebook, not only the active
+    # service loop.  Reserve a declared, testable window for drain, basebackup,
+    # exact readback, independent restore and durable HEAD promotion.
+    deadline = time.monotonic() + (
+        config.maximum_runtime_seconds - config.checkpoint_reserve_seconds
+    )
     current_lease = ready.lease_until
     active_error: BaseException | None = None
     try:
