@@ -6,6 +6,7 @@ import os
 import socket
 import stat
 import threading
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -394,7 +395,7 @@ def test_private_unix_socket_auth_and_mode(tmp_path: Path) -> None:
     assert receipt.after_boot_id == AFTER
     server.stop.set()
     # Wake accept() so shutdown does not wait for the timeout.
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wake:
+    with suppress(FileNotFoundError), socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wake:
         wake.connect(str(socket_path))
     thread.join(timeout=2)
     assert not thread.is_alive()
