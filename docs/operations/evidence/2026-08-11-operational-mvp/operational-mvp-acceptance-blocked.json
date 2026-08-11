@@ -22,9 +22,9 @@
     {"name": "public_mcp_deployment", "outcome": "BLOCKED", "evidence": "DNS, TLS, OAuth issuer, signed host evidence and reboot acceptance absent"}
   ],
   "blockers": [
-    {"code": "KAGGLE_MODERN_API_TOKEN_REQUIRED", "missing": "Modern Kaggle OAuth token required for exact private Notebook source/status/output", "closure_command": ".venv/bin/kaggle auth login"},
-    {"code": "REAL_KAGGLE_MATRIX_INCOMPLETE", "missing": "At least 15 qualifying real Kaggle Notebook run IDs and scenario receipts", "closure_command": ".venv/bin/python scripts/provider/real_kaggle_matrix.py notebook-canary"},
-    {"code": "BLOGGER_IMPORT_NOT_EXECUTED", "missing": "Transactional import of the 266-row bounded YDB snapshot into an ACTIVE master plus verified restore", "closure_command": ".venv/bin/python scripts/provider/scheduled_acceptance.py run --mode manual --receipt /tmp/manual-acceptance.json"},
-    {"code": "PUBLIC_EDGE_NOT_DEPLOYED", "missing": "Merge-commit control/MCP/OAuth deployment, DNS/TLS, signed host receipt and reboot proof", "closure_command": "gh workflow run post-deploy.yml -f expected_commit=<approved-merge-sha>"}
+    {"code": "KAGGLE_MODERN_API_TOKEN_REQUIRED", "missing": "Modern Kaggle OAuth token required for exact private Notebook source/status/output", "closure_proof": ".venv/bin/kaggle auth login"},
+    {"code": "REAL_KAGGLE_MATRIX_INCOMPLETE", "missing": "At least 15 qualifying real Kaggle Notebook run IDs and scenario receipts", "closure_proof": "UNIMPLEMENTED: no >=15-run matrix driver exists; notebook-canary proves only one run"},
+    {"code": "BLOGGER_IMPORT_NOT_EXECUTED", "missing": "Transactional import of the 266-row bounded YDB snapshot into an ACTIVE master plus verified restore", "closure_proof": "UNIMPLEMENTED: no production bounded-blogger import orchestration command exists"},
+    {"code": "PUBLIC_EDGE_NOT_DEPLOYED", "missing": "Merge-commit control/MCP/OAuth deployment, DNS/TLS, signed host receipt and reboot proof", "closure_proof": "BLOCKED: complete the merge-bound deployment and three-stage procedure in docs/operations/deployment-evidence.md"}
   ]
 }

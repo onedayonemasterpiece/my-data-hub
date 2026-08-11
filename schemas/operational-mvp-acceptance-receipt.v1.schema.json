@@ -48,11 +48,11 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["code", "missing", "closure_command"],
+        "required": ["code", "missing", "closure_proof"],
         "properties": {
           "code": {"type": "string", "pattern": "^[A-Z0-9_]{3,100}$"},
           "missing": {"type": "string", "minLength": 1, "maxLength": 500},
-          "closure_command": {"type": "string", "minLength": 1, "maxLength": 500}
+          "closure_proof": {"type": "string", "minLength": 1, "maxLength": 500}
         }
       }
     }

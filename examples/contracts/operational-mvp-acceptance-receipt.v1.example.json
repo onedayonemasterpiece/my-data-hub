@@ -20,7 +20,7 @@
     {
       "code": "KAGGLE_MODERN_API_TOKEN_REQUIRED",
       "missing": "Modern Kaggle OAuth access token",
-      "closure_command": ".venv/bin/kaggle auth login"
+      "closure_proof": ".venv/bin/kaggle auth login"
     }
   ]
 }
