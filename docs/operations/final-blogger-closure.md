@@ -31,7 +31,10 @@ checkpoint publication/readback, independent isolated restore verification and
 HEAD promotion; M1's durable rotation consumer cold-boots that HEAD; and bounded
 MCP `bloggers.migration.accounting` plus `bloggers.statistics` agree on revision,
 hashes, zero pending/quarantined/undispositioned rows, and 266 canonical bloggers.
-Only then is status `DURABLE_COMPLETE`.
+The same closure then walks the complete bounded `bloggers.list` cursor and
+proves representative `bloggers.get`, `bloggers.provenance`, and exact/FTS
+`bloggers.search` results without writing returned rows to its receipt. Only
+then is status `DURABLE_COMPLETE`.
 
 The control plane records a bounded `region-talk-ydb-bloggers-v1` connector
 coverage heartbeat only after that exact import checkpoint is VERIFIED. It

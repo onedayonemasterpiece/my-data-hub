@@ -244,6 +244,60 @@ def _require_accounting(value: dict[str, Any], imported: BloggerImportStageRecei
     return row
 
 
+def _require_public_projection(mcp: ClosureMcp) -> dict[str, Any]:
+    blogger_ids: list[str] = []
+    representative: dict[str, Any] | None = None
+    cursor: str | None = None
+    for _page in range(4):
+        page = mcp.call("bloggers.list", {"cursor": cursor, "limit": 100})
+        items = page.get("items")
+        if not isinstance(items, list) or len(items) > 100:
+            raise BloggerClosureError("bounded MCP blogger list returned an invalid page")
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("blogger_id"), str):
+                raise BloggerClosureError("bounded MCP blogger list returned an invalid item")
+            representative = representative or item
+            blogger_ids.append(item["blogger_id"])
+        if page.get("complete") is True:
+            break
+        next_cursor = page.get("cursor")
+        if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
+            raise BloggerClosureError("bounded MCP blogger list cursor did not advance")
+        cursor = next_cursor
+    if len(blogger_ids) != EXPECTED_BLOGGER_ROWS or len(set(blogger_ids)) != EXPECTED_BLOGGER_ROWS:
+        raise BloggerClosureError("bounded MCP blogger list does not contain exactly 266 distinct bloggers")
+    if representative is None:
+        raise BloggerClosureError("bounded MCP blogger list has no representative item")
+    representative_id = representative["blogger_id"]
+    detail = mcp.call("bloggers.get", {"blogger_id": representative_id})
+    if detail.get("found") is not True or not isinstance(detail.get("blogger"), dict):
+        raise BloggerClosureError("bounded MCP blogger get did not return the representative blogger")
+    provenance = mcp.call("bloggers.provenance", {"blogger_id": representative_id, "limit": 10})
+    provenance_items = provenance.get("items")
+    if not isinstance(provenance_items, list) or not provenance_items:
+        raise BloggerClosureError("bounded MCP blogger provenance is absent")
+    display_name = representative.get("display_name")
+    if not isinstance(display_name, str) or not display_name.strip():
+        raise BloggerClosureError("bounded MCP blogger projection lacks a search display name")
+    search = mcp.call("bloggers.search", {"query": display_name[:200], "limit": 20})
+    search_items = search.get("items")
+    retrievers = search.get("retrievers")
+    if (
+        not isinstance(search_items, list)
+        or representative_id not in {item.get("blogger_id") for item in search_items if isinstance(item, dict)}
+        or not isinstance(retrievers, dict)
+        or not {"exact", "fts"}.issubset(set(retrievers.get("completed", [])))
+    ):
+        raise BloggerClosureError("bounded MCP blogger search did not prove exact/FTS retrieval")
+    return {
+        "listed_bloggers": len(blogger_ids),
+        "get_found": True,
+        "provenance_events": len(provenance_items),
+        "search_matches": len(search_items),
+        "completed_retrievers": sorted(set(retrievers["completed"])),
+    }
+
+
 def run_blogger_closure(
     config: ClosureConfig,
     *,
@@ -335,6 +389,7 @@ def run_blogger_closure(
         or statistics["statistics"].get("bloggers") != EXPECTED_BLOGGER_ROWS
     ):
         raise BloggerClosureError("blogger statistics do not prove exactly 266 canonical bloggers")
+    projection = _require_public_projection(mcp)
     receipt_id = uuid5(_CLOSURE_NAMESPACE, f"receipt:{request_id}")
     receipt: dict[str, Any] = {
         "schema_version": FINAL_RECEIPT_SCHEMA,
@@ -368,6 +423,7 @@ def run_blogger_closure(
         },
         "mcp_accounting": accounting,
         "mcp_statistics": statistics["statistics"],
+        "mcp_projection": projection,
     }
     encoded = canonical_json_bytes(receipt)
     if len(encoded) > FINAL_RECEIPT_MAX_BYTES:

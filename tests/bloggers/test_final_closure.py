@@ -114,6 +114,10 @@ class FakeMcp:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.master_status_calls = 0
+        self.list_offset = 0
+        self.bloggers = [
+            {"blogger_id": str(UUID(int=index + 1)), "display_name": f"Blogger {index + 1}"} for index in range(266)
+        ]
 
     def call(self, tool: str, arguments: dict[str, object]) -> dict[str, object]:
         self.calls.append((tool, arguments))
@@ -171,6 +175,29 @@ class FakeMcp:
             return {
                 "canonical_revision": 9,
                 "statistics": {"bloggers": 266, "requires_review": 0, "with_public_accounts": 210},
+            }
+        if tool == "bloggers.list":
+            start = self.list_offset
+            page = self.bloggers[start : start + 100]
+            self.list_offset += len(page)
+            complete = self.list_offset == len(self.bloggers)
+            return {
+                "items": page,
+                "cursor": None if complete else page[-1]["blogger_id"],
+                "complete": complete,
+            }
+        if tool == "bloggers.get":
+            return {"found": True, "blogger": self.bloggers[0]}
+        if tool == "bloggers.provenance":
+            return {"items": [{"event_type": "imported"}], "complete": True}
+        if tool == "bloggers.search":
+            return {
+                "items": [self.bloggers[0]],
+                "retrievers": {
+                    "requested": ["exact", "fts", "e5", "bge_m3"],
+                    "completed": ["exact", "fts"],
+                    "unavailable": ["e5", "bge_m3"],
+                },
             }
         raise AssertionError(tool)
 
@@ -243,6 +270,12 @@ def test_final_closure_reaches_durable_complete_only_after_restore_and_mcp() -> 
         "master.status",
         "bloggers.migration.accounting",
         "bloggers.statistics",
+        "bloggers.list",
+        "bloggers.list",
+        "bloggers.list",
+        "bloggers.get",
+        "bloggers.provenance",
+        "bloggers.search",
     ]
 
 
