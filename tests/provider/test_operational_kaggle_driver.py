@@ -86,9 +86,15 @@ class FakeGateway:
             return {"events": events, "count": 2, "bounded": True}
         if tool == "master.status":
             return {
-                "state": "ACTIVE",
+                "master_state": "ACTIVE",
+                "operation_id": "11111111-1111-4111-8111-111111111111",
+                "instance_id": "22222222-2222-4222-8222-222222222222",
                 "master_epoch": 2,
+                "canonical_revision": 0,
+                "lease_expires_at": "2026-08-11T01:00:00Z",
                 "provider_run_ref": "owner/master/2",
+                "provider_kernel_id": 2,
+                "capabilities": ["bloggers:read"],
             }
         if tool == "checkpoint.status":
             return {
@@ -589,15 +595,15 @@ def test_driver_has_one_named_executor_and_only_unclosed_scenarios_retain_missin
     assert all(item.gap_dependency and len(item.gap_dependency) <= 500 for item in EXECUTORS)
 
 
-def test_missing_modern_token_blocks_before_mcp_or_mutation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_matrix_driver_does_not_require_local_kaggle_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
     monkeypatch.setenv("KAGGLE_CONFIG_DIR", str(tmp_path / "no-token"))
     gateway = FakeGateway()
     result = asyncio.run(execute(_request(1), gateway))
     assert result.outcome == "BLOCKED"
-    assert result.blocker_code == "KAGGLE_MODERN_API_TOKEN_REQUIRED"
+    assert result.blocker_code == "FM01_EVIDENCE_PROVIDER_CONFIGURATION_REQUIRED"
     assert result.mutations_started == 0
-    assert not gateway.calls
+    assert all(tool != "provider.resources.run" for _profile, tool, _arguments in gateway.calls)
     assert DriverResult.model_validate(result.model_dump(mode="json")).outcome == "BLOCKED"
 
 
@@ -612,7 +618,8 @@ def test_each_executor_runs_only_safe_existing_probes_then_names_exact_gap(
     spec = EXECUTORS[ordinal - 1]
     assert result.outcome == "BLOCKED"
     assert result.blocker_code == spec.gap_code
-    assert result.integration_dependency == spec.gap_dependency
+    assert result.integration_dependency is not None
+    assert result.integration_dependency.startswith(spec.gap_dependency)
     assert result.mutations_started == 0
     assert result.provider_run_ref is None
     assert all(check.detail_code != "OPERATIONAL_DRIVER_INTERFACE_MISSING" for check in result.capability_checks)
@@ -1239,7 +1246,8 @@ def test_rotation_uses_exact_stopped_checkpoint_binding_and_polls_durable_operat
 
     result = asyncio.run(execute(_request(13), gateway))
 
-    assert result.outcome == "PASS"
+    assert result.outcome == "FAIL"
+    assert any(check.detail_code == "CONTROL_OUTPUT_RECEIPT_MISSING" for check in result.capability_checks)
     rotation = next(arguments for _profile, tool, arguments in gateway.calls if tool == "master.rotation.request")
     assert rotation["expected_active_epoch"] == 2
     assert rotation["expected_canonical_revision"] == 9
@@ -1366,9 +1374,9 @@ def test_fm20_verifies_reboot_then_ensures_and_binds_bounded_search(
 
     result = asyncio.run(execute(request, gateway))
 
-    assert result.outcome == "PASS"
+    assert result.outcome == "FAIL"
     assert result.mutations_started == 1
-    assert result.provider_run_ref == "owner/fm20-evidence/7"
+    assert result.provider_run_ref is None
     tools = [tool for _profile, tool, _arguments in gateway.calls]
     assert tools.index("provider.resources.read") < tools.index("master.status")
     assert tools.index("master.status") < tools.index("master.ensure")
@@ -1418,7 +1426,7 @@ def test_fm20_resume_reconciles_claimed_ensure_without_creating_another(
 
     result = asyncio.run(execute(request, gateway))
 
-    assert result.outcome == "PASS"
+    assert result.outcome == "FAIL"
     assert result.mutations_started == 1
     tools = [tool for _profile, tool, _arguments in gateway.calls]
     assert "operation.get" in tools
@@ -1532,7 +1540,9 @@ def test_evidence_claim_schema_and_runtime_share_keyed_requirement_identity() ->
 
 def test_provider_workflow_selects_trusted_repository_driver_by_default() -> None:
     workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/provider-real.yml").read_text()
-    assert '["python","scripts/provider/operational_kaggle_driver.py"]' in workflow
+    assert "operational_kaggle_matrix.py run" in workflow
+    assert "MY_DATA_HUB_OPERATIONAL_DRIVER_JSON" not in workflow
+    assert "KAGGLE_API_TOKEN" not in workflow
 
 
 def test_direct_driver_cli_emits_typed_exit_78_before_network_without_token(
@@ -1578,5 +1588,5 @@ def test_direct_driver_cli_emits_typed_exit_78_before_network_without_token(
     assert completed.returncode == 78
     value = DriverResult.model_validate_json(result.read_bytes())
     assert value.outcome == "BLOCKED"
-    assert value.blocker_code == "KAGGLE_MODERN_API_TOKEN_REQUIRED"
+    assert value.blocker_code == "PROVIDER_MCP_TOKEN_MISSING"
     assert value.mutations_started == 0

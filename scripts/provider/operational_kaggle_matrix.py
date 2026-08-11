@@ -31,7 +31,13 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from my_data_hub.acceptance.master_lifecycle import MasterAcceptanceReceipt
+from my_data_hub.acceptance.master_lifecycle import (
+    CallbackLossEvidence,
+    LeaseExpiryEvidence,
+    MasterAcceptanceReceipt,
+    OldEpochEvidence,
+    RotationSoakEvidence,
+)
 from my_data_hub.acceptance.scenario_operator import CheckpointAcceptanceOperationalResult
 from my_data_hub.hashing import canonical_json_bytes
 
@@ -336,8 +342,8 @@ class DriverCapabilityCheck(BaseModel):
 
 class DriverCleanupBinding(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    claim_task_id: UUID
-    claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    claim_task_id: UUID | None = None
+    claim_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     provider_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
     provider_run_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$")
     provider_kernel_id: int = Field(ge=1)
@@ -347,18 +353,19 @@ class DriverCleanupBinding(BaseModel):
     output_file_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     output_tree_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
+    @model_validator(mode="after")
+    def exact_claim(self) -> DriverCleanupBinding:
+        if (self.claim_task_id is None) != (self.claim_sha256 is None):
+            raise ValueError("driver claim identity must be wholly present or absent")
+        return self
+
 
 class DriverResult(BaseModel):
-    """Bounded locator returned by the external operational driver.
-
-    A PASS locator is not acceptance evidence by itself.  The runner downloads
-    and validates the exact ``operational-result.json`` from the reconciled
-    Kaggle run before it writes a PASS scenario receipt.
-    """
+    """Control-owned locator/receipt returned by the pinned operational driver."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     schema_version: Literal["my-data-hub-operational-kaggle-driver-result.v2"]
-    phase: Literal["EXECUTE", "CLEANUP"]
+    phase: Literal["EXECUTE", "RECONCILE", "CLEANUP"]
     outcome: Literal["READY", "PASS", "FAIL", "BLOCKED"]
     scenario: str
     task_run_id: UUID
@@ -606,6 +613,68 @@ def _cleanup_request(
     }
 
 
+def _reconcile_request(
+    execute_request: Mapping[str, Any], binding: DriverCleanupBinding
+) -> dict[str, Any]:
+    return {
+        **dict(execute_request),
+        "phase": "RECONCILE",
+        "resume_only": True,
+        "cleanup": binding.model_dump(mode="json"),
+    }
+
+
+def _driver_binding(locator: DriverResult) -> DriverCleanupBinding:
+    if any(
+        value is None
+        for value in (
+            locator.provider_ref,
+            locator.provider_run_ref,
+            locator.provider_kernel_id,
+            locator.source_version,
+            locator.source_sha256,
+            locator.output_receipt_sha256,
+            locator.output_file_sha256,
+            locator.output_tree_sha256,
+        )
+    ):
+        raise RuntimeError("successful driver execution lacks exact reconciliation fields")
+    return DriverCleanupBinding(
+        claim_task_id=locator.claim_task_id,
+        claim_sha256=locator.claim_sha256,
+        provider_ref=locator.provider_ref,  # type: ignore[arg-type]
+        provider_run_ref=locator.provider_run_ref,  # type: ignore[arg-type]
+        provider_kernel_id=locator.provider_kernel_id,  # type: ignore[arg-type]
+        source_version=locator.source_version,  # type: ignore[arg-type]
+        source_sha256=locator.source_sha256,  # type: ignore[arg-type]
+        output_receipt_sha256=locator.output_receipt_sha256,  # type: ignore[arg-type]
+        output_file_sha256=locator.output_file_sha256,  # type: ignore[arg-type]
+        output_tree_sha256=locator.output_tree_sha256,  # type: ignore[arg-type]
+    )
+
+
+def _reconcile_driver_result(
+    execute_request: Mapping[str, Any],
+    locator: DriverResult,
+    *,
+    timeout_seconds: int,
+) -> tuple[DriverResult, DriverCleanupBinding]:
+    binding = _driver_binding(locator)
+    result = _invoke_driver(
+        _reconcile_request(execute_request, binding), timeout_seconds=timeout_seconds
+    )
+    if (
+        result.phase != "RECONCILE"
+        or result.outcome != "PASS"
+        or result.scenario != locator.scenario
+        or result.task_run_id != locator.task_run_id
+        or _driver_binding(result) != binding
+        or result.control_receipt != locator.control_receipt
+    ):
+        raise RuntimeError("independent control reconciliation differs from execution evidence")
+    return result, binding
+
+
 def _invoke_driver(request: Mapping[str, Any], *, timeout_seconds: int) -> DriverResult:
     with tempfile.TemporaryDirectory(prefix="my-data-hub-operational-driver-") as folder:
         request_path = Path(folder) / "request.json"
@@ -746,6 +815,102 @@ def _checkpoint_operational_output(
     )
 
 
+def _typed_master_output(
+    *,
+    plan: Mapping[str, Any],
+    row: Mapping[str, Any],
+    locator: DriverResult,
+) -> OperationalOutput:
+    receipt = locator.control_receipt
+    if receipt is None or str(receipt.task_id) != row["planned_task_run_id"]:
+        raise RuntimeError("master scenario lacks its exact typed control receipt")
+    evidence = receipt.evidence
+    proofs: dict[str, object]
+    lifecycle: list[dict[str, Any]] = []
+    if row["requirement_id"] == "FM08":
+        if not isinstance(evidence, CallbackLossEvidence):
+            raise RuntimeError("FM08 control receipt has the wrong typed evidence")
+        # The fixed lifecycle schema requires distinct terminated/recovery run
+        # locators. CallbackLossEvidence currently carries neither; one current
+        # carrier cannot be duplicated to manufacture that proof.
+        raise RuntimeError("FM08 typed receipt lacks distinct terminated/recovery provider runs")
+    if row["requirement_id"] == "FM10":
+        if not isinstance(evidence, LeaseExpiryEvidence):
+            raise RuntimeError("FM10 control receipt has the wrong typed evidence")
+        proofs = {
+            "lease_expired": {
+                "observed_wait_seconds": evidence.observed_wait_seconds,
+                "lease_expired": evidence.lease_expired,
+            },
+            "write_denied": {
+                "bounded_operator_dml_denied": evidence.bounded_operator_dml_denied,
+                "transaction_state": evidence.transaction_state,
+                "denial_code": evidence.denial_code,
+                "operator_operation_id": str(evidence.operator_operation_id),
+                "operator_receipt_sha256": evidence.operator_receipt_sha256,
+                "canonical_revision_before": evidence.canonical_revision_before,
+                "canonical_revision_after": evidence.canonical_revision_after,
+            },
+            "credentials_invalidated": {
+                "lease_expired": evidence.lease_expired,
+                "denial_code": evidence.denial_code,
+                "transaction_state": evidence.transaction_state,
+            },
+        }
+    elif row["requirement_id"] == "FM11":
+        if not isinstance(evidence, OldEpochEvidence):
+            raise RuntimeError("FM11 control receipt has the wrong typed evidence")
+        proofs = {
+            "epoch_advanced": {
+                "old_epoch": evidence.old_epoch,
+                "new_epoch": evidence.new_epoch,
+                "old_operation_id": str(evidence.old_operation_id),
+                "new_operation_id": str(evidence.new_operation_id),
+            },
+            "old_renew_denied": {"renew_denied": evidence.renew_denied},
+            "old_register_denied": {"register_denied": evidence.register_denied},
+            "old_write_denied": {
+                "bounded_write_denied": evidence.bounded_write_denied,
+                "tunnel_denied": evidence.tunnel_denied,
+                "write_denial_receipt_sha256": evidence.write_denial_receipt_sha256,
+                "tunnel_denial_receipt_sha256": evidence.tunnel_denial_receipt_sha256,
+            },
+            "registry_resolves_new": {
+                "new_epoch_active": evidence.new_epoch_active,
+                "new_epoch": evidence.new_epoch,
+                "new_operation_id": str(evidence.new_operation_id),
+            },
+        }
+    elif row["requirement_id"] == "FM24":
+        if not isinstance(evidence, RotationSoakEvidence):
+            raise RuntimeError("FM24 control receipt has the wrong typed evidence")
+        raise RuntimeError(
+            "FM24 typed receipt lacks heartbeat/read/checkpoint/recovery observations"
+        )
+    else:
+        raise RuntimeError("control receipt is not admitted for this matrix scenario")
+    if set(proofs) != set(row["required_assertions"]):
+        raise RuntimeError("typed control receipt differs from fixed scenario assertions")
+    return OperationalOutput(
+        schema_version="my-data-hub-operational-kaggle-output.v1",
+        matrix_id=UUID(str(plan["matrix_id"])),
+        scenario=str(row["name"]),
+        task_run_id=UUID(str(row["planned_task_run_id"])),
+        outcome="PASS",
+        assertions=tuple(
+            AssertionResult(
+                name=name,
+                outcome="PASS",
+                evidence_sha256=hashlib.sha256(canonical_json_bytes(proofs[name])).hexdigest(),
+            )
+            for name in row["required_assertions"]
+        ),
+        lifecycle_events=tuple(LifecycleEvent.model_validate(item) for item in lifecycle),
+        operation_ids=(str(receipt.binding.operation_id),),
+        completed_at=receipt.completed_at,
+    )
+
+
 def _trusted_control_receipt(
     *,
     plan: Mapping[str, Any],
@@ -763,13 +928,21 @@ def _trusted_control_receipt(
 
     if locator.scenario != row["name"] or str(locator.task_run_id) != row["planned_task_run_id"]:
         raise RuntimeError("driver result differs from planned scenario identity")
-    if locator.scenario_output is None:
-        raise RuntimeError("driver result lacks trusted scenario output metadata")
-    output = OperationalOutput.model_validate(locator.scenario_output)
-    raw = canonical_json_bytes(output.model_dump(mode="json"))
-    result_sha256 = hashlib.sha256(raw).hexdigest()
-    if locator.output_file_sha256 is not None and locator.output_file_sha256 != result_sha256:
-        raise RuntimeError("trusted scenario output differs from the control-owned output receipt")
+    if locator.control_receipt is not None:
+        if locator.scenario_output is not None:
+            raise RuntimeError("driver result mixes typed control receipt and scenario output")
+        output = _typed_master_output(plan=plan, row=row, locator=locator)
+        if locator.output_file_sha256 is None:
+            raise RuntimeError("typed control receipt lacks exact carrier output identity")
+        result_sha256 = locator.output_file_sha256
+    else:
+        if locator.scenario_output is None:
+            raise RuntimeError("driver result lacks trusted scenario output metadata")
+        output = OperationalOutput.model_validate(locator.scenario_output)
+        raw = canonical_json_bytes(output.model_dump(mode="json"))
+        result_sha256 = hashlib.sha256(raw).hexdigest()
+        if locator.output_file_sha256 is not None and locator.output_file_sha256 != result_sha256:
+            raise RuntimeError("trusted scenario output differs from the control-owned output receipt")
     expected_assertions = set(row["required_assertions"])
     actual_assertions = {item.name for item in output.assertions}
     if (
@@ -1030,6 +1203,7 @@ def run_operational_matrix(
                     "planned_task_run_id",
                     "started_at",
                     "execute_result",
+                    "reconcile_result",
                     "cleanup_request",
                     "validated_receipt",
                     "reconciliation_sha256",
@@ -1045,6 +1219,7 @@ def run_operational_matrix(
             ):
                 raise RuntimeError("durable operational reconciliation fence differs from the plan")
             locator = DriverResult.model_validate(reconciliation.get("execute_result"))
+            reconciled = DriverResult.model_validate(reconciliation.get("reconcile_result"))
             cleanup_request = dict(reconciliation.get("cleanup_request", {}))
             receipt = dict(reconciliation.get("validated_receipt", {}))
             if (
@@ -1060,9 +1235,63 @@ def run_operational_matrix(
         else:
             started = datetime.now(UTC)
             locator = _invoke_driver(request, timeout_seconds=driver_timeout_seconds)
+            reconciled = None
             cleanup_request = {}
         if locator.scenario != row["name"] or str(locator.task_run_id) != row["planned_task_run_id"]:
             raise RuntimeError("driver returned a different scenario identity")
+        cleanup_binding: DriverCleanupBinding | None = None
+        if locator.outcome in {"PASS", "READY"}:
+            execute_request = {**dict(request), "resume_only": False}
+            if reconciliation_loaded:
+                binding = _driver_binding(locator)
+                assert reconciled is not None
+                if (
+                    reconciled.phase != "RECONCILE"
+                    or reconciled.outcome != "PASS"
+                    or _driver_binding(reconciled) != binding
+                    or reconciled.control_receipt != locator.control_receipt
+                ):
+                    raise RuntimeError("durable control reconciliation differs from execution evidence")
+                cleanup_binding = binding if locator.outcome == "READY" else None
+            else:
+                reconciled, binding = _reconcile_driver_result(
+                    execute_request,
+                    locator,
+                    timeout_seconds=driver_timeout_seconds,
+                )
+                receipt, trusted_cleanup = _trusted_control_receipt(
+                    plan=plan,
+                    row=row,
+                    locator=locator,
+                    started_at=started,
+                )
+                cleanup_binding = trusted_cleanup
+                if locator.outcome == "READY":
+                    if cleanup_binding is None or cleanup_binding != binding:
+                        raise RuntimeError("driver READY cleanup differs from reconciled provider claim")
+                    cleanup_request = _cleanup_request(execute_request, cleanup_binding)
+                elif cleanup_binding is not None:
+                    raise RuntimeError("driver PASS unexpectedly requires pending cleanup")
+                reconciliation_payload = {
+                    "schema_version": "my-data-hub-operational-kaggle-reconciliation.v1",
+                    "matrix_id": plan["matrix_id"],
+                    "commit_sha": plan["commit_sha"],
+                    "planned_task_run_id": row["planned_task_run_id"],
+                    "started_at": started.isoformat(),
+                    "execute_result": locator.model_dump(mode="json"),
+                    "reconcile_result": reconciled.model_dump(mode="json"),
+                    "cleanup_request": cleanup_request,
+                    "validated_receipt": receipt,
+                }
+                _atomic_write(
+                    reconciliation_path,
+                    {
+                        **reconciliation_payload,
+                        "reconciliation_sha256": hashlib.sha256(
+                            canonical_json_bytes(reconciliation_payload)
+                        ).hexdigest(),
+                    },
+                )
         if locator.outcome == "BLOCKED":
             receipt = _blocker_receipt(
                 plan=plan,
@@ -1086,52 +1315,13 @@ def run_operational_matrix(
             receipt["driver_capability_checks"] = [item.model_dump(mode="json") for item in locator.capability_checks]
             receipt["driver_observation_sha256"] = locator.observation_sha256
         elif locator.outcome == "PASS":
-            receipt, cleanup_binding = _trusted_control_receipt(
-                plan=plan,
-                row=row,
-                locator=locator,
-                started_at=started,
-            )
             if cleanup_binding is not None:
                 raise RuntimeError("driver PASS unexpectedly requires pending cleanup")
         else:
             if locator.outcome != "READY":
                 raise RuntimeError("driver returned an unsupported execution outcome")
-            if reconciliation_loaded:
-                cleanup_binding = DriverCleanupBinding.model_validate(
-                    cleanup_request.get("cleanup")
-                )
-            else:
-                receipt, cleanup_binding = _trusted_control_receipt(
-                    plan=plan,
-                    row=row,
-                    locator=locator,
-                    started_at=started,
-                )
-                if cleanup_binding is None:
-                    raise RuntimeError("driver READY lacks a cleanup binding")
-                execute_request = dict(request)
-                execute_request["resume_only"] = False
-                cleanup_request = _cleanup_request(execute_request, cleanup_binding)
-                reconciliation_payload = {
-                    "schema_version": "my-data-hub-operational-kaggle-reconciliation.v1",
-                    "matrix_id": plan["matrix_id"],
-                    "commit_sha": plan["commit_sha"],
-                    "planned_task_run_id": row["planned_task_run_id"],
-                    "started_at": started.isoformat(),
-                    "execute_result": locator.model_dump(mode="json"),
-                    "cleanup_request": cleanup_request,
-                    "validated_receipt": receipt,
-                }
-                _atomic_write(
-                    reconciliation_path,
-                    {
-                        **reconciliation_payload,
-                        "reconciliation_sha256": hashlib.sha256(
-                            canonical_json_bytes(reconciliation_payload)
-                        ).hexdigest(),
-                    },
-                )
+            if cleanup_binding is None:
+                raise RuntimeError("driver READY lacks a cleanup binding")
             if reconciliation_loaded:
                 expected_cleanup = _cleanup_request(
                     {**dict(request), "resume_only": False}, cleanup_binding

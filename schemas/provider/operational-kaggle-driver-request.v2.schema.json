@@ -5,14 +5,30 @@
       "description": "Exact outer-reconciled evidence required for destructive cleanup.",
       "properties": {
         "claim_sha256": {
-          "pattern": "^[a-f0-9]{64}$",
-          "title": "Claim Sha256",
-          "type": "string"
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Claim Sha256"
         },
         "claim_task_id": {
-          "format": "uuid",
-          "title": "Claim Task Id",
-          "type": "string"
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Claim Task Id"
         },
         "output_file_sha256": {
           "pattern": "^[a-f0-9]{64}$",
@@ -56,8 +72,6 @@
         }
       },
       "required": [
-        "claim_task_id",
-        "claim_sha256",
         "provider_ref",
         "provider_run_ref",
         "provider_kernel_id",
@@ -79,7 +93,10 @@
       "if": {
         "properties": {
           "phase": {
-            "const": "CLEANUP"
+            "enum": [
+              "RECONCILE",
+              "CLEANUP"
+            ]
           }
         },
         "required": [
@@ -90,6 +107,39 @@
         "properties": {
           "cleanup": {
             "$ref": "#/$defs/CleanupBinding"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "phase": {
+            "const": "CLEANUP"
+          }
+        },
+        "required": [
+          "phase"
+        ]
+      },
+      "then": {
+        "properties": {
+          "cleanup": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/CleanupBinding"
+              },
+              {
+                "properties": {
+                  "claim_sha256": {
+                    "type": "string"
+                  },
+                  "claim_task_id": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
           }
         }
       }
@@ -185,6 +235,7 @@
     "phase": {
       "enum": [
         "EXECUTE",
+        "RECONCILE",
         "CLEANUP"
       ],
       "title": "Phase",

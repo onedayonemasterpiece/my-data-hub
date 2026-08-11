@@ -5,7 +5,6 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -16,7 +15,6 @@ import scripts.provider.operational_kaggle_matrix as matrix_module
 from my_data_hub.acceptance.scenario_operator import CheckpointAcceptanceOperationalResult
 from my_data_hub.checkpoints.acceptance import CheckpointAcceptanceReceipt
 from my_data_hub.hashing import canonical_json_bytes
-from my_data_hub.providers.kaggle.contracts import KernelState
 from scripts.provider.operational_kaggle_matrix import (
     EXTERNAL_BLOCKED,
     MAXIMUM_SOAK_SECONDS,
@@ -27,8 +25,6 @@ from scripts.provider.operational_kaggle_matrix import (
     LifecycleEvent,
     _driver_request,
     _invoke_driver,
-    _parse_driver_command,
-    _reconciled_live_receipt,
     _summary,
     build_plan,
     run_operational_matrix,
@@ -153,15 +149,13 @@ def test_credential_free_run_exits_78_before_plan_ledger_adapter_or_driver(
         plan_path=tmp_path / "plan.json",
         receipt_path=receipt,
         scenario_directory=tmp_path / "scenarios",
-        driver_command=("must-not-run",),
         commit_sha="a" * 40,
-        adapter_factory=adapter_factory,  # type: ignore[arg-type]
         root=tmp_path,
     )
     assert result == EXTERNAL_BLOCKED
-    assert json.loads(receipt.read_text())["mutations_started"] == 0
+    assert json.loads(receipt.read_text())["passed_scenarios"] == 0
     assert not called
-    assert not (tmp_path / "plan.json").exists()
+    assert (tmp_path / "plan.json").exists()
     assert not (tmp_path / "ledger.sqlite3").exists()
 
 
@@ -182,10 +176,8 @@ def test_missing_operational_interface_writes_24_typed_blockers_without_adapter(
         plan_path=tmp_path / "plan.json",
         receipt_path=receipt,
         scenario_directory=tmp_path / "scenarios",
-        driver_command=None,
         matrix_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
         commit_sha="a" * 40,
-        adapter_factory=adapter_factory,  # type: ignore[arg-type]
         root=tmp_path,
     )
     assert result == EXTERNAL_BLOCKED
@@ -210,10 +202,8 @@ def test_injected_fake_path_can_never_produce_live_pass(monkeypatch: pytest.Monk
         plan_path=tmp_path / "plan.json",
         receipt_path=tmp_path / "summary.json",
         scenario_directory=tmp_path / "scenarios",
-        driver_command=("fake-driver",),
         matrix_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
         commit_sha="a" * 40,
-        adapter_factory=lambda **_: pytest.fail("fake adapter must not be called"),  # type: ignore[arg-type]
         root=tmp_path,
     )
     assert result == EXTERNAL_BLOCKED
@@ -249,50 +239,14 @@ def test_summary_never_counts_task_uuid_as_real_provider_run() -> None:
     assert summary["outcome"] == "BLOCKED"
 
 
-def test_driver_command_is_json_argv_not_shell_text() -> None:
-    assert _parse_driver_command('["python", "/opt/mdh/driver.py"]') == (
-        "python",
-        "/opt/mdh/driver.py",
-    )
-    with pytest.raises(ValueError, match="JSON argv"):
-        _parse_driver_command("python /opt/mdh/driver.py")
+def test_driver_command_is_hard_pinned_to_checked_in_sibling(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MY_DATA_HUB_OPERATIONAL_DRIVER_JSON", '["/tmp/untrusted"]')
+    command = matrix_module._trusted_driver_command()
+    assert command == (sys.executable, str(matrix_module.TRUSTED_DRIVER_PATH.resolve()))
+    assert "/tmp/untrusted" not in command
 
 
-def test_typed_driver_fail_exit_is_preserved_as_scenario_failure(tmp_path: Path) -> None:
-    script = tmp_path / "typed_fail_driver.py"
-    script.write_text(
-        "import json, sys\n"
-        "result = sys.argv[sys.argv.index('--result') + 1]\n"
-        "request = json.load(open(sys.argv[sys.argv.index('--request') + 1]))\n"
-        "json.dump({\n"
-        " 'schema_version': 'my-data-hub-operational-kaggle-driver-result.v2',\n"
-        " 'phase': request['phase'], 'outcome': 'FAIL', 'scenario': request['scenario'],\n"
-        " 'task_run_id': request['task_run_id'], 'provider_ref': None,\n"
-        " 'provider_run_ref': None, 'provider_kernel_id': None,\n"
-        " 'source_version': None, 'source_sha256': None,\n"
-        " 'blocker_code': None, 'integration_dependency': None,\n"
-        " 'mutations_started': 1, 'capability_checks': [],\n"
-        " 'observation_sha256': None, 'claim_task_id': None,\n"
-        " 'claim_sha256': None, 'output_receipt_sha256': None,\n"
-        " 'output_file_sha256': None, 'output_tree_sha256': None,\n"
-        " 'cleanup_state': 'NOT_REQUIRED'}, open(result, 'w'))\n"
-        "raise SystemExit(1)\n"
-    )
-    plan = _plan()
-    rows = plan["scenarios"]
-    assert isinstance(rows, list)
-    request = _driver_request(plan, rows[5], resume_only=False)
-
-    result = _invoke_driver((sys.executable, str(script)), request, timeout_seconds=10)
-
-    assert result.outcome == "FAIL"
-    assert result.mutations_started == 1
-
-
-def test_outer_reconciliation_binds_exact_output_before_cleanup(tmp_path: Path) -> None:
-    plan = _plan()
-    row = plan["scenarios"][1]
-    assert isinstance(row, dict)
+def _trusted_output_locator(plan: dict[str, object], row: dict[str, object]) -> DriverResult:
     output = {
         "schema_version": "my-data-hub-operational-kaggle-output.v1",
         "matrix_id": plan["matrix_id"],
@@ -300,17 +254,14 @@ def test_outer_reconciliation_binds_exact_output_before_cleanup(tmp_path: Path) 
         "task_run_id": row["planned_task_run_id"],
         "outcome": "PASS",
         "assertions": [
-            {"name": name, "outcome": "PASS", "evidence_sha256": hashlib.sha256(name.encode()).hexdigest()}
+            {"name": name, "outcome": "PASS", "evidence_sha256": hashlib.sha256(str(name).encode()).hexdigest()}
             for name in row["required_assertions"]
         ],
         "lifecycle_events": [],
         "operation_ids": [],
         "completed_at": "2026-08-11T00:00:00Z",
     }
-    raw = canonical_json_bytes(output)
-    output_sha = hashlib.sha256(raw).hexdigest()
-    tree_sha = "f" * 64
-    locator = DriverResult.model_validate(
+    return DriverResult.model_validate(
         {
             "schema_version": "my-data-hub-operational-kaggle-driver-result.v2",
             "phase": "EXECUTE",
@@ -320,191 +271,43 @@ def test_outer_reconciliation_binds_exact_output_before_cleanup(tmp_path: Path) 
             "provider_ref": "owner/evidence",
             "provider_run_ref": "owner/evidence/7",
             "provider_kernel_id": 77,
-            "source_version": 3,
+            "source_version": 7,
             "source_sha256": "a" * 64,
-            "blocker_code": None,
-            "integration_dependency": None,
             "mutations_started": 1,
             "capability_checks": [],
             "observation_sha256": "b" * 64,
             "claim_task_id": "11111111-1111-4111-8111-111111111111",
             "claim_sha256": "c" * 64,
             "output_receipt_sha256": "d" * 64,
-            "output_file_sha256": output_sha,
-            "output_tree_sha256": tree_sha,
+            "output_file_sha256": hashlib.sha256(canonical_json_bytes(output)).hexdigest(),
+            "output_tree_sha256": "f" * 64,
             "cleanup_state": "PENDING",
+            "scenario_output": output,
         }
     )
-    run = SimpleNamespace(
-        task_run_id=locator.task_run_id,
-        provider_ref=locator.provider_ref,
-        provider_run_ref=locator.provider_run_ref,
-        provider_kernel_id=locator.provider_kernel_id,
-        source_version=locator.source_version,
-        source_sha256=locator.source_sha256,
-    )
-
-    class Adapter:
-        def reconcile_private_notebook_run(self, **_: object) -> object:
-            return run
-
-        def read_run_status(self, _run: object) -> object:
-            return SimpleNamespace(state=KernelState.COMPLETE)
-
-        def download_exact_run_output_file(
-            self, _run: object, *, destination: Path, file_name: str, max_bytes: int
-        ) -> object:
-            assert max_bytes >= len(raw)
-            (destination / file_name).write_bytes(raw)
-            return SimpleNamespace(output_tree_sha256=tree_sha, file_count=1)
-
-    receipt, binding = _reconciled_live_receipt(
-        adapter=Adapter(),  # type: ignore[arg-type]
-        plan=plan,
-        row=row,
-        locator=locator,
-        output_directory=tmp_path,
-        started_at=datetime(2026, 8, 11, tzinfo=UTC),
-    )
-
-    assert receipt["outcome"] == "PASS"
-    assert binding is not None
-    assert binding.output_file_sha256 == output_sha
-    assert binding.output_tree_sha256 == tree_sha
 
 
-def test_outer_reconciliation_independently_maps_exact_fm14_checkpoint_result(
-    tmp_path: Path,
-) -> None:
+def test_control_owned_scenario_output_binds_exact_receipt_without_local_adapter() -> None:
     plan = _plan()
-    rows = plan["scenarios"]
-    assert isinstance(rows, list)
-    row = rows[13]
-    result = _fm14_checkpoint_result(plan)
-    raw = canonical_json_bytes(result.model_dump(mode="json"))
-    output_sha256 = hashlib.sha256(raw).hexdigest()
-    tree_sha256 = "a" * 64
-    locator = DriverResult.model_validate(
-        {
-            "schema_version": "my-data-hub-operational-kaggle-driver-result.v2",
-            "phase": "EXECUTE",
-            "outcome": "PASS",
-            "scenario": row["name"],
-            "task_run_id": row["planned_task_run_id"],
-            "provider_ref": result.locator.evidence_notebook_ref,
-            "provider_run_ref": f"{result.locator.evidence_notebook_ref}/7",
-            "provider_kernel_id": 707,
-            "source_version": 7,
-            "source_sha256": "e" * 64,
-            "blocker_code": None,
-            "integration_dependency": None,
-            "mutations_started": result.mutations_started,
-            "capability_checks": [],
-            "observation_sha256": "f" * 64,
-            "claim_task_id": row["planned_task_run_id"],
-            "claim_sha256": "f" * 64,
-            "output_receipt_sha256": "b" * 64,
-            "output_file_sha256": output_sha256,
-            "output_tree_sha256": tree_sha256,
-            "cleanup_state": "NOT_REQUIRED",
-        }
+    row = plan["scenarios"][1]
+    assert isinstance(row, dict)
+    locator = _trusted_output_locator(plan, row)
+    receipt, binding = matrix_module._trusted_control_receipt(
+        plan=plan, row=row, locator=locator, started_at=datetime(2026, 8, 11, tzinfo=UTC)
     )
-    run = SimpleNamespace(
-        task_run_id=locator.task_run_id,
-        provider_ref=locator.provider_ref,
-        provider_run_ref=locator.provider_run_ref,
-        provider_kernel_id=locator.provider_kernel_id,
-        source_version=locator.source_version,
-        source_sha256=locator.source_sha256,
-    )
-
-    class Adapter:
-        def reconcile_private_notebook_run(self, **_: object) -> object:
-            return run
-
-        def read_run_status(self, _run: object) -> object:
-            return SimpleNamespace(state=KernelState.COMPLETE)
-
-        def download_exact_run_output_file(
-            self, _run: object, *, destination: Path, file_name: str, max_bytes: int
-        ) -> object:
-            assert max_bytes >= len(raw)
-            (destination / file_name).write_bytes(raw)
-            return SimpleNamespace(output_tree_sha256=tree_sha256, file_count=1)
-
-    receipt, binding = _reconciled_live_receipt(
-        adapter=Adapter(),  # type: ignore[arg-type]
-        plan=plan,
-        row=row,
-        locator=locator,
-        output_directory=tmp_path,
-        started_at=datetime(2026, 8, 11, tzinfo=UTC),
-    )
-
     assert receipt["outcome"] == "PASS"
-    assert receipt["operation_ids"] == [str(result.operation_id)]
-    assert {item["name"] for item in receipt["assertions"]} == set(row["required_assertions"])
-    assert binding is None
+    assert receipt["real_run_identity"]["provider_status"] == "control_reconciled"
+    assert binding is not None and binding.provider_run_ref == "owner/evidence/7"
 
 
-def test_outer_reconciliation_rejects_fm14_checkpoint_output_hash_drift(tmp_path: Path) -> None:
+def test_control_owned_scenario_output_rejects_hash_drift() -> None:
     plan = _plan()
-    rows = plan["scenarios"]
-    assert isinstance(rows, list)
-    row = rows[13]
-    result = _fm14_checkpoint_result(plan)
-    raw = canonical_json_bytes(result.model_dump(mode="json"))
-    locator = DriverResult.model_validate(
-        {
-            "schema_version": "my-data-hub-operational-kaggle-driver-result.v2",
-            "phase": "EXECUTE",
-            "outcome": "PASS",
-            "scenario": row["name"],
-            "task_run_id": row["planned_task_run_id"],
-            "provider_ref": result.locator.evidence_notebook_ref,
-            "provider_run_ref": f"{result.locator.evidence_notebook_ref}/7",
-            "provider_kernel_id": 707,
-            "source_version": 7,
-            "source_sha256": "e" * 64,
-            "mutations_started": result.mutations_started,
-            "capability_checks": [],
-            "claim_task_id": row["planned_task_run_id"],
-            "claim_sha256": "f" * 64,
-            "output_receipt_sha256": "b" * 64,
-            "output_file_sha256": "0" * 64,
-            "output_tree_sha256": "a" * 64,
-            "cleanup_state": "NOT_REQUIRED",
-        }
-    )
-    run = SimpleNamespace(
-        provider_ref=locator.provider_ref,
-        provider_run_ref=locator.provider_run_ref,
-        provider_kernel_id=locator.provider_kernel_id,
-        source_version=locator.source_version,
-        source_sha256=locator.source_sha256,
-    )
-
-    class Adapter:
-        def reconcile_private_notebook_run(self, **_: object) -> object:
-            return run
-
-        def read_run_status(self, _run: object) -> object:
-            return SimpleNamespace(state=KernelState.COMPLETE)
-
-        def download_exact_run_output_file(
-            self, _run: object, *, destination: Path, file_name: str, max_bytes: int
-        ) -> object:
-            (destination / file_name).write_bytes(raw)
-            return SimpleNamespace(output_tree_sha256="a" * 64, file_count=1)
-
-    with pytest.raises(RuntimeError, match="output reconciliation differs"):
-        _reconciled_live_receipt(
-            adapter=Adapter(),  # type: ignore[arg-type]
-            plan=plan,
-            row=row,
-            locator=locator,
-            output_directory=tmp_path,
-            started_at=datetime(2026, 8, 11, tzinfo=UTC),
+    row = plan["scenarios"][1]
+    assert isinstance(row, dict)
+    locator = _trusted_output_locator(plan, row).model_copy(update={"output_file_sha256": "0" * 64})
+    with pytest.raises(RuntimeError, match="control-owned output receipt"):
+        matrix_module._trusted_control_receipt(
+            plan=plan, row=row, locator=locator, started_at=datetime(2026, 8, 11, tzinfo=UTC)
         )
 
 
@@ -541,7 +344,7 @@ def test_reconciliation_fence_resumes_cleanup_after_notebook_was_deleted(
             "provider_ref": "owner/evidence",
             "provider_run_ref": "owner/evidence/7",
             "provider_kernel_id": 77,
-            "source_version": 3,
+            "source_version": 7,
             "source_sha256": "a" * 64,
             "blocker_code": None,
             "integration_dependency": None,
@@ -554,35 +357,13 @@ def test_reconciliation_fence_resumes_cleanup_after_notebook_was_deleted(
             "output_file_sha256": output_sha,
             "output_tree_sha256": tree_sha,
             "cleanup_state": "PENDING",
+            "scenario_output": output,
         }
     )
-    download_count = 0
-
-    class Adapter:
-        def reconcile_private_notebook_run(self, **_: object) -> object:
-            return SimpleNamespace(
-                task_run_id=ready.task_run_id,
-                provider_ref=ready.provider_ref,
-                provider_run_ref=ready.provider_run_ref,
-                provider_kernel_id=ready.provider_kernel_id,
-                source_version=ready.source_version,
-                source_sha256=ready.source_sha256,
-            )
-
-        def read_run_status(self, _run: object) -> object:
-            return SimpleNamespace(state=KernelState.COMPLETE)
-
-        def download_exact_run_output_file(
-            self, _run: object, *, destination: Path, file_name: str, max_bytes: int
-        ) -> object:
-            nonlocal download_count
-            download_count += 1
-            (destination / file_name).write_bytes(raw)
-            return SimpleNamespace(output_tree_sha256=tree_sha, file_count=1)
 
     cleanup_attempts = 0
 
-    def invoke(_command: object, request: dict[str, object], *, timeout_seconds: int) -> DriverResult:
+    def invoke(request: dict[str, object], *, timeout_seconds: int) -> DriverResult:
         nonlocal cleanup_attempts
         assert timeout_seconds == 7200
         if request["phase"] == "EXECUTE":
@@ -613,6 +394,22 @@ def test_reconciliation_fence_resumes_cleanup_after_notebook_was_deleted(
                     "cleanup_state": "NOT_REQUIRED",
                 }
             )
+        if request["phase"] == "RECONCILE":
+            cleanup = dict(request["cleanup"])  # type: ignore[arg-type]
+            return DriverResult.model_validate(
+                {
+                    "schema_version": "my-data-hub-operational-kaggle-driver-result.v2",
+                    "phase": "RECONCILE",
+                    "outcome": "PASS",
+                    "scenario": request["scenario"],
+                    "task_run_id": request["task_run_id"],
+                    "mutations_started": 1,
+                    "capability_checks": [],
+                    "observation_sha256": "e" * 64,
+                    **cleanup,
+                    "cleanup_state": "PENDING",
+                }
+            )
         cleanup_attempts += 1
         if cleanup_attempts == 1:
             raise RuntimeError("cleanup response lost after durable delete")
@@ -639,28 +436,18 @@ def test_reconciliation_fence_resumes_cleanup_after_notebook_was_deleted(
             }
         )
 
-    monkeypatch.setenv("KAGGLE_API_TOKEN", "unit-test-token")
     monkeypatch.setattr(matrix_module, "_exact_commit", lambda _root: "a" * 40)
     monkeypatch.setattr(matrix_module, "_invoke_driver", invoke)
-    monkeypatch.setattr(
-        matrix_module.KaggleProviderAdapter,
-        "from_environment",
-        lambda **_: Adapter(),
-    )
     kwargs = {
         "ledger_path": tmp_path / "ledger.sqlite3",
         "plan_path": tmp_path / "plan.json",
         "receipt_path": tmp_path / "summary.json",
         "scenario_directory": tmp_path / "scenarios",
-        "driver_command": ("trusted-driver",),
         "matrix_id": UUID(str(plan["matrix_id"])),
     }
     with pytest.raises(RuntimeError, match="cleanup response lost"):
         run_operational_matrix(**kwargs)  # type: ignore[arg-type]
-    assert download_count == 1
-
     assert run_operational_matrix(**kwargs) == EXTERNAL_BLOCKED  # type: ignore[arg-type]
-    assert download_count == 1
     assert cleanup_attempts == 2
     fm01 = json.loads((tmp_path / "scenarios/01-private-dataset-create-readback-delete.json").read_text())
     assert fm01["outcome"] == "PASS"
@@ -687,7 +474,7 @@ def test_fm16_owner_pause_resumes_same_launch_and_stops_dependents_until_authori
             }
         )
 
-    def invoke(_command: object, request: dict[str, object], *, timeout_seconds: int) -> DriverResult:
+    def invoke(request: dict[str, object], *, timeout_seconds: int) -> DriverResult:
         assert timeout_seconds == 7200
         if request["requirement_id"] == "FM16":
             fm16_requests.append(dict(request))
@@ -699,20 +486,13 @@ def test_fm16_owner_pause_resumes_same_launch_and_stops_dependents_until_authori
             return blocked(request, code)
         return blocked(request, "UNIT_TEST_REMAINDER_BLOCKED")
 
-    monkeypatch.setenv("KAGGLE_API_TOKEN", "unit-test-token")
     monkeypatch.setattr(matrix_module, "_exact_commit", lambda _root: "a" * 40)
     monkeypatch.setattr(matrix_module, "_invoke_driver", invoke)
-    monkeypatch.setattr(
-        matrix_module.KaggleProviderAdapter,
-        "from_environment",
-        lambda **_: SimpleNamespace(),
-    )
     kwargs = {
         "ledger_path": tmp_path / "ledger.sqlite3",
         "plan_path": tmp_path / "plan.json",
         "receipt_path": tmp_path / "summary.json",
         "scenario_directory": tmp_path / "scenarios",
-        "driver_command": ("trusted-driver",),
         "matrix_id": UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
     }
 
@@ -764,5 +544,6 @@ def test_provider_workflow_runs_operational_matrix_not_smoke_surrogate() -> None
     assert "operational_kaggle_matrix.py preflight" in workflow
     assert "operational_kaggle_matrix.py run" in workflow
     assert "real_kaggle_matrix.py matrix" not in workflow
-    assert "MY_DATA_HUB_OPERATIONAL_DRIVER_JSON" in workflow
+    assert "MY_DATA_HUB_OPERATIONAL_DRIVER_JSON" not in workflow
+    assert "KAGGLE_API_TOKEN" not in workflow
     assert "timeout-minutes: 360" in workflow

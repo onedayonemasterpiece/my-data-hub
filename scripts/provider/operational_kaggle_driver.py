@@ -50,7 +50,13 @@ from my_data_hub.acceptance.data_workloads import (
     DataWorkloadPlan,
     DataWorkloadState,
 )
-from my_data_hub.acceptance.master_lifecycle import MasterAcceptanceReceipt
+from my_data_hub.acceptance.master_lifecycle import (
+    CallbackLossEvidence,
+    LeaseExpiryEvidence,
+    MasterAcceptanceReceipt,
+    OldEpochEvidence,
+    RotationSoakEvidence,
+)
 from my_data_hub.acceptance.scenario_operator import CheckpointAcceptanceLaunchStatus
 from my_data_hub.hashing import canonical_json_bytes
 
@@ -63,9 +69,9 @@ if not __package__:
 from scripts.verify_post_deploy import validate_deployment_evidence_v2
 
 if __package__:
-    from scripts.provider.operational_kaggle_matrix import EXTERNAL_BLOCKED, SCENARIOS, modern_token_configured
+    from scripts.provider.operational_kaggle_matrix import EXTERNAL_BLOCKED, SCENARIOS
 else:  # Direct repository script execution places this directory on sys.path.
-    from operational_kaggle_matrix import EXTERNAL_BLOCKED, SCENARIOS, modern_token_configured
+    from operational_kaggle_matrix import EXTERNAL_BLOCKED, SCENARIOS
 
 FAIL = 1
 MAX_REQUEST_BYTES = 256 * 1024
@@ -77,6 +83,10 @@ ACTION_TERMINAL_STATES = frozenset({"DURABLE_COMPLETE", "FAILED", "FENCED", "ORP
 CHECKPOINT_ACCEPTANCE_TERMINAL_STATES = frozenset({"LIVE_EVIDENCE_READY", "BLOCKED", "FAIL"})
 CHECKPOINT_ACCEPTANCE_POLL_SECONDS = 5.0
 CHECKPOINT_ACCEPTANCE_TIMEOUT_SECONDS = 900
+MASTER_ACCEPTANCE_TERMINAL_STATES = frozenset({"PASSED", "FAILED"})
+MASTER_ACCEPTANCE_POLL_SECONDS = 5.0
+MASTER_ACCEPTANCE_TIMEOUT_SECONDS = 1800
+MASTER_ACCEPTANCE_SOAK_TIMEOUT_SECONDS = 5700
 FM20_MASTER_TIMEOUT_SECONDS = 1800
 FM20_MASTER_POLL_SECONDS = 5.0
 EXPECTED_SOURCE_IDENTITY = "onedayonemasterpiece/my-data-hub"
@@ -94,8 +104,8 @@ class CleanupBinding(BaseModel):
     """Exact outer-reconciled evidence required for destructive cleanup."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    claim_task_id: UUID
-    claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    claim_task_id: UUID | None = None
+    claim_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     provider_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
     provider_run_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$")
     provider_kernel_id: int = Field(ge=1)
@@ -104,6 +114,12 @@ class CleanupBinding(BaseModel):
     output_receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     output_file_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     output_tree_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def exact_cleanup_claim(self) -> CleanupBinding:
+        if (self.claim_task_id is None) != (self.claim_sha256 is None):
+            raise ValueError("cleanup claim identity must be wholly present or absent")
+        return self
 
 
 class DriverRequest(BaseModel):
@@ -141,6 +157,8 @@ class DriverRequest(BaseModel):
             raise ValueError("driver request has inconsistent soak bounds")
         if (self.phase == "EXECUTE") == (self.cleanup is not None):
             raise ValueError("driver reconcile/cleanup phase requires one exact binding")
+        if self.phase == "CLEANUP" and self.cleanup is not None and self.cleanup.claim_task_id is None:
+            raise ValueError("driver cleanup phase requires an exact disposable claim")
         return self
 
 
@@ -179,6 +197,56 @@ class DriverScenarioOutput(BaseModel):
     def exact_assertions(self) -> DriverScenarioOutput:
         if self.completed_at.tzinfo is None or len({item.name for item in self.assertions}) != len(self.assertions):
             raise ValueError("driver scenario output is not exact and timezone-bound")
+        return self
+
+
+class MasterProviderCarrier(BaseModel):
+    """Exact control-owned Kaggle carrier observation for a master scenario."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+    provider_run_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$"
+    )
+    provider_kernel_id: int = Field(ge=1)
+    source_version: int = Field(ge=1)
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    output_file_name: Literal["operational-result.json"]
+    output_file_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    output_tree_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    output_receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def exact_run(self) -> MasterProviderCarrier:
+        if self.provider_run_ref.rsplit("/", 1)[0] != self.provider_ref:
+            raise ValueError("master carrier run differs from provider_ref")
+        if int(self.provider_run_ref.rsplit("/", 1)[1]) != self.source_version:
+            raise ValueError("master carrier run version differs from source_version")
+        return self
+
+
+class MasterCommandProjection(BaseModel):
+    """Terminal command projection returned by acceptance.scenario.status."""
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    command_id: UUID
+    command_kind: str
+    command_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    state: Literal["SUCCEEDED"]
+    receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    receipt: MasterAcceptanceReceipt
+
+    @model_validator(mode="after")
+    def exact_receipt(self) -> MasterCommandProjection:
+        if (
+            self.command_id != self.receipt.command_id
+            or self.command_kind != self.receipt.command_kind.value
+            or self.command_sha256 != self.receipt.command_sha256
+            or self.receipt_sha256 != self.receipt.receipt_sha256
+        ):
+            raise ValueError("master command projection differs from its typed receipt")
         return self
 
 
@@ -236,10 +304,11 @@ class TrustedDriverResult(BaseModel):
             raise ValueError("driver READY lacks an exact pending cleanup binding")
         if self.phase == "CLEANUP" and self.outcome == "PASS" and self.cleanup_state != "COMPLETE":
             raise ValueError("cleanup PASS requires a COMPLETE durable claim")
-        if self.phase == "RECONCILE" and self.outcome == "PASS" and (
-            self.cleanup_state not in {"PENDING", "NOT_REQUIRED"} or any(value is None for value in cleanup)
-        ):
-            raise ValueError("reconciliation PASS requires the exact pending provider binding")
+        if self.phase == "RECONCILE" and self.outcome == "PASS":
+            if self.cleanup_state == "PENDING" and any(value is None for value in cleanup):
+                raise ValueError("reconciliation PASS lacks its exact pending cleanup binding")
+            if self.cleanup_state == "NOT_REQUIRED" and any(value is not None for value in cleanup[:2]):
+                raise ValueError("protected carrier reconciliation cannot contain a cleanup claim")
         if (
             self.phase == "EXECUTE"
             and self.outcome == "PASS"
@@ -562,10 +631,12 @@ EXECUTORS: tuple[ExecutorSpec, ...] = (
     ExecutorSpec(
         "FM08",
         ("reader", "operator"),
-        (("reader", "master.status"), ("operator", "operation.get")),
+        (("reader", "master.status"),
+         ("operator", "acceptance.scenario.request"),
+         ("operator", "acceptance.scenario.status")),
         "master_status",
-        "CALLBACK_LOSS_AND_CONTROL_RESTART_FAULT_API_MISSING",
-        "privileged callback suppression, abrupt termination, and in-flight control restart API",
+        "FM08_ACCEPTANCE_SCENARIO_EXECUTOR_MISSING",
+        "owner-only typed callback-loss/restart acceptance executor",
     ),
     ExecutorSpec(
         "FM09",
@@ -578,18 +649,22 @@ EXECUTORS: tuple[ExecutorSpec, ...] = (
     ExecutorSpec(
         "FM10",
         ("reader", "operator"),
-        (("reader", "master.status"), ("operator", "runtime.stale_epoch.probe")),
+        (("reader", "master.status"),
+         ("operator", "acceptance.scenario.request"),
+         ("operator", "acceptance.scenario.status")),
         "master_status",
-        "LEASE_EXPIRY_CLOCK_AND_WRITE_PROBE_MISSING",
-        "lease-expiry clock control plus expired-session real write admission probe",
+        "FM10_ACCEPTANCE_SCENARIO_EXECUTOR_MISSING",
+        "owner-only typed lease-expiry acceptance executor",
     ),
     ExecutorSpec(
         "FM11",
         ("reader", "operator"),
-        (("reader", "master.status"), ("operator", "runtime.stale_epoch.probe")),
-        "stale_epoch",
-        "OLD_RUN_RENEW_REGISTER_PROBES_MISSING",
-        "old provider run resume plus renew/register/write/tunnel denial probes",
+        (("reader", "master.status"),
+         ("operator", "acceptance.scenario.request"),
+         ("operator", "acceptance.scenario.status")),
+        "master_status",
+        "FM11_ACCEPTANCE_SCENARIO_EXECUTOR_MISSING",
+        "owner-only typed old-epoch return acceptance executor",
     ),
     ExecutorSpec(
         "FM12",
@@ -763,10 +838,12 @@ EXECUTORS: tuple[ExecutorSpec, ...] = (
     ExecutorSpec(
         "FM24",
         ("reader", "operator"),
-        (("reader", "master.status"), ("reader", "checkpoint.status"), ("operator", "master.rotation.request")),
-        "master_checkpoint_status",
-        "ACCELERATED_SOAK_SESSION_CONTROL_API_MISSING",
-        "60-90 minute session rotation/heartbeat/read/checkpoint/recovery controller with exact event stream",
+        (("reader", "master.status"),
+         ("operator", "acceptance.scenario.request"),
+         ("operator", "acceptance.scenario.status")),
+        "master_status",
+        "FM24_ACCEPTANCE_SCENARIO_EXECUTOR_MISSING",
+        "owner-only typed 60-90 minute session-rotation soak executor",
     ),
 )
 
@@ -1908,6 +1985,256 @@ def _checkpoint_driver_pass(
     )
 
 
+def _master_status_identity(
+    request: DriverRequest,
+    value: Mapping[str, Any],
+    *,
+    target_operation_id: UUID,
+) -> None:
+    if (
+        value.get("found") is not True
+        or value.get("bounded") is not True
+        or value.get("task_id") != str(request.task_run_id)
+        or value.get("scenario_id") != request.requirement_id
+        or value.get("source_revision") != request.commit_sha
+        or value.get("operation_id") != str(target_operation_id)
+        or value.get("target_operation_id") != str(target_operation_id)
+        or value.get("state") not in {"PENDING", "BOUND", "CLAIMED", "PASSED", "FAILED"}
+    ):
+        raise ValueError("master acceptance status differs from its exact task binding")
+
+
+def _terminal_master_evidence(
+    request: DriverRequest,
+    value: Mapping[str, Any],
+    *,
+    target_operation_id: UUID,
+) -> tuple[MasterAcceptanceReceipt, MasterProviderCarrier]:
+    _master_status_identity(request, value, target_operation_id=target_operation_id)
+    if value.get("state") != "PASSED" or value.get("failure_code") is not None:
+        raise ValueError("master acceptance status is not a successful terminal task")
+    command = MasterCommandProjection.model_validate(value.get("command"))
+    receipt = command.receipt
+    if (
+        receipt.task_id != request.task_run_id
+        or receipt.scenario.value != request.requirement_id
+        or receipt.binding.operation_id != target_operation_id
+    ):
+        raise ValueError("typed master acceptance receipt differs from the matrix task")
+    carrier = MasterProviderCarrier.model_validate(value.get("provider_carrier"))
+    return receipt, carrier
+
+
+def _master_evidence_is_exact(request: DriverRequest, receipt: MasterAcceptanceReceipt) -> None:
+    evidence = receipt.evidence
+    if request.requirement_id == "FM08":
+        if not isinstance(evidence, CallbackLossEvidence):
+            raise ValueError("FM08 receipt lacks typed callback-loss evidence")
+    elif request.requirement_id == "FM10":
+        if not isinstance(evidence, LeaseExpiryEvidence):
+            raise ValueError("FM10 receipt lacks typed lease-expiry evidence")
+    elif request.requirement_id == "FM11":
+        if not isinstance(evidence, OldEpochEvidence):
+            raise ValueError("FM11 receipt lacks typed old-epoch evidence")
+    elif request.requirement_id == "FM24":
+        if not isinstance(evidence, RotationSoakEvidence):
+            raise ValueError("FM24 receipt lacks typed soak evidence")
+    else:  # pragma: no cover - closed dispatch invariant
+        raise ValueError("unsupported master acceptance scenario")
+
+
+def _master_driver_pass(
+    request: DriverRequest,
+    receipt: MasterAcceptanceReceipt,
+    carrier: MasterProviderCarrier,
+    *,
+    checks: list[CapabilityCheck],
+    observations: Mapping[str, Any],
+    phase: Literal["EXECUTE", "RECONCILE"] = "EXECUTE",
+) -> TrustedDriverResult:
+    _master_evidence_is_exact(request, receipt)
+    return TrustedDriverResult(
+        schema_version="my-data-hub-operational-kaggle-driver-result.v2",
+        phase=phase,
+        outcome="PASS",
+        scenario=request.scenario,
+        task_run_id=request.task_run_id,
+        provider_ref=carrier.provider_ref,
+        provider_run_ref=carrier.provider_run_ref,
+        provider_kernel_id=carrier.provider_kernel_id,
+        source_version=carrier.source_version,
+        source_sha256=carrier.source_sha256,
+        mutations_started=1,
+        capability_checks=tuple(checks),
+        observation_sha256=_sha(dict(observations)),
+        output_receipt_sha256=carrier.output_receipt_sha256,
+        output_file_sha256=carrier.output_file_sha256,
+        output_tree_sha256=carrier.output_tree_sha256,
+        cleanup_state="NOT_REQUIRED",
+        control_receipt=receipt,
+    )
+
+
+async def _execute_master_acceptance_scenario(
+    request: DriverRequest,
+    spec: ExecutorSpec,
+    gateway: McpGateway,
+    *,
+    checks: list[CapabilityCheck],
+    observations: Mapping[str, Any],
+) -> TrustedDriverResult:
+    raw_master = observations.get("master")
+    if not isinstance(raw_master, Mapping) or not _exact_active_master(raw_master):
+        return _blocked(
+            request,
+            checks=[*checks, _check("master.target", "BLOCKED", "ACTIVE_MASTER_TARGET_REQUIRED")],
+            code=f"{request.requirement_id}_ACTIVE_MASTER_TARGET_REQUIRED",
+            dependency="exact ACTIVE master.status operation binding before acceptance mutation",
+            observations=observations,
+        )
+    try:
+        target_operation_id = UUID(str(raw_master.get("operation_id")))
+    except (TypeError, ValueError, AttributeError):
+        return _blocked(
+            request,
+            checks=[*checks, _check("master.target", "BLOCKED", "ACTIVE_MASTER_OPERATION_ID_MISSING")],
+            code=f"{request.requirement_id}_ACTIVE_MASTER_OPERATION_ID_MISSING",
+            dependency="ACTIVE master.status with exact operation_id",
+            observations=observations,
+        )
+    task_id = request.task_run_id
+    try:
+        observed = await gateway.call(
+            "operator", "acceptance.scenario.status", {"task_id": str(task_id)}
+        )
+    except Exception as exc:
+        return _blocked(
+            request,
+            checks=[*checks, _check("acceptance.status", "BLOCKED", "ACCEPTANCE_STATUS_UNAVAILABLE")],
+            code=spec.gap_code,
+            dependency=f"{spec.gap_dependency} ({type(exc).__name__})",
+            observations=observations,
+        )
+    status: Mapping[str, Any] | None = None
+    if observed == {"found": False}:
+        if request.resume_only:
+            return _failed(
+                request,
+                checks=[*checks, _check("acceptance.resume", "FAIL", "ACCEPTANCE_TASK_MISSING_ON_RESUME")],
+                observations={**observations, "status_sha256": _sha(observed)},
+                mutations_started=1,
+            )
+    elif observed.get("found") is True:
+        try:
+            _master_status_identity(request, observed, target_operation_id=target_operation_id)
+        except Exception as exc:
+            return _failed(
+                request,
+                checks=[*checks, _check("acceptance.status", "FAIL", "ACCEPTANCE_STATUS_INVALID")],
+                observations={**observations, "status_sha256": _sha(observed), "failure_type": type(exc).__name__},
+                mutations_started=1,
+            )
+        status = observed
+    else:
+        return _failed(
+            request,
+            checks=[*checks, _check("acceptance.status", "FAIL", "ACCEPTANCE_STATUS_INVALID")],
+            observations={**observations, "status_sha256": _sha(observed)},
+            mutations_started=1,
+        )
+    if status is None:
+        arguments = {
+            "task_id": str(task_id),
+            "scenario": request.requirement_id,
+            "idempotency_key": f"operational:{request.matrix_id}:{request.requirement_id}:master",
+            "source_revision": request.commit_sha,
+            "target_operation_id": str(target_operation_id),
+        }
+        try:
+            launched = await gateway.call("operator", "acceptance.scenario.request", arguments)
+        except Exception as exc:
+            try:
+                launched = await gateway.call(
+                    "operator", "acceptance.scenario.status", {"task_id": str(task_id)}
+                )
+                _master_status_identity(request, launched, target_operation_id=target_operation_id)
+            except Exception as reconcile_exc:
+                return _failed(
+                    request,
+                    checks=[*checks, _check("acceptance.request", "FAIL", "ACCEPTANCE_REQUEST_AMBIGUOUS")],
+                    observations={
+                        **observations,
+                        "failure_type": type(exc).__name__,
+                        "reconcile_failure_type": type(reconcile_exc).__name__,
+                    },
+                    mutations_started=1,
+                )
+        else:
+            try:
+                _master_status_identity(request, launched, target_operation_id=target_operation_id)
+            except Exception as exc:
+                return _failed(
+                    request,
+                    checks=[*checks, _check("acceptance.request", "FAIL", "ACCEPTANCE_REQUEST_INVALID")],
+                    observations={**observations, "response_sha256": _sha(launched), "failure_type": type(exc).__name__},
+                    mutations_started=1,
+                )
+        status = launched
+    deadline_seconds = (
+        MASTER_ACCEPTANCE_SOAK_TIMEOUT_SECONDS
+        if request.requirement_id == "FM24"
+        else MASTER_ACCEPTANCE_TIMEOUT_SECONDS
+    )
+    deadline = asyncio.get_running_loop().time() + deadline_seconds
+    assert status is not None
+    while status.get("state") not in MASTER_ACCEPTANCE_TERMINAL_STATES:
+        if asyncio.get_running_loop().time() >= deadline:
+            return _failed(
+                request,
+                checks=[*checks, _check("acceptance.poll", "FAIL", "ACCEPTANCE_SCENARIO_TIMEOUT")],
+                observations={**observations, "task_id": str(task_id), "state": status.get("state")},
+                mutations_started=1,
+            )
+        await asyncio.sleep(MASTER_ACCEPTANCE_POLL_SECONDS)
+        try:
+            status = await gateway.call(
+                "operator", "acceptance.scenario.status", {"task_id": str(task_id)}
+            )
+            _master_status_identity(request, status, target_operation_id=target_operation_id)
+        except Exception as exc:
+            return _failed(
+                request,
+                checks=[*checks, _check("acceptance.poll", "FAIL", "ACCEPTANCE_STATUS_RECONCILIATION_FAILED")],
+                observations={**observations, "failure_type": type(exc).__name__},
+                mutations_started=1,
+            )
+    if status.get("state") == "FAILED":
+        return _failed(
+            request,
+            checks=[*checks, _check("acceptance.terminal", "FAIL", "ACCEPTANCE_SCENARIO_FAILED")],
+            observations={**observations, "failure_code": status.get("failure_code")},
+            mutations_started=1,
+        )
+    try:
+        receipt, carrier = _terminal_master_evidence(
+            request, status, target_operation_id=target_operation_id
+        )
+        return _master_driver_pass(
+            request,
+            receipt,
+            carrier,
+            checks=[*checks, _check("acceptance.terminal", "PASS", "TYPED_CONTROL_RECEIPT_BOUND", status)],
+            observations={**observations, "terminal_status_sha256": _sha(status)},
+        )
+    except Exception as exc:
+        return _failed(
+            request,
+            checks=[*checks, _check("acceptance.terminal", "FAIL", "TYPED_CONTROL_RECEIPT_INVALID")],
+            observations={**observations, "status_sha256": _sha(status), "failure_type": type(exc).__name__},
+            mutations_started=1,
+        )
+
+
 async def _execute_checkpoint_acceptance_scenario(
     request: DriverRequest,
     spec: ExecutorSpec,
@@ -2104,11 +2431,113 @@ async def _launch_post_action_evidence(
     )
 
 
+def _binding_matches_result(binding: CleanupBinding, result: TrustedDriverResult) -> bool:
+    return (
+        binding.claim_task_id == result.claim_task_id
+        and binding.claim_sha256 == result.claim_sha256
+        and binding.provider_ref == result.provider_ref
+        and binding.provider_run_ref == result.provider_run_ref
+        and binding.provider_kernel_id == result.provider_kernel_id
+        and binding.source_version == result.source_version
+        and binding.source_sha256 == result.source_sha256
+        and binding.output_receipt_sha256 == result.output_receipt_sha256
+        and binding.output_file_sha256 == result.output_file_sha256
+        and binding.output_tree_sha256 == result.output_tree_sha256
+    )
+
+
+async def _execute_reconcile(
+    request: DriverRequest, gateway: McpGateway
+) -> TrustedDriverResult:
+    binding = request.cleanup
+    assert binding is not None
+    checks: list[CapabilityCheck] = []
+    if request.requirement_id in {"FM08", "FM10", "FM11", "FM24"}:
+        try:
+            catalog = await gateway.catalog("operator")
+            if "acceptance.scenario.status" not in catalog:
+                raise ValueError("acceptance scenario status tool is absent")
+            status = await gateway.call(
+                "operator", "acceptance.scenario.status", {"task_id": str(request.task_run_id)}
+            )
+            raw_operation_id = status.get("operation_id")
+            target_operation_id = UUID(str(raw_operation_id))
+            receipt, carrier = _terminal_master_evidence(
+                request, status, target_operation_id=target_operation_id
+            )
+            result = _master_driver_pass(
+                request,
+                receipt,
+                carrier,
+                checks=[_check("reconcile.acceptance", "PASS", "TYPED_CONTROL_RECEIPT_RECONCILED", status)],
+                observations={"status_sha256": _sha(status)},
+                phase="RECONCILE",
+            )
+            if not _binding_matches_result(binding, result):
+                raise ValueError("reconciled master carrier differs from the execute binding")
+            return result
+        except Exception as exc:
+            return _failed(
+                request,
+                checks=[_check("reconcile.acceptance", "FAIL", "CONTROL_RECEIPT_RECONCILIATION_FAILED")],
+                observations={"failure_type": type(exc).__name__},
+                mutations_started=1,
+            )
+
+    try:
+        catalog = await gateway.catalog("provider")
+        if "provider.acceptance.claim.get" not in catalog:
+            raise ValueError("provider claim status tool is absent")
+        if binding.claim_task_id is None or binding.claim_sha256 is None:
+            raise ValueError("provider reconciliation lacks a claim identity")
+        claim = await _claim_get(gateway, request, binding.claim_task_id)
+        cleanup_state = claim.get("cleanup_state")
+        if cleanup_state not in {"PENDING", "COMPLETE"}:
+            raise ValueError("provider claim lacks an exact cleanup state")
+        locator, output = _notebook_binding(
+            request, binding.claim_task_id, claim, cleanup_state=cleanup_state
+        )
+        result = TrustedDriverResult(
+            schema_version="my-data-hub-operational-kaggle-driver-result.v2",
+            phase="RECONCILE",
+            outcome="PASS",
+            scenario=request.scenario,
+            task_run_id=request.task_run_id,
+            provider_ref=locator.provider_ref,
+            provider_run_ref=locator.provider_run_ref,
+            provider_kernel_id=locator.provider_kernel_id,
+            source_version=locator.source_version,
+            source_sha256=locator.source_sha256,
+            mutations_started=1,
+            capability_checks=(
+                _check("reconcile.provider", "PASS", "PROVIDER_CLAIM_RECONCILED", claim),
+            ),
+            observation_sha256=_sha(claim),
+            claim_task_id=binding.claim_task_id,
+            claim_sha256=locator.claim_sha256,
+            output_receipt_sha256=str(output["output_receipt_sha256"]),
+            output_file_sha256=str(output["output_file_sha256"]),
+            output_tree_sha256=str(output["output_tree_sha256"]),
+            cleanup_state="PENDING" if cleanup_state == "PENDING" else "COMPLETE",
+        )
+        if not _binding_matches_result(binding, result):
+            raise ValueError("reconciled provider claim differs from the execute binding")
+        return result
+    except Exception as exc:
+        return _failed(
+            request,
+            checks=[_check("reconcile.provider", "FAIL", "PROVIDER_CLAIM_RECONCILIATION_FAILED")],
+            observations={"failure_type": type(exc).__name__},
+            mutations_started=1,
+        )
+
+
 async def _execute_cleanup(
     request: DriverRequest, gateway: McpGateway
 ) -> TrustedDriverResult:
     binding = request.cleanup
     assert binding is not None
+    assert binding.claim_task_id is not None and binding.claim_sha256 is not None
     checks: list[CapabilityCheck] = []
     try:
         catalog = await gateway.catalog("provider")
@@ -2419,20 +2848,22 @@ def _pass(
     checks: list[CapabilityCheck],
     observations: Mapping[str, Any],
 ) -> TrustedDriverResult:
+    # Legacy action paths have an exact launch locator but no control-owned
+    # terminal output/receipt projection. Returning PASS here would let the
+    # driver bless its own assertions without independent reconciliation.
     return TrustedDriverResult(
         schema_version="my-data-hub-operational-kaggle-driver-result.v2",
         phase=request.phase,
-        outcome="PASS",
+        outcome="FAIL",
         scenario=request.scenario,
         task_run_id=request.task_run_id,
-        provider_ref=locator.provider_ref,
-        provider_run_ref=locator.provider_run_ref,
-        provider_kernel_id=locator.provider_kernel_id,
-        source_version=locator.source_version,
-        source_sha256=locator.source_sha256,
         mutations_started=1,
-        capability_checks=tuple(checks),
-        observation_sha256=_sha(dict(observations)),
+        capability_checks=tuple(
+            [*checks, _check("control-reconciliation", "FAIL", "CONTROL_OUTPUT_RECEIPT_MISSING")]
+        ),
+        observation_sha256=_sha(
+            {**dict(observations), "untrusted_locator_sha256": _sha(locator.model_dump(mode="json"))}
+        ),
     )
 
 
@@ -2929,16 +3360,10 @@ async def _execute_fm20(
 async def execute(request: DriverRequest, gateway: McpGateway) -> TrustedDriverResult:
     if request.phase == "CLEANUP":
         return await _execute_cleanup(request, gateway)
+    if request.phase == "RECONCILE":
+        return await _execute_reconcile(request, gateway)
     spec = EXECUTORS[request.ordinal - 1]
     checks: list[CapabilityCheck] = []
-    if not modern_token_configured():
-        return _blocked(
-            request,
-            checks=[_check("kaggle-token", "BLOCKED", "KAGGLE_MODERN_API_TOKEN_REQUIRED")],
-            code="KAGGLE_MODERN_API_TOKEN_REQUIRED",
-            dependency="KAGGLE_API_TOKEN or a regular non-symlinked access_token",
-        )
-    checks.append(_check("kaggle-token", "PASS", "KAGGLE_MODERN_API_TOKEN_PRESENT", {"present": True}))
     for profile in spec.profiles:
         try:
             catalog = await gateway.catalog(profile)
@@ -2980,6 +3405,14 @@ async def execute(request: DriverRequest, gateway: McpGateway) -> TrustedDriverR
             dependency=f"bounded {spec.probe} production observation ({type(exc).__name__})",
         )
     checks.extend(probe_checks)
+    if request.requirement_id in {"FM08", "FM10", "FM11", "FM24"}:
+        return await _execute_master_acceptance_scenario(
+            request,
+            spec,
+            gateway,
+            checks=checks,
+            observations=observations,
+        )
     if request.requirement_id == "FM20":
         return await _execute_fm20(request, spec, gateway, checks=checks)
     if request.requirement_id in {"FM01", "FM02", "FM03", "FM22", "FM23"}:
