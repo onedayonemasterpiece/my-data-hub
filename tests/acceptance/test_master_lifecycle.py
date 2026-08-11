@@ -359,6 +359,7 @@ class FixedEffects:
                 request_count=20,
                 operation_ids=(UUID(int=1),) * 20,
                 provider_run_refs=("owner/run/1",) * 20,
+                provider_kernel_ids=(1,) * 20,
                 epochs=(1,) * 20,
             ),
         ),

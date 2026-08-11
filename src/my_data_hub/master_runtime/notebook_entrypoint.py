@@ -32,6 +32,7 @@ from my_data_hub.acceptance.master_lifecycle import (
     MasterAcceptanceRuntimeEffects,
     execute_master_acceptance_command,
 )
+from my_data_hub.acceptance.master_production import ProductionMasterAcceptanceEffectsFactory
 from my_data_hub.checkpoints import load_and_verify, restore_physical_archive
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.db.migrations import migrate
@@ -1221,6 +1222,7 @@ def run_master(
     *,
     checkpoint_coordinator: RuntimeCheckpointCoordinator | None = None,
     acceptance_effects: MasterAcceptanceRuntimeEffects | None = None,
+    acceptance_effects_factory: ProductionMasterAcceptanceEffectsFactory | None = None,
     process_started_at: float | None = None,
 ) -> int:
     # Direct callers get the same entry-bound budget as ``main``.  ``main``
@@ -1477,6 +1479,17 @@ def run_master(
         gate_connection.close()
         raise
     issued_principals = set(session_principals)
+    if acceptance_effects is not None and acceptance_effects_factory is not None:
+        raise ValueError("provide either acceptance effects or its production factory, not both")
+    if acceptance_effects_factory is not None:
+        # Build only after the exact epoch is ACTIVE and its local PostgreSQL
+        # connection exists.  This prevents a preboot request from receiving a
+        # generic connection/clock/fault payload and keeps the ordinary launch
+        # path free of test-only effects.
+        acceptance_effects = acceptance_effects_factory.build(
+            connection=gate_connection,
+            boot_source=config.boot_source.value,
+        )
     current_lease = ready.lease_until
     blogger_receipt: BloggerImportStageReceipt | None = None
     embedding_receipt: EmbeddingProductionStageReceipt | None = None

@@ -138,11 +138,18 @@ class ConcurrentEnsureEvidence(_Evidence):
     request_count: Literal[20]
     operation_ids: tuple[UUID, ...] = Field(min_length=20, max_length=20)
     provider_run_refs: tuple[str, ...] = Field(min_length=20, max_length=20)
+    provider_kernel_ids: tuple[int, ...] = Field(min_length=20, max_length=20)
     epochs: tuple[int, ...] = Field(min_length=20, max_length=20)
 
     @model_validator(mode="after")
     def single_effect(self) -> ConcurrentEnsureEvidence:
-        if len(set(self.operation_ids)) != 1 or len(set(self.provider_run_refs)) != 1 or len(set(self.epochs)) != 1:
+        if (
+            len(set(self.operation_ids)) != 1
+            or len(set(self.provider_run_refs)) != 1
+            or len(set(self.provider_kernel_ids)) != 1
+            or self.provider_kernel_ids[0] < 1
+            or len(set(self.epochs)) != 1
+        ):
             raise ValueError("20 same-key ensures did not converge to one operation, run, and epoch")
         return self
 

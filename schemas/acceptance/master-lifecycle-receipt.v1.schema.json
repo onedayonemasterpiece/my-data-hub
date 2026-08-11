@@ -155,6 +155,15 @@
           "title": "Provider Run Refs",
           "type": "array"
         },
+        "provider_kernel_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 20,
+          "minItems": 20,
+          "title": "Provider Kernel Ids",
+          "type": "array"
+        },
         "epochs": {
           "items": {
             "type": "integer"
@@ -170,6 +179,7 @@
         "request_count",
         "operation_ids",
         "provider_run_refs",
+        "provider_kernel_ids",
         "epochs"
       ],
       "title": "ConcurrentEnsureEvidence",
