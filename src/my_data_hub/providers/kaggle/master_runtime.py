@@ -97,6 +97,7 @@ class KaggleMasterLaunchAssets:
     def render_values(self, identity: Mapping[str, Any]) -> dict[str, str]:
         values = {
             "MY_DATA_HUB_CALLBACK_URL": self.callback_url,
+            "MY_DATA_HUB_OPERATION_ID": str(identity["operation_id"]),
             "MY_DATA_HUB_RUN_ID": str(identity["run_id"]),
             "MY_DATA_HUB_ATTEMPT_ID": str(identity["attempt_id"]),
             "MY_DATA_HUB_SERVICE_INSTANCE_ID": str(identity["service_instance_id"]),
