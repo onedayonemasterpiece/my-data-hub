@@ -129,7 +129,10 @@ jobs:
       - name: Verify disposable database reader/editor
         run: python scripts/verify_db_operator.py
       - name: Verify synthetic connector exactly-once flow
-        run: python scripts/verify_connector_flow.py --bootstrap-disposable-epoch
+        run: >-
+          python scripts/verify_connector_flow.py
+          --bootstrap-disposable-epoch
+          --bootstrap-disposable-checkpoint
       - name: Import MCP v2 server contract
         run: python -c "from my_data_hub.config import Settings; from my_data_hub.mcp.server import create_server; assert create_server(Settings.from_env()) is not None"
       - name: Write PostgreSQL integration receipt

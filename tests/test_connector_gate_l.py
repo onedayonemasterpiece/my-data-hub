@@ -49,3 +49,13 @@ def test_live_connector_verifier_requires_durable_complete_not_acceptance() -> N
     assert 'eventual_durability["state"] == "DURABLE_COMPLETE"' in source
     assert '"durable_complete_count"' in source
     assert 'recovery_summary.deferred == 1' in source
+
+
+def test_ci_checkpoint_fixture_is_explicit_and_never_the_live_default() -> None:
+    source = (ROOT / "scripts/verify_connector_flow.py").read_text()
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    assert '"--bootstrap-disposable-checkpoint"' in source
+    assert "if args.bootstrap_disposable_checkpoint:" in source
+    assert "synthetic_disposable_ci" in source
+    assert "live_external_gateway_required" in source
+    assert "--bootstrap-disposable-checkpoint" in workflow

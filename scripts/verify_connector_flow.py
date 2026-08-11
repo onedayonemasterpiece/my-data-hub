@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import atexit
 import json
 import os
@@ -16,11 +17,15 @@ from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from my_data_hub.connectors.contracts import (
+    ConnectorCheckpointRequest,
+    ConnectorCheckpointState,
+    ConnectorCheckpointStatusReceipt,
     ConnectorDurabilityState,
     ConnectorReceipt,
     canonical_json_bytes,
     payload_sha256,
 )
+from my_data_hub.connectors.durability import ConnectorDurabilityService
 from my_data_hub.connectors.postgres import (
     PostgresConnectorAcceptanceRepository,
     PostgresDailyStatisticsCommitter,
@@ -154,6 +159,14 @@ def main() -> int:
         default=os.getenv("MY_DATA_HUB_ROLE_ADMIN_DATABASE_URL", ""),
     )
     parser.add_argument("--bootstrap-disposable-epoch", action="store_true")
+    parser.add_argument(
+        "--bootstrap-disposable-checkpoint",
+        action="store_true",
+        help=(
+            "complete durability with an explicit synthetic checkpoint fixture; "
+            "CI-only and never live evidence"
+        ),
+    )
     parser.add_argument("--sequence", type=int, default=None)
     parser.add_argument("--durability-timeout-seconds", type=float, default=0.0)
     args = parser.parse_args()
@@ -333,6 +346,50 @@ def main() -> int:
         eventual_acceptance = ConnectorReceipt.model_validate_json(accepted_files[0].read_bytes())
         eventual_commit = committer.commit(eventual_acceptance.batch_id)
         eventual_replay = committer.commit(eventual_acceptance.batch_id)
+        if args.bootstrap_disposable_checkpoint:
+            if not args.bootstrap_disposable_epoch:
+                raise SystemExit(
+                    "synthetic checkpoint bootstrap requires the disposable epoch fixture"
+                )
+
+            class DisposableCheckpointGateway:
+                """Exact CI fixture; it is never constructed by the live verifier path."""
+
+                def __init__(self) -> None:
+                    self.request: ConnectorCheckpointRequest | None = None
+
+                def request_checkpoint(
+                    self, request: ConnectorCheckpointRequest
+                ) -> ConnectorCheckpointStatusReceipt:
+                    self.request = request
+                    return ConnectorCheckpointStatusReceipt(
+                        request_id=request.request_id,
+                        operation_id=f"disposable-ci:{request.request_id}",
+                        state=ConnectorCheckpointState.REQUESTED,
+                        canonical_revision=request.canonical_revision,
+                    )
+
+                def checkpoint_status(
+                    self, operation_id: str
+                ) -> ConnectorCheckpointStatusReceipt:
+                    request = self.request
+                    if request is None or operation_id != f"disposable-ci:{request.request_id}":
+                        raise RuntimeError("disposable checkpoint operation identity changed")
+                    return ConnectorCheckpointStatusReceipt(
+                        request_id=request.request_id,
+                        operation_id=operation_id,
+                        state=ConnectorCheckpointState.DURABLE_COMPLETE,
+                        canonical_revision=request.canonical_revision,
+                        checkpoint_id=f"disposable-ci:{request.canonical_revision}",
+                        manifest_sha256=request.exact_sha256(),
+                        verified_at=datetime.now(UTC),
+                    )
+
+            asyncio.run(
+                ConnectorDurabilityService(
+                    repository, DisposableCheckpointGateway()
+                ).advance(eventual_acceptance.batch_id)
+            )
         deadline = time.monotonic() + max(0.0, args.durability_timeout_seconds)
         durability_summary = ConnectorDeliveryService(
             restarted_spool, IntakeTransport()
@@ -417,6 +474,11 @@ def main() -> int:
             "semantic_quarantine": counts[5],
         },
         "outage_restart": {
+            "checkpoint_evidence_class": (
+                "synthetic_disposable_ci"
+                if args.bootstrap_disposable_checkpoint
+                else "live_external_gateway_required"
+            ),
             "first_delivery_deferred": outage_summary.deferred,
             "acceptance_deferred": recovery_summary.deferred,
             "durable_complete_count": durability_summary.delivered,
