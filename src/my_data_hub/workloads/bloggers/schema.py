@@ -46,8 +46,19 @@ SOURCE_QUERY = (
     + ", ".join(f"`{name}`" for name in SOURCE_COLUMNS)
     + f" FROM `{SOURCE_TABLE}` ORDER BY `record_id`;"
 )
-# Owner-approved normalized query identity recovered from the exact donor schema.
-SOURCE_QUERY_SHA256 = "25dc6aafe54c0b89097d0604455cbe5f240bc4ad5da0239afeda1db0867b3937"
+
+
+def source_query_sha256(query: str) -> str:
+    """Fingerprint the exact UTF-8 query bytes sent to YDB.
+
+    No whitespace, quoting, or case normalization is applied.  This keeps import
+    identities and receipts bound to the statement that was actually executed.
+    """
+
+    return hashlib.sha256(query.encode("utf-8")).hexdigest()
+
+
+SOURCE_QUERY_SHA256 = source_query_sha256(SOURCE_QUERY)
 
 
 class BloggerSourceError(ValueError):
@@ -174,13 +185,12 @@ class BloggerSourceRow:
         return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
 
-def assert_query_identity() -> None:
-    """Protect the reviewed query identity from casual textual changes.
-
-    The normalized owner receipt predates this module. The literal text is also
-    hashed and exposed for receipts, but the authoritative normalized hash is the
-    fixed constant above.
-    """
+def assert_query_identity(query: str | None = None, claimed_sha256: str | None = None) -> None:
+    """Require a query to match its claimed exact-byte fingerprint and row shape."""
 
     if tuple(field.name for field in fields(BloggerSourceRow)) != SOURCE_COLUMNS:
         raise AssertionError("dataclass and exact source column order diverged")
+    actual_query = SOURCE_QUERY if query is None else query
+    expected = SOURCE_QUERY_SHA256 if claimed_sha256 is None else claimed_sha256
+    if source_query_sha256(actual_query) != expected:
+        raise AssertionError("executed query bytes differ from the claimed query fingerprint")

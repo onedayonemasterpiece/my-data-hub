@@ -14,7 +14,7 @@ from uuid import UUID, uuid5
 
 from psycopg.types.json import Jsonb
 
-from .schema import SOURCE_DATABASE_PATH, SOURCE_TABLE, BloggerSourceRow
+from .schema import SOURCE_DATABASE_PATH, SOURCE_QUERY_SHA256, SOURCE_TABLE, BloggerSourceRow
 from .transform import BloggerDisposition, BloggerProjection
 
 _OBJECT_NAMESPACE = UUID("1e783e11-4872-58ef-a123-096f40890d51")
@@ -125,7 +125,7 @@ class PostgresBloggerWriter:
                 project_id,
                 projection.actor_id,
                 self.mapping_version,
-                "sha256:25dc6aafe54c0b89097d0604455cbe5f240bc4ad5da0239afeda1db0867b3937",
+                f"sha256:{SOURCE_QUERY_SHA256}",
                 f"ydb://{SOURCE_DATABASE_PATH}/{SOURCE_TABLE}/{row.record_id}",
                 row.updated_at,
                 Jsonb({"export_batch_id": str(export_batch_id), "payload_sha256": row.payload_sha256}),

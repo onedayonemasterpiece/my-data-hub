@@ -145,6 +145,8 @@ class BloggerSnapshotImporter:
                     accumulator.add(row, replace(projection, disposition=outcome.disposition))
                     outcomes.append(outcome)
                 export = accumulator.finish(expected_row_count=expected_row_count)
+                if not export.complete:
+                    raise ValueError("source accounting is not complete")
                 accounting = cursor.execute(
                     """
                     SELECT raw_count,undispositioned_count,quarantined_count
@@ -159,6 +161,10 @@ class BloggerSnapshotImporter:
                     "WHERE export_batch_id=%s AND decision_status='pending'",
                     (batch_id,),
                 ).fetchone()[0]
+                if duplicate_count:
+                    raise ValueError(
+                        f"duplicate decision accounting failed: {duplicate_count} pending group(s)"
+                    )
                 actor_count = cursor.execute(
                     "SELECT count(*) FROM region_talk.blogger_profile WHERE export_batch_id=%s",
                     (batch_id,),

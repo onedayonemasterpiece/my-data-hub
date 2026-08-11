@@ -205,6 +205,7 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
             assert first_import.accounting_complete
             assert not first_import.durable_complete
             assert first_import.replayed_count == 0
+            assert first_import.canonical_revision == 1
             replay = BloggerSnapshotImporter().import_rows(
                 migration,
                 project_id=project_id,
@@ -215,13 +216,39 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
             )
             assert replay.replayed_count == 1
             assert replay.canonical_revision == first_import.canonical_revision
+
+            duplicate_row = {
+                **blogger_row,
+                "record_id": "live-test-duplicate",
+                "batch_id": "live-batch-duplicate",
+                "blogger_name": "Другой тестовый автор",
+                "evidence_url": "https://example.test/evidence/live-test-duplicate",
+            }
+            with pytest.raises(ValueError, match="duplicate decision"):
+                BloggerSnapshotImporter().import_rows(
+                    migration,
+                    project_id=project_id,
+                    snapshot_at=datetime(2026, 8, 11, 0, 0, 1, tzinfo=UTC),
+                    expected_row_count=1,
+                    rows=[duplicate_row],
+                    source_code_revision="fixture",
+                )
         with psycopg.connect(admin_url) as admin:
+            # The rejected duplicate batch rolls back canonical rows, accounting
+            # evidence, its revision advance, and its required checkpoint effect.
             assert admin.execute("SELECT count(*) FROM sync.audit_event").fetchone()[0] == 3
             assert admin.execute("SELECT count(*) FROM region_talk.bloggers_ru_v1").fetchone()[0] == 1
             assert admin.execute(
                 "SELECT count(*) FROM sync.external_outbox "
                 "WHERE aggregate_type='blogger_import' AND effect_kind='verified_checkpoint_required'"
             ).fetchone()[0] == 1
+            assert admin.execute(
+                "SELECT count(*) FROM migration.export_batch "
+                "WHERE source_scope='region-talk-bloggers-v1'"
+            ).fetchone()[0] == 1
+            assert admin.execute(
+                "SELECT count(*) FROM migration.duplicate_group"
+            ).fetchone()[0] == 0
             state = admin.execute(
                 "SELECT highest_epoch,current_epoch,gate_state FROM master_control.epoch_state"
             ).fetchone()
@@ -229,6 +256,9 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
             assert admin.execute(
                 "SELECT schema_revision FROM hub.canonical_state WHERE singleton"
             ).fetchone()[0] == 12
+            assert admin.execute(
+                "SELECT canonical_revision FROM hub.canonical_state WHERE singleton"
+            ).fetchone()[0] == first_import.canonical_revision
             assert admin.execute("SELECT count(*) FROM search.embedding_model").fetchone()[0] == 2
             assert admin.execute(
                 "SELECT count(*) FROM pg_indexes WHERE schemaname='search' AND indexdef ILIKE '%hnsw%'"

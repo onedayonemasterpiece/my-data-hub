@@ -13,6 +13,7 @@ from my_data_hub.workloads.bloggers.schema import (
     BloggerSourceError,
     BloggerSourceRow,
     assert_query_identity,
+    source_query_sha256,
 )
 from my_data_hub.workloads.bloggers.transform import BloggerDisposition, transform_row
 
@@ -51,12 +52,20 @@ def source_row(**changes: object) -> dict[str, object]:
     return value
 
 
-def test_exact_27_column_query_and_owner_hash_are_fixed() -> None:
+def test_exact_27_column_query_and_executed_byte_hash_are_fixed() -> None:
     assert_query_identity()
     assert len(SOURCE_COLUMNS) == 27
     assert SOURCE_QUERY.endswith("ORDER BY `record_id`;")
     assert "LIMIT" not in SOURCE_QUERY and "SELECT *" not in SOURCE_QUERY
-    assert SOURCE_QUERY_SHA256 == "25dc6aafe54c0b89097d0604455cbe5f240bc4ad5da0239afeda1db0867b3937"
+    assert SOURCE_QUERY_SHA256 == "ef94cf114fea0e2f89418c5dacbc289e5c2d21f6935883c2b685ec4f64bd0e50"
+    assert source_query_sha256(SOURCE_QUERY) == SOURCE_QUERY_SHA256
+
+
+def test_query_mutation_cannot_retain_the_claimed_executed_byte_hash() -> None:
+    mutated = SOURCE_QUERY + " "
+    assert source_query_sha256(mutated) != SOURCE_QUERY_SHA256
+    with pytest.raises(AssertionError, match="executed query bytes"):
+        assert_query_identity(mutated, SOURCE_QUERY_SHA256)
 
 
 def test_unknown_or_missing_source_field_is_not_silently_discarded() -> None:

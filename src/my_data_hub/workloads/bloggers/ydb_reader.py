@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-from .schema import SOURCE_COLUMNS, SOURCE_QUERY
+from .schema import SOURCE_COLUMNS, SOURCE_QUERY, SOURCE_QUERY_SHA256, assert_query_identity
 
 ZERO_ROW_WRITE_DENIAL_PROBE = (
     "UPDATE `region_talk_external_blogger_evidence` SET blogger_name = blogger_name "
@@ -36,6 +36,7 @@ class YdbBloggerSnapshot:
         import ydb
         from ydb import convert
 
+        assert_query_identity(SOURCE_QUERY, SOURCE_QUERY_SHA256)
         pool = ydb.QuerySessionPool(self.driver, size=1)
         try:
             with pool.checkout(timeout=self.acquire_timeout_seconds) as session:
