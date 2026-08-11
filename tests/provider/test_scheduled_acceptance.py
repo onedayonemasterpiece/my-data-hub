@@ -221,6 +221,20 @@ def test_existing_checkpoint_status_blocks_when_exact_refs_and_freshness_interfa
     assert values["checkpoint_freshness"].blocker_code == "CHECKPOINT_VERIFIED_AT_API_MISSING"
 
 
+def test_absent_master_is_healthy_and_does_not_invent_a_stale_epoch() -> None:
+    observations = complete_observations()
+    observations.master_status = {
+        "master_state": "ABSENT",
+        "master_epoch": None,
+        "lease_expires_at": None,
+    }
+
+    check = acceptance._master_checks(observations, now=NOW)[0]
+
+    assert check.outcome is acceptance.Outcome.PASS
+    assert check.observed == {"state": "ABSENT", "stale_active_epoch": False}
+
+
 def test_bad_lifecycle_cleanup_is_a_failure_not_a_success_claim() -> None:
     observations = complete_observations()
     observations.lifecycle_receipts["dataset"] = {

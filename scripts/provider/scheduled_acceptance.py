@@ -229,17 +229,40 @@ def _master_checks(observations: Observations, *, now: datetime) -> list[Check]:
     status = observations.master_status
     if status is None:
         return [_component_blocker(observations, "mcp", "master_active_epoch", "DEPLOYMENT")]
+    state = status.get("state", status.get("master_state"))
+    if state in {"ABSENT", "STOPPED"}:
+        return [
+            Check(
+                "master_active_epoch",
+                "DEPLOYMENT",
+                Outcome.PASS,
+                {"state": state, "stale_active_epoch": False},
+            )
+        ]
+    if state != "ACTIVE":
+        return [
+            _blocked(
+                "master_active_epoch",
+                "DEPLOYMENT",
+                "MASTER_TRANSITION_FRESHNESS_API_MISSING",
+                "master.status transition age/deadline for nonterminal states",
+            )
+        ]
     epoch = status.get("master_epoch", status.get("epoch"))
     lease = _parse_time(status.get("lease_expires_at"))
-    active = status.get("state") == "ACTIVE" or status.get("master_state") == "ACTIVE"
     valid_epoch = isinstance(epoch, int) and not isinstance(epoch, bool) and epoch >= 1
     lease_current = lease is not None and lease > now
     return [
         Check(
             "master_active_epoch",
             "DEPLOYMENT",
-            Outcome.PASS if active and valid_epoch and lease_current else Outcome.FAIL,
-            {"active": active, "epoch_present": valid_epoch, "lease_current": lease_current},
+            Outcome.PASS if valid_epoch and lease_current else Outcome.FAIL,
+            {
+                "state": state,
+                "epoch_present": valid_epoch,
+                "lease_current": lease_current,
+                "stale_active_epoch": not (valid_epoch and lease_current),
+            },
         )
     ]
 

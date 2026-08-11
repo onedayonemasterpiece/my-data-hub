@@ -74,3 +74,8 @@ my-data-hub refs. Unknown account resources remain `external_read_only`; they ar
 reported as a bounded count and are never mislabeled as task orphans or used to
 fail the system-private-resource gate. A focused regression test covers an
 unrelated public account resource alongside one private registered resource.
+
+A second integration correction treats `master=ABSENT`/`STOPPED` as healthy
+cold states rather than stale epochs. ACTIVE still requires a positive epoch and
+future lease; transitional states fail closed as BLOCKED until `master.status`
+exposes transition-age/deadline evidence.
