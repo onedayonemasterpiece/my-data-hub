@@ -25,6 +25,8 @@ jobs:
     # workflow_dispatch can name another ref. Never run repository code or expose
     # credentials unless GitHub says this invocation came from the default branch.
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    environment:
+      name: devstand
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:

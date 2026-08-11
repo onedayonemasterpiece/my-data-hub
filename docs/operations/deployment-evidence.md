@@ -138,6 +138,12 @@ commit reachable from that branch, and scopes reader/evidence inputs only to the
 step. Its MCP resource and authorization-server origins are fixed owner contracts, not
 workflow inputs.
 
+Store the reader token and public evidence-key configuration in the `devstand` GitHub
+Environment, not as unrestricted repository secrets. Restrict that Environment to the
+default branch and require the repository's deployment approval policy before adding live
+credentials. The workflow's default-branch and approved-merge gates are defense in depth,
+not a substitute for Environment protection.
+
 Supply the fresh signed JSON as `deployment_evidence_receipt`, its key ID as
 `deployment_evidence_key_id`, and the exact deployed merge SHA as `expected_commit`. The
 remote verifier independently checks the signature, exact source/commit, equal
