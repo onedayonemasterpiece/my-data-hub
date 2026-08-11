@@ -1,0 +1,293 @@
+{
+  "blocked_scenarios": 24,
+  "blockers": [
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "operational driver must create/read/delete a disposable private Dataset"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "operational driver must run and clean a disposable private Notebook"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "runtime event observation API with exact run and epoch identity"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "disposable empty-master bootstrap action and status API"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "checkpoint publish/readback/restore action API"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "cold-restore action API with exact checkpoint identity"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "20-way concurrent master.ensure client and provider inventory"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "callback-loss fault injector and restart-safe reconciliation"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "callback and output replay fault injector"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "lease clock/fault control and real write admission probe"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "split-brain old-run resume injector and admission probes"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "clean drain/checkpoint/stop action API"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "forced rotation action API"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "checkpoint corruption fault injector"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "restore-smoke failure injector"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "production YDB export plus migration-operator preview/apply"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "post-import checkpoint restore and logical equality query"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "E5 worker submission and embedding import status interface"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "BGE-M3 worker submission and embedding import status interface"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "remote reader MCP plus host reboot controller"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "controlled business row and owner/operator MCP credential"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "provider-operator MCP credential and lifecycle tools"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "operator acceptance probe for protected provider resources"
+    },
+    {
+      "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
+      "integration_dependency": "60-90 minute soak controller with session rotation"
+    }
+  ],
+  "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "completed_at": "2026-08-11T07:17:33.407456+00:00",
+  "distinct_provider_kernel_ids": [],
+  "distinct_provider_run_refs": [],
+  "failed_scenarios": 0,
+  "lifecycle_gates": {
+    "abrupt_master_terminations": 0,
+    "clean_rotations": 0,
+    "control_plane_restarts": 0,
+    "host_reboots": 0,
+    "master_boots": 0,
+    "soak_duration_seconds": 0,
+    "soak_runs": 0
+  },
+  "live_evidence": false,
+  "matrix_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "matrix_scope": "operational_24_scenario",
+  "minimum_distinct_provider_runs": 15,
+  "outcome": "BLOCKED",
+  "passed_scenarios": 0,
+  "planned_scenarios": 24,
+  "scenario_receipts": [
+    {
+      "ordinal": 1,
+      "outcome": "BLOCKED",
+      "receipt": "01-private-dataset-create-readback-delete.json",
+      "requirement_id": "FM01",
+      "scenario": "private-dataset-create-readback-delete"
+    },
+    {
+      "ordinal": 2,
+      "outcome": "BLOCKED",
+      "receipt": "02-private-notebook-source-run-output-delete.json",
+      "requirement_id": "FM02",
+      "scenario": "private-notebook-source-run-output-delete"
+    },
+    {
+      "ordinal": 3,
+      "outcome": "BLOCKED",
+      "receipt": "03-runtime-callback-heartbeat-terminal.json",
+      "requirement_id": "FM03",
+      "scenario": "runtime-callback-heartbeat-terminal"
+    },
+    {
+      "ordinal": 4,
+      "outcome": "BLOCKED",
+      "receipt": "04-empty-postgresql-master-bootstrap.json",
+      "requirement_id": "FM04",
+      "scenario": "empty-postgresql-master-bootstrap"
+    },
+    {
+      "ordinal": 5,
+      "outcome": "BLOCKED",
+      "receipt": "05-verified-empty-checkpoint-roundtrip.json",
+      "requirement_id": "FM05",
+      "scenario": "verified-empty-checkpoint-roundtrip"
+    },
+    {
+      "ordinal": 6,
+      "outcome": "BLOCKED",
+      "receipt": "06-cold-master-restore.json",
+      "requirement_id": "FM06",
+      "scenario": "cold-master-restore"
+    },
+    {
+      "ordinal": 7,
+      "outcome": "BLOCKED",
+      "receipt": "07-concurrent-ensure-master-single-run.json",
+      "requirement_id": "FM07",
+      "scenario": "concurrent-ensure-master-single-run"
+    },
+    {
+      "ordinal": 8,
+      "outcome": "BLOCKED",
+      "receipt": "08-callback-loss-status-output-recovery.json",
+      "requirement_id": "FM08",
+      "scenario": "callback-loss-status-output-recovery"
+    },
+    {
+      "ordinal": 9,
+      "outcome": "BLOCKED",
+      "receipt": "09-duplicate-stale-callback-output-rejection.json",
+      "requirement_id": "FM09",
+      "scenario": "duplicate-stale-callback-output-rejection"
+    },
+    {
+      "ordinal": 10,
+      "outcome": "BLOCKED",
+      "receipt": "10-lease-expiry-write-gate-closes.json",
+      "requirement_id": "FM10",
+      "scenario": "lease-expiry-write-gate-closes"
+    },
+    {
+      "ordinal": 11,
+      "outcome": "BLOCKED",
+      "receipt": "11-old-epoch-return-fenced.json",
+      "requirement_id": "FM11",
+      "scenario": "old-epoch-return-fenced"
+    },
+    {
+      "ordinal": 12,
+      "outcome": "BLOCKED",
+      "receipt": "12-clean-drain-checkpoint-stop.json",
+      "requirement_id": "FM12",
+      "scenario": "clean-drain-checkpoint-stop"
+    },
+    {
+      "ordinal": 13,
+      "outcome": "BLOCKED",
+      "receipt": "13-forced-rotation-new-run-epoch.json",
+      "requirement_id": "FM13",
+      "scenario": "forced-rotation-new-run-epoch"
+    },
+    {
+      "ordinal": 14,
+      "outcome": "BLOCKED",
+      "receipt": "14-corrupt-candidate-head-preserved.json",
+      "requirement_id": "FM14",
+      "scenario": "corrupt-candidate-head-preserved"
+    },
+    {
+      "ordinal": 15,
+      "outcome": "BLOCKED",
+      "receipt": "15-restore-smoke-failure-head-preserved.json",
+      "requirement_id": "FM15",
+      "scenario": "restore-smoke-failure-head-preserved"
+    },
+    {
+      "ordinal": 16,
+      "outcome": "BLOCKED",
+      "receipt": "16-full-ydb-blogger-import-checkpoint.json",
+      "requirement_id": "FM16",
+      "scenario": "full-ydb-blogger-import-checkpoint"
+    },
+    {
+      "ordinal": 17,
+      "outcome": "BLOCKED",
+      "receipt": "17-post-import-cold-restore-equality.json",
+      "requirement_id": "FM17",
+      "scenario": "post-import-cold-restore-equality"
+    },
+    {
+      "ordinal": 18,
+      "outcome": "BLOCKED",
+      "receipt": "18-e5-corpus-worker-transactional-import.json",
+      "requirement_id": "FM18",
+      "scenario": "e5-corpus-worker-transactional-import"
+    },
+    {
+      "ordinal": 19,
+      "outcome": "BLOCKED",
+      "receipt": "19-bge-m3-corpus-worker-transactional-import.json",
+      "requirement_id": "FM19",
+      "scenario": "bge-m3-corpus-worker-transactional-import"
+    },
+    {
+      "ordinal": 20,
+      "outcome": "BLOCKED",
+      "receipt": "20-remote-mcp-cold-start-blogger-search.json",
+      "requirement_id": "FM20",
+      "scenario": "remote-mcp-cold-start-blogger-search"
+    },
+    {
+      "ordinal": 21,
+      "outcome": "BLOCKED",
+      "receipt": "21-owner-preview-apply-checkpoint-receipt.json",
+      "requirement_id": "FM21",
+      "scenario": "owner-preview-apply-checkpoint-receipt"
+    },
+    {
+      "ordinal": 22,
+      "outcome": "BLOCKED",
+      "receipt": "22-mcp-managed-provider-lifecycle-cleanup.json",
+      "requirement_id": "FM22",
+      "scenario": "mcp-managed-provider-lifecycle-cleanup"
+    },
+    {
+      "ordinal": 23,
+      "outcome": "BLOCKED",
+      "receipt": "23-protected-kaggle-mutation-denial.json",
+      "requirement_id": "FM23",
+      "scenario": "protected-kaggle-mutation-denial"
+    },
+    {
+      "ordinal": 24,
+      "outcome": "BLOCKED",
+      "receipt": "24-accelerated-session-rotation-soak.json",
+      "requirement_id": "FM24",
+      "scenario": "accelerated-session-rotation-soak"
+    }
+  ],
+  "schema_version": "my-data-hub-operational-kaggle-matrix-receipt.v1"
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/provider/operational-kaggle-matrix-receipt.v1.schema.json",
+  "title": "Operational Kaggle 24-scenario summary receipt v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "matrix_id", "commit_sha", "matrix_scope", "outcome", "live_evidence", "minimum_distinct_provider_runs", "planned_scenarios", "passed_scenarios", "failed_scenarios", "blocked_scenarios", "distinct_provider_run_refs", "distinct_provider_kernel_ids", "lifecycle_gates", "scenario_receipts", "blockers", "completed_at"],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-operational-kaggle-matrix-receipt.v1"},
+    "matrix_id": {"type": "string", "format": "uuid"}, "commit_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "matrix_scope": {"const": "operational_24_scenario"}, "outcome": {"enum": ["PASS", "FAIL", "BLOCKED"]}, "live_evidence": {"type": "boolean"},
+    "minimum_distinct_provider_runs": {"const": 15}, "planned_scenarios": {"const": 24},
+    "passed_scenarios": {"type": "integer", "minimum": 0, "maximum": 24}, "failed_scenarios": {"type": "integer", "minimum": 0, "maximum": 24}, "blocked_scenarios": {"type": "integer", "minimum": 0, "maximum": 24},
+    "distinct_provider_run_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$"}},
+    "distinct_provider_kernel_ids": {"type": "array", "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
+    "lifecycle_gates": {"type": "object", "additionalProperties": false, "required": ["master_boots", "clean_rotations", "abrupt_master_terminations", "control_plane_restarts", "host_reboots", "soak_runs", "soak_duration_seconds"], "properties": {
+      "master_boots": {"type": "integer", "minimum": 0}, "clean_rotations": {"type": "integer", "minimum": 0}, "abrupt_master_terminations": {"type": "integer", "minimum": 0},
+      "control_plane_restarts": {"type": "integer", "minimum": 0}, "host_reboots": {"type": "integer", "minimum": 0}, "soak_runs": {"type": "integer", "minimum": 0}, "soak_duration_seconds": {"type": "integer", "minimum": 0}
+    }},
+    "scenario_receipts": {"type": "array", "minItems": 24, "maxItems": 24, "items": {"type": "object", "additionalProperties": false, "required": ["ordinal", "requirement_id", "scenario", "outcome", "receipt"], "properties": {
+      "ordinal": {"type": "integer", "minimum": 1, "maximum": 24}, "requirement_id": {"type": "string", "pattern": "^FM(0[1-9]|1[0-9]|2[0-4])$"}, "scenario": {"type": "string", "pattern": "^[a-z0-9-]+$"}, "outcome": {"enum": ["PASS", "FAIL", "BLOCKED"]}, "receipt": {"type": "string", "pattern": "^[0-9]{2}-[a-z0-9-]+\\.json$"}
+    }}},
+    "blockers": {"type": "array", "items": {"type": "object"}}, "completed_at": {"type": "string", "format": "date-time"}
+  },
+  "allOf": [
+    {"if": {"properties": {"outcome": {"const": "PASS"}}}, "then": {"properties": {"live_evidence": {"const": true}, "passed_scenarios": {"const": 24}, "failed_scenarios": {"const": 0}, "blocked_scenarios": {"const": 0}, "distinct_provider_run_refs": {"minItems": 15}, "distinct_provider_kernel_ids": {"minItems": 15}, "blockers": {"maxItems": 0}, "lifecycle_gates": {"properties": {"master_boots": {"minimum": 3}, "clean_rotations": {"minimum": 2}, "abrupt_master_terminations": {"minimum": 1}, "control_plane_restarts": {"minimum": 1}, "host_reboots": {"minimum": 1}, "soak_runs": {"minimum": 1}, "soak_duration_seconds": {"minimum": 3600, "maximum": 5400}}}}}},
+    {"if": {"properties": {"outcome": {"enum": ["BLOCKED", "FAIL"]}}}, "then": {"properties": {"live_evidence": {"const": false}}}}
+  ]
+}

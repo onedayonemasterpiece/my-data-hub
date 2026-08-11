@@ -1,0 +1,168 @@
+{
+  "$id": "https://schemas.my-data-hub.local/provider/operational-kaggle-driver-result.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "PASS"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "blocker_code": {
+            "type": "null"
+          },
+          "integration_dependency": {
+            "type": "null"
+          },
+          "provider_kernel_id": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "provider_ref": {
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+            "type": "string"
+          },
+          "provider_run_ref": {
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+            "type": "string"
+          },
+          "source_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "type": "string"
+          },
+          "source_version": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "BLOCKED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "blocker_code": {
+            "pattern": "^[A-Z0-9_]+$",
+            "type": "string"
+          },
+          "integration_dependency": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "provider_kernel_id": {
+            "type": "null"
+          },
+          "provider_ref": {
+            "type": "null"
+          },
+          "provider_run_ref": {
+            "type": "null"
+          },
+          "source_sha256": {
+            "type": "null"
+          },
+          "source_version": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "blocker_code": {
+      "pattern": "^[A-Z0-9_]+$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "integration_dependency": {
+      "maxLength": 500,
+      "minLength": 1,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "outcome": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "BLOCKED"
+      ]
+    },
+    "provider_kernel_id": {
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "provider_ref": {
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provider_run_ref": {
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "scenario": {
+      "pattern": "^[a-z0-9-]+$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "my-data-hub-operational-kaggle-driver-result.v1"
+    },
+    "source_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source_version": {
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "task_run_id": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "outcome",
+    "scenario",
+    "task_run_id",
+    "provider_ref",
+    "provider_run_ref",
+    "provider_kernel_id",
+    "source_version",
+    "source_sha256",
+    "blocker_code",
+    "integration_dependency"
+  ],
+  "title": "Operational driver exact run locator v1",
+  "type": "object"
+}

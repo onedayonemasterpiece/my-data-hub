@@ -1,4 +1,9 @@
-# Real Kaggle platform-smoke matrix
+# Real Kaggle platform-smoke matrix (diagnostic only)
+
+> **Not operational acceptance.** The provider workflow no longer invokes this
+> smoke matrix. The mandatory 24-scenario contract is documented in
+> [`operational-kaggle-matrix.md`](operational-kaggle-matrix.md). Nothing in
+> this document or the smoke receipts can satisfy an operational gate.
 
 This command is an **opt-in provider platform-smoke run**, not the full operational
 acceptance matrix. It is not part of the fake/unit suite and no checked-in
@@ -35,7 +40,7 @@ Only the uninjected CLI path marks receipts `live_evidence: true`. Fake-adapter 
 
 ## Invocation
 
-The `provider-real` GitHub Actions workflow performs the token preflight first and retains the plan, summary, and separate scenario receipts. A local opt-in invocation is:
+This diagnostic is local/manual only. A local opt-in invocation is:
 
 ```bash
 python scripts/provider/real_kaggle_matrix.py preflight

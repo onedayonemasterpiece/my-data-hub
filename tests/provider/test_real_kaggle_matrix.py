@@ -423,8 +423,9 @@ def test_real_matrix_contract_examples_validate(schema_name: str, example_name: 
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(example)
 
 
-def test_provider_real_workflow_runs_matrix_after_token_preflight() -> None:
+def test_provider_real_workflow_does_not_run_smoke_as_operational_acceptance() -> None:
     workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/provider-real.yml").read_text()
-    assert workflow.index("real_kaggle_matrix.py preflight") < workflow.index("real_kaggle_matrix.py matrix")
+    assert "real_kaggle_matrix.py matrix" not in workflow
+    assert workflow.index("operational_kaggle_matrix.py preflight") < workflow.index("operational_kaggle_matrix.py run")
     assert "timeout-minutes: 360" in workflow
-    assert "artifacts/kaggle-matrix-scenarios/" in workflow
+    assert "artifacts/operational-kaggle-scenarios/" in workflow
