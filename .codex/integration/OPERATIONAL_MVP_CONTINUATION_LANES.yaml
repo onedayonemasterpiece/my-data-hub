@@ -1,0 +1,68 @@
+mode: worktree_worker
+repo: /home/dev/projects/my-data-hub
+base_ref: 97c40e4e0ba28b38c69a5f028748432d3475092f
+base_branch: main@de657d63e4662e69dfb7169bc67aa65e8a9bda71
+integration_branch: integration/operational-mvp
+global_constraints:
+  - writable PostgreSQL exists only inside the protected Kaggle master
+  - no business/checkpoint bytes on devstand
+  - exactly one Kaggle transport implementation
+  - Region Talk remains paused and publication disabled
+  - no live provider/deploy action without exact credential and resource gates
+verification_owner: /root
+stop_conditions:
+  - never fabricate real Kaggle, YDB import, checkpoint, embedding, OAuth, or deploy evidence
+  - no merge/deploy until exact-head review and hosted checks are green
+lanes:
+  - id: FINAL-MATRIX-OPERATIONAL
+    role: worker
+    requirement_ids: [MATRIX, LIVE-KAGGLE]
+    target: implement the mandatory 24-scenario executable operational matrix and receipts, while real execution remains credential-gated
+    depends_on: []
+    execution_mode: parallel
+    branch: agent/operational-mvp/final-matrix-operational
+    worktree: /home/dev/.codex/worktrees/my-data-hub/final-matrix-operational
+    writable_files: [scripts/provider/, schemas/provider/, examples/provider/, tests/provider/, .github/workflows/provider-real.yml, docs/operations/, .codex/lanes/FINAL-MATRIX-OPERATIONAL/]
+    forbidden_files: [src/my_data_hub/embeddings/, src/my_data_hub/workloads/bloggers/, src/my_data_hub/control_plane/, src/my_data_hub/mcp/]
+    expected_output: committed implementation plus RESULTS.md; credential-free run exits 78 before mutation; fake scenario driver cannot claim live PASS
+    verification_scope: full_local
+    status: planned
+  - id: FINAL-EMBED-LIVE
+    role: worker
+    requirement_ids: [EMBED]
+    target: implement production embedding request/status consumer inside ACTIVE master plus vector-aware MCP coverage/search and durable checkpoint/restore lifecycle
+    depends_on: []
+    execution_mode: parallel
+    branch: agent/operational-mvp/final-embed-live
+    worktree: /home/dev/.codex/worktrees/my-data-hub/final-embed-live
+    writable_files: [src/my_data_hub/embeddings/, src/my_data_hub/control_plane/, src/my_data_hub/mcp/, src/my_data_hub/master_runtime/, control_migrations/, scripts/embeddings/, schemas/embeddings/, examples/embeddings/, tests/embeddings/, tests/control/, tests/mcp/, docs/operations/, .codex/lanes/FINAL-EMBED-LIVE/]
+    forbidden_files: [scripts/provider/real_kaggle_matrix.py, src/my_data_hub/workloads/bloggers/importer.py, .github/workflows/provider-real.yml]
+    expected_output: committed production code and tests; no fake production capability; real execution remains fail-closed without modern token and imported corpus
+    verification_scope: full_local
+    status: planned
+  - id: FINAL-YDB-QUARANTINE
+    role: worker
+    requirement_ids: [YDB-Q]
+    target: implement terminal retained/quarantine accounting for conflicting replay and malformed/oversized rows without silent loss or canonical overwrite
+    depends_on: []
+    execution_mode: parallel
+    branch: agent/operational-mvp/final-ydb-quarantine
+    worktree: /home/dev/.codex/worktrees/my-data-hub/final-ydb-quarantine
+    writable_files: [src/my_data_hub/workloads/bloggers/, src/my_data_hub/master_runtime/sql/migrations/, sql/admin/role_contract.sql, schemas/region-talk-ydb-*, examples/region-talk-ydb-*, tests/bloggers/, tests/master/, docs/operations/, .codex/lanes/FINAL-YDB-QUARANTINE/]
+    forbidden_files: [scripts/provider/, src/my_data_hub/embeddings/, src/my_data_hub/mcp/, .github/workflows/]
+    expected_output: committed append-only migration/code/tests and RESULTS.md; conflicting/malformed input has one durable terminal disposition and still blocks completion while quarantine is nonzero
+    verification_scope: full_local
+    status: planned
+  - id: FINAL-INTEGRATION-REVIEW
+    role: merge_reviewer
+    requirement_ids: [MATRIX, EMBED, YDB-Q, LIVE-KAGGLE, DEPLOY]
+    target: reconcile lanes, run exact full gates, perform XHigh audit, then execute only currently authorized real/deploy gates
+    depends_on: [FINAL-MATRIX-OPERATIONAL, FINAL-EMBED-LIVE, FINAL-YDB-QUARANTINE]
+    execution_mode: serial_after_dependency
+    branch: integration/operational-mvp
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-mvp
+    writable_files: [shared integration surfaces and evidence]
+    forbidden_files: [unknown external resources, unrelated VPN/DNS/firewall]
+    expected_output: merged/rejected lane table, exact blockers or verified operational receipt
+    verification_scope: full_local
+    status: planned
