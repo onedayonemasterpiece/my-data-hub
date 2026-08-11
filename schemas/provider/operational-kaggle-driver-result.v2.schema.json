@@ -488,6 +488,11 @@
           "title": "Canonical Revision Before",
           "type": "integer"
         },
+        "credentials_invalidated": {
+          "const": true,
+          "title": "Credentials Invalidated",
+          "type": "boolean"
+        },
         "denial_code": {
           "const": "MDH_EPOCH_LEASE_EXPIRED",
           "title": "Denial Code",
@@ -529,6 +534,7 @@
         "kind",
         "observed_wait_seconds",
         "lease_expired",
+        "credentials_invalidated",
         "bounded_operator_dml_denied",
         "transaction_state",
         "operator_operation_id",
@@ -756,6 +762,17 @@
           "title": "New Operation Id",
           "type": "string"
         },
+        "new_provider_kernel_id": {
+          "minimum": 1,
+          "title": "New Provider Kernel Id",
+          "type": "integer"
+        },
+        "new_provider_run_ref": {
+          "maxLength": 320,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "New Provider Run Ref",
+          "type": "string"
+        },
         "old_epoch": {
           "minimum": 1,
           "title": "Old Epoch",
@@ -766,6 +783,17 @@
           "title": "Old Operation Id",
           "type": "string"
         },
+        "old_provider_kernel_id": {
+          "minimum": 1,
+          "title": "Old Provider Kernel Id",
+          "type": "integer"
+        },
+        "old_provider_run_ref": {
+          "maxLength": 320,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Old Provider Run Ref",
+          "type": "string"
+        },
         "old_runtime_draining_before_rotation": {
           "const": true,
           "title": "Old Runtime Draining Before Rotation",
@@ -774,6 +802,11 @@
         "register_denied": {
           "const": true,
           "title": "Register Denied",
+          "type": "boolean"
+        },
+        "registry_resolves_new": {
+          "const": true,
+          "title": "Registry Resolves New",
           "type": "boolean"
         },
         "renew_denied": {
@@ -807,8 +840,13 @@
         "bounded_write_denied",
         "tunnel_denied",
         "new_epoch_active",
+        "registry_resolves_new",
         "old_operation_id",
         "new_operation_id",
+        "old_provider_run_ref",
+        "old_provider_kernel_id",
+        "new_provider_run_ref",
+        "new_provider_kernel_id",
         "handoff_checkpoint_id",
         "write_denial_receipt_sha256",
         "tunnel_denial_receipt_sha256"

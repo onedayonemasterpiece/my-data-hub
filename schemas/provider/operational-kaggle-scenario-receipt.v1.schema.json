@@ -401,7 +401,24 @@
           "additionalProperties": false,
           "properties": {
             "output_tree_sha256": {
-              "$ref": "#/$defs/sha"
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/sha"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "provider_claim_sha256": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/sha"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "provider_kernel_id": {
               "minimum": 1,
@@ -414,7 +431,11 @@
               "$ref": "#/$defs/provider_run_ref"
             },
             "provider_status": {
-              "const": "complete"
+              "enum": [
+                "complete",
+                "control_reconciled",
+                "control_receipt_reconciled"
+              ]
             },
             "result_sha256": {
               "$ref": "#/$defs/sha"
@@ -435,7 +456,8 @@
             "source_sha256",
             "provider_status",
             "output_tree_sha256",
-            "result_sha256"
+            "result_sha256",
+            "provider_claim_sha256"
           ],
           "type": "object"
         }

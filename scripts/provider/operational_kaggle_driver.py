@@ -54,6 +54,7 @@ from my_data_hub.acceptance.master_lifecycle import (
     CallbackLossEvidence,
     LeaseExpiryEvidence,
     MasterAcceptanceReceipt,
+    MasterProviderCarrierObservation,
     OldEpochEvidence,
     RotationSoakEvidence,
 )
@@ -111,14 +112,17 @@ class CleanupBinding(BaseModel):
     provider_kernel_id: int = Field(ge=1)
     source_version: int = Field(ge=1)
     source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    output_receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    output_file_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    output_tree_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    output_receipt_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    output_file_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    output_tree_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
     def exact_cleanup_claim(self) -> CleanupBinding:
         if (self.claim_task_id is None) != (self.claim_sha256 is None):
             raise ValueError("cleanup claim identity must be wholly present or absent")
+        outputs = (self.output_receipt_sha256, self.output_file_sha256, self.output_tree_sha256)
+        if any(value is not None for value in outputs) != all(value is not None for value in outputs):
+            raise ValueError("reconciliation output identity must be wholly present or absent")
         return self
 
 
@@ -159,6 +163,15 @@ class DriverRequest(BaseModel):
             raise ValueError("driver reconcile/cleanup phase requires one exact binding")
         if self.phase == "CLEANUP" and self.cleanup is not None and self.cleanup.claim_task_id is None:
             raise ValueError("driver cleanup phase requires an exact disposable claim")
+        if self.phase == "CLEANUP" and self.cleanup is not None and any(
+            value is None
+            for value in (
+                self.cleanup.output_receipt_sha256,
+                self.cleanup.output_file_sha256,
+                self.cleanup.output_tree_sha256,
+            )
+        ):
+            raise ValueError("driver cleanup phase requires an exact output receipt")
         return self
 
 
@@ -197,32 +210,6 @@ class DriverScenarioOutput(BaseModel):
     def exact_assertions(self) -> DriverScenarioOutput:
         if self.completed_at.tzinfo is None or len({item.name for item in self.assertions}) != len(self.assertions):
             raise ValueError("driver scenario output is not exact and timezone-bound")
-        return self
-
-
-class MasterProviderCarrier(BaseModel):
-    """Exact control-owned Kaggle carrier observation for a master scenario."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    provider_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-    provider_run_ref: str = Field(
-        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$"
-    )
-    provider_kernel_id: int = Field(ge=1)
-    source_version: int = Field(ge=1)
-    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    output_file_name: Literal["operational-result.json"]
-    output_file_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    output_tree_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    output_receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-
-    @model_validator(mode="after")
-    def exact_run(self) -> MasterProviderCarrier:
-        if self.provider_run_ref.rsplit("/", 1)[0] != self.provider_ref:
-            raise ValueError("master carrier run differs from provider_ref")
-        if int(self.provider_run_ref.rsplit("/", 1)[1]) != self.source_version:
-            raise ValueError("master carrier run version differs from source_version")
         return self
 
 
@@ -2045,7 +2032,7 @@ def _terminal_master_evidence(
     value: Mapping[str, Any],
     *,
     target_operation_id: UUID,
-) -> tuple[MasterAcceptanceReceipt, MasterProviderCarrier]:
+) -> tuple[MasterAcceptanceReceipt, MasterProviderCarrierObservation]:
     _master_status_identity(request, value, target_operation_id=target_operation_id)
     if value.get("state") != "PASSED" or value.get("failure_code") is not None:
         raise ValueError("master acceptance status is not a successful terminal task")
@@ -2057,7 +2044,19 @@ def _terminal_master_evidence(
         or receipt.binding.operation_id != target_operation_id
     ):
         raise ValueError("typed master acceptance receipt differs from the matrix task")
-    carrier = MasterProviderCarrier.model_validate(value.get("provider_carrier"))
+    carrier = MasterProviderCarrierObservation.model_validate(value.get("provider_carrier"))
+    output_identity = (
+        carrier.output_file_name,
+        carrier.output_file_sha256,
+        carrier.output_tree_sha256,
+        carrier.output_receipt_sha256,
+    )
+    if request.requirement_id == "FM11" and any(value is None for value in output_identity):
+        raise ValueError("FM11 stopped old master lacks its terminal output receipt")
+    if request.requirement_id in {"FM10", "FM24"} and any(
+        value is not None for value in output_identity
+    ):
+        raise ValueError("active-master control-receipt scenario unexpectedly contains terminal output")
     return receipt, carrier
 
 
@@ -2066,6 +2065,7 @@ def _master_evidence_is_exact(request: DriverRequest, receipt: MasterAcceptanceR
     if request.requirement_id == "FM08":
         if not isinstance(evidence, CallbackLossEvidence):
             raise ValueError("FM08 receipt lacks typed callback-loss evidence")
+        raise ValueError("FM08 receipt lacks typed terminated/recovery provider identities")
     elif request.requirement_id == "FM10":
         if not isinstance(evidence, LeaseExpiryEvidence):
             raise ValueError("FM10 receipt lacks typed lease-expiry evidence")
@@ -2099,7 +2099,7 @@ def _master_evidence_is_exact(request: DriverRequest, receipt: MasterAcceptanceR
 def _master_driver_pass(
     request: DriverRequest,
     receipt: MasterAcceptanceReceipt,
-    carrier: MasterProviderCarrier,
+    carrier: MasterProviderCarrierObservation,
     *,
     checks: list[CapabilityCheck],
     observations: Mapping[str, Any],
@@ -2131,17 +2131,23 @@ def _master_driver_pass(
             ),
         )
     elif isinstance(receipt.evidence, OldEpochEvidence):
+        terminal_kernel_id = terminal_master.get("provider_kernel_id")
         if (
-            terminal_operation_id != receipt.evidence.new_operation_id
+            receipt.binding.operation_id != receipt.evidence.old_operation_id
+            or carrier.provider_run_ref != receipt.evidence.old_provider_run_ref
+            or carrier.provider_kernel_id != receipt.evidence.old_provider_kernel_id
+            or terminal_operation_id != receipt.evidence.new_operation_id
             or terminal_epoch != receipt.evidence.new_epoch
+            or terminal_ref != receipt.evidence.new_provider_run_ref
+            or terminal_kernel_id != receipt.evidence.new_provider_kernel_id
         ):
             raise ValueError("FM11 terminal master differs from replacement evidence")
         lifecycle = (
             DriverControlLifecycle(
                 gate="clean_rotation",
                 operation_id=receipt.evidence.new_operation_id,
-                old_provider_run_ref=carrier.provider_run_ref,
-                new_provider_run_ref=terminal_ref,
+                old_provider_run_ref=receipt.evidence.old_provider_run_ref,
+                new_provider_run_ref=receipt.evidence.new_provider_run_ref,
                 old_epoch=receipt.evidence.old_epoch,
                 new_epoch=receipt.evidence.new_epoch,
             ),
@@ -2177,6 +2183,23 @@ async def _execute_master_acceptance_scenario(
     checks: list[CapabilityCheck],
     observations: Mapping[str, Any],
 ) -> TrustedDriverResult:
+    if request.requirement_id == "FM08":
+        return _blocked(
+            request,
+            checks=[
+                *checks,
+                _check(
+                    "acceptance.abrupt-provider-runs",
+                    "BLOCKED",
+                    "ABRUPT_MASTER_PROVIDER_IDENTITIES_MISSING",
+                ),
+            ],
+            code="FM08_ABRUPT_MASTER_PROVIDER_IDENTITIES_MISSING",
+            dependency=(
+                "typed callback-loss receipt with exact terminated and recovery provider run identities"
+            ),
+            observations=observations,
+        )
     raw_master = observations.get("master")
     if not isinstance(raw_master, Mapping) or not _exact_active_master(raw_master):
         return _blocked(

@@ -297,7 +297,7 @@ def test_control_owned_scenario_output_binds_exact_receipt_without_local_adapter
         plan=plan, row=row, locator=locator, started_at=datetime(2026, 8, 11, tzinfo=UTC)
     )
     assert receipt["outcome"] == "PASS"
-    assert receipt["real_run_identity"]["provider_status"] == "control_reconciled"
+    assert receipt["real_run_identity"]["provider_status"] == "control_receipt_reconciled"
     assert binding is not None and binding.provider_run_ref == "owner/evidence/7"
 
 

@@ -350,14 +350,17 @@ class DriverCleanupBinding(BaseModel):
     provider_kernel_id: int = Field(ge=1)
     source_version: int = Field(ge=1)
     source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    output_receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    output_file_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    output_tree_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    output_receipt_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    output_file_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    output_tree_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
     def exact_claim(self) -> DriverCleanupBinding:
         if (self.claim_task_id is None) != (self.claim_sha256 is None):
             raise ValueError("driver claim identity must be wholly present or absent")
+        outputs = (self.output_receipt_sha256, self.output_file_sha256, self.output_tree_sha256)
+        if any(value is not None for value in outputs) != all(value is not None for value in outputs):
+            raise ValueError("driver output identity must be wholly present or absent")
         return self
 
 
@@ -665,9 +668,6 @@ def _driver_binding(locator: DriverResult) -> DriverCleanupBinding:
             locator.provider_kernel_id,
             locator.source_version,
             locator.source_sha256,
-            locator.output_receipt_sha256,
-            locator.output_file_sha256,
-            locator.output_tree_sha256,
         )
     ):
         raise RuntimeError("successful driver execution lacks exact reconciliation fields")
@@ -897,7 +897,7 @@ def _typed_master_output(
                 "canonical_revision_after": evidence.canonical_revision_after,
             },
             "credentials_invalidated": {
-                "lease_expired": evidence.lease_expired,
+                "credentials_invalidated": evidence.credentials_invalidated,
                 "denial_code": evidence.denial_code,
                 "transaction_state": evidence.transaction_state,
             },
@@ -921,9 +921,11 @@ def _typed_master_output(
                 "tunnel_denial_receipt_sha256": evidence.tunnel_denial_receipt_sha256,
             },
             "registry_resolves_new": {
-                "new_epoch_active": evidence.new_epoch_active,
+                "registry_resolves_new": evidence.registry_resolves_new,
                 "new_epoch": evidence.new_epoch,
                 "new_operation_id": str(evidence.new_operation_id),
+                "old_provider_run_ref": evidence.old_provider_run_ref,
+                "new_provider_run_ref": evidence.new_provider_run_ref,
             },
         }
     elif row["requirement_id"] == "FM24":
@@ -1051,9 +1053,21 @@ def _trusted_control_receipt(
         if locator.scenario_output is not None:
             raise RuntimeError("driver result mixes typed control receipt and scenario output")
         output = _typed_master_output(plan=plan, row=row, locator=locator)
-        if locator.output_file_sha256 is None:
-            raise RuntimeError("typed control receipt lacks exact carrier output identity")
-        result_sha256 = locator.output_file_sha256
+        if row["requirement_id"] == "FM11":
+            if locator.output_file_sha256 is None:
+                raise RuntimeError("FM11 typed control receipt lacks stopped-master terminal output")
+            result_sha256 = locator.output_file_sha256
+        else:
+            if any(
+                value is not None
+                for value in (
+                    locator.output_receipt_sha256,
+                    locator.output_file_sha256,
+                    locator.output_tree_sha256,
+                )
+            ):
+                raise RuntimeError("active-master control receipt unexpectedly contains terminal output")
+            result_sha256 = locator.control_receipt.receipt_sha256
     else:
         if locator.scenario_output is None:
             raise RuntimeError("driver result lacks trusted scenario output metadata")
@@ -1098,7 +1112,7 @@ def _trusted_control_receipt(
             "source_version": locator.source_version,
             "source_sha256": locator.source_sha256,
             "provider_claim_sha256": locator.claim_sha256,
-            "provider_status": "control_reconciled",
+            "provider_status": "control_receipt_reconciled",
             "output_tree_sha256": locator.output_tree_sha256,
             "result_sha256": result_sha256,
         },

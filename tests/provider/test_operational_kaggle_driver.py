@@ -32,7 +32,6 @@ from my_data_hub.acceptance.data_workloads import (
     RequirementEvidence,
 )
 from my_data_hub.acceptance.master_lifecycle import (
-    CallbackLossEvidence,
     LeaseExpiryEvidence,
     MasterAcceptanceBinding,
     MasterAcceptanceReceipt,
@@ -542,6 +541,21 @@ class MasterAcceptanceGateway(FakeGateway):
             evidence=self.evidence,
             completed_at=datetime(2026, 8, 11, 1, tzinfo=UTC),
         )
+        terminal_output = (
+            {
+                "output_file_name": "master-terminal-output.json",
+                "output_file_sha256": "d" * 64,
+                "output_tree_sha256": "c" * 64,
+                "output_receipt_sha256": "d" * 64,
+            }
+            if self.request.requirement_id == "FM11"
+            else {
+                "output_file_name": None,
+                "output_file_sha256": None,
+                "output_tree_sha256": None,
+                "output_receipt_sha256": None,
+            }
+        )
         return {
             "found": True,
             "bounded": True,
@@ -566,10 +580,7 @@ class MasterAcceptanceGateway(FakeGateway):
                 "provider_kernel_id": 7,
                 "source_version": 7,
                 "source_sha256": "a" * 64,
-                "output_file_name": "operational-result.json",
-                "output_file_sha256": "b" * 64,
-                "output_tree_sha256": "c" * 64,
-                "output_receipt_sha256": "d" * 64,
+                **terminal_output,
             },
         }
 
@@ -725,6 +736,10 @@ def test_each_executor_runs_only_safe_existing_probes_then_names_exact_gap(
     result = asyncio.run(execute(_request(ordinal), gateway))
     spec = EXECUTORS[ordinal - 1]
     assert result.outcome == "BLOCKED"
+    if ordinal == 8:
+        assert result.blocker_code == "FM08_ABRUPT_MASTER_PROVIDER_IDENTITIES_MISSING"
+        assert result.mutations_started == 0
+        return
     assert result.blocker_code == spec.gap_code
     assert result.integration_dependency is not None
     assert result.integration_dependency.startswith(spec.gap_dependency)
@@ -750,19 +765,6 @@ def test_each_executor_runs_only_safe_existing_probes_then_names_exact_gap(
 @pytest.mark.parametrize(
     ("ordinal", "evidence"),
     [
-        (
-            8,
-            CallbackLossEvidence(
-                kind="CALLBACK_LOSS_RECOVERY",
-                callback_suppressed_once=True,
-                exact_event_id=UUID(int=30),
-                exact_body_sha256="1" * 64,
-                control_boot_id_before=UUID(int=31),
-                control_boot_id_after=UUID(int=32),
-                replay_disposition="accepted",
-                service_active_after_recovery=True,
-            ),
-        ),
         (
             10,
             LeaseExpiryEvidence(
@@ -794,10 +796,10 @@ def test_each_executor_runs_only_safe_existing_probes_then_names_exact_gap(
                 registry_resolves_new=True,
                 old_operation_id=UUID("11111111-1111-4111-8111-111111111111"),
                 new_operation_id=UUID(int=9),
-                old_provider_run_ref="owner/postgres-master/8",
-                old_provider_kernel_id=8,
-                new_provider_run_ref="owner/postgres-master/9",
-                new_provider_kernel_id=9,
+                old_provider_run_ref="owner/master/7",
+                old_provider_kernel_id=7,
+                new_provider_run_ref="owner/master/8",
+                new_provider_kernel_id=8,
                 handoff_checkpoint_id=UUID(int=34),
                 write_denial_receipt_sha256="3" * 64,
                 tunnel_denial_receipt_sha256="4" * 64,
@@ -845,17 +847,12 @@ def test_master_acceptance_scenarios_bind_typed_receipt_and_exact_carrier(
     assert result.control_receipt is not None
     assert result.control_receipt.evidence == evidence
     assert result.provider_run_ref == "owner/master/7"
-    assert result.output_receipt_sha256 == "d" * 64
+    assert result.output_receipt_sha256 == ("d" * 64 if request.requirement_id == "FM11" else None)
     assert result.scenario_output is None
     assert [tool for _profile, tool, _arguments in gateway.calls].count(
         "acceptance.scenario.request"
     ) == 1
-    if request.requirement_id == "FM08":
-        assert {item.gate for item in result.control_lifecycle} == {
-            "abrupt_master_termination",
-            "control_plane_restart",
-        }
-    elif request.requirement_id == "FM11":
+    if request.requirement_id == "FM11":
         assert [item.gate for item in result.control_lifecycle] == ["clean_rotation"]
     else:
         assert result.control_lifecycle == ()
@@ -871,6 +868,90 @@ def test_master_acceptance_scenarios_bind_typed_receipt_and_exact_carrier(
         started_at=request.evidence_issued_at,
     )
     assert receipt["outcome"] == "PASS" and cleanup is None
+    scenario_schema = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "schemas/provider/operational-kaggle-scenario-receipt.v1.schema.json"
+        ).read_text()
+    )
+    Draft202012Validator(scenario_schema, format_checker=FormatChecker()).validate(receipt)
+
+
+def test_fm08_stays_pre_action_blocked_without_typed_abrupt_provider_runs() -> None:
+    gateway = FakeGateway()
+
+    result = asyncio.run(execute(_request(8), gateway))
+
+    assert result.outcome == "BLOCKED"
+    assert result.blocker_code == "FM08_ABRUPT_MASTER_PROVIDER_IDENTITIES_MISSING"
+    assert result.mutations_started == 0
+    called = [tool for _profile, tool, _arguments in gateway.calls]
+    assert called == ["master.status"]
+    assert "acceptance.scenario.request" not in called
+
+
+def test_master_carrier_output_policy_is_scenario_specific() -> None:
+    fm11_request = _request(11).model_copy(update={"resume_only": True})
+    fm11_evidence = OldEpochEvidence(
+        kind="OLD_EPOCH_RETURN_DENIAL",
+        old_epoch=1,
+        new_epoch=2,
+        old_runtime_draining_before_rotation=True,
+        renew_denied=True,
+        register_denied=True,
+        bounded_write_denied=True,
+        tunnel_denied=True,
+        new_epoch_active=True,
+        registry_resolves_new=True,
+        old_operation_id=UUID("11111111-1111-4111-8111-111111111111"),
+        new_operation_id=UUID(int=9),
+        old_provider_run_ref="owner/master/7",
+        old_provider_kernel_id=7,
+        new_provider_run_ref="owner/master/8",
+        new_provider_kernel_id=8,
+        handoff_checkpoint_id=UUID(int=34),
+        write_denial_receipt_sha256="3" * 64,
+        tunnel_denial_receipt_sha256="4" * 64,
+    )
+    fm11 = MasterAcceptanceGateway(fm11_request, fm11_evidence)
+    fm11.status = fm11._terminal()
+    fm11.status["provider_carrier"].update(
+        {
+            "output_file_name": None,
+            "output_file_sha256": None,
+            "output_tree_sha256": None,
+            "output_receipt_sha256": None,
+        }
+    )
+    result = asyncio.run(execute(fm11_request, fm11))
+    assert result.outcome == "FAIL" and result.mutations_started == 1
+
+    fm10_request = _request(10).model_copy(update={"resume_only": True})
+    fm10_evidence = LeaseExpiryEvidence(
+        kind="LEASE_EXPIRY_DENIAL",
+        observed_wait_seconds=60,
+        lease_expired=True,
+        credentials_invalidated=True,
+        bounded_operator_dml_denied=True,
+        transaction_state="rollback_only",
+        operator_operation_id=UUID(int=33),
+        operator_receipt_sha256="2" * 64,
+        denial_code="MDH_EPOCH_LEASE_EXPIRED",
+        canonical_revision_before=4,
+        canonical_revision_after=4,
+    )
+    fm10 = MasterAcceptanceGateway(fm10_request, fm10_evidence)
+    fm10.status = fm10._terminal()
+    fm10.status["provider_carrier"].update(
+        {
+            "output_file_name": "master-terminal-output.json",
+            "output_file_sha256": "d" * 64,
+            "output_tree_sha256": "c" * 64,
+            "output_receipt_sha256": "d" * 64,
+        }
+    )
+    result = asyncio.run(execute(fm10_request, fm10))
+    assert result.outcome == "FAIL" and result.mutations_started == 1
 
 
 def test_fm14_checkpoint_executor_requests_then_returns_exact_evidence_locator(

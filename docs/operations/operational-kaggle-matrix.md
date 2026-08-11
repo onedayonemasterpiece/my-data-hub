@@ -229,17 +229,23 @@ to reach ACTIVE, or malformed/empty search result is FAIL with
   authenticated clean-drain/checkpoint/stop request or credential revocation
   endpoint.
 
-FM08, FM10, FM11, and FM24 use `acceptance.scenario.request/status` with an
-exact ACTIVE operation target. PASS requires a full validated
-`MasterAcceptanceReceipt`, its receipt hash, the numeric control-owned Kaggle
-carrier, runtime-attested source SHA, and all output receipt hashes. FM08 also
-requires distinct terminated/recovery provider runs plus distinct control boot
-IDs. FM11 owns the second `clean_rotation` gate and binds distinct provider runs
-with consecutive epochs. FM24 is a single-epoch session/credential rotation
-soak; it proves 12 heartbeats, 12 bounded reads, checkpoint/recovery receipts,
-and the 3,600–5,400 second duration, but does not pretend that session rotation
-is a provider-run rotation. If the deployed status projection omits any of
-these fields after acceptance, the result is FAIL, never a synthetic PASS.
+FM10, FM11, and FM24 use `acceptance.scenario.request/status` with an exact
+ACTIVE operation target. PASS requires a full validated
+`MasterAcceptanceReceipt`, its receipt hash, and the numeric control-owned
+Kaggle carrier with runtime-attested source SHA. FM10 and FM24 are active-master
+scenarios: their durable typed control receipt is the evidence and terminal
+Kaggle output hashes must remain absent. FM11 stops and replaces the old master,
+so it additionally requires the persisted terminal output receipt and exact
+old/new operation, provider run, kernel, and consecutive epoch identities. FM11
+owns the second `clean_rotation` gate. FM24 remains a single-epoch
+session/credential rotation soak and proves 12 heartbeats, 12 bounded reads,
+checkpoint/recovery receipts, and the 3,600–5,400 second duration.
+
+FM08 remains pre-action BLOCKED with zero mutations. Its current typed callback
+receipt has distinct control boot IDs but no exact terminated/recovery provider
+run identities, so it cannot satisfy the abrupt-master lifecycle gate without
+fabrication. It may be enabled only after those identities are part of the
+durable control contract.
 
 ## What counts as PASS
 

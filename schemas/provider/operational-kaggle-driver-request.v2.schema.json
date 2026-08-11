@@ -31,19 +31,43 @@
           "title": "Claim Task Id"
         },
         "output_file_sha256": {
-          "pattern": "^[a-f0-9]{64}$",
-          "title": "Output File Sha256",
-          "type": "string"
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output File Sha256"
         },
         "output_receipt_sha256": {
-          "pattern": "^[a-f0-9]{64}$",
-          "title": "Output Receipt Sha256",
-          "type": "string"
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Receipt Sha256"
         },
         "output_tree_sha256": {
-          "pattern": "^[a-f0-9]{64}$",
-          "title": "Output Tree Sha256",
-          "type": "string"
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Tree Sha256"
         },
         "provider_kernel_id": {
           "minimum": 1,
@@ -76,10 +100,7 @@
         "provider_run_ref",
         "provider_kernel_id",
         "source_version",
-        "source_sha256",
-        "output_receipt_sha256",
-        "output_file_sha256",
-        "output_tree_sha256"
+        "source_sha256"
       ],
       "title": "CleanupBinding",
       "type": "object"
@@ -136,11 +157,23 @@
                   },
                   "claim_task_id": {
                     "type": "string"
+                  },
+                  "output_file_sha256": {
+                    "type": "string"
+                  },
+                  "output_receipt_sha256": {
+                    "type": "string"
+                  },
+                  "output_tree_sha256": {
+                    "type": "string"
                   }
                 },
                 "required": [
                   "claim_task_id",
-                  "claim_sha256"
+                  "claim_sha256",
+                  "output_receipt_sha256",
+                  "output_file_sha256",
+                  "output_tree_sha256"
                 ]
               }
             ]
