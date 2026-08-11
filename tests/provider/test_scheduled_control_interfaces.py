@@ -68,7 +68,7 @@ def test_checkpoint_status_exposes_exact_current_previous_metadata(tmp_path: Pat
     assert status["current"]["manifest_sha256"] == "b" * 64
 
 
-def test_restore_request_is_exact_idempotent_and_records_missing_consumer(tmp_path: Path) -> None:
+def test_restore_request_is_exact_but_does_not_enqueue_without_a_consumer(tmp_path: Path) -> None:
     ledger = ControlLedger(tmp_path / "control.sqlite3")
     _checkpoint(ledger, "cp-1", None, 0)
     reader = LedgerControlReader(ledger)
@@ -80,16 +80,17 @@ def test_restore_request_is_exact_idempotent_and_records_missing_consumer(tmp_pa
         "timeout_seconds": 1200,
     }
 
+    before = len(ledger.incomplete_operations())
     first = reader.invoke_control("checkpoint.restore.request", arguments, _identity())
     second = reader.invoke_control("checkpoint.restore.request", arguments, _identity())
 
-    assert first["accepted"] is True and first["duplicate"] is False
-    assert second["accepted"] is True and second["duplicate"] is True
-    assert first["operation_id"] == second["operation_id"]
-    assert first["state"] == "REQUESTED"
+    assert first["accepted"] is False and first["duplicate"] is False
+    assert second == first
+    assert first["operation_id"] is None
+    assert first["state"] == "BLOCKED"
     assert first["execution_supported"] is False
     assert first["blocker_code"] == "ISOLATED_RESTORE_OPERATION_CONSUMER_MISSING"
-    assert ledger.get_operation(first["operation_id"]).operation_kind == "checkpoint_restore_smoke"
+    assert len(ledger.incomplete_operations()) == before
 
 
 def test_protected_resource_probe_does_not_fabricate_admission_evidence(tmp_path: Path) -> None:

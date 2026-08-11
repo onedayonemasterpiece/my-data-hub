@@ -445,20 +445,13 @@ def _action_request_check(observations: Observations, *, kind: str, name: str) -
             ("ACCEPTANCE_OPERATOR_API_UNAVAILABLE", f"MCP {kind} durable request"),
         )
         return _blocked(name, "BACKUP_RECOVERY" if "restore" in kind else "DEPLOYMENT", code, interface)
-    if result.get("accepted") is not True or result.get("state") != "REQUESTED":
-        return Check(
-            name,
-            "BACKUP_RECOVERY" if "restore" in kind else "DEPLOYMENT",
-            Outcome.FAIL,
-            {"durable_request_accepted": False},
-        )
     if result.get("execution_supported") is not True:
         return Check(
             name=name,
             category="BACKUP_RECOVERY" if "restore" in kind else "DEPLOYMENT",
             outcome=Outcome.BLOCKED,
             observed={
-                "durable_request_accepted": True,
+                "durable_request_accepted": result.get("accepted") is True,
                 "exact_checkpoint_bound": bool(result.get("checkpoint_id"))
                 and _is_exact_numeric_version_ref(result.get("exact_version_ref")),
                 "duplicate": result.get("duplicate") is True,
@@ -466,6 +459,13 @@ def _action_request_check(observations: Observations, *, kind: str, name: str) -
             },
             blocker_code=str(result.get("blocker_code") or "ACTION_EXECUTOR_UNAVAILABLE"),
             missing_interface=f"consumer for durable {kind} operation",
+        )
+    if result.get("accepted") is not True or result.get("state") != "REQUESTED":
+        return Check(
+            name,
+            "BACKUP_RECOVERY" if "restore" in kind else "DEPLOYMENT",
+            Outcome.FAIL,
+            {"durable_request_accepted": False},
         )
     return Check(
         name,

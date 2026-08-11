@@ -183,7 +183,7 @@ class LedgerControlReader(ControlPlaneReader):
                 "mutation_attempted": False,
             }
         if tool in {"checkpoint.restore.request", "master.rotation.request"}:
-            return self._acceptance_action_request(tool, arguments, principal)
+            return self._acceptance_action_request(tool, arguments)
         if tool == "provider.resources.status":
             limit = min(int(arguments.get("limit", 100)), 100)
             resources = self.ledger.list_provider_resources(limit=limit)
@@ -208,7 +208,6 @@ class LedgerControlReader(ControlPlaneReader):
         self,
         tool: str,
         arguments: dict[str, Any],
-        principal: AccessIdentity,
     ) -> dict[str, Any]:
         """Persist an exact request without pretending an executor exists.
 
@@ -266,21 +265,15 @@ class LedgerControlReader(ControlPlaneReader):
             + b":"
             + request_key.encode()
         ).hexdigest()
-        operation, created = self.ledger.ensure_operation(
-            operation_id=digest,
-            idempotency_key=f"scheduled-acceptance:{tool}:{request_key}",
-            operation_kind=(
-                "checkpoint_restore_smoke" if tool == "checkpoint.restore.request" else "forced_master_rotation"
-            ),
-            intent=intent,
-            initial_state="REQUESTED",
-            identity={"principal": principal.subject, "request_sha256": digest},
-        )
+        # Do not enqueue an operation that has no consumer. A scheduled probe
+        # must not create an immortal REQUESTED row on every run. The exact
+        # request fingerprint remains useful for a future consumer handshake.
         return {
-            "accepted": True,
-            "duplicate": not created,
-            "operation_id": operation.operation_id,
-            "state": operation.state,
+            "accepted": False,
+            "duplicate": False,
+            "request_sha256": digest,
+            "operation_id": None,
+            "state": "BLOCKED",
             "target": target,
             "checkpoint_id": checkpoint_id,
             "exact_version_ref": exact_version,
