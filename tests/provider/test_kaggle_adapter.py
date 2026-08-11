@@ -64,7 +64,10 @@ class FakeKaggleApi:
     def get_config_value(self, name: str) -> str | None:
         return "owner" if name == self.CONFIG_NAME_USER else None
 
-    def dataset_list_with_response(self, *, mine: bool, page_size: int, page_token: str | None):
+    def dataset_list_with_response(
+        self, *, mine: bool, page_size: int, page_token: str | None,
+        search: str | None = None, sort_by: str | None = None
+    ):
         assert mine is True
         rows = [
             SimpleNamespace(
@@ -75,9 +78,14 @@ class FakeKaggleApi:
             )
             for ref, versions in sorted(self.datasets.items())
         ]
+        if search:
+            rows = [row for row in rows if search in row.ref]
         return SimpleNamespace(datasets=rows[:page_size], next_page_token=None)
 
-    def kernels_list_with_response(self, *, mine: bool, page_size: int, page_token: str | None):
+    def kernels_list_with_response(
+        self, *, mine: bool, page_size: int, page_token: str | None,
+        search: str | None = None
+    ):
         assert mine is True
         rows = [
             SimpleNamespace(
@@ -89,6 +97,8 @@ class FakeKaggleApi:
             )
             for ref, versions in sorted(self.kernels.items())
         ]
+        if search:
+            rows = [row for row in rows if search in row.ref]
         return SimpleNamespace(kernels=rows[:page_size], next_page_token=None)
 
     def dataset_status(self, dataset: str, format: str | None = None) -> str:

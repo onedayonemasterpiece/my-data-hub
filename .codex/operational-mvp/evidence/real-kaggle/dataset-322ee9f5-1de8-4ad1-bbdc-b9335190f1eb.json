@@ -1,0 +1,72 @@
+{
+  "cleanup": {
+    "action": "delete_dataset",
+    "attempts": 1,
+    "detail_code": "task_created_resource_absent",
+    "effect_id": "8b93b69b-a4a9-4e8d-a5d4-10f0056c45a0",
+    "observed_at": "2026-08-11T00:27:28.368492Z",
+    "observed_fingerprint": null,
+    "operation_id": "2fe54848-281a-4c5b-bd2c-42871f8c071e",
+    "outcome": "applied",
+    "provider_ref": "zigomaro/mdh-private-canary-20260811002424",
+    "provider_version": null
+  },
+  "completed_at": "2026-08-11T00:27:28.372751+00:00",
+  "create": {
+    "claim": {
+      "claim_sha256": "4eef06df84c7c9e9c7e6c85481bed312d8ee46cc1a6bb4763083b816ffcd4fa4",
+      "control_class": "mcp_managed",
+      "disposable": true,
+      "effect_id": "8ff46074-f80c-4f15-ac49-d61487739093",
+      "fingerprint": {
+        "algorithm": "sha256",
+        "value": "8973a4ee6262e2fa3807103a47ffe8ed82f2fd5d783f0a741dab377cc8167b0c"
+      },
+      "kind": "dataset",
+      "provider_ref": "zigomaro/mdh-private-canary-20260811002424",
+      "provider_version": 1,
+      "registered_at": "2026-08-11T00:27:26.103549Z",
+      "task_id": "322ee9f5-1de8-4ad1-bbdc-b9335190f1eb"
+    },
+    "effect": {
+      "action": "create_dataset",
+      "attempts": 0,
+      "detail_code": "reconciled_after_targeted_exact_lookup_fix",
+      "effect_id": "8ff46074-f80c-4f15-ac49-d61487739093",
+      "observed_at": "2026-08-11T00:27:26.099490Z",
+      "observed_fingerprint": {
+        "algorithm": "sha256",
+        "value": "8973a4ee6262e2fa3807103a47ffe8ed82f2fd5d783f0a741dab377cc8167b0c"
+      },
+      "operation_id": "f7c27b52-a389-4432-8a48-0e5623148bae",
+      "outcome": "already_applied",
+      "provider_ref": "zigomaro/mdh-private-canary-20260811002424",
+      "provider_version": 1
+    },
+    "identity": {
+      "fingerprint": {
+        "algorithm": "sha256",
+        "value": "8973a4ee6262e2fa3807103a47ffe8ed82f2fd5d783f0a741dab377cc8167b0c"
+      },
+      "observed_at": "2026-08-11T00:27:26.099397Z",
+      "package_sha256": "a18e309820b8b72af6a08e4b1ca71f414f3e1dd9695ca4f5dcf6fd3c31c75826",
+      "privacy": "private",
+      "provider_ref": "zigomaro/mdh-private-canary-20260811002424",
+      "version": 1
+    }
+  },
+  "kind": "dataset",
+  "privacy_proof": {
+    "authenticated_readback_sha256": "a18e309820b8b72af6a08e4b1ca71f414f3e1dd9695ca4f5dcf6fd3c31c75826",
+    "denial_class": "authorization",
+    "observed_at": "2026-08-11T00:27:26.898514Z",
+    "provider_ref": "zigomaro/mdh-private-canary-20260811002424",
+    "provider_version": 1,
+    "unauthenticated_http_status": 403
+  },
+  "provider_ref": "zigomaro/mdh-private-canary-20260811002424",
+  "schema_version": "my-data-hub-real-kaggle-canary.v1",
+  "started_at": "2026-08-11T00:24:24.529275+00:00",
+  "task_id": "322ee9f5-1de8-4ad1-bbdc-b9335190f1eb",
+  "verdict": "PASS_RECOVERED"
+}

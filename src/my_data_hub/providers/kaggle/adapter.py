@@ -906,6 +906,7 @@ class KaggleProviderAdapter:
         self, provider_ref: str, kind: ProviderKind
     ) -> tuple[ObservedProviderResource, int | None, int | None]:
         ref = _normalized_ref(provider_ref)
+        slug = ref.split("/", 1)[1]
         cursor: str | None = None
         seen: set[str] = set()
         for _ in range(20):
@@ -913,7 +914,11 @@ class KaggleProviderAdapter:
                 response, _attempts = self.retry.call(
                     "dataset_inventory_lookup",
                     lambda cursor=cursor: self.api.dataset_list_with_response(
-                        mine=True, page_size=100, page_token=cursor
+                        mine=True,
+                        search=slug,
+                        sort_by="updated",
+                        page_size=100,
+                        page_token=cursor,
                     ),
                 )
                 rows = _field(response, "datasets") or []
@@ -921,7 +926,10 @@ class KaggleProviderAdapter:
                 response, _attempts = self.retry.call(
                     "kernel_inventory_lookup",
                     lambda cursor=cursor: self.api.kernels_list_with_response(
-                        mine=True, page_size=100, page_token=cursor
+                        mine=True,
+                        search=slug,
+                        page_size=100,
+                        page_token=cursor,
                     ),
                 )
                 rows = _field(response, "kernels") or []

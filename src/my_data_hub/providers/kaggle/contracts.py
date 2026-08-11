@@ -381,9 +381,24 @@ class KaggleApiProtocol(Protocol):
 
     def get_config_value(self, name: str) -> str | None: ...
 
-    def dataset_list_with_response(self, *, mine: bool, page_size: int, page_token: str | None) -> Any: ...
+    def dataset_list_with_response(
+        self,
+        *,
+        mine: bool,
+        page_size: int,
+        page_token: str | None,
+        search: str | None = None,
+        sort_by: str | None = None,
+    ) -> Any: ...
 
-    def kernels_list_with_response(self, *, mine: bool, page_size: int, page_token: str | None) -> Any: ...
+    def kernels_list_with_response(
+        self,
+        *,
+        mine: bool,
+        page_size: int,
+        page_token: str | None,
+        search: str | None = None,
+    ) -> Any: ...
 
     def dataset_status(self, dataset: str, format: str | None = None) -> str: ...
 
