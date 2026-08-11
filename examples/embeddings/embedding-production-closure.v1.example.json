@@ -1,0 +1,159 @@
+{
+  "schema_version": "my-data-hub-embedding-production-closure.v1",
+  "receipt_id": "30000000-0000-4000-8000-000000000001",
+  "status": "DURABLE_COMPLETE",
+  "live_evidence": true,
+  "started_at": "2026-08-11T00:00:00Z",
+  "completed_at": "2026-08-11T04:00:00Z",
+  "request_id": "40000000-0000-4000-8000-000000000001",
+  "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "blogger_prerequisite": {
+    "receipt_id": "50000000-0000-4000-8000-000000000001",
+    "receipt_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "canonical_revision": 9,
+    "checkpoint_id": "60000000-0000-4000-8000-000000000001"
+  },
+  "provider_adapter": {
+    "package": "kaggle",
+    "version": "2.2.4",
+    "single_adapter": true,
+    "execution_location": "active_kaggle_master",
+    "implementation": "my_data_hub.providers.kaggle.KaggleProviderAdapter"
+  },
+  "workers": [
+    {
+      "model_exact_id": "intfloat/multilingual-e5-base@d128750597153bb5987e10b1c3493a34e5a4502a",
+      "task_run_id": "00000000-0000-4000-8000-000000000001",
+      "provider_ref": "example-owner/05-e5-blogger-embedding-worker",
+      "provider_run_ref": "example-owner/05-e5-blogger-embedding-worker/1",
+      "provider_kernel_id": 101,
+      "source_version": 1,
+      "source_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "provider_status": "complete",
+      "privacy": "private",
+      "control_class": "orchestrator_protected",
+      "output_tree_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "artifact_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "artifact_id": "10000000-0000-4000-8000-000000000001",
+      "artifact_run_id": "00000000-0000-4000-8000-000000000001",
+      "input_dataset": {
+        "provider_ref": "example-owner/embedding-input-1",
+        "provider_version": 1,
+        "package_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+        "jobs_sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+      }
+    },
+    {
+      "model_exact_id": "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
+      "task_run_id": "00000000-0000-4000-8000-000000000002",
+      "provider_ref": "example-owner/06-bge-m3-blogger-embedding-worker",
+      "provider_run_ref": "example-owner/06-bge-m3-blogger-embedding-worker/2",
+      "provider_kernel_id": 102,
+      "source_version": 2,
+      "source_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "provider_status": "complete",
+      "privacy": "private",
+      "control_class": "orchestrator_protected",
+      "output_tree_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "artifact_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "artifact_id": "10000000-0000-4000-8000-000000000002",
+      "artifact_run_id": "00000000-0000-4000-8000-000000000002",
+      "input_dataset": {
+        "provider_ref": "example-owner/embedding-input-2",
+        "provider_version": 1,
+        "package_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+        "jobs_sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+      }
+    }
+  ],
+  "imports": [
+    {
+      "model_exact_id": "intfloat/multilingual-e5-base@d128750597153bb5987e10b1c3493a34e5a4502a",
+      "artifact_id": "10000000-0000-4000-8000-000000000001",
+      "outbox_id": "20000000-0000-4000-8000-000000000001",
+      "canonical_revision": 10,
+      "inserted_count": 266,
+      "stale_count": 0,
+      "failed_count": 0,
+      "replayed": false,
+      "durability_state": "COMMITTED_PENDING_CHECKPOINT",
+      "run_id": "00000000-0000-4000-8000-000000000001",
+      "artifact_sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    {
+      "model_exact_id": "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
+      "artifact_id": "10000000-0000-4000-8000-000000000002",
+      "outbox_id": "20000000-0000-4000-8000-000000000002",
+      "canonical_revision": 11,
+      "inserted_count": 266,
+      "stale_count": 0,
+      "failed_count": 0,
+      "replayed": false,
+      "durability_state": "COMMITTED_PENDING_CHECKPOINT",
+      "run_id": "00000000-0000-4000-8000-000000000002",
+      "artifact_sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+    }
+  ],
+  "stage_coverage": [
+    {
+      "model_exact_id": "intfloat/multilingual-e5-base@d128750597153bb5987e10b1c3493a34e5a4502a",
+      "expected_documents": 266,
+      "completed_documents": 266,
+      "coverage": 1.0
+    },
+    {
+      "model_exact_id": "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
+      "expected_documents": 266,
+      "completed_documents": 266,
+      "coverage": 1.0
+    }
+  ],
+  "checkpoint": {
+    "checkpoint_id": "70000000-0000-4000-8000-000000000001",
+    "status": "VERIFIED",
+    "canonical_revision": 11,
+    "manifest_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "exact_version_ref": "example-owner/embedding-checkpoints/3"
+  },
+  "cold_restore": {
+    "rotation_operation_id": "example-embedding-rotation",
+    "master_instance_id": "80000000-0000-4000-8000-000000000001",
+    "epoch": 10,
+    "canonical_revision": 11
+  },
+  "mcp_coverage": [
+    {
+      "model_exact_id": "intfloat/multilingual-e5-base@d128750597153bb5987e10b1c3493a34e5a4502a",
+      "expected_documents": 266,
+      "completed_documents": 266,
+      "coverage": 1.0
+    },
+    {
+      "model_exact_id": "BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181",
+      "expected_documents": 266,
+      "completed_documents": 266,
+      "coverage": 1.0
+    }
+  ],
+  "hybrid_search": {
+    "query_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "result_count": 4,
+    "requested_retrievers": [
+      "bge_m3",
+      "e5",
+      "exact",
+      "fts"
+    ],
+    "completed_retrievers": [
+      "bge_m3",
+      "e5",
+      "exact",
+      "fts"
+    ],
+    "unavailable_retrievers": [],
+    "complete": true,
+    "canonical_revision": 11
+  },
+  "blockers": []
+}
