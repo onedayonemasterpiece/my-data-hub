@@ -201,3 +201,30 @@ Focused unit/integration gates cover one-shot lost-response reconciliation,
 fence/retry idempotency, revoked-token stored-event projection, supervisor call
 ordering, schemas and migration continuity. No live provider mutation or host
 restart was performed, so no FM08 `LIVE_PASS` is claimed here.
+
+## 2026-08-11 FM11 production context and denial composition
+
+- control migration 024 journals the task/command-bound pre-STOPPED capture
+  intent while the old operation is still ACTIVE, including only the exact old
+  binding, runtime-token SHA-256, opaque held-session handle, public tunnel
+  certificate digests, fixed 900-second expiry and release receipt;
+- `TaskBoundOldEpochDenialFactory` is resolved before the host executor checks
+  for STOPPED. It opens the restricted H1 operator session and snapshots the
+  exact current tunnel identity once, caches one probe per task, and refuses to
+  reconstruct a lost process-private credential context after rotation;
+- after clean drain/current VERIFIED checkpoint and a consecutive ACTIVE
+  replacement, canonical ledger admission proves the old runtime token revoked
+  and registration/renewal fenced, the superseded Directory credential must be
+  absent, H1 must return SQLSTATE 55000 in rollback-only state with unchanged
+  revision, and the broker must show the original certificate serial revoked;
+- the tunnel broker/IPC accepts only two fixed metadata-only FM11 actions:
+  current identity snapshot and retired-denial proof. It exposes no generic
+  status/action, private key, database credential, payload or caller duration;
+- default-off production app assembly now constructs the task factory from the
+  existing session directory and existing root-owned tunnel authority, and
+  fails startup when that concrete structured authority is unavailable.
+
+Focused tests cover capture-before-STOPPED ordering, opaque handle persistence,
+same-task reuse, structured broker revocation, migration continuity and the
+existing fixed H1 rollback probe. No real rotation was executed, so this is not
+live FM11 PASS evidence.

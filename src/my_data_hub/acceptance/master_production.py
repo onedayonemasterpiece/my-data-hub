@@ -914,6 +914,14 @@ class ProductionControlHostEffects:
         return self.h1_denial.prove_expired_lease_denial(command)
 
     def _old_epoch(self, command: MasterAcceptanceCommand) -> OldEpochEvidence:
+        denials = self.old_epoch_denials
+        resolve_for_command = getattr(denials, "for_command", None)
+        if callable(resolve_for_command):
+            # The task-keyed factory opens and journals the protected old H1
+            # session and tunnel identity while the old master is still ACTIVE.
+            denials = resolve_for_command(command)
+        if denials is None:
+            raise ProductionAcceptanceBlocked("FM11_OLD_EPOCH_PROBE_UNAVAILABLE")
         old_operation = self.runtime.ledger.get_operation(str(command.binding.operation_id))
         if old_operation is None or old_operation.state != MasterState.STOPPED.value:
             raise ProductionAcceptanceBlocked("FM11_OLD_RUNTIME_NOT_STOPPED")
@@ -948,9 +956,7 @@ class ProductionControlHostEffects:
             raise ProductionAcceptanceBlocked("FM11_REGISTRY_DID_NOT_RESOLVE_REPLACEMENT")
         old_run = self._exact_provider_run(command.binding.operation_id)
         new_run = self._exact_provider_run(UUID(replacement.operation_id))
-        if self.old_epoch_denials is None:
-            raise ProductionAcceptanceBlocked("FM11_OLD_EPOCH_PROBE_UNAVAILABLE")
-        bind_replacement = getattr(self.old_epoch_denials, "bind_replacement", None)
+        bind_replacement = getattr(denials, "bind_replacement", None)
         if callable(bind_replacement):
             # Imported lazily because the concrete probe depends on this module's
             # public evidence models.  The exact old context already existed
@@ -971,7 +977,7 @@ class ProductionControlHostEffects:
                     checkpoint_is_current=True,
                 )
             )
-        denial = self.old_epoch_denials.prove_old_epoch_denials(command.binding)
+        denial = denials.prove_old_epoch_denials(command.binding)
         return OldEpochEvidence(
             kind="OLD_EPOCH_RETURN_DENIAL",
             old_epoch=command.binding.epoch,

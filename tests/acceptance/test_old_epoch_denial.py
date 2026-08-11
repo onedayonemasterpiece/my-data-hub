@@ -4,14 +4,20 @@ import inspect
 import json
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
 import jsonschema
 import pytest
 
-from my_data_hub.acceptance.master_lifecycle import MasterAcceptanceBinding
+from my_data_hub.acceptance.master_lifecycle import (
+    MasterAcceptanceBinding,
+    MasterAcceptanceRequest,
+    command_for,
+)
 from my_data_hub.acceptance.master_production import ProductionAcceptanceBlocked
 from my_data_hub.acceptance.old_epoch_denial import (
     BoundedWriteDenial,
@@ -25,6 +31,8 @@ from my_data_hub.acceptance.old_epoch_denial import (
     RuntimeRenewalDenial,
     TunnelRenewalDenial,
 )
+from my_data_hub.acceptance.old_epoch_production import TaskBoundOldEpochDenialFactory
+from my_data_hub.mcp.postgres_broker import DirectoryEpochCredentialSource
 
 ZERO = "0" * 64
 ONE = "1" * 64
@@ -166,6 +174,76 @@ def test_context_can_be_issued_before_rotation_then_bound_exactly_once() -> None
     with pytest.raises(ProductionAcceptanceBlocked, match="FM11_REPLACEMENT_REBIND_DENIED"):
         adapter.bind_replacement(switched)
     assert adapter.prove_old_epoch_denials(old.binding).bounded_write_denied is True
+
+
+def test_task_factory_persists_context_and_holds_operator_before_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    old = context()
+    request = MasterAcceptanceRequest(
+        task_id=old.task_id,
+        scenario="FM11",
+        idempotency_key="fm11-pre-stopped-context",
+        source_revision="a" * 40,
+        target_operation_id=old.old_operation_id,
+    )
+    command = command_for(request, old.binding)
+    connection = SimpleNamespace(close=lambda: None)
+
+    class Clock:
+        def now(self) -> datetime:
+            return datetime(2026, 8, 11, tzinfo=UTC)
+
+    class Ledger:
+        clock = Clock()
+        captured: dict[str, Any] | None = None
+
+        def fm11_old_epoch_context(self, _task_id: str):  # type: ignore[no-untyped-def]
+            return None
+
+        def begin_fm11_old_epoch_context(self, **values: Any):  # type: ignore[no-untyped-def]
+            assert values["task_id"] == str(old.task_id)
+            return {
+                **values,
+                "runtime_token_sha256": ZERO,
+                "old_binding": old.binding.model_dump(mode="json"),
+            }, True
+
+        def complete_fm11_old_epoch_context_capture(self, **values: Any):  # type: ignore[no-untyped-def]
+            self.captured = values
+            return values
+
+        def release_fm11_old_epoch_context(self, **_values: Any) -> None:
+            pass
+
+        def fm11_retired_admission_observation(self, **_values: Any):  # type: ignore[no-untyped-def]
+            raise AssertionError("denial is post-replacement only")
+
+    class Tunnel:
+        def acceptance_identity_snapshot(self, **values: Any) -> dict[str, object]:
+            assert values["epoch"] == old.epoch
+            return {"serial": 17, "principal_sha256": ONE, "public_key_sha256": TWO}
+
+        def acceptance_retired_denial(self, **_values: Any) -> dict[str, object]:
+            raise AssertionError("denial is post-replacement only")
+
+    monkeypatch.setattr(
+        "my_data_hub.acceptance.old_epoch_production.DirectoryOperatorConnectionFactory.open",
+        lambda _self, binding: connection if binding == old.binding else pytest.fail("wrong binding"),
+    )
+    ledger = Ledger()
+    factory = TaskBoundOldEpochDenialFactory(
+        ledger=ledger,  # type: ignore[arg-type]
+        source=DirectoryEpochCredentialSource(tmp_path),
+        tunnel=Tunnel(),
+    )
+    first = factory.for_command(command)
+    second = factory.for_command(command)
+    assert first is second
+    assert first.context is not None and first.context.binding == old.binding
+    assert ledger.captured is not None
+    assert ledger.captured["context_sha256"] == first.context.context_sha256
+    assert first.context.credential_handle in factory.registry._values
 
 
 def test_response_replay_cannot_switch_old_binding() -> None:

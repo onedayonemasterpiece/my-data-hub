@@ -89,9 +89,11 @@ acceptance execution authority blocks before provider mutation.
 
 ## FM11 old-epoch probe composition handoff
 
-`my_data_hub.acceptance.old_epoch_denial.ProductionOldEpochDenialProbe` is the
-concrete `OldEpochDenialPort`. It is intentionally a one-task, in-memory object;
-it is not an MCP tool and has no serializer for its context.
+`TaskBoundOldEpochDenialFactory` is the default-off control composition around
+`ProductionOldEpochDenialProbe`. It is not an MCP tool. Migration 024 persists
+only the owner-task capture intent, exact old binding, bearer hash, opaque held-
+session handle, public tunnel certificate identity, fixed expiry and release
+receipt; the database credential and live connection remain process-private.
 
 The production composition order is fixed:
 
@@ -102,8 +104,9 @@ The production composition order is fixed:
    the old tunnel certificate serial plus principal/public-key digests. Raw
    bearer, DSN, password, certificate and private key remain inside their
    narrow clients.
-2. Construct `ProductionOldEpochDenialProbe` with `replacement=None`, install it
-   as `ProductionControlHostEffects.old_epoch_denials`, and then perform the
+2. The task factory constructs `ProductionOldEpochDenialProbe` with
+   `replacement=None` and returns it to `ProductionControlHostEffects` before
+   the latter tests for STOPPED. The runtime directive then performs the
    ordinary drain, verified checkpoint and STOPPED transition.
    Never rotate first and reconstruct an old context from durable state.
 3. After `ControlPlaneMasterRuntime.ensure` returns the exact ACTIVE
@@ -112,11 +115,14 @@ The production composition order is fixed:
    version and manifest hash), then call the probe's one-shot
    `bind_replacement`. Exact replay is allowed; rebinding is denied. This is the
    post-`ensure` composition handoff in `ProductionControlHostEffects._old_epoch`.
-4. The runtime client exercises the old
-   heartbeat/renewal path; the credential client exercises registration and
-   master-local binding; `PsycopgRetiredBoundedWriteClient` executes only H1's
+4. The runtime client projects the exact revoked-token/current-epoch decision
+   from the same canonical admission state used by callback/renewal routes; the
+   credential client additionally proves the superseded Directory credential
+   can no longer bind; `PsycopgRetiredBoundedWriteClient` executes only H1's
    fixed `assert_session_write_epoch()` followed by the no-row bounded UPDATE;
-   and the tunnel client exercises both lease and certificate renewal.
+   and the tunnel broker's fixed FM11 IPC action verifies the old serial is
+   revoked under the exact consecutive active replacement. No generic tunnel
+   status/action or arbitrary certificate material is exposed.
 5. The adapter requires normalized exact denials, revoked token evidence,
    SQLSTATE `55000`, PostgreSQL `rollback_only`, unchanged canonical revision,
    and the original certificate identity. It then releases the protected
@@ -129,6 +135,7 @@ hashes, UUIDs, numeric epochs/checkpoint versions, denial codes and booleans are
 representable in the sanitized internal receipt. Its schema is
 `schemas/acceptance/old-epoch-denial-receipt.v1.schema.json`.
 
-This implementation and its injected-client tests are not live FM11 evidence.
-FM11 remains blocked until the four clients are wired to deployed authorities
-and one real stopped-old/active-new rotation yields the receipt.
+The four clients and production `create_app` assembly are concrete and fail
+closed if the session directory or structured tunnel authority is absent. Unit
+and integration tests remain implementation evidence only; FM11 still needs one
+real stopped-old/active-new rotation before any live PASS claim.

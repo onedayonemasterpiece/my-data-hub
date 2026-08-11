@@ -755,6 +755,41 @@ def test_fm08_recovery_plan_survives_old_epoch_fencing_without_second_intent(
     assert not created_again and replay == fenced
 
 
+def test_fm11_context_intent_is_task_keyed_and_persisted_only_while_active(
+    tmp_path: Path,
+) -> None:
+    ledger, handle = _active_ledger(tmp_path)
+    request = _request("FM11", operation_id=handle.operation_id)
+    ledger.ensure_master_acceptance_task(
+        task_id=str(request.task_id), scenario_id="FM11",
+        idempotency_key=request.idempotency_key, request_sha256=request.request_sha256,
+        principal_id="owner", client_id="acceptance-client", source_revision=request.source_revision,
+        target_operation_id=handle.operation_id,
+    )
+    payload = ledger.claim_master_acceptance_host_command(
+        task_id=str(request.task_id), expected_scenario="FM11",
+        principal_id="owner", client_id="acceptance-client",
+    )
+    assert payload is not None
+    command = MasterAcceptanceCommand.model_validate(payload)
+    handle_id = str(uuid4())
+    values = {
+        "task_id": str(command.task_id),
+        "command_id": str(command.command_id),
+        "command_sha256": command.command_sha256,
+        "credential_handle": handle_id,
+        "expires_at": ledger.clock.now() + timedelta(minutes=15),
+    }
+    intent, created = ledger.begin_fm11_old_epoch_context(**values)
+    assert created and intent["state"] == "INTENT"
+    assert intent["old_binding"] == command.binding.model_dump(mode="json")
+    assert intent["runtime_token_sha256"] == hashlib.sha256(SECRET.encode()).hexdigest()
+    replay, created_again = ledger.begin_fm11_old_epoch_context(**values)
+    assert not created_again and replay == intent
+    with pytest.raises(IdempotencyConflict):
+        ledger.begin_fm11_old_epoch_context(**{**values, "credential_handle": str(uuid4())})
+
+
 def test_fm10_runtime_control_endpoint_acknowledges_exact_suspension(tmp_path: Path) -> None:
     ledger, handle = _active_ledger(tmp_path)
     request = _request("FM10", operation_id=handle.operation_id)

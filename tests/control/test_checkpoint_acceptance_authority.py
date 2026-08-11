@@ -297,7 +297,12 @@ def test_enabled_app_assembles_checkpoint_launcher_without_runtime_impersonation
         runtime = SimpleNamespace(
             ledger=ledger,
             settings=SimpleNamespace(),
-            coordinator=SimpleNamespace(),
+            coordinator=SimpleNamespace(
+                tunnel_authority=SimpleNamespace(
+                    acceptance_identity_snapshot=lambda **_values: {},
+                    acceptance_retired_denial=lambda **_values: {},
+                )
+            ),
             reconcile_requested_once=lambda: None,
             reconcile_acceptance_once=lambda: None,
         )
@@ -325,3 +330,6 @@ def test_enabled_app_assembles_checkpoint_launcher_without_runtime_impersonation
     assert isinstance(launcher, ControlCheckpointAcceptanceLauncher)
     assert launcher.adapter is provider_adapter
     assert launcher.deployment.catalog.provider_owner == "owner"
+    assert adapter.executor.master.host_effects.old_epoch_denials.__class__.__name__ == (
+        "TaskBoundOldEpochDenialFactory"
+    )

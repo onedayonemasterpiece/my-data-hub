@@ -388,6 +388,25 @@ def create_app(
         callback_supervisor = callback_loss_supervisor_from_environment(
             control_ledger, master_recovery=master_runtime
         )
+        if old_epoch_denials is None:
+            from my_data_hub.acceptance.old_epoch_production import (
+                TaskBoundOldEpochDenialFactory,
+            )
+            from my_data_hub.mcp.postgres_broker import DirectoryEpochCredentialSource
+
+            tunnel_authority = getattr(master_runtime.coordinator, "tunnel_authority", None)
+            if tunnel_authority is None or not all(
+                callable(getattr(tunnel_authority, name, None))
+                for name in ("acceptance_identity_snapshot", "acceptance_retired_denial")
+            ):
+                raise ControlPlaneConfigurationError(
+                    "acceptance scenario opt-in requires the structured FM11 tunnel authority"
+                )
+            old_epoch_denials = TaskBoundOldEpochDenialFactory(
+                ledger=control_ledger,
+                source=DirectoryEpochCredentialSource(runtime.session_credentials_path),
+                tunnel=tunnel_authority,
+            )
         acceptance_scenario_adapter = AcceptanceScenarioOperatorAdapter(
             UnifiedAcceptanceScenarioExecutor(
                 master=ProductionControlAcceptanceContext(

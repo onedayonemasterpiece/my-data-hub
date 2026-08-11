@@ -3034,6 +3034,237 @@ class ControlLedger:
             assert row is not None
             return self._fm08_abrupt_recovery_from_row(row), True
 
+    def begin_fm11_old_epoch_context(
+        self,
+        *,
+        task_id: str,
+        command_id: str,
+        command_sha256: str,
+        credential_handle: str,
+        expires_at: datetime,
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist the exact pre-STOPPED capture intent before opening H1."""
+
+        try:
+            UUID(task_id)
+            UUID(command_id)
+            UUID(credential_handle)
+        except ValueError as exc:
+            raise ValueError("FM11 context requires exact UUID identities") from exc
+        if (
+            len(command_sha256) != 64
+            or expires_at.tzinfo is None
+            or not self.clock.now() < expires_at <= self.clock.now() + timedelta(seconds=900)
+        ):
+            raise ValueError("FM11 context deadline or command hash is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            command = connection.execute(
+                "SELECT c.command_id,c.command_sha256,c.state,c.claim_authority,t.scenario_id,"
+                "t.target_operation_id FROM master_acceptance_commands c "
+                "JOIN master_acceptance_tasks t ON t.task_id=c.task_id WHERE c.task_id=?",
+                (task_id,),
+            ).fetchone()
+            if (
+                command is None
+                or command["command_id"] != command_id
+                or command["command_sha256"] != command_sha256
+                or command["state"] != "CLAIMED"
+                or command["claim_authority"] != "owner_host"
+                or command["scenario_id"] != "FM11"
+            ):
+                raise StaleRuntimeEvent("FM11 context differs from its owner-host claim")
+            existing = connection.execute(
+                "SELECT * FROM master_acceptance_old_epoch_contexts WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if existing is not None:
+                value = self._fm11_old_epoch_context_from_row(existing)
+                if (
+                    value["command_id"] != command_id
+                    or value["command_sha256"] != command_sha256
+                    or value["credential_handle"] != credential_handle
+                ):
+                    raise IdempotencyConflict("FM11 context capture identity changed")
+                return value, False
+            operation = connection.execute(
+                "SELECT state,identity_json FROM operations WHERE operation_id=?",
+                (command["target_operation_id"],),
+            ).fetchone()
+            if operation is None or operation["state"] != "ACTIVE":
+                raise StaleRuntimeEvent("FM11 context must be captured while the old master is ACTIVE")
+            identity = json.loads(str(operation["identity_json"]))
+            token = connection.execute(
+                "SELECT token_sha256,revoked_at FROM runtime_token_hashes WHERE run_id=? AND attempt_id=?",
+                (identity["run_id"], identity["attempt_id"]),
+            ).fetchone()
+            if token is None or token["revoked_at"] is not None:
+                raise StaleRuntimeEvent("FM11 old runtime token is unavailable before capture")
+            binding = {
+                "operation_id": str(command["target_operation_id"]),
+                "run_id": str(identity["run_id"]),
+                "attempt_id": str(identity["attempt_id"]),
+                "service_instance_id": str(identity["service_instance_id"]),
+                "master_instance_id": str(identity["master_instance_id"]),
+                "epoch": int(identity["epoch"]),
+            }
+            connection.execute(
+                "INSERT INTO master_acceptance_old_epoch_contexts(task_id,command_id,command_sha256,"
+                "old_operation_id,old_binding_json,runtime_token_sha256,credential_handle,state,"
+                "expires_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'INTENT',?,?,?)",
+                (
+                    task_id,
+                    command_id,
+                    command_sha256,
+                    command["target_operation_id"],
+                    _safe_json(binding),
+                    token["token_sha256"],
+                    credential_handle,
+                    _format_time(expires_at),
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_old_epoch_contexts WHERE task_id=?", (task_id,)
+            ).fetchone()
+            assert row is not None
+            return self._fm11_old_epoch_context_from_row(row), True
+
+    def complete_fm11_old_epoch_context_capture(
+        self,
+        *,
+        task_id: str,
+        tunnel_certificate: Mapping[str, Any],
+        context_sha256: str,
+    ) -> dict[str, Any]:
+        tunnel_json = _safe_json(tunnel_certificate, max_bytes=8 * 1024)
+        if len(context_sha256) != 64:
+            raise ValueError("FM11 context digest is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_old_epoch_contexts WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["state"] == "CAPTURED":
+                if row["tunnel_certificate_json"] != tunnel_json or row["context_sha256"] != context_sha256:
+                    raise IdempotencyConflict("FM11 captured context changed")
+            elif row["state"] != "INTENT" or str(row["expires_at"]) <= now:
+                raise StaleRuntimeEvent("FM11 context capture intent is no longer current")
+            else:
+                connection.execute(
+                    "UPDATE master_acceptance_old_epoch_contexts SET state='CAPTURED',"
+                    "tunnel_certificate_json=?,context_sha256=?,captured_at=?,updated_at=? "
+                    "WHERE task_id=? AND state='INTENT'",
+                    (tunnel_json, context_sha256, now, now, task_id),
+                )
+            current = connection.execute(
+                "SELECT * FROM master_acceptance_old_epoch_contexts WHERE task_id=?", (task_id,)
+            ).fetchone()
+            assert current is not None
+            return self._fm11_old_epoch_context_from_row(current)
+
+    def release_fm11_old_epoch_context(
+        self, *, task_id: str, context_sha256: str, result_receipt_sha256: str
+    ) -> None:
+        for value in (context_sha256, result_receipt_sha256):
+            if len(value) != 64:
+                raise ValueError("FM11 context release digest is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_old_epoch_contexts WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if row is None or row["context_sha256"] != context_sha256:
+                raise StaleRuntimeEvent("FM11 released context differs from its captured identity")
+            if row["state"] == "RELEASED":
+                if row["result_receipt_sha256"] != result_receipt_sha256:
+                    raise IdempotencyConflict("FM11 released context receipt changed")
+                return
+            if row["state"] != "CAPTURED":
+                raise StaleRuntimeEvent("FM11 context was not captured before release")
+            connection.execute(
+                "UPDATE master_acceptance_old_epoch_contexts SET state='RELEASED',released_at=?,"
+                "result_receipt_sha256=?,updated_at=? WHERE task_id=? AND state='CAPTURED'",
+                (now, result_receipt_sha256, now, task_id),
+            )
+
+    def fm11_old_epoch_context(self, task_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_acceptance_old_epoch_contexts WHERE task_id=?", (task_id,)
+            ).fetchone()
+        return self._fm11_old_epoch_context_from_row(row) if row is not None else None
+
+    def fm11_retired_admission_observation(
+        self, *, task_id: str, replacement_operation_id: str
+    ) -> dict[str, Any]:
+        """Project fixed runtime/register denial facts from canonical admission state."""
+
+        with self._reader() as connection:
+            context = connection.execute(
+                "SELECT * FROM master_acceptance_old_epoch_contexts WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if context is None or context["state"] != "CAPTURED":
+                raise StaleRuntimeEvent("FM11 retired admission has no captured context")
+            old_binding = json.loads(str(context["old_binding_json"]))
+            old_operation = connection.execute(
+                "SELECT state FROM operations WHERE operation_id=?", (context["old_operation_id"],)
+            ).fetchone()
+            replacement = connection.execute(
+                "SELECT state,identity_json FROM operations WHERE operation_id=?",
+                (replacement_operation_id,),
+            ).fetchone()
+            token = connection.execute(
+                "SELECT token_sha256,revoked_at FROM runtime_token_hashes WHERE run_id=? AND attempt_id=?",
+                (old_binding["run_id"], old_binding["attempt_id"]),
+            ).fetchone()
+            service = connection.execute(
+                "SELECT * FROM services WHERE service_kind='postgres-master' AND state='ACTIVE' "
+                "ORDER BY epoch DESC LIMIT 1"
+            ).fetchone()
+            epoch = connection.execute(
+                "SELECT current_epoch FROM service_epochs WHERE service_kind='postgres-master'"
+            ).fetchone()
+        if (
+            old_operation is None
+            or old_operation["state"] != "STOPPED"
+            or replacement is None
+            or replacement["state"] != "ACTIVE"
+            or token is None
+            or token["revoked_at"] is None
+            or service is None
+            or epoch is None
+        ):
+            raise StaleRuntimeEvent("FM11 retired runtime is not durably denied/current")
+        replacement_identity = json.loads(str(replacement["identity_json"]))
+        if (
+            int(replacement_identity["epoch"]) != int(old_binding["epoch"]) + 1
+            or int(epoch["current_epoch"]) != int(replacement_identity["epoch"])
+            or service["run_id"] != replacement_identity["run_id"]
+            or service["attempt_id"] != replacement_identity["attempt_id"]
+            or service["master_instance_id"] != replacement_identity["master_instance_id"]
+        ):
+            raise StaleRuntimeEvent("FM11 replacement is not the current admission authority")
+        return {
+            "runtime_token_sha256": str(token["token_sha256"]),
+            "heartbeat_denied": True,
+            "lease_renewal_denied": True,
+            "runtime_token_revoked": True,
+            "registration_denied": True,
+            "old_credential_bind_denied": True,
+        }
+
+    @staticmethod
+    def _fm11_old_epoch_context_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["old_binding"] = json.loads(str(value.pop("old_binding_json")))
+        tunnel = value.pop("tunnel_certificate_json")
+        value["tunnel_certificate"] = json.loads(str(tunnel)) if tunnel is not None else None
+        return value
+
     def fence_fm08_abrupt_master(
         self,
         *,

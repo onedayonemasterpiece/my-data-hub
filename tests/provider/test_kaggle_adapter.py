@@ -762,6 +762,18 @@ def test_fm08_termination_reconciles_lost_delete_response_without_second_delete(
     assert len(journal.receipts) == 2
 
 
+def test_delete_absence_reconciliation_waits_without_a_second_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _api, _journal = adapter()
+    observations = iter((False, False, True))
+    sleeps: list[float] = []
+    monkeypatch.setattr(client, "_is_absent", lambda *_args: next(observations))
+    client.sleep = sleeps.append
+    assert client._wait_for_absence("owner/eventual-delete", ProviderKind.NOTEBOOK) is True
+    assert sleeps == [5.0, 5.0]
+
+
 def test_output_rejects_stale_run_receipt() -> None:
     client, api, _journal = adapter()
     task_id = uuid4()

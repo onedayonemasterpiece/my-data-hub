@@ -530,3 +530,77 @@ def test_local_ipc_dispatch_accepts_only_exact_epoch_metadata(tmp_path: Path) ->
                 },
             },
         )
+
+
+def test_fm11_ipc_snapshot_and_retired_denial_are_structured_and_task_bound(
+    tmp_path: Path,
+) -> None:
+    broker, _terminated, _ca = _broker(tmp_path)
+    now = datetime.now(UTC)
+    broker.activate(
+        master_instance_id=INSTANCE,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        epoch=1,
+        lease_until=now + timedelta(minutes=5),
+        listen_port=25432,
+        now=now,
+    )
+    public_key = _key(tmp_path / "runtime", "fm11 old runtime").read_text(encoding="ascii")
+    certificate = broker.issue_public_key(
+        master_instance_id=INSTANCE,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        epoch=1,
+        public_key=public_key,
+        valid_before=now + timedelta(minutes=4),
+        now=now,
+    )
+    snapshot = _dispatch(
+        broker,
+        {
+            "action": "acceptance_snapshot",
+            "payload": {
+                "master_instance_id": INSTANCE,
+                "run_id": RUN_ID,
+                "attempt_id": ATTEMPT_ID,
+                "epoch": 1,
+            },
+        },
+    )
+    assert snapshot["serial"] == certificate.serial
+    replacement = "4a9e762d-1f71-4aec-af75-6ec36f384629"
+    broker.activate(
+        master_instance_id=replacement,
+        run_id="run-8",
+        attempt_id="attempt-3",
+        epoch=2,
+        lease_until=now + timedelta(minutes=5),
+        listen_port=25432,
+        now=now,
+    )
+    denial = _dispatch(
+        broker,
+        {
+            "action": "acceptance_retired_denial",
+            "payload": {
+                "master_instance_id": INSTANCE,
+                "run_id": RUN_ID,
+                "attempt_id": ATTEMPT_ID,
+                "epoch": 1,
+                "certificate_serial": snapshot["serial"],
+                "principal_sha256": snapshot["principal_sha256"],
+                "public_key_sha256": snapshot["public_key_sha256"],
+                "replacement_master_instance_id": replacement,
+                "replacement_epoch": 2,
+            },
+        },
+    )
+    assert denial == {
+        "lease_renewal_denied": True,
+        "certificate_renewal_denied": True,
+        "lease_denial_code": "MDH_RETIRED_TUNNEL_LEASE",
+        "certificate_denial_code": "MDH_RETIRED_TUNNEL_CERTIFICATE",
+        "certificate_serial": certificate.serial,
+        "principal_sha256": snapshot["principal_sha256"],
+    }

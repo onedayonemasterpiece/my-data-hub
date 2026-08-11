@@ -129,6 +129,53 @@ class TunnelBrokerClient:
         if self._call("deactivate", payload) != {"deactivated": True}:
             raise TunnelBrokerError("broker deactivation response differs from the contract")
 
+    def acceptance_identity_snapshot(
+        self, *, master_instance_id: str, run_id: str, attempt_id: str, epoch: int
+    ) -> dict[str, object]:
+        result = self._call(
+            "acceptance_snapshot",
+            self._identity(master_instance_id, run_id, attempt_id, epoch),
+        )
+        if set(result) != {"serial", "principal_sha256", "public_key_sha256"}:
+            raise TunnelBrokerError("FM11 tunnel snapshot response differs from the contract")
+        return result
+
+    def acceptance_retired_denial(
+        self,
+        *,
+        master_instance_id: str,
+        run_id: str,
+        attempt_id: str,
+        epoch: int,
+        certificate_serial: int,
+        principal_sha256: str,
+        public_key_sha256: str,
+        replacement_master_instance_id: str,
+        replacement_epoch: int,
+    ) -> dict[str, object]:
+        payload = self._identity(master_instance_id, run_id, attempt_id, epoch)
+        payload.update(
+            {
+                "certificate_serial": certificate_serial,
+                "principal_sha256": principal_sha256,
+                "public_key_sha256": public_key_sha256,
+                "replacement_master_instance_id": replacement_master_instance_id,
+                "replacement_epoch": replacement_epoch,
+            }
+        )
+        result = self._call("acceptance_retired_denial", payload)
+        expected = {
+            "lease_renewal_denied",
+            "certificate_renewal_denied",
+            "lease_denial_code",
+            "certificate_denial_code",
+            "certificate_serial",
+            "principal_sha256",
+        }
+        if set(result) != expected:
+            raise TunnelBrokerError("FM11 retired tunnel response differs from the contract")
+        return result
+
 
 def _exact(value: object, fields: set[str]) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != fields:
@@ -171,6 +218,39 @@ def _dispatch(broker: TunnelBroker, request: object) -> dict[str, object]:
             reason=str(payload["reason"]),
         )
         return {"deactivated": True}
+    if action == "acceptance_snapshot":
+        payload = _exact(envelope["payload"], base)
+        return broker.acceptance_identity_snapshot(
+            master_instance_id=str(payload["master_instance_id"]),
+            run_id=str(payload["run_id"]),
+            attempt_id=str(payload["attempt_id"]),
+            epoch=int(cast(int, payload["epoch"])),
+            now=datetime.now(UTC),
+        )
+    if action == "acceptance_retired_denial":
+        payload = _exact(
+            envelope["payload"],
+            base
+            | {
+                "certificate_serial",
+                "principal_sha256",
+                "public_key_sha256",
+                "replacement_master_instance_id",
+                "replacement_epoch",
+            },
+        )
+        return broker.acceptance_retired_denial(
+            master_instance_id=str(payload["master_instance_id"]),
+            run_id=str(payload["run_id"]),
+            attempt_id=str(payload["attempt_id"]),
+            epoch=int(cast(int, payload["epoch"])),
+            certificate_serial=int(cast(int, payload["certificate_serial"])),
+            principal_sha256=str(payload["principal_sha256"]),
+            public_key_sha256=str(payload["public_key_sha256"]),
+            replacement_master_instance_id=str(payload["replacement_master_instance_id"]),
+            replacement_epoch=int(cast(int, payload["replacement_epoch"])),
+            now=datetime.now(UTC),
+        )
     raise TunnelBrokerError("broker action is not allowlisted")
 
 

@@ -614,6 +614,116 @@ class TunnelBroker:
                 self._fail_closed(state)
                 raise
 
+    def acceptance_identity_snapshot(
+        self,
+        *,
+        master_instance_id: str,
+        run_id: str,
+        attempt_id: str,
+        epoch: int,
+        now: datetime,
+    ) -> dict[str, object]:
+        """Return only task-bound public tunnel identity for FM11 capture."""
+
+        instance, epoch = _validate_identity(master_instance_id, epoch)
+        run_id, attempt_id = _validate_runtime_ids(run_id, attempt_id)
+        observed = _utc(now, "now")
+        with self._lock():
+            state = self._load_or_fail_closed()
+            active = state.active
+            if (
+                active is None
+                or active.master_instance_id != instance
+                or active.run_id != run_id
+                or active.attempt_id != attempt_id
+                or active.epoch != epoch
+                or active.lease_until <= observed
+            ):
+                raise TunnelBrokerError("FM11 capture requires the current unexpired tunnel epoch")
+            issued = [
+                item
+                for item in state.issued
+                if item["master_instance_id"] == instance
+                and item["run_id"] == run_id
+                and item["attempt_id"] == attempt_id
+                and item["epoch"] == epoch
+                and cast(int, item["serial"]) not in state.revoked_serials
+            ]
+            if not issued:
+                raise TunnelBrokerError("FM11 capture requires an issued current certificate")
+            certificate = max(issued, key=lambda item: cast(int, item["serial"]))
+            return {
+                "serial": int(cast(int, certificate["serial"])),
+                "principal_sha256": hashlib.sha256(
+                    str(certificate["principal"]).encode("utf-8")
+                ).hexdigest(),
+                "public_key_sha256": str(certificate["public_key_sha256"]),
+            }
+
+    def acceptance_retired_denial(
+        self,
+        *,
+        master_instance_id: str,
+        run_id: str,
+        attempt_id: str,
+        epoch: int,
+        certificate_serial: int,
+        principal_sha256: str,
+        public_key_sha256: str,
+        replacement_master_instance_id: str,
+        replacement_epoch: int,
+        now: datetime,
+    ) -> dict[str, object]:
+        """Prove old lease/certificate admission is fenced by current state."""
+
+        instance, epoch = _validate_identity(master_instance_id, epoch)
+        run_id, attempt_id = _validate_runtime_ids(run_id, attempt_id)
+        replacement, replacement_epoch = _validate_identity(
+            replacement_master_instance_id, replacement_epoch
+        )
+        _utc(now, "now")
+        if (
+            certificate_serial < 1
+            or not re.fullmatch(r"[a-f0-9]{64}", principal_sha256)
+            or not re.fullmatch(r"[a-f0-9]{64}", public_key_sha256)
+            or replacement_epoch != epoch + 1
+        ):
+            raise TunnelBrokerError("FM11 retired tunnel proof identity is invalid")
+        with self._lock():
+            state = self._load_or_fail_closed()
+            active = state.active
+            certificate = next(
+                (
+                    item
+                    for item in state.issued
+                    if int(cast(int, item["serial"])) == certificate_serial
+                    and item["master_instance_id"] == instance
+                    and item["run_id"] == run_id
+                    and item["attempt_id"] == attempt_id
+                    and item["epoch"] == epoch
+                ),
+                None,
+            )
+            if (
+                active is None
+                or active.master_instance_id != replacement
+                or active.epoch != replacement_epoch
+                or certificate is None
+                or certificate_serial not in state.revoked_serials
+                or hashlib.sha256(str(certificate["principal"]).encode("utf-8")).hexdigest()
+                != principal_sha256
+                or certificate["public_key_sha256"] != public_key_sha256
+            ):
+                raise TunnelBrokerError("FM11 retired tunnel denial is not durably proven")
+            return {
+                "lease_renewal_denied": True,
+                "certificate_renewal_denied": True,
+                "lease_denial_code": "MDH_RETIRED_TUNNEL_LEASE",
+                "certificate_denial_code": "MDH_RETIRED_TUNNEL_CERTIFICATE",
+                "certificate_serial": certificate_serial,
+                "principal_sha256": principal_sha256,
+            }
+
     def issue(
         self,
         *,

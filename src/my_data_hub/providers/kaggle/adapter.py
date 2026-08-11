@@ -1283,11 +1283,11 @@ class KaggleProviderAdapter:
             self.api.kernels_delete(run.provider_ref, no_confirm=True)
             attempts = 1
         except Exception as exc:
-            if not self._is_absent(run.provider_ref, ProviderKind.NOTEBOOK):
+            if not self._wait_for_absence(run.provider_ref, ProviderKind.NOTEBOOK):
                 self._persist_uncertain(intent, detail="fm08_master_termination_ambiguous")
                 raise KaggleAmbiguousMutation("FM08 master termination is not exactly reconcilable") from exc
             attempts = 0
-        if not self._is_absent(run.provider_ref, ProviderKind.NOTEBOOK):
+        if not self._wait_for_absence(run.provider_ref, ProviderKind.NOTEBOOK):
             self._persist_uncertain(intent, detail="fm08_master_still_present")
             raise KaggleAmbiguousMutation("FM08 master run remains after termination")
         receipt = ProviderEffectReceipt(
@@ -1793,11 +1793,11 @@ class KaggleProviderAdapter:
                     "kernels_delete", lambda: self.api.kernels_delete(claim.provider_ref, no_confirm=True)
                 )
         except Exception as exc:
-            if not self._is_absent(claim.provider_ref, claim.kind):
+            if not self._wait_for_absence(claim.provider_ref, claim.kind):
                 self._persist_uncertain(intent, detail="delete_ambiguous")
                 raise KaggleAmbiguousMutation("cleanup outcome is not exactly reconcilable") from exc
             attempts = 0
-        if not self._is_absent(claim.provider_ref, claim.kind):
+        if not self._wait_for_absence(claim.provider_ref, claim.kind):
             self._persist_uncertain(intent, detail="delete_still_present")
             raise KaggleAmbiguousMutation("provider resource remains after delete")
         receipt = ProviderEffectReceipt(
@@ -1940,6 +1940,16 @@ class KaggleProviderAdapter:
             return True
         except Exception:
             return False
+        return False
+
+    def _wait_for_absence(self, provider_ref: str, kind: ProviderKind) -> bool:
+        """Bound eventual-consistency reads after one destructive provider call."""
+
+        for poll in range(24):
+            if self._is_absent(provider_ref, kind):
+                return True
+            if poll < 23:
+                self.sleep(5.0)
         return False
 
     def _write_dataset_metadata(self, folder: Path, provider_ref: str, title: str) -> None:
