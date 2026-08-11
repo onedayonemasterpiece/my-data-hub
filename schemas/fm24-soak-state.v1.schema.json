@@ -1,0 +1,256 @@
+{
+  "$defs": {
+    "ActionRecord": {
+      "additionalProperties": false,
+      "description": "One persisted intent/ACK pair; receipt contents stay at the authority.",
+      "properties": {
+        "acknowledged_monotonic_ns": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Acknowledged Monotonic Ns"
+        },
+        "action": {
+          "$ref": "#/$defs/StepAction"
+        },
+        "intent_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Intent Sha256",
+          "type": "string"
+        },
+        "receipt_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Receipt Sha256"
+        },
+        "state": {
+          "enum": [
+            "INTENT_COMMITTED",
+            "ACKED"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "intent_sha256",
+        "state"
+      ],
+      "title": "ActionRecord",
+      "type": "object"
+    },
+    "SoakStepRecord": {
+      "additionalProperties": false,
+      "description": "Durable progress for one of the twelve fixed rotation steps.",
+      "properties": {
+        "actions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ActionRecord"
+          },
+          "maxItems": 7,
+          "title": "Actions",
+          "type": "array"
+        },
+        "credential_expires_at": {
+          "format": "date-time",
+          "title": "Credential Expires At",
+          "type": "string"
+        },
+        "lease_until": {
+          "format": "date-time",
+          "title": "Lease Until",
+          "type": "string"
+        },
+        "not_before_monotonic_ns": {
+          "minimum": 0,
+          "title": "Not Before Monotonic Ns",
+          "type": "integer"
+        },
+        "step": {
+          "maximum": 12,
+          "minimum": 1,
+          "title": "Step",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "step",
+        "not_before_monotonic_ns",
+        "lease_until",
+        "credential_expires_at"
+      ],
+      "title": "SoakStepRecord",
+      "type": "object"
+    },
+    "StepAction": {
+      "enum": [
+        "heartbeat_ack",
+        "database_lease_renew",
+        "tunnel_lease_renew",
+        "credential_rotation",
+        "bounded_read",
+        "prior_credential_expiry",
+        "stale_reconnect_denial"
+      ],
+      "title": "StepAction",
+      "type": "string"
+    }
+  },
+  "$id": "https://schemas.my-data-hub.local/fm24-soak-state.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Bounded task-owned journal projection containing metadata only.",
+  "properties": {
+    "binding_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Binding Sha256",
+      "type": "string"
+    },
+    "bounded_reads": {
+      "default": 0,
+      "maximum": 12,
+      "minimum": 0,
+      "title": "Bounded Reads",
+      "type": "integer"
+    },
+    "completed_steps": {
+      "default": 0,
+      "maximum": 12,
+      "minimum": 0,
+      "title": "Completed Steps",
+      "type": "integer"
+    },
+    "deadline_monotonic_ns": {
+      "minimum": 0,
+      "title": "Deadline Monotonic Ns",
+      "type": "integer"
+    },
+    "evidence_class": {
+      "enum": [
+        "injected",
+        "live"
+      ],
+      "title": "Evidence Class",
+      "type": "string"
+    },
+    "finished_monotonic_ns": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Finished Monotonic Ns"
+    },
+    "lease_renewals": {
+      "default": 0,
+      "maximum": 12,
+      "minimum": 0,
+      "title": "Lease Renewals",
+      "type": "integer"
+    },
+    "rejected_stale_sessions": {
+      "default": 0,
+      "maximum": 12,
+      "minimum": 0,
+      "title": "Rejected Stale Sessions",
+      "type": "integer"
+    },
+    "schema_version": {
+      "const": "my-data-hub-fm24-soak-state.v1",
+      "default": "my-data-hub-fm24-soak-state.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "session_rotations": {
+      "default": 0,
+      "maximum": 12,
+      "minimum": 0,
+      "title": "Session Rotations",
+      "type": "integer"
+    },
+    "started_monotonic_ns": {
+      "minimum": 0,
+      "title": "Started Monotonic Ns",
+      "type": "integer"
+    },
+    "status": {
+      "default": "RUNNING",
+      "enum": [
+        "RUNNING",
+        "COMPLETE",
+        "CANCELLED",
+        "FAILED"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "steps": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SoakStepRecord"
+      },
+      "maxItems": 12,
+      "title": "Steps",
+      "type": "array"
+    },
+    "task_id_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Task Id Sha256",
+      "type": "string"
+    },
+    "terminal_code": {
+      "anyOf": [
+        {
+          "enum": [
+            "FM24_CANCELLED",
+            "FM24_DEADLINE_EXCEEDED"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Terminal Code"
+    },
+    "tunnel_renewals": {
+      "default": 0,
+      "maximum": 12,
+      "minimum": 0,
+      "title": "Tunnel Renewals",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "task_id_sha256",
+    "binding_sha256",
+    "evidence_class",
+    "started_monotonic_ns",
+    "deadline_monotonic_ns"
+  ],
+  "title": "SoakSessionState",
+  "type": "object"
+}
