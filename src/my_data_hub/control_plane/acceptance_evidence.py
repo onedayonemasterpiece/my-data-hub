@@ -15,7 +15,19 @@ from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.providers.kaggle.contracts import KaggleKernelRunIdentity, PollPolicy
 
 ACCEPTANCE_EVIDENCE_SCENARIOS: Final = frozenset(
-    {"FM01", "FM02", "FM03", "FM06", "FM22", "FM23"}
+    {
+        "FM01",
+        "FM02",
+        "FM03",
+        "FM06",
+        "FM16",
+        "FM17",
+        "FM18",
+        "FM19",
+        "FM21",
+        "FM22",
+        "FM23",
+    }
 )
 
 
@@ -79,7 +91,9 @@ class NotebookDatasetInput(BaseModel):
 class NotebookLifecycleRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    scenario_id: Literal["FM01", "FM02", "FM03", "FM06", "FM22", "FM23"]
+    scenario_id: Literal[
+        "FM01", "FM02", "FM03", "FM06", "FM16", "FM17", "FM18", "FM19", "FM21", "FM22", "FM23"
+    ]
     task_id: UUID
     task_run_id: UUID
     idempotency_key: str = Field(min_length=8, max_length=260)
@@ -111,7 +125,9 @@ class NotebookLifecycleRequest(BaseModel):
 class AcceptanceCleanupRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    scenario_id: Literal["FM01", "FM02", "FM03", "FM06", "FM22", "FM23"]
+    scenario_id: Literal[
+        "FM01", "FM02", "FM03", "FM06", "FM16", "FM17", "FM18", "FM19", "FM21", "FM22", "FM23"
+    ]
     task_id: UUID
     claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     provider_run_ref: str = Field(min_length=3, max_length=500)

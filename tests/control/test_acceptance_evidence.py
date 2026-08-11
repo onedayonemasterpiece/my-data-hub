@@ -69,6 +69,27 @@ def notebook_request(
     }
 
 
+@pytest.mark.parametrize("scenario_id", ["FM16", "FM17", "FM18", "FM19", "FM21"])
+def test_data_workload_scenarios_have_exact_notebook_and_cleanup_contracts(
+    scenario_id: str,
+) -> None:
+    from my_data_hub.control_plane.acceptance_evidence import (
+        AcceptanceCleanupRequest,
+        NotebookLifecycleRequest,
+    )
+
+    request = NotebookLifecycleRequest.model_validate(notebook_request(scenario_id=scenario_id))
+    cleanup = AcceptanceCleanupRequest(
+        scenario_id=scenario_id,  # type: ignore[arg-type]
+        task_id=request.task_id,
+        claim_sha256="a" * 64,
+        provider_run_ref="owner/evidence/run/1",
+        output_receipt_sha256="b" * 64,
+        idempotency_key=f"{scenario_id.casefold()}-cleanup",
+    )
+    assert cleanup.scenario_id == scenario_id
+
+
 def test_dataset_claim_precedes_effect_and_response_loss_reconciles_without_duplicate_create(
     tmp_path: Path,
 ) -> None:
