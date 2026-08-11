@@ -1002,6 +1002,49 @@ def test_unknown_names_are_external_read_only_and_never_cleanup_authority() -> N
     assert journal.claims == {}
 
 
+def test_inventory_ignores_only_exact_non_addressable_private_notebook_tombstone() -> None:
+    client, api, _journal = adapter()
+    api.kernels["owner/visible-private-notebook"] = {1: b"print('visible')\n"}
+    original = api.kernels_list_with_response
+
+    def with_redacted_tombstone(**kwargs):  # type: ignore[no-untyped-def]
+        response = original(**kwargs)
+        response.kernels.append(
+            SimpleNamespace(
+                ref="",
+                slug="",
+                author="",
+                title="[Private Notebook]",
+                id=0,
+                current_version_number=0,
+                is_private=False,
+            )
+        )
+        return response
+
+    api.kernels_list_with_response = with_redacted_tombstone
+    inventory = BoundedInventory(client, ProviderRegistry()).collect(ProviderKind.NOTEBOOK)
+    assert [item.provider_ref for item in inventory] == ["owner/visible-private-notebook"]
+
+    def with_malformed_identifiable_row(**kwargs):  # type: ignore[no-untyped-def]
+        response = original(**kwargs)
+        response.kernels.append(
+            SimpleNamespace(
+                ref="",
+                slug="",
+                author="",
+                title="not-the-provider-tombstone",
+                id=0,
+                current_version_number=0,
+            )
+        )
+        return response
+
+    api.kernels_list_with_response = with_malformed_identifiable_row
+    with pytest.raises(KaggleIdentityError, match="exact owner/slug"):
+        BoundedInventory(client, ProviderRegistry()).collect(ProviderKind.NOTEBOOK)
+
+
 def test_exact_task_claim_allows_only_disposable_resource_cleanup() -> None:
     client, api, _journal = adapter()
     task_id = uuid4()

@@ -102,6 +102,19 @@ def _normalized_ref(value: object) -> str:
     return ref
 
 
+def _is_redacted_kernel_placeholder(row: object) -> bool:
+    """Recognize the pinned SDK's non-addressable private-Notebook tombstone."""
+
+    return bool(
+        str(_field(row, "ref") or "") == ""
+        and str(_field(row, "slug") or "") == ""
+        and str(_field(row, "author") or "") == ""
+        and str(_field(row, "title") or "") == "[Private Notebook]"
+        and _field(row, "id") in (None, 0)
+        and _field(row, "current_version_number", "currentVersionNumber") in (None, 0)
+    )
+
+
 def _normalized_dataset_source(value: object) -> str:
     source = str(value or "").strip().removeprefix("/")
     parts = source.split("/")
@@ -364,7 +377,17 @@ class KaggleProviderAdapter:
             raise KaggleContractError(f"unsupported Kaggle resource kind: {kind}")
         if len(rows) > limit:
             raise KaggleContractError("Kaggle returned more inventory rows than requested")
-        observed = tuple(self._observed_resource(row, kind) for row in rows)
+        # The official profile listing may contain an identity-free tombstone
+        # for a deleted/inaccessible private Notebook. It is not an
+        # addressable provider resource and cannot participate in registry,
+        # policy, or cleanup decisions. Ignore only the exact provider
+        # sentinel; every other malformed row remains fail-closed.
+        identifiable_rows = (
+            tuple(row for row in rows if not _is_redacted_kernel_placeholder(row))
+            if kind == ProviderKind.NOTEBOOK
+            else tuple(rows)
+        )
+        observed = tuple(self._observed_resource(row, kind) for row in identifiable_rows)
         next_cursor = str(_field(response, "next_page_token", "nextPageToken") or "").strip() or None
         return InventoryPage(resources=observed, next_cursor=next_cursor)
 
