@@ -27,7 +27,7 @@
       "byte_size": 4096
     },
     "postgres_runtime": {
-      "path": "dataset/postgresql-18-runtime.tar.gz",
+      "path": "dataset/postgresql-18-runtime.bundle",
       "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
       "byte_size": 12868357
     },

@@ -164,7 +164,7 @@ def verify_bundle(*, bundle: Path, expected_commit: str) -> dict[str, object]:
     expected_paths = {
         "master_notebook": "postgres-master.ipynb",
         "checkpoint_verifier": "dataset/checkpoint-verifier.ipynb",
-        "postgres_runtime": "dataset/postgresql-18-runtime.tar.gz",
+        "postgres_runtime": "dataset/postgresql-18-runtime.bundle",
         "postgres_runtime_manifest": "dataset/postgresql-18-runtime.json",
         "tunnel_known_hosts": "dataset/tunnel-known-hosts",
     }

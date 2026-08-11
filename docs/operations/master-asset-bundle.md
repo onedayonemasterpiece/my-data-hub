@@ -23,6 +23,13 @@ digest-pinned, both upstream archives are SHA-256 pinned, pgvector disables host
 outside Git and must match the explicit CLI digest; the known-host file must already use
 OpenSSH hashed-host syntax.
 
+The reviewed local input may retain its `.tar.gz` name, but the Dataset package stores
+the exact same bytes as `dataset/postgresql-18-runtime.bundle`. A real Kaggle upload on
+2026-08-11 proved that a `.tar.gz` Dataset member is provider-expanded and therefore no
+longer has the exact staged package tree; the neutral `.bundle` suffix preserves the
+single opaque artifact and its approved SHA-256. The Notebook still verifies that hash
+before passing the bytes to `tar -xzf`.
+
 The
 manifest binds every file hash to the exact Git commit and permanent owner/slug resource
 identity. Directories are mode `0700`; files are mode `0600`. The environment file has
