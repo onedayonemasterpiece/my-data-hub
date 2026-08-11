@@ -202,6 +202,37 @@ def test_production_builder_constructs_single_adapter_journal_and_bridge(monkeyp
     assert isinstance(built.master.coordinator.provider, KaggleMasterRuntimeProvider)
 
 
+def test_production_builder_accepts_central_legacy_kaggle_credentials(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
+    monkeypatch.setenv("KAGGLE_CONFIG_DIR", str(tmp_path / "missing-sdk-config"))
+    monkeypatch.setenv("KAGGLE_USERNAME", "automation-owner")
+    monkeypatch.setenv("KAGGLE_KEY", "k" * 32)
+    ledger = ControlLedger(tmp_path / "legacy-builder.sqlite3")
+    adapter = object()
+    built = build_production_runtime(
+        ledger,
+        MasterRuntimeSettings(assets(), ROOT),
+        adapter_factory=lambda _journal: adapter,  # type: ignore[arg-type,return-value]
+    )
+    assert built.provider_status == "available"
+    assert built.provider_adapter is adapter
+    assert built.master is not None
+
+
+def test_production_builder_rejects_partial_legacy_kaggle_credentials(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
+    monkeypatch.setenv("KAGGLE_CONFIG_DIR", str(tmp_path / "missing-sdk-config"))
+    monkeypatch.setenv("KAGGLE_USERNAME", "automation-owner")
+    monkeypatch.delenv("KAGGLE_KEY", raising=False)
+    built = build_production_runtime(
+        ControlLedger(tmp_path / "partial-legacy.sqlite3"),
+        MasterRuntimeSettings(assets(), ROOT),
+        adapter_factory=lambda _journal: object(),  # type: ignore[arg-type,return-value]
+    )
+    assert built.provider_status == "provider_unavailable"
+    assert built.master is None
+
+
 def test_control_provider_gateway_requires_service_auth_and_uses_injected_single_adapter(
     tmp_path: Path,
 ) -> None:

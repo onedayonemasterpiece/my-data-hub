@@ -37,6 +37,7 @@ from my_data_hub.providers.kaggle import (
     derive_runtime_secret,
 )
 from my_data_hub.providers.kaggle.contracts import KaggleDatasetIdentity
+from my_data_hub.providers.kaggle.credentials import kaggle_credentials_configured
 from my_data_hub.providers.models import ProviderFingerprint
 from my_data_hub.runtime_sdk import CANONICAL_RUNTIME_CALLBACK_URL
 from my_data_hub.tunnel_broker_ipc import TunnelBrokerClient
@@ -502,7 +503,7 @@ def build_production_runtime(
     registrar = _build_session_registrar(session_credentials_path)
     if settings is None:
         return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None)
-    if not _modern_kaggle_token_available():
+    if not kaggle_credentials_configured():
         return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None)
     journal = ControlLedgerKaggleJournal(ledger)
     factory = adapter_factory or (lambda value: KaggleProviderAdapter.from_environment(journal=value))
@@ -532,15 +533,6 @@ def build_production_runtime(
     # readiness, not an assertion that Kaggle accepted an effect.
     return ProductionRuntimeBuild(runtime, "available", registrar, adapter)
 
-
-def _modern_kaggle_token_available() -> bool:
-    if os.getenv("KAGGLE_API_TOKEN", "").strip():
-        return True
-    token_path = Path(os.getenv("KAGGLE_CONFIG_DIR", "~/.kaggle")).expanduser() / "access_token"
-    try:
-        return token_path.is_file() and bool(token_path.read_text(encoding="utf-8").strip())
-    except OSError:
-        return False
 
 
 def _bounded_file(path: Path, *, max_bytes: int) -> bytes:

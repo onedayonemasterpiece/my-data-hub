@@ -136,7 +136,10 @@ def test_operator_profile_keeps_kaggle_authority_only_in_control_process() -> No
     assert 'MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED: "true"' in source
     assert "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL" in source
     assert source.count("mcp-control-gateway.token:ro") == 2
-    assert 'grep -Eic \'^[[:space:]]*KAGGLE_API_TOKEN' in source
+    assert 'kaggle_token_count=' in source
+    assert 'kaggle_username_count=' in source
+    assert 'kaggle_key_count=' in source
+    assert 'access token OR one legacy username/key pair' in source
 
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
     assert compose["services"]["control-plane"]["environment"][
