@@ -27,6 +27,7 @@ from my_data_hub.control_plane.acceptance_supervisor import (
     CallbackLossDirective,
     CallbackSupervisorBlocked,
     ComposeControlPlaneRestartRunner,
+    ControlLedgerCallbackLossPort,
     HostRestartController,
     HostRestartJournal,
     HostRestartRequest,
@@ -35,6 +36,7 @@ from my_data_hub.control_plane.acceptance_supervisor import (
     UnixHostRestartServer,
     _parse_signed_envelope,
     _signed_envelope,
+    callback_loss_supervisor_from_environment,
 )
 from my_data_hub.hashing import canonical_json_bytes
 
@@ -396,3 +398,98 @@ def test_private_unix_socket_auth_and_mode(tmp_path: Path) -> None:
         wake.connect(str(socket_path))
     thread.join(timeout=2)
     assert not thread.is_alive()
+
+
+@dataclass
+class FakeLedger:
+    row: dict[str, Any] | None = None
+
+    def arm_master_acceptance_callback_loss(self, **values: Any) -> dict[str, Any]:
+        expires = (NOW + timedelta(seconds=120)).isoformat().replace("+00:00", "Z")
+        receipt = {
+            "schema_version": "my-data-hub-fm08-callback-directive.v1",
+            "task_id": values["task_id"],
+            "command_id": values["command_id"],
+            "command_sha256": values["command_sha256"],
+            "run_id": values["run_id"],
+            "attempt_id": values["attempt_id"],
+            "master_instance_id": values["master_instance_id"],
+            "epoch": values["epoch"],
+            "event_type": "runtime.heartbeat",
+            "maximum_callbacks": 1,
+            "before_boot_id": values["before_boot_id"],
+            "expires_at": expires,
+        }
+        self.row = {
+            **values,
+            "scenario_id": "FM08",
+            "callback_state": "ARMED",
+            "callback_count": 0,
+            "armed_at": NOW.isoformat().replace("+00:00", "Z"),
+            "expires_at": expires,
+            "directive_receipt_sha256": hashlib.sha256(
+                canonical_json_bytes(receipt)
+            ).hexdigest(),
+            "restart_from_id": None,
+            "restart_to_id": None,
+        }
+        return self.row
+
+    def master_acceptance_runtime_control(self, task_id: str) -> dict[str, Any] | None:
+        assert self.row is None or task_id == self.row["task_id"]
+        return self.row
+
+    def armed_master_acceptance_callback_loss(self, **identity: Any) -> dict[str, Any] | None:
+        assert self.row is not None
+        assert identity["run_id"] == self.row["run_id"]
+        return self.row
+
+    def record_master_acceptance_restart(self, **values: Any) -> dict[str, Any]:
+        assert self.row is not None and values["task_id"] == self.row["task_id"]
+        self.row["restart_from_id"] = values["restart_from_id"]
+        self.row["restart_to_id"] = values["restart_to_id"]
+        return self.row
+
+
+def test_control_ledger_adapter_reconciles_exact_directive_and_restart() -> None:
+    ledger = FakeLedger()
+    adapter = ControlLedgerCallbackLossPort(ledger)
+    value = command()
+    armed = adapter.arm_callback_loss(
+        value,
+        allowed_event_types=ALLOWED_CALLBACK_EVENT_TYPES,
+        max_callbacks=1,
+        armed_at=NOW,
+        expires_at=NOW + timedelta(seconds=180),
+        before_boot_id=BEFORE,
+    )
+    assert armed.command_sha256 == value.command_sha256
+    assert armed.expires_at == NOW + timedelta(seconds=120)
+    assert adapter.callback_loss_directive(value) == armed
+
+    assert ledger.row is not None
+    ledger.row.update(
+        callback_state="CAPTURED",
+        callback_count=1,
+        callback_event_id=str(UUID(int=99)),
+        callback_body_sha256=BODY_HASH,
+    )
+    assert adapter.captured_callback(value, armed) == CallbackCapture(
+        event_id=UUID(int=99), body_sha256=BODY_HASH
+    )
+    adapter.record_control_restart(
+        value, armed, before_boot_id=BEFORE, after_boot_id=AFTER
+    )
+    ledger.row["callback_state"] = "REPLAYED"
+    assert adapter.replay_disposition(value, armed, UUID(int=99)) == "duplicate"
+
+
+def test_environment_factory_is_default_off_and_rejects_partial_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_SOCKET", raising=False)
+    monkeypatch.delenv("MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_KEY_FILE", raising=False)
+    assert callback_loss_supervisor_from_environment(FakeLedger()) is None
+    monkeypatch.setenv("MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_SOCKET", "/run/mdh/control.sock")
+    with pytest.raises(ValueError, match="configured together"):
+        callback_loss_supervisor_from_environment(FakeLedger())
