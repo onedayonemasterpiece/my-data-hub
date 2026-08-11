@@ -58,12 +58,8 @@ def test_request_example_and_all_generated_schemas_validate() -> None:
 
 def test_fm24_live_receipt_example_requires_exact_checkpoint_recovery_hashes() -> None:
     root = Path(__file__).resolve().parents[2]
-    example = json.loads(
-        (root / "examples/acceptance/master-lifecycle-receipt-fm24.v1.example.json").read_text()
-    )
-    schema = json.loads(
-        (root / "schemas/acceptance/master-lifecycle-receipt.v1.schema.json").read_text()
-    )
+    example = json.loads((root / "examples/acceptance/master-lifecycle-receipt-fm24.v1.example.json").read_text())
+    schema = json.loads((root / "schemas/acceptance/master-lifecycle-receipt.v1.schema.json").read_text())
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(example)
     receipt = MasterAcceptanceReceipt.model_validate(example)
     assert receipt.evidence.checkpoint_verified is True
@@ -105,12 +101,22 @@ def _control_runtime(ledger: ControlLedger) -> ControlPlaneMasterRuntime:
         checkpoint_ref="owner/checkpoints",
         dataset_ref="owner/master-assets",
         notebook_ref="owner/master-runtime",
-        dataset_files={"asset.txt": b"bounded", "checkpoint-verifier.ipynb": b"{}"},
+        dataset_files={
+            "asset.txt": b"bounded",
+            "checkpoint-verifier.ipynb": b"{}",
+            "postgresql-18-runtime.tar.gz": b"fake-postgresql-18-runtime",
+            "postgresql-18-runtime.json": b"""{"archive_sha256":"63a988449f3d37c9c9fd2658b14f9254918e0b0f8ac600f9b98f15ede09e912f","build_recipe_sha256":"3fbcf52450dd44e3eb0eb7b826ebdb84a4293fbc54b713408083f10b44964d61","builder_image":"ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f","pgvector_source_sha256":"10bf9938906e5d643bbc4a7eea104b6f57ba4898e5b76b20e60484ea1d5a7f8f","pgvector_source_url":"https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.6.tar.gz","pgvector_version":"0.8.6","platform":"linux-x86_64","postgresql_source_sha256":"81a81ec695fb0c7901407defaa1d2f7973617154cf27ba74e3a7ab8e64436094","postgresql_source_url":"https://ftp.postgresql.org/pub/source/v18.4/postgresql-18.4.tar.bz2","postgresql_version":"18.4","schema_version":"my-data-hub-postgresql-runtime.v1"}""",
+            "tunnel-known-hosts": b"|1|aaaa|bbbb ssh-ed25519 AAAA\n",
+        },
         notebook_source=b"print('master')\n",
         callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
         checkpoint_probe_relations=("hub.canonical_state",),
+        tunnel_gateway_host="gateway.example.test",
+        tunnel_gateway_port=22,
+        tunnel_gateway_user="mdh_tunnel",
+        tunnel_remote_port=25432,
         notebook_kernel_type="script",
     )
     return ControlPlaneMasterRuntime(
@@ -258,9 +264,7 @@ def test_ledger_claim_is_exact_epoch_bound_and_replay_safe(tmp_path: Path) -> No
     )
     assert command is not None and command["command_kind"] == "LEASE_EXPIRY_DENIAL"
     assert (
-        ledger.claim_master_acceptance_command(
-            run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch
-        )
+        ledger.claim_master_acceptance_command(run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch)
         is None
     )
     parsed = MasterAcceptanceCommand.model_validate(command)
@@ -331,8 +335,7 @@ def test_ledger_claim_is_exact_epoch_bound_and_replay_safe(tmp_path: Path) -> No
             "output_receipt_sha256": "9" * 64,
             "provider_status": "complete",
             "events": [
-                {"event_id": f"terminal-event-{index}", "body_sha256": str(index) * 64}
-                for index in range(1, 5)
+                {"event_id": f"terminal-event-{index}", "body_sha256": str(index) * 64} for index in range(1, 5)
             ],
         },
     )
@@ -506,9 +509,10 @@ def test_owner_claim_exposes_only_exact_fm11_fm12_drain_directive(tmp_path: Path
         source_revision=request.source_revision,
         target_operation_id=handle.operation_id,
     )
-    assert ledger.master_acceptance_drain_directive(
-        run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch
-    ) is None
+    assert (
+        ledger.master_acceptance_drain_directive(run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch)
+        is None
+    )
     ledger.claim_master_acceptance_host_command(
         task_id=str(request.task_id),
         expected_scenario="FM12",
@@ -520,9 +524,12 @@ def test_owner_claim_exposes_only_exact_fm11_fm12_drain_directive(tmp_path: Path
     )
     assert directive is not None
     assert directive["scenario_id"] == "FM12" and directive["task_id"] == str(request.task_id)
-    assert ledger.master_acceptance_drain_directive(
-        run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch + 1
-    ) is None
+    assert (
+        ledger.master_acceptance_drain_directive(
+            run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch + 1
+        )
+        is None
+    )
     app = create_app(
         ControlPlaneSettings(ledger_path=ledger.path),
         ledger=ledger,
@@ -544,9 +551,7 @@ def test_owner_claim_exposes_only_exact_fm11_fm12_drain_directive(tmp_path: Path
 
 
 @pytest.mark.parametrize("scenario", ["FM08", "FM10"])
-def test_runtime_control_directive_is_exact_owner_claim_bound(
-    tmp_path: Path, scenario: str
-) -> None:
+def test_runtime_control_directive_is_exact_owner_claim_bound(tmp_path: Path, scenario: str) -> None:
     ledger, handle = _active_ledger(tmp_path)
     request = _request(scenario, operation_id=handle.operation_id)
     ledger.ensure_master_acceptance_task(
@@ -588,14 +593,10 @@ def test_runtime_control_directive_is_exact_owner_claim_bound(
         assert ledger.master_acceptance_runtime_control(str(command.task_id))["renewal_acknowledged"] == 1  # type: ignore[index]
     else:
         before_boot_id = str(uuid4())
-        control = ledger.arm_master_acceptance_callback_loss(
-            **arguments, before_boot_id=before_boot_id
-        )
+        control = ledger.arm_master_acceptance_callback_loss(**arguments, before_boot_id=before_boot_id)
         assert control["callback_state"] == "ARMED"
         event_id = str(uuid4())
-        ledger.capture_master_acceptance_callback(
-            task_id=str(command.task_id), event_id=event_id, body_sha256="b" * 64
-        )
+        ledger.capture_master_acceptance_callback(task_id=str(command.task_id), event_id=event_id, body_sha256="b" * 64)
         before, after = before_boot_id, str(uuid4())
         ledger.record_master_acceptance_restart(
             task_id=str(command.task_id), restart_from_id=before, restart_to_id=after
@@ -632,47 +633,59 @@ def test_fm08_app_persists_exact_heartbeat_but_suppresses_projection_and_ack(
     runtime = _control_runtime(ledger)
     request = _request("FM08", operation_id=handle.operation_id)
     ledger.ensure_master_acceptance_task(
-        task_id=str(request.task_id), scenario_id="FM08",
-        idempotency_key=request.idempotency_key, request_sha256=request.request_sha256,
-        principal_id="owner", client_id="acceptance-client", source_revision=request.source_revision,
+        task_id=str(request.task_id),
+        scenario_id="FM08",
+        idempotency_key=request.idempotency_key,
+        request_sha256=request.request_sha256,
+        principal_id="owner",
+        client_id="acceptance-client",
+        source_revision=request.source_revision,
         target_operation_id=handle.operation_id,
     )
     payload = ledger.claim_master_acceptance_host_command(
-        task_id=str(request.task_id), expected_scenario="FM08",
-        principal_id="owner", client_id="acceptance-client",
+        task_id=str(request.task_id),
+        expected_scenario="FM08",
+        principal_id="owner",
+        client_id="acceptance-client",
     )
     assert payload is not None
     command = MasterAcceptanceCommand.model_validate(payload)
     ledger.arm_master_acceptance_callback_loss(
-        task_id=str(command.task_id), command_id=str(command.command_id),
-        command_sha256=command.command_sha256, run_id=str(command.binding.run_id),
+        task_id=str(command.task_id),
+        command_id=str(command.command_id),
+        command_sha256=command.command_sha256,
+        run_id=str(command.binding.run_id),
         attempt_id=str(command.binding.attempt_id),
-        master_instance_id=str(command.binding.master_instance_id), epoch=command.binding.epoch,
+        master_instance_id=str(command.binding.master_instance_id),
+        epoch=command.binding.epoch,
         before_boot_id=str(uuid4()),
     )
     service_before = ledger.resolve_service("postgres-master")
     assert service_before is not None
     heartbeat = RuntimeEvent(
-        event_id=str(uuid4()), run_id=handle.run_id, attempt_id=handle.attempt_id,
+        event_id=str(uuid4()),
+        run_id=handle.run_id,
+        attempt_id=handle.attempt_id,
         service_instance_id=handle.service_instance_id,
-        source_identity="my-data-hub/postgres-master", source_version="git:0123456789abcdef",
-        event_type=RuntimeEventType.RUNTIME_HEARTBEAT, emitted_at=ledger.clock.now(),
-        local_sequence=2, epoch=handle.epoch,
+        source_identity="my-data-hub/postgres-master",
+        source_version="git:0123456789abcdef",
+        event_type=RuntimeEventType.RUNTIME_HEARTBEAT,
+        emitted_at=ledger.clock.now(),
+        local_sequence=2,
+        epoch=handle.epoch,
         data={"lease_until": (ledger.clock.now() + timedelta(minutes=6)).isoformat()},
     )
-    app = create_app(
-        ControlPlaneSettings(ledger_path=ledger.path), ledger=ledger, master_runtime=runtime
-    )
+    app = create_app(ControlPlaneSettings(ledger_path=ledger.path), ledger=ledger, master_runtime=runtime)
     with TestClient(app) as client:
         response = client.post(
-            "/internal/runtime/events", content=json_body(
-                heartbeat.model_dump(mode="json", by_alias=True, exclude_none=True)
-            ), headers={"Authorization": f"Bearer {SECRET}"},
+            "/internal/runtime/events",
+            content=json_body(heartbeat.model_dump(mode="json", by_alias=True, exclude_none=True)),
+            headers={"Authorization": f"Bearer {SECRET}"},
         )
         retry = client.post(
-            "/internal/runtime/events", content=json_body(
-                heartbeat.model_dump(mode="json", by_alias=True, exclude_none=True)
-            ), headers={"Authorization": f"Bearer {SECRET}"},
+            "/internal/runtime/events",
+            content=json_body(heartbeat.model_dump(mode="json", by_alias=True, exclude_none=True)),
+            headers={"Authorization": f"Bearer {SECRET}"},
         )
         control = ledger.master_acceptance_runtime_control(str(command.task_id))
         assert control is not None
@@ -680,20 +693,24 @@ def test_fm08_app_persists_exact_heartbeat_but_suppresses_projection_and_ack(
         assert service_suppressed is not None
         assert service_suppressed.latest_event_id == service_before.latest_event_id
         ledger.record_master_acceptance_restart(
-            task_id=str(command.task_id), restart_from_id=str(control["before_boot_id"]),
+            task_id=str(command.task_id),
+            restart_from_id=str(control["before_boot_id"]),
             restart_to_id=str(uuid4()),
         )
     assert response.status_code == 503
     assert retry.status_code == 503
     assert response.json()["detail"]["code"] == "acceptance_callback_ack_suppressed"
     ledger.revoke_runtime_token(handle.run_id, handle.attempt_id)
-    assert ledger.project_master_acceptance_callback_replay(
-        task_id=str(command.task_id),
-        event_id=str(heartbeat.event_id),
-        body_sha256=hashlib.sha256(
-            json_body(heartbeat.model_dump(mode="json", by_alias=True, exclude_none=True))
-        ).hexdigest(),
-    ) == "duplicate"
+    assert (
+        ledger.project_master_acceptance_callback_replay(
+            task_id=str(command.task_id),
+            event_id=str(heartbeat.event_id),
+            body_sha256=hashlib.sha256(
+                json_body(heartbeat.model_dump(mode="json", by_alias=True, exclude_none=True))
+            ).hexdigest(),
+        )
+        == "duplicate"
+    )
     control = ledger.master_acceptance_runtime_control(str(command.task_id))
     assert control is not None and control["callback_state"] == "REPLAYED"
     assert control["callback_event_id"] == heartbeat.event_id
@@ -707,14 +724,20 @@ def test_fm08_recovery_plan_survives_old_epoch_fencing_without_second_intent(
     ledger, handle = _active_ledger(tmp_path)
     request = _request("FM08", operation_id=handle.operation_id)
     ledger.ensure_master_acceptance_task(
-        task_id=str(request.task_id), scenario_id="FM08",
-        idempotency_key=request.idempotency_key, request_sha256=request.request_sha256,
-        principal_id="owner", client_id="acceptance-client", source_revision=request.source_revision,
+        task_id=str(request.task_id),
+        scenario_id="FM08",
+        idempotency_key=request.idempotency_key,
+        request_sha256=request.request_sha256,
+        principal_id="owner",
+        client_id="acceptance-client",
+        source_revision=request.source_revision,
         target_operation_id=handle.operation_id,
     )
     payload = ledger.claim_master_acceptance_host_command(
-        task_id=str(request.task_id), expected_scenario="FM08",
-        principal_id="owner", client_id="acceptance-client",
+        task_id=str(request.task_id),
+        expected_scenario="FM08",
+        principal_id="owner",
+        client_id="acceptance-client",
     )
     assert payload is not None
     command = MasterAcceptanceCommand.model_validate(payload)
@@ -740,9 +763,7 @@ def test_fm08_recovery_plan_survives_old_epoch_fencing_without_second_intent(
     plan, created = ledger.ensure_fm08_abrupt_recovery(**kwargs)
     assert created and plan["state"] == "INTENT"
     receipt = {"schema_version": "my-data-hub-fm08-termination-test.v1", "outcome": "APPLIED"}
-    receipt_sha256 = hashlib.sha256(
-        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    receipt_sha256 = hashlib.sha256(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     fenced = ledger.fence_fm08_abrupt_master(
         task_id=str(command.task_id),
         termination_receipt=receipt,
@@ -761,14 +782,20 @@ def test_fm11_context_intent_is_task_keyed_and_persisted_only_while_active(
     ledger, handle = _active_ledger(tmp_path)
     request = _request("FM11", operation_id=handle.operation_id)
     ledger.ensure_master_acceptance_task(
-        task_id=str(request.task_id), scenario_id="FM11",
-        idempotency_key=request.idempotency_key, request_sha256=request.request_sha256,
-        principal_id="owner", client_id="acceptance-client", source_revision=request.source_revision,
+        task_id=str(request.task_id),
+        scenario_id="FM11",
+        idempotency_key=request.idempotency_key,
+        request_sha256=request.request_sha256,
+        principal_id="owner",
+        client_id="acceptance-client",
+        source_revision=request.source_revision,
         target_operation_id=handle.operation_id,
     )
     payload = ledger.claim_master_acceptance_host_command(
-        task_id=str(request.task_id), expected_scenario="FM11",
-        principal_id="owner", client_id="acceptance-client",
+        task_id=str(request.task_id),
+        expected_scenario="FM11",
+        principal_id="owner",
+        client_id="acceptance-client",
     )
     assert payload is not None
     command = MasterAcceptanceCommand.model_validate(payload)
@@ -794,25 +821,35 @@ def test_fm10_runtime_control_endpoint_acknowledges_exact_suspension(tmp_path: P
     ledger, handle = _active_ledger(tmp_path)
     request = _request("FM10", operation_id=handle.operation_id)
     ledger.ensure_master_acceptance_task(
-        task_id=str(request.task_id), scenario_id="FM10",
-        idempotency_key=request.idempotency_key, request_sha256=request.request_sha256,
-        principal_id="owner", client_id="acceptance-client", source_revision=request.source_revision,
+        task_id=str(request.task_id),
+        scenario_id="FM10",
+        idempotency_key=request.idempotency_key,
+        request_sha256=request.request_sha256,
+        principal_id="owner",
+        client_id="acceptance-client",
+        source_revision=request.source_revision,
         target_operation_id=handle.operation_id,
     )
     payload = ledger.claim_master_acceptance_host_command(
-        task_id=str(request.task_id), expected_scenario="FM10",
-        principal_id="owner", client_id="acceptance-client",
+        task_id=str(request.task_id),
+        expected_scenario="FM10",
+        principal_id="owner",
+        client_id="acceptance-client",
     )
     assert payload is not None
     command = MasterAcceptanceCommand.model_validate(payload)
     ledger.suspend_master_acceptance_renewal(
-        task_id=str(command.task_id), command_id=str(command.command_id),
-        command_sha256=command.command_sha256, run_id=str(command.binding.run_id),
+        task_id=str(command.task_id),
+        command_id=str(command.command_id),
+        command_sha256=command.command_sha256,
+        run_id=str(command.binding.run_id),
         attempt_id=str(command.binding.attempt_id),
-        master_instance_id=str(command.binding.master_instance_id), epoch=command.binding.epoch,
+        master_instance_id=str(command.binding.master_instance_id),
+        epoch=command.binding.epoch,
     )
     app = create_app(
-        ControlPlaneSettings(ledger_path=ledger.path), ledger=ledger,
+        ControlPlaneSettings(ledger_path=ledger.path),
+        ledger=ledger,
         master_runtime=_control_runtime(ledger),
     )
     headers = {
@@ -835,15 +872,21 @@ def test_fm24_is_claimed_only_by_the_exact_active_runtime(tmp_path: Path) -> Non
     ledger, handle = _active_ledger(tmp_path)
     request = _request("FM24", operation_id=handle.operation_id)
     ledger.ensure_master_acceptance_task(
-        task_id=str(request.task_id), scenario_id="FM24",
-        idempotency_key=request.idempotency_key, request_sha256=request.request_sha256,
-        principal_id="owner", client_id="acceptance-client",
-        source_revision=request.source_revision, target_operation_id=handle.operation_id,
+        task_id=str(request.task_id),
+        scenario_id="FM24",
+        idempotency_key=request.idempotency_key,
+        request_sha256=request.request_sha256,
+        principal_id="owner",
+        client_id="acceptance-client",
+        source_revision=request.source_revision,
+        target_operation_id=handle.operation_id,
     )
     with pytest.raises(ValueError, match="host claim identity"):
         ledger.claim_master_acceptance_host_command(
-            task_id=str(request.task_id), expected_scenario="FM24",
-            principal_id="owner", client_id="acceptance-client",
+            task_id=str(request.task_id),
+            expected_scenario="FM24",
+            principal_id="owner",
+            client_id="acceptance-client",
         )
     payload = ledger.claim_master_acceptance_command(
         run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch
@@ -851,9 +894,12 @@ def test_fm24_is_claimed_only_by_the_exact_active_runtime(tmp_path: Path) -> Non
     assert payload is not None
     assert payload["command_kind"] == "SESSION_ROTATION_SOAK"
     assert payload["task_id"] == str(request.task_id)
-    assert ledger.claim_master_acceptance_command(
-        run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch + 1
-    ) is None
+    assert (
+        ledger.claim_master_acceptance_command(
+            run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch + 1
+        )
+        is None
+    )
 
 
 def test_protected_ledger_replays_one_exact_acked_body_without_state_change(tmp_path: Path) -> None:
@@ -933,8 +979,11 @@ def test_protected_ledger_replays_one_exact_acked_body_without_state_change(tmp_
     assert "retired_runtime_token" not in replay.__dataclass_fields__
     with pytest.raises(StaleRuntimeEvent):
         ledger.replay_stored_runtime_event_identity(
-            event_id=str(stored.event_id), body_sha256="f" * 64,
-            run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch,
+            event_id=str(stored.event_id),
+            body_sha256="f" * 64,
+            run_id=handle.run_id,
+            attempt_id=handle.attempt_id,
+            epoch=handle.epoch,
         )
 
 
@@ -1165,14 +1214,17 @@ def test_fm10_fm11_and_fm24_cannot_overstate_partial_checks() -> None:
 
 def test_fm24_live_receipt_rejects_soak_without_real_checkpoint_recovery() -> None:
     operation = uuid4()
-    command = command_for(_request("FM24", operation_id=str(operation)), MasterAcceptanceBinding(
-        operation_id=operation,
-        run_id=uuid4(),
-        attempt_id=uuid4(),
-        service_instance_id="service-1",
-        master_instance_id=uuid4(),
-        epoch=1,
-    ))
+    command = command_for(
+        _request("FM24", operation_id=str(operation)),
+        MasterAcceptanceBinding(
+            operation_id=operation,
+            run_id=uuid4(),
+            attempt_id=uuid4(),
+            service_instance_id="service-1",
+            master_instance_id=uuid4(),
+            epoch=1,
+        ),
+    )
     evidence = RotationSoakEvidence(
         kind="SESSION_ROTATION_SOAK",
         monotonic_started_ns=0,

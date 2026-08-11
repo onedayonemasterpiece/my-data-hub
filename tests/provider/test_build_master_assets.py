@@ -8,10 +8,19 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
+from scripts.provider import build_master_assets as build_module
+from scripts.provider import verify_master_assets as verify_module
 from scripts.provider.build_master_assets import AssetBundleError, build_bundle
 from scripts.provider.verify_master_assets import AssetVerificationError, verify_bundle
 
 COMMIT = "1" * 40
+
+
+@pytest.fixture(autouse=True)
+def _approved_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    digest = hashlib.sha256(b"exact-postgresql-runtime").hexdigest()
+    monkeypatch.setattr(build_module, "APPROVED_POSTGRES_RUNTIME_SHA256", digest)
+    monkeypatch.setattr(verify_module, "APPROVED_POSTGRES_RUNTIME_SHA256", digest)
 
 
 def _root(tmp_path: Path) -> Path:
@@ -22,6 +31,11 @@ def _root(tmp_path: Path) -> Path:
     verifier.parent.mkdir(parents=True)
     master.write_bytes(b'{"master":true}')
     verifier.write_bytes(b'{"verifier":true}')
+    recipe = root / "scripts/provider/assets/postgresql-18.4-pgvector-0.8.6.Dockerfile"
+    recipe.parent.mkdir(parents=True)
+    recipe.write_bytes(
+        (Path(__file__).parents[2] / "scripts/provider/assets/postgresql-18.4-pgvector-0.8.6.Dockerfile").read_bytes()
+    )
     return root
 
 
@@ -34,6 +48,10 @@ def _wheel_builder(_root: Path, destination: Path) -> Path:
 def _build(tmp_path: Path) -> tuple[Path, dict[str, object]]:
     root = _root(tmp_path)
     output = tmp_path / "bundle"
+    runtime = tmp_path / "postgresql-runtime.tar.gz"
+    runtime.write_bytes(b"exact-postgresql-runtime")
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_bytes(b"|1|aaaa|bbbb ssh-ed25519 AAAA\n")
     manifest = build_bundle(
         root=root,
         output=output,
@@ -43,6 +61,9 @@ def _build(tmp_path: Path) -> tuple[Path, dict[str, object]]:
         checkpoint_dataset_ref="owner/checkpoints",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         probe_relations=["hub.canonical_state"],
+        postgres_runtime_archive=runtime,
+        postgres_runtime_sha256=hashlib.sha256(runtime.read_bytes()).hexdigest(),
+        tunnel_known_hosts=known_hosts,
         wheel_builder=_wheel_builder,
     )
     return output, manifest
@@ -50,9 +71,7 @@ def _build(tmp_path: Path) -> tuple[Path, dict[str, object]]:
 
 def test_build_bundle_is_exact_secret_free_and_schema_valid(tmp_path: Path) -> None:
     output, manifest = _build(tmp_path)
-    schema = json.loads(
-        (Path(__file__).parents[2] / "schemas/master-asset-bundle.v1.schema.json").read_text()
-    )
+    schema = json.loads((Path(__file__).parents[2] / "schemas/master-asset-bundle.v1.schema.json").read_text())
     Draft202012Validator(schema).validate(manifest)
 
     persisted = json.loads((output / "master-asset-bundle.json").read_text())
@@ -73,18 +92,12 @@ def test_build_bundle_is_exact_secret_free_and_schema_valid(tmp_path: Path) -> N
     assert not any(word in env.upper() for word in ("TOKEN=", "PASSWORD=", "SECRET="))
     assert stat.S_IMODE(output.stat().st_mode) == 0o700
     assert stat.S_IMODE((output / "dataset").stat().st_mode) == 0o700
-    assert all(
-        stat.S_IMODE(path.stat().st_mode) == 0o600
-        for path in output.rglob("*")
-        if path.is_file()
-    )
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in output.rglob("*") if path.is_file())
     assert verify_bundle(bundle=output, expected_commit=COMMIT) == {
         "schema_version": "my-data-hub-master-asset-bundle.v1",
         "source_commit": COMMIT,
-        "manifest_sha256": hashlib.sha256(
-            (output / "master-asset-bundle.json").read_bytes()
-        ).hexdigest(),
-        "asset_count": 3,
+        "manifest_sha256": hashlib.sha256((output / "master-asset-bundle.json").read_bytes()).hexdigest(),
+        "asset_count": 6,
         "verified": True,
     }
 
@@ -97,9 +110,7 @@ def test_build_bundle_is_exact_secret_free_and_schema_valid(tmp_path: Path) -> N
         ("probe_relations", ["hub.canonical_state", "hub.canonical_state"]),
     ],
 )
-def test_build_bundle_rejects_ambiguous_identity(
-    tmp_path: Path, field: str, value: object
-) -> None:
+def test_build_bundle_rejects_ambiguous_identity(tmp_path: Path, field: str, value: object) -> None:
     root = _root(tmp_path)
     arguments: dict[str, object] = {
         "root": root,
@@ -110,8 +121,13 @@ def test_build_bundle_rejects_ambiguous_identity(
         "checkpoint_dataset_ref": "owner/checkpoints",
         "checkpoint_verifier_ref": "owner/checkpoint-verifier",
         "probe_relations": ["hub.canonical_state"],
+        "postgres_runtime_archive": tmp_path / "postgresql-runtime.tar.gz",
+        "postgres_runtime_sha256": hashlib.sha256(b"exact-postgresql-runtime").hexdigest(),
+        "tunnel_known_hosts": tmp_path / "known_hosts",
         "wheel_builder": _wheel_builder,
     }
+    Path(arguments["postgres_runtime_archive"]).write_bytes(b"exact-postgresql-runtime")
+    Path(arguments["tunnel_known_hosts"]).write_bytes(b"|1|aaaa|bbbb ssh-ed25519 AAAA\n")
     arguments[field] = value
     with pytest.raises(AssetBundleError):
         build_bundle(**arguments)  # type: ignore[arg-type]
@@ -127,8 +143,13 @@ def test_build_bundle_refuses_source_checkout_output_and_nonempty_output(tmp_pat
         "checkpoint_dataset_ref": "owner/checkpoints",
         "checkpoint_verifier_ref": "owner/checkpoint-verifier",
         "probe_relations": ["hub.canonical_state"],
+        "postgres_runtime_archive": tmp_path / "postgresql-runtime.tar.gz",
+        "postgres_runtime_sha256": hashlib.sha256(b"exact-postgresql-runtime").hexdigest(),
+        "tunnel_known_hosts": tmp_path / "known_hosts",
         "wheel_builder": _wheel_builder,
     }
+    Path(common["postgres_runtime_archive"]).write_bytes(b"exact-postgresql-runtime")
+    Path(common["tunnel_known_hosts"]).write_bytes(b"|1|aaaa|bbbb ssh-ed25519 AAAA\n")
     with pytest.raises(AssetBundleError, match="outside"):
         build_bundle(output=root / "generated", **common)
 

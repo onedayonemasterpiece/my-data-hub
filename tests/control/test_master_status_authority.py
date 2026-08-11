@@ -8,9 +8,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
+from cryptography import x509
+from cryptography.x509.oid import ObjectIdentifier
 from fastapi.testclient import TestClient
 
 from my_data_hub.control_plane.app import ControlPlaneSettings, create_app
@@ -43,12 +45,21 @@ def _assets() -> KaggleMasterLaunchAssets:
         checkpoint_ref="owner/checkpoints",
         dataset_ref="owner/master-assets",
         notebook_ref="owner/postgres-master",
-        dataset_files={"checkpoint-verifier.ipynb": b"{}"},
+        dataset_files={
+            "checkpoint-verifier.ipynb": b"{}",
+            "postgresql-18-runtime.tar.gz": b"fake-postgresql-18-runtime",
+            "postgresql-18-runtime.json": b"""{"archive_sha256":"63a988449f3d37c9c9fd2658b14f9254918e0b0f8ac600f9b98f15ede09e912f","build_recipe_sha256":"3fbcf52450dd44e3eb0eb7b826ebdb84a4293fbc54b713408083f10b44964d61","builder_image":"ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f","pgvector_source_sha256":"10bf9938906e5d643bbc4a7eea104b6f57ba4898e5b76b20e60484ea1d5a7f8f","pgvector_source_url":"https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.6.tar.gz","pgvector_version":"0.8.6","platform":"linux-x86_64","postgresql_source_sha256":"81a81ec695fb0c7901407defaa1d2f7973617154cf27ba74e3a7ab8e64436094","postgresql_source_url":"https://ftp.postgresql.org/pub/source/v18.4/postgresql-18.4.tar.bz2","postgresql_version":"18.4","schema_version":"my-data-hub-postgresql-runtime.v1"}""",
+            "tunnel-known-hosts": b"|1|aaaa|bbbb ssh-ed25519 AAAA\n",
+        },
         notebook_source=b"print('master')\n",
         callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
         checkpoint_probe_relations=("hub.canonical_state",),
+        tunnel_gateway_host="gateway.example.test",
+        tunnel_gateway_port=22,
+        tunnel_gateway_user="mdh_tunnel",
+        tunnel_remote_port=25432,
         notebook_kernel_type="script",
         notebook_timeout_seconds=3600,
     )
@@ -104,9 +115,7 @@ class StatusAdapter:
         if is_status:
             self.status_files = dict(files)
             self.ledger.persist_provider_effect_intent(intent.model_dump(mode="json"))
-            self.ledger.persist_provider_effect_receipt(
-                str(intent.effect_id), receipt.model_dump(mode="json")
-            )
+            self.ledger.persist_provider_effect_receipt(str(intent.effect_id), receipt.model_dump(mode="json"))
             self.ledger.persist_provider_resource_claim(claim.model_dump(mode="json"))
             if self.crash_after_status:
                 raise RuntimeError("simulated crash after status side effect")
@@ -200,8 +209,52 @@ def _runtime(tmp_path: Path) -> tuple[ControlLedger, StatusAdapter, ControlPlane
         ledger,
         MasterCoordinator(ledger, provider),
         MasterRuntimeSettings(assets),
+        master_tls_ca_path=tmp_path / "master-tls-ca.pem",
     )
     return ledger, adapter, runtime
+
+
+def _ledger_storage_bytes(ledger: ControlLedger) -> bytes:
+    candidates = (
+        ledger.path,
+        ledger.path.with_name(ledger.path.name + "-wal"),
+        ledger.path.with_name(ledger.path.name + "-shm"),
+    )
+    return b"".join(path.read_bytes() for path in candidates if path.is_file())
+
+
+def _promote_checkpoint(ledger: ControlLedger, *, version: int = 7) -> tuple[str, str]:
+    checkpoint_id = str(uuid4())
+    operation_id = str(uuid4())
+    ledger.ensure_operation(
+        operation_id=operation_id,
+        idempotency_key=f"checkpoint-source:{checkpoint_id}",
+        operation_kind="checkpoint_source_test",
+        intent={"source": "test"},
+        initial_state="STOPPED",
+        identity={"run_id": str(uuid4()), "attempt_id": str(uuid4()), "epoch": 1},
+    )
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=checkpoint_id,
+        operation_id=operation_id,
+        dataset_ref="owner/checkpoints",
+        version_ref=None,
+        manifest_sha256="c" * 64,
+        source_checkpoint_id=None,
+        master_instance_id=str(uuid4()),
+        epoch=1,
+    )
+    exact_ref = f"owner/checkpoints/{version}"
+    ledger.mark_checkpoint_uploaded(checkpoint_id, exact_ref)
+    ledger.mark_checkpoint_readback_verified(checkpoint_id)
+    ledger.mark_checkpoint_restore_verified(checkpoint_id)
+    ledger.promote_checkpoint(
+        "postgres-master",
+        checkpoint_id,
+        expected_generation=0,
+        expected_parent_checkpoint_id=None,
+    )
+    return checkpoint_id, exact_ref
 
 
 def test_master_status_dataset_is_hash_only_exact_version_and_not_in_source(
@@ -215,11 +268,28 @@ def test_master_status_dataset_is_hash_only_exact_version_and_not_in_source(
     status = ledger.master_status_dataset_authority(handle.operation_id)
     assert status is not None and status["state"] == "READY"
     token = json.loads(adapter.status_files["kaggle_run.json"])["token"]
+    tls_private_key = adapter.status_files["postgres-server.key"]
+    tls_certificate = adapter.status_files["postgres-server.crt"]
     assert len(token) == 64
     assert status["token_sha256"] == hashlib.sha256(token.encode()).hexdigest()
     assert token not in json.dumps(status, sort_keys=True)
-    assert token.encode() not in ledger.path.read_bytes()
+    assert token.encode() not in _ledger_storage_bytes(ledger)
+    assert tls_private_key not in _ledger_storage_bytes(ledger)
+    assert status["status_dataset"]["tls_certificate_pem"].encode() == tls_certificate
+    certificate = x509.load_pem_x509_certificate(tls_certificate)
+    binding = json.loads(
+        certificate.extensions.get_extension_for_oid(ObjectIdentifier("1.3.6.1.4.1.57264.1.1")).value.value
+    )
+    assert binding == {
+        "schema_version": "my-data-hub-master-tls-binding.v1",
+        "operation_id": handle.operation_id,
+        "run_id": handle.run_id,
+        "attempt_id": handle.attempt_id,
+        "master_instance_id": handle.master_instance_id,
+        "epoch": handle.epoch,
+    }
     assert token.encode() not in adapter.source
+    assert tls_private_key not in adapter.source
     assert token not in caplog.text
     assert adapter.dataset_sources == (
         "owner/master-assets/1",
@@ -229,10 +299,85 @@ def test_master_status_dataset_is_hash_only_exact_version_and_not_in_source(
     assert adapter.calls == {"status_create": 1, "asset_create": 1, "push": 1}
 
 
-def test_master_launch_rejects_copying_control_kaggle_credentials_into_notebook() -> None:
+def test_atomic_tls_rotation_is_visible_by_shared_directory_without_private_key_leak(
+    tmp_path: Path,
+) -> None:
+    ledger, adapter, runtime = _runtime(tmp_path)
+    observer = tmp_path / "master-tls-ca.pem"
+    first, _ = runtime.ensure("tls-rotation-one")
+    first_certificate = observer.read_bytes()
+    first_private_key = adapter.status_files["postgres-server.key"]
+    ledger.transition_operation(
+        first.operation_id,
+        expected_state=MasterState.REGISTERING.value,
+        new_state=MasterState.FAILED.value,
+        metadata={"code": "TEST_ROTATE_TLS"},
+    )
+    runtime.reconcile_status_cleanup_once()
+
+    second, _ = runtime.ensure("tls-rotation-two")
+    second_certificate = observer.read_bytes()
+
+    assert second.epoch == first.epoch + 1
+    assert first_certificate != second_certificate
+    assert first_private_key not in _ledger_storage_bytes(ledger)
+    assert adapter.status_files["postgres-server.key"] not in _ledger_storage_bytes(ledger)
+    first_status = ledger.master_status_dataset_authority(first.operation_id)
+    second_status = ledger.master_status_dataset_authority(second.operation_id)
+    assert first_status is not None and second_status is not None
+    assert first_status["status_dataset"]["tls_certificate_pem"].encode() == first_certificate
+    assert second_status["status_dataset"]["tls_certificate_pem"].encode() == second_certificate
+    assert observer.stat().st_mode & 0o777 == 0o600
+
+
+def test_verified_head_is_in_status_config_and_attached_by_exact_numeric_version(
+    tmp_path: Path,
+) -> None:
+    ledger, adapter, runtime = _runtime(tmp_path)
+    checkpoint_id, exact_ref = _promote_checkpoint(ledger)
+
+    handle, _ = runtime.ensure("verified-head-boot")
+
+    config = json.loads(adapter.status_files["master-config.json"])
+    assert config["checkpoint_id"] == checkpoint_id
+    assert config["checkpoint_exact_version_ref"] == exact_ref
+    assert config["checkpoint_manifest_sha256"] == "c" * 64
+    assert config["checkpoint_head_generation"] == 1
+    assert config["checkpoint_directory"] == "/kaggle/input/checkpoints"
+    assert adapter.dataset_sources == (
+        "owner/master-assets/1",
+        f"owner/mdh-master-status-{UUID(handle.run_id).hex}/1",
+        exact_ref,
+    )
+
+
+def test_checkpoint_head_change_after_status_admission_blocks_before_notebook_push(
+    tmp_path: Path,
+) -> None:
+    ledger, adapter, runtime = _runtime(tmp_path)
+    key = "head-cas-race"
+    identity = MasterCoordinator.identity_for(key)
+    operation, _ = ledger.ensure_master_operation(
+        operation_id=identity["operation_id"],
+        idempotency_key=key,
+        intent=runtime.intent(key).as_dict(),
+        identity=identity,
+    )
+    assert runtime._status_dataset_ready(operation.operation_id, operation.identity)
+    _promote_checkpoint(ledger)
+
+    with pytest.raises(ValueError, match="HEAD advanced"):
+        runtime.coordinator.ensure_master(runtime.intent(key))
+
+    assert adapter.calls["push"] == 0
+
+
+def test_master_launch_rejects_control_credentials_and_manual_tls_user_secrets() -> None:
     for binding in (
         {"KAGGLE_API_TOKEN": "MDH_KAGGLE_API_TOKEN"},
         {"KAGGLE_USERNAME": "MDH_KAGGLE_USERNAME", "KAGGLE_KEY": "MDH_KAGGLE_KEY"},
+        {"MY_DATA_HUB_POSTGRES_TLS_CERT": "MDH_TLS_CERT"},
+        {"MY_DATA_HUB_POSTGRES_TLS_KEY": "MDH_TLS_KEY"},
     ):
         with pytest.raises(ValueError, match="runtime secret binding is invalid"):
             replace(_assets(), runtime_secret_bindings=binding)
@@ -262,16 +407,15 @@ def test_donor_heartbeat_renews_the_exact_status_resource_lease(tmp_path: Path) 
             "service_kind": "postgres-master",
             "endpoint": "tunnel://127.0.0.1:55432",
             "protocol": "postgresql+tls",
-            "tls_fingerprint": "sha256:" + "a" * 64,
+            "tls_fingerprint": "sha256:" + status["status_dataset"]["tls_certificate_sha256"],
             "capabilities": ["sql"],
             "canonical_revision": 0,
             "schema_version": "1",
             "lease_until": (NOW + timedelta(minutes=4)).isoformat(),
             "master_instance_id": handle.master_instance_id,
             "epoch": handle.epoch,
-            "executed_source_sha256": executable_source_sha256(
-                adapter.source, kernel_type="script"
-            ),
+            "executed_source_sha256": executable_source_sha256(adapter.source, kernel_type="script"),
+            "boot_checkpoint": status["status_dataset"]["boot_checkpoint"],
         },
     )
     runtime.coordinator.accept_runtime_event(
@@ -302,9 +446,7 @@ def test_donor_heartbeat_renews_the_exact_status_resource_lease(tmp_path: Path) 
     assert lease is not None and lease.lease_until == renewed_until
 
 
-def test_twenty_same_key_ensures_create_one_status_dataset_and_one_run(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_twenty_same_key_ensures_create_one_status_dataset_and_one_run(tmp_path: Path, monkeypatch) -> None:
     _ledger, adapter, runtime = _runtime(tmp_path)
     barrier = threading.Barrier(20)
     candidates = iter(range(20))

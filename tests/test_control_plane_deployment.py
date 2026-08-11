@@ -83,13 +83,9 @@ def test_compose_has_exact_opt_in_profile_split_secret_boundaries_and_loopback_p
         "control-plane": {"condition": "service_healthy"},
         "oauth-server": {"condition": "service_healthy"},
     }
-    assert services["oauth-server"]["depends_on"] == {
-        "control-plane": {"condition": "service_healthy"}
-    }
+    assert services["oauth-server"]["depends_on"] == {"control-plane": {"condition": "service_healthy"}}
 
-    env_files = {
-        name: service["env_file"][0]["path"] for name, service in services.items()
-    }
+    env_files = {name: service["env_file"][0]["path"] for name, service in services.items()}
     assert len(set(env_files.values())) == 3
     assert all(service["env_file"][0]["required"] is True for service in services.values())
     assert "provider.env" in env_files["control-plane"]
@@ -116,14 +112,14 @@ def test_install_requires_private_split_inputs_without_static_master_credentials
         "MY_DATA_HUB_OAUTH_ENV_FILE",
         "MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE",
         "MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE",
-        "MY_DATA_HUB_MASTER_TLS_CA_FILE",
+        "MY_DATA_HUB_MASTER_TLS_DIR",
     ):
         assert variable in source
-    assert "require_private_file \"$provider_env\"" in source
-    assert "require_private_file \"$mcp_env\"" in source
-    assert "require_private_file \"$oauth_env\"" in source
-    assert "require_private_file \"$oauth_key\"" in source
-    assert "require_regular_file \"$oauth_overlap_jwks\"" in source
+    assert 'require_private_file "$provider_env"' in source
+    assert 'require_private_file "$mcp_env"' in source
+    assert 'require_private_file "$oauth_env"' in source
+    assert 'require_private_file "$oauth_key"' in source
+    assert 'require_regular_file "$oauth_overlap_jwks"' in source
     assert 'verify_master_assets.py"' in source
     assert '--bundle "$asset_dir" --expected-commit "$commit"' in source
     assert "reject_data_plane_environment" in source
@@ -138,15 +134,13 @@ def test_operator_profile_keeps_kaggle_authority_only_in_control_process() -> No
     assert 'MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED: "true"' in source
     assert "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL" in source
     assert source.count("mcp-control-gateway.token:ro") == 2
-    assert 'kaggle_token_count=' in source
-    assert 'kaggle_username_count=' in source
-    assert 'kaggle_key_count=' in source
-    assert 'access token OR one legacy username/key pair' in source
+    assert "kaggle_token_count=" in source
+    assert "kaggle_username_count=" in source
+    assert "kaggle_key_count=" in source
+    assert "access token OR one legacy username/key pair" in source
 
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
-    assert compose["services"]["control-plane"]["environment"][
-        "MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED"
-    ] == "false"
+    assert compose["services"]["control-plane"]["environment"]["MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED"] == "false"
     assert "KAGGLE_API_TOKEN" not in json.dumps(compose["services"]["remote-mcp"])
 
 
@@ -166,9 +160,7 @@ def test_fm08_host_supervisor_is_explicit_private_and_has_one_restart_target() -
     assert "docker.sock" not in source
     assert "MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_SOCKET" not in COMPOSE.read_text()
 
-    supervisor = (
-        ROOT / "src/my_data_hub/control_plane/acceptance_supervisor.py"
-    ).read_text(encoding="utf-8")
+    supervisor = (ROOT / "src/my_data_hub/control_plane/acceptance_supervisor.py").read_text(encoding="utf-8")
     assert 'result.extend(("restart", "--no-deps", "control-plane"))' in supervisor
     for forbidden in ('"restart", "remote-mcp"', '"restart", "oauth-server"', "shell=True"):
         assert forbidden not in supervisor

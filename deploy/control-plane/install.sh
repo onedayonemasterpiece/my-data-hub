@@ -102,7 +102,8 @@ secret_root="${MY_DATA_HUB_CONTROL_SECRET_DIR:-$runtime_root/secrets}"
 ledger_dir="${MY_DATA_HUB_CONTROL_LEDGER_DIR:-$runtime_root/control-ledger}"
 session_dir="${MY_DATA_HUB_MASTER_SESSION_DIR:-$runtime_root/master-sessions}"
 asset_dir="${MY_DATA_HUB_MASTER_ASSET_DIR:-$runtime_root/master-assets}"
-tls_ca_file="${MY_DATA_HUB_MASTER_TLS_CA_FILE:-$runtime_root/master-tls/ca.pem}"
+tls_dir="${MY_DATA_HUB_MASTER_TLS_DIR:-$runtime_root/master-tls}"
+tls_ca_file="$tls_dir/ca.pem"
 provider_env="${MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE:-$env_root/provider.env}"
 mcp_env="${MY_DATA_HUB_MCP_ENV_FILE:-$env_root/mcp-reader.env}"
 oauth_env="${MY_DATA_HUB_OAUTH_ENV_FILE:-$env_root/oauth.env}"
@@ -136,18 +137,26 @@ if [[ -n "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SUPERVISOR:-}" ]]; then
   acceptance_supervisor=true
 fi
 for path_value in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$asset_dir" \
-  "$tls_ca_file" "$provider_env" "$mcp_env" "$oauth_env" "$oauth_key" "$oauth_overlap_jwks" \
+  "$tls_dir" "$tls_ca_file" "$provider_env" "$mcp_env" "$oauth_env" "$oauth_key" "$oauth_overlap_jwks" \
   "$operator_gate_receipt" "$operator_gate_key" "$control_gateway_token" "$tunnel_broker_socket_dir" \
   "$acceptance_socket_dir" "$acceptance_key" "$checkpoint_acceptance_deployment"; do
   case "$path_value" in
     *[$'\n\r\t ']* ) echo "deployment inputs may not contain whitespace" >&2; exit 2 ;;
   esac
 done
-mkdir -p "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$HOME/.config/systemd/user"
-for private_dir in "$env_root" "$secret_root" "$ledger_dir" "$session_dir"; do
+mkdir -p "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$tls_dir" "$HOME/.config/systemd/user"
+for private_dir in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$tls_dir"; do
   [[ ! -L "$private_dir" ]] || { echo "private runtime directories may not be symbolic links" >&2; exit 2; }
 done
-chmod 700 "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$HOME/.config/systemd/user"
+chmod 700 "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$tls_dir" "$HOME/.config/systemd/user"
+runtime_uid="$(id -u)"
+for private_dir in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$tls_dir"; do
+  if [[ "$(stat -c '%u' "$private_dir")" != "$runtime_uid" \
+    || "$(stat -c '%a' "$private_dir")" != "700" ]]; then
+    echo "private runtime directory must be owned by the service user with mode 0700" >&2
+    exit 2
+  fi
+done
 
 require_regular_file() {
   local path="$1" label="$2"
@@ -192,7 +201,11 @@ require_private_file "$mcp_env" "remote MCP environment"
 require_private_file "$oauth_env" "OAuth environment"
 require_private_file "$oauth_key" "OAuth signing key"
 require_regular_file "$oauth_overlap_jwks" "OAuth overlap public JWKS"
-require_regular_file "$tls_ca_file" "master TLS CA"
+if [[ ! -e "$tls_ca_file" ]]; then
+  : > "$tls_ca_file"
+  chmod 600 "$tls_ca_file"
+fi
+require_private_file "$tls_ca_file" "master TLS CA publication target"
 [[ -d "$tunnel_broker_socket_dir" && ! -L "$tunnel_broker_socket_dir" \
   && -S "$tunnel_broker_socket_dir/control.sock" ]] || {
   echo "root-installed epoch tunnel broker socket is required before control deployment" >&2
@@ -205,11 +218,58 @@ for env_file in "$provider_env" "$mcp_env" "$oauth_env"; do
   reject_data_plane_environment "$env_file" "$(basename "$env_file")"
 done
 reject_environment_keys "$provider_env" "provider environment" \
-  'MY_DATA_HUB_OAUTH_SIGNING_KEY|MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)'
+  'MY_DATA_HUB_OAUTH_SIGNING_KEY|MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)|MY_DATA_HUB_KAGGLE_MASTER_(SOURCE_IDENTITY|SOURCE_VERSION|CHECKPOINT_REF|DATASET_REF|NOTEBOOK_REF|DATASET_DIR|NOTEBOOK_SOURCE)'
 reject_environment_keys "$mcp_env" "remote MCP environment" \
   'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_OAUTH_SIGNING_KEY|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)'
 reject_environment_keys "$oauth_env" "OAuth environment" \
   'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)'
+python3 - "$provider_env" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+values = {}
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if not line or line.lstrip().startswith("#"):
+        continue
+    if "=" not in line:
+        raise SystemExit("provider environment contains an invalid line")
+    key, value = line.split("=", 1)
+    key = key.strip()
+    if key in values:
+        raise SystemExit("provider environment contains a duplicate key")
+    values[key] = value.strip()
+required = {
+    "MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_HOST",
+    "MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_PORT",
+    "MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_USER",
+    "MY_DATA_HUB_MASTER_TUNNEL_REMOTE_PORT",
+}
+if any(not values.get(key) for key in required):
+    raise SystemExit("provider environment lacks the exact master tunnel/TLS binding")
+if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", values["MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_HOST"]):
+    raise SystemExit("master tunnel gateway host is invalid")
+if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", values["MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_USER"]):
+    raise SystemExit("master tunnel gateway user is invalid")
+if any(
+    not value.isdigit() or not 1 <= int(value) <= 65535
+    for value in (
+        values["MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_PORT"],
+        values["MY_DATA_HUB_MASTER_TUNNEL_REMOTE_PORT"],
+    )
+):
+    raise SystemExit("master tunnel port is invalid")
+raw_bindings = values.get("MY_DATA_HUB_KAGGLE_MASTER_SECRET_BINDINGS_JSON", "{}")
+try:
+    bindings = json.loads(raw_bindings)
+except json.JSONDecodeError as exc:
+    raise SystemExit("optional master secret-name binding is invalid JSON") from exc
+if not isinstance(bindings, dict) or set(bindings) - {"YDB_ACCESS_TOKEN_CREDENTIALS"}:
+    raise SystemExit("master secret-name binding is overbroad")
+if any(not isinstance(value, str) or not value or len(value) > 200 for value in bindings.values()):
+    raise SystemExit("master optional secret name is invalid")
+PY
 
 operator_override=""
 operator_compose_arg=""
@@ -340,7 +400,7 @@ MY_DATA_HUB_CONTROL_GID=$(id -g)
 MY_DATA_HUB_CONTROL_LEDGER_DIR=$ledger_dir
 MY_DATA_HUB_MASTER_SESSION_DIR=$session_dir
 MY_DATA_HUB_MASTER_ASSET_DIR=$asset_dir
-MY_DATA_HUB_MASTER_TLS_CA_FILE=$tls_ca_file
+MY_DATA_HUB_MASTER_TLS_DIR=$tls_dir
 MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE=$provider_env
 MY_DATA_HUB_MCP_ENV_FILE=$mcp_env
 MY_DATA_HUB_OAUTH_ENV_FILE=$oauth_env

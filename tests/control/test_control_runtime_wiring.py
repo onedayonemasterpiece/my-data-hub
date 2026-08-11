@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
+import my_data_hub.control_plane.app as app_module
 from my_data_hub.control_plane.adapters import LedgerControlReader
 from my_data_hub.control_plane.app import (
     ControlPlaneSettings,
@@ -19,8 +20,10 @@ from my_data_hub.control_plane.app import (
 )
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.control_plane.runtime import (
+    CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE,
     ControlPlaneMasterRuntime,
     MasterRuntimeSettings,
+    ProductionRuntimeBuild,
     TunnelCertificate,
     build_production_runtime,
 )
@@ -51,28 +54,46 @@ TOKEN = "a" * 64
 def test_duplicate_replay_requires_terminal_quarantine_and_exact_source_authorization() -> None:
     snapshot_at = datetime(2026, 8, 9, tzinfo=UTC)
     source = BloggerMigrationRequest(
-        request_id=uuid4(), operation_id=uuid4(), project_id=uuid4(),
-        snapshot_at=snapshot_at, source_revision="a" * 40,
+        request_id=uuid4(),
+        operation_id=uuid4(),
+        project_id=uuid4(),
+        snapshot_at=snapshot_at,
+        source_revision="a" * 40,
     )
     authorized_at = datetime(2026, 8, 11, tzinfo=UTC)
     authorizer = "owner-review:test"
     canonical_actor_id = uuid4()
     envelope = BloggerDuplicateResolutionEnvelope(
-        authorization_id=uuid4(), authorized_by=authorizer, authorized_at=authorized_at,
-        source_request_id=source.request_id, source_operation_id=source.operation_id,
+        authorization_id=uuid4(),
+        authorized_by=authorizer,
+        authorized_at=authorized_at,
+        source_request_id=source.request_id,
+        source_operation_id=source.operation_id,
         source_request_sha256=source.request_sha256,
-        export_batch_id=batch_identity(snapshot_at, 266), project_id=source.project_id,
-        snapshot_at=snapshot_at, source_revision=source.source_revision,
-        decisions=(BloggerDuplicateDecision(
-            identity_sha256="b" * 64, canonical_record_id="record-1", canonical_actor_id=canonical_actor_id,
-            member_record_ids=("record-1", "record-2"), decided_by=authorizer,
-            reason="The exact reviewed evidence establishes one person.",
-        ),),
+        export_batch_id=batch_identity(snapshot_at, 266),
+        project_id=source.project_id,
+        snapshot_at=snapshot_at,
+        source_revision=source.source_revision,
+        decisions=(
+            BloggerDuplicateDecision(
+                identity_sha256="b" * 64,
+                canonical_record_id="record-1",
+                canonical_actor_id=canonical_actor_id,
+                member_record_ids=("record-1", "record-2"),
+                decided_by=authorizer,
+                reason="The exact reviewed evidence establishes one person.",
+            ),
+        ),
     )
     replay = BloggerMigrationRequest(
-        schema_version=BLOGGER_REPLAY_STAGE_SCHEMA, request_id=uuid4(), operation_id=uuid4(),
-        project_id=source.project_id, snapshot_at=snapshot_at, source_revision=source.source_revision,
-        replay_of_request_id=source.request_id, duplicate_resolution=envelope,
+        schema_version=BLOGGER_REPLAY_STAGE_SCHEMA,
+        request_id=uuid4(),
+        operation_id=uuid4(),
+        project_id=source.project_id,
+        snapshot_at=snapshot_at,
+        source_revision=source.source_revision,
+        replay_of_request_id=source.request_id,
+        duplicate_resolution=envelope,
     )
     quarantine = BloggerQuarantineReceipt(
         request_id=source.request_id,
@@ -98,9 +119,7 @@ def test_duplicate_replay_requires_terminal_quarantine_and_exact_source_authoriz
                 BloggerDuplicateReviewGroup(
                     identity_sha256="b" * 64,
                     members=(
-                        BloggerDuplicateReviewMember(
-                            record_id="record-1", projected_actor_id=canonical_actor_id
-                        ),
+                        BloggerDuplicateReviewMember(record_id="record-1", projected_actor_id=canonical_actor_id),
                         BloggerDuplicateReviewMember(record_id="record-2", projected_actor_id=uuid4()),
                     ),
                 ),
@@ -108,34 +127,37 @@ def test_duplicate_replay_requires_terminal_quarantine_and_exact_source_authoriz
         ),
     )
     record = {
-        "request_id": str(source.request_id), "operation_id": str(source.operation_id),
-        "request_sha256": source.request_sha256, "request": source.model_dump(mode="json"),
-        "state": "FAILED", "failure_code": "BloggerMigrationQuarantined",
+        "request_id": str(source.request_id),
+        "operation_id": str(source.operation_id),
+        "request_sha256": source.request_sha256,
+        "request": source.model_dump(mode="json"),
+        "state": "FAILED",
+        "failure_code": "BloggerMigrationQuarantined",
         "quarantine_receipt": quarantine.model_dump(mode="json"),
         "quarantine_receipt_sha256": quarantine.receipt_sha256,
-        "created_at": "2026-08-10T00:00:00Z", "updated_at": "2026-08-10T00:01:00Z",
+        "created_at": "2026-08-10T00:00:00Z",
+        "updated_at": "2026-08-10T00:01:00Z",
     }
     assert _validate_blogger_replay_source(replay, record, now=authorized_at) is None
-    assert _validate_blogger_replay_source(
-        replay, {**record, "failure_code": "RuntimeError"}, now=authorized_at
-    ) == "blogger_replay_source_invalid"
-    assert _validate_blogger_replay_source(
-        replay, {**record, "request_sha256": "c" * 64}, now=authorized_at
-    ) == "blogger_replay_source_invalid"
-    assert _validate_blogger_replay_source(
-        replay, {**record, "updated_at": "2026-08-12T00:00:00Z"}, now=authorized_at
-    ) == "blogger_replay_binding_invalid"
+    assert (
+        _validate_blogger_replay_source(replay, {**record, "failure_code": "RuntimeError"}, now=authorized_at)
+        == "blogger_replay_source_invalid"
+    )
+    assert (
+        _validate_blogger_replay_source(replay, {**record, "request_sha256": "c" * 64}, now=authorized_at)
+        == "blogger_replay_source_invalid"
+    )
+    assert (
+        _validate_blogger_replay_source(replay, {**record, "updated_at": "2026-08-12T00:00:00Z"}, now=authorized_at)
+        == "blogger_replay_binding_invalid"
+    )
     tampered_envelope = envelope.model_copy(
-        update={
-            "decisions": (
-                envelope.decisions[0].model_copy(update={"canonical_actor_id": uuid4()}),
-            )
-        }
+        update={"decisions": (envelope.decisions[0].model_copy(update={"canonical_actor_id": uuid4()}),)}
     )
     tampered_replay = replay.model_copy(update={"duplicate_resolution": tampered_envelope})
-    assert _validate_blogger_replay_source(
-        tampered_replay, record, now=authorized_at
-    ) == "blogger_replay_binding_invalid"
+    assert (
+        _validate_blogger_replay_source(tampered_replay, record, now=authorized_at) == "blogger_replay_binding_invalid"
+    )
 
 
 def test_production_runtime_rejects_an_attacker_callback_audience(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -148,9 +170,13 @@ def test_production_runtime_rejects_an_attacker_callback_audience(monkeypatch) -
         "MY_DATA_HUB_KAGGLE_MASTER_DATASET_DIR": "/does/not/matter",
         "MY_DATA_HUB_KAGGLE_MASTER_NOTEBOOK_SOURCE": "/does/not/matter.ipynb",
         "MY_DATA_HUB_CALLBACK_URL": "https://attacker.example/internal/runtime/events",
-                "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_REF": "owner/verifier",
+        "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_REF": "owner/verifier",
         "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_SOURCE_FILE": "verifier.ipynb",
-            }
+        "MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_HOST": "gateway.example.test",
+        "MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_PORT": "22",
+        "MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_USER": "mdh_tunnel",
+        "MY_DATA_HUB_MASTER_TUNNEL_REMOTE_PORT": "25432",
+    }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
     with pytest.raises(ValueError, match="owner-approved canonical HTTPS audience"):
@@ -164,12 +190,22 @@ def assets() -> KaggleMasterLaunchAssets:
         checkpoint_ref="owner/checkpoints",
         dataset_ref="owner/master-launch",
         notebook_ref="owner/postgres-master",
-        dataset_files={"launch.txt": b"exact", "checkpoint-verifier.ipynb": b"{}"},
+        dataset_files={
+            "launch.txt": b"exact",
+            "checkpoint-verifier.ipynb": b"{}",
+            "postgresql-18-runtime.tar.gz": b"fake-postgresql-18-runtime",
+            "postgresql-18-runtime.json": b"""{"archive_sha256":"63a988449f3d37c9c9fd2658b14f9254918e0b0f8ac600f9b98f15ede09e912f","build_recipe_sha256":"3fbcf52450dd44e3eb0eb7b826ebdb84a4293fbc54b713408083f10b44964d61","builder_image":"ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f","pgvector_source_sha256":"10bf9938906e5d643bbc4a7eea104b6f57ba4898e5b76b20e60484ea1d5a7f8f","pgvector_source_url":"https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.6.tar.gz","pgvector_version":"0.8.6","platform":"linux-x86_64","postgresql_source_sha256":"81a81ec695fb0c7901407defaa1d2f7973617154cf27ba74e3a7ab8e64436094","postgresql_source_url":"https://ftp.postgresql.org/pub/source/v18.4/postgresql-18.4.tar.bz2","postgresql_version":"18.4","schema_version":"my-data-hub-postgresql-runtime.v1"}""",
+            "tunnel-known-hosts": b"|1|aaaa|bbbb ssh-ed25519 AAAA\n",
+        },
         notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
         callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
         checkpoint_probe_relations=("hub.canonical_state",),
+        tunnel_gateway_host="gateway.example.test",
+        tunnel_gateway_port=22,
+        tunnel_gateway_user="mdh_tunnel",
+        tunnel_remote_port=25432,
     )
 
 
@@ -191,11 +227,10 @@ def test_production_builder_constructs_single_adapter_journal_and_bridge(monkeyp
         MasterRuntimeSettings(assets()),
         adapter_factory=lambda journal: seen.append(journal) or adapter,  # type: ignore[arg-type,return-value]
     )
-    assert built.provider_status == "available"
-    assert built.master is not None
+    assert built.provider_status == CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE
+    assert built.master is None
     assert built.provider_adapter is adapter
     assert len(seen) == 1
-    assert isinstance(built.master.coordinator.provider, KaggleMasterRuntimeProvider)
 
 
 def test_production_builder_accepts_central_legacy_kaggle_credentials(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
@@ -210,9 +245,40 @@ def test_production_builder_accepts_central_legacy_kaggle_credentials(monkeypatc
         MasterRuntimeSettings(assets()),
         adapter_factory=lambda _journal: adapter,  # type: ignore[arg-type,return-value]
     )
-    assert built.provider_status == "available"
+    assert built.provider_status == CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE
     assert built.provider_adapter is adapter
-    assert built.master is not None
+    assert built.master is None
+
+
+def test_production_master_ensure_blocks_before_provider_mutation_when_checkpoint_upload_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ledger = ControlLedger(tmp_path / "checkpoint-path-blocked.sqlite3")
+    adapter = object()
+
+    def blocked(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return ProductionRuntimeBuild(
+            master=None,
+            provider_status=CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE,
+            provider_adapter=adapter,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(app_module, "build_production_runtime", blocked)
+    app = create_app(
+        ControlPlaneSettings(
+            ledger_path=ledger.path,
+            master_runtime=MasterRuntimeSettings(assets()),
+        ),
+        ledger=ledger,
+    )
+    response = TestClient(app).post(
+        "/control/v1/master/ensure",
+        json={"idempotency_key": "checkpoint-upload-not-proven"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": {"code": CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE}}
+    assert ledger.incomplete_operations() == []
 
 
 def test_production_builder_rejects_partial_legacy_kaggle_credentials(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
@@ -283,9 +349,7 @@ def test_control_provider_gateway_requires_service_auth_and_uses_injected_single
     )
     assert accepted.status_code == 200
     assert accepted.json() == {"provider_ref": "owner/disposable", "outcome": "applied"}
-    assert gateway.calls == [
-        ("provider.resources.delete", body["arguments"], "owner", "internal-provider-gateway")
-    ]
+    assert gateway.calls == [("provider.resources.delete", body["arguments"], "owner", "internal-provider-gateway")]
 
     secret = {**body, "arguments": {**body["arguments"], "password": "forbidden"}}
     rejected = client.post(
@@ -346,6 +410,7 @@ def test_runtime_callback_reaches_active_through_production_app_wiring(tmp_path:
     path = tmp_path / "control.sqlite3"
     ledger = ControlLedger(path)
     wired = runtime(ledger, FakeKaggleRuntime())
+
     class CertificateBroker:
         def __init__(self) -> None:
             self.calls = []
@@ -609,12 +674,8 @@ def test_quarantine_callback_is_durable_public_and_alteration_denied(tmp_path: P
     path = tmp_path / "quarantine-control.sqlite3"
     ledger = ControlLedger(path)
     wired = runtime(ledger, FakeKaggleRuntime())
-    client = TestClient(
-        create_app(ControlPlaneSettings(ledger_path=path), ledger=ledger, master_runtime=wired)
-    )
-    ensured = client.post(
-        "/control/v1/master/ensure", json={"idempotency_key": "blogger-quarantine-master"}
-    )
+    client = TestClient(create_app(ControlPlaneSettings(ledger_path=path), ledger=ledger, master_runtime=wired))
+    ensured = client.post("/control/v1/master/ensure", json={"idempotency_key": "blogger-quarantine-master"})
     operation = ledger.get_operation(ensured.json()["operation_id"])
     assert operation is not None
     identity = operation.identity
@@ -645,11 +706,14 @@ def test_quarantine_callback_is_durable_public_and_alteration_denied(tmp_path: P
     )
     token = TOKEN
     ledger.store_runtime_token_hash(str(identity["run_id"]), str(identity["attempt_id"]), token)
-    assert client.post(
-        "/internal/runtime/events",
-        content=ready.model_dump_json(by_alias=True, exclude_none=True).encode(),
-        headers={"Authorization": f"Bearer {token}"},
-    ).status_code == 200
+    assert (
+        client.post(
+            "/internal/runtime/events",
+            content=ready.model_dump_json(by_alias=True, exclude_none=True).encode(),
+            headers={"Authorization": f"Bearer {token}"},
+        ).status_code
+        == 200
+    )
     migration = BloggerMigrationRequest(
         request_id=uuid4(),
         operation_id=operation.operation_id,
@@ -657,9 +721,9 @@ def test_quarantine_callback_is_durable_public_and_alteration_denied(tmp_path: P
         snapshot_at=now,
         source_revision="a" * 40,
     )
-    assert client.post(
-        "/control/v1/blogger-closure/requests", json=migration.model_dump(mode="json")
-    ).status_code == 200
+    assert (
+        client.post("/control/v1/blogger-closure/requests", json=migration.model_dump(mode="json")).status_code == 200
+    )
     runtime_headers = {
         "Authorization": f"Bearer {token}",
         "X-MDH-Master-Instance-ID": str(identity["master_instance_id"]),
@@ -695,12 +759,8 @@ def test_quarantine_callback_is_durable_public_and_alteration_denied(tmp_path: P
                 BloggerDuplicateReviewGroup(
                     identity_sha256="e" * 64,
                     members=(
-                        BloggerDuplicateReviewMember(
-                            record_id="record-1", projected_actor_id=actor_one
-                        ),
-                        BloggerDuplicateReviewMember(
-                            record_id="record-2", projected_actor_id=actor_two
-                        ),
+                        BloggerDuplicateReviewMember(record_id="record-1", projected_actor_id=actor_one),
+                        BloggerDuplicateReviewMember(record_id="record-2", projected_actor_id=actor_two),
                     ),
                 ),
             )
@@ -909,9 +969,7 @@ def test_embedding_admission_accepts_first_request_and_replays_without_completio
         probe_query=probe_query,
         probe_query_sha256=hashlib.sha256(probe_query.encode()).hexdigest(),
     )
-    blocked = client.post(
-        "/control/v1/embedding-production/requests", json=request.model_dump(mode="json")
-    )
+    blocked = client.post("/control/v1/embedding-production/requests", json=request.model_dump(mode="json"))
     assert blocked.status_code == 409
     assert ledger.embedding_production_request(str(request.request_id)) is None
 
@@ -925,7 +983,9 @@ def test_embedding_admission_accepts_first_request_and_replays_without_completio
     assert "verified_checkpoint_restore" not in capability.json()
     assert "mcp_hybrid_search" not in capability.json()
     observed = LedgerControlReader(ledger).invoke_control(
-        "embedding.production.capabilities", {}, object()  # type: ignore[arg-type]
+        "embedding.production.capabilities",
+        {},
+        object(),  # type: ignore[arg-type]
     )
     assert observed["interface"] == "mcp_observer"
     assert observed["binding"] == capability.json()["binding"]

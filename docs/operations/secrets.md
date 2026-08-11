@@ -14,12 +14,20 @@ records contain identities/locators, never credentials.
 
 ## Kaggle master Notebook
 
-Master-only data-plane secrets are supplied through Kaggle User Secrets or
-short-lived epoch-bound issuance: YDB viewer access for the bounded import,
-PostgreSQL restricted-role credentials and service-announcement authentication.
+Master-only data-plane secrets use per-attempt protected status input or short-lived
+epoch-bound issuance: YDB viewer access for the bounded import, PostgreSQL restricted-role
+credentials and service-announcement authentication. Control generates the PostgreSQL
+server certificate/private key per operation and epoch. The raw key exists only in the
+exact private status Dataset and fixed mode-`0600` Notebook path; the ledger stores its
+hash plus the public certificate, and remote MCP observes atomic public-certificate
+rotation through a shared read-only directory. The public tunnel known-host key is a
+reviewed hashed release asset, not a secret.
 The Kaggle account credential remains solely in the control-owned provider
-adapter and is not copied into the Notebook. No secret enters Notebook source or
-Dataset contents. The DB write gate requires the current epoch and lease.
+adapter and is not copied into the Notebook. No provider credential enters Notebook
+source, any Dataset, callback, log, or receipt. The only secret-bearing Dataset is the
+task-owned `ORCHESTRATOR_PROTECTED` status Dataset containing the one-time callback token
+and operation-bound TLS private key; it is deleted after terminal reconciliation. The DB
+write gate requires the current epoch and lease.
 
 ## Separation
 
@@ -41,11 +49,10 @@ installed DNS/OAuth edge secrets and has not enabled remote MCP writes.
 - Kaggle control credential: keep exactly one complete control-side mode
   (`KAGGLE_API_TOKEN`, private access-token file, or
   `KAGGLE_USERNAME`/`KAGGLE_KEY`). Legacy values remain in the control process
-  and are never launch bindings. If a protected checkpoint worker genuinely
-  needs the narrower exact-read API, provision a separately reviewed API-token
-  User Secret for that fixed worker only; never introduce interactive browser
-  sessions or refresh-cookie state. Re-run the applicable attestation/readback
-  canary after rotation.
+  and are never launch bindings. No separate checkpoint User Secret, interactive browser
+  session, or refresh-cookie state is admitted. Until the single central adapter has a
+  proven provider-side checkpoint upload/copy path, production master admission returns
+  `CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE` before provider mutation.
 - runtime callback authority: each attempt has an independent random token. The
   control ledger stores only its SHA-256; terminal cleanup revokes the hash and
   deletes the exact protected status Dataset containing the raw value. There is

@@ -19,6 +19,12 @@ RELATION = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$")
 WHEEL_PATH = re.compile(r"^dataset/my_data_hub-[A-Za-z0-9_.+-]+\.whl$")
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_ASSET_BYTES = 64 * 1024 * 1024
+POSTGRES_BUILDER_IMAGE = "ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f"
+POSTGRESQL_SOURCE_URL = "https://ftp.postgresql.org/pub/source/v18.4/postgresql-18.4.tar.bz2"
+POSTGRESQL_SOURCE_SHA256 = "81a81ec695fb0c7901407defaa1d2f7973617154cf27ba74e3a7ab8e64436094"
+PGVECTOR_SOURCE_URL = "https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.6.tar.gz"
+PGVECTOR_SOURCE_SHA256 = "10bf9938906e5d643bbc4a7eea104b6f57ba4898e5b76b20e60484ea1d5a7f8f"
+APPROVED_POSTGRES_RUNTIME_SHA256 = "40bf34fb4a97a248537d0221127e38deb98c9b35208d474dd1b93f773c2558b5"
 
 
 class AssetVerificationError(RuntimeError):
@@ -73,9 +79,7 @@ def _expected_environment(manifest: dict[str, Any]) -> dict[str, str]:
         "MY_DATA_HUB_KAGGLE_MASTER_NOTEBOOK_SOURCE": "/master-assets/postgres-master.ipynb",
         "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_REF": manifest["checkpoint_verifier_ref"],
         "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_SOURCE_FILE": "checkpoint-verifier.ipynb",
-        "MY_DATA_HUB_KAGGLE_CHECKPOINT_PROBE_RELATIONS_JSON": json.dumps(
-            relations, separators=(",", ":")
-        ),
+        "MY_DATA_HUB_KAGGLE_CHECKPOINT_PROBE_RELATIONS_JSON": json.dumps(relations, separators=(",", ":")),
     }
 
 
@@ -103,9 +107,7 @@ def verify_bundle(*, bundle: Path, expected_commit: str) -> dict[str, object]:
     dataset = bundle / "dataset"
     _private_directory(dataset)
 
-    manifest_body = _private_file(
-        bundle / "master-asset-bundle.json", maximum=MAX_MANIFEST_BYTES
-    )
+    manifest_body = _private_file(bundle / "master-asset-bundle.json", maximum=MAX_MANIFEST_BYTES)
     try:
         manifest: Any = json.loads(manifest_body)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -154,11 +156,17 @@ def verify_bundle(*, bundle: Path, expected_commit: str) -> dict[str, object]:
         "master_notebook",
         "checkpoint_verifier",
         "wheel",
+        "postgres_runtime",
+        "postgres_runtime_manifest",
+        "tunnel_known_hosts",
     }:
         raise AssetVerificationError("master asset inventory is invalid")
     expected_paths = {
         "master_notebook": "postgres-master.ipynb",
         "checkpoint_verifier": "dataset/checkpoint-verifier.ipynb",
+        "postgres_runtime": "dataset/postgresql-18-runtime.tar.gz",
+        "postgres_runtime_manifest": "dataset/postgresql-18-runtime.json",
+        "tunnel_known_hosts": "dataset/tunnel-known-hosts",
     }
     verified_assets: dict[str, dict[str, object]] = {}
     for name, raw in assets.items():
@@ -186,6 +194,54 @@ def verify_bundle(*, bundle: Path, expected_commit: str) -> dict[str, object]:
             "sha256": digest,
             "byte_size": byte_size,
         }
+    runtime_manifest = json.loads((bundle / str(assets["postgres_runtime_manifest"]["path"])).read_bytes())
+    runtime_archive = assets["postgres_runtime"]
+    expected_runtime_keys = {
+        "schema_version",
+        "postgresql_version",
+        "pgvector_version",
+        "platform",
+        "archive_sha256",
+        "postgresql_source_url",
+        "postgresql_source_sha256",
+        "pgvector_source_url",
+        "pgvector_source_sha256",
+        "builder_image",
+        "build_recipe_sha256",
+    }
+    if (
+        not isinstance(runtime_manifest, dict)
+        or set(runtime_manifest) != expected_runtime_keys
+        or runtime_manifest.get("schema_version") != "my-data-hub-postgresql-runtime.v1"
+        or runtime_manifest.get("postgresql_version") != "18.4"
+        or runtime_manifest.get("pgvector_version") != "0.8.6"
+        or runtime_manifest.get("platform") != "linux-x86_64"
+        or runtime_manifest.get("archive_sha256") != runtime_archive["sha256"]
+        or runtime_archive["sha256"] != APPROVED_POSTGRES_RUNTIME_SHA256
+        or runtime_manifest.get("postgresql_source_url") != POSTGRESQL_SOURCE_URL
+        or runtime_manifest.get("postgresql_source_sha256") != POSTGRESQL_SOURCE_SHA256
+        or runtime_manifest.get("pgvector_source_url") != PGVECTOR_SOURCE_URL
+        or runtime_manifest.get("pgvector_source_sha256") != PGVECTOR_SOURCE_SHA256
+        or runtime_manifest.get("builder_image") != POSTGRES_BUILDER_IMAGE
+        or not SHA256.fullmatch(str(runtime_manifest.get("build_recipe_sha256", "")))
+    ):
+        raise AssetVerificationError("PostgreSQL runtime provenance is invalid")
+    recipe = Path(__file__).resolve().parent / "assets/postgresql-18.4-pgvector-0.8.6.Dockerfile"
+    if (
+        recipe.is_symlink()
+        or not recipe.is_file()
+        or _sha256(recipe.read_bytes()) != runtime_manifest["build_recipe_sha256"]
+    ):
+        raise AssetVerificationError("PostgreSQL runtime recipe differs from the release")
+    known_hosts_body = (bundle / str(assets["tunnel_known_hosts"]["path"])).read_bytes()
+    try:
+        known_host_lines = known_hosts_body.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise AssetVerificationError("tunnel known_hosts is not ASCII") from exc
+    if not known_host_lines or any(
+        not line.startswith("|") or " ssh-ed25519 " not in line or len(line) > 4096 for line in known_host_lines
+    ):
+        raise AssetVerificationError("tunnel known_hosts is not hashed ed25519 metadata")
 
     env_body = _private_file(bundle / "master-assets.env", maximum=MAX_MANIFEST_BYTES)
     if _parse_environment(env_body) != _expected_environment(manifest):
@@ -195,21 +251,11 @@ def verify_bundle(*, bundle: Path, expected_commit: str) -> dict[str, object]:
         "master-assets.env",
         *(str(item["path"]) for item in verified_assets.values()),
     }
-    observed_files = {
-        path.relative_to(bundle).as_posix()
-        for path in bundle.rglob("*")
-        if path.is_file()
-    }
-    observed_directories = {
-        path.relative_to(bundle).as_posix()
-        for path in bundle.rglob("*")
-        if path.is_dir()
-    }
+    observed_files = {path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.is_file()}
+    observed_directories = {path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.is_dir()}
     if observed_files != expected_files or observed_directories != {"dataset"}:
         raise AssetVerificationError("master asset bundle contains unexpected paths")
-    canonical_manifest = json.dumps(
-        manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
+    canonical_manifest = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     if manifest_body != canonical_manifest:
         raise AssetVerificationError("master asset manifest is not canonical JSON")
     return {

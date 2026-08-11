@@ -25,6 +25,21 @@
       "path": "dataset/my_data_hub-0.1.0-py3-none-any.whl",
       "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
       "byte_size": 4096
+    },
+    "postgres_runtime": {
+      "path": "dataset/postgresql-18-runtime.tar.gz",
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "byte_size": 12868357
+    },
+    "postgres_runtime_manifest": {
+      "path": "dataset/postgresql-18-runtime.json",
+      "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "byte_size": 1024
+    },
+    "tunnel_known_hosts": {
+      "path": "dataset/tunnel-known-hosts",
+      "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "byte_size": 128
     }
   }
 }

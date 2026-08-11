@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import secrets
 import tempfile
 from collections.abc import Callable, Mapping
-from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID, ObjectIdentifier
 
 from my_data_hub.acceptance.master_lifecycle import (
     AcceptancePrincipal,
@@ -51,6 +56,9 @@ from my_data_hub.tunnel_broker_ipc import TunnelBrokerClient
 
 class MasterProviderUnavailable(RuntimeError):
     """The control plane is healthy but no authenticated provider is available."""
+
+
+CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE = "CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE"
 
 
 @dataclass(slots=True)
@@ -207,6 +215,10 @@ class MasterRuntimeSettings:
             "callback_url": "MY_DATA_HUB_CALLBACK_URL",
             "checkpoint_verifier_ref": "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_REF",
             "checkpoint_verifier_source_file": "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_SOURCE_FILE",
+            "tunnel_gateway_host": "MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_HOST",
+            "tunnel_gateway_port": "MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_PORT",
+            "tunnel_gateway_user": "MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_USER",
+            "tunnel_remote_port": "MY_DATA_HUB_MASTER_TUNNEL_REMOTE_PORT",
         }
         raw = {key: os.getenv(name, "").strip() for key, name in names.items()}
         if not any(raw.values()):
@@ -228,6 +240,11 @@ class MasterRuntimeSettings:
             raise ValueError("runtime callback must use the owner-approved canonical HTTPS audience")
         dataset_dir = Path(raw.pop("dataset_dir")).expanduser().resolve()
         notebook_source = Path(raw.pop("notebook_source")).expanduser().resolve()
+        try:
+            tunnel_gateway_port = int(raw.pop("tunnel_gateway_port"))
+            tunnel_remote_port = int(raw.pop("tunnel_remote_port"))
+        except ValueError as exc:
+            raise ValueError("master tunnel ports must be integers") from exc
         files = _bounded_files(dataset_dir)
         source = _bounded_file(notebook_source, max_bytes=8 * 1024 * 1024)
         probe_relations_raw = os.getenv("MY_DATA_HUB_KAGGLE_CHECKPOINT_PROBE_RELATIONS_JSON", "").strip()
@@ -250,6 +267,8 @@ class MasterRuntimeSettings:
             raise ValueError("master secret bindings must map environment names to Kaggle secret names")
         assets = KaggleMasterLaunchAssets(
             **raw,
+            tunnel_gateway_port=tunnel_gateway_port,
+            tunnel_remote_port=tunnel_remote_port,
             dataset_files=files,
             notebook_source=source,
             runtime_secret_bindings=bindings,
@@ -264,6 +283,7 @@ class ControlPlaneMasterRuntime:
     coordinator: MasterCoordinator
     settings: MasterRuntimeSettings
     acceptance_executor: KaggleAcceptanceOperationExecutor | None = None
+    master_tls_ca_path: Path | None = None
 
     def request_master_acceptance(
         self,
@@ -415,19 +435,14 @@ class ControlPlaneMasterRuntime:
         provider = self.coordinator.provider
         if not isinstance(provider, KaggleMasterRuntimeProvider):
             raise ProductionAcceptanceBlocked("FM08_OFFICIAL_KAGGLE_ADAPTER_REQUIRED")
-        trigger = self.ledger.get_effect_by_idempotency_key(
-            f"{command.binding.operation_id}:trigger_run"
-        )
+        trigger = self.ledger.get_effect_by_idempotency_key(f"{command.binding.operation_id}:trigger_run")
         try:
             old_run = KaggleKernelRunIdentity.model_validate(
                 trigger.receipt["exact_identity"] if trigger is not None and trigger.receipt else None
             )
         except (TypeError, ValueError) as exc:
             raise ProductionAcceptanceBlocked("FM08_OLD_PROVIDER_RUN_RECEIPT_INVALID") from exc
-        if (
-            old_run.task_run_id != command.binding.run_id
-            or old_run.provider_ref != self.settings.assets.notebook_ref
-        ):
+        if old_run.task_run_id != command.binding.run_id or old_run.provider_ref != self.settings.assets.notebook_ref:
             raise ProductionAcceptanceBlocked("FM08_OLD_PROVIDER_RUN_BINDING_MISMATCH")
         owner = self.settings.assets.notebook_ref.split("/", 1)[0]
         replacement_key = f"fm08-recovery:{command.task_id}"
@@ -474,9 +489,7 @@ class ControlPlaneMasterRuntime:
             recovery_receipt_sha256=None,
             active=False,
         )
-        replacement_trigger = self.ledger.get_effect_by_idempotency_key(
-            f"{replacement.operation_id}:trigger_run"
-        )
+        replacement_trigger = self.ledger.get_effect_by_idempotency_key(f"{replacement.operation_id}:trigger_run")
         try:
             replacement_run = KaggleKernelRunIdentity.model_validate(
                 replacement_trigger.receipt["exact_identity"]
@@ -536,9 +549,7 @@ class ControlPlaneMasterRuntime:
             self.settings.assets,
             notebook_ref=str(row["replacement_notebook_ref"]),
         )
-        recovery_provider = KaggleMasterRuntimeProvider(
-            provider.adapter, assets, status_authority=self.ledger
-        )
+        recovery_provider = KaggleMasterRuntimeProvider(provider.adapter, assets, status_authority=self.ledger)
         recovery_coordinator = MasterCoordinator(
             self.ledger,
             recovery_provider,
@@ -551,6 +562,7 @@ class ControlPlaneMasterRuntime:
             coordinator=recovery_coordinator,
             settings=MasterRuntimeSettings(assets),
             acceptance_executor=self.acceptance_executor,
+            master_tls_ca_path=self.master_tls_ca_path,
         )
 
     def _status_dataset_ready(self, operation_id: str, identity: dict[str, Any]) -> bool:
@@ -561,9 +573,7 @@ class ControlPlaneMasterRuntime:
         if existing is not None:
             if existing["status_dataset"] is not None:
                 return existing["state"] in {"READY", "CLEANED"}
-            claim_until = datetime.fromisoformat(
-                str(existing["creator_claim_until"]).replace("Z", "+00:00")
-            )
+            claim_until = datetime.fromisoformat(str(existing["creator_claim_until"]).replace("Z", "+00:00"))
             if claim_until > self.ledger.clock.now():
                 return False
             self.ledger.fail_ambiguous_master_status_dataset(operation_id)
@@ -578,8 +588,7 @@ class ControlPlaneMasterRuntime:
             resource_kind="kaggle_notebook",
             resource_ref=self.settings.assets.notebook_ref,
             holder_id=str(identity["run_id"]),
-            lease_until=self.ledger.clock.now()
-            + timedelta(seconds=self.settings.assets.notebook_timeout_seconds),
+            lease_until=self.ledger.clock.now() + timedelta(seconds=self.settings.assets.notebook_timeout_seconds),
         )
         resource_lease = {
             "lease_id": lease.lease_id,
@@ -593,8 +602,15 @@ class ControlPlaneMasterRuntime:
             **identity,
             "operation_id": operation_id,
             "status_resource_lease": resource_lease,
+            "boot_checkpoint": self._boot_checkpoint_snapshot(),
         }
-        files = provider.status_files(candidate_identity, token)
+        tls_certificate, tls_private_key = self._generate_master_tls(candidate_identity)
+        files = provider.status_files(
+            candidate_identity,
+            token,
+            tls_certificate=tls_certificate,
+            tls_private_key=tls_private_key,
+        )
         authority, created = self.ledger.ensure_master_status_dataset_authority(
             operation_id=operation_id,
             run_id=str(identity["run_id"]),
@@ -610,8 +626,9 @@ class ControlPlaneMasterRuntime:
             **candidate_identity,
             "status_requested_at": authority["created_at"],
         }
-        result = provider.create_status_dataset(exact_identity, token)
+        result = provider.create_status_dataset(exact_identity, files)
         claim = result.claim
+        self._publish_master_tls_ca(tls_certificate)
         self.ledger.record_master_status_dataset(
             operation_id=operation_id,
             status_dataset={
@@ -621,10 +638,114 @@ class ControlPlaneMasterRuntime:
                 "content_tree_sha256": mapping_sha256(files),
                 "status_config_sha256": hashlib.sha256(files["kaggle_run.json"]).hexdigest(),
                 "status_helper_sha256": hashlib.sha256(files["kaggle_status_client.py"]).hexdigest(),
+                "master_config_sha256": hashlib.sha256(files["master-config.json"]).hexdigest(),
+                "tls_certificate_sha256": hashlib.sha256(tls_certificate).hexdigest(),
+                "tls_key_material_sha256": hashlib.sha256(tls_private_key).hexdigest(),
+                "tls_certificate_pem": tls_certificate.decode("ascii"),
+                "boot_checkpoint": candidate_identity["boot_checkpoint"],
                 "resource_lease": resource_lease,
             },
         )
         return True
+
+    def _generate_master_tls(self, identity: Mapping[str, Any]) -> tuple[bytes, bytes]:
+        operation_id = str(identity["operation_id"])
+        master_instance_id = UUID(str(identity["master_instance_id"]))
+        epoch = int(identity["epoch"])
+        if epoch < 1:
+            raise MasterProviderUnavailable("master TLS epoch is invalid")
+        key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+        now = self.ledger.clock.now()
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"mdh-postgres-{master_instance_id}")])
+        binding = canonical_json_bytes(
+            {
+                "schema_version": "my-data-hub-master-tls-binding.v1",
+                "operation_id": operation_id,
+                "run_id": str(identity["run_id"]),
+                "attempt_id": str(identity["attempt_id"]),
+                "master_instance_id": str(master_instance_id),
+                "epoch": epoch,
+            }
+        )
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=5))
+            .not_valid_after(now + timedelta(hours=12))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+            .add_extension(
+                x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                critical=False,
+            )
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+            .add_extension(
+                x509.UnrecognizedExtension(ObjectIdentifier("1.3.6.1.4.1.57264.1.1"), binding),
+                critical=False,
+            )
+            .sign(key, hashes.SHA256())
+        )
+        return (
+            certificate.public_bytes(serialization.Encoding.PEM),
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            ),
+        )
+
+    def _publish_master_tls_ca(self, certificate: bytes) -> None:
+        path = self.master_tls_ca_path
+        if path is None:
+            raise MasterProviderUnavailable("master TLS CA publication path is unavailable")
+        path = path.resolve(strict=False)
+        parent = path.parent
+        if parent.is_symlink() or not parent.is_dir():
+            raise MasterProviderUnavailable("master TLS CA directory is unavailable")
+        if path.exists() and (path.is_symlink() or not path.is_file()):
+            raise MasterProviderUnavailable("master TLS CA target is unsafe")
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".ca.pem.", dir=parent)
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(certificate)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(path)
+            os.chmod(path, 0o600)
+            directory_descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _boot_checkpoint_snapshot(self) -> dict[str, Any]:
+        head = self.ledger.checkpoint_head("postgres-master")
+        if head is None or head.current_checkpoint_id is None:
+            return {"kind": "EMPTY", "generation": 0}
+        candidate = self.ledger.checkpoint_candidate(head.current_checkpoint_id)
+        if (
+            candidate is None
+            or candidate.get("status") != "VERIFIED"
+            or candidate.get("dataset_ref") != self.settings.assets.checkpoint_ref
+            or not isinstance(candidate.get("version_ref"), str)
+            or not str(candidate["version_ref"]).startswith(self.settings.assets.checkpoint_ref + "/")
+            or not str(candidate["version_ref"]).rsplit("/", 1)[-1].isdigit()
+            or int(str(candidate["version_ref"]).rsplit("/", 1)[-1]) < 1
+        ):
+            raise MasterProviderUnavailable("current checkpoint HEAD is not exact VERIFIED metadata")
+        return {
+            "kind": "VERIFIED",
+            "generation": head.generation,
+            "checkpoint_id": head.current_checkpoint_id,
+            "exact_version_ref": candidate["version_ref"],
+            "manifest_sha256": candidate["manifest_sha256"],
+        }
 
     def _cleanup_terminal_status_dataset(self, handle: MasterHandle) -> None:
         if handle.state not in {
@@ -661,9 +782,7 @@ class ControlPlaneMasterRuntime:
             TaskResourceClaim.model_validate(status["claim"]),
         )
         lease = status["resource_lease"]
-        self.ledger.release_resource_lease_exact(
-            str(lease["lease_id"]), str(lease["holder_id"]), int(lease["epoch"])
-        )
+        self.ledger.release_resource_lease_exact(str(lease["lease_id"]), str(lease["holder_id"]), int(lease["epoch"]))
         self.ledger.complete_master_status_dataset_cleanup(
             operation_id=handle.operation_id,
             cleanup_receipt=receipt.model_dump(mode="json"),
@@ -684,9 +803,7 @@ class ControlPlaneMasterRuntime:
         if stored is None:
             raise RuntimeError("master status authority disappeared before lease release")
         lease = stored["resource_lease"]
-        self.ledger.release_resource_lease_exact(
-            str(lease["lease_id"]), str(lease["holder_id"]), int(lease["epoch"])
-        )
+        self.ledger.release_resource_lease_exact(str(lease["lease_id"]), str(lease["holder_id"]), int(lease["epoch"]))
 
     def _cleanup_ambiguous_status_dataset(
         self,
@@ -719,9 +836,7 @@ class ControlPlaneMasterRuntime:
                         disposable=True,
                         fingerprint=receipt.observed_fingerprint,
                         provider_version=receipt.provider_version,
-                        registered_at=datetime.fromisoformat(
-                            str(stored["created_at"]).replace("Z", "+00:00")
-                        ),
+                        registered_at=datetime.fromisoformat(str(stored["created_at"]).replace("Z", "+00:00")),
                     )
         if claim is None:
             return
@@ -895,6 +1010,7 @@ def build_production_runtime(
     *,
     adapter_factory: Callable[[ControlLedgerKaggleJournal], KaggleProviderAdapter] | None = None,
     session_credentials_path: Path | None = None,
+    master_tls_ca_path: Path | None = None,
     tunnel_authority: TunnelBrokerClient | None = None,
     tunnel_listen_port: int = 25432,
 ) -> ProductionRuntimeBuild:
@@ -911,26 +1027,21 @@ def build_production_runtime(
         # Authentication/dependency failures do not make the stable control plane
         # unhealthy and must not leak provider exception/credential detail.
         return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None)
-    provider = KaggleMasterRuntimeProvider(adapter, settings.assets, status_authority=ledger)
-    coordinator = MasterCoordinator(
-        ledger,
-        provider,
-        tunnel_authority=tunnel_authority,
-        tunnel_listen_port=tunnel_listen_port,
+    # The normal master must remain able to create a verified checkpoint before it
+    # can ever become ACTIVE.  Kaggle checkpoint bytes cannot cross the devstand,
+    # and the only existing checkpoint writer constructs a second provider client
+    # inside the Notebook.  That would either require copying the central Kaggle
+    # credential into the runtime or guarantee that a launched master cannot
+    # checkpoint.  Both violate the owner-approved single-adapter topology.  Keep
+    # the central adapter available for protected control-owned operations, but do
+    # not construct a production master runtime until a provider-side checkpoint
+    # upload/copy path exists.
+    return ProductionRuntimeBuild(
+        None,
+        CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE,
+        registrar,
+        adapter,
     )
-    receipt_root = (session_credentials_path or Path(tempfile.gettempdir())) / "acceptance-receipts"
-    runtime = ControlPlaneMasterRuntime(
-        ledger,
-        coordinator,
-        settings,
-        KaggleAcceptanceOperationExecutor(adapter, settings.assets, receipt_root),
-    )
-    with suppress(Exception):
-        runtime.reconcile_startup()
-    # Durable operations remain resumable; readiness is still control-plane
-    # readiness, not an assertion that Kaggle accepted an effect.
-    return ProductionRuntimeBuild(runtime, "available", registrar, adapter)
-
 
 
 def _bounded_file(path: Path, *, max_bytes: int) -> bytes:

@@ -30,6 +30,8 @@ from my_data_hub.runtime_sdk import (
 from my_data_hub.workloads.bloggers.master_stage import BloggerImportStageReceipt, BloggerMigrationRequest
 
 SECRET = "a" * 64
+TLS_CERTIFICATE = b"-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n"
+TLS_CERTIFICATE_SHA256 = hashlib.sha256(TLS_CERTIFICATE).hexdigest()
 
 
 def _prepare_status_authority(
@@ -39,12 +41,13 @@ def _prepare_status_authority(
     token: str = SECRET,
 ) -> None:
     identity = MasterCoordinator.identity_for(intent.idempotency_key)
-    ledger.ensure_master_operation(
+    operation, _ = ledger.ensure_master_operation(
         operation_id=identity["operation_id"],
         idempotency_key=intent.idempotency_key,
         intent=intent.as_dict(),
         identity=identity,
     )
+    identity = operation.identity
     lease = ledger.acquire_resource_lease(
         lease_id=str(uuid4()),
         resource_kind="kaggle_notebook",
@@ -60,8 +63,19 @@ def _prepare_status_authority(
         "epoch": lease.epoch,
         "lease_until": lease.lease_until.isoformat(),
     }
-    exact = {**identity, "operation_id": identity["operation_id"], "status_resource_lease": resource_lease}
-    files = provider.status_files(exact, token)
+    exact = {
+        **identity,
+        "operation_id": identity["operation_id"],
+        "status_resource_lease": resource_lease,
+        "boot_checkpoint": {"kind": "EMPTY", "generation": 0},
+    }
+    private_key = b"-----BEGIN " + b"PRIVATE KEY-----\nTEST\n-----END PRIVATE " + b"KEY-----\n"
+    files = provider.status_files(
+        exact,
+        token,
+        tls_certificate=TLS_CERTIFICATE,
+        tls_private_key=private_key,
+    )
     stored, _ = ledger.ensure_master_status_dataset_authority(
         operation_id=identity["operation_id"],
         run_id=identity["run_id"],
@@ -78,6 +92,11 @@ def _prepare_status_authority(
             "exact_version_ref": f"{provider.status_dataset_ref(identity)}/1",
             "status_config_sha256": hashlib.sha256(files["kaggle_run.json"]).hexdigest(),
             "status_helper_sha256": hashlib.sha256(files["kaggle_status_client.py"]).hexdigest(),
+            "master_config_sha256": hashlib.sha256(files["master-config.json"]).hexdigest(),
+            "boot_checkpoint": exact["boot_checkpoint"],
+            "tls_certificate_sha256": TLS_CERTIFICATE_SHA256,
+            "tls_key_material_sha256": hashlib.sha256(private_key).hexdigest(),
+            "tls_certificate_pem": TLS_CERTIFICATE.decode(),
             "content_tree_sha256": stored["expected_content_tree_sha256"],
             "resource_lease": resource_lease,
         },
@@ -164,12 +183,22 @@ def test_concrete_bridge_launches_dataset_notebook_and_run_once(tmp_path: Path) 
         checkpoint_ref="owner/checkpoints",
         dataset_ref="owner/master-launch",
         notebook_ref="owner/postgres-master",
-        dataset_files={"config.json": b'{"run":"{{MY_DATA_HUB_RUN_ID}}"}', "checkpoint-verifier.ipynb": b"{}"},
+        dataset_files={
+            "config.json": b'{"run":"{{MY_DATA_HUB_RUN_ID}}"}',
+            "checkpoint-verifier.ipynb": b"{}",
+            "postgresql-18-runtime.tar.gz": b"fake-postgresql-18-runtime",
+            "postgresql-18-runtime.json": b"""{"archive_sha256":"63a988449f3d37c9c9fd2658b14f9254918e0b0f8ac600f9b98f15ede09e912f","build_recipe_sha256":"3fbcf52450dd44e3eb0eb7b826ebdb84a4293fbc54b713408083f10b44964d61","builder_image":"ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f","pgvector_source_sha256":"10bf9938906e5d643bbc4a7eea104b6f57ba4898e5b76b20e60484ea1d5a7f8f","pgvector_source_url":"https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.6.tar.gz","pgvector_version":"0.8.6","platform":"linux-x86_64","postgresql_source_sha256":"81a81ec695fb0c7901407defaa1d2f7973617154cf27ba74e3a7ab8e64436094","postgresql_source_url":"https://ftp.postgresql.org/pub/source/v18.4/postgresql-18.4.tar.bz2","postgresql_version":"18.4","schema_version":"my-data-hub-postgresql-runtime.v1"}""",
+            "tunnel-known-hosts": b"|1|aaaa|bbbb ssh-ed25519 AAAA\n",
+        },
         notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
         callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
         checkpoint_probe_relations=("hub.canonical_state",),
+        tunnel_gateway_host="gateway.example.test",
+        tunnel_gateway_port=22,
+        tunnel_gateway_user="mdh_tunnel",
+        tunnel_remote_port=25432,
     )
     adapter = FakeKaggleAdapter()
     ledger = ControlLedger(tmp_path / "control.sqlite3")
@@ -204,12 +233,21 @@ def _launch() -> KaggleMasterLaunchAssets:
         checkpoint_ref="owner/checkpoints",
         dataset_ref="owner/master-launch",
         notebook_ref="owner/postgres-master",
-        dataset_files={"checkpoint-verifier.ipynb": b"{}"},
+        dataset_files={
+            "checkpoint-verifier.ipynb": b"{}",
+            "postgresql-18-runtime.tar.gz": b"fake-postgresql-18-runtime",
+            "postgresql-18-runtime.json": b"""{"archive_sha256":"63a988449f3d37c9c9fd2658b14f9254918e0b0f8ac600f9b98f15ede09e912f","build_recipe_sha256":"3fbcf52450dd44e3eb0eb7b826ebdb84a4293fbc54b713408083f10b44964d61","builder_image":"ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f","pgvector_source_sha256":"10bf9938906e5d643bbc4a7eea104b6f57ba4898e5b76b20e60484ea1d5a7f8f","pgvector_source_url":"https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.6.tar.gz","pgvector_version":"0.8.6","platform":"linux-x86_64","postgresql_source_sha256":"81a81ec695fb0c7901407defaa1d2f7973617154cf27ba74e3a7ab8e64436094","postgresql_source_url":"https://ftp.postgresql.org/pub/source/v18.4/postgresql-18.4.tar.bz2","postgresql_version":"18.4","schema_version":"my-data-hub-postgresql-runtime.v1"}""",
+            "tunnel-known-hosts": b"|1|aaaa|bbbb ssh-ed25519 AAAA\n",
+        },
         notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
         callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
         checkpoint_probe_relations=("hub.canonical_state",),
+        tunnel_gateway_host="gateway.example.test",
+        tunnel_gateway_port=22,
+        tunnel_gateway_user="mdh_tunnel",
+        tunnel_remote_port=25432,
     )
 
 
@@ -256,7 +294,7 @@ def _active_master_with_terminal_output(tmp_path: Path):  # type: ignore[no-unty
             "service_kind": "postgres-master",
             "endpoint": "tunnel://terminal-recovery",
             "protocol": "postgresql+tls",
-            "tls_fingerprint": "sha256:" + "a" * 64,
+            "tls_fingerprint": "sha256:" + TLS_CERTIFICATE_SHA256,
             "capabilities": ["sql"],
             "canonical_revision": 1,
             "schema_version": "13",
@@ -264,6 +302,7 @@ def _active_master_with_terminal_output(tmp_path: Path):  # type: ignore[no-unty
             "master_instance_id": handle.master_instance_id,
             "epoch": handle.epoch,
             "executed_source_sha256": source_sha256,
+            "boot_checkpoint": {"kind": "EMPTY", "generation": 0},
         },
     )
     coordinator.accept_runtime_event(ready.model_dump_json(exclude_none=True).encode(), header_token=SECRET)
@@ -376,13 +415,14 @@ def test_service_ready_requires_runtime_computed_exact_push_source_and_replays_l
         "service_kind": "postgres-master",
         "endpoint": "tunnel://source-attestation",
         "protocol": "postgresql+tls",
-        "tls_fingerprint": "sha256:" + "a" * 64,
+        "tls_fingerprint": "sha256:" + TLS_CERTIFICATE_SHA256,
         "capabilities": ["sql"],
         "canonical_revision": 1,
         "schema_version": "13",
         "lease_until": "2099-01-01T00:00:00+00:00",
         "master_instance_id": handle.master_instance_id,
         "epoch": handle.epoch,
+        "boot_checkpoint": {"kind": "EMPTY", "generation": 0},
     }
     mismatch = _runtime_event(
         handle,
@@ -392,9 +432,7 @@ def test_service_ready_requires_runtime_computed_exact_push_source_and_replays_l
         data={**common, "executed_source_sha256": "0" * 64},
     )
     with pytest.raises(ValueError, match="exact provider push"):
-        coordinator.accept_runtime_event(
-            mismatch.model_dump_json(exclude_none=True).encode(), header_token=SECRET
-        )
+        coordinator.accept_runtime_event(mismatch.model_dump_json(exclude_none=True).encode(), header_token=SECRET)
     operation = ledger.get_operation(handle.operation_id)
     assert operation is not None and operation.state == MasterState.REGISTERING.value
     assert ledger.resolve_service("postgres-master") is None

@@ -34,7 +34,7 @@ present. Partial configuration remains healthy but reports the provider unavaila
 makes no Kaggle call.
 
 ```text
-KAGGLE_API_TOKEN
+KAGGLE_API_TOKEN or KAGGLE_USERNAME + KAGGLE_KEY (control process only)
 MY_DATA_HUB_KAGGLE_MASTER_SOURCE_IDENTITY
 MY_DATA_HUB_KAGGLE_MASTER_SOURCE_VERSION
 MY_DATA_HUB_KAGGLE_MASTER_CHECKPOINT_REF
@@ -46,6 +46,11 @@ MY_DATA_HUB_CALLBACK_URL
 MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_REF
 MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_SOURCE_FILE
 MY_DATA_HUB_KAGGLE_CHECKPOINT_PROBE_RELATIONS_JSON
+MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_HOST
+MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_PORT
+MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_USER
+MY_DATA_HUB_MASTER_TUNNEL_REMOTE_PORT
+MY_DATA_HUB_KAGGLE_MASTER_SECRET_BINDINGS_JSON
 ```
 
 `MY_DATA_HUB_CALLBACK_URL` is not an arbitrary deployment input. Production
@@ -57,14 +62,32 @@ callback token, stores only its SHA-256, and places the raw value only in an
 exact private `ORCHESTRATOR_PROTECTED` status Dataset attached by numeric
 version. There is no runtime-token root or callback-token Kaggle User Secret.
 
-`MY_DATA_HUB_KAGGLE_MASTER_SECRET_BINDINGS_JSON` is an optional exact mapping from
-non-provider Notebook environment names to reviewed Kaggle User Secret names. It
-cannot include `KAGGLE_API_TOKEN`, `KAGGLE_USERNAME`, `KAGGLE_KEY`, or the
+The source/version/ref/path values above come from the independently verified
+`master-assets.env`; the provider environment may not override them. Compose loads that
+file from the reviewed asset bundle. The four tunnel values are deployment inputs in the
+private provider environment.
+
+The control process generates a distinct operation/epoch-bound self-signed PostgreSQL
+certificate and private key for every attempt. Both travel only in the same exact private
+status Dataset as the callback token; the control ledger retains the public certificate
+and hashes, never the key. The Notebook validates the hashes and writes both to fixed
+mode-`0600` files below `/kaggle/working`. Control atomically publishes the public
+certificate in the shared mode-`0700` TLS directory before launch/activation; remote MCP
+mounts that directory read-only so atomic rotation is visible by pathname rather than a
+stale bind-mounted inode.
+
+`MY_DATA_HUB_KAGGLE_MASTER_SECRET_BINDINGS_JSON` may contain only optional
+`YDB_ACCESS_TOKEN_CREDENTIALS`. It cannot include TLS material, `KAGGLE_API_TOKEN`,
+`KAGGLE_USERNAME`, `KAGGLE_KEY`, arbitrary environment names, or the
 per-attempt callback token: the control-owned automated Kaggle credential remains
-central and is never copied into the PostgreSQL master Notebook. The separate,
-fixed checkpoint-acceptance runtime may bind exact provider API secret names only
-under its narrower data-local contract; values never enter its source, Dataset
-metadata, callback, log, or receipt.
+central and is never copied into the PostgreSQL master Notebook.
+
+Production master admission is currently fail-closed before any provider mutation with
+`CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE`. The existing checkpoint writer would need a
+second provider client inside the Notebook, but copying the central credential or adding
+a new User Secret/provider session is not approved. The reusable status-Dataset, TLS,
+portable PostgreSQL runtime, and exact boot-HEAD contracts remain available for isolated
+task-owned boot validation; they do not authorize a production master to become ACTIVE.
 
 The dataset directory and Notebook/verifier source paths are bounded regular files read
 from the reviewed release. The checkpoint and verifier provider references are permanent
@@ -101,8 +124,14 @@ The installation command additionally refuses to proceed unless:
 - the OAuth signing key has the same private-file constraint;
 - the overlap JWKS is a bounded regular public-key file (`{"keys":[]}` before the first
   rotation, then up to four previous public verification keys);
-- the master TLS CA is a regular non-symlink file;
+- the master TLS directory is a private non-symlink directory and its `ca.pem` target is
+  a regular mode-`0600` file;
 - the bounded master-asset root is a real non-symlink directory;
+- the asset bundle contains the reviewed exact-hash portable PostgreSQL 18.4/pgvector
+  0.8.6 archive, its pinned build recipe/provenance, and a hashed tunnel host-key asset;
+- the private provider environment contains exact tunnel coordinates but no TLS values or
+  asset identity override; the shared TLS directory is private and atomically writable by
+  control/read-only to remote MCP;
 - none of the static environments contains a PostgreSQL data-plane URL or crosses the
   provider/MCP/OAuth secret boundary.
 
@@ -115,7 +144,7 @@ MY_DATA_HUB_MCP_ENV_FILE
 MY_DATA_HUB_OAUTH_ENV_FILE
 MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE
 MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE
-MY_DATA_HUB_MASTER_TLS_CA_FILE
+MY_DATA_HUB_MASTER_TLS_DIR
 MY_DATA_HUB_MASTER_ASSET_DIR
 MY_DATA_HUB_CONTROL_LEDGER_DIR
 MY_DATA_HUB_MASTER_SESSION_DIR

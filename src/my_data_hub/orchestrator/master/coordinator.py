@@ -131,9 +131,7 @@ class MasterCoordinator:
             state=MasterState.REQUESTED.value,
         )
         if runtime_secret is not None:
-            self.ledger.store_runtime_token_hash(
-                str(durable["run_id"]), str(durable["attempt_id"]), runtime_secret
-            )
+            self.ledger.store_runtime_token_hash(str(durable["run_id"]), str(durable["attempt_id"]), runtime_secret)
         self.reconcile_operation(record.operation_id, intent)
         current = self.ledger.get_operation(record.operation_id)
         assert current is not None
@@ -480,6 +478,7 @@ class MasterCoordinator:
                 expected_source_sha256, observed_source_sha256
             ):
                 raise ValueError("service.ready executed source differs from exact provider push")
+            self._require_admitted_boot_checkpoint(operation.operation_id, data)
             self.ledger.activate_service_operation(
                 operation_id=operation.operation_id,
                 expected_state=MasterState.REGISTERING.value,
@@ -617,6 +616,48 @@ class MasterCoordinator:
             self.ledger.revoke_runtime_token(event.run_id, event.attempt_id)
         return receipt
 
+    def _require_admitted_boot_checkpoint(self, operation_id: str, data: dict[str, Any]) -> None:
+        authority = self.ledger.master_status_dataset_authority(operation_id)
+        if authority is None:
+            return
+        status_dataset = authority.get("status_dataset")
+        expected = status_dataset.get("boot_checkpoint") if isinstance(status_dataset, dict) else None
+        expected_tls_sha256 = (
+            str(status_dataset.get("tls_certificate_sha256", "")) if isinstance(status_dataset, dict) else ""
+        )
+        observed_tls_sha256 = str(data.get("tls_fingerprint", ""))
+        if observed_tls_sha256.startswith("sha256:"):
+            observed_tls_sha256 = observed_tls_sha256.removeprefix("sha256:")
+        if (
+            len(expected_tls_sha256) != 64
+            or len(observed_tls_sha256) != 64
+            or not hmac.compare_digest(expected_tls_sha256, observed_tls_sha256)
+        ):
+            raise ValueError("service.ready TLS certificate differs from admitted status Dataset")
+        observed = data.get("boot_checkpoint")
+        if not isinstance(expected, dict) or observed != expected:
+            raise ValueError("service.ready boot checkpoint differs from admitted status Dataset")
+        head = self.ledger.checkpoint_head(MASTER_SERVICE_KIND)
+        if expected.get("kind") == "EMPTY":
+            if expected != {"kind": "EMPTY", "generation": 0} or (
+                head is not None and head.current_checkpoint_id is not None
+            ):
+                raise ValueError("service.ready EMPTY checkpoint is no longer current")
+            return
+        checkpoint_id = str(expected.get("checkpoint_id", ""))
+        candidate = self.ledger.checkpoint_candidate(checkpoint_id)
+        if (
+            expected.get("kind") != "VERIFIED"
+            or head is None
+            or head.generation != int(expected.get("generation", -1))
+            or head.current_checkpoint_id != checkpoint_id
+            or candidate is None
+            or candidate.get("status") != "VERIFIED"
+            or candidate.get("version_ref") != expected.get("exact_version_ref")
+            or candidate.get("manifest_sha256") != expected.get("manifest_sha256")
+        ):
+            raise ValueError("service.ready verified checkpoint is no longer current")
+
     def _exact_status_resource_lease(self, operation_id: str, event: RuntimeEvent) -> dict[str, Any]:
         resource = event.data.get("resource")
         authority = self.ledger.master_status_dataset_authority(operation_id)
@@ -689,9 +730,7 @@ class MasterCoordinator:
             assert source_effect.receipt is not None
             exact_identity["notebook_launch"] = source_effect.receipt.get("exact_identity")
         if effect_kind == "push_notebook":
-            dataset_effect = self.ledger.get_effect_by_idempotency_key(
-                f"{operation_id}:ensure_dataset"
-            )
+            dataset_effect = self.ledger.get_effect_by_idempotency_key(f"{operation_id}:ensure_dataset")
             if dataset_effect is None or dataset_effect.state != EffectState.APPLIED:
                 return None
             assert dataset_effect.receipt is not None
@@ -734,9 +773,7 @@ class MasterCoordinator:
                         # can never be valid, so terminalize the ABSENT attempt
                         # instead of stranding admission behind IN_PROGRESS.
                         with suppress(Exception):
-                            self._deactivate_tunnel_authority(
-                                identity, "trigger_absent_after_lease_expiry"
-                            )
+                            self._deactivate_tunnel_authority(identity, "trigger_absent_after_lease_expiry")
                         # An already-expired/reconciled broker may have no
                         # matching active lease to deactivate.  The durable
                         # high-water mark still prevents revival.
@@ -778,9 +815,7 @@ class MasterCoordinator:
             now=now,
         )
 
-    def _renew_tunnel_authority(
-        self, event: RuntimeEvent, identity: dict[str, Any], lease_until: datetime
-    ) -> None:
+    def _renew_tunnel_authority(self, event: RuntimeEvent, identity: dict[str, Any], lease_until: datetime) -> None:
         authority = self.tunnel_authority
         if authority is None:
             return

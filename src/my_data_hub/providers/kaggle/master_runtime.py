@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -51,6 +52,18 @@ from .source_attestation import executable_source_sha256
 MASTER_TERMINAL_OUTPUT_NAME = "my-data-hub-master-terminal.json"
 MAX_MASTER_TERMINAL_OUTPUT_BYTES = 256 * 1024
 MAX_MASTER_STATUS_BYTES = 16 * 1024
+MASTER_CONFIG_NAME = "master-config.json"
+POSTGRES_RUNTIME_ARCHIVE_NAME = "postgresql-18-runtime.tar.gz"
+POSTGRES_RUNTIME_MANIFEST_NAME = "postgresql-18-runtime.json"
+TUNNEL_KNOWN_HOSTS_NAME = "tunnel-known-hosts"
+POSTGRES_TLS_CERT_NAME = "postgres-server.crt"
+POSTGRES_TLS_KEY_NAME = "postgres-server.key"
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+POSTGRES_RUNTIME_RECIPE_SHA256 = "3fbcf52450dd44e3eb0eb7b826ebdb84a4293fbc54b713408083f10b44964d61"
+POSTGRESQL_SOURCE_URL = "https://ftp.postgresql.org/pub/source/v18.4/postgresql-18.4.tar.bz2"
+POSTGRESQL_SOURCE_SHA256 = "81a81ec695fb0c7901407defaa1d2f7973617154cf27ba74e3a7ab8e64436094"
+PGVECTOR_SOURCE_URL = "https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.6.tar.gz"
+PGVECTOR_SOURCE_SHA256 = "10bf9938906e5d643bbc4a7eea104b6f57ba4898e5b76b20e60484ea1d5a7f8f"
 
 MASTER_STATUS_HELPER = (
     b'"""Fixed master status bootstrap; token values are never logged."""\n'
@@ -61,7 +74,7 @@ MASTER_STATUS_HELPER = (
     b'        raise RuntimeError("status input size invalid")\n'
     b"    value = json.loads(raw)\n"
     b'    expected = {"schema_version","run_id","attempt_id","kind","notebook",'
-    b'"callback_url","token","resource_leases"}\n'
+    b'"callback_url","token","resource_leases","tls_certificate_sha256","tls_key_material_sha256"}\n'
     b"    if set(value) != expected or value['schema_version'] != 'my-data-hub-kaggle-run.v1':\n"
     b'        raise RuntimeError("status input shape invalid")\n'
     b"    if value['kind'] != 'postgres-master' or value['run_id'] != run_id:\n"
@@ -103,6 +116,10 @@ class KaggleMasterLaunchAssets:
     checkpoint_verifier_ref: str
     checkpoint_verifier_source_file: str
     checkpoint_probe_relations: tuple[str, ...]
+    tunnel_gateway_host: str
+    tunnel_gateway_port: int
+    tunnel_gateway_user: str
+    tunnel_remote_port: int
     runtime_secret_bindings: Mapping[str, str] = field(default_factory=dict)
     notebook_code_file: str = "worker.ipynb"
     notebook_kernel_type: str = "notebook"
@@ -134,21 +151,84 @@ class KaggleMasterLaunchAssets:
             raise MasterLaunchContractError("checkpoint verifier/probe assets are incomplete")
         if self.notebook_kernel_type not in {"notebook", "script"}:
             raise MasterLaunchContractError("master notebook kernel type is invalid")
+        if (
+            not self.tunnel_gateway_host
+            or not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", self.tunnel_gateway_host)
+            or not self.tunnel_gateway_user
+            or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", self.tunnel_gateway_user)
+            or not 1 <= self.tunnel_gateway_port <= 65535
+            or not 1 <= self.tunnel_remote_port <= 65535
+        ):
+            raise MasterLaunchContractError("master tunnel binding is invalid")
+        self._validate_runtime_assets()
         if not 1_800 <= self.notebook_timeout_seconds <= KAGGLE_PROVIDER_TIMEOUT_SECONDS:
             raise MasterLaunchContractError(
                 "master provider timeout must leave the declared reserve below Kaggle's 12-hour cap"
             )
+        allowed_secret_bindings = {
+            "YDB_ACCESS_TOKEN_CREDENTIALS",
+        }
         for environment_name, secret_name in self.runtime_secret_bindings.items():
-            if (
-                (
-                    environment_name != "YDB_ACCESS_TOKEN_CREDENTIALS"
-                    and not environment_name.startswith("MY_DATA_HUB_")
-                )
-                or environment_name == "MY_DATA_HUB_RUN_SECRET"
-                or environment_name in {"KAGGLE_API_TOKEN", "KAGGLE_USERNAME", "KAGGLE_KEY"}
-                or not secret_name
-            ):
+            if environment_name not in allowed_secret_bindings or not secret_name:
                 raise MasterLaunchContractError("runtime secret binding is invalid")
+
+    def _validate_runtime_assets(self) -> None:
+        required = {
+            POSTGRES_RUNTIME_ARCHIVE_NAME,
+            POSTGRES_RUNTIME_MANIFEST_NAME,
+            TUNNEL_KNOWN_HOSTS_NAME,
+        }
+        if not required.issubset(self.dataset_files):
+            raise MasterLaunchContractError("pinned PostgreSQL runtime or tunnel host key is absent")
+        manifest_body = self.dataset_files[POSTGRES_RUNTIME_MANIFEST_NAME]
+        try:
+            manifest = json.loads(manifest_body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise MasterLaunchContractError("PostgreSQL runtime manifest is invalid JSON") from exc
+        expected = {
+            "schema_version",
+            "postgresql_version",
+            "pgvector_version",
+            "platform",
+            "archive_sha256",
+            "postgresql_source_url",
+            "postgresql_source_sha256",
+            "pgvector_source_url",
+            "pgvector_source_sha256",
+            "builder_image",
+            "build_recipe_sha256",
+        }
+        archive_sha = hashlib.sha256(self.dataset_files[POSTGRES_RUNTIME_ARCHIVE_NAME]).hexdigest()
+        if (
+            not isinstance(manifest, dict)
+            or set(manifest) != expected
+            or manifest.get("schema_version") != "my-data-hub-postgresql-runtime.v1"
+            or manifest.get("postgresql_version") != "18.4"
+            or manifest.get("pgvector_version") != "0.8.6"
+            or manifest.get("platform") != "linux-x86_64"
+            or manifest.get("archive_sha256") != archive_sha
+            or archive_sha == "9be7324987fa81656e6b54888b9ec707851481254cdf839517a6a0f9732671f6"
+            or manifest.get("postgresql_source_url") != POSTGRESQL_SOURCE_URL
+            or manifest.get("postgresql_source_sha256") != POSTGRESQL_SOURCE_SHA256
+            or manifest.get("pgvector_source_url") != PGVECTOR_SOURCE_URL
+            or manifest.get("pgvector_source_sha256") != PGVECTOR_SOURCE_SHA256
+            or manifest.get("builder_image")
+            != "ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f"
+            or manifest.get("build_recipe_sha256") != POSTGRES_RUNTIME_RECIPE_SHA256
+        ):
+            raise MasterLaunchContractError("PostgreSQL runtime provenance is incomplete or mismatched")
+        known_hosts = self.dataset_files[TUNNEL_KNOWN_HOSTS_NAME]
+        try:
+            known_hosts_text = known_hosts.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise MasterLaunchContractError("tunnel known_hosts must be bounded ASCII") from exc
+        lines = tuple(line for line in known_hosts_text.splitlines() if line)
+        if (
+            not 1 <= len(known_hosts) <= 64 * 1024
+            or not lines
+            or any(not line.startswith("|") or " ssh-ed25519 " not in line or len(line) > 4096 for line in lines)
+        ):
+            raise MasterLaunchContractError("tunnel known_hosts is not a reviewed hashed host-key asset")
 
     def render_values(self, identity: Mapping[str, Any]) -> dict[str, str]:
         values = {
@@ -164,8 +244,22 @@ class KaggleMasterLaunchAssets:
             "MY_DATA_HUB_CHECKPOINT_REF": self.checkpoint_ref,
         }
         input_root = f"/kaggle/input/{self.dataset_ref.split('/', 1)[1]}"
-        if "master-config.json" in self.dataset_files:
-            values["MY_DATA_HUB_MASTER_CONFIG"] = f"{input_root}/master-config.json"
+        values.update(
+            {
+                "MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE": f"{input_root}/{POSTGRES_RUNTIME_ARCHIVE_NAME}",
+                "MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE_SHA256": hashlib.sha256(
+                    self.dataset_files[POSTGRES_RUNTIME_ARCHIVE_NAME]
+                ).hexdigest(),
+                "MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST": f"{input_root}/{POSTGRES_RUNTIME_MANIFEST_NAME}",
+                "MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST_SHA256": hashlib.sha256(
+                    self.dataset_files[POSTGRES_RUNTIME_MANIFEST_NAME]
+                ).hexdigest(),
+                "MY_DATA_HUB_TUNNEL_KNOWN_HOSTS": f"{input_root}/{TUNNEL_KNOWN_HOSTS_NAME}",
+                "MY_DATA_HUB_TUNNEL_KNOWN_HOSTS_SHA256": hashlib.sha256(
+                    self.dataset_files[TUNNEL_KNOWN_HOSTS_NAME]
+                ).hexdigest(),
+            }
+        )
         verifier_source = self.dataset_files[self.checkpoint_verifier_source_file]
         values.update(
             {
@@ -201,6 +295,7 @@ def _runtime_bootstrap(
     status_dataset_ref: str,
     status_config_sha256: str,
     status_helper_sha256: str,
+    master_config_sha256: str,
     secret_bindings: Mapping[str, str],
 ) -> str:
     # The callback token is loaded only from the exact private status Dataset.
@@ -215,8 +310,11 @@ def _runtime_bootstrap(
         f"_mdh_status_root = _mdh_pathlib.Path({status_mount!r})\n"
         "_mdh_config = _mdh_status_root / 'kaggle_run.json'\n"
         "_mdh_helper = _mdh_status_root / 'kaggle_status_client.py'\n"
+        "_mdh_master_config = _mdh_status_root / 'master-config.json'\n"
         f"assert _mdh_hashlib.sha256(_mdh_config.read_bytes()).hexdigest() == {status_config_sha256!r}\n"
         f"assert _mdh_hashlib.sha256(_mdh_helper.read_bytes()).hexdigest() == {status_helper_sha256!r}\n"
+        f"assert _mdh_hashlib.sha256(_mdh_master_config.read_bytes()).hexdigest() == {master_config_sha256!r}\n"
+        "_mdh_os.environ['MY_DATA_HUB_MASTER_CONFIG'] = str(_mdh_master_config)\n"
         "_mdh_spec = _mdh_importlib.spec_from_file_location('mdh_status_bootstrap', _mdh_helper)\n"
         "_mdh_module = _mdh_importlib.module_from_spec(_mdh_spec)\n"
         "_mdh_spec.loader.exec_module(_mdh_module)\n"
@@ -229,8 +327,58 @@ def _runtime_bootstrap(
             "from kaggle_secrets import UserSecretsClient as _MdhSecrets\n"
             "_mdh_secrets = _MdhSecrets()\n"
             f"for _mdh_env, _mdh_name in {bindings}.items():\n"
-            "    _mdh_os.environ[_mdh_env] = _mdh_secrets.get_secret(_mdh_name)\n"
+            "    _mdh_value = _mdh_secrets.get_secret(_mdh_name)\n"
+            "    _mdh_os.environ[_mdh_env] = _mdh_value\n"
         )
+    bootstrap += (
+        "import json as _mdh_json, tarfile as _mdh_tarfile\n"
+        "_mdh_archive = _mdh_pathlib.Path(_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE'])\n"
+        "_mdh_manifest_path = _mdh_pathlib.Path(_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST'])\n"
+        "if _mdh_hashlib.sha256(_mdh_archive.read_bytes()).hexdigest() != "
+        "_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE_SHA256']:\n"
+        "    raise RuntimeError('PostgreSQL runtime archive hash differs')\n"
+        "if _mdh_hashlib.sha256(_mdh_manifest_path.read_bytes()).hexdigest() != "
+        "_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST_SHA256']:\n"
+        "    raise RuntimeError('PostgreSQL runtime manifest hash differs')\n"
+        "_mdh_pg_manifest = _mdh_json.loads(_mdh_manifest_path.read_bytes())\n"
+        "if _mdh_pg_manifest.get('schema_version') != 'my-data-hub-postgresql-runtime.v1' or "
+        "_mdh_pg_manifest.get('archive_sha256') != "
+        "_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE_SHA256']:\n"
+        "    raise RuntimeError('PostgreSQL runtime provenance differs')\n"
+        "_mdh_pg_root = _mdh_pathlib.Path('/kaggle/working/mdh-postgresql-runtime')\n"
+        "_mdh_pg_root.mkdir(mode=0o700, parents=True, exist_ok=False)\n"
+        "with _mdh_tarfile.open(_mdh_archive, 'r:gz') as _mdh_tar:\n"
+        "    _mdh_members = _mdh_tar.getmembers()\n"
+        "    if not 1 <= len(_mdh_members) <= 4000 or sum(max(0, m.size) for m in _mdh_members) > 536870912:\n"
+        "        raise RuntimeError('PostgreSQL runtime archive exceeds fixed bounds')\n"
+        "    if any(m.islnk() or (m.issym() and ('/' in m.linkname or "
+        "'..' in _mdh_pathlib.PurePosixPath(m.linkname).parts)) or "
+        "not m.name.startswith('pgsql/') or "
+        "'..' in _mdh_pathlib.PurePosixPath(m.name).parts for m in _mdh_members):\n"
+        "        raise RuntimeError('PostgreSQL runtime archive contains an unsafe member')\n"
+        "    _mdh_tar.extractall(_mdh_pg_root, members=_mdh_members, filter='data')\n"
+        "_mdh_os.environ['LD_LIBRARY_PATH'] = "
+        "'/kaggle/working/mdh-postgresql-runtime/pgsql/lib:"
+        "/kaggle/working/mdh-postgresql-runtime/pgsql/lib/runtime-deps'\n"
+        "_mdh_tls_root = _mdh_pathlib.Path('/kaggle/working/mdh-tls')\n"
+        "_mdh_tls_root.mkdir(mode=0o700, parents=True, exist_ok=False)\n"
+        "for _mdh_tls_name, _mdh_tls_hash, _mdh_tls_env in "
+        "(('postgres-server.crt','tls_certificate_sha256','MY_DATA_HUB_POSTGRES_TLS_CERT'),"
+        "('postgres-server.key','tls_key_material_sha256','MY_DATA_HUB_POSTGRES_TLS_KEY')):\n"
+        "    _mdh_tls_input = _mdh_status_root / _mdh_tls_name\n"
+        "    _mdh_tls_body = _mdh_tls_input.read_bytes()\n"
+        "    if _mdh_hashlib.sha256(_mdh_tls_body).hexdigest() != _mdh_status[_mdh_tls_hash]:\n"
+        "        raise RuntimeError('PostgreSQL TLS status asset hash differs')\n"
+        "    _mdh_tls_output = _mdh_tls_root / _mdh_tls_name\n"
+        "    _mdh_fd = _mdh_os.open(_mdh_tls_output, _mdh_os.O_WRONLY|_mdh_os.O_CREAT|_mdh_os.O_EXCL, 0o600)\n"
+        "    with _mdh_os.fdopen(_mdh_fd, 'wb') as _mdh_stream:\n"
+        "        _mdh_stream.write(_mdh_tls_body)\n"
+        "    _mdh_os.environ[_mdh_tls_env] = str(_mdh_tls_output)\n"
+        "_mdh_known_hosts = _mdh_pathlib.Path(_mdh_values['MY_DATA_HUB_TUNNEL_KNOWN_HOSTS'])\n"
+        "if _mdh_hashlib.sha256(_mdh_known_hosts.read_bytes()).hexdigest() != "
+        "_mdh_values['MY_DATA_HUB_TUNNEL_KNOWN_HOSTS_SHA256']:\n"
+        "    raise RuntimeError('tunnel known_hosts hash differs')\n"
+    )
     return bootstrap
 
 
@@ -242,6 +390,7 @@ def render_notebook_source(
     status_dataset_ref: str,
     status_config_sha256: str,
     status_helper_sha256: str,
+    master_config_sha256: str,
     secret_bindings: Mapping[str, str] | None = None,
 ) -> bytes:
     source = _replace_nonsecret_markers(source, values)
@@ -250,6 +399,7 @@ def render_notebook_source(
         status_dataset_ref=status_dataset_ref,
         status_config_sha256=status_config_sha256,
         status_helper_sha256=status_helper_sha256,
+        master_config_sha256=master_config_sha256,
         secret_bindings=secret_bindings or {},
     )
     if kernel_type == "script":
@@ -292,7 +442,21 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
         owner = self.assets.notebook_ref.split("/", 1)[0]
         return f"{owner}/mdh-master-status-{UUID(str(identity['run_id'])).hex}"
 
-    def status_files(self, identity: Mapping[str, Any], token: str) -> dict[str, bytes]:
+    def status_files(
+        self,
+        identity: Mapping[str, Any],
+        token: str,
+        *,
+        tls_certificate: bytes,
+        tls_private_key: bytes,
+    ) -> dict[str, bytes]:
+        if (
+            not tls_certificate.startswith(b"-----BEGIN CERTIFICATE-----")
+            or not 1 <= len(tls_certificate) <= 64 * 1024
+            or not tls_private_key.startswith(b"-----BEGIN " + b"PRIVATE KEY-----")
+            or not 1 <= len(tls_private_key) <= 64 * 1024
+        ):
+            raise MasterLaunchContractError("master TLS status assets are invalid")
         value = {
             "schema_version": "my-data-hub-kaggle-run.v1",
             "run_id": str(identity["run_id"]),
@@ -302,16 +466,59 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             "callback_url": self.assets.callback_url,
             "token": token,
             "resource_leases": [identity["status_resource_lease"]],
+            "tls_certificate_sha256": hashlib.sha256(tls_certificate).hexdigest(),
+            "tls_key_material_sha256": hashlib.sha256(tls_private_key).hexdigest(),
         }
         encoded = canonical_json_bytes(value)
         if len(encoded) > MAX_MASTER_STATUS_BYTES:
             raise MasterLaunchContractError("master status config exceeds 16 KiB")
-        return {"kaggle_run.json": encoded, "kaggle_status_client.py": MASTER_STATUS_HELPER}
+        master_config = self._master_config(identity)
+        return {
+            "kaggle_run.json": encoded,
+            "kaggle_status_client.py": MASTER_STATUS_HELPER,
+            MASTER_CONFIG_NAME: canonical_json_bytes(master_config),
+            POSTGRES_TLS_CERT_NAME: tls_certificate,
+            POSTGRES_TLS_KEY_NAME: tls_private_key,
+        }
 
-    def create_status_dataset(
-        self, identity: Mapping[str, Any], token: str
-    ) -> DatasetMutationResult:
-        files = self.status_files(identity, token)
+    def _master_config(self, identity: Mapping[str, Any]) -> dict[str, object]:
+        checkpoint = identity.get("boot_checkpoint")
+        if not isinstance(checkpoint, Mapping) or checkpoint.get("kind") not in {"EMPTY", "VERIFIED"}:
+            raise MasterLaunchContractError("master boot checkpoint snapshot is absent")
+        verified = checkpoint.get("kind") == "VERIFIED"
+        checkpoint_directory: str | None = None
+        if verified:
+            exact_ref = str(checkpoint.get("exact_version_ref", ""))
+            parts = exact_ref.split("/")
+            if len(parts) != 3 or not parts[2].isdigit() or int(parts[2]) < 1:
+                raise MasterLaunchContractError("master boot checkpoint ref is not exact numeric")
+            checkpoint_directory = f"/kaggle/input/{parts[1]}"
+        return {
+            "master_instance_id": str(identity["master_instance_id"]),
+            "run_id": str(identity["run_id"]),
+            "attempt_id": str(identity["attempt_id"]),
+            "service_instance_id": str(identity["service_instance_id"]),
+            "epoch": int(identity["epoch"]),
+            "boot_source": "verified_checkpoint" if verified else "empty_baseline",
+            "checkpoint_directory": checkpoint_directory,
+            "checkpoint_id": str(checkpoint["checkpoint_id"]) if verified else None,
+            "checkpoint_exact_version_ref": str(checkpoint["exact_version_ref"]) if verified else None,
+            "checkpoint_manifest_sha256": str(checkpoint["manifest_sha256"]) if verified else None,
+            "checkpoint_head_generation": int(checkpoint["generation"]),
+            "lease_seconds": 120,
+            "postgres_bin": "/kaggle/working/mdh-postgresql-runtime/pgsql/bin",
+            "postgres_port": 15432,
+            "tunnel_gateway_host": self.assets.tunnel_gateway_host,
+            "tunnel_gateway_port": self.assets.tunnel_gateway_port,
+            "tunnel_gateway_user": self.assets.tunnel_gateway_user,
+            "tunnel_remote_port": self.assets.tunnel_remote_port,
+            "maximum_runtime_seconds": 21600,
+            "checkpoint_reserve_seconds": 10800,
+            "source_identity": self.assets.source_identity,
+            "source_version": self.assets.source_version,
+        }
+
+    def create_status_dataset(self, identity: Mapping[str, Any], files: Mapping[str, bytes]) -> DatasetMutationResult:
         provider_ref = self.status_dataset_ref(identity)
         intent = ProviderEffectIntent.create(
             operation_id=UUID(str(identity["operation_id"])),
@@ -325,9 +532,7 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
                 "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
                 "disposable": True,
             },
-            requested_at=datetime.fromisoformat(
-                str(identity["status_requested_at"]).replace("Z", "+00:00")
-            ),
+            requested_at=datetime.fromisoformat(str(identity["status_requested_at"]).replace("Z", "+00:00")),
         )
         return self.adapter.create_private_dataset(
             intent=intent,
@@ -337,9 +542,7 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             disposable=True,
         )
 
-    def delete_status_dataset(
-        self, identity: Mapping[str, Any], claim: TaskResourceClaim
-    ) -> object:
+    def delete_status_dataset(self, identity: Mapping[str, Any], claim: TaskResourceClaim) -> object:
         return self.adapter.delete_task_created_resource(
             intent=ProviderEffectIntent.create(
                 operation_id=UUID(str(identity["operation_id"])),
@@ -353,9 +556,7 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
                     "claim_sha256": claim.claim_sha256,
                     "provider_version": claim.provider_version,
                 },
-                requested_at=datetime.fromisoformat(
-                    str(identity["status_requested_at"]).replace("Z", "+00:00")
-                ),
+                requested_at=datetime.fromisoformat(str(identity["status_requested_at"]).replace("Z", "+00:00")),
             ),
             claim=claim,
         )
@@ -427,21 +628,26 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
         if effect.effect_kind == "push_notebook":
             source = self._source(effect.exact_identity)
             status = self._status_authority_row(effect.exact_identity)
+            self._assert_boot_checkpoint_current(status)
             asset = effect.exact_identity.get("asset_dataset")
             if not isinstance(asset, Mapping) or not isinstance(asset.get("provider_version"), int):
                 raise MasterLaunchContractError("master push lacks exact asset Dataset version")
             asset_ref = f"{self.assets.dataset_ref}/{asset['provider_version']}"
             status_ref = str(status["status_dataset"]["exact_version_ref"])
-            dataset_sources = (asset_ref, status_ref)
+            boot = status["status_dataset"].get("boot_checkpoint")
+            checkpoint_sources = (
+                (str(boot["exact_version_ref"]),)
+                if isinstance(boot, Mapping) and boot.get("kind") == "VERIFIED"
+                else ()
+            )
+            dataset_sources = (asset_ref, status_ref, *checkpoint_sources)
             intent = self._intent(
                 effect,
                 MutationAction.PUSH_NOTEBOOK,
                 self.assets.notebook_ref,
                 {
                     "task_run_id": str(effect.exact_identity["run_id"]),
-                    "source_sha256": executable_source_sha256(
-                        source, kernel_type=self.assets.notebook_kernel_type
-                    ),
+                    "source_sha256": executable_source_sha256(source, kernel_type=self.assets.notebook_kernel_type),
                     "dataset_sources": dataset_sources,
                     "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
                     "disposable": False,
@@ -490,9 +696,7 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             run = reconciler(
                 task_run_id=UUID(str(effect.exact_identity["run_id"])),
                 provider_ref=self.assets.notebook_ref,
-                expected_source_sha256=executable_source_sha256(
-                    source, kernel_type=self.assets.notebook_kernel_type
-                ),
+                expected_source_sha256=executable_source_sha256(source, kernel_type=self.assets.notebook_kernel_type),
             )
             if run is None:
                 return EffectReconciliation(ReconciliationStatus.ABSENT)
@@ -697,8 +901,35 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             status_dataset_ref=str(status_dataset["provider_ref"]),
             status_config_sha256=str(status_dataset["status_config_sha256"]),
             status_helper_sha256=str(status_dataset["status_helper_sha256"]),
+            master_config_sha256=str(status_dataset["master_config_sha256"]),
             secret_bindings=self.assets.runtime_secret_bindings,
         )
+
+    def _assert_boot_checkpoint_current(self, status: Mapping[str, Any]) -> None:
+        status_dataset = status.get("status_dataset")
+        boot = status_dataset.get("boot_checkpoint") if isinstance(status_dataset, Mapping) else None
+        head_lookup = getattr(self.status_authority, "checkpoint_head", None)
+        candidate_lookup = getattr(self.status_authority, "checkpoint_candidate", None)
+        if not isinstance(boot, Mapping) or not callable(head_lookup) or not callable(candidate_lookup):
+            raise MasterLaunchContractError("master boot checkpoint CAS authority is unavailable")
+        head = head_lookup("postgres-master")
+        if boot.get("kind") == "EMPTY":
+            if head is not None and head.current_checkpoint_id is not None:
+                raise MasterLaunchContractError("checkpoint HEAD advanced after EMPTY boot admission")
+            return
+        if boot.get("kind") != "VERIFIED" or head is None:
+            raise MasterLaunchContractError("verified master boot checkpoint is unavailable")
+        candidate = candidate_lookup(str(boot.get("checkpoint_id")))
+        if (
+            head.generation != int(boot.get("generation", -1))
+            or head.current_checkpoint_id != boot.get("checkpoint_id")
+            or candidate is None
+            or candidate.get("status") != "VERIFIED"
+            or candidate.get("dataset_ref") != self.assets.checkpoint_ref
+            or candidate.get("version_ref") != boot.get("exact_version_ref")
+            or candidate.get("manifest_sha256") != boot.get("manifest_sha256")
+        ):
+            raise MasterLaunchContractError("checkpoint HEAD changed after master boot admission")
 
     def _status_authority_row(self, identity: Mapping[str, Any]) -> Mapping[str, Any]:
         lookup = getattr(self.status_authority, "master_status_dataset_authority", None)

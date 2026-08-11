@@ -77,11 +77,21 @@
     "assets": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["master_notebook", "checkpoint_verifier", "wheel"],
+      "required": [
+        "master_notebook",
+        "checkpoint_verifier",
+        "wheel",
+        "postgres_runtime",
+        "postgres_runtime_manifest",
+        "tunnel_known_hosts"
+      ],
       "properties": {
         "master_notebook": {"$ref": "#/$defs/asset"},
         "checkpoint_verifier": {"$ref": "#/$defs/asset"},
-        "wheel": {"$ref": "#/$defs/asset"}
+        "wheel": {"$ref": "#/$defs/asset"},
+        "postgres_runtime": {"$ref": "#/$defs/asset"},
+        "postgres_runtime_manifest": {"$ref": "#/$defs/asset"},
+        "tunnel_known_hosts": {"$ref": "#/$defs/asset"}
       }
     }
   }

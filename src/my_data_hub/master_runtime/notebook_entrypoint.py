@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from functools import partial
@@ -69,6 +69,9 @@ from .tunnel import ReverseTunnelSpec, TunnelSupervisor
 MASTER_TERMINAL_OUTPUT_NAME = "my-data-hub-master-terminal.json"
 MASTER_TERMINAL_SCHEMA_VERSION = "my-data-hub-master-terminal.v1"
 MASTER_TERMINAL_MAX_BYTES = 256 * 1024
+POSTGRES_RUNTIME_LIBRARY_PATH = (
+    "/kaggle/working/mdh-postgresql-runtime/pgsql/lib:/kaggle/working/mdh-postgresql-runtime/pgsql/lib/runtime-deps"
+)
 _MASTER_TERMINAL_EVENT_TYPES = (
     RuntimeEventType.RUNTIME_DRAINING,
     RuntimeEventType.CHECKPOINT_STARTED,
@@ -185,6 +188,10 @@ class NotebookMasterConfig:
     epoch: int
     boot_source: BootSource
     checkpoint_directory: Path | None
+    checkpoint_id: UUID | None
+    checkpoint_exact_version_ref: str | None
+    checkpoint_manifest_sha256: str | None
+    checkpoint_head_generation: int
     lease_seconds: int
     postgres_bin: Path
     postgres_port: int
@@ -210,6 +217,10 @@ class NotebookMasterConfig:
             "epoch",
             "boot_source",
             "checkpoint_directory",
+            "checkpoint_id",
+            "checkpoint_exact_version_ref",
+            "checkpoint_manifest_sha256",
+            "checkpoint_head_generation",
             "lease_seconds",
             "postgres_bin",
             "postgres_port",
@@ -234,6 +245,14 @@ class NotebookMasterConfig:
             epoch=int(raw["epoch"]),
             boot_source=source,
             checkpoint_directory=checkpoint,
+            checkpoint_id=(UUID(str(raw["checkpoint_id"])) if raw["checkpoint_id"] else None),
+            checkpoint_exact_version_ref=(
+                str(raw["checkpoint_exact_version_ref"]) if raw["checkpoint_exact_version_ref"] else None
+            ),
+            checkpoint_manifest_sha256=(
+                str(raw["checkpoint_manifest_sha256"]) if raw["checkpoint_manifest_sha256"] else None
+            ),
+            checkpoint_head_generation=int(raw["checkpoint_head_generation"]),
             lease_seconds=int(raw["lease_seconds"]),
             postgres_bin=Path(str(raw["postgres_bin"])),
             postgres_port=int(raw["postgres_port"]),
@@ -258,7 +277,47 @@ class NotebookMasterConfig:
             raise ValueError("process runtime plus exit reserve exceeds the declared Kaggle provider timeout")
         if (source is BootSource.EMPTY_BASELINE) != (checkpoint is None):
             raise ValueError("checkpoint source/config mismatch")
+        checkpoint_metadata = (
+            config.checkpoint_id,
+            config.checkpoint_exact_version_ref,
+            config.checkpoint_manifest_sha256,
+        )
+        if source is BootSource.EMPTY_BASELINE:
+            if any(value is not None for value in checkpoint_metadata) or config.checkpoint_head_generation != 0:
+                raise ValueError("EMPTY boot may not carry checkpoint metadata")
+        elif (
+            any(value is None for value in checkpoint_metadata)
+            or config.checkpoint_head_generation < 1
+            or not config.checkpoint_exact_version_ref
+            or len(config.checkpoint_exact_version_ref.split("/")) != 3
+            or not config.checkpoint_exact_version_ref.rsplit("/", 1)[-1].isdigit()
+            or not config.checkpoint_manifest_sha256
+            or len(config.checkpoint_manifest_sha256) != 64
+            or any(char not in "0123456789abcdef" for char in config.checkpoint_manifest_sha256)
+        ):
+            raise ValueError("verified boot checkpoint metadata is incomplete")
         return config
+
+
+def validate_relocated_postgres_runtime(config: NotebookMasterConfig) -> None:
+    """Fail before restore/provider work unless the pinned runtime is executable."""
+
+    if os.environ.get("LD_LIBRARY_PATH") != POSTGRES_RUNTIME_LIBRARY_PATH:
+        raise RuntimeError("PostgreSQL runtime library path is not the exact relocated binding")
+    for name in ("initdb", "pg_ctl", "psql"):
+        executable = config.postgres_bin / name
+        if executable.is_symlink() or not executable.is_file() or not os.access(executable, os.X_OK):
+            raise RuntimeError(f"relocated PostgreSQL tool is unavailable: {name}")
+        completed = subprocess.run(
+            [str(executable), "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=os.environ.copy(),
+        )
+        if len(completed.stdout) > 4096 or "18.4" not in completed.stdout:
+            raise RuntimeError(f"relocated PostgreSQL tool version differs: {name}")
 
 
 class RuntimeCheckpointCoordinator(Protocol):
@@ -394,9 +453,7 @@ class _EmbeddingLeaseMaintainer:
         except CallbackLeaseClosingError:
             raise
         except BaseException as exc:
-            failure = CallbackLeaseClosingError(
-                "embedding lease maintenance lost control or database reachability"
-            )
+            failure = CallbackLeaseClosingError("embedding lease maintenance lost control or database reachability")
             self._fail(failure, "embedding_lease_maintenance_failed")
             raise failure from exc
 
@@ -472,6 +529,7 @@ def _emit_service_ready(
     ready: Any,
     active_deadline: float,
     executed_source_sha256: str = "0" * 64,
+    boot_checkpoint: dict[str, Any] | None = None,
     monotonic: Any = time.monotonic,
 ) -> None:
     """Check the fixed process deadline before readiness can authorize writes."""
@@ -481,7 +539,11 @@ def _emit_service_ready(
         RuntimeEventType.SERVICE_READY,
         phase="registering",
         status="ready",
-        data={**ready.event_payload(), "executed_source_sha256": executed_source_sha256},
+        data={
+            **ready.event_payload(),
+            "executed_source_sha256": executed_source_sha256,
+            **({"boot_checkpoint": boot_checkpoint} if boot_checkpoint is not None else {}),
+        },
     )
     if receipt.status != "delivered":
         raise RuntimeError("service.ready was not acknowledged by the control plane")
@@ -953,9 +1015,7 @@ def _claim_master_acceptance(
     return MasterAcceptanceCommand.model_validate(body.get("command"))
 
 
-def _master_acceptance_drain_requested(
-    *, config: NotebookMasterConfig, callback_url: str, run_secret: str
-) -> bool:
+def _master_acceptance_drain_requested(*, config: NotebookMasterConfig, callback_url: str, run_secret: str) -> bool:
     """Poll the exact owner-host FM11/FM12 directive; it has no payload."""
 
     request = urllib.request.Request(
@@ -999,9 +1059,7 @@ def _master_acceptance_drain_requested(
     return True
 
 
-def _master_acceptance_renewal_suspended(
-    *, config: NotebookMasterConfig, callback_url: str, run_secret: str
-) -> bool:
+def _master_acceptance_renewal_suspended(*, config: NotebookMasterConfig, callback_url: str, run_secret: str) -> bool:
     """Acknowledge the fixed FM10 directive before stopping both renewals."""
 
     request = urllib.request.Request(
@@ -1021,7 +1079,10 @@ def _master_acceptance_renewal_suspended(
         raise RuntimeError("master acceptance control directive exceeds 16 KiB")
     body = json.loads(raw)
     if not isinstance(body, dict) or set(body) != {
-        "available", "renewal_suspended", "soak_requested_step", "soak_completed_step"
+        "available",
+        "renewal_suspended",
+        "soak_requested_step",
+        "soak_completed_step",
     }:
         raise RuntimeError("master acceptance control directive differs from its exact contract")
     if (
@@ -1133,9 +1194,7 @@ def _post_embedding_runtime_receipt(
         raise RuntimeError("embedding runtime receipt exceeds 256 KiB")
     for attempt in range(attempts):
         request = urllib.request.Request(
-            _embedding_production_url(
-                callback_url, config.run_id, config.attempt_id, "/stage-receipt"
-            ),
+            _embedding_production_url(callback_url, config.run_id, config.attempt_id, "/stage-receipt"),
             data=encoded,
             headers=_runtime_metadata_headers(config, run_secret),
             method="POST",
@@ -1194,9 +1253,7 @@ def _register_session_credentials(
     roles: tuple[Literal["reader", "operator"], ...],
     expires_at: datetime,
     now: datetime,
-    registration_observer: Callable[
-        [tuple[str, ...], tuple[dict[str, str], ...]], None
-    ] | None = None,
+    registration_observer: Callable[[tuple[str, ...], tuple[dict[str, str], ...]], None] | None = None,
 ) -> tuple[tuple[str, ...], datetime]:
     """Issue only the roles explicitly authorized by activation, in one envelope."""
 
@@ -1474,6 +1531,7 @@ def run_master(
         run_secret=run_secret,
         lease_until=initial_registration_lease,
     )
+
     class LazyCertifiedTunnel:
         def __init__(self) -> None:
             self.supervisor: TunnelSupervisor | None = None
@@ -1501,8 +1559,7 @@ def run_master(
                     identity_file=tunnel_identity.private_key,
                     certificate_file=tunnel_identity.certificate,
                     known_hosts_file=Path(_required("MY_DATA_HUB_TUNNEL_KNOWN_HOSTS")),
-                    expires_at=observed
-                    + timedelta(seconds=max(1.0, session_deadline - time.monotonic())),
+                    expires_at=observed + timedelta(seconds=max(1.0, session_deadline - time.monotonic())),
                     delete_identity_on_stop=True,
                 )
             )
@@ -1585,11 +1642,23 @@ def run_master(
         return schema_version, canonical_revision, hashlib.sha256(tls_certificate.read_bytes()).hexdigest()
 
     def announce(ready) -> None:  # type: ignore[no-untyped-def]
+        boot_checkpoint = (
+            {"kind": "EMPTY", "generation": 0}
+            if config.boot_source is BootSource.EMPTY_BASELINE
+            else {
+                "kind": "VERIFIED",
+                "generation": config.checkpoint_head_generation,
+                "checkpoint_id": str(config.checkpoint_id),
+                "exact_version_ref": config.checkpoint_exact_version_ref,
+                "manifest_sha256": config.checkpoint_manifest_sha256,
+            }
+        )
         _emit_service_ready(
             runtime=runtime,
             ready=ready,
             active_deadline=active_deadline,
             executed_source_sha256=executed_source_sha256,
+            boot_checkpoint=boot_checkpoint,
         )
 
     def endpoint() -> str:
@@ -1768,8 +1837,7 @@ def run_master(
                                 task_id=acceptance_command.task_id,
                                 binding=acceptance_command.binding,
                                 journal_path=(
-                                    paths.working / ".master-acceptance"
-                                    / f"fm24-{acceptance_command.task_id}.json"
+                                    paths.working / ".master-acceptance" / f"fm24-{acceptance_command.task_id}.json"
                                 ),
                                 runtime_client=runtime,
                                 database_gate=gate,
@@ -1783,14 +1851,14 @@ def run_master(
                                 checkpoint_recovery=RuntimeCheckpointRecoveryAdapter(
                                     coordinator=checkpoint_coordinator,
                                     database_url=database_url,
-                                ) if checkpoint_coordinator is not None else None,
+                                )
+                                if checkpoint_coordinator is not None
+                                else None,
                             )
                             soak_ports[acceptance_command.task_id] = port
                         acceptance_effects.soak_sessions = port  # type: ignore[assignment]
                     try:
-                        acceptance_receipt = execute_master_acceptance_command(
-                            acceptance_command, acceptance_effects
-                        )
+                        acceptance_receipt = execute_master_acceptance_command(acceptance_command, acceptance_effects)
                     except Exception as exc:
                         from my_data_hub.acceptance.soak_session import SoakSessionNotDue
 
@@ -2235,21 +2303,24 @@ def main() -> int:
     process_started_at = time.monotonic()
     config = NotebookMasterConfig.load(Path(_required("MY_DATA_HUB_MASTER_CONFIG")))
     identity = MasterIdentity(config.master_instance_id, config.run_id, config.epoch)
+    validate_relocated_postgres_runtime(config)
     from my_data_hub.checkpoints.kaggle_runtime import (
         build_runtime_checkpoint_coordinator_from_environment,
     )
 
+    boot_checkpoint = config.checkpoint_directory
+    if config.boot_source is BootSource.VERIFIED_CHECKPOINT:
+        assert boot_checkpoint is not None and config.checkpoint_id is not None
+        manifest = load_and_verify(boot_checkpoint / "checkpoint-manifest.json", boot_checkpoint)
+        if (
+            manifest.checkpoint_id != config.checkpoint_id
+            or manifest.manifest_sha256 != config.checkpoint_manifest_sha256
+        ):
+            raise RuntimeError("attached boot checkpoint differs from admitted exact HEAD")
     coordinator = build_runtime_checkpoint_coordinator_from_environment(
         identity=identity,
         attempt_id=UUID(config.attempt_id),
         postgres_bin=config.postgres_bin,
-    )
-    paths = MasterPaths.under(Path(os.environ.get("KAGGLE_WORKING_DIR", "/kaggle/working")))
-    boot_checkpoint = coordinator.resolve_boot_checkpoint(paths.checkpoints / "verified-head-boot")
-    config = replace(
-        config,
-        boot_source=(BootSource.VERIFIED_CHECKPOINT if boot_checkpoint is not None else BootSource.EMPTY_BASELINE),
-        checkpoint_directory=boot_checkpoint,
     )
     return run_master(
         config,

@@ -15,6 +15,7 @@ from my_data_hub.acceptance.master_production import ProductionMasterAcceptanceE
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.master_runtime.contracts import BootSource, MasterIdentity
 from my_data_hub.master_runtime.notebook_entrypoint import (
+    POSTGRES_RUNTIME_LIBRARY_PATH,
     BloggerReceiptDeliveryError,
     CallbackLeaseClosingError,
     CheckpointAdmissionError,
@@ -36,6 +37,7 @@ from my_data_hub.master_runtime.notebook_entrypoint import (
     _wait_for_activation,
     main,
     run_master,
+    validate_relocated_postgres_runtime,
 )
 from my_data_hub.runtime_sdk import (
     CHECKPOINT_ARCHIVE_COMMAND_COUNT,
@@ -65,6 +67,10 @@ def _payload() -> dict[str, object]:
         "epoch": 1,
         "boot_source": "empty_baseline",
         "checkpoint_directory": None,
+        "checkpoint_id": None,
+        "checkpoint_exact_version_ref": None,
+        "checkpoint_manifest_sha256": None,
+        "checkpoint_head_generation": 0,
         "lease_seconds": 120,
         "postgres_bin": "/kaggle/input/postgresql-18/bin",
         "postgres_port": 15432,
@@ -93,7 +99,6 @@ def test_master_notebook_config_requires_exact_fields_and_source_binding(tmp_pat
     with pytest.raises(ValueError, match="exactly 10800"):
         NotebookMasterConfig.load(path)
 
-
     payload = _payload()
     payload["checkpoint_directory"] = "/kaggle/input/checkpoint"
     path.write_text(json.dumps(payload))
@@ -111,6 +116,30 @@ def test_master_notebook_config_requires_exact_fields_and_source_binding(tmp_pat
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="provider timeout"):
         NotebookMasterConfig.load(path)
+
+
+def test_relocated_postgres_preflight_uses_exact_library_path_and_real_tools(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "master.json"
+    payload = _payload()
+    postgres_bin = tmp_path / "pgsql/bin"
+    postgres_bin.mkdir(parents=True)
+    payload["postgres_bin"] = str(postgres_bin)
+    config_path.write_text(json.dumps(payload))
+    config = NotebookMasterConfig.load(config_path)
+    for name in ("initdb", "pg_ctl", "psql"):
+        tool = postgres_bin / name
+        tool.write_text("#!/bin/sh\nprintf '%s\\n' '" + name + " (PostgreSQL) 18.4'\n")
+        tool.chmod(0o700)
+    monkeypatch.setenv("LD_LIBRARY_PATH", POSTGRES_RUNTIME_LIBRARY_PATH)
+
+    validate_relocated_postgres_runtime(config)
+
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/attacker")
+    with pytest.raises(RuntimeError, match="exact relocated"):
+        validate_relocated_postgres_runtime(config)
+
 
 def test_fm10_observed_directive_stays_suspended_when_ack_response_is_lost(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -150,11 +179,14 @@ def test_fm10_observed_directive_stays_suspended_when_ack_response_is_lost(
         raise OSError("ack response lost")
 
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.urllib.request.urlopen", urlopen)
-    assert _master_acceptance_renewal_suspended(
-        config=config,
-        callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
-        run_secret="r" * 32,
-    ) is True
+    assert (
+        _master_acceptance_renewal_suspended(
+            config=config,
+            callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
+            run_secret="r" * 32,
+        )
+        is True
+    )
     assert calls == 2
 
 
@@ -255,6 +287,10 @@ def test_reader_credential_handoff_is_epoch_bound_tls_and_not_returned(
         epoch=7,
         boot_source=BootSource.EMPTY_BASELINE,
         checkpoint_directory=None,
+        checkpoint_id=None,
+        checkpoint_exact_version_ref=None,
+        checkpoint_manifest_sha256=None,
+        checkpoint_head_generation=0,
         lease_seconds=120,
         postgres_bin=Path("/kaggle/input/postgresql-18/bin"),
         postgres_port=15432,
@@ -333,6 +369,10 @@ def test_activation_authorized_operator_is_issued_with_reader_in_one_bounded_env
         epoch=IDENTITY.epoch,
         boot_source=BootSource.EMPTY_BASELINE,
         checkpoint_directory=None,
+        checkpoint_id=None,
+        checkpoint_exact_version_ref=None,
+        checkpoint_manifest_sha256=None,
+        checkpoint_head_generation=0,
         lease_seconds=120,
         postgres_bin=Path("/postgres/bin"),
         postgres_port=15432,
@@ -530,13 +570,16 @@ def test_fresh_embedding_committer_is_epoch_bound_non_superuser_and_always_remov
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.psycopg.connect", connect)
     gate = Gate()
     now = datetime(2026, 8, 11, tzinfo=UTC)
-    with pytest.raises(RuntimeError, match="import failed"), _fresh_canonical_committer_connection(
-        owner_connection=object(),
-        gate=gate,  # type: ignore[arg-type]
-        identity=IDENTITY,
-        database_url="postgresql:///postgres",
-        lease_until=lambda: now + timedelta(minutes=5),
-        now=lambda: now,
+    with (
+        pytest.raises(RuntimeError, match="import failed"),
+        _fresh_canonical_committer_connection(
+            owner_connection=object(),
+            gate=gate,  # type: ignore[arg-type]
+            identity=IDENTITY,
+            database_url="postgresql:///postgres",
+            lease_until=lambda: now + timedelta(minutes=5),
+            now=lambda: now,
+        ),
     ):
         raise RuntimeError("import failed")
 
@@ -1075,6 +1118,10 @@ def test_run_master_suppresses_only_callback_lease_closure_after_exact_terminal_
         epoch=IDENTITY.epoch,
         boot_source=BootSource.EMPTY_BASELINE,
         checkpoint_directory=None,
+        checkpoint_id=None,
+        checkpoint_exact_version_ref=None,
+        checkpoint_manifest_sha256=None,
+        checkpoint_head_generation=0,
         lease_seconds=120,
         postgres_bin=tmp_path,
         postgres_port=15432,
@@ -1237,6 +1284,10 @@ def test_run_master_never_checkpoints_unacknowledged_blogger_import_receipt(
         epoch=IDENTITY.epoch,
         boot_source=BootSource.EMPTY_BASELINE,
         checkpoint_directory=None,
+        checkpoint_id=None,
+        checkpoint_exact_version_ref=None,
+        checkpoint_manifest_sha256=None,
+        checkpoint_head_generation=0,
         lease_seconds=120,
         postgres_bin=tmp_path,
         postgres_port=15432,
@@ -1370,7 +1421,7 @@ def test_checkpoint_errors_identify_the_only_permitted_retry_stage(tmp_path: Pat
 
 
 @pytest.mark.parametrize("has_head", [False, True])
-def test_notebook_main_resolves_exact_durable_head_and_always_wires_checkpoint_coordinator(
+def test_notebook_main_uses_only_the_attached_admitted_head_and_always_wires_checkpoint_coordinator(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, has_head: bool
 ) -> None:
     payload = _payload()
@@ -1380,18 +1431,30 @@ def test_notebook_main_resolves_exact_durable_head_and_always_wires_checkpoint_c
             "attempt_id": "22222222-2222-4222-8222-222222222222",
         }
     )
-    config_path = tmp_path / "master.json"
-    config_path.write_text(json.dumps(payload))
-    monkeypatch.setenv("MY_DATA_HUB_MASTER_CONFIG", str(config_path))
     working = tmp_path / "kaggle" / "working"
     working.mkdir(parents=True)
     monkeypatch.setenv("KAGGLE_WORKING_DIR", str(working))
+    checkpoint_id = UUID("33333333-3333-4333-8333-333333333333")
+    checkpoint_directory = working / "exact-v7"
+    if has_head:
+        checkpoint_directory.mkdir()
+        payload.update(
+            {
+                "boot_source": "verified_checkpoint",
+                "checkpoint_directory": str(checkpoint_directory),
+                "checkpoint_id": str(checkpoint_id),
+                "checkpoint_exact_version_ref": "owner/checkpoints/7",
+                "checkpoint_manifest_sha256": "c" * 64,
+                "checkpoint_head_generation": 7,
+            }
+        )
+    config_path = tmp_path / "master.json"
+    config_path.write_text(json.dumps(payload))
+    monkeypatch.setenv("MY_DATA_HUB_MASTER_CONFIG", str(config_path))
     observed: dict[str, object] = {}
 
     class Coordinator:
-        def resolve_boot_checkpoint(self, destination: Path) -> Path | None:
-            observed["destination"] = destination
-            return working / "exact-v7" if has_head else None
+        pass
 
     coordinator = Coordinator()
     monkeypatch.setattr(
@@ -1413,12 +1476,29 @@ def test_notebook_main_resolves_exact_durable_head_and_always_wires_checkpoint_c
         return 17
 
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.run_master", run)
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint.validate_relocated_postgres_runtime",
+        lambda config: observed.update(runtime_preflight=config.postgres_bin),
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint.load_and_verify",
+        lambda manifest, directory: (
+            observed.update(manifest=manifest, directory=directory)
+            or type(
+                "Manifest",
+                (),
+                {"checkpoint_id": checkpoint_id, "manifest_sha256": "c" * 64},
+            )()
+        ),
+    )
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.time.monotonic", lambda: 123.0)
     assert main() == 17
     config = observed["config"]
     assert isinstance(config, NotebookMasterConfig)
     assert config.boot_source is (BootSource.VERIFIED_CHECKPOINT if has_head else BootSource.EMPTY_BASELINE)
-    assert config.checkpoint_directory == (working / "exact-v7" if has_head else None)
+    assert config.checkpoint_directory == (checkpoint_directory if has_head else None)
+    assert ("manifest" in observed) is has_head
     assert observed["coordinator"] is coordinator
     assert isinstance(observed["acceptance_effects_factory"], ProductionMasterAcceptanceEffectsFactory)
     assert observed["process_started_at"] == 123.0
+    assert observed["runtime_preflight"] == config.postgres_bin

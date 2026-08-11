@@ -247,3 +247,43 @@ Focused tests use an actual epoch-2 active ledger plus a genuinely revoked prior
 identity, validate duplicate/retired/stale results, reject an altered body hash,
 and assert the production adapter has no raw-token fields. This is local
 implementation evidence only, not live FM09 PASS evidence.
+
+## 2026-08-11 reusable master boot assets and fail-closed production boundary
+
+- the deterministic master-asset builder now requires the reviewed portable
+  PostgreSQL 18.4 + pgvector 0.8.6 `linux-x86_64` archive at exact SHA-256
+  `40bf34fb4a97a248537d0221127e38deb98c9b35208d474dd1b93f773c2558b5`;
+  the superseded host-native pgvector build is explicitly rejected;
+- the bundle includes the exact archive, canonical provenance manifest, pinned
+  source URLs/hashes, digest-pinned Ubuntu 22.04 recipe using `OPTFLAGS=""`, and
+  the reviewed hashed SSH known-host asset. Install verifies the approved Git
+  commit, exact six-file inventory, hashes, sizes, modes, canonical environment,
+  recipe, upstream provenance and portable artifact digest before Compose;
+- per-attempt `master-config.json` binds EMPTY or the exact current VERIFIED
+  checkpoint id, HEAD generation, numeric Dataset version and manifest hash.
+  The checkpoint input is attached by exact version and SERVICE_READY compares
+  the admitted snapshot again before activation;
+- control generates one operation/run/attempt/epoch-bound PostgreSQL TLS key and
+  self-signed certificate. Raw key bytes exist only in the exact private
+  `ORCHESTRATOR_PROTECTED` status Dataset and fixed mode-0600 Notebook file; the
+  ledger retains only the public certificate and hashes. Atomic public-CA rename
+  occurs inside a shared directory mounted read-write by control and read-only by
+  remote MCP, avoiding stale single-file bind-mount inodes;
+- the Notebook bootstrap validates all status/asset hashes, safely extracts the
+  bounded portable PostgreSQL tree, sets the required exact `LD_LIBRARY_PATH`,
+  and verifies the relocated PostgreSQL 18.4 utilities before database boot.
+  Central Kaggle credentials never enter source, Dataset, callback, receipt or
+  Notebook environment;
+- production master admission deliberately remains unavailable. The only current
+  checkpoint publisher constructs a second Kaggle client inside the Notebook,
+  which would require an unapproved provider credential/User Secret and violate
+  the single central adapter boundary. `build_production_runtime` therefore
+  retains the central adapter for control-owned operations but returns no master,
+  and `/control/v1/master/ensure` returns
+  `CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE` before any provider mutation.
+
+The asset/status/TLS/runtime contracts are reusable for a separately authorized
+boot canary, but do not constitute an ACTIVE production master or scenario
+`LIVE_PASS`. Removing the fail-closed gate requires a proven, owner-approved
+central/provider-side checkpoint upload or copy path that does not move checkpoint
+bytes through devstand and does not add another authentication mechanism.

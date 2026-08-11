@@ -23,12 +23,15 @@ services:
     env_file:
       - path: "${MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE:-./.state/control-plane/provider.env}"
         required: true
+      - path: "${MY_DATA_HUB_MASTER_ASSET_DIR:-./.state/master-assets}/master-assets.env"
+        required: true
     environment:
       MY_DATA_HUB_ENVIRONMENT: production
       MY_DATA_HUB_CONTROL_HOST: 0.0.0.0
       MY_DATA_HUB_CONTROL_PORT: 8080
       MY_DATA_HUB_CONTROL_LEDGER_PATH: /ledger/control.sqlite3
       MY_DATA_HUB_MASTER_SESSION_DIR: /sessions
+      MY_DATA_HUB_MASTER_TLS_CA_PATH: /state/master-tls/ca.pem
       MY_DATA_HUB_SCHEDULER_ENABLED: "false"
       MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED: "false"
       MY_DATA_HUB_MCP_REMOTE_ENABLED: "false"
@@ -42,6 +45,7 @@ services:
       - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:-./.state/control-ledger}:/ledger"
       - "${MY_DATA_HUB_MASTER_SESSION_DIR:-./.state/master-sessions}:/sessions"
       - "${MY_DATA_HUB_MASTER_ASSET_DIR:-./.state/master-assets}:/master-assets:ro"
+      - "${MY_DATA_HUB_MASTER_TLS_DIR:-./.state/master-tls}:/state/master-tls"
       - "${MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR:-/run/my-data-hub/tunnel-broker}:/run/mdh-tunnel"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=3).read()"]
@@ -87,7 +91,7 @@ services:
     volumes:
       - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:-./.state/control-ledger}:/ledger"
       - "${MY_DATA_HUB_MASTER_SESSION_DIR:-./.state/master-sessions}:/sessions:ro"
-      - "${MY_DATA_HUB_MASTER_TLS_CA_FILE:-./.state/master-tls/ca.pem}:/state/master-tls/ca.pem:ro"
+      - "${MY_DATA_HUB_MASTER_TLS_DIR:-./.state/master-tls}:/state/master-tls:ro"
     healthcheck:
       test:
         - CMD

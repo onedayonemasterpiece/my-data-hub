@@ -34,6 +34,7 @@ from my_data_hub.control_plane.ledger import (
     StaleRuntimeEvent,
 )
 from my_data_hub.control_plane.runtime import (
+    CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE,
     ControlPlaneMasterRuntime,
     MasterRuntimeSettings,
     SessionCredential,
@@ -160,8 +161,7 @@ def assert_no_database_environment() -> None:
     leaked = sorted(name for name in candidates if os.getenv(name, "").strip())
     if leaked:
         raise ControlPlaneConfigurationError(
-            "lightweight control plane must not receive master database credentials: "
-            + ", ".join(leaked)
+            "lightweight control plane must not receive master database credentials: " + ", ".join(leaked)
         )
 
 
@@ -232,6 +232,7 @@ class ControlPlaneSettings:
     ledger_path: Path | None = None
     master_runtime: MasterRuntimeSettings | None = None
     session_credentials_path: Path | None = None
+    master_tls_ca_path: Path | None = None
     operator_credentials_enabled: bool = False
     provider_gateway_enabled: bool = False
     acceptance_scenarios_enabled: bool = False
@@ -269,11 +270,12 @@ class ControlPlaneSettings:
             session_credentials_path=Path(
                 os.getenv("MY_DATA_HUB_MASTER_SESSION_DIR", "/state/master-sessions")
             ).expanduser(),
+            master_tls_ca_path=Path(
+                os.getenv("MY_DATA_HUB_MASTER_TLS_CA_PATH", "/state/master-tls/ca.pem")
+            ).expanduser(),
             operator_credentials_enabled=_boolean("MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED"),
             provider_gateway_enabled=_boolean("MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED"),
-            acceptance_scenarios_enabled=_boolean(
-                "MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED"
-            ),
+            acceptance_scenarios_enabled=_boolean("MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED"),
         )
 
 
@@ -314,10 +316,9 @@ def create_app(
             control_ledger,
             runtime.master_runtime,
             session_credentials_path=runtime.session_credentials_path,
+            master_tls_ca_path=runtime.master_tls_ca_path,
             tunnel_authority=(
-                tunnel_certificate_broker
-                if isinstance(tunnel_certificate_broker, TunnelBrokerClient)
-                else None
+                tunnel_certificate_broker if isinstance(tunnel_certificate_broker, TunnelBrokerClient) else None
             ),
             tunnel_listen_port=tunnel_listen_port,
         )
@@ -333,13 +334,9 @@ def create_app(
         provider_gateway = KaggleMCPProviderGateway(control_ledger, provider_adapter)
     if runtime.provider_gateway_enabled:
         if not operator_credential_enabled or provider_gateway is None:
-            raise ControlPlaneConfigurationError(
-                "provider gateway requires the single authenticated control adapter"
-            )
+            raise ControlPlaneConfigurationError("provider gateway requires the single authenticated control adapter")
         if provider_gateway_token is None:
-            token_path = Path(
-                os.getenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE", "")
-            ).expanduser()
+            token_path = Path(os.getenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE", "")).expanduser()
             if not token_path.is_absolute() or token_path.is_symlink() or not token_path.is_file():
                 raise ControlPlaneConfigurationError("provider gateway token must be an absolute regular file")
             if token_path.stat().st_mode & 0o077:
@@ -368,11 +365,7 @@ def create_app(
                 deployment=deployment,
             )
             checkpoint_acceptance_catalog = deployment.catalog
-        if (
-            master_runtime is None
-            or checkpoint_acceptance_launcher is None
-            or checkpoint_acceptance_catalog is None
-        ):
+        if master_runtime is None or checkpoint_acceptance_launcher is None or checkpoint_acceptance_catalog is None:
             raise ControlPlaneConfigurationError(
                 "acceptance scenario opt-in requires concrete master and checkpoint executors"
             )
@@ -385,9 +378,7 @@ def create_app(
             callback_loss_supervisor_from_environment,
         )
 
-        callback_supervisor = callback_loss_supervisor_from_environment(
-            control_ledger, master_recovery=master_runtime
-        )
+        callback_supervisor = callback_loss_supervisor_from_environment(control_ledger, master_recovery=master_runtime)
         if old_epoch_denials is None:
             from my_data_hub.acceptance.old_epoch_production import (
                 TaskBoundOldEpochDenialFactory,
@@ -443,9 +434,7 @@ def create_app(
                         reconcile_acceptance = getattr(master_runtime, "reconcile_acceptance_once", None)
                         if reconcile_acceptance is not None:
                             await asyncio.to_thread(reconcile_acceptance)
-                        reconcile_status_cleanup = getattr(
-                            master_runtime, "reconcile_status_cleanup_once", None
-                        )
+                        reconcile_status_cleanup = getattr(master_runtime, "reconcile_status_cleanup_once", None)
                         if reconcile_status_cleanup is not None:
                             await asyncio.to_thread(reconcile_status_cleanup)
                         # The durable request remains PENDING; provider details
@@ -583,13 +572,8 @@ def create_app(
             )
             if launch is None or launch["task_run_id"] != exact_task:
                 raise HTTPException(status_code=401, detail={"code": "acceptance_token_invalid"})
-            if (
-                require_acceptance_source_attestation
-                and launch["source_attestation_state"] != "MATCHED"
-            ):
-                raise HTTPException(
-                    status_code=409, detail={"code": "acceptance_source_attestation_required"}
-                )
+            if require_acceptance_source_attestation and launch["source_attestation_state"] != "MATCHED":
+                raise HTTPException(status_code=409, detail={"code": "acceptance_source_attestation_required"})
             return _ProviderOperationAuthority(
                 operation_id=str(launch["operation_id"]),
                 identity={
@@ -600,8 +584,12 @@ def create_app(
                 acceptance=launch,
             )
         operation = _runtime_authority(
-            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
-            master_instance_id=master_instance_id, epoch=epoch, allowed_states=allowed_states,
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            allowed_states=allowed_states,
         )
         return _ProviderOperationAuthority(
             operation_id=operation.operation_id, identity=dict(operation.identity), acceptance=None
@@ -675,9 +663,7 @@ def create_app(
         if event.event_type is RuntimeEventType.RUNTIME_STARTED:
             observed_source = event.data.get("progress", {}).get("runtime_source_sha256")
             if not isinstance(observed_source, str):
-                raise HTTPException(
-                    status_code=422, detail={"code": "acceptance_source_attestation_missing"}
-                )
+                raise HTTPException(status_code=422, detail={"code": "acceptance_source_attestation_missing"})
             try:
                 launch = control_ledger.attest_checkpoint_acceptance_source(
                     request_id=exact_request,
@@ -685,9 +671,7 @@ def create_app(
                     observed_source_sha256=observed_source,
                 )
             except (IdempotencyConflict, StaleRuntimeEvent, ValueError) as exc:
-                raise HTTPException(
-                    status_code=409, detail={"code": "acceptance_source_attestation_rejected"}
-                ) from exc
+                raise HTTPException(status_code=409, detail={"code": "acceptance_source_attestation_rejected"}) from exc
         try:
             receipt = control_ledger.record_checkpoint_acceptance_event(
                 request_id=exact_request,
@@ -824,9 +808,7 @@ def create_app(
                 "issued_at",
                 "resource",
             }
-            principal_string_keys = {
-                "subject", "client_id", "audience", "issuer", "resource"
-            }
+            principal_string_keys = {"subject", "client_id", "audience", "issuer", "resource"}
             if (
                 not isinstance(tool, str)
                 or tool not in provider_tools
@@ -877,9 +859,7 @@ def create_app(
                 if isinstance(value, dict):
                     for key, nested in value.items():
                         if str(key).casefold() in forbidden:
-                            raise HTTPException(
-                                status_code=422, detail={"code": "provider_gateway_secret_forbidden"}
-                            )
+                            raise HTTPException(status_code=422, detail={"code": "provider_gateway_secret_forbidden"})
                         reject_secrets(nested)
                 elif isinstance(value, list):
                     for nested in value:
@@ -888,9 +868,7 @@ def create_app(
             reject_secrets(arguments)
             assert provider_control is not None
             try:
-                result = await asyncio.to_thread(
-                    provider_control.invoke_control, tool, arguments, identity
-                )
+                result = await asyncio.to_thread(provider_control.invoke_control, tool, arguments, identity)
             except PermissionError as exc:
                 raise HTTPException(status_code=403, detail={"code": "provider_gateway_policy_denied"}) from exc
             except ValueError as exc:
@@ -918,7 +896,12 @@ def create_app(
         if not 8 <= len(key) <= 300:
             raise HTTPException(status_code=422, detail={"code": "idempotency_key_required"})
         if master_runtime is None:
-            raise HTTPException(status_code=503, detail={"code": "provider_unavailable"})
+            code = (
+                CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE
+                if app.state.master_provider_status == CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE
+                else "provider_unavailable"
+            )
+            raise HTTPException(status_code=503, detail={"code": code})
         try:
             handle, duplicate = master_runtime.ensure(key)
         except Exception as exc:
@@ -945,9 +928,7 @@ def create_app(
         replay_receipt_sha256: str | None = None
         if migration.schema_version == BLOGGER_REPLAY_STAGE_SCHEMA:
             source = control_ledger.blogger_migration_request(str(migration.replay_of_request_id))
-            replay_error = _validate_blogger_replay_source(
-                migration, source, now=control_ledger.clock.now()
-            )
+            replay_error = _validate_blogger_replay_source(migration, source, now=control_ledger.clock.now())
             if replay_error is not None:
                 raise HTTPException(status_code=409, detail={"code": replay_error})
             assert source is not None
@@ -1055,9 +1036,7 @@ def create_app(
     def _embedding_admission_binding() -> EmbeddingProductionAdmissionBinding | None:
         service = control_ledger.resolve_service("postgres-master")
         operation = (
-            control_ledger.operation_for_attempt(service.run_id, service.attempt_id)
-            if service is not None
-            else None
+            control_ledger.operation_for_attempt(service.run_id, service.attempt_id) if service is not None else None
         )
         head = control_ledger.checkpoint_head("postgres-master")
         provider = master_runtime.coordinator.provider if master_runtime is not None else None
@@ -1130,12 +1109,12 @@ def create_app(
         except IdempotencyConflict as exc:
             raise HTTPException(status_code=409, detail={"code": "embedding_request_conflict"}) from exc
         except MasterAdmissionRejected as exc:
-            raise HTTPException(
-                status_code=409, detail={"code": "embedding_prerequisite_not_active"}
-            ) from exc
+            raise HTTPException(status_code=409, detail={"code": "embedding_prerequisite_not_active"}) from exc
         return {
-            "request_id": record["request_id"], "request_sha256": record["request_sha256"],
-            "state": record["state"], "created": created,
+            "request_id": record["request_id"],
+            "request_sha256": record["request_sha256"],
+            "state": record["state"],
+            "created": created,
         }
 
     @app.get("/control/v1/embedding-production/requests/{request_id}")
@@ -1175,10 +1154,14 @@ def create_app(
                 )
         stage = record["stage_receipt"] or {}
         return {
-            "request_id": record["request_id"], "request_sha256": record["request_sha256"],
-            "state": record["state"], "claimed_run_id": record["claimed_run_id"],
-            "claimed_attempt_id": record["claimed_attempt_id"], "claimed_epoch": record["claimed_epoch"],
-            "workers": stage.get("workers"), "imports": stage.get("imports"),
+            "request_id": record["request_id"],
+            "request_sha256": record["request_sha256"],
+            "state": record["state"],
+            "claimed_run_id": record["claimed_run_id"],
+            "claimed_attempt_id": record["claimed_attempt_id"],
+            "claimed_epoch": record["claimed_epoch"],
+            "workers": stage.get("workers"),
+            "imports": stage.get("imports"),
             "coverage": stage.get("coverage"),
             "query_vector_receipts": stage.get("query_vector_receipts"),
             "canonical_revision": stage.get("canonical_revision"),
@@ -1188,39 +1171,62 @@ def create_app(
 
     @app.get("/internal/runtime/embedding-production/{run_id}/{attempt_id}")
     def claim_embedding_production(
-        run_id: str, attempt_id: str, authorization: str | None = Header(default=None),
+        run_id: str,
+        attempt_id: str,
+        authorization: str | None = Header(default=None),
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, Any]:
         operation = _runtime_authority(
-            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
-            master_instance_id=master_instance_id, epoch=epoch, allowed_states=frozenset({"ACTIVE"}),
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            allowed_states=frozenset({"ACTIVE"}),
         )
         record = control_ledger.claim_embedding_production_request(
-            operation_id=operation.operation_id, run_id=run_id, attempt_id=attempt_id,
-            master_instance_id=str(operation.identity["master_instance_id"]), epoch=int(operation.identity["epoch"]),
+            operation_id=operation.operation_id,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=str(operation.identity["master_instance_id"]),
+            epoch=int(operation.identity["epoch"]),
         )
-        return {"available": False} if record is None or record["state"] != "CLAIMED" else {
-            "available": True, "request": record["request"], "request_sha256": record["request_sha256"],
-        }
+        return (
+            {"available": False}
+            if record is None or record["state"] != "CLAIMED"
+            else {
+                "available": True,
+                "request": record["request"],
+                "request_sha256": record["request_sha256"],
+            }
+        )
 
     @app.post("/internal/runtime/embedding-production/{run_id}/{attempt_id}/stage-receipt")
     async def embedding_stage_receipt(
-        run_id: str, attempt_id: str, request: Request,
+        run_id: str,
+        attempt_id: str,
+        request: Request,
         authorization: str | None = Header(default=None),
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, Any]:
         _runtime_authority(
-            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
-            master_instance_id=master_instance_id, epoch=epoch, allowed_states=frozenset({"ACTIVE"}),
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            allowed_states=frozenset({"ACTIVE"}),
         )
         try:
             receipt = EmbeddingProductionStageReceipt.model_validate(await _bounded_json(request))
         except Exception as exc:
             raise HTTPException(status_code=422, detail={"code": "embedding_receipt_invalid"}) from exc
         if (str(receipt.run_id), str(receipt.master_instance_id), receipt.epoch) != (
-            run_id, str(master_instance_id), int(epoch or 0)
+            run_id,
+            str(master_instance_id),
+            int(epoch or 0),
         ):
             raise HTTPException(status_code=409, detail={"code": "embedding_receipt_epoch_mismatch"})
         pending = control_ledger.embedding_production_request(str(receipt.request_id))
@@ -1234,7 +1240,9 @@ def create_app(
         ):
             raise HTTPException(status_code=409, detail={"code": "embedding_receipt_request_mismatch"})
         stored = control_ledger.record_embedding_stage_receipt(
-            request_id=str(receipt.request_id), run_id=run_id, attempt_id=attempt_id,
+            request_id=str(receipt.request_id),
+            run_id=run_id,
+            attempt_id=attempt_id,
             receipt=receipt.model_dump(mode="json"),
         )
         return {"accepted": True, "state": stored["state"], "receipt_sha256": receipt.receipt_sha256}
@@ -1308,8 +1316,7 @@ def create_app(
         if (
             receipt.operation_id != exact_request.operation_id
             or receipt.request_sha256 != pending["request_sha256"]
-            or receipt.export_batch_id
-            != batch_identity(exact_request.snapshot_at, exact_request.expected_rows)
+            or receipt.export_batch_id != batch_identity(exact_request.snapshot_at, exact_request.expected_rows)
             or pending["claimed_run_id"] != run_id
             or pending["claimed_attempt_id"] != attempt_id
             or pending["claimed_master_instance_id"] != str(master_instance_id)
@@ -1346,14 +1353,10 @@ def create_app(
             try:
                 receipt = BloggerQuarantineReceipt.model_validate(body["quarantine_receipt"])
             except Exception as exc:
-                raise HTTPException(
-                    status_code=422, detail={"code": "blogger_quarantine_receipt_invalid"}
-                ) from exc
+                raise HTTPException(status_code=422, detail={"code": "blogger_quarantine_receipt_invalid"}) from exc
             pending = control_ledger.blogger_migration_request(str(receipt.request_id))
             if pending is None:
-                raise HTTPException(
-                    status_code=409, detail={"code": "blogger_quarantine_receipt_mismatch"}
-                )
+                raise HTTPException(status_code=409, detail={"code": "blogger_quarantine_receipt_mismatch"})
             exact_request = BloggerMigrationRequest.model_validate(pending["request"])
             if (
                 body["request_id"] != str(receipt.request_id)
@@ -1362,8 +1365,7 @@ def create_app(
                 or receipt.operation_id != exact_request.operation_id
                 or str(receipt.operation_id) != operation.operation_id
                 or receipt.request_sha256 != pending["request_sha256"]
-                or receipt.export_batch_id
-                != batch_identity(exact_request.snapshot_at, exact_request.expected_rows)
+                or receipt.export_batch_id != batch_identity(exact_request.snapshot_at, exact_request.expected_rows)
                 or receipt.run_id != run_id
                 or receipt.attempt_id != attempt_id
                 or str(receipt.master_instance_id) != str(master_instance_id)
@@ -1373,9 +1375,7 @@ def create_app(
                 or pending["claimed_master_instance_id"] != str(master_instance_id)
                 or pending["claimed_epoch"] != int(epoch or 0)
             ):
-                raise HTTPException(
-                    status_code=409, detail={"code": "blogger_quarantine_receipt_mismatch"}
-                )
+                raise HTTPException(status_code=409, detail={"code": "blogger_quarantine_receipt_mismatch"})
             try:
                 stored = control_ledger.record_blogger_quarantine_receipt(
                     request_id=str(receipt.request_id),
@@ -1385,17 +1385,13 @@ def create_app(
                     receipt_sha256=receipt.receipt_sha256,
                 )
             except StaleRuntimeEvent as exc:
-                raise HTTPException(
-                    status_code=409, detail={"code": "blogger_quarantine_receipt_conflict"}
-                ) from exc
+                raise HTTPException(status_code=409, detail={"code": "blogger_quarantine_receipt_conflict"}) from exc
             return {
                 "accepted": True,
                 "state": stored["state"],
                 "receipt_sha256": receipt.receipt_sha256,
             }
-        if set(body) != {"request_id", "failure_code"} or body.get(
-            "failure_code"
-        ) == "BloggerMigrationQuarantined":
+        if set(body) != {"request_id", "failure_code"} or body.get("failure_code") == "BloggerMigrationQuarantined":
             raise HTTPException(status_code=422, detail={"code": "blogger_failure_invalid"})
         try:
             control_ledger.fail_blogger_migration_request(
@@ -1488,9 +1484,8 @@ def create_app(
             if armed is not None and event.event_type is RuntimeEventType.RUNTIME_HEARTBEAT:
                 observed_hash = hashlib.sha256(raw).hexdigest()
                 if armed["callback_state"] == "CAPTURED":
-                    if (
-                        armed["callback_event_id"] == str(event.event_id)
-                        and hmac.compare_digest(str(armed["callback_body_sha256"]), observed_hash)
+                    if armed["callback_event_id"] == str(event.event_id) and hmac.compare_digest(
+                        str(armed["callback_body_sha256"]), observed_hash
                     ):
                         raise HTTPException(
                             status_code=503,
@@ -1510,9 +1505,7 @@ def create_app(
                 raise HTTPException(status_code=503, detail={"code": "acceptance_callback_ack_suppressed"})
             receipt = coordinator.accept_runtime_event(raw, header_token=token)
             if event.event_type in {RuntimeEventType.RUNTIME_TERMINAL, RuntimeEventType.RUNTIME_FAILED}:
-                reconcile_status_cleanup = getattr(
-                    master_runtime, "reconcile_status_cleanup_once", None
-                )
+                reconcile_status_cleanup = getattr(master_runtime, "reconcile_status_cleanup_once", None)
                 if reconcile_status_cleanup is not None:
                     # Cleanup failure never changes the already-durable runtime
                     # ACK. The periodic bounded reconciler resumes the exact
@@ -1522,12 +1515,16 @@ def create_app(
             if event.event_type is RuntimeEventType.RUNTIME_HEARTBEAT:
                 observed_hash = hashlib.sha256(raw).hexdigest()
                 restarted = control_ledger.restarted_master_acceptance_callback(
-                    run_id=str(event.run_id), attempt_id=str(event.attempt_id), epoch=event.epoch,
-                    event_id=str(event.event_id), body_sha256=observed_hash,
+                    run_id=str(event.run_id),
+                    attempt_id=str(event.attempt_id),
+                    epoch=event.epoch,
+                    event_id=str(event.event_id),
+                    body_sha256=observed_hash,
                 )
                 if restarted is not None:
                     control_ledger.mark_master_acceptance_callback_replayed(
-                        task_id=str(restarted["task_id"]), event_id=str(event.event_id),
+                        task_id=str(restarted["task_id"]),
+                        event_id=str(event.event_id),
                         body_sha256=observed_hash,
                     )
         except HTTPException:
@@ -1813,9 +1810,7 @@ def create_app(
             _session_credential(item, identity, now=now, latest_expiry=latest_expiry) for item in body["credentials"]
         ]
         expected_roles = (
-            ["reader", "operator"]
-            if operation.state == "ACTIVE" and operator_credential_enabled
-            else ["reader"]
+            ["reader", "operator"] if operation.state == "ACTIVE" and operator_credential_enabled else ["reader"]
         )
         if [credential.role for credential in credentials] != expected_roles:
             raise HTTPException(status_code=422, detail={"code": "credential_roles_not_authorized"})
@@ -1847,9 +1842,7 @@ def create_app(
             body = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=400, detail={"code": "invalid_json"}) from exc
-        if not isinstance(body, dict) or set(body) != {
-            "master_instance_id", "epoch", "public_key", "valid_before"
-        }:
+        if not isinstance(body, dict) or set(body) != {"master_instance_id", "epoch", "public_key", "valid_before"}:
             raise HTTPException(status_code=422, detail={"code": "tunnel_certificate_contract_invalid"})
         operation = control_ledger.operation_for_attempt(run_id, attempt_id)
         if operation is None or operation.state not in {"REGISTERING", "ACTIVE"}:
@@ -2105,23 +2098,26 @@ def create_app(
             authorized = bool(
                 str(intent.task_id) == current_run
                 and (
-                    (intent.action in {MutationAction.CREATE_DATASET, MutationAction.VERSION_DATASET}
-                    and intent.provider_ref == allowed_dataset)
-                    or (intent.action is MutationAction.PUSH_NOTEBOOK
-                    and allowed_notebook is not None
-                    and intent.provider_ref == allowed_notebook)
+                    (
+                        intent.action in {MutationAction.CREATE_DATASET, MutationAction.VERSION_DATASET}
+                        and intent.provider_ref == allowed_dataset
+                    )
+                    or (
+                        intent.action is MutationAction.PUSH_NOTEBOOK
+                        and allowed_notebook is not None
+                        and intent.provider_ref == allowed_notebook
+                    )
                 )
             )
         elif assets is not None and intent.action is MutationAction.CREATE_DATASET:
-            authorized = (
-                (intent.provider_ref == assets.checkpoint_ref and str(intent.task_id) == current_run)
-                or (intent.provider_ref, intent.task_id) in embedding_datasets
-            )
+            authorized = (intent.provider_ref == assets.checkpoint_ref and str(intent.task_id) == current_run) or (
+                intent.provider_ref,
+                intent.task_id,
+            ) in embedding_datasets
         elif assets is not None and intent.action is MutationAction.PUSH_NOTEBOOK:
             authorized = (
-                (intent.provider_ref == assets.checkpoint_verifier_ref and str(intent.task_id) == current_run)
-                or (intent.provider_ref, intent.task_id) in embedding_workers
-            )
+                intent.provider_ref == assets.checkpoint_verifier_ref and str(intent.task_id) == current_run
+            ) or (intent.provider_ref, intent.task_id) in embedding_workers
         elif assets is not None and intent.action is MutationAction.VERSION_DATASET:
             prior = _current_checkpoint_claim(intent.provider_ref)
             authorized = bool(
@@ -2260,8 +2256,10 @@ def create_app(
                     and claim.control_class is ControlClass.ORCHESTRATOR_PROTECTED
                     and not claim.disposable
                     and assets is not None
-                    and claim.provider_ref in {
-                        assets.checkpoint_ref, assets.checkpoint_verifier_ref,
+                    and claim.provider_ref
+                    in {
+                        assets.checkpoint_ref,
+                        assets.checkpoint_verifier_ref,
                         *(provider_ref for provider_ref, _task_id in embedding_pairs),
                     }
                 )
@@ -2336,7 +2334,9 @@ def create_app(
         expected_ref = (
             str(acceptance_request["candidate_dataset_ref"])
             if acceptance_request is not None
-            else assets.checkpoint_ref if assets else None
+            else assets.checkpoint_ref
+            if assets
+            else None
         )
         if body != {
             "provider_ref": expected_ref,
@@ -2401,13 +2401,14 @@ def create_app(
         expected_dataset = (
             str(acceptance_request["candidate_dataset_ref"])
             if acceptance_request is not None
-            else assets.checkpoint_ref if assets else None
+            else assets.checkpoint_ref
+            if assets
+            else None
         )
         acceptance_manifest = bool(
             acceptance_request is not None
             and manifest.source_run_id == str(operation.identity["run_id"])
-            and manifest.source_identity
-            == f"checkpoint-acceptance:{acceptance_request['source_revision']}"
+            and manifest.source_identity == f"checkpoint-acceptance:{acceptance_request['source_revision']}"
         )
         runtime_manifest = bool(
             acceptance_request is None

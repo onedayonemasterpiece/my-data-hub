@@ -40,12 +40,22 @@ def _runtime(ledger: ControlLedger) -> ControlPlaneMasterRuntime:
         checkpoint_ref="owner/checkpoints",
         dataset_ref="owner/master-launch",
         notebook_ref="owner/master",
-        dataset_files={"launch.txt": b"exact", "checkpoint-verifier.ipynb": b"{}"},
+        dataset_files={
+            "launch.txt": b"exact",
+            "checkpoint-verifier.ipynb": b"{}",
+            "postgresql-18-runtime.tar.gz": b"fake-postgresql-18-runtime",
+            "postgresql-18-runtime.json": b"""{"archive_sha256":"63a988449f3d37c9c9fd2658b14f9254918e0b0f8ac600f9b98f15ede09e912f","build_recipe_sha256":"3fbcf52450dd44e3eb0eb7b826ebdb84a4293fbc54b713408083f10b44964d61","builder_image":"ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f","pgvector_source_sha256":"10bf9938906e5d643bbc4a7eea104b6f57ba4898e5b76b20e60484ea1d5a7f8f","pgvector_source_url":"https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.6.tar.gz","pgvector_version":"0.8.6","platform":"linux-x86_64","postgresql_source_sha256":"81a81ec695fb0c7901407defaa1d2f7973617154cf27ba74e3a7ab8e64436094","postgresql_source_url":"https://ftp.postgresql.org/pub/source/v18.4/postgresql-18.4.tar.bz2","postgresql_version":"18.4","schema_version":"my-data-hub-postgresql-runtime.v1"}""",
+            "tunnel-known-hosts": b"|1|aaaa|bbbb ssh-ed25519 AAAA\n",
+        },
         notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
         callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
         checkpoint_probe_relations=("hub.canonical_state",),
+        tunnel_gateway_host="gateway.example.test",
+        tunnel_gateway_port=22,
+        tunnel_gateway_user="mdh_tunnel",
+        tunnel_remote_port=25432,
     )
     return ControlPlaneMasterRuntime(
         ledger,
@@ -188,7 +198,6 @@ def test_remote_journal_requires_exact_runtime_identity(tmp_path: Path) -> None:
     assert current.json() == {"claim": claim.model_dump(mode="json")}
     fenced = {**headers, "X-MDH-Epoch": "2"}
     assert client.post(path, json={"intent": intent.model_dump(mode="json")}, headers=fenced).status_code == 409
-
 
     ledger.ensure_operation(
         operation_id=str(OPERATION_2),
@@ -342,6 +351,7 @@ def test_checkpoint_api_promotes_only_after_exact_stages_and_returns_numeric_hea
         "previous": None,
     }
 
+
 def test_remote_journal_allows_only_exact_claimed_embedding_resources(tmp_path: Path) -> None:
     app, ledger, headers = _app(tmp_path)
     request_id = UUID("12121212-1212-4212-8212-121212121212")
@@ -373,9 +383,7 @@ def test_remote_journal_allows_only_exact_claimed_embedding_resources(tmp_path: 
     )
     client = TestClient(app)
     endpoint = "/internal/provider-journal/intents"
-    assert client.post(
-        endpoint, json={"intent": exact.model_dump(mode="json")}, headers=headers
-    ).status_code == 200
+    assert client.post(endpoint, json={"intent": exact.model_dump(mode="json")}, headers=headers).status_code == 200
     wrong = ProviderEffectIntent.create(
         operation_id=OPERATION,
         effect_id=UUID("14141414-1414-4414-8414-141414141414"),
@@ -386,6 +394,4 @@ def test_remote_journal_allows_only_exact_claimed_embedding_resources(tmp_path: 
         arguments={"exact": True},
         requested_at=datetime(2026, 8, 11, tzinfo=UTC),
     )
-    assert client.post(
-        endpoint, json={"intent": wrong.model_dump(mode="json")}, headers=headers
-    ).status_code == 403
+    assert client.post(endpoint, json={"intent": wrong.model_dump(mode="json")}, headers=headers).status_code == 403
