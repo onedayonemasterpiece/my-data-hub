@@ -24,7 +24,7 @@ concurrency:
 jobs:
   private-notebook-canary:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 360
     env:
       KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
     steps:
@@ -36,6 +36,13 @@ jobs:
       - run: python -m pip install -e '.[dev,kaggle]'
       - name: Require modern Kaggle token
         run: python scripts/provider/real_kaggle_matrix.py preflight
+      - name: Run distinct private generated-Notebook scenario matrix
+        run: >-
+          python scripts/provider/real_kaggle_matrix.py matrix
+          --ledger artifacts/provider-matrix-effects.sqlite3
+          --receipt artifacts/kaggle-matrix.json
+          --scenario-receipts artifacts/kaggle-matrix-scenarios
+          --plan artifacts/kaggle-matrix-plan.json
       - name: Run private exact-version dataset canary
         run: >-
           python scripts/provider/real_kaggle_matrix.py dataset-canary
@@ -69,6 +76,9 @@ jobs:
           path: |
             artifacts/dataset-canary.json
             artifacts/notebook-canary.json
+            artifacts/kaggle-matrix.json
+            artifacts/kaggle-matrix-plan.json
+            artifacts/kaggle-matrix-scenarios/*.json
             artifacts/scheduled-provider-real.json
           if-no-files-found: error
           retention-days: 30

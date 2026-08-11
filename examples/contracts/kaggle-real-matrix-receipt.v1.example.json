@@ -1,0 +1,178 @@
+{
+  "schema_version": "my-data-hub-real-kaggle-matrix.v1",
+  "matrix_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "outcome": "PASS",
+  "minimum_real_runs": 15,
+  "planned_runs": 16,
+  "completed_real_runs": 16,
+  "distinct_real_run_ids": [
+    "00000000-0000-4000-8000-000000000001",
+    "00000000-0000-4000-8000-000000000002",
+    "00000000-0000-4000-8000-000000000003",
+    "00000000-0000-4000-8000-000000000004",
+    "00000000-0000-4000-8000-000000000005",
+    "00000000-0000-4000-8000-000000000006",
+    "00000000-0000-4000-8000-000000000007",
+    "00000000-0000-4000-8000-000000000008",
+    "00000000-0000-4000-8000-000000000009",
+    "00000000-0000-4000-8000-000000000010",
+    "00000000-0000-4000-8000-000000000011",
+    "00000000-0000-4000-8000-000000000012",
+    "00000000-0000-4000-8000-000000000013",
+    "00000000-0000-4000-8000-000000000014",
+    "00000000-0000-4000-8000-000000000015",
+    "00000000-0000-4000-8000-000000000016"
+  ],
+  "input_dataset": {
+    "provider_ref": "example-owner/mdh-matrix-input-example",
+    "provider_version": 1,
+    "privacy": "private",
+    "cleanup": "task_created_resource_absent"
+  },
+  "scenario_receipts": [
+    {
+      "ordinal": 1,
+      "scenario": "scenario-01",
+      "task_run_id": "00000000-0000-4000-8000-000000000001",
+      "provider_run_ref": "example-owner/mdh-matrix-01-example/1",
+      "outcome": "PASS",
+      "receipt": "01-scenario-01.json"
+    },
+    {
+      "ordinal": 2,
+      "scenario": "scenario-02",
+      "task_run_id": "00000000-0000-4000-8000-000000000002",
+      "provider_run_ref": "example-owner/mdh-matrix-02-example/1",
+      "outcome": "PASS",
+      "receipt": "02-scenario-02.json"
+    },
+    {
+      "ordinal": 3,
+      "scenario": "scenario-03",
+      "task_run_id": "00000000-0000-4000-8000-000000000003",
+      "provider_run_ref": "example-owner/mdh-matrix-03-example/1",
+      "outcome": "PASS",
+      "receipt": "03-scenario-03.json"
+    },
+    {
+      "ordinal": 4,
+      "scenario": "scenario-04",
+      "task_run_id": "00000000-0000-4000-8000-000000000004",
+      "provider_run_ref": "example-owner/mdh-matrix-04-example/1",
+      "outcome": "PASS",
+      "receipt": "04-scenario-04.json"
+    },
+    {
+      "ordinal": 5,
+      "scenario": "scenario-05",
+      "task_run_id": "00000000-0000-4000-8000-000000000005",
+      "provider_run_ref": "example-owner/mdh-matrix-05-example/1",
+      "outcome": "PASS",
+      "receipt": "05-scenario-05.json"
+    },
+    {
+      "ordinal": 6,
+      "scenario": "scenario-06",
+      "task_run_id": "00000000-0000-4000-8000-000000000006",
+      "provider_run_ref": "example-owner/mdh-matrix-06-example/1",
+      "outcome": "PASS",
+      "receipt": "06-scenario-06.json"
+    },
+    {
+      "ordinal": 7,
+      "scenario": "scenario-07",
+      "task_run_id": "00000000-0000-4000-8000-000000000007",
+      "provider_run_ref": "example-owner/mdh-matrix-07-example/1",
+      "outcome": "PASS",
+      "receipt": "07-scenario-07.json"
+    },
+    {
+      "ordinal": 8,
+      "scenario": "scenario-08",
+      "task_run_id": "00000000-0000-4000-8000-000000000008",
+      "provider_run_ref": "example-owner/mdh-matrix-08-example/1",
+      "outcome": "PASS",
+      "receipt": "08-scenario-08.json"
+    },
+    {
+      "ordinal": 9,
+      "scenario": "scenario-09",
+      "task_run_id": "00000000-0000-4000-8000-000000000009",
+      "provider_run_ref": "example-owner/mdh-matrix-09-example/1",
+      "outcome": "PASS",
+      "receipt": "09-scenario-09.json"
+    },
+    {
+      "ordinal": 10,
+      "scenario": "scenario-10",
+      "task_run_id": "00000000-0000-4000-8000-000000000010",
+      "provider_run_ref": "example-owner/mdh-matrix-10-example/1",
+      "outcome": "PASS",
+      "receipt": "10-scenario-10.json"
+    },
+    {
+      "ordinal": 11,
+      "scenario": "scenario-11",
+      "task_run_id": "00000000-0000-4000-8000-000000000011",
+      "provider_run_ref": "example-owner/mdh-matrix-11-example/1",
+      "outcome": "PASS",
+      "receipt": "11-scenario-11.json"
+    },
+    {
+      "ordinal": 12,
+      "scenario": "scenario-12",
+      "task_run_id": "00000000-0000-4000-8000-000000000012",
+      "provider_run_ref": "example-owner/mdh-matrix-12-example/1",
+      "outcome": "PASS",
+      "receipt": "12-scenario-12.json"
+    },
+    {
+      "ordinal": 13,
+      "scenario": "scenario-13",
+      "task_run_id": "00000000-0000-4000-8000-000000000013",
+      "provider_run_ref": "example-owner/mdh-matrix-13-example/1",
+      "outcome": "PASS",
+      "receipt": "13-scenario-13.json"
+    },
+    {
+      "ordinal": 14,
+      "scenario": "scenario-14",
+      "task_run_id": "00000000-0000-4000-8000-000000000014",
+      "provider_run_ref": "example-owner/mdh-matrix-14-example/1",
+      "outcome": "PASS",
+      "receipt": "14-scenario-14.json"
+    },
+    {
+      "ordinal": 15,
+      "scenario": "scenario-15",
+      "task_run_id": "00000000-0000-4000-8000-000000000015",
+      "provider_run_ref": "example-owner/mdh-matrix-15-example/1",
+      "outcome": "PASS",
+      "receipt": "15-scenario-15.json"
+    },
+    {
+      "ordinal": 16,
+      "scenario": "scenario-16",
+      "task_run_id": "00000000-0000-4000-8000-000000000016",
+      "provider_run_ref": "example-owner/mdh-matrix-16-example/1",
+      "outcome": "PASS",
+      "receipt": "16-scenario-16.json"
+    }
+  ],
+  "coverage": [
+    "baseline",
+    "checkpoint",
+    "contract",
+    "fault",
+    "idempotency",
+    "identity",
+    "resume",
+    "retry",
+    "soak"
+  ],
+  "started_at": "2026-08-11T00:00:00Z",
+  "completed_at": "2026-08-11T02:00:00Z",
+  "live_evidence": true,
+  "blockers": []
+}
