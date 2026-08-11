@@ -81,10 +81,7 @@ class AnonymousDatasetProbe:
     def read_dataset(self, provider_ref: str, version: int) -> object:
         owner, slug = provider_ref.split("/", 1)
         quoted = "/".join(urllib.parse.quote(value, safe="") for value in (owner, slug))
-        url = (
-            f"https://www.kaggle.com/api/v1/datasets/download/{quoted}"
-            f"?datasetVersionNumber={version}"
-        )
+        url = f"https://www.kaggle.com/api/v1/datasets/download/{quoted}?datasetVersionNumber={version}"
         request = urllib.request.Request(
             url,
             headers={"Accept": "application/zip", "User-Agent": "my-data-hub-private-proof/1"},
@@ -129,7 +126,7 @@ def _effect(
 def _notebook_source(*, task_run_id: UUID, provider_ref: str) -> bytes:
     # The source hashes its exact staged bytes at runtime; no self-referential
     # digest is embedded.  Unique task slugs make the first exact source version 1.
-    return f'''from __future__ import annotations
+    return f"""from __future__ import annotations
 import hashlib, json
 from pathlib import Path
 TASK_RUN_ID = {str(task_run_id)!r}
@@ -150,7 +147,7 @@ Path("/kaggle/working/my-data-hub-run-receipt.json").write_text(
 Path("/kaggle/working/smoke-output.json").write_text(
     json.dumps({{"ok": True, "task_run_id": TASK_RUN_ID}}, sort_keys=True), encoding="utf-8"
 )
-'''.encode()
+""".encode()
 
 
 def run_dataset_canary(*, ledger_path: Path, receipt_path: Path) -> int:
@@ -283,8 +280,7 @@ def run_notebook_canary(*, ledger_path: Path, receipt_path: Path) -> int:
                     "blocker_code": "KAGGLE_MODERN_API_TOKEN_REQUIRED",
                     "credential_location": "KAGGLE_API_TOKEN or ~/.kaggle/access_token",
                     "proof_command": (
-                        "kaggle auth login && python "
-                        "scripts/provider/real_kaggle_matrix.py notebook-canary"
+                        "kaggle auth login && python scripts/provider/real_kaggle_matrix.py notebook-canary"
                     ),
                     "observed_at": datetime.now(UTC).isoformat(),
                 }
@@ -447,9 +443,7 @@ def build_matrix_plan(*, matrix_id: UUID, commit_sha: str, created_at: datetime)
                 "work_item_id": str(uuid5(NAMESPACE_URL, f"{namespace}:work-item")),
                 "subject_id": str(uuid5(NAMESPACE_URL, f"{namespace}:subject")),
                 "checkpoint_id": str(checkpoint_id) if spec.checkpoint_bound else None,
-                "checkpoint_manifest_sha256": (
-                    checkpoint_manifest_sha256 if spec.checkpoint_bound else None
-                ),
+                "checkpoint_manifest_sha256": (checkpoint_manifest_sha256 if spec.checkpoint_bound else None),
             }
         )
     return {
@@ -462,9 +456,7 @@ def build_matrix_plan(*, matrix_id: UUID, commit_sha: str, created_at: datetime)
     }
 
 
-def _load_or_create_plan(
-    *, plan_path: Path, matrix_id: UUID | None, commit_sha: str, now: datetime
-) -> dict[str, Any]:
+def _load_or_create_plan(*, plan_path: Path, matrix_id: UUID | None, commit_sha: str, now: datetime) -> dict[str, Any]:
     if plan_path.is_file():
         plan = json.loads(plan_path.read_bytes())
         expected_names = [spec.name for spec in MATRIX_SCENARIOS]
@@ -644,7 +636,7 @@ def _render_generated_matrix_notebook(
     if not isinstance(body, dict) or not isinstance(body.get("cells"), list):
         raise RuntimeError("generated platform smoke notebook is invalid")
     input_root = f"/kaggle/input/{input_slug}"
-    bootstrap = f'''from __future__ import annotations
+    bootstrap = f"""from __future__ import annotations
 import hashlib, os, subprocess, sys
 from pathlib import Path
 MATRIX_TASK_RUN_ID = {scenario["task_run_id"]!r}
@@ -662,7 +654,7 @@ subprocess.run(
 os.environ["MY_DATA_HUB_NOTEBOOK_INPUT_MANIFEST"] = str(manifest)
 os.environ["MY_DATA_HUB_NOTEBOOK_RESULT_PATH"] = "/kaggle/working/{MATRIX_RESULT_NAME}"
 os.environ["MY_DATA_HUB_CODE_REVISION"] = {commit_sha!r}
-'''
+"""
     body["cells"].insert(
         1,
         {
@@ -696,14 +688,8 @@ def _canonical_notebook_sha256(source: bytes) -> str:
     return hashlib.sha256(json.dumps(body).encode()).hexdigest()
 
 
-def _delete_claimed_resource(
-    *, adapter: Any, matrix_id: UUID, identity: str, task_id: UUID, claim: Any
-) -> Any:
-    action = (
-        MutationAction.DELETE_DATASET
-        if claim.kind.value == "dataset"
-        else MutationAction.DELETE_NOTEBOOK
-    )
+def _delete_claimed_resource(*, adapter: Any, matrix_id: UUID, identity: str, task_id: UUID, claim: Any) -> Any:
+    action = MutationAction.DELETE_DATASET if claim.kind.value == "dataset" else MutationAction.DELETE_NOTEBOOK
     intent = _matrix_effect(
         matrix_id=matrix_id,
         identity=f"{identity}:cleanup",
@@ -788,11 +774,13 @@ def _validate_completed_result(
         or str(result.items[0].work_item_id) != scenario["work_item_id"]
         or result.items[0].input_fingerprint != input_fingerprint
         or result.items[0].result.get("payload_keys")
-        != sorted(_scenario_payload(
-            scenario,
-            matrix_id=UUID(str(scenario["matrix_id"])),
-            commit_sha=str(scenario["commit_sha"]),
-        ))
+        != sorted(
+            _scenario_payload(
+                scenario,
+                matrix_id=UUID(str(scenario["matrix_id"])),
+                commit_sha=str(scenario["commit_sha"]),
+            )
+        )
     ):
         raise RuntimeError("typed Notebook output differs from the exact scenario manifest/accounting")
     return result
@@ -812,9 +800,7 @@ def run_real_matrix(
 ) -> int:
     """Run the real disposable matrix; never instantiate the adapter without a modern token."""
 
-    live_evidence = (
-        commit_sha is None and adapter_factory is None and wheel_builder is None and root is None
-    )
+    live_evidence = commit_sha is None and adapter_factory is None and wheel_builder is None and root is None
     if not modern_token_configured():
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
         receipt_path.write_bytes(
@@ -848,9 +834,7 @@ def run_real_matrix(
         existing_summary = json.loads(receipt_path.read_bytes())
         exact_receipts: list[dict[str, Any]] = []
         for planned in plan["scenarios"]:
-            scenario_path = (
-                scenario_receipt_dir / f"{planned['ordinal']:02d}-{planned['name']}.json"
-            )
+            scenario_path = scenario_receipt_dir / f"{planned['ordinal']:02d}-{planned['name']}.json"
             if not scenario_path.is_file():
                 break
             scenario_receipt = json.loads(scenario_path.read_bytes())
@@ -870,13 +854,14 @@ def run_real_matrix(
                 existing_summary.get("schema_version") == MATRIX_SCHEMA
                 and existing_summary.get("matrix_id") == str(matrix_uuid)
                 and existing_summary.get("commit_sha") == exact_commit
-                and existing_summary.get("outcome") == "PASS"
+                and existing_summary.get("outcome") == "SMOKE_PASS"
+                and existing_summary.get("matrix_scope") == "platform_smoke_only"
                 and existing_summary.get("live_evidence") is live_evidence
                 and set(existing_summary.get("distinct_real_run_ids", [])) == set(run_ids)
                 and set(existing_summary.get("distinct_provider_run_refs", []))
                 == {item["provider_run_ref"] for item in exact_receipts}
             ):
-                return 0
+                return EXTERNAL_BLOCKED
             raise RuntimeError("unsafe or stale completed matrix summary receipt")
     scenario_receipt_dir.mkdir(parents=True, exist_ok=True)
     ledger = ControlLedger(ledger_path)
@@ -999,9 +984,7 @@ def run_real_matrix(
                 task_id=task_id,
                 arguments=push_arguments,
             )
-            launch_path = scenario_receipt_dir / (
-                f"{scenario['ordinal']:02d}-{scenario['name']}.launch"
-            )
+            launch_path = scenario_receipt_dir / (f"{scenario['ordinal']:02d}-{scenario['name']}.launch")
             launch_fence = {
                 "schema_version": "my-data-hub-real-kaggle-matrix-launch.v1",
                 "matrix_id": str(matrix_uuid),
@@ -1169,11 +1152,11 @@ def run_real_matrix(
         "matrix_id": str(matrix_uuid),
         "commit_sha": exact_commit,
         "outcome": (
-            "PASS"
-            if len(distinct_run_ids) >= MATRIX_MINIMUM_RUNS
-            and len(distinct_provider_run_refs) >= MATRIX_MINIMUM_RUNS
+            "SMOKE_PASS"
+            if len(distinct_run_ids) >= MATRIX_MINIMUM_RUNS and len(distinct_provider_run_refs) >= MATRIX_MINIMUM_RUNS
             else "FAIL"
         ),
+        "matrix_scope": "platform_smoke_only",
         "minimum_real_runs": MATRIX_MINIMUM_RUNS,
         "planned_runs": len(plan["scenarios"]),
         "completed_real_runs": len(distinct_run_ids),
@@ -1200,11 +1183,15 @@ def run_real_matrix(
         "started_at": started_at.isoformat(),
         "completed_at": datetime.now(UTC).isoformat(),
         "live_evidence": live_evidence,
-        "blockers": [],
+        "blockers": (
+            ["MANDATORY_OPERATIONAL_SCENARIOS_NOT_EXECUTED"]
+            if len(distinct_run_ids) >= MATRIX_MINIMUM_RUNS and len(distinct_provider_run_refs) >= MATRIX_MINIMUM_RUNS
+            else ["PLATFORM_SMOKE_RUNS_INCOMPLETE"]
+        ),
     }
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     receipt_path.write_bytes(canonical_json_bytes(summary))
-    return 0 if summary["outcome"] == "PASS" else 1
+    return EXTERNAL_BLOCKED if summary["outcome"] == "SMOKE_PASS" else 1
 
 
 def parse_args() -> argparse.Namespace:
@@ -1237,9 +1224,7 @@ def main() -> int:
         print(json.dumps(payload, sort_keys=True))
         return 0 if payload["private_notebook_exact_read_ready"] else EXTERNAL_BLOCKED
     if args.command == "dataset-canary":
-        receipt = args.receipt or Path(
-            ".codex/operational-mvp/evidence/real-kaggle/dataset-canary.json"
-        )
+        receipt = args.receipt or Path(".codex/operational-mvp/evidence/real-kaggle/dataset-canary.json")
         return run_dataset_canary(ledger_path=args.ledger, receipt_path=receipt)
     if args.command == "matrix":
         receipt = args.receipt or Path("artifacts/kaggle-matrix.json")
@@ -1250,9 +1235,7 @@ def main() -> int:
             plan_path=args.plan,
             matrix_id=args.matrix_id,
         )
-    receipt = args.receipt or Path(
-        ".codex/operational-mvp/evidence/real-kaggle/notebook-canary.json"
-    )
+    receipt = args.receipt or Path(".codex/operational-mvp/evidence/real-kaggle/notebook-canary.json")
     return run_notebook_canary(ledger_path=args.ledger, receipt_path=receipt)
 
 

@@ -64,10 +64,7 @@ def test_real_notebook_canary_fails_before_mutation_without_modern_token(
     monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
     monkeypatch.setenv("KAGGLE_CONFIG_DIR", str(tmp_path / "no-token"))
     receipt = tmp_path / "blocker.json"
-    assert (
-        run_notebook_canary(ledger_path=tmp_path / "ledger.sqlite3", receipt_path=receipt)
-        == EXTERNAL_BLOCKED
-    )
+    assert run_notebook_canary(ledger_path=tmp_path / "ledger.sqlite3", receipt_path=receipt) == EXTERNAL_BLOCKED
     payload = json.loads(receipt.read_text())
     assert payload["blocker_code"] == "KAGGLE_MODERN_API_TOKEN_REQUIRED"
     assert not (tmp_path / "ledger.sqlite3").exists()
@@ -79,9 +76,7 @@ def test_real_dataset_canary_fails_before_mutation_without_modern_token(
     monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
     monkeypatch.setenv("KAGGLE_CONFIG_DIR", str(tmp_path / "no-token"))
     receipt = tmp_path / "blocker.json"
-    assert run_dataset_canary(
-        ledger_path=tmp_path / "ledger.sqlite3", receipt_path=receipt
-    ) == EXTERNAL_BLOCKED
+    assert run_dataset_canary(ledger_path=tmp_path / "ledger.sqlite3", receipt_path=receipt) == EXTERNAL_BLOCKED
     assert json.loads(receipt.read_text())["mutations_started"] == 0
     assert not (tmp_path / "ledger.sqlite3").exists()
 
@@ -120,10 +115,7 @@ def test_anonymous_probe_uses_exact_https_ref_and_version(
     monkeypatch.setattr("urllib.request.urlopen", open_request)
     assert AnonymousDatasetProbe().read_dataset("owner/private-dataset", 7) == {"status": 200}
     assert observed == {
-        "url": (
-            "https://www.kaggle.com/api/v1/datasets/download/owner/private-dataset"
-            "?datasetVersionNumber=7"
-        ),
+        "url": ("https://www.kaggle.com/api/v1/datasets/download/owner/private-dataset?datasetVersionNumber=7"),
         "timeout": 20,
     }
 
@@ -197,9 +189,7 @@ class _FakeMatrixAdapter:
             raise KaggleIdentityError("fake exact source mismatch")
         return result
 
-    def push_private_notebook(
-        self, *, intent: object, task_run_id: UUID, source: bytes, **_: object
-    ) -> object:
+    def push_private_notebook(self, *, intent: object, task_run_id: UUID, source: bytes, **_: object) -> object:
         self.notebook_pushes += 1
         ref = str(intent.provider_ref)  # type: ignore[attr-defined]
         source_sha = __import__(
@@ -247,19 +237,19 @@ class _FakeMatrixAdapter:
             "workload": manifest["workload"],
             "stage": manifest["stage"],
             "stage_contract_version": manifest["stage_contract_version"],
-            "input_manifest_sha256": hashlib.sha256(
-                self.dataset_files[f"manifest-{task_run_id}.json"]
-            ).hexdigest(),
+            "input_manifest_sha256": hashlib.sha256(self.dataset_files[f"manifest-{task_run_id}.json"]).hexdigest(),
             "producer": {"code_revision": item["payload"]["commit_sha"], "runtime": "fake", "model": {}},
             "status": "succeeded",
-            "items": [{
-                "work_item_id": item["work_item_id"],
-                "input_fingerprint": item["input_fingerprint"],
-                "output_fingerprint": hashlib.sha256(str(task_run_id).encode()).hexdigest(),
-                "status": "succeeded",
-                "result": {"payload_keys": sorted(item["payload"])},
-                "evidence": {},
-            }],
+            "items": [
+                {
+                    "work_item_id": item["work_item_id"],
+                    "input_fingerprint": item["input_fingerprint"],
+                    "output_fingerprint": hashlib.sha256(str(task_run_id).encode()).hexdigest(),
+                    "status": "succeeded",
+                    "result": {"payload_keys": sorted(item["payload"])},
+                    "evidence": {},
+                }
+            ],
             "failures": [],
             "metrics": {"input_items": 1, "accounted_items": 1, "successful_items": 1, "failed_items": 0},
             "provider_usage": [],
@@ -324,7 +314,12 @@ def test_matrix_plan_has_distinct_run_identities_and_required_variants() -> None
     assert len(run_ids) == len(MATRIX_SCENARIOS) >= 15
     assert len(set(run_ids)) == len(run_ids)
     assert {scenario["category"] for scenario in plan["scenarios"]} >= {
-        "retry", "soak", "fault", "resume", "idempotency", "checkpoint"
+        "retry",
+        "soak",
+        "fault",
+        "resume",
+        "idempotency",
+        "checkpoint",
     }
 
 
@@ -334,13 +329,16 @@ def test_real_matrix_fails_before_adapter_or_ledger_without_modern_token(
     monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
     monkeypatch.setenv("KAGGLE_CONFIG_DIR", str(tmp_path / "no-token"))
     receipt = tmp_path / "blocked.json"
-    assert run_real_matrix(
-        ledger_path=tmp_path / "ledger.sqlite3",
-        receipt_path=receipt,
-        scenario_receipt_dir=tmp_path / "scenarios",
-        plan_path=tmp_path / "plan.json",
-        adapter_factory=lambda _ledger: pytest.fail("adapter must not be constructed"),
-    ) == EXTERNAL_BLOCKED
+    assert (
+        run_real_matrix(
+            ledger_path=tmp_path / "ledger.sqlite3",
+            receipt_path=receipt,
+            scenario_receipt_dir=tmp_path / "scenarios",
+            plan_path=tmp_path / "plan.json",
+            adapter_factory=lambda _ledger: pytest.fail("adapter must not be constructed"),
+        )
+        == EXTERNAL_BLOCKED
+    )
     assert json.loads(receipt.read_text())["mutations_started"] == 0
     assert not (tmp_path / "ledger.sqlite3").exists()
     assert not (tmp_path / "plan.json").exists()
@@ -362,9 +360,12 @@ def test_fake_matrix_proves_planning_accounting_cleanup_and_receipt_resume(
         "wheel_builder": lambda _root, _commit: ("my_data_hub-test.whl", b"fake wheel"),
         "root": Path(__file__).resolve().parents[2],
     }
-    assert run_real_matrix(**kwargs) == 0
+    assert run_real_matrix(**kwargs) == EXTERNAL_BLOCKED
     summary = json.loads((tmp_path / "summary.json").read_text())
     assert summary["live_evidence"] is False
+    assert summary["outcome"] == "SMOKE_PASS"
+    assert summary["matrix_scope"] == "platform_smoke_only"
+    assert summary["blockers"] == ["MANDATORY_OPERATIONAL_SCENARIOS_NOT_EXECUTED"]
     assert summary["completed_real_runs"] == len(MATRIX_SCENARIOS)
     assert len(summary["distinct_real_run_ids"]) == len(MATRIX_SCENARIOS)
     assert len(summary["distinct_provider_run_refs"]) == len(MATRIX_SCENARIOS)
@@ -379,13 +380,12 @@ def test_fake_matrix_proves_planning_accounting_cleanup_and_receipt_resume(
         for path in (tmp_path / "scenarios").glob("*.json")
     )
     assert all(
-        json.loads(path.read_text())["live_evidence"] is False
-        for path in (tmp_path / "scenarios").glob("*.json")
+        json.loads(path.read_text())["live_evidence"] is False for path in (tmp_path / "scenarios").glob("*.json")
     )
 
     # A process restart consumes exact completed receipts and does not launch a second run.
     cleanup_count = len(adapter.cleanups)
-    assert run_real_matrix(**kwargs) == 0
+    assert run_real_matrix(**kwargs) == EXTERNAL_BLOCKED
     assert adapter.notebook_pushes == len(MATRIX_SCENARIOS)
     assert len(adapter.cleanups) == cleanup_count
 
@@ -425,8 +425,6 @@ def test_real_matrix_contract_examples_validate(schema_name: str, example_name: 
 
 def test_provider_real_workflow_runs_matrix_after_token_preflight() -> None:
     workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/provider-real.yml").read_text()
-    assert workflow.index("real_kaggle_matrix.py preflight") < workflow.index(
-        "real_kaggle_matrix.py matrix"
-    )
+    assert workflow.index("real_kaggle_matrix.py preflight") < workflow.index("real_kaggle_matrix.py matrix")
     assert "timeout-minutes: 360" in workflow
     assert "artifacts/kaggle-matrix-scenarios/" in workflow

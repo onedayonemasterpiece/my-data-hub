@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.my-data-hub.local/kaggle-real-matrix-receipt.v1.schema.json",
-  "title": "Real Kaggle >=15-run matrix summary receipt v1",
+  "title": "Real Kaggle >=15-run platform-smoke summary receipt v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema_version", "matrix_id", "commit_sha", "outcome", "minimum_real_runs",
+    "schema_version", "matrix_id", "commit_sha", "outcome", "matrix_scope", "minimum_real_runs",
     "planned_runs", "completed_real_runs", "distinct_real_run_ids", "distinct_provider_run_refs", "input_dataset",
     "scenario_receipts", "coverage", "started_at", "completed_at", "live_evidence", "blockers"
   ],
@@ -13,7 +13,8 @@
     "schema_version": {"const": "my-data-hub-real-kaggle-matrix.v1"},
     "matrix_id": {"type": "string", "format": "uuid"},
     "commit_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
-    "outcome": {"const": "PASS"},
+    "outcome": {"const": "SMOKE_PASS"},
+    "matrix_scope": {"const": "platform_smoke_only"},
     "minimum_real_runs": {"const": 15},
     "planned_runs": {"type": "integer", "minimum": 15},
     "completed_real_runs": {"type": "integer", "minimum": 15},
@@ -62,6 +63,12 @@
     "started_at": {"type": "string", "format": "date-time"},
     "completed_at": {"type": "string", "format": "date-time"},
     "live_evidence": {"const": true},
-    "blockers": {"type": "array", "maxItems": 0}
+    "blockers": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "contains": {"const": "MANDATORY_OPERATIONAL_SCENARIOS_NOT_EXECUTED"},
+      "items": {"type": "string"}
+    }
   }
 }

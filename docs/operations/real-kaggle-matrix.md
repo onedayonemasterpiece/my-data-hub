@@ -1,6 +1,8 @@
-# Real Kaggle scenario matrix
+# Real Kaggle platform-smoke matrix
 
-This gate is an **opt-in provider acceptance run**. It is not part of the fake/unit suite and no checked-in example is evidence that Kaggle was contacted.
+This command is an **opt-in provider platform-smoke run**, not the full operational
+acceptance matrix. It is not part of the fake/unit suite and no checked-in
+example is evidence that Kaggle was contacted.
 
 ## Safety boundary
 
@@ -19,11 +21,15 @@ The current plan has 16 physical Notebook scenarios (the required minimum is 15)
 - two manifest-level current/resume checkpoint bindings;
 - three sequential short-soak runs.
 
-A successful operational invocation writes:
+A successful set of smoke runs writes:
 
 - one stable plan, created before provider mutation;
 - one receipt per scenario, binding task run ID, provider ref/run/kernel ID, source version/hash, private status, exact input Dataset version/package hash, manifest/result/output hashes, optional checkpoint identity, accounting, fault probe, and claim cleanup;
-- one summary requiring at least 15 distinct task run IDs, 15 distinct exact provider run refs, and the required coverage categories.
+- one `SMOKE_PASS` summary requiring at least 15 distinct task run IDs and 15
+  distinct exact provider run refs. It always retains
+  `MANDATORY_OPERATIONAL_SCENARIOS_NOT_EXECUTED` and exits 78 because these
+  platform-smoke variants do not prove master lifecycle, physical checkpoint,
+  YDB import, embeddings, remote MCP, write fencing, or the long soak.
 
 Only the uninjected CLI path marks receipts `live_evidence: true`. Fake-adapter tests exercise planning, accounting, cleanup, fault probes, and restart receipt consumption with `live_evidence: false`. Files under `examples/contracts/` are synthetic schema illustrations, not observed provider evidence.
 
@@ -40,4 +46,4 @@ python scripts/provider/real_kaggle_matrix.py matrix \
   --receipt artifacts/kaggle-matrix.json
 ```
 
-Keep the plan, ledger, scenario launch fences, and completed scenario receipts together to resume after a process interruption. A completed exact receipt prevents relaunch of that scenario; an incomplete scenario is reconciled against the exact planned task run/source. A durable launch fence with no exact physical run fails closed and requires a new matrix identity rather than launching a second physical run under the same task run ID. Stale or mismatched state fails closed. Do not describe a matrix as passed unless its operational summary validates against `schemas/kaggle-real-matrix-receipt.v1.schema.json` and retains its referenced scenario receipts.
+Keep the plan, ledger, scenario launch fences, and completed scenario receipts together to resume after a process interruption. A completed exact receipt prevents relaunch of that scenario; an incomplete scenario is reconciled against the exact planned task run/source. A durable launch fence with no exact physical run fails closed and requires a new matrix identity rather than launching a second physical run under the same task run ID. Stale or mismatched state fails closed. Validation against `schemas/kaggle-real-matrix-receipt.v1.schema.json` proves only the explicitly named platform-smoke scope; it can never close full operational acceptance.
