@@ -12,6 +12,9 @@ acceptance receipt and cannot establish `MY_DATA_HUB_OPERATIONAL_MVP_COMPLETE`.
 - PR #5: open; exact-base hosted contracts and PostgreSQL integration checks
   passed, but merge is intentionally withheld while internal and live gates
   remain open.
+- Current integrated implementation head: `HEAD` of `integration/operational-mvp`;
+  exact SHA is recorded at each gate run and will be frozen only after remaining
+  live evidence lands.
 
 ## Owner-approved Kaggle authority
 
@@ -40,49 +43,36 @@ The production topology reuses the existing events-bot/CherryFlash pattern:
 
 | Requirement | Status | Exact evidence or blocker |
 |---|---|---|
-| Gate A | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
-| Gate B | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
-| Gate C | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
-| Gate D | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
-| Gate E | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
+| Gate A | CODE PASS | Single-transport validator and 10,000 deterministic provider histories; lane `gates-a-b`. |
+| Gate B | CODE PASS | Poisoned operation isolation and retry-safe effect preservation; lane `gates-a-b`. |
+| Gate C | CODE PASS | Durable lease payload and event redaction; lane `gates-c-e`. |
+| Gate D | CODE PASS / LIVE PENDING | Central brokered direct upload, bounded reconcile, exact verifier and CAS HEAD; lanes `checkpoint-adapter-primitives` and `checkpoint-broker`. |
+| Gate E | CODE PASS | Exact generated E5/BGE worker assets and runtime-bound pins; lane `gates-c-e`. |
 | Gate F | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
 | Gate G | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
 | Gate H | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
-| Gate I | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
+| Gate I | CODE PASS / LIVE PENDING | OAuth/OIDC readiness and negative canaries; lane `gates-i-m-readiness`. |
 | Gate J | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
 | Gate K | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
-| Gate L | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
-| Gate M | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
-| Gate N | AUDIT IN PROGRESS | Read-only exact-head audit lane. |
+| Gate L | CODE PASS / LIVE PENDING | Connector durability requires exact `DURABLE_COMPLETE` before spool deletion; lane `gate-l-connectors`. |
+| Gate M | CODE PASS / LIVE PENDING | Deployment/post-deploy evidence contracts; lane `gates-i-m-readiness`. |
+| Gate N | CODE PASS / LIVE PENDING | Typed acceptance dispatch and staged provider-real recovery; lane `acceptance-matrix-runtime`. |
 | Live matrix | MISSING | No synthetic or diagnostic carrier is counted. |
 | Security/fault matrix | AUDIT IN PROGRESS | Exact-head audit lane. |
 | Deployment | BLOCKED | PR #5 is not merged; public endpoints return 502. |
 | Final acceptance | BLOCKED | Required live evidence and deployment are absent. |
 
-## Known integration blocker under research
+## Brokered checkpoint topology implemented
 
-The normal master is intentionally rejected before provider mutation with
-`CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE`. The existing checkpoint writer
-creates a second Kaggle client inside the master Notebook so it can version a
-private checkpoint Dataset. That would require copying the central provider
-credential into the Notebook and violates the owner-approved single-adapter
-topology. Exact official-source research of pinned `kaggle==2.2.4`, current
-`kagglesdk==0.1.37` and current `kagglehub==1.0.2` found no credential-free
-server-side Notebook-output-to-Dataset copy operation. Dataset create/version
-uploads caller-local files; kernel output is downloaded to the caller; kernel
-sources attach completed output only to another Notebook. `kagglehub`'s
-Notebook-default auth is an injected bearer session and would still be a
-second lifecycle client.
-
-The smallest technically plausible split-upload seam would let the central
-adapter request resumable blob upload URLs, retain the resulting opaque file
-tokens, and send only the short-lived signed upload URLs to the exact fenced
-master. Bytes would travel master-to-provider and only central control would
-create the Dataset version. Those URLs are nevertheless bearer upload-session
-capabilities. The owner has explicitly rejected a new Notebook auth/session
-mechanism, so this exception is **not implemented**. Unless Kaggle exposes a
-supported server-side copy API, one of the stated constraints must be relaxed;
-this is a topology decision, not missing `KAGGLE_USERNAME`/`KAGGLE_KEY`.
+The owner explicitly approved Kaggle's one-file signed `create_url` as a
+temporary upload capability, not an account credential or second lifecycle
+client. The central adapter alone starts blob uploads, encrypts and retains
+opaque blob tokens, finalizes the private Dataset version, launches the exact
+numeric-version restore verifier and advances HEAD by CAS. The master contains
+no Kaggle credential/SDK/CLI and streams each file directly to Kaggle storage;
+checkpoint bytes never traverse devstand. Deterministic full-suite acceptance
+passes. The disposable live upload/verifier/cleanup canary is now the next gate,
+not an internal topology blocker.
 
 ## Final gates
 
