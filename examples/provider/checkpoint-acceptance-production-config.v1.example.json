@@ -24,10 +24,14 @@
   "working_directory": "/kaggle/working/checkpoint-acceptance/state",
   "control_base_url": "https://control.example.test",
   "control_identity": {
-    "run_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "authority_kind": "acceptance-task",
+    "request_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "task_run_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     "attempt_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-    "master_instance_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
-    "epoch": 7
+    "scope": "acceptance:operate"
   },
-  "timeout_seconds": 900
+  "timeout_seconds": 900,
+  "status_dataset_version_ref": "owner/mdh-acc-status-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/1",
+  "status_config_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "status_helper_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 }

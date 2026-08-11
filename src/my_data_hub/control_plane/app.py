@@ -350,6 +350,25 @@ def create_app(
         ):
             raise ControlPlaneConfigurationError("provider gateway token violates the bounded contract")
     if runtime.acceptance_scenarios_enabled and acceptance_scenario_adapter is None:
+        if checkpoint_acceptance_launcher is None or checkpoint_acceptance_catalog is None:
+            from my_data_hub.acceptance.checkpoint_launcher import (
+                ControlCheckpointAcceptanceLauncher,
+                checkpoint_acceptance_deployment_from_environment,
+            )
+
+            deployment = checkpoint_acceptance_deployment_from_environment()
+            if deployment is None or provider_adapter is None or master_runtime is None:
+                raise ControlPlaneConfigurationError(
+                    "acceptance scenario opt-in requires the exact checkpoint deployment "
+                    "and single authenticated control adapter"
+                )
+            checkpoint_acceptance_launcher = ControlCheckpointAcceptanceLauncher(
+                ledger=control_ledger,
+                adapter=provider_adapter,
+                deployment=deployment,
+                control_token_root=master_runtime.settings.runtime_token_root,
+            )
+            checkpoint_acceptance_catalog = deployment.catalog
         if (
             master_runtime is None
             or checkpoint_acceptance_launcher is None
@@ -368,14 +387,6 @@ def create_app(
         )
 
         callback_supervisor = callback_loss_supervisor_from_environment(control_ledger)
-        if (
-            callback_supervisor is None
-            or old_epoch_denials is None
-            or runtime.session_credentials_path is None
-        ):
-            raise ControlPlaneConfigurationError(
-                "acceptance scenario opt-in requires concrete FM08/FM10/FM11 adapters"
-            )
         acceptance_scenario_adapter = AcceptanceScenarioOperatorAdapter(
             UnifiedAcceptanceScenarioExecutor(
                 master=ProductionControlAcceptanceContext(
@@ -442,6 +453,7 @@ def create_app(
     app.state.tunnel_certificate_broker = tunnel_certificate_broker
     app.state.embedding_stage_runner = embedding_stage_runner or execute_embedding_production_stage
     app.state.provider_gateway = provider_gateway if runtime.provider_gateway_enabled else None
+    app.state.acceptance_scenario_adapter = acceptance_scenario_adapter
     # Process invocation identity, not the host/kernel boot ID. A real control
     # restart necessarily constructs a new application and therefore a new UUID.
     app.state.control_boot_id = uuid4()
@@ -504,6 +516,63 @@ def create_app(
         ):
             raise HTTPException(status_code=409, detail={"code": "runtime_epoch_fenced"})
         return operation
+
+    @dataclass(frozen=True, slots=True)
+    class _ProviderOperationAuthority:
+        operation_id: str
+        identity: dict[str, Any]
+        acceptance: dict[str, Any] | None = None
+
+    def _provider_authority(
+        *,
+        request: Request,
+        authorization: str | None,
+        run_id: str | None,
+        attempt_id: str | None,
+        master_instance_id: str | None,
+        epoch: str | None,
+        allowed_states: frozenset[str] = frozenset({"ACTIVE", "DRAINING", "CHECKPOINTING"}),
+    ) -> _ProviderOperationAuthority:
+        acceptance_request = request.headers.get("X-MDH-Acceptance-Request-ID")
+        acceptance_task = request.headers.get("X-MDH-Acceptance-Task-Run-ID")
+        acceptance_attempt = request.headers.get("X-MDH-Acceptance-Attempt-ID")
+        acceptance_headers = (acceptance_request, acceptance_task, acceptance_attempt)
+        if any(value is not None for value in acceptance_headers):
+            if not all(value is not None for value in acceptance_headers):
+                raise HTTPException(status_code=401, detail={"code": "acceptance_identity_incomplete"})
+            if not authorization or not authorization.startswith("Bearer "):
+                raise HTTPException(status_code=401, detail={"code": "acceptance_token_required"})
+            try:
+                exact_request = str(UUID(str(acceptance_request)))
+                exact_task = str(UUID(str(acceptance_task)))
+                exact_attempt = str(UUID(str(acceptance_attempt)))
+            except ValueError as exc:
+                raise HTTPException(status_code=401, detail={"code": "acceptance_identity_invalid"}) from exc
+            if exact_request != exact_task:
+                raise HTTPException(status_code=401, detail={"code": "acceptance_identity_invalid"})
+            launch = control_ledger.authenticate_checkpoint_acceptance(
+                request_id=exact_request,
+                attempt_id=exact_attempt,
+                token=authorization.removeprefix("Bearer ").strip(),
+            )
+            if launch is None or launch["task_run_id"] != exact_task:
+                raise HTTPException(status_code=401, detail={"code": "acceptance_token_invalid"})
+            return _ProviderOperationAuthority(
+                operation_id=str(launch["operation_id"]),
+                identity={
+                    "run_id": exact_task,
+                    "attempt_id": exact_attempt,
+                    "acceptance_request_id": exact_request,
+                },
+                acceptance=launch,
+            )
+        operation = _runtime_authority(
+            authorization=authorization, run_id=run_id, attempt_id=attempt_id,
+            master_instance_id=master_instance_id, epoch=epoch, allowed_states=allowed_states,
+        )
+        return _ProviderOperationAuthority(
+            operation_id=operation.operation_id, identity=dict(operation.identity), acceptance=None
+        )
 
     async def _bounded_json(request: Request) -> dict[str, Any]:
         raw = await request.body()
@@ -1898,7 +1967,8 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, bool]:
-        operation = _runtime_authority(
+        operation = _provider_authority(
+            request=request,
             authorization=authorization,
             run_id=run_id,
             attempt_id=attempt_id,
@@ -1920,7 +1990,21 @@ def create_app(
         embedding_datasets = {value for key, value in embedding_authority.items() if key.endswith("_input")}
         embedding_workers = {value for key, value in embedding_authority.items() if key.endswith("_worker")}
         authorized = False
-        if assets is not None and intent.action is MutationAction.CREATE_DATASET:
+        acceptance_request = operation.acceptance["request"] if operation.acceptance else None
+        if acceptance_request is not None:
+            allowed_dataset = str(acceptance_request["candidate_dataset_ref"])
+            allowed_notebook = acceptance_request.get("verifier_notebook_ref")
+            authorized = bool(
+                str(intent.task_id) == current_run
+                and (
+                    (intent.action in {MutationAction.CREATE_DATASET, MutationAction.VERSION_DATASET}
+                    and intent.provider_ref == allowed_dataset)
+                    or (intent.action is MutationAction.PUSH_NOTEBOOK
+                    and allowed_notebook is not None
+                    and intent.provider_ref == allowed_notebook)
+                )
+            )
+        elif assets is not None and intent.action is MutationAction.CREATE_DATASET:
             authorized = (
                 (intent.provider_ref == assets.checkpoint_ref and str(intent.task_id) == current_run)
                 or (intent.provider_ref, intent.task_id) in embedding_datasets
@@ -1952,7 +2036,8 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, bool]:
-        operation = _runtime_authority(
+        operation = _provider_authority(
+            request=request,
             authorization=authorization,
             run_id=run_id,
             attempt_id=attempt_id,
@@ -1986,7 +2071,8 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, bool]:
-        operation = _runtime_authority(
+        operation = _provider_authority(
+            request=request,
             authorization=authorization,
             run_id=run_id,
             attempt_id=attempt_id,
@@ -2035,20 +2121,43 @@ def create_app(
             }
             else ProviderKind.NOTEBOOK.value
         )
+        acceptance_request = operation.acceptance["request"] if operation.acceptance else None
+        acceptance_claim = bool(
+            acceptance_request is not None
+            and str(claim.task_id) == current_run
+            and claim.disposable
+            and (
+                (
+                    claim.provider_ref == str(acceptance_request["candidate_dataset_ref"])
+                    and claim.kind is ProviderKind.DATASET
+                    and claim.control_class is ControlClass.MCP_EXCHANGE
+                )
+                or (
+                    claim.provider_ref == str(acceptance_request.get("verifier_notebook_ref") or "")
+                    and claim.kind is ProviderKind.NOTEBOOK
+                    and claim.control_class is ControlClass.MCP_MANAGED
+                )
+            )
+        )
         if (
             authority is None
             or authority["operation_id"] != operation.operation_id
             or authority["task_id"] != str(claim.task_id)
             or authority["provider_ref"] != claim.provider_ref
-            or not task_authorized
-            or claim.control_class != ControlClass.ORCHESTRATOR_PROTECTED
-            or claim.disposable
             or claim.kind.value != expected_kind
-            or assets is None
-            or claim.provider_ref not in {
-                assets.checkpoint_ref, assets.checkpoint_verifier_ref,
-                *(provider_ref for provider_ref, _task_id in embedding_pairs),
-            }
+            or not (
+                acceptance_claim
+                or (
+                    task_authorized
+                    and claim.control_class is ControlClass.ORCHESTRATOR_PROTECTED
+                    and not claim.disposable
+                    and assets is not None
+                    and claim.provider_ref in {
+                        assets.checkpoint_ref, assets.checkpoint_verifier_ref,
+                        *(provider_ref for provider_ref, _task_id in embedding_pairs),
+                    }
+                )
+            )
         ):
             raise HTTPException(status_code=403, detail={"code": "provider_authority_mismatch"})
         provider_journal.persist_resource_claim(claim)
@@ -2063,7 +2172,8 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, bool]:
-        operation = _runtime_authority(
+        operation = _provider_authority(
+            request=request,
             authorization=authorization,
             run_id=run_id,
             attempt_id=attempt_id,
@@ -2103,7 +2213,8 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, Any]:
-        _runtime_authority(
+        operation = _provider_authority(
+            request=request,
             authorization=authorization,
             run_id=run_id,
             attempt_id=attempt_id,
@@ -2113,7 +2224,12 @@ def create_app(
         )
         body = await _bounded_json(request)
         assets = _configured_master_assets()
-        expected_ref = assets.checkpoint_ref if assets else None
+        acceptance_request = operation.acceptance["request"] if operation.acceptance else None
+        expected_ref = (
+            str(acceptance_request["candidate_dataset_ref"])
+            if acceptance_request is not None
+            else assets.checkpoint_ref if assets else None
+        )
         if body != {
             "provider_ref": expected_ref,
             "kind": ProviderKind.DATASET.value,
@@ -2130,13 +2246,15 @@ def create_app(
     @app.get("/internal/checkpoints/{service_kind}/head")
     def checkpoint_head(
         service_kind: str,
+        request: Request,
         authorization: str | None = Header(default=None),
         run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
         attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, Any]:
-        _runtime_authority(
+        _provider_authority(
+            request=request,
             authorization=authorization,
             run_id=run_id,
             attempt_id=attempt_id,
@@ -2155,7 +2273,8 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, bool]:
-        operation = _runtime_authority(
+        operation = _provider_authority(
+            request=request,
             authorization=authorization,
             run_id=run_id,
             attempt_id=attempt_id,
@@ -2170,15 +2289,30 @@ def create_app(
         except (ManifestError, TypeError) as exc:
             raise HTTPException(status_code=422, detail={"code": "checkpoint_manifest_invalid"}) from exc
         assets = _configured_master_assets()
-        expected_dataset = assets.checkpoint_ref if assets else None
+        acceptance_request = operation.acceptance["request"] if operation.acceptance else None
+        expected_dataset = (
+            str(acceptance_request["candidate_dataset_ref"])
+            if acceptance_request is not None
+            else assets.checkpoint_ref if assets else None
+        )
+        acceptance_manifest = bool(
+            acceptance_request is not None
+            and manifest.source_run_id == str(operation.identity["run_id"])
+            and manifest.source_identity
+            == f"checkpoint-acceptance:{acceptance_request['source_revision']}"
+        )
+        runtime_manifest = bool(
+            acceptance_request is None
+            and str(manifest.master_instance_id) == str(operation.identity["master_instance_id"])
+            and manifest.epoch == int(operation.identity["epoch"])
+            and manifest.source_run_id == str(operation.identity["run_id"])
+        )
         if (
             body["operation_id"] != operation.operation_id
             or body["service_kind"] != "postgres-master"
             or not expected_dataset
             or body["dataset_ref"] != expected_dataset
-            or str(manifest.master_instance_id) != str(operation.identity["master_instance_id"])
-            or manifest.epoch != int(operation.identity["epoch"])
-            or manifest.source_run_id != str(operation.identity["run_id"])
+            or not (acceptance_manifest or runtime_manifest)
         ):
             raise HTTPException(status_code=403, detail={"code": "checkpoint_authority_mismatch"})
         registry = ControlLedgerCheckpointRegistry(
@@ -2221,7 +2355,8 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, bool]:
-        operation = _runtime_authority(
+        operation = _provider_authority(
+            request=request,
             authorization=authorization,
             run_id=run_id,
             attempt_id=attempt_id,
@@ -2246,7 +2381,8 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, str]:
-        operation = _runtime_authority(
+        operation = _provider_authority(
+            request=request,
             authorization=authorization,
             run_id=run_id,
             attempt_id=attempt_id,
@@ -2295,7 +2431,8 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, bool]:
-        operation = _runtime_authority(
+        operation = _provider_authority(
+            request=request,
             authorization=authorization,
             run_id=run_id,
             attempt_id=attempt_id,
@@ -2314,7 +2451,8 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, bool]:
-        operation = _runtime_authority(
+        operation = _provider_authority(
+            request=request,
             authorization=authorization,
             run_id=run_id,
             attempt_id=attempt_id,
@@ -2333,7 +2471,8 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, bool]:
-        operation = _runtime_authority(
+        operation = _provider_authority(
+            request=request,
             authorization=authorization,
             run_id=run_id,
             attempt_id=attempt_id,
@@ -2352,7 +2491,8 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, Any]:
-        operation = _runtime_authority(
+        operation = _provider_authority(
+            request=request,
             authorization=authorization,
             run_id=run_id,
             attempt_id=attempt_id,

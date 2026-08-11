@@ -5,6 +5,7 @@ umask 077
 action="${1:-}"
 operator_profile=false
 acceptance_supervisor=false
+acceptance_scenarios=false
 if [[ "$action" == "INSTALL_MY_DATA_HUB_SAME_HOST" ]]; then
   echo "FORBIDDEN: local PostgreSQL topology is superseded; no local database will be installed" >&2
   exit 78
@@ -113,6 +114,15 @@ control_gateway_token="${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:-$secret_roo
 tunnel_broker_socket_dir="${MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR:-/run/my-data-hub/tunnel-broker}"
 acceptance_socket_dir="${MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_SOCKET_DIR:-$runtime_root/acceptance-supervisor}"
 acceptance_key="${MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_KEY_FILE:-$acceptance_socket_dir/supervisor.key}"
+checkpoint_acceptance_deployment="${MY_DATA_HUB_CHECKPOINT_ACCEPTANCE_DEPLOYMENT_FILE:-$runtime_root/checkpoint-acceptance-deployment.json}"
+if [[ -n "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SCENARIOS:-}" ]]; then
+  if [[ "$operator_profile" != true \
+    || "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SCENARIOS}" != "I_ACKNOWLEDGE_PROTECTED_ACCEPTANCE_EFFECTS" ]]; then
+    echo "acceptance scenarios require operator install and the exact protected-effects acknowledgement" >&2
+    exit 2
+  fi
+  acceptance_scenarios=true
+fi
 if [[ -n "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SUPERVISOR:-}" ]]; then
   if [[ "$operator_profile" != true \
     || "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SUPERVISOR}" != "I_ACKNOWLEDGE_TASK_BOUND_CONTROL_RESTART" ]]; then
@@ -128,7 +138,7 @@ fi
 for path_value in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$asset_dir" \
   "$tls_ca_file" "$provider_env" "$mcp_env" "$oauth_env" "$oauth_key" "$oauth_overlap_jwks" \
   "$operator_gate_receipt" "$operator_gate_key" "$control_gateway_token" "$tunnel_broker_socket_dir" \
-  "$acceptance_socket_dir" "$acceptance_key"; do
+  "$acceptance_socket_dir" "$acceptance_key" "$checkpoint_acceptance_deployment"; do
   case "$path_value" in
     *[$'\n\r\t ']* ) echo "deployment inputs may not contain whitespace" >&2; exit 2 ;;
   esac
@@ -238,13 +248,56 @@ services:
       MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE: /run/secrets/mcp-write-gate.key
       MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL: http://control-plane:8080/internal/mcp-provider/invoke
       MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE: /run/secrets/mcp-control-gateway.token
-      MY_DATA_HUB_MCP_SCOPES: platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,data:write,migration:operate,provider:write
+      MY_DATA_HUB_MCP_SCOPES: platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,acceptance:operate,data:write,migration:operate,provider:write
     volumes:
       - "${MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE:?write gate key is required}:/run/secrets/mcp-write-gate.key:ro"
       - "${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:?provider control gateway token is required}:/run/secrets/mcp-control-gateway.token:ro"
 YAML
   chmod 600 "$operator_override"
   operator_compose_arg=" -f $operator_override"
+fi
+
+acceptance_scenarios_override=""
+acceptance_scenarios_compose_arg=""
+if [[ "$acceptance_scenarios" == true ]]; then
+  require_private_file "$checkpoint_acceptance_deployment" "checkpoint acceptance deployment"
+  python3 - "$checkpoint_acceptance_deployment" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+raw = path.read_bytes()
+if not 1 <= len(raw) <= 256 * 1024:
+    raise SystemExit("checkpoint acceptance deployment exceeds 256 KiB")
+value = json.loads(raw)
+if value.get("schema_version") != "my-data-hub-checkpoint-acceptance-deployment.v1":
+    raise SystemExit("checkpoint acceptance deployment schema is invalid")
+if "runtime_root_secret_name" in value:
+    raise SystemExit("checkpoint callback roots may not be provisioned as Kaggle User Secrets")
+bindings = value.get("kaggle_secret_bindings")
+if not isinstance(bindings, dict) or set(bindings) not in (
+    {"KAGGLE_API_TOKEN"}, {"KAGGLE_USERNAME", "KAGGLE_KEY"}
+):
+    raise SystemExit("checkpoint provider secret-name binding is incomplete")
+if any(not isinstance(item, str) or not item or len(item) > 200 for item in bindings.values()):
+    raise SystemExit("checkpoint provider secret names are invalid")
+PY
+  acceptance_scenarios_override="$runtime_root/acceptance-scenarios.$commit.yaml"
+  cat > "$acceptance_scenarios_override" <<YAML
+services:
+  control-plane:
+    environment:
+      MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "true"
+      MY_DATA_HUB_CHECKPOINT_ACCEPTANCE_DEPLOYMENT_FILE: /run/mdh-acceptance/checkpoint-deployment.json
+    volumes:
+      - "$checkpoint_acceptance_deployment:/run/mdh-acceptance/checkpoint-deployment.json:ro"
+  remote-mcp:
+    environment:
+      MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "true"
+YAML
+  chmod 600 "$acceptance_scenarios_override"
+  acceptance_scenarios_compose_arg=" -f $acceptance_scenarios_override"
 fi
 
 if [[ "$acceptance_supervisor" == true ]]; then
@@ -304,6 +357,9 @@ fi
 if [[ -n "$acceptance_override" ]]; then
   compose_files+=(-f "$acceptance_override")
 fi
+if [[ -n "$acceptance_scenarios_override" ]]; then
+  compose_files+=(-f "$acceptance_scenarios_override")
+fi
 compose=("$docker_path" compose --env-file "$compose_env" --profile remote-mcp \
   --project-directory "$release" "${compose_files[@]}")
 "${compose[@]}" config --quiet
@@ -355,9 +411,9 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=$compose_env
 ExecStartPre=$docker_path info
-ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg up --remove-orphans control-plane remote-mcp oauth-server
-ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg up -d --wait --remove-orphans control-plane remote-mcp oauth-server
-ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg down --remove-orphans
+ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg up --remove-orphans control-plane remote-mcp oauth-server
+ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg up -d --wait --remove-orphans control-plane remote-mcp oauth-server
+ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg down --remove-orphans
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=300
@@ -485,4 +541,4 @@ mv -Tf "$next_link" "$current"
 trap - ERR
 rm -f "$unit_backup"
 rm -f "$supervisor_unit_backup"
-printf 'installed_control_plane_commit=%s\nservices=control-plane,remote-mcp,oauth-server\noperator_profile=%s\nacceptance_supervisor=%s\nmaster_state=ABSENT_or_durable_runtime_state\n' "$commit" "$operator_profile" "$acceptance_supervisor"
+printf 'installed_control_plane_commit=%s\nservices=control-plane,remote-mcp,oauth-server\noperator_profile=%s\nacceptance_scenarios=%s\nacceptance_supervisor=%s\nmaster_state=ABSENT_or_durable_runtime_state\n' "$commit" "$operator_profile" "$acceptance_scenarios" "$acceptance_supervisor"

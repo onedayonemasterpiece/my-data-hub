@@ -3248,6 +3248,244 @@ class ControlLedger:
             (task_id, event_type, evidence_json, hashlib.sha256(evidence_json.encode()).hexdigest(), now),
         )
 
+    def ensure_checkpoint_acceptance_launch(
+        self,
+        *,
+        request: Mapping[str, Any],
+        request_sha256: str,
+        principal_id: str,
+        client_id: str,
+        token_sha256: str,
+        expires_at: datetime,
+        config_sha256: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist one owner-task checkpoint launch before provider mutation."""
+
+        required = {
+            "request_id", "scenario", "operation_id", "task_run_id", "idempotency_key",
+            "control_identity",
+        }
+        if not required.issubset(request) or request["scenario"] not in {"FM05", "FM14", "FM15"}:
+            raise ValueError("checkpoint acceptance launch request is incomplete")
+        identity = request["control_identity"]
+        if not isinstance(identity, Mapping):
+            raise ValueError("checkpoint acceptance control identity is invalid")
+        values = {
+            "request_id": str(UUID(str(request["request_id"]))),
+            "operation_id": str(UUID(str(request["operation_id"]))),
+            "task_run_id": str(UUID(str(request["task_run_id"]))),
+            "attempt_id": str(UUID(str(identity["attempt_id"]))),
+        }
+        if (
+            values["request_id"] != values["task_run_id"]
+            or str(identity.get("request_id")) != values["request_id"]
+            or str(identity.get("task_run_id")) != values["task_run_id"]
+            or identity.get("scope") != "acceptance:operate"
+            or any(len(value) != 64 or any(c not in "0123456789abcdef" for c in value)
+                   for value in (request_sha256, token_sha256, config_sha256))
+            or expires_at.tzinfo is None
+        ):
+            raise ValueError("checkpoint acceptance launch binding is invalid")
+        request_json = _safe_json(request, max_bytes=64 * 1024)
+        now = _format_time(self.clock.now())
+        expiry = _format_time(expires_at)
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=? OR idempotency_key=?",
+                (values["request_id"], str(request["idempotency_key"])),
+            ).fetchone()
+            if existing is not None:
+                row = dict(existing)
+                exact = (
+                    row["request_id"] == values["request_id"]
+                    and row["scenario_id"] == request["scenario"]
+                    and row["operation_id"] == values["operation_id"]
+                    and row["task_run_id"] == values["task_run_id"]
+                    and row["attempt_id"] == values["attempt_id"]
+                    and row["request_sha256"] == request_sha256
+                    and row["request_json"] == request_json
+                    and row["principal_id"] == principal_id
+                    and row["client_id"] == client_id
+                    and row["token_sha256"] == token_sha256
+                    and row["config_sha256"] == config_sha256
+                )
+                if not exact:
+                    raise IdempotencyConflict("checkpoint acceptance launch identity changed")
+                return self._checkpoint_acceptance_launch_from_row(existing), False
+            connection.execute(
+                "INSERT INTO checkpoint_acceptance_launches("
+                "request_id,scenario_id,operation_id,task_run_id,attempt_id,idempotency_key,"
+                "request_sha256,request_json,principal_id,client_id,token_sha256,expires_at,state,"
+                "config_sha256,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (values["request_id"], request["scenario"], values["operation_id"],
+                 values["task_run_id"], values["attempt_id"], request["idempotency_key"],
+                 request_sha256, request_json, principal_id, client_id, token_sha256, expiry,
+                 "REQUESTED", config_sha256, now, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=?",
+                (values["request_id"],),
+            ).fetchone()
+            assert row is not None
+            return self._checkpoint_acceptance_launch_from_row(row), True
+
+    def checkpoint_acceptance_launch(self, request_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=?",
+                (str(UUID(request_id)),),
+            ).fetchone()
+        return self._checkpoint_acceptance_launch_from_row(row) if row is not None else None
+
+    def authenticate_checkpoint_acceptance(
+        self, *, request_id: str, attempt_id: str, token: str
+    ) -> dict[str, Any] | None:
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        now = self.clock.now()
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=? AND attempt_id=?",
+                (str(UUID(request_id)), str(UUID(attempt_id))),
+            ).fetchone()
+        if row is None or not hmac.compare_digest(str(row["token_sha256"]), digest):
+            return None
+        if _parse_time(str(row["expires_at"])) <= now or row["state"] not in {"REQUESTED", "RUNNING"}:
+            return None
+        return self._checkpoint_acceptance_launch_from_row(row)
+
+    def record_checkpoint_acceptance_provider_run(
+        self, *, request_id: str, provider_run: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        payload = _safe_json(provider_run, max_bytes=32 * 1024)
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(request_id)
+            if row["provider_run_json"] is not None and row["provider_run_json"] != payload:
+                raise IdempotencyConflict("checkpoint acceptance provider run changed")
+            connection.execute(
+                "UPDATE checkpoint_acceptance_launches SET provider_run_json=?,state='RUNNING',updated_at=? "
+                "WHERE request_id=? AND state IN ('REQUESTED','RUNNING')",
+                (payload, now, request_id),
+            )
+            current = connection.execute(
+                "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=?", (request_id,)
+            ).fetchone()
+            assert current is not None
+            return self._checkpoint_acceptance_launch_from_row(current)
+
+    def record_checkpoint_acceptance_status_dataset(
+        self, *, request_id: str, status_dataset: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Bind the exact disposable status input before the Notebook push."""
+
+        payload = _safe_json(status_dataset, max_bytes=32 * 1024)
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(request_id)
+            if row["status_dataset_json"] is not None and row["status_dataset_json"] != payload:
+                raise IdempotencyConflict("checkpoint acceptance status Dataset changed")
+            if row["provider_run_json"] is not None and row["status_dataset_json"] is None:
+                raise StaleRuntimeEvent("checkpoint acceptance Notebook was launched without status authority")
+            connection.execute(
+                "UPDATE checkpoint_acceptance_launches SET status_dataset_json=?,updated_at=? "
+                "WHERE request_id=? AND state='REQUESTED'",
+                (payload, now, request_id),
+            )
+            current = connection.execute(
+                "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=?", (request_id,)
+            ).fetchone()
+            assert current is not None
+            return self._checkpoint_acceptance_launch_from_row(current)
+
+    def record_checkpoint_acceptance_cleanup(
+        self, *, request_id: str, cleanup_receipt: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Persist exact absence proof for the task status Dataset."""
+
+        payload = _safe_json(cleanup_receipt, max_bytes=32 * 1024)
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(request_id)
+            if row["status_dataset_json"] is None:
+                raise StaleRuntimeEvent("checkpoint acceptance has no status Dataset to clean")
+            if row["cleanup_receipt_json"] is not None and row["cleanup_receipt_json"] != payload:
+                raise IdempotencyConflict("checkpoint acceptance cleanup receipt changed")
+            connection.execute(
+                "UPDATE checkpoint_acceptance_launches SET cleanup_receipt_json=?,updated_at=? "
+                "WHERE request_id=?",
+                (payload, now, request_id),
+            )
+            current = connection.execute(
+                "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=?", (request_id,)
+            ).fetchone()
+            assert current is not None
+            return self._checkpoint_acceptance_launch_from_row(current)
+
+    def complete_checkpoint_acceptance_launch(
+        self,
+        *,
+        request_id: str,
+        state: str,
+        result: Mapping[str, Any],
+        result_sha256: str,
+    ) -> dict[str, Any]:
+        if state not in {"LIVE_EVIDENCE_READY", "BLOCKED", "FAIL"}:
+            raise ValueError("checkpoint acceptance terminal state is invalid")
+        if len(result_sha256) != 64 or any(c not in "0123456789abcdef" for c in result_sha256):
+            raise ValueError("checkpoint acceptance result hash is invalid")
+        payload = _safe_json(result, max_bytes=256 * 1024)
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=?", (request_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(request_id)
+            if row["result_json"] is not None:
+                if (row["state"], row["result_json"], row["result_sha256"]) != (state, payload, result_sha256):
+                    raise IdempotencyConflict("checkpoint acceptance terminal result changed")
+                return self._checkpoint_acceptance_launch_from_row(row)
+            connection.execute(
+                "UPDATE checkpoint_acceptance_launches SET state=?,result_json=?,result_sha256=?,updated_at=? "
+                "WHERE request_id=? AND state IN ('REQUESTED','RUNNING')",
+                (state, payload, result_sha256, now, request_id),
+            )
+            current = connection.execute(
+                "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=?", (request_id,)
+            ).fetchone()
+            assert current is not None
+            if current["result_json"] is None:
+                raise StaleRuntimeEvent("checkpoint acceptance launch was already terminal")
+            return self._checkpoint_acceptance_launch_from_row(current)
+
+    @staticmethod
+    def _checkpoint_acceptance_launch_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["request"] = json.loads(str(value.pop("request_json")))
+        provider = value.pop("provider_run_json")
+        status_dataset = value.pop("status_dataset_json")
+        cleanup = value.pop("cleanup_receipt_json")
+        result = value.pop("result_json")
+        value["status_dataset"] = (
+            json.loads(str(status_dataset)) if status_dataset is not None else None
+        )
+        value["provider_run"] = json.loads(str(provider)) if provider is not None else None
+        value["cleanup_receipt"] = json.loads(str(cleanup)) if cleanup is not None else None
+        value["result"] = json.loads(str(result)) if result is not None else None
+        return value
+
     def runtime_event_history(
         self, *, run_id: str, attempt_id: str, epoch: int, limit: int = 100
     ) -> list[dict[str, Any]]:

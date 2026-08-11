@@ -44,7 +44,7 @@ from my_data_hub.providers.kaggle.contracts import (
 )
 from my_data_hub.providers.kaggle.control_journal import (
     AuthenticatedControlPlaneClient,
-    ControlPlaneRuntimeIdentity,
+    ControlPlaneAcceptanceIdentity,
     RemoteControlLedgerKaggleJournal,
 )
 from my_data_hub.providers.models import ControlClass, ProviderKind
@@ -108,14 +108,21 @@ class CheckpointAcceptanceRuntimeAmbiguity(CheckpointAcceptanceError):
 
 
 class CheckpointAcceptanceControlIdentity(BaseModel):
-    """Exact modern runtime-token identity sent only as control request headers."""
+    """Dedicated owner-task authority; it never impersonates a master epoch."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    run_id: UUID
+    authority_kind: Literal["acceptance-task"] = "acceptance-task"
+    request_id: UUID
+    task_run_id: UUID
     attempt_id: UUID
-    master_instance_id: UUID
-    epoch: int = Field(ge=1)
+    scope: Literal["acceptance:operate"] = "acceptance:operate"
+
+    @model_validator(mode="after")
+    def task_bound(self) -> CheckpointAcceptanceControlIdentity:
+        if self.request_id != self.task_run_id:
+            raise ValueError("checkpoint control authority must be task-bound")
+        return self
 
 
 class CheckpointAcceptanceVerifierAsset(BaseModel):
@@ -164,6 +171,12 @@ class CheckpointAcceptanceProductionConfig(BaseModel):
     template_manifest_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     template_content_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     verifier: CheckpointAcceptanceVerifierAsset | None = None
+    status_dataset_version_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+        max_length=320,
+    )
+    status_config_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    status_helper_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     working_directory: Path
     control_base_url: str = Field(min_length=12, max_length=500)
     control_identity: CheckpointAcceptanceControlIdentity
@@ -173,14 +186,17 @@ class CheckpointAcceptanceProductionConfig(BaseModel):
     def exact_production_binding(self) -> CheckpointAcceptanceProductionConfig:
         if self.started_at.tzinfo is None or self.started_at.utcoffset() is None:
             raise ValueError("checkpoint acceptance start must be timezone-aware")
-        if self.control_identity.run_id != self.task_run_id:
-            raise ValueError("control run identity must equal the task run id")
+        if (
+            self.control_identity.request_id != self.task_run_id
+            or self.control_identity.task_run_id != self.task_run_id
+        ):
+            raise ValueError("control acceptance identity must equal the task run id")
         output_refs = [self.dataset_ref, self.evidence_notebook_ref]
         if self.verifier_notebook_ref is not None:
             output_refs.append(self.verifier_notebook_ref)
         if any(ref.split("/", 1)[0] != self.provider_owner for ref in output_refs):
             raise ValueError("checkpoint acceptance resources must have the fixed provider owner")
-        input_refs = [self.template_dataset_version_ref]
+        input_refs = [self.template_dataset_version_ref, self.status_dataset_version_ref]
         if self.verifier is not None:
             input_refs.append(self.verifier.dataset_version_ref)
         if any(ref.split("/", 1)[0] != self.provider_owner for ref in input_refs):
@@ -728,11 +744,10 @@ def build_production_checkpoint_acceptance_runtime(
         client = AuthenticatedControlPlaneClient(
             base_url=config.control_base_url,
             bearer_token=token,
-            runtime_identity=ControlPlaneRuntimeIdentity(
-                run_id=config.control_identity.run_id,
+            runtime_identity=ControlPlaneAcceptanceIdentity(
+                request_id=config.control_identity.request_id,
+                task_run_id=config.control_identity.task_run_id,
                 attempt_id=config.control_identity.attempt_id,
-                master_instance_id=config.control_identity.master_instance_id,
-                epoch=config.control_identity.epoch,
             ),
             transport=control_transport,
         )

@@ -1,9 +1,10 @@
 # Production checkpoint acceptance adapters
 
 `my_data_hub.checkpoints.acceptance_runtime` connects the fixed FM05, FM14 and
-FM15 coordinator to the existing durable control ledger, checkpoint registry,
-and the repository's single `KaggleProviderAdapter`. It does not add a control
-endpoint, migration, generic upload operation, or fault selector.
+FM15 coordinator to the durable control ledger, checkpoint registry, and the
+repository's single control-owned `KaggleProviderAdapter`. Control migration
+021 adds only task authority/launch metadata; it adds no generic upload or
+fault selector.
 
 ## Fixed binding
 
@@ -110,16 +111,33 @@ operation/task/source/start identity, owner Dataset and Notebook refs, exact
 numeric protected template Dataset version/claim plus manifest/content hashes,
 the task-owned evidence Notebook ref, exact numeric protected verifier Dataset
 version/claim/path/hash and isolated verifier Notebook ref for FM05 or FM15,
-and run/attempt/master/epoch control identity. The launch port validates the
+and dedicated request/task/attempt control identity. The authority carries
+`acceptance:operate` and deliberately has no master instance or epoch. The
+launch port validates the
 protected input claims before launch; the config hash lets the outer status
 path prove that the Notebook consumed that same binding. The config contains no
 token, Kaggle credential, PostgreSQL URL, checkpoint bytes or verifier bytes.
 
-`MY_DATA_HUB_RUN_SECRET` is the only accepted control credential. Kaggle
-credentials use the official SDK's environment/User Secret discovery. There is
-no CLI/config credential override. Before creating the local acceptance journal
+The control process creates a unique private disposable status Dataset before
+the Notebook push. Its exact version contains only bounded `kaggle_run.json`
+(`run_id`, `attempt_id`, kind, Notebook, credential-free callback URL,
+one-time token and an empty fixed lease list) plus the fixed bootstrap helper.
+The ledger stores only the token hash and exact Dataset claim/hashes. The
+Notebook verifies both files, exports `MY_DATA_HUB_RUN_SECRET` locally and then
+uses the existing Bearer/header transport with redacted JSONL fallback. It
+never receives a manually provisioned callback root User Secret. The status
+Dataset is deleted through its exact disposable claim after a reconciled
+terminal run; ambiguous launch response retains it rather than risking deletion
+under an unknown live run.
+
+Provider-side checkpoint Dataset access may use one explicitly reviewed Kaggle
+User Secret name or the complete legacy username/key *name* pair. This narrow
+data-local exception is required because checkpoint bytes may not cross the
+devstand. Secret values are absent from deployment JSON, Notebook source,
+Datasets, callback bodies, control rows, logs and status responses. There is no
+interactive OAuth/session credential or CLI/config override. Before creating the local acceptance journal
 or permitting any adapter/provider mutation, the factory validates the modern
-runtime token by resolving the bounded remote checkpoint HEAD. It then verifies
+task authority by resolving the bounded remote checkpoint HEAD. It then verifies
 the template and verifier assets and requires the exact official
 `KaggleProviderAdapter`, Kaggle `KaggleApi`, remote provider journal and remote
 checkpoint registry types. An injected adapter can never emit live evidence.
@@ -146,3 +164,19 @@ The bounded output schema is
   business bytes and conservatively reports `mutations_started=1`.
 
 Config and sanitized result examples live under `examples/provider/`.
+
+## Production opt-in
+
+`MY_DATA_HUB_CHECKPOINT_ACCEPTANCE_DEPLOYMENT_FILE` points to one private,
+bounded `my-data-hub-checkpoint-acceptance-deployment.v1` document containing
+only exact provider refs/version claims/hashes and reviewed User Secret names.
+The schema and example are
+`schemas/checkpoint-acceptance-deployment.v1.schema.json` and
+`examples/provider/checkpoint-acceptance-deployment.v1.example.json`.
+
+The installer exposes the unified tools only for the operator profile when
+`MY_DATA_HUB_ENABLE_ACCEPTANCE_SCENARIOS` equals
+`I_ACKNOWLEDGE_PROTECTED_ACCEPTANCE_EFFECTS`. It adds `acceptance:operate` and
+enables the same single control gateway for control and remote MCP. FM08 remains
+honestly blocked: control-process callback recovery is not the required abrupt
+master termination with distinct old/recovery provider runs.

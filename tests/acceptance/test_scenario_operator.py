@@ -125,7 +125,8 @@ def test_checkpoint_request_builds_exact_provider_only_launch_metadata() -> None
     launch = launcher.requests[0]
     assert response["state"] == "REQUESTED"
     assert launch.timeout_seconds == 900
-    assert launch.launch_secret_name == "MY_DATA_HUB_RUN_SECRET"
+    assert launch.status_config_file == "kaggle_run.json"
+    assert launch.status_helper_file == "kaggle_status_client.py"
     assert launch.template_input.exact_version_ref.endswith("/17")
     assert launch.verifier_input is not None and launch.verifier_input.exact_version_ref.endswith("/23")
     assert launch.control_identity.scope == "acceptance:operate"

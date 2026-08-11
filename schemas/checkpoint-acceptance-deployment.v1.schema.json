@@ -1,0 +1,233 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/checkpoint-acceptance-deployment.v1.schema.json",
+  "$defs": {
+    "CheckpointDatasetInputClaim": {
+      "additionalProperties": false,
+      "description": "Exact protected Dataset input; bytes remain provider-side.",
+      "properties": {
+        "provider_ref": {
+          "maxLength": 300,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Provider Ref",
+          "type": "string"
+        },
+        "exact_version_ref": {
+          "maxLength": 320,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Exact Version Ref",
+          "type": "string"
+        },
+        "claim_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Claim Sha256",
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
+        },
+        "content_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Content Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_ref",
+        "exact_version_ref",
+        "claim_sha256",
+        "manifest_sha256",
+        "content_sha256"
+      ],
+      "title": "CheckpointDatasetInputClaim",
+      "type": "object"
+    },
+    "CheckpointRuntimeInput": {
+      "additionalProperties": false,
+      "properties": {
+        "provider_ref": {
+          "maxLength": 300,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Provider Ref",
+          "type": "string"
+        },
+        "exact_version_ref": {
+          "maxLength": 320,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Exact Version Ref",
+          "type": "string"
+        },
+        "claim_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Claim Sha256",
+          "type": "string"
+        },
+        "wheel_file": {
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9_.-]+\\.whl$",
+          "title": "Wheel File",
+          "type": "string"
+        },
+        "wheel_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Wheel Sha256",
+          "type": "string"
+        },
+        "entrypoint_file": {
+          "const": "checkpoint_acceptance_evidence.py",
+          "default": "checkpoint_acceptance_evidence.py",
+          "title": "Entrypoint File",
+          "type": "string"
+        },
+        "entrypoint_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Entrypoint Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_ref",
+        "exact_version_ref",
+        "claim_sha256",
+        "wheel_file",
+        "wheel_sha256",
+        "entrypoint_sha256"
+      ],
+      "title": "CheckpointRuntimeInput",
+      "type": "object"
+    },
+    "CheckpointVerifierInputClaim": {
+      "additionalProperties": false,
+      "description": "Exact owner-reviewed verifier source Dataset; no source bytes.",
+      "properties": {
+        "provider_ref": {
+          "maxLength": 300,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Provider Ref",
+          "type": "string"
+        },
+        "exact_version_ref": {
+          "maxLength": 320,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Exact Version Ref",
+          "type": "string"
+        },
+        "claim_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Claim Sha256",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "code_file": {
+          "const": "worker.py",
+          "default": "worker.py",
+          "title": "Code File",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_ref",
+        "exact_version_ref",
+        "claim_sha256",
+        "source_sha256"
+      ],
+      "title": "CheckpointVerifierInputClaim",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Validated owner asset catalog loaded once by production assembly.",
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-checkpoint-acceptance-deployment.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "provider_owner": {
+      "pattern": "^[A-Za-z0-9_.-]{1,80}$",
+      "title": "Provider Owner",
+      "type": "string"
+    },
+    "evidence_notebook_ref": {
+      "title": "Evidence Notebook Ref",
+      "type": "string"
+    },
+    "candidate_dataset_refs": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "propertyNames": {
+        "enum": [
+          "FM05",
+          "FM14",
+          "FM15"
+        ]
+      },
+      "title": "Candidate Dataset Refs",
+      "type": "object"
+    },
+    "template_input": {
+      "$ref": "#/$defs/CheckpointDatasetInputClaim"
+    },
+    "verifier_inputs": {
+      "additionalProperties": {
+        "$ref": "#/$defs/CheckpointVerifierInputClaim"
+      },
+      "propertyNames": {
+        "enum": [
+          "FM05",
+          "FM15"
+        ]
+      },
+      "title": "Verifier Inputs",
+      "type": "object"
+    },
+    "verifier_notebook_refs": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "propertyNames": {
+        "enum": [
+          "FM05",
+          "FM15"
+        ]
+      },
+      "title": "Verifier Notebook Refs",
+      "type": "object"
+    },
+    "runtime_input": {
+      "$ref": "#/$defs/CheckpointRuntimeInput"
+    },
+    "control_base_url": {
+      "title": "Control Base Url",
+      "type": "string"
+    },
+    "kaggle_secret_bindings": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Kaggle Secret Bindings",
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "provider_owner",
+    "evidence_notebook_ref",
+    "candidate_dataset_refs",
+    "template_input",
+    "verifier_inputs",
+    "verifier_notebook_refs",
+    "runtime_input",
+    "control_base_url",
+    "kaggle_secret_bindings"
+  ],
+  "title": "CheckpointAcceptanceDeployment",
+  "type": "object"
+}

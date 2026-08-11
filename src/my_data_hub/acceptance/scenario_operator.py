@@ -35,7 +35,8 @@ MASTER_SCENARIOS = frozenset(item.value for item in MasterAcceptanceScenario)
 ALL_ACCEPTANCE_SCENARIOS = MASTER_SCENARIOS | CHECKPOINT_SCENARIOS
 CHECKPOINT_TIMEOUT_SECONDS = 900
 CHECKPOINT_RESULT_FILE = "operational-result.json"
-CHECKPOINT_SECRET_NAME = "MY_DATA_HUB_RUN_SECRET"
+CHECKPOINT_STATUS_CONFIG_FILE = "kaggle_run.json"
+CHECKPOINT_STATUS_HELPER_FILE = "kaggle_status_client.py"
 
 
 class AcceptanceScenarioId(StrEnum):
@@ -165,7 +166,8 @@ class CheckpointAcceptanceLaunchRequest(BaseModel):
     control_identity: CheckpointAcceptanceServiceIdentity
     result_file: Literal["operational-result.json"] = CHECKPOINT_RESULT_FILE
     timeout_seconds: Literal[900] = CHECKPOINT_TIMEOUT_SECONDS
-    launch_secret_name: Literal["MY_DATA_HUB_RUN_SECRET"] = CHECKPOINT_SECRET_NAME
+    status_config_file: Literal["kaggle_run.json"] = CHECKPOINT_STATUS_CONFIG_FILE
+    status_helper_file: Literal["kaggle_status_client.py"] = CHECKPOINT_STATUS_HELPER_FILE
 
     @model_validator(mode="after")
     def exact_binding(self) -> CheckpointAcceptanceLaunchRequest:
@@ -231,6 +233,33 @@ class CheckpointProviderRunOutput(BaseModel):
         return self
 
 
+class CheckpointStatusDatasetObservation(BaseModel):
+    """Exact provider-only callback bootstrap and its cleanup proof."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=300
+    )
+    exact_version_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$", max_length=320
+    )
+    claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    content_tree_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    status_config_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    status_helper_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    cleanup_receipt_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    cleaned: bool = False
+
+    @model_validator(mode="after")
+    def exact_observation(self) -> CheckpointStatusDatasetObservation:
+        if self.exact_version_ref.rsplit("/", 1)[0] != self.provider_ref:
+            raise ValueError("checkpoint status Dataset exact version differs")
+        if self.cleaned != (self.cleanup_receipt_sha256 is not None):
+            raise ValueError("checkpoint status Dataset cleanup proof is incomplete")
+        return self
+
+
 class CheckpointAcceptanceLaunchStatus(BaseModel):
     """Metadata-only reconciliation result; never an operational-matrix PASS."""
 
@@ -252,6 +281,7 @@ class CheckpointAcceptanceLaunchStatus(BaseModel):
     config_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     result_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     provider_output: CheckpointProviderRunOutput | None = None
+    status_input: CheckpointStatusDatasetObservation | None = None
     result: CheckpointAcceptanceOperationalResult | None = None
     blocker_code: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{2,119}$")
     failure_code: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{2,119}$")
@@ -273,6 +303,8 @@ class CheckpointAcceptanceLaunchStatus(BaseModel):
                 )
             ) or self.official_adapter_observed:
                 raise ValueError("nonterminal checkpoint status contains terminal evidence")
+            if self.status_input is not None and self.status_input.cleaned:
+                raise ValueError("running checkpoint status cannot report cleaned input")
             return self
         if self.state == "LIVE_EVIDENCE_READY":
             if (
@@ -288,6 +320,8 @@ class CheckpointAcceptanceLaunchStatus(BaseModel):
                 or self.failure_code is not None
                 or not self.official_adapter_observed
                 or self.provider_output.provider_ref != self.result.locator.evidence_notebook_ref
+                or self.status_input is None
+                or not self.status_input.cleaned
             ):
                 raise ValueError("ready checkpoint status lacks exact provider/result reconciliation")
             calculated = hashlib.sha256(
@@ -301,6 +335,11 @@ class CheckpointAcceptanceLaunchStatus(BaseModel):
                 raise ValueError("blocked checkpoint status lacks blocker code")
         elif not self.failure_code or self.blocker_code is not None:
             raise ValueError("failed checkpoint status lacks failure code")
+        ambiguous_push = (
+            self.state == "FAIL" and self.failure_code == "CHECKPOINT_PUSH_RESPONSE_AMBIGUOUS"
+        )
+        if self.status_input is not None and not self.status_input.cleaned and not ambiguous_push:
+            raise ValueError("terminal checkpoint status retains its status Dataset")
         if self.result is not None and self.result.outcome != self.state:
             raise ValueError("checkpoint terminal result outcome differs from launch state")
         return self

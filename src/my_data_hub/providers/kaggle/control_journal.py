@@ -45,6 +45,26 @@ class MetadataHttpResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class ControlPlaneAcceptanceIdentity:
+    """Launch-bound checkpoint authority, distinct from runtime epoch headers."""
+
+    request_id: UUID
+    task_run_id: UUID
+    attempt_id: UUID
+
+    def __post_init__(self) -> None:
+        if self.request_id != self.task_run_id:
+            raise ValueError("checkpoint acceptance identity must be task-bound")
+
+    def headers(self) -> dict[str, str]:
+        return {
+            "X-MDH-Acceptance-Request-ID": str(self.request_id),
+            "X-MDH-Acceptance-Task-Run-ID": str(self.task_run_id),
+            "X-MDH-Acceptance-Attempt-ID": str(self.attempt_id),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ControlPlaneRuntimeIdentity:
     run_id: UUID
     attempt_id: UUID
@@ -119,7 +139,7 @@ class AuthenticatedControlPlaneClient:
         *,
         base_url: str,
         bearer_token: str,
-        runtime_identity: ControlPlaneRuntimeIdentity,
+        runtime_identity: ControlPlaneRuntimeIdentity | ControlPlaneAcceptanceIdentity,
         timeout_seconds: float = 15.0,
         transport: MetadataHttpsTransport | None = None,
     ) -> None:

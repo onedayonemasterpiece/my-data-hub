@@ -100,3 +100,31 @@ executed by this lane. Consequently this document reports implementation and
 local verification, never `LIVE_PASS`. The deployed operator tool remains
 unavailable until all fail-closed production dependencies are supplied; FM11's
 protected pre-STOPPED context capture is the remaining internal assembly gap.
+
+## 2026-08-11 checkpoint authority closure
+
+- control migration 021 persists one FM05/FM14/FM15 owner-task launch, exact
+  request/config hashes, principal/client binding, one-time token hash, exact
+  status-Dataset claim, provider run, cleanup receipt and terminal result;
+- the provider runtime authenticates with dedicated
+  request/task/attempt headers and `acceptance:operate`, never a borrowed master
+  instance/epoch;
+- the concrete launcher uses the single control-owned Kaggle adapter, persists
+  before effects, creates a unique private disposable exact-version status
+  Dataset (`kaggle_run.json` plus fixed helper), launches the protected evidence
+  Notebook with exact numeric runtime/template/status/verifier inputs, and
+  reconciles only the exact official run/output;
+- callback/session transport no longer depends on a Kaggle User Secret root.
+  The raw one-time token exists only in the provider input Dataset and Notebook
+  environment; control stores its SHA-256. Existing Bearer/header transport and
+  redacted JSONL behavior are retained;
+- only provider-side checkpoint API access may use reviewed User Secret names,
+  with exactly one access-token name or a complete legacy username/key name
+  pair. Values never enter source, Dataset metadata, callbacks, logs or receipts;
+- terminal reconciliation deletes the status Dataset by its exact task claim and
+  persists the absence receipt. Ambiguous Notebook-push response is terminal
+  failure and is never blindly retried or unsafely cleaned;
+- operator deployment remains default-off and needs the exact protected-effects
+  acknowledgement plus a private deployment document. FM08 remains BLOCKED
+  pending real abrupt-master termination/recovery identities; no synthetic
+  lifecycle evidence was added.

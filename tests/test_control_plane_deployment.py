@@ -172,6 +172,20 @@ def test_fm08_host_supervisor_is_explicit_private_and_has_one_restart_target() -
         assert forbidden not in supervisor
 
 
+def test_acceptance_scenarios_are_owner_opt_in_and_use_provider_status_input() -> None:
+    source = installer_source()
+    assert "I_ACKNOWLEDGE_PROTECTED_ACCEPTANCE_EFFECTS" in source
+    assert "acceptance scenarios require operator install" in source
+    assert 'MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "true"' in source
+    assert "/run/mdh-acceptance/checkpoint-deployment.json:ro" in source
+    assert "acceptance:operate" in source
+    assert '"runtime_root_secret_name" in value' in source
+    assert "callback roots may not be provisioned as Kaggle User Secrets" in source
+    assert '{"KAGGLE_USERNAME", "KAGGLE_KEY"}' in source
+    assert 'MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "false"' not in source
+    assert "MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED" not in COMPOSE.read_text()
+
+
 def test_prepare_checks_bounded_disk_headroom_before_building_release_image() -> None:
     source = installer_source()
     disk_check = source.index('minimum_free_kib="${MY_DATA_HUB_CONTROL_MIN_FREE_KIB:-4194304}"')
