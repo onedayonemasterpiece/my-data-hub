@@ -262,6 +262,48 @@ def test_duplicate_ready_callback_repairs_crash_between_event_and_projection(tmp
     assert service is not None and service.endpoint == "tunnel://recovered"
 
 
+def test_checkpoint_callbacks_project_drain_stop_and_revoke_runtime_token(tmp_path: Path) -> None:
+    clock = DeterministicClock(datetime(2026, 8, 10, 18, 0, tzinfo=UTC))
+    ledger = ledger_at(tmp_path, clock)
+    coordinator = MasterCoordinator(ledger, FakeKaggleRuntime())
+    handle = coordinator.ensure_master(intent("checkpoint-lifecycle"), runtime_secret=SECRET)
+    ready = runtime_event(
+        handle,
+        RuntimeEventType.SERVICE_READY,
+        1,
+        clock.now(),
+        service_kind="postgres-master",
+        endpoint="tunnel://checkpoint",
+        protocol="postgresql+tls",
+        tls_fingerprint="sha256:" + "a" * 64,
+        capabilities=["sql"],
+        canonical_revision=1,
+        schema_version="13",
+        lease_until=(clock.now() + timedelta(minutes=5)).isoformat(),
+        master_instance_id=handle.master_instance_id,
+        epoch=handle.epoch,
+    )
+    coordinator.accept_runtime_event(ready, header_token=SECRET)
+    for sequence, event_type in enumerate(
+        (
+            RuntimeEventType.RUNTIME_DRAINING,
+            RuntimeEventType.CHECKPOINT_STARTED,
+            RuntimeEventType.CHECKPOINT_VERIFIED,
+            RuntimeEventType.RUNTIME_TERMINAL,
+        ),
+        start=2,
+    ):
+        event = runtime_event(handle, event_type, sequence, clock.now())
+        coordinator.accept_runtime_event(event, header_token=SECRET)
+    operation = ledger.get_operation(handle.operation_id)
+    assert operation is not None and operation.state == MasterState.STOPPED.value
+    row = sqlite3.connect(ledger.path).execute(
+        "SELECT state FROM services WHERE service_instance_id=?", (handle.service_instance_id,)
+    ).fetchone()
+    assert row == (MasterState.STOPPED.value,)
+    assert not ledger.runtime_token_valid(handle.run_id, handle.attempt_id, SECRET)
+
+
 def test_stale_output_never_completes_attempt() -> None:
     expected = {
         "run_id": "run-a",

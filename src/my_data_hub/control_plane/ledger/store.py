@@ -774,6 +774,60 @@ class ControlLedger:
             assert row is not None
             return self._service_from_row(row)
 
+    def project_master_lifecycle(
+        self,
+        *,
+        operation_id: str,
+        service_instance_id: str,
+        epoch: int,
+        expected_operation_state: str,
+        operation_state: str,
+        service_state: str,
+        event_id: str,
+    ) -> None:
+        """Atomically project one authenticated runtime lifecycle transition."""
+
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            operation = connection.execute(
+                "SELECT state FROM operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            service = connection.execute(
+                "SELECT state,epoch FROM services WHERE service_instance_id=?", (service_instance_id,)
+            ).fetchone()
+            if operation is None or service is None or int(service["epoch"]) != epoch:
+                raise StaleRuntimeEvent("runtime lifecycle identity is absent or fenced")
+            if operation["state"] == operation_state and service["state"] == service_state:
+                return
+            if operation["state"] != expected_operation_state:
+                raise StaleRuntimeEvent(
+                    f"runtime lifecycle expected {expected_operation_state}, found {operation['state']}"
+                )
+            connection.execute(
+                "UPDATE operations SET state=?,updated_at=? WHERE operation_id=? AND state=?",
+                (operation_state, now, operation_id, expected_operation_state),
+            )
+            connection.execute(
+                "UPDATE services SET state=?,latest_event_id=?,updated_at=? "
+                "WHERE service_instance_id=? AND epoch=?",
+                (service_state, event_id, now, service_instance_id, epoch),
+            )
+            connection.execute(
+                "UPDATE run_attempts SET state=?,updated_at=? WHERE operation_id=? AND epoch=?",
+                (operation_state, now, operation_id, epoch),
+            )
+            connection.execute(
+                "INSERT INTO operation_log(operation_id,from_state,to_state,recorded_at,metadata_json) "
+                "VALUES (?,?,?,?,?)",
+                (
+                    operation_id,
+                    expected_operation_state,
+                    operation_state,
+                    now,
+                    _safe_json({"event_id": event_id}),
+                ),
+            )
+
     def renew_service(self, service_instance_id: str, epoch: int, lease_until: datetime, event_id: str) -> None:
         now = self.clock.now()
         if lease_until <= now:

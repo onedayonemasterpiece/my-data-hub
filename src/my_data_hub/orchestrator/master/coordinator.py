@@ -136,7 +136,15 @@ class MasterCoordinator:
         if receipt.disposition in {EventDisposition.COALESCED, EventDisposition.FENCED}:
             return receipt
         event = RuntimeEvent.model_validate_json(raw_body)
-        if receipt.disposition == EventDisposition.DUPLICATE and event.event_type != RuntimeEventType.SERVICE_READY:
+        projected_events = {
+            RuntimeEventType.SERVICE_READY,
+            RuntimeEventType.RUNTIME_DRAINING,
+            RuntimeEventType.CHECKPOINT_STARTED,
+            RuntimeEventType.CHECKPOINT_VERIFIED,
+            RuntimeEventType.CHECKPOINT_FAILED,
+            RuntimeEventType.RUNTIME_TERMINAL,
+        }
+        if receipt.disposition == EventDisposition.DUPLICATE and event.event_type not in projected_events:
             return receipt
         operation = self._operation_for_attempt(event.run_id, event.attempt_id)
         if event.event_type == RuntimeEventType.SERVICE_READY:
@@ -186,6 +194,57 @@ class MasterCoordinator:
                     self._parse_time(str(lease_until_raw)),
                     event.event_id,
                 )
+        elif event.event_type == RuntimeEventType.RUNTIME_DRAINING:
+            self.ledger.project_master_lifecycle(
+                operation_id=operation.operation_id,
+                service_instance_id=event.service_instance_id,
+                epoch=event.epoch,
+                expected_operation_state=MasterState.ACTIVE.value,
+                operation_state=MasterState.DRAINING.value,
+                service_state=MasterState.DRAINING.value,
+                event_id=event.event_id,
+            )
+        elif event.event_type == RuntimeEventType.CHECKPOINT_STARTED:
+            self.ledger.project_master_lifecycle(
+                operation_id=operation.operation_id,
+                service_instance_id=event.service_instance_id,
+                epoch=event.epoch,
+                expected_operation_state=MasterState.DRAINING.value,
+                operation_state=MasterState.CHECKPOINTING.value,
+                service_state=MasterState.DRAINING.value,
+                event_id=event.event_id,
+            )
+        elif event.event_type == RuntimeEventType.CHECKPOINT_VERIFIED:
+            self.ledger.project_master_lifecycle(
+                operation_id=operation.operation_id,
+                service_instance_id=event.service_instance_id,
+                epoch=event.epoch,
+                expected_operation_state=MasterState.CHECKPOINTING.value,
+                operation_state=MasterState.STOPPED.value,
+                service_state=MasterState.DRAINING.value,
+                event_id=event.event_id,
+            )
+        elif event.event_type == RuntimeEventType.CHECKPOINT_FAILED:
+            self.ledger.project_master_lifecycle(
+                operation_id=operation.operation_id,
+                service_instance_id=event.service_instance_id,
+                epoch=event.epoch,
+                expected_operation_state=MasterState.CHECKPOINTING.value,
+                operation_state=MasterState.CHECKPOINT_FAILED.value,
+                service_state=MasterState.DRAINING.value,
+                event_id=event.event_id,
+            )
+        elif event.event_type == RuntimeEventType.RUNTIME_TERMINAL:
+            self.ledger.project_master_lifecycle(
+                operation_id=operation.operation_id,
+                service_instance_id=event.service_instance_id,
+                epoch=event.epoch,
+                expected_operation_state=MasterState.STOPPED.value,
+                operation_state=MasterState.STOPPED.value,
+                service_state=MasterState.STOPPED.value,
+                event_id=event.event_id,
+            )
+            self.ledger.revoke_runtime_token(event.run_id, event.attempt_id)
         return receipt
 
     def _apply_effect(
