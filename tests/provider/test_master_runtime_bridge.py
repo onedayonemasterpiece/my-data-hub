@@ -107,7 +107,7 @@ def test_concrete_bridge_launches_dataset_notebook_and_run_once(tmp_path: Path) 
         notebook_ref="owner/postgres-master",
         dataset_files={"config.json": b'{"run":"{{MY_DATA_HUB_RUN_ID}}"}', "checkpoint-verifier.ipynb": b"{}"},
         notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
-        callback_url="https://control.example/internal/runtime/events",
+        callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
         runtime_token_secret_name="master-runtime-root",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
@@ -136,6 +136,8 @@ def test_concrete_bridge_launches_dataset_notebook_and_run_once(tmp_path: Path) 
     assert adapter.last_notebook_kwargs["timeout_seconds"] == KAGGLE_PROVIDER_TIMEOUT_SECONDS
     with pytest.raises(MasterLaunchContractError, match="reserve"):
         replace(launch, notebook_timeout_seconds=KAGGLE_HARD_CAP_SECONDS)
+    with pytest.raises(MasterLaunchContractError, match="owner-pinned"):
+        replace(launch, callback_url="https://attacker.example/internal/runtime/events")
 
 
 def _launch() -> KaggleMasterLaunchAssets:
@@ -147,7 +149,7 @@ def _launch() -> KaggleMasterLaunchAssets:
         notebook_ref="owner/postgres-master",
         dataset_files={"checkpoint-verifier.ipynb": b"{}"},
         notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
-        callback_url="https://control.example/internal/runtime/events",
+        callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
         runtime_token_secret_name="master-runtime-root",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",

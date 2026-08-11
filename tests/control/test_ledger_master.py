@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -104,6 +105,20 @@ def test_sqlite_pragmas_permissions_and_append_only_logs(tmp_path: Path) -> None
         connection.execute("UPDATE operation_log SET to_state='BROKEN'")
     connection.close()
     assert ledger.get_operation(operation.operation_id) is not None
+
+
+def test_mode_tightening_tolerates_a_wal_unlinked_during_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ledger = ledger_at(tmp_path)
+    real_open = os.open
+
+    def racy_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if str(path).endswith("-wal"):
+            raise FileNotFoundError(str(path))
+        return real_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "open", racy_open)
+    ledger._tighten_file_modes()
+    assert ledger.path.stat().st_mode & 0o777 == 0o600
 
 
 def test_packaged_and_repository_control_migrations_are_identical() -> None:
@@ -455,7 +470,7 @@ def test_lost_terminal_response_replays_exact_duplicate_and_empties_spool(tmp_pa
         prior_spool.append_event(payload)
         prior_spool.acknowledge(str(payload["event_id"]), clock.now().isoformat())
     client = RuntimeClient(
-        callback_url="https://control.example/internal/runtime/events",
+        callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
         run_secret=SECRET,
         run_id=handle.run_id,
         attempt_id=handle.attempt_id,

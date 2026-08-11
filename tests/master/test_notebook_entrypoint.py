@@ -116,9 +116,7 @@ def test_runtime_deadlines_are_fixed_at_process_entry_and_charge_boot_time(tmp_p
     active_deadline, session_deadline = _runtime_deadlines(config, 100.0)
     assert active_deadline == 10_840.0
     assert session_deadline == 21_700.0
-    assert session_deadline - active_deadline == (
-        MIN_CHECKPOINT_RESERVE_SECONDS + CHECKPOINT_TRANSITION_GUARD_SECONDS
-    )
+    assert session_deadline - active_deadline == (MIN_CHECKPOINT_RESERVE_SECONDS + CHECKPOINT_TRANSITION_GUARD_SECONDS)
     # A 600-second bootstrap reduces the active window; it cannot reset either deadline.
     boot_completed_at = 700.0
     assert active_deadline - boot_completed_at == 10_140.0
@@ -144,11 +142,13 @@ def test_long_boot_refuses_ready_before_control_or_local_write_activation() -> N
 
 def test_activation_url_is_https_and_exact() -> None:
     assert (
-        _activation_url("https://control.example/internal/runtime/events", "run-1", "attempt-1")
-        == "https://control.example/internal/runtime/activation/run-1/attempt-1"
+        _activation_url("https://mcp-datahub.kenigevents.ru/internal/runtime/events", "run-1", "attempt-1")
+        == "https://mcp-datahub.kenigevents.ru/internal/runtime/activation/run-1/attempt-1"
     )
-    with pytest.raises(ValueError, match="exact HTTPS"):
+    with pytest.raises(ValueError, match="owner-pinned"):
         _activation_url("http://control.example/internal/runtime/events", "run", "attempt")
+    with pytest.raises(ValueError, match="owner-pinned"):
+        _activation_url("https://attacker.example/internal/runtime/events", "run", "attempt")
 
 
 def test_reader_credential_handoff_is_epoch_bound_tls_and_not_returned(
@@ -213,14 +213,14 @@ def test_reader_credential_handoff_is_epoch_bound_tls_and_not_returned(
         connection=object(),
         gate=object(),  # type: ignore[arg-type]
         config=config,
-        callback_url="https://control.example/internal/runtime/events",
+        callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
         run_secret="runtime-secret-long-enough",
         expires_at=now + timedelta(minutes=3),
         now=now,
     )
     assert principal.startswith("mdh_e7_reader_") and expiry == now + timedelta(minutes=3)
     assert captured["url"] == _credential_registration_url(
-        "https://control.example/internal/runtime/events", "run-1", "attempt-1"
+        "https://mcp-datahub.kenigevents.ru/internal/runtime/events", "run-1", "attempt-1"
     )
     assert captured["authorization"] == "Bearer runtime-secret-long-enough"
     body = captured["body"]
@@ -412,12 +412,15 @@ def test_durable_promotion_writes_exact_terminal_recovery_before_ack_failure(tmp
     assert output_path.stat().st_size <= 256 * 1024
     raw_output = output_path.read_bytes()
     body = json.loads(raw_output)
-    assert raw_output == json.dumps(
-        body,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
+    assert (
+        raw_output
+        == json.dumps(
+            body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
     assert set(body) == {
         "schema_version",
         "run_id",
@@ -453,9 +456,7 @@ def test_durable_promotion_writes_exact_terminal_recovery_before_ack_failure(tmp
         assert event["source_version"] == body["source_version"]
         assert event["epoch"] == body["epoch"]
     assert body["events"][2]["data"] == body["checkpoint"]
-    assert body["events"][3]["data"] == {
-        "checkpoint_id": body["checkpoint"]["current_checkpoint_id"]
-    }
+    assert body["events"][3]["data"] == {"checkpoint_id": body["checkpoint"]["current_checkpoint_id"]}
     encoded = output_path.read_bytes().lower()
     assert b"postgresql://" not in encoded and b"secret" not in encoded and b"token" not in encoded
     assert "tunnel.stop" not in events and "postgres.stop" not in events
@@ -564,7 +565,7 @@ def test_persistent_terminal_callback_outage_keeps_spool_and_exits_cleanly_for_o
             raise ConnectionError("persistent callback outage")
 
     runtime = RuntimeClient(
-        callback_url="https://control.example/internal/runtime/events",
+        callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
         run_secret="terminal-outage-secret-long-enough",
         run_id="run-1",
         attempt_id="attempt-1",
@@ -656,7 +657,7 @@ def test_run_master_suppresses_only_callback_lease_closure_after_exact_terminal_
     working.mkdir(parents=True)
     monkeypatch.setenv("KAGGLE_WORKING_DIR", str(working))
     for name, value in {
-        "MY_DATA_HUB_CALLBACK_URL": "https://control.example/internal/runtime/events",
+        "MY_DATA_HUB_CALLBACK_URL": "https://mcp-datahub.kenigevents.ru/internal/runtime/events",
         "MY_DATA_HUB_RUN_SECRET": "run-secret-long-enough",
         "MY_DATA_HUB_POSTGRES_TLS_CERT": str(tmp_path / "tls.crt"),
         "MY_DATA_HUB_POSTGRES_TLS_KEY": str(tmp_path / "tls.key"),

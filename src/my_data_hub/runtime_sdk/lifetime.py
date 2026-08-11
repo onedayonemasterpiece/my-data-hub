@@ -6,6 +6,7 @@ budget leaves another reserve for pre-entry provider startup variance.
 """
 
 KAGGLE_HARD_CAP_SECONDS = 43_200
+CANONICAL_RUNTIME_CALLBACK_URL = "https://mcp-datahub.kenigevents.ru/internal/runtime/events"
 PROVIDER_HARD_CUTOFF_RESERVE_SECONDS = 900
 KAGGLE_PROVIDER_TIMEOUT_SECONDS = KAGGLE_HARD_CAP_SECONDS - PROVIDER_HARD_CUTOFF_RESERVE_SECONDS
 MIN_PROCESS_EXIT_RESERVE_SECONDS = 900

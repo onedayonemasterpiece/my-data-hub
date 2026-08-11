@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import sqlite3
+import stat
 import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -119,8 +120,21 @@ class ControlLedger:
         with self._permission_lock:
             for suffix in ("", "-wal", "-shm"):
                 candidate = Path(f"{self.path}{suffix}")
-                if candidate.exists():
-                    os.chmod(candidate, 0o600)
+                flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                try:
+                    descriptor = os.open(candidate, flags)
+                except FileNotFoundError:
+                    # SQLite may unlink WAL/SHM while a connection is closing.
+                    # Absence is safe; each connection tightens new sidecars.
+                    continue
+                except OSError as exc:
+                    raise ValueError("control ledger files must be regular non-symlinks") from exc
+                try:
+                    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                        raise ValueError("control ledger files must be regular non-symlinks")
+                    os.fchmod(descriptor, 0o600)
+                finally:
+                    os.close(descriptor)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(

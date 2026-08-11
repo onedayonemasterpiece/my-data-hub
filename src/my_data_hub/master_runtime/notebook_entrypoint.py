@@ -25,6 +25,7 @@ from my_data_hub.checkpoints import load_and_verify, restore_physical_archive
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.db.migrations import migrate
 from my_data_hub.runtime_sdk import (
+    CANONICAL_RUNTIME_CALLBACK_URL,
     CHECKPOINT_ATTEMPT_BUDGET_SECONDS,
     CHECKPOINT_TRANSITION_GUARD_SECONDS,
     KAGGLE_PROVIDER_TIMEOUT_SECONDS,
@@ -416,15 +417,15 @@ def _local_url(paths: MasterPaths, port: int) -> str:
 
 def _activation_url(callback_url: str, run_id: str, attempt_id: str) -> str:
     suffix = "/internal/runtime/events"
-    if not callback_url.startswith("https://") or not callback_url.endswith(suffix):
-        raise ValueError("callback URL does not match the exact HTTPS runtime endpoint")
+    if callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
+        raise ValueError("callback URL does not match the owner-pinned HTTPS runtime endpoint")
     return f"{callback_url.removesuffix(suffix)}/internal/runtime/activation/{run_id}/{attempt_id}"
 
 
 def _blogger_migration_url(callback_url: str, run_id: str, attempt_id: str, suffix: str = "") -> str:
     events_suffix = "/internal/runtime/events"
-    if not callback_url.startswith("https://") or not callback_url.endswith(events_suffix):
-        raise ValueError("callback URL does not match the exact HTTPS runtime endpoint")
+    if callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
+        raise ValueError("callback URL does not match the owner-pinned HTTPS runtime endpoint")
     base = callback_url.removesuffix(events_suffix)
     return f"{base}/internal/runtime/blogger-migration/{run_id}/{attempt_id}{suffix}"
 
@@ -480,8 +481,8 @@ def _post_blogger_runtime_receipt(
 
 def _credential_registration_url(callback_url: str, run_id: str, attempt_id: str) -> str:
     suffix = "/internal/runtime/events"
-    if not callback_url.startswith("https://") or not callback_url.endswith(suffix):
-        raise ValueError("callback URL does not match the exact HTTPS runtime endpoint")
+    if callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
+        raise ValueError("callback URL does not match the owner-pinned HTTPS runtime endpoint")
     return f"{callback_url.removesuffix(suffix)}/internal/runtime/session-credentials/{run_id}/{attempt_id}"
 
 
@@ -610,6 +611,8 @@ def run_master(
     now = datetime.now(UTC)
     lease_until = now + timedelta(seconds=config.lease_seconds)
     callback_url = _required("MY_DATA_HUB_CALLBACK_URL")
+    if callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
+        raise RuntimeError("runtime callback URL does not match the owner-pinned audience")
     run_secret = _required("MY_DATA_HUB_RUN_SECRET")
     runtime = RuntimeClient(
         callback_url=callback_url,

@@ -41,7 +41,7 @@ def _runtime(ledger: ControlLedger) -> ControlPlaneMasterRuntime:
         notebook_ref="owner/master",
         dataset_files={"launch.txt": b"exact", "checkpoint-verifier.ipynb": b"{}"},
         notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
-        callback_url="https://control.example/internal/runtime/events",
+        callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
         runtime_token_secret_name="MDH_RUNTIME_ROOT",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",

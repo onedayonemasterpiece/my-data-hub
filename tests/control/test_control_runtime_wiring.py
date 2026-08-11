@@ -56,7 +56,7 @@ def assets() -> KaggleMasterLaunchAssets:
         notebook_ref="owner/postgres-master",
         dataset_files={"launch.txt": b"exact", "checkpoint-verifier.ipynb": b"{}"},
         notebook_source=b'{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}',
-        callback_url="https://control.example/internal/runtime/events",
+        callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
         runtime_token_secret_name="MY_DATA_HUB_MASTER_RUNTIME_TOKEN_ROOT",
         checkpoint_verifier_ref="owner/checkpoint-verifier",
         checkpoint_verifier_source_file="checkpoint-verifier.ipynb",

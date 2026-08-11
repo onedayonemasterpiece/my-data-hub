@@ -30,13 +30,11 @@ from my_data_hub.providers.kaggle import (
 )
 from my_data_hub.providers.kaggle.contracts import KaggleDatasetIdentity
 from my_data_hub.providers.models import ProviderFingerprint
+from my_data_hub.runtime_sdk import CANONICAL_RUNTIME_CALLBACK_URL
 
 
 class MasterProviderUnavailable(RuntimeError):
     """The control plane is healthy but no authenticated provider is available."""
-
-
-CANONICAL_RUNTIME_CALLBACK_URL = "https://mcp-datahub.kenigevents.ru/internal/runtime/events"
 
 
 @dataclass(slots=True)

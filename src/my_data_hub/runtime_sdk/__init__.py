@@ -3,6 +3,7 @@
 from .client import DeliveryReceipt, RetryPolicy, RuntimeClient
 from .events import ArtifactRef, RuntimeEvent, RuntimeEventType
 from .lifetime import (
+    CANONICAL_RUNTIME_CALLBACK_URL,
     CHECKPOINT_ARCHIVE_COMMAND_COUNT,
     CHECKPOINT_ARCHIVE_COMMAND_TIMEOUT_SECONDS,
     CHECKPOINT_ATTEMPT_BUDGET_SECONDS,
@@ -20,6 +21,7 @@ from .spool import JsonlEventSpool
 from .transport import CallbackTransport, TransportResponse, UrllibCallbackTransport
 
 __all__ = [
+    "CANONICAL_RUNTIME_CALLBACK_URL",
     "CHECKPOINT_ARCHIVE_COMMAND_COUNT",
     "CHECKPOINT_ARCHIVE_COMMAND_TIMEOUT_SECONDS",
     "CHECKPOINT_ATTEMPT_BUDGET_SECONDS",

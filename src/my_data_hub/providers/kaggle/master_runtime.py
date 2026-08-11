@@ -30,7 +30,7 @@ from my_data_hub.orchestrator.master.provider import (
     ReconciliationStatus,
 )
 from my_data_hub.providers.models import ControlClass
-from my_data_hub.runtime_sdk import KAGGLE_PROVIDER_TIMEOUT_SECONDS
+from my_data_hub.runtime_sdk import CANONICAL_RUNTIME_CALLBACK_URL, KAGGLE_PROVIDER_TIMEOUT_SECONDS
 
 from .adapter import KaggleProviderAdapter
 from .contracts import (
@@ -90,8 +90,8 @@ class KaggleMasterLaunchAssets:
             raise MasterLaunchContractError("source/checkpoint identity must be exact")
         if not self.dataset_files or not self.notebook_source:
             raise MasterLaunchContractError("master launch assets must be non-empty")
-        if not self.callback_url.startswith("https://") or not self.callback_url.endswith("/internal/runtime/events"):
-            raise MasterLaunchContractError("callback URL must be the exact HTTPS runtime endpoint")
+        if self.callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
+            raise MasterLaunchContractError("callback URL must be the owner-pinned HTTPS runtime endpoint")
         if not self.runtime_token_secret_name or len(self.runtime_token_secret_name) > 200:
             raise MasterLaunchContractError("runtime token secret name is invalid")
         if (
