@@ -125,8 +125,10 @@ independently downloaded and cleaned by the normal two-phase protocol.
 
 After the exact v1 quarantine and duplicate-review projections are durably
 reconciled, FM16 may return `FM16_AWAITING_OWNER_AUTHORIZATION` as BLOCKED/0 for
-the *current* invocation. The matrix stops before dependent scenarios. A later
-run recognizes only that exact blocker, reuses the existing launch fence and
+the *current* invocation. The matrix writes a distinct append-only
+`.owner-pause.json` fence and stops before dependent scenarios; it does not
+write or later overwrite the final scenario receipt. A later run validates
+that exact pause fence, reuses the existing launch fence and
 same state/task, and supplies the owner-created mode-0600 envelope. It never
 creates a synthetic decision. Any other capability loss or ambiguous response
 after a persisted action phase is FAIL with nonzero mutation accounting, not

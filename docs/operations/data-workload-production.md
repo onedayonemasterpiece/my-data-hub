@@ -111,8 +111,10 @@ independent outer output reconciliation and exact claim cleanup.
 At the owner authorization boundary the CLI is invoked without an absent
 optional envelope so it can safely reach and persist the quarantine/review
 pause. The matrix records only the exact resumable
-`FM16_AWAITING_OWNER_AUTHORIZATION` blocker, stops before FM17, and on the next
-run reuses the same matrix launch and state. The envelope is admitted only when
+`FM16_AWAITING_OWNER_AUTHORIZATION` blocker in an append-only owner-pause fence,
+stops before FM17, and on the next run reuses the same matrix launch and state.
+The final scenario receipt is a separate file and never overwrites that pause
+receipt. The envelope is admitted only when
 the file exists and the production loader verifies owner UID, non-symlink
 regular type, exact mode 0600, size, schema, and persisted review bindings.
 There is no generated or default duplicate decision.

@@ -566,6 +566,9 @@ def test_fm16_owner_pause_resumes_same_launch_and_stops_dependents_until_authori
     assert run_operational_matrix(**kwargs) == EXTERNAL_BLOCKED  # type: ignore[arg-type]
     assert len(fm16_requests) == 1
     assert fm16_requests[0]["resume_only"] is False
+    assert not (tmp_path / "scenarios/16-full-ydb-blogger-import-checkpoint.json").exists()
+    pause_path = tmp_path / "scenarios/16-full-ydb-blogger-import-checkpoint.owner-pause.json"
+    assert json.loads(pause_path.read_text())["blocker"]["code"] == "FM16_AWAITING_OWNER_AUTHORIZATION"
     assert not (tmp_path / "scenarios/17-post-import-cold-restore-equality.json").exists()
 
     assert run_operational_matrix(**kwargs) == EXTERNAL_BLOCKED  # type: ignore[arg-type]
@@ -573,6 +576,7 @@ def test_fm16_owner_pause_resumes_same_launch_and_stops_dependents_until_authori
     assert fm16_requests[1]["resume_only"] is True
     fm16 = json.loads((tmp_path / "scenarios/16-full-ydb-blogger-import-checkpoint.json").read_text())
     assert fm16["blocker"]["code"] == "FM16_OWNER_ENVELOPE_STILL_REQUIRED"
+    assert json.loads(pause_path.read_text())["blocker"]["code"] == "FM16_AWAITING_OWNER_AUTHORIZATION"
 
 
 @pytest.mark.parametrize(

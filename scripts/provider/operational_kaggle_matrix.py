@@ -885,6 +885,7 @@ def run_operational_matrix(
     receipts: list[dict[str, Any]] = []
     for row in plan["scenarios"]:
         scenario_path = _scenario_path(scenario_directory, row)
+        owner_pause_path = scenario_path.with_suffix(".owner-pause.json")
         if scenario_path.is_file():
             existing = json.loads(scenario_path.read_bytes())
             if (
@@ -905,6 +906,21 @@ def run_operational_matrix(
             if not resumable_owner_pause:
                 receipts.append(existing)
                 continue
+        if owner_pause_path.exists():
+            owner_pause = json.loads(owner_pause_path.read_bytes())
+            blocker = owner_pause.get("blocker")
+            if (
+                owner_pause.get("schema_version") != SCENARIO_SCHEMA
+                or owner_pause.get("matrix_id") != plan["matrix_id"]
+                or owner_pause.get("commit_sha") != plan["commit_sha"]
+                or owner_pause.get("planned_task_run_id") != row["planned_task_run_id"]
+                or row["requirement_id"] != "FM16"
+                or owner_pause.get("outcome") != "BLOCKED"
+                or not isinstance(blocker, Mapping)
+                or blocker.get("code") != RESUMABLE_OWNER_BLOCKER
+                or owner_pause.get("driver_mutations_started") != 0
+            ):
+                raise RuntimeError("durable FM16 owner-pause fence differs from the plan")
         launch_path = scenario_path.with_suffix(".launch.json")
         reconciliation_path = scenario_path.with_suffix(".reconciled.json")
         reconciliation_loaded = reconciliation_path.exists()
@@ -1075,8 +1091,6 @@ def run_operational_matrix(
                     }
                 )
             ).hexdigest()
-        _atomic_write(scenario_path, receipt)
-        receipts.append(receipt)
         blocker = receipt.get("blocker")
         if (
             row["requirement_id"] == "FM16"
@@ -1086,8 +1100,15 @@ def run_operational_matrix(
         ):
             # Do not launch dependent FM17--FM21 rows until the exact same
             # FM16 task/state resumes with an owner-provided mode-0600 envelope.
+            # The pause fence is append-only; it is never overwritten by the
+            # later final scenario receipt.
+            if not owner_pause_path.exists():
+                _atomic_write(owner_pause_path, receipt)
+            receipts.append(receipt)
             _atomic_write(receipt_path, _summary(plan, receipts))
             return EXTERNAL_BLOCKED
+        _atomic_write(scenario_path, receipt)
+        receipts.append(receipt)
     summary = _summary(plan, receipts)
     _atomic_write(receipt_path, summary)
     return PASS if summary["outcome"] == "PASS" else (FAIL if summary["outcome"] == "FAIL" else EXTERNAL_BLOCKED)
