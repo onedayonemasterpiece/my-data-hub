@@ -28,6 +28,7 @@ from .ydb_reader import YdbBloggerSnapshot
 EXPECTED_BLOGGER_ROWS = 266
 BLOGGER_STAGE_SCHEMA = "my-data-hub-blogger-migration-request.v1"
 BLOGGER_IMPORT_RECEIPT_SCHEMA = "region-talk-ydb-bloggers-import-receipt.v2"
+BLOGGER_IMPORT_RECEIPT_SCHEMA_V3 = "region-talk-ydb-bloggers-import-receipt.v3"
 MAX_REQUEST_BYTES = 16 * 1024
 MAX_RECEIPT_BYTES = 64 * 1024
 
@@ -62,7 +63,10 @@ class BloggerImportStageReceipt(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["region-talk-ydb-bloggers-import-receipt.v2"] = BLOGGER_IMPORT_RECEIPT_SCHEMA
+    schema_version: Literal[
+        "region-talk-ydb-bloggers-import-receipt.v2",
+        "region-talk-ydb-bloggers-import-receipt.v3",
+    ] = BLOGGER_IMPORT_RECEIPT_SCHEMA
     request_id: UUID
     operation_id: UUID
     master_instance_id: UUID
@@ -103,6 +107,12 @@ class BloggerImportStageReceipt(BaseModel):
             raise ValueError("blogger actor accounting exceeds source rows")
         if self.duplicate_group_count == 0 and deduplicated:
             raise ValueError("deduplicated rows require durable duplicate groups")
+        if self.schema_version == BLOGGER_IMPORT_RECEIPT_SCHEMA and (
+            self.actor_count != EXPECTED_BLOGGER_ROWS
+            or self.duplicate_group_count != 0
+            or deduplicated != 0
+        ):
+            raise ValueError("v2 blogger receipt cannot describe duplicate resolution")
         return self
 
     @property
@@ -137,6 +147,11 @@ def _to_receipt(
     export = imported.export
     quarantined = export.dispositions.get("quarantined", 0)
     return BloggerImportStageReceipt(
+        schema_version=(
+            BLOGGER_IMPORT_RECEIPT_SCHEMA_V3
+            if imported.duplicate_group_count or imported.actor_count != EXPECTED_BLOGGER_ROWS
+            else BLOGGER_IMPORT_RECEIPT_SCHEMA
+        ),
         request_id=context.request.request_id,
         operation_id=context.request.operation_id,
         master_instance_id=context.identity.master_instance_id,

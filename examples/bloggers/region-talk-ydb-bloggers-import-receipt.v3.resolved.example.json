@@ -1,5 +1,5 @@
 {
-  "schema_version": "region-talk-ydb-bloggers-import-receipt.v2",
+  "schema_version": "region-talk-ydb-bloggers-import-receipt.v3",
   "request_id": "11111111-1111-4111-8111-111111111111",
   "operation_id": "22222222-2222-4222-8222-222222222222",
   "master_instance_id": "33333333-3333-4333-8333-333333333333",
@@ -11,7 +11,13 @@
   "row_count": 266,
   "distinct_record_ids": 266,
   "source_file_count": 14,
-  "dispositions": {"normalized": 265, "deduplicated": 1, "intentionally_excluded": 0, "retained_raw": 0, "quarantined": 0},
+  "dispositions": {
+    "normalized": 265,
+    "deduplicated": 1,
+    "intentionally_excluded": 0,
+    "retained_raw": 0,
+    "quarantined": 0
+  },
   "record_id_set_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "logical_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   "canonical_outcome_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",

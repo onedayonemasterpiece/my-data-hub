@@ -47,8 +47,11 @@ accompanied by business rows.
 The devstand stores request, run, count, hash, revision and checkpoint identities
 only. It never receives blogger rows, YDB credentials, a PostgreSQL DSN, PGDATA,
 or checkpoint bytes. Receipts are canonical JSON, bounded to 256 KiB, and mode
-0600. Schemas are `schemas/region-talk-ydb-bloggers-import-receipt.v2.schema.json`
-and `schemas/blogger-closure-receipt.v1.schema.json`.
+0600. Unresolved-free imports without duplicate decisions retain the compatible
+v2/v1 receipt pair. A resolved duplicate replay uses the append-only
+`schemas/region-talk-ydb-bloggers-import-receipt.v3.schema.json` and
+`schemas/blogger-closure-receipt.v2.schema.json` pair; the earlier schemas are
+unchanged.
 
 ## Duplicate quarantine and replay
 

@@ -106,6 +106,7 @@ def test_existing_account_owner_must_be_selected_without_implicit_merge() -> Non
 
 def test_resolved_receipt_allows_fewer_actors_and_nonzero_durable_groups() -> None:
     receipt = BloggerImportStageReceipt(
+        schema_version="region-talk-ydb-bloggers-import-receipt.v3",
         request_id=UUID("11111111-1111-4111-8111-111111111111"),
         operation_id=UUID("22222222-2222-4222-8222-222222222222"),
         master_instance_id=UUID("33333333-3333-4333-8333-333333333333"),
@@ -144,8 +145,8 @@ def test_duplicate_resolution_and_resolved_receipt_examples_validate() -> None:
             "examples/bloggers/region-talk-blogger-duplicate-resolution-set.v1.example.json",
         ),
         (
-            "schemas/region-talk-ydb-bloggers-import-receipt.v2.schema.json",
-            "examples/bloggers/region-talk-ydb-bloggers-import-receipt.v2.resolved.example.json",
+            "schemas/region-talk-ydb-bloggers-import-receipt.v3.schema.json",
+            "examples/bloggers/region-talk-ydb-bloggers-import-receipt.v3.resolved.example.json",
         ),
     )
     for schema_path, example_path in pairs:

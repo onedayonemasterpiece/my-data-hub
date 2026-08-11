@@ -30,6 +30,7 @@ from .master_stage import (
 
 EXTERNAL_BLOCKED = 78
 FINAL_RECEIPT_SCHEMA = "my-data-hub-blogger-closure.v1"
+FINAL_RECEIPT_SCHEMA_V2 = "my-data-hub-blogger-closure.v2"
 FINAL_RECEIPT_MAX_BYTES = 256 * 1024
 LOCAL_CONTROL_URL = "http://127.0.0.1:8080"
 CANONICAL_MCP_URL = "https://mcp-datahub.kenigevents.ru/mcp"
@@ -392,7 +393,11 @@ def run_blogger_closure(
     projection = _require_public_projection(mcp, imported.actor_count)
     receipt_id = uuid5(_CLOSURE_NAMESPACE, f"receipt:{request_id}")
     receipt: dict[str, Any] = {
-        "schema_version": FINAL_RECEIPT_SCHEMA,
+        "schema_version": (
+            FINAL_RECEIPT_SCHEMA_V2
+            if imported.schema_version == "region-talk-ydb-bloggers-import-receipt.v3"
+            else FINAL_RECEIPT_SCHEMA
+        ),
         "receipt_id": str(receipt_id),
         "status": "DURABLE_COMPLETE",
         "started_at": started_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
