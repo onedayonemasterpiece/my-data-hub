@@ -857,6 +857,27 @@ class ProductionControlHostEffects:
             raise ProductionAcceptanceBlocked("FM11_REPLACEMENT_NOT_ACTIVE")
         if self.old_epoch_denials is None:
             raise ProductionAcceptanceBlocked("FM11_OLD_EPOCH_PROBE_UNAVAILABLE")
+        bind_replacement = getattr(self.old_epoch_denials, "bind_replacement", None)
+        if callable(bind_replacement):
+            # Imported lazily because the concrete probe depends on this module's
+            # public evidence models.  The exact old context already existed
+            # before STOPPED; only the now-current replacement is attached here.
+            from .old_epoch_denial import ReplacementEpochContext
+
+            bind_replacement(
+                ReplacementEpochContext(
+                    task_id=command.task_id,
+                    operation_id=UUID(replacement.operation_id),
+                    master_instance_id=UUID(str(replacement.master_instance_id)),
+                    epoch=replacement.epoch,
+                    active=True,
+                    checkpoint_id=UUID(str(checkpoint["checkpoint_id"])),
+                    exact_version_ref=str(checkpoint["version_ref"]),
+                    manifest_sha256=str(checkpoint["manifest_sha256"]),
+                    checkpoint_status="VERIFIED",
+                    checkpoint_is_current=True,
+                )
+            )
         denial = self.old_epoch_denials.prove_old_epoch_denials(command.binding)
         return OldEpochEvidence(
             kind="OLD_EPOCH_RETURN_DENIAL",

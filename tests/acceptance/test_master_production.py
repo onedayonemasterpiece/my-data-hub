@@ -401,7 +401,13 @@ class RotationLedger(CleanLedger):
 
 
 class OldDenialProbe:
+    replacement = None
+
+    def bind_replacement(self, replacement) -> None:
+        self.replacement = replacement
+
     def prove_old_epoch_denials(self, _binding) -> OldEpochDenials:
+        assert self.replacement is not None
         return OldEpochDenials(True, True, True, True, "1" * 64, "2" * 64)
 
 
@@ -412,16 +418,19 @@ def test_fm11_waits_for_old_stopped_checkpoint_then_activates_new_epoch() -> Non
         state=MasterState.ACTIVE,
         epoch=command.binding.epoch + 1,
         operation_id=str(UUID(int=12)),
+        master_instance_id=str(UUID(int=13)),
     )
     runtime = SimpleNamespace(ledger=ledger, ensure=lambda _key: (replacement, False))
+    denial_probe = OldDenialProbe()
     evidence = ProductionControlHostEffects(
-        runtime=runtime, old_epoch_denials=OldDenialProbe()  # type: ignore[arg-type]
+        runtime=runtime, old_epoch_denials=denial_probe  # type: ignore[arg-type]
     ).execute(command)
     assert evidence.old_runtime_draining_before_rotation
     assert evidence.new_epoch == command.binding.epoch + 1
     assert evidence.new_operation_id == UUID(int=12)
     assert evidence.renew_denied and evidence.register_denied
     assert evidence.bounded_write_denied and evidence.tunnel_denied
+    assert denial_probe.replacement.master_instance_id == UUID(int=13)
 
 
 class SoakSessions:
