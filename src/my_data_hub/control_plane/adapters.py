@@ -16,6 +16,7 @@ from my_data_hub.auth.control import (
     OAuthClientRecord,
     OAuthRevocationQuery,
 )
+from my_data_hub.control_plane.acceptance_evidence import AcceptanceEvidenceController
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.contracts import (
@@ -93,8 +94,16 @@ class LedgerWriteGate(WriteGate):
         if master.canonical_revision is None:
             raise PermissionError("operator writes require an observed canonical revision")
         checkpoint = self._verified_checkpoint(master.canonical_revision)
-        if tool.startswith("provider.resources."):
-            resource_class = str(arguments.get("control_class", ""))
+        if tool.startswith("provider.resources.") or tool in {
+            "provider.acceptance.dataset.lifecycle",
+            "provider.acceptance.notebook.lifecycle",
+            "provider.acceptance.claim.cleanup",
+        }:
+            resource_class = (
+                "mcp_managed"
+                if tool.startswith("provider.acceptance.")
+                else str(arguments.get("control_class", ""))
+            )
             if resource_class not in {"mcp_managed", "mcp_exchange"}:
                 raise PermissionError("provider resource class is not MCP-controlled")
             return WritePermit(
@@ -557,6 +566,7 @@ class KaggleMCPProviderGateway:
             "provider_kernel_id": result.run.provider_kernel_id,
             "source_version": result.source.source_version,
             "source_sha256": result.source.source_sha256,
+            "fingerprint": result.source.fingerprint.model_dump(mode="json"),
             "claim_sha256": result.claim.claim_sha256,
             "outcome": result.effect.outcome.value,
             "attempts": result.effect.attempts,
@@ -866,6 +876,7 @@ class LedgerControlReader(ControlPlaneReader):
         deployed_commit: str | None = None,
         write_gate: LedgerWriteGate | None = None,
         provider_gateway: KaggleMCPProviderGateway | None = None,
+        acceptance_evidence: AcceptanceEvidenceController | None = None,
     ) -> None:
         if deployed_commit is not None and (
             len(deployed_commit) != 40 or any(character not in "0123456789abcdef" for character in deployed_commit)
@@ -875,6 +886,9 @@ class LedgerControlReader(ControlPlaneReader):
         self.deployed_commit = deployed_commit
         self.write_gate = write_gate
         self.provider_gateway = provider_gateway
+        self.acceptance_evidence = acceptance_evidence or (
+            AcceptanceEvidenceController(ledger, provider_gateway) if provider_gateway is not None else None
+        )
 
     def invoke_control(self, tool: str, arguments: dict[str, Any], principal: AccessIdentity) -> dict[str, Any]:
         if tool == "platform.status":
@@ -988,6 +1002,40 @@ class LedgerControlReader(ControlPlaneReader):
             limit = min(int(arguments.get("limit", 100)), 100)
             resources = self.ledger.list_provider_resources(limit=limit)
             return {"resources": resources, "count": len(resources), "bounded": True}
+        if tool == "runtime.events.history":
+            if set(arguments) not in (
+                {"run_id", "attempt_id", "epoch"},
+                {"run_id", "attempt_id", "epoch", "limit"},
+            ):
+                raise ValueError("runtime event history arguments differ from the exact contract")
+            limit = min(int(arguments.get("limit", 100)), 200)
+            events = self.ledger.runtime_event_history(
+                run_id=str(arguments.get("run_id", "")),
+                attempt_id=str(arguments.get("attempt_id", "")),
+                epoch=int(arguments.get("epoch", 0)),
+                limit=limit,
+            )
+            return {"events": events, "count": len(events), "bounded": True}
+        if tool == "provider.acceptance.claim.get":
+            if set(arguments) != {"scenario_id", "task_id"}:
+                raise ValueError("acceptance claim arguments differ from the exact contract")
+            if self.acceptance_evidence is None:
+                raise PermissionError("provider acceptance evidence controller is not configured")
+            return self.acceptance_evidence.claim_get(
+                str(arguments.get("scenario_id", "")), str(arguments.get("task_id", ""))
+            )
+        if tool in {
+            "provider.acceptance.dataset.lifecycle",
+            "provider.acceptance.notebook.lifecycle",
+            "provider.acceptance.claim.cleanup",
+        }:
+            if self.acceptance_evidence is None:
+                raise PermissionError("provider acceptance evidence controller is not configured")
+            if tool == "provider.acceptance.dataset.lifecycle":
+                return self.acceptance_evidence.dataset_lifecycle(arguments, principal)
+            if tool == "provider.acceptance.notebook.lifecycle":
+                return self.acceptance_evidence.notebook_lifecycle(arguments, principal)
+            return self.acceptance_evidence.cleanup(arguments, principal)
         if tool in {
             "provider.resources.create",
             "provider.resources.version",

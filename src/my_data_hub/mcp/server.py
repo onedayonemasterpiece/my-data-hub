@@ -203,6 +203,56 @@ def create_server(
     async def provider_status(limit: int = 100) -> dict[str, Any]:
         return await service.invoke("provider.resources.status", {"limit": limit})
 
+    async def runtime_events_history(
+        run_id: str, attempt_id: str, epoch: int, limit: int = 100
+    ) -> dict[str, Any]:
+        return await service.invoke("runtime.events.history", locals())
+
+    async def provider_acceptance_dataset_lifecycle(
+        scenario_id: str,
+        task_id: str,
+        idempotency_key: str,
+        resource_ref: str,
+        title: str,
+        file_name: str,
+        file_sha256: str,
+        file_utf8: str,
+        version_file_sha256: str,
+        version_file_utf8: str,
+    ) -> dict[str, Any]:
+        return await service.invoke("provider.acceptance.dataset.lifecycle", locals())
+
+    async def provider_acceptance_notebook_lifecycle(
+        scenario_id: str,
+        task_id: str,
+        task_run_id: str,
+        idempotency_key: str,
+        resource_ref: str,
+        title: str,
+        code_file: str,
+        source_utf8: str,
+        dataset_sources: list[str],
+        output_file_name: str,
+        expected_output_sha256: str,
+        max_output_bytes: int,
+    ) -> dict[str, Any]:
+        return await service.invoke("provider.acceptance.notebook.lifecycle", locals())
+
+    async def provider_acceptance_claim_get(
+        scenario_id: str, task_id: str
+    ) -> dict[str, Any]:
+        return await service.invoke("provider.acceptance.claim.get", locals())
+
+    async def provider_acceptance_claim_cleanup(
+        scenario_id: str,
+        task_id: str,
+        claim_sha256: str,
+        provider_run_ref: str,
+        output_receipt_sha256: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return await service.invoke("provider.acceptance.claim.cleanup", locals())
+
     async def bloggers_list(cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
         return await service.invoke("bloggers.list", {"cursor": cursor, "limit": limit})
 
@@ -323,6 +373,11 @@ def create_server(
         "embedding.coverage": embedding_coverage,
         "embedding.production.capabilities": embedding_production_capabilities,
         "provider.resources.status": provider_status,
+        "runtime.events.history": runtime_events_history,
+        "provider.acceptance.dataset.lifecycle": provider_acceptance_dataset_lifecycle,
+        "provider.acceptance.notebook.lifecycle": provider_acceptance_notebook_lifecycle,
+        "provider.acceptance.claim.get": provider_acceptance_claim_get,
+        "provider.acceptance.claim.cleanup": provider_acceptance_claim_cleanup,
         "bloggers.list": bloggers_list,
         "bloggers.get": bloggers_get,
         "bloggers.search": bloggers_search,

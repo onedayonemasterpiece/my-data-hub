@@ -54,6 +54,8 @@ _CONTROL_TOOLS = frozenset(
         "embedding.production.capabilities",
         "provider.resources.status",
         "provider.resources.read",
+        "provider.acceptance.claim.get",
+        "runtime.events.history",
         "data.change.status",
     }
 )
@@ -63,6 +65,9 @@ _PROVIDER_WRITES = frozenset(
         "provider.resources.version",
         "provider.resources.run",
         "provider.resources.delete",
+        "provider.acceptance.dataset.lifecycle",
+        "provider.acceptance.notebook.lifecycle",
+        "provider.acceptance.claim.cleanup",
     }
 )
 _DURABLE_WRITE_STATES = frozenset(
@@ -157,7 +162,7 @@ class HubService:
                 result = await self._stale_epoch_probe(bounded_arguments, identity)
             elif tool in _CONTROL_TOOLS:
                 result = await self._control(tool, bounded_arguments, identity)
-            elif tool.startswith("provider.resources.") and tool != "provider.resources.read":
+            elif tool in _PROVIDER_WRITES:
                 result = await self._provider_write(tool, bounded_arguments, identity)
             elif not contract.read_only:
                 result = await self._write(tool, bounded_arguments, identity)
@@ -362,10 +367,11 @@ class HubService:
     ) -> dict[str, Any]:
         if self.control is None:
             raise MasterUnavailableError("provider control gateway is not configured")
-        resource_class = str(arguments.get("control_class", ""))
+        acceptance_tool = tool.startswith("provider.acceptance.")
+        resource_class = "mcp_managed" if acceptance_tool else str(arguments.get("control_class", ""))
         if resource_class not in {"mcp_managed", "mcp_exchange"}:
             raise HubPermissionError("provider mutation is limited to MCP-owned control classes")
-        if arguments.get("private") is not True:
+        if not acceptance_tool and arguments.get("private") is not True:
             raise HubPermissionError("public provider resources are forbidden")
         if tool == "provider.resources.run" and resource_class != "mcp_managed":
             raise HubPermissionError("only mcp_managed notebooks may run")

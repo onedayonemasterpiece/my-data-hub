@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from my_data_hub.control_plane.clock import Clock, SystemClock
 
@@ -1711,6 +1711,235 @@ class ControlLedger:
                 (claim_sha256,),
             ).fetchone()
         return json.loads(str(row["claim_json"])) if row else None
+
+    def provider_resource_claim_for_effect(self, effect_id: str) -> dict[str, Any] | None:
+        """Return the exact claim committed by one deterministic provider effect."""
+
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT claim_json FROM provider_resource_claims WHERE effect_id=?",
+                (effect_id,),
+            ).fetchone()
+        return json.loads(str(row["claim_json"])) if row else None
+
+    def latest_provider_effect_receipt(self, effect_id: str) -> dict[str, Any] | None:
+        """Return bounded reconciliation metadata; provider bytes never enter this journal."""
+
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT receipt_json FROM provider_effect_receipts WHERE effect_id=? "
+                "ORDER BY sequence DESC LIMIT 1",
+                (effect_id,),
+            ).fetchone()
+        return json.loads(str(row["receipt_json"])) if row else None
+
+    def ensure_acceptance_evidence_task(
+        self,
+        *,
+        scenario_id: str,
+        task_id: str,
+        idempotency_key: str,
+        principal_id: str,
+        client_id: str,
+        request_sha256: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Claim an exact acceptance task before any provider side effect starts."""
+
+        if (
+            scenario_id not in {"FM01", "FM02", "FM03", "FM06", "FM22", "FM23"}
+            or not task_id
+            or not 8 <= len(idempotency_key) <= 300
+            or not principal_id
+            or not client_id
+            or len(request_sha256) != 64
+        ):
+            raise ValueError("acceptance evidence task identity is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM acceptance_evidence_tasks WHERE (scenario_id=? AND task_id=?) OR "
+                "(scenario_id=? AND principal_id=? AND client_id=? AND idempotency_key=?)",
+                (scenario_id, task_id, scenario_id, principal_id, client_id, idempotency_key),
+            ).fetchone()
+            if row is not None:
+                current = dict(row)
+                expected = {
+                    "scenario_id": scenario_id,
+                    "task_id": task_id,
+                    "idempotency_key": idempotency_key,
+                    "principal_id": principal_id,
+                    "client_id": client_id,
+                    "request_sha256": request_sha256,
+                }
+                if any(current[key] != value for key, value in expected.items()):
+                    raise IdempotencyConflict("acceptance task identity was reused for different evidence intent")
+                return current, False
+            connection.execute(
+                "INSERT INTO acceptance_evidence_tasks(task_id,scenario_id,idempotency_key,principal_id,client_id,"
+                "request_sha256,state,created_at,updated_at) VALUES (?,?,?,?,?,?,'CLAIMED',?,?)",
+                (task_id, scenario_id, idempotency_key, principal_id, client_id, request_sha256, now, now),
+            )
+            evidence = _safe_json({"request_sha256": request_sha256})
+            connection.execute(
+                "INSERT INTO acceptance_evidence_events(scenario_id,task_id,event_type,evidence_json,"
+                "evidence_sha256,recorded_at) VALUES (?,?, 'CLAIMED',?,?,?)",
+                (scenario_id, task_id, evidence, hashlib.sha256(evidence.encode()).hexdigest(), now),
+            )
+            created = connection.execute(
+                "SELECT * FROM acceptance_evidence_tasks WHERE scenario_id=? AND task_id=?",
+                (scenario_id, task_id),
+            ).fetchone()
+            assert created is not None
+            return dict(created), True
+
+    def begin_acceptance_evidence_task(self, *, scenario_id: str, task_id: str) -> dict[str, Any]:
+        """Durably mark that a provider mutation may follow this transaction."""
+
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM acceptance_evidence_tasks WHERE scenario_id=? AND task_id=?",
+                (scenario_id, task_id),
+            ).fetchone()
+            if row is None or str(row["state"]) not in {"CLAIMED", "RUNNING"}:
+                raise StaleRuntimeEvent("acceptance evidence task cannot begin from its current state")
+            if str(row["state"]) == "CLAIMED":
+                connection.execute(
+                    "UPDATE acceptance_evidence_tasks SET state='RUNNING',mutation_started=1,updated_at=? "
+                    "WHERE scenario_id=? AND task_id=?",
+                    (now, scenario_id, task_id),
+                )
+                evidence = _safe_json({"mutation_started": True})
+                connection.execute(
+                    "INSERT INTO acceptance_evidence_events(scenario_id,task_id,event_type,evidence_json,"
+                    "evidence_sha256,recorded_at) VALUES (?,?,'RUNNING',?,?,?)",
+                    (scenario_id, task_id, evidence, hashlib.sha256(evidence.encode()).hexdigest(), now),
+                )
+            current = connection.execute(
+                "SELECT * FROM acceptance_evidence_tasks WHERE scenario_id=? AND task_id=?",
+                (scenario_id, task_id),
+            ).fetchone()
+            assert current is not None
+            return dict(current)
+
+    def append_acceptance_evidence(
+        self,
+        *,
+        scenario_id: str,
+        task_id: str,
+        event_type: str,
+        evidence: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        allowed = {"PROVIDER_DATASET", "PROVIDER_NOTEBOOK", "OUTPUT_READ", "CLEANUP"}
+        if event_type not in allowed:
+            raise ValueError("acceptance evidence type is invalid")
+        evidence_json = _safe_json(evidence)
+        evidence_sha256 = hashlib.sha256(evidence_json.encode()).hexdigest()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT state FROM acceptance_evidence_tasks WHERE scenario_id=? AND task_id=?",
+                (scenario_id, task_id),
+            ).fetchone()
+            if row is None or str(row["state"]) not in {"RUNNING", "SUCCEEDED"}:
+                raise StaleRuntimeEvent("acceptance evidence has no running or successful task claim")
+            connection.execute(
+                "INSERT OR IGNORE INTO acceptance_evidence_events(scenario_id,task_id,event_type,evidence_json,"
+                "evidence_sha256,recorded_at) VALUES (?,?,?,?,?,?)",
+                (scenario_id, task_id, event_type, evidence_json, evidence_sha256, _format_time(self.clock.now())),
+            )
+        return {"event_type": event_type, "evidence_sha256": evidence_sha256, **dict(evidence)}
+
+    def terminalize_acceptance_evidence_task(
+        self,
+        *,
+        scenario_id: str,
+        task_id: str,
+        state: str,
+        evidence: Mapping[str, Any],
+        failure_code: str | None = None,
+    ) -> dict[str, Any]:
+        if state not in {"SUCCEEDED", "FAILED"} or (state == "FAILED") != bool(failure_code):
+            raise ValueError("acceptance terminal state is invalid")
+        evidence_json = _safe_json(evidence)
+        evidence_sha256 = hashlib.sha256(evidence_json.encode()).hexdigest()
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM acceptance_evidence_tasks WHERE scenario_id=? AND task_id=?",
+                (scenario_id, task_id),
+            ).fetchone()
+            if row is None:
+                raise StaleRuntimeEvent("acceptance evidence terminal has no task claim")
+            if str(row["state"]) in {"SUCCEEDED", "FAILED"}:
+                if str(row["state"]) != state or (row["failure_code"] or None) != failure_code:
+                    raise IdempotencyConflict("acceptance task is already terminal with a different result")
+            else:
+                connection.execute(
+                    "UPDATE acceptance_evidence_tasks SET state=?,failure_code=?,updated_at=? "
+                    "WHERE scenario_id=? AND task_id=?",
+                    (state, failure_code, now, scenario_id, task_id),
+                )
+            connection.execute(
+                "INSERT OR IGNORE INTO acceptance_evidence_events(scenario_id,task_id,event_type,evidence_json,"
+                "evidence_sha256,recorded_at) VALUES (?,?,?,?,?,?)",
+                (scenario_id, task_id, state, evidence_json, evidence_sha256, now),
+            )
+        result = self.acceptance_evidence_task(scenario_id=scenario_id, task_id=task_id)
+        assert result is not None
+        return result
+
+    def acceptance_evidence_task(self, *, scenario_id: str, task_id: str) -> dict[str, Any] | None:
+        """Read an exact metadata-only task and its bounded append-only evidence."""
+
+        with self._reader() as connection:
+            task = connection.execute(
+                "SELECT * FROM acceptance_evidence_tasks WHERE scenario_id=? AND task_id=?",
+                (scenario_id, task_id),
+            ).fetchone()
+            if task is None:
+                return None
+            events = connection.execute(
+                "SELECT sequence,event_type,evidence_json,evidence_sha256,recorded_at "
+                "FROM acceptance_evidence_events WHERE scenario_id=? AND task_id=? "
+                "ORDER BY sequence ASC LIMIT 100",
+                (scenario_id, task_id),
+            ).fetchall()
+        value = dict(task)
+        value["mutation_started"] = bool(value["mutation_started"])
+        value["evidence"] = [
+            {
+                "sequence": int(event["sequence"]),
+                "event_type": str(event["event_type"]),
+                "evidence": json.loads(str(event["evidence_json"])),
+                "evidence_sha256": str(event["evidence_sha256"]),
+                "recorded_at": str(event["recorded_at"]),
+            }
+            for event in events
+        ]
+        value["bounded"] = True
+        return value
+
+    def runtime_event_history(
+        self, *, run_id: str, attempt_id: str, epoch: int, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return event envelope metadata only, never sanitized event payloads."""
+
+        try:
+            UUID(run_id)
+            UUID(attempt_id)
+        except ValueError as exc:
+            raise ValueError("runtime event history requires exact UUID identities") from exc
+        if epoch < 1 or not 1 <= limit <= 200:
+            raise ValueError("runtime event history identity or limit is invalid")
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT event_id,schema_version,run_id,attempt_id,service_instance_id,source_identity,"
+                "source_version,epoch,event_type,emitted_at,received_at,local_sequence,body_sha256,body_bytes "
+                "FROM runtime_events WHERE run_id=? AND attempt_id=? AND epoch=? "
+                "ORDER BY local_sequence ASC LIMIT ?",
+                (run_id, attempt_id, epoch, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def provider_resource(self, provider_ref: str, source_version: str) -> dict[str, Any] | None:
         with self._reader() as connection:

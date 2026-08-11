@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -20,6 +21,8 @@ from my_data_hub.providers.kaggle.contracts import (
     KaggleDatasetIdentity,
     KaggleKernelRunIdentity,
     KaggleKernelSourceIdentity,
+    KaggleKernelStatus,
+    KernelState,
     MutationAction,
     NotebookMutationResult,
     ProviderEffectReceipt,
@@ -156,6 +159,11 @@ class FakeAdapter:
         self.now = ledger.clock.now
         self.datasets: dict[tuple[str, int], KaggleDatasetIdentity] = {}
         self.sources: dict[tuple[str, int], KaggleKernelSourceIdentity] = {}
+        self.output_bytes = b'{"accepted":true}'
+        self.create_calls = 0
+        self.version_calls = 0
+        self.run_calls = 0
+        self.delete_calls = 0
 
     def _dataset_result(self, intent, control_class, disposable, version):  # type: ignore[no-untyped-def]
         fingerprint = ProviderFingerprint(value=("c" if version == 1 else "d") * 64)
@@ -198,16 +206,19 @@ class FakeAdapter:
 
     def create_private_dataset(self, *, intent, files, title, control_class, disposable):  # type: ignore[no-untyped-def]
         assert files and title
+        self.create_calls += 1
         return self._dataset_result(intent, control_class, disposable, 1)
 
     def create_private_dataset_version(self, *, intent, claim, files, version_notes):  # type: ignore[no-untyped-def]
         assert files and version_notes
+        self.version_calls += 1
         return self._dataset_result(intent, claim.control_class, claim.disposable, claim.provider_version + 1)
 
     def read_private_dataset(self, *, provider_ref, version):  # type: ignore[no-untyped-def]
         return self.datasets[(provider_ref, version)]
 
     def push_private_notebook(self, *, intent, task_run_id, source, control_class, disposable, **_kwargs):  # type: ignore[no-untyped-def]
+        self.run_calls += 1
         source_identity = KaggleKernelSourceIdentity(
             provider_ref=intent.provider_ref,
             source_version=1,
@@ -259,6 +270,7 @@ class FakeAdapter:
         return self.sources[(provider_ref, source_version)]
 
     def delete_task_created_resource(self, *, intent, claim):  # type: ignore[no-untyped-def]
+        self.delete_calls += 1
         receipt = ProviderEffectReceipt(
             operation_id=intent.operation_id,
             effect_id=intent.effect_id,
@@ -272,6 +284,23 @@ class FakeAdapter:
         self.journal.persist_intent(intent)
         self.journal.persist_receipt(receipt)
         return receipt
+
+    def poll_run(self, run, policy):  # type: ignore[no-untyped-def]
+        assert policy.max_polls >= 1
+        return KaggleKernelStatus(
+            run=run,
+            state=KernelState.COMPLETE,
+            provider_status="complete",
+            observed_at=self.now(),
+        )
+
+    def download_exact_run_output_file(  # type: ignore[no-untyped-def]
+        self, run, *, destination, file_name, max_bytes
+    ):
+        assert len(self.output_bytes) <= max_bytes
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / file_name).write_bytes(self.output_bytes)
+        return SimpleNamespace(output_tree_sha256="9" * 64, file_count=1)
 
 
 def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_path: Path) -> None:

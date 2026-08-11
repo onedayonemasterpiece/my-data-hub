@@ -55,6 +55,7 @@ _WRITES = (
     ToolContract(
         "provider.protected_resource.probe", "acceptance:probe", True, idempotent=True, role="operator"
     ),
+    ToolContract("runtime.events.history", "acceptance:probe", True, idempotent=True, role="operator"),
     ToolContract("data.change.preview", "data:write", False, role="operator"),
     ToolContract("data.change.apply", "data:write", False, destructive=True, role="operator"),
     ToolContract("bloggers.import.preview", "migration:operate", False, role="migration_operator"),
@@ -65,6 +66,35 @@ _WRITES = (
     ToolContract("provider.resources.version", "provider:write", False, open_world=True, role="provider_operator"),
     ToolContract("provider.resources.run", "provider:write", False, open_world=True, role="provider_operator"),
     ToolContract("provider.resources.read", "provider:write", True, open_world=True, role="provider_operator"),
+    ToolContract(
+        "provider.acceptance.dataset.lifecycle",
+        "provider:write",
+        False,
+        open_world=True,
+        role="provider_operator",
+    ),
+    ToolContract(
+        "provider.acceptance.notebook.lifecycle",
+        "provider:write",
+        False,
+        open_world=True,
+        role="provider_operator",
+    ),
+    ToolContract(
+        "provider.acceptance.claim.get",
+        "provider:write",
+        True,
+        open_world=True,
+        role="provider_operator",
+    ),
+    ToolContract(
+        "provider.acceptance.claim.cleanup",
+        "provider:write",
+        False,
+        destructive=True,
+        open_world=True,
+        role="provider_operator",
+    ),
     ToolContract(
         "provider.resources.delete",
         "provider:write",
