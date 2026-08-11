@@ -1,0 +1,28 @@
+{
+  "protocolVersion": "2026-07-28",
+  "securitySchemes": [
+    {
+      "type": "oauth2",
+      "scopes": [
+        "bloggers:read", "checkpoint:read", "data:read", "data:write", "embedding:read",
+        "master:ensure", "master:read", "migration:operate", "operation:read", "platform:read",
+        "provider:manage", "provider:read"
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "bloggers.search",
+      "securitySchemes": [{ "type": "oauth2", "scopes": ["bloggers:read"] }],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "_meta": {
+        "securitySchemes": [{ "type": "oauth2", "scopes": ["bloggers:read"] }]
+      }
+    }
+  ]
+}

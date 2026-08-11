@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/mcp/security-catalog.v1.schema.json",
+  "title": "my-data-hub MCP security catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "protocolVersion": { "const": "2026-07-28" },
+    "securitySchemes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/OAuthScheme" }
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}$" },
+          "securitySchemes": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/$defs/OAuthScheme" }
+          },
+          "annotations": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "readOnlyHint": { "type": "boolean" },
+              "destructiveHint": { "type": "boolean" },
+              "idempotentHint": { "type": "boolean" },
+              "openWorldHint": { "type": "boolean" }
+            },
+            "required": ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"]
+          },
+          "_meta": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "securitySchemes": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "$ref": "#/$defs/OAuthScheme" }
+              }
+            },
+            "required": ["securitySchemes"]
+          }
+        },
+        "required": ["name", "securitySchemes", "annotations", "_meta"]
+      }
+    }
+  },
+  "required": ["protocolVersion", "securitySchemes", "tools"],
+  "$defs": {
+    "OAuthScheme": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "oauth2" },
+        "scopes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+        }
+      },
+      "required": ["type", "scopes"]
+    }
+  }
+}

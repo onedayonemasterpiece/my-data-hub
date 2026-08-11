@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from my_data_hub.mcp.oauth import TokenValidationError
 
@@ -20,8 +21,20 @@ class JwksJwtDecoder:
     _client: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if not self.jwks_url.startswith("https://"):
-            raise ValueError("OAuth JWKS URL must use HTTPS")
+        for name, value in (("issuer", self.issuer), ("JWKS", self.jwks_url)):
+            parsed = urlsplit(value)
+            if (
+                parsed.scheme != "https"
+                or not parsed.netloc
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError(f"OAuth {name} URL must use exact HTTPS")
+        audience = urlsplit(self.audience)
+        if audience.scheme != "https" or not audience.netloc or audience.query or audience.fragment:
+            raise ValueError("OAuth audience must be an exact HTTPS resource URL")
         allowed = tuple(self.algorithms)
         if not allowed or any(value not in {"RS256", "RS384", "RS512", "ES256", "ES384"} for value in allowed):
             raise ValueError("OAuth JWT algorithms must be an explicit asymmetric allowlist")

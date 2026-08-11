@@ -52,6 +52,7 @@ def claims(**changes: Any) -> dict[str, Any]:
         ("iss", "https://identity.example/near-match"),
         ("aud", "https://mcp-datahub.kenigevents.ru"),
         ("aud", [RESOURCE]),
+        ("resource", None),
         ("resource", f"{RESOURCE}/"),
         ("sub", ""),
         ("client_id", None),

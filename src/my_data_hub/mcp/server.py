@@ -1,300 +1,361 @@
 from __future__ import annotations
 
+import inspect
+from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
-from uuid import UUID
 
+from my_data_hub.auth.context import current_identity
+from my_data_hub.auth.control import OAuthAuditEvent
+from my_data_hub.auth.metadata import ProtectedResourceMetadata, protected_resource_metadata_url
 from my_data_hub.config import ConfigurationError, Settings
-from my_data_hub.mcp.scopes import TOOL_SCOPES, require_scope
+from my_data_hub.mcp.catalog import DEFAULT_SECURITY_SCHEMES, TOOL_CONTRACTS, visible_tools
+from my_data_hub.mcp.contracts import (
+    ControlPlaneReader,
+    MasterResolver,
+    MasterSessionBroker,
+    MCPAuditSink,
+    WriteGate,
+)
+from my_data_hub.mcp.oauth import AccessIdentity, OAuthBearerValidator
 from my_data_hub.mcp.service import HubService
 
 
 def oauth_resource_metadata_url(resource: str) -> str:
-    """Return the RFC 9728 path-derived metadata URL for one exact resource."""
+    """Backward-compatible name for the RFC 9728 path-derived URL."""
 
-    parsed = urlsplit(resource)
-    if parsed.scheme != "https" or not parsed.netloc or parsed.query or parsed.fragment:
-        raise ConfigurationError("OAuth resource must be an HTTPS URL without query or fragment")
-    suffix_path = parsed.path.rstrip("/")
-    metadata_path = f"/.well-known/oauth-protected-resource{suffix_path}"
-    return urlunsplit((parsed.scheme, parsed.netloc, metadata_path, "", ""))
+    try:
+        return protected_resource_metadata_url(resource)
+    except ValueError as exc:
+        raise ConfigurationError(str(exc)) from exc
 
 
-def create_server(settings: Settings):  # type: ignore[no-untyped-def]
+@dataclass(frozen=True, slots=True)
+class MCPDependencies:
+    resolver: MasterResolver | None = None
+    broker: MasterSessionBroker | None = None
+    control: ControlPlaneReader | None = None
+    write_gate: WriteGate | None = None
+    audit: MCPAuditSink | None = None
+
+
+def _local_identity(settings: Settings) -> AccessIdentity | None:
+    if settings.mcp_remote_enabled:
+        return None
+    return AccessIdentity(
+        subject="local-stdio",
+        client_id="my-data-hub-local",
+        scopes=settings.mcp_scopes,
+        audience="local-stdio",
+        token_id="local-process",
+        expires_at=2**63 - 1,
+        issuer="local-process",
+        issued_at=0,
+        resource="local-stdio",
+    )
+
+
+def _auth_error(resource_metadata_url: str, *, insufficient_scope: bool = True):  # type: ignore[no-untyped-def]
+    from mcp.types import CallToolResult, TextContent
+
+    code = "insufficient_scope" if insufficient_scope else "invalid_token"
+    description = "The authenticated identity is not authorized for this tool."
+    challenge = (
+        f'Bearer resource_metadata="{resource_metadata_url}", '
+        f'error="{code}", error_description="{description}"'
+    )
+    return CallToolResult(
+        content=[TextContent(type="text", text="Authentication or additional authorization is required.")],
+        isError=True,
+        _meta={"mcp/www_authenticate": [challenge]},
+    )
+
+
+def create_server(
+    settings: Settings,
+    *,
+    dependencies: MCPDependencies | None = None,
+    default_identity: AccessIdentity | None = None,
+):  # type: ignore[no-untyped-def]
     try:
         from mcp.server import MCPServer
+        from mcp.types import ToolAnnotations
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("install my-data-hub to run the MCP server") from exc
 
-    service = HubService(
-        settings.mcp_reader_database_url or settings.database_url,
-        scopes=settings.mcp_scopes,
-        write_enabled=settings.mcp_write_enabled,
+    deps = dependencies or MCPDependencies()
+    fallback = default_identity or _local_identity(settings)
+    metadata_url = (
+        oauth_resource_metadata_url(settings.mcp_oauth_resource)
+        if settings.mcp_oauth_resource
+        else "https://invalid.example/.well-known/oauth-protected-resource"
     )
-    mcp = MCPServer(
+
+    class IdentityAwareMCPServer(MCPServer):  # type: ignore[misc]
+        security_schemes = DEFAULT_SECURITY_SCHEMES
+
+        def _identity(self) -> AccessIdentity | None:
+            return current_identity() or fallback
+
+        async def list_tools(self):  # type: ignore[no-untyped-def]
+            tools = await super().list_tools()
+            allowed = visible_tools(self._identity())
+            return [tool for tool in tools if tool.name in allowed]
+
+        async def call_tool(self, name, arguments, context=None):  # type: ignore[no-untyped-def]
+            identity = self._identity()
+            contract = TOOL_CONTRACTS.get(name)
+            if contract is None or identity is None or contract.scope not in identity.scopes:
+                if identity is not None and deps.audit is not None:
+                    recorded = deps.audit.record_mcp_audit(
+                        OAuthAuditEvent(
+                            event="mcp_tool",
+                            outcome="scope_denied",
+                            issuer=identity.issuer,
+                            client_id=identity.client_id,
+                            subject=identity.subject,
+                            token_id=identity.token_id,
+                            tool=str(name),
+                        )
+                    )
+                    if inspect.isawaitable(recorded):
+                        await recorded
+                return _auth_error(metadata_url, insufficient_scope=identity is not None)
+            return await super().call_tool(name, arguments, context)
+
+    service = HubService(
+        deps.resolver,
+        broker=deps.broker,
+        control=deps.control,
+        write_gate=deps.write_gate,
+        audit=deps.audit,
+        fallback_identity=fallback,
+    )
+    mcp = IdentityAwareMCPServer(
         "my-data-hub",
-        version="0.1.0",
+        version="0.2.0",
         instructions=(
-            "Use bounded domain tools only. Writes are disabled unless an explicit "
-            "scope and server-side write gate are both enabled."
+            "MCP 2026-07-28 bounded domain tools. The reader catalog contains no writes. "
+            "Writes require an identity-bound preview and checkpoint lifecycle permit."
         ),
     )
 
-    if TOOL_SCOPES["hub.health"] in settings.mcp_scopes:
-        @mcp.tool(name="hub.health")
-        def health() -> dict[str, Any]:
-            """Return bounded canonical database health and revision."""
-            require_scope(settings.mcp_scopes, TOOL_SCOPES["hub.health"])
-            return service.health()
+    def register(name: str, function):  # type: ignore[no-untyped-def]
+        contract = TOOL_CONTRACTS[name]
+        annotations = ToolAnnotations(**contract.annotations())
+        meta = {"securitySchemes": contract.security_schemes()}
+        return mcp.tool(name=name, annotations=annotations, meta=meta, structured_output=True)(function)
 
-    if TOOL_SCOPES["hub.project.list"] in settings.mcp_scopes:
-        @mcp.tool(name="hub.project.list")
-        def project_list(limit: int = 50) -> list[dict[str, Any]]:
-            """List projects, capped at 100 records."""
-            require_scope(settings.mcp_scopes, TOOL_SCOPES["hub.project.list"])
-            return service.list_projects(limit)
+    async def platform_status() -> dict[str, Any]:
+        return await service.invoke("platform.status", {})
 
-    if TOOL_SCOPES["hub.content.search"] in settings.mcp_scopes:
-        @mcp.tool(name="hub.content.search")
-        def content_search(query: str, limit: int = 20) -> list[dict[str, Any]]:
-            """Search compact content using PostgreSQL Russian full-text search."""
-            require_scope(settings.mcp_scopes, TOOL_SCOPES["hub.content.search"])
-            return service.search_content(query, limit)
+    async def master_status() -> dict[str, Any]:
+        return await service.invoke("master.status", {})
 
-    if TOOL_SCOPES["hub.content.get"] in settings.mcp_scopes:
-        @mcp.tool(name="hub.content.get")
-        def content_get(content_id: str) -> dict[str, Any] | None:
-            """Return one bounded content record by UUID."""
-            require_scope(settings.mcp_scopes, TOOL_SCOPES["hub.content.get"])
-            return service.get_content(UUID(content_id))
+    async def master_ensure() -> dict[str, Any]:
+        return await service.invoke("master.ensure", {})
 
-    if TOOL_SCOPES["hub.trace.get"] in settings.mcp_scopes:
-        @mcp.tool(name="hub.trace.get")
-        def trace_get(
-            subject_type: str, subject_id: str, limit: int = 50
-        ) -> list[dict[str, Any]]:
-            """Return bounded provenance events for one exact subject."""
-            require_scope(settings.mcp_scopes, TOOL_SCOPES["hub.trace.get"])
-            return service.get_trace(subject_type, UUID(subject_id), limit)
+    async def operation_get(operation_id: str) -> dict[str, Any]:
+        return await service.invoke("operation.get", {"operation_id": operation_id})
 
-    if TOOL_SCOPES["region_talk.queue.summary"] in settings.mcp_scopes:
-        @mcp.tool(name="region_talk.queue.summary")
-        def queue_summary() -> list[dict[str, Any]]:
-            """Return bounded Region Talk queue counts and oldest timestamps."""
-            require_scope(
-                settings.mcp_scopes, TOOL_SCOPES["region_talk.queue.summary"]
-            )
-            return service.region_talk_queue_summary()
+    async def checkpoint_status() -> dict[str, Any]:
+        return await service.invoke("checkpoint.status", {})
 
-    if TOOL_SCOPES["region_talk.plan.preview"] in settings.mcp_scopes:
-        @mcp.tool(name="region_talk.plan.preview")
-        def plan_preview(max_actions: int = 8) -> dict[str, Any]:
-            """Preview the pressure-aware plan without executing side effects."""
-            require_scope(
-                settings.mcp_scopes, TOOL_SCOPES["region_talk.plan.preview"]
-            )
-            return service.region_talk_plan(max_actions)
+    async def embedding_coverage() -> dict[str, Any]:
+        return await service.invoke("embedding.coverage", {})
 
-    if TOOL_SCOPES["region_talk.migration.status"] in settings.mcp_scopes:
-        @mcp.tool(name="region_talk.migration.status")
-        def migration_status(limit: int = 20) -> list[dict[str, Any]]:
-            """Return bounded YDB migration batches and unexplained row counts."""
-            require_scope(
-                settings.mcp_scopes, TOOL_SCOPES["region_talk.migration.status"]
-            )
-            return service.migration_status(limit)
+    async def provider_status(limit: int = 100) -> dict[str, Any]:
+        return await service.invoke("provider.resources.status", {"limit": limit})
 
-    if TOOL_SCOPES["region_talk.migration.accounting"] in settings.mcp_scopes:
-        @mcp.tool(name="region_talk.migration.accounting")
-        def migration_accounting(
-            export_batch_id: str | None = None, limit: int = 200
-        ) -> list[dict[str, Any]]:
-            """Return row-kind accounting for one export batch or recent batches."""
-            require_scope(
-                settings.mcp_scopes,
-                TOOL_SCOPES["region_talk.migration.accounting"],
-            )
-            parsed = UUID(export_batch_id) if export_batch_id else None
-            return service.migration_accounting(parsed, limit)
+    async def bloggers_list(cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
+        return await service.invoke("bloggers.list", {"cursor": cursor, "limit": limit})
 
-    if TOOL_SCOPES["connector.status.list"] in settings.mcp_scopes:
+    async def bloggers_get(blogger_id: str) -> dict[str, Any]:
+        return await service.invoke("bloggers.get", {"blogger_id": blogger_id})
 
-        @mcp.tool(name="connector.status.list")
-        def connector_status(limit: int = 50) -> list[dict[str, Any]]:
-            """Return bounded connector and data-product delivery status."""
-            require_scope(settings.mcp_scopes, TOOL_SCOPES["connector.status.list"])
-            return service.connector_status(limit)
+    async def bloggers_search(query: str, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
+        return await service.invoke(
+            "bloggers.search", {"query": query, "cursor": cursor, "limit": limit}
+        )
 
-    if TOOL_SCOPES["provider.resource.status"] in settings.mcp_scopes:
+    async def bloggers_provenance(blogger_id: str, limit: int = 50) -> dict[str, Any]:
+        return await service.invoke(
+            "bloggers.provenance", {"blogger_id": blogger_id, "limit": limit}
+        )
 
-        @mcp.tool(name="provider.resource.status")
-        def provider_resource_status(limit: int = 100) -> list[dict[str, Any]]:
-            """Return minimal Kaggle resource status without source or output."""
-            require_scope(settings.mcp_scopes, TOOL_SCOPES["provider.resource.status"])
-            return service.provider_resource_status(limit)
+    async def bloggers_statistics() -> dict[str, Any]:
+        return await service.invoke("bloggers.statistics", {})
 
-    if (
-        settings.mcp_write_enabled
-        and TOOL_SCOPES["region_talk.work.enqueue"] in settings.mcp_scopes
-    ):
-        @mcp.tool(name="region_talk.work.enqueue")
-        def work_enqueue(
-            stage: str,
-            url: str | None = None,
-            subject_id: str | None = None,
-            subject_type: str = "content_url",
-            priority: int = 100,
-            dedupe_key: str | None = None,
-            dry_run: bool = True,
+    async def data_query(
+        sql: str,
+        parameters: list[Any] | None = None,
+        max_rows: int = 200,
+        max_bytes: int = 262_144,
+        timeout_ms: int = 5_000,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "data.query",
+            {
+                "sql": sql,
+                "parameters": parameters or [],
+                "max_rows": max_rows,
+                "max_bytes": max_bytes,
+                "timeout_ms": timeout_ms,
+            },
+        )
+
+    async def data_change_preview(
+        sql: str,
+        parameters: list[Any],
+        expected_revision: int,
+        max_affected_rows: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return await service.invoke("data.change.preview", locals())
+
+    async def data_change_apply(
+        sql: str,
+        parameters: list[Any],
+        expected_revision: int,
+        max_affected_rows: int,
+        idempotency_key: str,
+        preview_receipt: str,
+    ) -> dict[str, Any]:
+        return await service.invoke("data.change.apply", locals())
+
+    async def data_change_status(operation_id: str) -> dict[str, Any]:
+        return await service.invoke("data.change.status", {"operation_id": operation_id})
+
+    async def bloggers_import_preview(
+        batch_id: str, expected_revision: int, idempotency_key: str
+    ) -> dict[str, Any]:
+        return await service.invoke("bloggers.import.preview", locals())
+
+    async def bloggers_import_apply(
+        batch_id: str, expected_revision: int, idempotency_key: str, preview_receipt: str
+    ) -> dict[str, Any]:
+        return await service.invoke("bloggers.import.apply", locals())
+
+    def provider_function(tool: str):  # type: ignore[no-untyped-def]
+        async def invoke_provider(
+            resource_ref: str,
+            control_class: str,
+            private: bool,
+            payload: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
-            """Enqueue one bounded Region Talk task; dry-run defaults to true."""
-            require_scope(
-                settings.mcp_scopes, TOOL_SCOPES["region_talk.work.enqueue"]
-            )
-            return service.enqueue_region_talk_work(
-                stage=stage,
-                url=url,
-                subject_id=UUID(subject_id) if subject_id else None,
-                subject_type=subject_type,
-                priority=priority,
-                dedupe_key=dedupe_key,
-                dry_run=dry_run,
+            return await service.invoke(
+                tool,
+                {
+                    "resource_ref": resource_ref,
+                    "control_class": control_class,
+                    "private": private,
+                    "payload": payload or {},
+                },
             )
 
-    if (
-        settings.mcp_write_enabled
-        and TOOL_SCOPES["hub.command.submit"] in settings.mcp_scopes
-    ):
-        @mcp.tool(name="hub.command.submit")
-        def command_submit(command: dict[str, Any]) -> dict[str, Any]:
-            """Submit a typed idempotent command; arbitrary SQL is not accepted."""
-            require_scope(settings.mcp_scopes, TOOL_SCOPES["hub.command.submit"])
-            return service.submit_command(command)
+        return invoke_provider
 
+    functions = {
+        "platform.status": platform_status,
+        "master.status": master_status,
+        "master.ensure": master_ensure,
+        "operation.get": operation_get,
+        "checkpoint.status": checkpoint_status,
+        "embedding.coverage": embedding_coverage,
+        "provider.resources.status": provider_status,
+        "bloggers.list": bloggers_list,
+        "bloggers.get": bloggers_get,
+        "bloggers.search": bloggers_search,
+        "bloggers.provenance": bloggers_provenance,
+        "bloggers.statistics": bloggers_statistics,
+        "data.query": data_query,
+        "data.change.preview": data_change_preview,
+        "data.change.apply": data_change_apply,
+        "data.change.status": data_change_status,
+        "bloggers.import.preview": bloggers_import_preview,
+        "bloggers.import.apply": bloggers_import_apply,
+    }
+    for tool_name in TOOL_CONTRACTS:
+        register(tool_name, functions.get(tool_name) or provider_function(tool_name))
     return mcp
 
 
-def serve(*, transport: str) -> None:
-    settings = Settings.from_env()
-    if transport not in {"stdio", "streamable-http"}:
-        raise ConfigurationError(f"unsupported MCP transport: {transport}")
-    mcp = create_server(settings)
-    if transport == "stdio":
-        mcp.run(transport="stdio")
-        return
+def create_streamable_http_app(
+    settings: Settings,
+    *,
+    dependencies: MCPDependencies,
+    validator: OAuthBearerValidator,
+):  # type: ignore[no-untyped-def]
+    """Build the MCP 2026-07-28 stateless Streamable HTTP resource server."""
 
-    if not settings.mcp_remote_enabled:
-        raise ConfigurationError("remote MCP is disabled by configuration")
-    try:
-        import uvicorn
-        from mcp.server.transport_security import TransportSecuritySettings
-    except ImportError as exc:  # pragma: no cover
-        raise RuntimeError("MCP HTTP dependencies are required for Streamable HTTP") from exc
     from contextlib import asynccontextmanager
+    from urllib.parse import urlsplit
 
+    from mcp.server.transport_security import TransportSecuritySettings
     from starlette.applications import Starlette
     from starlette.responses import JSONResponse
     from starlette.routing import Mount, Route
 
     from my_data_hub.mcp.admission import AdmissionLimits, OAuthAdmissionSecurity
-    from my_data_hub.mcp.http_security import DevelopmentBearerSecurity
-    from my_data_hub.mcp.oauth import OAuthBearerValidator, OAuthValidationPolicy
-    from my_data_hub.mcp.oauth_jwt import JwksJwtDecoder
-    from my_data_hub.mcp.oauth_postgres import PostgresRevocationStore
 
-    allowed_hosts = sorted(
-        set(settings.mcp_allowed_hosts)
-        | {f"{settings.mcp_host}:{settings.mcp_port}"}
-    )
-    mcp_app = mcp.streamable_http_app(
+    server = create_server(settings, dependencies=dependencies)
+    mcp_app = server.streamable_http_app(
         host=settings.mcp_host,
+        streamable_http_path="/mcp",
+        json_response=True,
+        stateless_http=True,
         max_request_body_size=1_048_576,
         transport_security=TransportSecuritySettings(
-            allowed_hosts=allowed_hosts,
+            allowed_hosts=list(settings.mcp_allowed_hosts),
             allowed_origins=list(settings.mcp_allowed_origins),
         ),
     )
+    resource_metadata = ProtectedResourceMetadata(
+        resource=settings.mcp_oauth_resource,
+        authorization_servers=(settings.mcp_oauth_issuer,),
+        scopes_supported=frozenset(TOOL_CONTRACTS[name].scope for name in TOOL_CONTRACTS),
+    )
+    metadata_url = oauth_resource_metadata_url(settings.mcp_oauth_resource)
+    metadata_path = urlsplit(metadata_url).path
+
+    async def metadata(_request):  # type: ignore[no-untyped-def]
+        return JSONResponse(resource_metadata.document(), headers={"Cache-Control": "no-store"})
 
     @asynccontextmanager
-    async def lifespan(_app: Starlette):  # type: ignore[no-untyped-def]
-        async with mcp.session_manager.run():
+    async def lifespan(_app):  # type: ignore[no-untyped-def]
+        async with server.session_manager.run():
             yield
 
-    if settings.mcp_auth_mode == "oauth":
-        metadata_url = oauth_resource_metadata_url(settings.mcp_oauth_resource)
-        metadata_path = urlsplit(metadata_url).path
-
-        async def protected_resource_metadata(_request: Any) -> JSONResponse:
-            return JSONResponse(
-                {
-                    "resource": settings.mcp_oauth_resource,
-                    "authorization_servers": [settings.mcp_oauth_issuer],
-                    "bearer_methods_supported": ["header"],
-                    "scopes_supported": sorted(settings.mcp_scopes),
-                    "resource_name": "my-data-hub read-only MCP",
-                }
-            )
-
-        mounted = Starlette(
-            routes=[
-                Route(metadata_path, protected_resource_metadata, methods=["GET"]),
-                Mount("/", app=mcp_app),
-            ],
-            lifespan=lifespan,
-        )
-        decoder = JwksJwtDecoder(
-            jwks_url=settings.mcp_oauth_jwks_url,
-            issuer=settings.mcp_oauth_issuer,
-            audience=settings.mcp_oauth_audience,
-            algorithms=settings.mcp_oauth_algorithms,
-        )
-        validator = OAuthBearerValidator(
-            decoder=decoder,
-            policy=OAuthValidationPolicy(
-                issuer=settings.mcp_oauth_issuer,
-                audience=settings.mcp_oauth_audience,
-                resource=settings.mcp_oauth_resource,
-                allowed_scopes=settings.mcp_scopes,
-                max_token_lifetime_seconds=settings.mcp_token_max_lifetime_seconds,
-            ),
-            revocations=PostgresRevocationStore(settings.mcp_revocation_database_url),
-        )
-        guarded = OAuthAdmissionSecurity(
-            mounted,
-            validator=validator,
-            required_scopes=settings.mcp_scopes,
-            allowed_origins=settings.mcp_allowed_origins,
-            allowed_hosts=settings.mcp_allowed_hosts,
-            trusted_proxy_ips=settings.mcp_trusted_proxies,
-            limits=AdmissionLimits(
-                max_request_bytes=1_048_576,
-                max_response_bytes=2_097_152,
-                max_concurrency=16,
-                requests_per_window=120,
-                rate_window_seconds=60,
-                request_timeout_seconds=30,
-            ),
-            metadata_path=metadata_path,
-            resource_metadata_url=metadata_url,
-        )
-    elif settings.mcp_auth_mode == "development-token" and settings.mcp_development_token:
-        mounted = Starlette(routes=[Mount("/", app=mcp_app)], lifespan=lifespan)
-        guarded = DevelopmentBearerSecurity(
-            mounted,
-            token=settings.mcp_development_token,
-            allowed_origins=settings.mcp_allowed_origins,
-            allowed_hosts=settings.mcp_allowed_hosts,
-            max_request_bytes=1_048_576,
-        )
-    else:
-        raise ConfigurationError("Streamable HTTP requires OAuth or a loopback development token")
-    uvicorn.run(
-        guarded,
-        host=settings.mcp_host,
-        port=settings.mcp_port,
-        proxy_headers=False,
-        server_header=False,
+    mounted = Starlette(
+        routes=[Route(metadata_path, metadata, methods=["GET"]), Mount("/", app=mcp_app)],
+        lifespan=lifespan,
     )
+    return OAuthAdmissionSecurity(
+        mounted,
+        validator=validator,
+        required_scopes=frozenset(),
+        allowed_origins=settings.mcp_allowed_origins,
+        allowed_hosts=settings.mcp_allowed_hosts,
+        trusted_proxy_ips=settings.mcp_trusted_proxies,
+        limits=AdmissionLimits(
+            max_request_bytes=1_048_576,
+            max_response_bytes=2_097_152,
+            max_concurrency=16,
+            requests_per_window=120,
+            rate_window_seconds=60,
+            request_timeout_seconds=30,
+        ),
+        metadata_path=metadata_path,
+        resource_metadata_url=metadata_url,
+    )
+
+
+def serve(*, transport: str) -> None:
+    settings = Settings.from_env()
+    if transport != "stdio":
+        raise ConfigurationError(
+            "remote MCP requires injected control-ledger, resolver, broker and OAuth validator dependencies"
+        )
+    create_server(settings).run(transport="stdio")
 
 
 def main() -> None:

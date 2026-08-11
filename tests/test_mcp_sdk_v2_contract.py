@@ -8,19 +8,21 @@ from my_data_hub.mcp.server import create_server, oauth_resource_metadata_url
 mcp_server_module = pytest.importorskip("mcp.server")
 
 READ_ONLY_TOOLS = {
-    "hub.health",
-    "hub.project.list",
-    "hub.content.search",
-    "hub.content.get",
-    "hub.trace.get",
-    "region_talk.queue.summary",
-    "region_talk.plan.preview",
-    "region_talk.migration.status",
-    "region_talk.migration.accounting",
-    "connector.status.list",
-    "provider.resource.status",
+    "platform.status",
+    "master.status",
+    "operation.get",
+    "checkpoint.status",
+    "embedding.coverage",
+    "provider.resources.status",
+    "bloggers.list",
+    "bloggers.get",
+    "bloggers.search",
+    "bloggers.provenance",
+    "bloggers.statistics",
+    "data.query",
+    "data.change.status",
 }
-WRITE_TOOLS = {"region_talk.work.enqueue", "hub.command.submit"}
+WRITE_TOOLS = {"master.ensure", "data.change.preview", "data.change.apply"}
 
 
 def read_only_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
@@ -33,7 +35,7 @@ def read_only_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_ENABLED", "false")
     monkeypatch.setenv(
         "MY_DATA_HUB_MCP_SCOPES",
-        "hub:read,orchestrator:read,region-talk:read,migration:read,connector:read,provider:read",
+        "platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,data:read",
     )
     return Settings.from_env()
 

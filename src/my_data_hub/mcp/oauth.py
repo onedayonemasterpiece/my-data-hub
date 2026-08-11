@@ -6,7 +6,10 @@ import math
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from my_data_hub.auth.control import OAuthControlLedger
 
 
 class TokenValidationError(PermissionError):
@@ -52,12 +55,10 @@ class RevocationKey:
 
 @runtime_checkable
 class RevocationStore(Protocol):
-    """PostgreSQL-friendly revocation boundary.
+    """Control-ledger revocation boundary, independent of the master DB.
 
-    A production implementation should perform one bounded PostgreSQL lookup for
-    token, client and principal revocations and return ``True`` if any applies.
-    Store errors must raise rather than returning ``False``.  The interface is
-    intentionally storage-neutral and contains no SQLite fallback.
+    Implementations perform one bounded durable lookup covering token, client
+    and principal revocations.  Errors must raise rather than returning False.
     """
 
     def is_revoked(self, key: RevocationKey) -> bool | Awaitable[bool]: ...
@@ -152,7 +153,7 @@ def validate_verified_claims(
     if claims.get("aud") != policy.audience:
         raise TokenValidationError("invalid_token")
     token_resource = claims.get("resource")
-    if token_resource is not None and token_resource != policy.resource:
+    if token_resource != policy.resource:
         raise TokenValidationError("invalid_token")
 
     subject = _required_string(claims, "sub")
@@ -197,14 +198,21 @@ class OAuthBearerValidator:
         *,
         decoder: VerifiedTokenDecoder,
         policy: OAuthValidationPolicy,
-        revocations: RevocationStore,
+        revocations: RevocationStore | None = None,
+        control_ledger: OAuthControlLedger | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        if decoder is None or revocations is None:
-            raise ValueError("OAuth decoder and durable revocation store are required")
+        if decoder is None or (revocations is None and control_ledger is None):
+            raise ValueError("OAuth decoder and durable control-ledger revocation authority are required")
+        if revocations is None:
+            from my_data_hub.auth.control import ControlLedgerRevocationStore
+
+            assert control_ledger is not None
+            revocations = ControlLedgerRevocationStore(control_ledger)
         self.decoder = decoder
         self.policy = policy
         self.revocations = revocations
+        self.control_ledger = control_ledger
         self.clock = clock
 
     async def validate_token(
@@ -246,18 +254,58 @@ class OAuthBearerValidator:
             subject=identity.subject,
             issued_at=identity.issued_at,
         )
+
+        async def audit(outcome: str) -> None:
+            if self.control_ledger is None:
+                return
+            from my_data_hub.auth.control import OAuthAuditEvent
+
+            recorded = self.control_ledger.record_oauth_audit(
+                OAuthAuditEvent(
+                    event="oauth_token",
+                    outcome=outcome,
+                    issuer=identity.issuer,
+                    client_id=identity.client_id,
+                    subject=identity.subject,
+                    token_id=identity.token_id,
+                )
+            )
+            if inspect.isawaitable(recorded):
+                await recorded
+
         try:
             revocation_check = self.revocations.is_revoked
             if inspect.iscoroutinefunction(revocation_check):
                 revoked = await revocation_check(key)
             else:
-                # psycopg's synchronous connection/query must not stall admission.
+                # A synchronous durable-ledger lookup must not stall admission.
                 revoked = await asyncio.to_thread(revocation_check, key)
+                if inspect.isawaitable(revoked):
+                    revoked = await revoked
         except Exception as exc:
             # Availability of the revocation authority is part of authentication.
             raise TokenValidationError("invalid_token") from exc
         if not isinstance(revoked, bool) or revoked:
+            await audit("revoked_or_invalid")
             raise TokenValidationError("invalid_token")
+        if self.control_ledger is not None:
+            try:
+                client_result = self.control_ledger.get_client(identity.issuer, identity.client_id)
+                client = await client_result if inspect.isawaitable(client_result) else client_result
+                if (
+                    client is None
+                    or not client.enabled
+                    or client.issuer != identity.issuer
+                    or client.client_id != identity.client_id
+                    or not identity.scopes.issubset(client.allowed_scopes)
+                ):
+                    await audit("client_denied")
+                    raise TokenValidationError("invalid_token")
+                await audit("accepted")
+            except TokenValidationError:
+                raise
+            except Exception as exc:
+                raise TokenValidationError("invalid_token") from exc
         return identity
 
     async def validate_authorization_header(
