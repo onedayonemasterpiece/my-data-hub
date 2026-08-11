@@ -30,7 +30,7 @@ jobs:
       # This is a JSON argv array, not a shell command.  The referenced trusted
       # executable owns real master/import/embed/MCP/host fault actions and
       # must return an exact Kaggle run locator or a typed BLOCKED dependency.
-      MY_DATA_HUB_OPERATIONAL_DRIVER_JSON: ${{ vars.MY_DATA_HUB_OPERATIONAL_DRIVER_JSON }}
+      MY_DATA_HUB_OPERATIONAL_DRIVER_JSON: ${{ vars.MY_DATA_HUB_OPERATIONAL_DRIVER_JSON || '["python","scripts/provider/operational_kaggle_driver.py"]' }}
       MY_DATA_HUB_MCP_CANARY_ENDPOINT: ${{ vars.MY_DATA_HUB_MCP_CANARY_ENDPOINT || 'https://mcp-datahub.kenigevents.ru/mcp' }}
       MY_DATA_HUB_MCP_CANARY_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_CANARY_TOKEN }}
       MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN }}

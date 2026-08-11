@@ -44,6 +44,42 @@
       "pattern": "^[a-f0-9]{40}$",
       "type": "string"
     },
+    "driver_capability_check": {
+      "additionalProperties": false,
+      "properties": {
+        "detail_code": {
+          "maxLength": 120,
+          "pattern": "^[A-Z0-9_]+$",
+          "type": "string"
+        },
+        "evidence_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "maxLength": 120,
+          "pattern": "^[a-z0-9_.-]+$",
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "PASS",
+            "BLOCKED",
+            "FAIL"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "outcome",
+        "evidence_sha256",
+        "detail_code"
+      ],
+      "type": "object"
+    },
     "lifecycle": {
       "additionalProperties": false,
       "properties": {
@@ -241,6 +277,9 @@
           "blocker": {
             "$ref": "#/$defs/blocker"
           },
+          "driver_mutations_started": {
+            "const": 0
+          },
           "live_evidence": {
             "const": false
           },
@@ -297,6 +336,23 @@
     "completed_at": {
       "format": "date-time",
       "type": "string"
+    },
+    "driver_capability_checks": {
+      "items": {
+        "$ref": "#/$defs/driver_capability_check"
+      },
+      "type": "array"
+    },
+    "driver_mutations_started": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "driver_observation_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "lifecycle_events": {
       "items": {
@@ -417,7 +473,10 @@
     "operation_ids",
     "blocker",
     "started_at",
-    "completed_at"
+    "completed_at",
+    "driver_mutations_started",
+    "driver_capability_checks",
+    "driver_observation_sha256"
   ],
   "title": "Operational Kaggle scenario receipt v1",
   "type": "object"

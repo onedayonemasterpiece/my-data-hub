@@ -1,4 +1,42 @@
 {
+  "$defs": {
+    "capability_check": {
+      "additionalProperties": false,
+      "properties": {
+        "detail_code": {
+          "maxLength": 120,
+          "pattern": "^[A-Z0-9_]+$",
+          "type": "string"
+        },
+        "evidence_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "maxLength": 120,
+          "pattern": "^[a-z0-9_.-]+$",
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "PASS",
+            "BLOCKED",
+            "FAIL"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "outcome",
+        "evidence_sha256",
+        "detail_code"
+      ],
+      "type": "object"
+    }
+  },
   "$id": "https://schemas.my-data-hub.local/provider/operational-kaggle-driver-result.v1.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
@@ -18,6 +56,10 @@
           },
           "integration_dependency": {
             "type": "null"
+          },
+          "mutations_started": {
+            "minimum": 1,
+            "type": "integer"
           },
           "provider_kernel_id": {
             "minimum": 1,
@@ -61,6 +103,9 @@
             "minLength": 1,
             "type": "string"
           },
+          "mutations_started": {
+            "const": 0
+          },
           "provider_kernel_id": {
             "type": "null"
           },
@@ -88,9 +133,26 @@
         "null"
       ]
     },
+    "capability_checks": {
+      "items": {
+        "$ref": "#/$defs/capability_check"
+      },
+      "type": "array"
+    },
     "integration_dependency": {
       "maxLength": 500,
       "minLength": 1,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mutations_started": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "observation_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
       "type": [
         "string",
         "null"
@@ -161,7 +223,10 @@
     "source_version",
     "source_sha256",
     "blocker_code",
-    "integration_dependency"
+    "integration_dependency",
+    "mutations_started",
+    "capability_checks",
+    "observation_sha256"
   ],
   "title": "Operational driver exact run locator v1",
   "type": "object"

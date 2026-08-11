@@ -1,11 +1,14 @@
 {
   "assertions": [],
   "blocker": {
-    "code": "OPERATIONAL_DRIVER_INTERFACE_MISSING",
-    "integration_dependency": "operational driver must create/read/delete a disposable private Dataset"
+    "code": "PROVIDER_DATASET_EXACT_PAYLOAD_CONTRACT_MISSING",
+    "integration_dependency": "provider control gateway create/read/delete payload and exact evidence-run locator contract"
   },
   "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "completed_at": "2026-08-11T07:17:33.406922+00:00",
+  "completed_at": "2026-08-11T08:06:12.721582+00:00",
+  "driver_capability_checks": [],
+  "driver_mutations_started": 0,
+  "driver_observation_sha256": null,
   "lifecycle_events": [],
   "live_evidence": false,
   "matrix_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -17,5 +20,5 @@
   "requirement_id": "FM01",
   "scenario": "private-dataset-create-readback-delete",
   "schema_version": "my-data-hub-operational-kaggle-scenario-receipt.v1",
-  "started_at": "2026-08-11T07:17:33.406922+00:00"
+  "started_at": "2026-08-11T08:06:12.721582+00:00"
 }

@@ -13,13 +13,12 @@ mutation. If the token is absent, it writes a bounded blocker with
 `mutations_started: 0` and exits 78. Legacy `kaggle.json` does not satisfy this
 gate.
 
-The repository does not currently contain the privileged production callable
-that can reboot the host, restart the control plane during an operation,
-terminate a live master, inject checkpoint corruption, or submit the complete
-YDB/embedding workloads. That boundary is explicit:
+The repository includes the trusted bounded driver
+`scripts/provider/operational_kaggle_driver.py`. The provider workflow selects
+it by default:
 
 ```text
-MY_DATA_HUB_OPERATIONAL_DRIVER_JSON=["/trusted/path/mdh-operational-driver"]
+MY_DATA_HUB_OPERATIONAL_DRIVER_JSON=["python","scripts/provider/operational_kaggle_driver.py"]
 ```
 
 The value is parsed as a JSON argv array, never as shell text. For each scenario
@@ -33,9 +32,28 @@ validate as `my-data-hub-operational-kaggle-driver-result.v1` and either:
 - report `BLOCKED` with an uppercase blocker code and the concrete missing
   integration dependency.
 
-No configured driver means 24 separate typed `BLOCKED` scenario receipts and
-exit 78. This is the repository's current observed state; it is not a readiness
-claim.
+The driver has one exact executor entry for every FM01–FM24 scenario. It checks
+the required reader/operator/migration/provider OAuth profile and exact MCP tool
+catalog, then performs only bounded non-mutating observations until the whole
+scenario can be bound to an exact evidence Notebook run. It never starts a
+mutation and then returns BLOCKED: every BLOCKED result requires
+`mutations_started: 0`.
+
+Existing safe production surfaces are wired now: master/checkpoint/provider
+status, stale-epoch denial, blogger accounting/statistics, embedding coverage,
+and protected-resource denial. Unresolved mutation/fault interfaces use a
+scenario-specific code such as `CHECKPOINT_CORRUPTION_FAULT_API_MISSING` or
+`E5_WORKER_SUBMISSION_TOOL_MISSING`; the generic
+`OPERATIONAL_DRIVER_INTERFACE_MISSING` blocker is not used by the trusted
+driver. This remains a blocked operational state, not a readiness claim.
+
+The current internal gaps are explicit in the executor registry. They include
+exact provider create/run/read/delete payload contracts, runtime event history,
+empty-bootstrap selection, checkpoint candidate publication, callback/lease/
+replay fault controls, drain control, YDB batch-to-checkpoint binding, blogger
+logical hash reads, embedding submission tools, host boot identity, a controlled
+business-row fixture, and the accelerated soak controller. Privileged actions
+are not attempted until their terminal exact-run evidence contract exists.
 
 ## What counts as PASS
 
@@ -62,6 +80,10 @@ at least 15 distinct refs and kernel IDs, and all lifecycle gates:
 
 Injected/fake adapter paths are hard-coded to produce only BLOCKED receipts, so
 unit tests cannot create live PASS evidence.
+
+Driver BLOCKED receipts additionally record hashed capability checks and a
+hash of bounded safe observations. Raw business rows, OAuth tokens, database
+credentials, or provider output are never copied into the driver receipt.
 
 ## Scenario contract
 

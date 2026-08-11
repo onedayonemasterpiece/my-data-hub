@@ -318,6 +318,14 @@ class LifecycleEvent(BaseModel):
         return self
 
 
+class DriverCapabilityCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    name: str = Field(pattern=r"^[a-z0-9_.-]+$", max_length=120)
+    outcome: Literal["PASS", "BLOCKED", "FAIL"]
+    evidence_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    detail_code: str = Field(pattern=r"^[A-Z0-9_]+$", max_length=120)
+
+
 class DriverResult(BaseModel):
     """Bounded locator returned by the external operational driver.
 
@@ -338,6 +346,9 @@ class DriverResult(BaseModel):
     source_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     blocker_code: str | None = Field(default=None, pattern=r"^[A-Z0-9_]+$", max_length=100)
     integration_dependency: str | None = Field(default=None, min_length=1, max_length=500)
+    mutations_started: int = Field(ge=0)
+    capability_checks: tuple[DriverCapabilityCheck, ...]
+    observation_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
     def pass_has_exact_provider_locator(self) -> DriverResult:
@@ -350,8 +361,12 @@ class DriverResult(BaseModel):
         )
         if self.outcome == "PASS" and any(value is None for value in locator):
             raise ValueError("PASS driver result lacks exact provider run identity")
+        if self.outcome == "PASS" and self.mutations_started < 1:
+            raise ValueError("PASS driver result lacks a real evidence Notebook mutation")
         if self.outcome == "BLOCKED" and not (self.blocker_code and self.integration_dependency):
             raise ValueError("BLOCKED driver result lacks a concrete integration dependency")
+        if self.outcome == "BLOCKED" and self.mutations_started != 0:
+            raise ValueError("BLOCKED driver result cannot leave an unreceipted mutation")
         return self
 
 
@@ -484,6 +499,9 @@ def _blocker_receipt(
         "assertions": [],
         "lifecycle_events": [],
         "operation_ids": [],
+        "driver_mutations_started": 0,
+        "driver_capability_checks": [],
+        "driver_observation_sha256": None,
         "blocker": {"code": code, "integration_dependency": dependency},
         "started_at": now,
         "completed_at": now,
@@ -619,6 +637,9 @@ def _validated_live_receipt(
         "assertions": [item.model_dump(mode="json") for item in output.assertions],
         "lifecycle_events": [item.model_dump(mode="json") for item in output.lifecycle_events],
         "operation_ids": list(output.operation_ids),
+        "driver_mutations_started": locator.mutations_started,
+        "driver_capability_checks": [item.model_dump(mode="json") for item in locator.capability_checks],
+        "driver_observation_sha256": locator.observation_sha256,
         "blocker": None,
         "started_at": started_at.isoformat(),
         "completed_at": datetime.now(UTC).isoformat(),
@@ -807,6 +828,9 @@ def run_operational_matrix(
                 code=str(locator.blocker_code),
                 dependency=str(locator.integration_dependency),
             )
+            receipt["driver_mutations_started"] = locator.mutations_started
+            receipt["driver_capability_checks"] = [item.model_dump(mode="json") for item in locator.capability_checks]
+            receipt["driver_observation_sha256"] = locator.observation_sha256
         elif locator.outcome == "FAIL":
             receipt = _blocker_receipt(
                 plan=plan,
@@ -816,6 +840,9 @@ def run_operational_matrix(
             )
             receipt["outcome"] = "FAIL"
             receipt["blocker"] = None
+            receipt["driver_mutations_started"] = locator.mutations_started
+            receipt["driver_capability_checks"] = [item.model_dump(mode="json") for item in locator.capability_checks]
+            receipt["driver_observation_sha256"] = locator.observation_sha256
         else:
             with tempfile.TemporaryDirectory(prefix="my-data-hub-operational-output-") as folder:
                 receipt = _validated_live_receipt(

@@ -1,13 +1,23 @@
 {
-  "schema_version": "my-data-hub-operational-kaggle-driver-result.v1",
+  "blocker_code": "EMPTY_MASTER_BOOTSTRAP_SELECTOR_MISSING",
+  "capability_checks": [
+    {
+      "detail_code": "KAGGLE_MODERN_API_TOKEN_PRESENT",
+      "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "name": "kaggle-token",
+      "outcome": "PASS"
+    }
+  ],
+  "integration_dependency": "master.ensure request contract selecting a verified empty checkpoint and returning bootstrap evidence",
+  "mutations_started": 0,
+  "observation_sha256": null,
   "outcome": "BLOCKED",
-  "scenario": "empty-postgresql-master-bootstrap",
-  "task_run_id": "11111111-1111-4111-8111-111111111111",
+  "provider_kernel_id": null,
   "provider_ref": null,
   "provider_run_ref": null,
-  "provider_kernel_id": null,
-  "source_version": null,
+  "scenario": "empty-postgresql-master-bootstrap",
+  "schema_version": "my-data-hub-operational-kaggle-driver-result.v1",
   "source_sha256": null,
-  "blocker_code": "EMPTY_MASTER_BOOTSTRAP_API_MISSING",
-  "integration_dependency": "disposable empty-master bootstrap action and status API"
+  "source_version": null,
+  "task_run_id": "11111111-1111-4111-8111-111111111111"
 }
