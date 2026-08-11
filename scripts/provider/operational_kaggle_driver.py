@@ -24,7 +24,10 @@ import hashlib
 import json
 import os
 import re
+import stat
+import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,6 +38,12 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from my_data_hub.acceptance.data_production import (
+    AtomicJsonStateStore,
+    ProductionDataWorkloadConfig,
+    ProductionDataWorkloadReceipt,
+)
+from my_data_hub.acceptance.data_workloads import DataPhase, DataWorkloadPlan
 from my_data_hub.hashing import canonical_json_bytes
 
 if not __package__:
@@ -187,11 +196,22 @@ class RuntimeEventIdentity(BaseModel):
     epoch: int = Field(ge=1)
 
 
+class DataWorkloadDriverConfig(BaseModel):
+    """Owner-fixed files for the single matrix-wide FM16--FM21 workflow."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    plan_path: str = Field(min_length=1, max_length=4096)
+    production_config_path: str = Field(min_length=1, max_length=4096)
+    state_path: str = Field(min_length=1, max_length=4096)
+    owner_envelope_path: str | None = Field(default=None, min_length=1, max_length=4096)
+
+
 class EvidenceDriverConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     schema_version: Literal["my-data-hub-operational-kaggle-evidence-driver.v1"]
     provider_owner: str = Field(pattern=r"^[A-Za-z0-9_.-]+$", max_length=80)
     fm03_runtime: RuntimeEventIdentity | None = None
+    data_workload: DataWorkloadDriverConfig | None = None
 
 
 class EvidenceClaim(BaseModel):
@@ -539,44 +559,71 @@ EXECUTORS: tuple[ExecutorSpec, ...] = (
     ),
     ExecutorSpec(
         "FM16",
-        ("reader", "migration"),
+        ("reader", "operator", "provider"),
         (
             ("reader", "bloggers.migration.accounting"),
-            ("migration", "bloggers.import.preview"),
-            ("migration", "bloggers.import.apply"),
+            ("reader", "operation.get"),
+            ("reader", "master.status"),
+            ("reader", "checkpoint.status"),
+            ("reader", "data.change.status"),
+            ("operator", "master.rotation.request"),
+            ("operator", "data.change.preview"),
+            ("operator", "data.change.apply"),
+            ("provider", "provider.acceptance.notebook.lifecycle"),
+            ("provider", "provider.acceptance.claim.get"),
+            ("provider", "provider.acceptance.claim.cleanup"),
         ),
-        "blogger_accounting",
-        "YDB_FULL_EXPORT_BATCH_BINDING_MISSING",
-        "trusted full YDB export batch locator and post-import checkpoint terminal operation binding",
+        "catalog_only",
+        "FM16_DATA_WORKLOAD_CONFIGURATION_REQUIRED",
+        "owner-fixed production data-workload plan/config/state and duplicate-resolution envelope",
     ),
     ExecutorSpec(
         "FM17",
-        ("reader", "operator"),
+        ("reader", "operator", "provider"),
         (
             ("reader", "master.status"),
-            ("reader", "bloggers.statistics"),
+            ("reader", "bloggers.migration.accounting"),
             ("reader", "checkpoint.status"),
-            ("operator", "checkpoint.restore.request"),
+            ("reader", "operation.get"),
+            ("reader", "data.change.status"),
+            ("operator", "master.rotation.request"),
+            ("operator", "data.change.preview"),
+            ("operator", "data.change.apply"),
+            ("provider", "provider.acceptance.notebook.lifecycle"),
+            ("provider", "provider.acceptance.claim.get"),
+            ("provider", "provider.acceptance.claim.cleanup"),
         ),
-        "blogger_checkpoint_status",
-        "BLOGGER_LOGICAL_HASH_READ_TOOL_MISSING",
-        "bounded canonical blogger logical-hash tool before and after cold restore",
+        "catalog_only",
+        "FM17_DATA_WORKLOAD_CONFIGURATION_REQUIRED",
+        "same exact matrix-wide production data-workload state used by FM16",
     ),
     ExecutorSpec(
         "FM18",
-        ("reader", "operator"),
-        (("reader", "embedding.coverage"),),
-        "embedding_status",
-        "E5_WORKER_SUBMISSION_TOOL_MISSING",
-        "exact E5 corpus worker submission/import/checkpoint operation tool",
+        ("reader", "operator", "provider"),
+        (("reader", "bloggers.migration.accounting"), ("reader", "operation.get"),
+         ("reader", "master.status"), ("reader", "checkpoint.status"),
+         ("reader", "data.change.status"), ("operator", "master.rotation.request"),
+         ("operator", "data.change.preview"), ("operator", "data.change.apply"),
+         ("provider", "provider.acceptance.notebook.lifecycle"),
+         ("provider", "provider.acceptance.claim.get"),
+         ("provider", "provider.acceptance.claim.cleanup")),
+        "catalog_only",
+        "FM18_DATA_WORKLOAD_CONFIGURATION_REQUIRED",
+        "same exact two-model production request and matrix-wide data-workload state",
     ),
     ExecutorSpec(
         "FM19",
-        ("reader", "operator"),
-        (("reader", "embedding.coverage"),),
-        "embedding_status",
-        "BGE_M3_WORKER_SUBMISSION_TOOL_MISSING",
-        "exact BGE-M3 corpus worker submission/import/checkpoint operation tool",
+        ("reader", "operator", "provider"),
+        (("reader", "bloggers.migration.accounting"), ("reader", "operation.get"),
+         ("reader", "master.status"), ("reader", "checkpoint.status"),
+         ("reader", "data.change.status"), ("operator", "master.rotation.request"),
+         ("operator", "data.change.preview"), ("operator", "data.change.apply"),
+         ("provider", "provider.acceptance.notebook.lifecycle"),
+         ("provider", "provider.acceptance.claim.get"),
+         ("provider", "provider.acceptance.claim.cleanup")),
+        "catalog_only",
+        "FM19_DATA_WORKLOAD_CONFIGURATION_REQUIRED",
+        "same exact two-model production request and matrix-wide data-workload state",
     ),
     ExecutorSpec(
         "FM20",
@@ -594,16 +641,24 @@ EXECUTORS: tuple[ExecutorSpec, ...] = (
     ),
     ExecutorSpec(
         "FM21",
-        ("reader", "operator"),
+        ("reader", "operator", "provider"),
         (
             ("reader", "checkpoint.status"),
+            ("reader", "bloggers.migration.accounting"),
+            ("reader", "operation.get"),
+            ("reader", "master.status"),
+            ("reader", "data.change.status"),
+            ("operator", "master.rotation.request"),
             ("operator", "data.change.preview"),
             ("operator", "data.change.apply"),
-            ("reader", "data.change.status"),
+            ("provider", "provider.acceptance.notebook.lifecycle"),
+            ("provider", "provider.acceptance.claim.get"),
+            ("provider", "provider.acceptance.claim.cleanup"),
         ),
-        "checkpoint_status",
-        "CONTROLLED_BUSINESS_ROW_FIXTURE_MISSING",
-        "owner-approved disposable business-row SQL/parameters/revision fixture and cleanup contract",
+        "catalog_only",
+        "FM21_DATA_WORKLOAD_CONFIGURATION_REQUIRED",
+        "owner-fixed production data-workload state with fixed "
+        "insert/checkpoint/delete/checkpoint/zero-preview fixture",
     ),
     ExecutorSpec(
         "FM22",
@@ -657,6 +712,171 @@ def _evidence_driver_config() -> EvidenceDriverConfig | None:
     if len(raw.encode()) > MAX_EVIDENCE_CLAIMS_BYTES:
         raise ValueError("operational evidence driver configuration is too large")
     return EvidenceDriverConfig.model_validate_json(raw)
+
+
+def _owner_path(value: str, *, label: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute() or path != path.resolve(strict=False):
+        raise ValueError(f"{label} must be an absolute path without symlink components")
+    return path
+
+
+def _read_owner_model(path: Path, model: Any) -> Any:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{path.name} must be a regular non-symlink file")
+    raw = path.read_bytes()
+    if not 1 <= len(raw) <= MAX_REQUEST_BYTES:
+        raise ValueError(f"{path.name} is empty or exceeds 256 KiB")
+    return model.model_validate_json(raw)
+
+
+def _valid_secret(name: str, *, optional: bool = False) -> bool:
+    value = os.environ.get(name, "")
+    if not value and optional:
+        return True
+    return 24 <= len(value) <= 4096 and not any(char.isspace() for char in value)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedDataWorkload:
+    plan: DataWorkloadPlan
+    production: ProductionDataWorkloadConfig
+    store: AtomicJsonStateStore
+    plan_path: Path
+    production_config_path: Path
+    state_path: Path
+    owner_envelope_path: Path | None
+
+
+def _prepare_data_workload(
+    request: DriverRequest, config: DataWorkloadDriverConfig
+) -> PreparedDataWorkload:
+    plan_path = _owner_path(config.plan_path, label="data workload plan")
+    production_path = _owner_path(
+        config.production_config_path, label="data workload production config"
+    )
+    state_path = _owner_path(config.state_path, label="data workload state")
+    owner_path = (
+        _owner_path(config.owner_envelope_path, label="FM16 owner envelope")
+        if config.owner_envelope_path is not None
+        else None
+    )
+    plan = _read_owner_model(plan_path, DataWorkloadPlan)
+    production = _read_owner_model(production_path, ProductionDataWorkloadConfig)
+    if plan.matrix_id != request.matrix_id or plan.source_commit != request.commit_sha:
+        raise ValueError("data workload plan differs from the exact operational matrix")
+    if production.timeout_seconds > 6900:
+        raise ValueError("data workload deadline exceeds the outer driver safety budget")
+    if not _valid_secret(
+        "MY_DATA_HUB_DATA_CONTROL_TOKEN",
+        optional=production.control_base_url.startswith("http://127.0.0.1:8080"),
+    ):
+        raise ValueError("data workload control credential is absent or invalid")
+    for name in (
+        "MY_DATA_HUB_DATA_MCP_READER_TOKEN",
+        "MY_DATA_HUB_DATA_MCP_OPERATOR_TOKEN",
+    ):
+        if not _valid_secret(name):
+            raise ValueError(f"required data workload credential {name} is absent or invalid")
+    store = AtomicJsonStateStore(state_path)
+    existed = state_path.exists()
+    if request.resume_only and not existed:
+        raise MissingPreActionEvidence("resume has no durable data-workload state")
+    if existed:
+        info = state_path.stat(follow_symlinks=False)
+        if (
+            state_path.is_symlink()
+            or not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != os.getuid()
+        ):
+            raise ValueError("data workload state must be an owner-owned mode-0600 regular file")
+    state = store.load(plan)
+    if not existed:
+        # This metadata-only matrix claim is durable before the production
+        # entrypoint is allowed to persist any scenario action intent.
+        store.persist(state)
+    return PreparedDataWorkload(
+        plan=plan,
+        production=production,
+        store=store,
+        plan_path=plan_path,
+        production_config_path=production_path,
+        state_path=state_path,
+        owner_envelope_path=owner_path,
+    )
+
+
+def _invoke_data_workload_entrypoint(prepared: PreparedDataWorkload) -> ProductionDataWorkloadReceipt:
+    entrypoint = Path(__file__).with_name("data_workload_evidence.py")
+    if entrypoint.is_symlink() or not entrypoint.is_file():
+        raise ValueError("trusted data-workload production entrypoint is unavailable")
+    with tempfile.TemporaryDirectory(prefix="my-data-hub-data-workload-") as folder:
+        output = Path(folder) / "receipt.json"
+        command = [
+            sys.executable,
+            str(entrypoint),
+            "--plan",
+            str(prepared.plan_path),
+            "--production-config",
+            str(prepared.production_config_path),
+            "--state",
+            str(prepared.state_path),
+            "--output",
+            str(output),
+        ]
+        if prepared.owner_envelope_path is not None and prepared.owner_envelope_path.exists():
+            command.extend(("--owner-envelope", str(prepared.owner_envelope_path)))
+        completed = subprocess.run(
+            command,
+            check=False,
+            timeout=prepared.production.timeout_seconds + 30,
+            env=os.environ.copy(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if completed.returncode not in {0, 2}:
+            raise RuntimeError(f"data-workload entrypoint exited unexpectedly: {completed.returncode}")
+        if output.is_symlink() or not output.is_file() or not 1 <= output.stat().st_size <= MAX_RESULT_BYTES:
+            raise RuntimeError("data-workload entrypoint emitted no bounded receipt")
+        return ProductionDataWorkloadReceipt.model_validate_json(output.read_bytes())
+
+
+def _data_requirement_proof(
+    request: DriverRequest, receipt: ProductionDataWorkloadReceipt
+) -> tuple[dict[str, object], tuple[str, ...], str]:
+    evidence = receipt.evidence
+    if (
+        evidence is None
+        or evidence.matrix_id != request.matrix_id
+        or evidence.source_commit != request.commit_sha
+        or evidence.live_evidence is not False
+    ):
+        raise ValueError("data workload evidence differs from the exact matrix")
+    requirements = {item.requirement_id: item for item in evidence.requirements}
+    fm18 = requirements["FM18"]
+    fm19 = requirements["FM19"]
+    if (
+        len(fm18.operation_ids) != 2
+        or len(fm19.operation_ids) != 2
+        or fm18.operation_ids[0] != fm19.operation_ids[0]
+        or fm18.operation_ids[1] == fm19.operation_ids[1]
+    ):
+        raise ValueError("FM18/FM19 do not split one exact two-model request")
+    selected = next(
+        item for item in evidence.requirements if item.requirement_id == request.requirement_id
+    )
+    if set(selected.assertion_evidence_sha256) != set(request.required_assertions):
+        raise ValueError("data workload assertion evidence differs from the catalog")
+    bundle_sha256 = evidence.bundle_sha256
+    proofs = {
+        name: {
+            "production_evidence_sha256": selected.assertion_evidence_sha256[name],
+            "data_workload_bundle_sha256": bundle_sha256,
+        }
+        for name in request.required_assertions
+    }
+    return proofs, tuple(selected.operation_ids), str(bundle_sha256)
 
 
 def _subtask_id(request: DriverRequest, kind: Literal["dataset", "notebook"]) -> UUID:
@@ -1241,6 +1461,186 @@ async def _execute_evidence_scenario(
             observations={**mutable_observations, "failure_type": type(exc).__name__},
             mutations_started=possible_mutations,
         )
+
+
+async def _execute_data_workload_scenario(
+    request: DriverRequest,
+    spec: ExecutorSpec,
+    gateway: McpGateway,
+    *,
+    checks: list[CapabilityCheck],
+) -> TrustedDriverResult:
+    try:
+        config = _evidence_driver_config()
+    except Exception as exc:
+        return _blocked(
+            request,
+            checks=[*checks, _check("data.config", "FAIL", "DATA_WORKLOAD_CONFIGURATION_INVALID")],
+            code=f"{request.requirement_id}_DATA_WORKLOAD_CONFIGURATION_INVALID",
+            dependency=f"valid bounded production data-workload configuration ({type(exc).__name__})",
+        )
+    if config is None or config.data_workload is None:
+        return _blocked(
+            request,
+            checks=[*checks, _check("data.config", "BLOCKED", "DATA_WORKLOAD_CONFIGURATION_REQUIRED")],
+            code=spec.gap_code,
+            dependency=spec.gap_dependency,
+        )
+    try:
+        prepared = _prepare_data_workload(request, config.data_workload)
+    except MissingPreActionEvidence as exc:
+        return _blocked(
+            request,
+            checks=[*checks, _check("data.state", "BLOCKED", "DURABLE_DATA_STATE_MISSING")],
+            code=f"{request.requirement_id}_DURABLE_DATA_STATE_MISSING",
+            dependency=f"same exact matrix-wide data-workload state ({type(exc).__name__})",
+        )
+    except Exception as exc:
+        return _blocked(
+            request,
+            checks=[*checks, _check("data.preflight", "FAIL", "DATA_WORKLOAD_PREFLIGHT_INVALID")],
+            code=f"{request.requirement_id}_DATA_WORKLOAD_PREFLIGHT_INVALID",
+            dependency=(
+                "owner-fixed paths, exact plan binding, and required production credentials "
+                f"({type(exc).__name__})"
+            ),
+        )
+
+    before = prepared.store.load(prepared.plan)
+    checks.append(
+        _check(
+            "data.intent",
+            "PASS",
+            "DURABLE_MATRIX_DATA_INTENT_BOUND",
+            {
+                "matrix_id": str(before.matrix_id),
+                "plan_sha256": before.plan_sha256,
+                "phase": before.phase.value,
+            },
+        )
+    )
+    try:
+        receipt = await asyncio.to_thread(_invoke_data_workload_entrypoint, prepared)
+    except Exception as exc:
+        after = prepared.store.load(prepared.plan)
+        possible = max(
+            after.mutations_started,
+            1 if after.phase is not DataPhase.INITIAL else 0,
+        )
+        if possible == 0:
+            return _blocked(
+                request,
+                checks=[*checks, _check("data.entrypoint", "BLOCKED", "DATA_WORKLOAD_ENTRYPOINT_UNAVAILABLE")],
+                code=f"{request.requirement_id}_DATA_WORKLOAD_ENTRYPOINT_UNAVAILABLE",
+                dependency=f"trusted production data-workload entrypoint ({type(exc).__name__})",
+                observations={"state_sha256": _sha(after.model_dump(mode="json"))},
+            )
+        return _failed(
+            request,
+            checks=[*checks, _check("data.entrypoint", "FAIL", "DATA_WORKLOAD_RESPONSE_AMBIGUOUS")],
+            observations={
+                "state_sha256": _sha(after.model_dump(mode="json")),
+                "phase": after.phase.value,
+                "failure_type": type(exc).__name__,
+            },
+            mutations_started=possible,
+        )
+
+    after = prepared.store.load(prepared.plan)
+    state_sha256 = _sha(after.model_dump(mode="json"))
+    observations: dict[str, Any] = {
+        "production_receipt_sha256": _sha(receipt.model_dump(mode="json", exclude_none=True)),
+        "state_sha256": state_sha256,
+        "phase": after.phase.value,
+    }
+    if receipt.matrix_id != request.matrix_id or receipt.state_sha256 != state_sha256:
+        return _failed(
+            request,
+            checks=[*checks, _check("data.receipt", "FAIL", "DATA_WORKLOAD_RECEIPT_BINDING_INVALID")],
+            observations=observations,
+            mutations_started=max(after.mutations_started, 1),
+        )
+    checks.append(_check("data.receipt", "PASS", "DATA_WORKLOAD_RECEIPT_RECONCILED", observations))
+
+    if receipt.outcome == "AWAITING_OWNER_AUTHORIZATION":
+        if (
+            after.phase is not DataPhase.AWAITING_OWNER_AUTHORIZATION
+            or after.quarantine is None
+            or after.duplicate_review is None
+        ):
+            return _failed(
+                request,
+                checks=[*checks, _check("data.owner", "FAIL", "OWNER_AUTHORIZATION_PAUSE_INVALID")],
+                observations=observations,
+                mutations_started=max(after.mutations_started, 1),
+            )
+        # This is an explicitly resumable, durably reconciled owner boundary.
+        # BLOCKED/0 describes this invocation: the prior quarantine is fully
+        # receipted in the shared state and no next mutation was attempted.
+        return _blocked(
+            request,
+            checks=[*checks, _check("data.owner", "BLOCKED", "FM16_OWNER_AUTHORIZATION_REQUIRED")],
+            code="FM16_AWAITING_OWNER_AUTHORIZATION",
+            dependency="mode-0600 owner duplicate-resolution envelope; resume the same matrix and state",
+            observations=observations,
+        )
+    if receipt.outcome == "BLOCKED":
+        if after.phase is DataPhase.INITIAL and after.mutations_started == 0:
+            return _blocked(
+                request,
+                checks=[*checks, _check("data.capability", "BLOCKED", "DATA_WORKLOAD_CAPABILITY_BLOCKED")],
+                code=str(receipt.blocker_code),
+                dependency="production data-workload capability before the first mutation",
+                observations=observations,
+            )
+        return _failed(
+            request,
+            checks=[*checks, _check("data.capability", "FAIL", "POST_MUTATION_CAPABILITY_LOST")],
+            observations={**observations, "blocker_code": receipt.blocker_code},
+            mutations_started=max(after.mutations_started, 1),
+        )
+    if receipt.outcome != "EVIDENCE_READY":
+        return _failed(
+            request,
+            checks=[*checks, _check("data.terminal", "FAIL", "DATA_WORKLOAD_NOT_EVIDENCE_READY")],
+            observations={**observations, "failure_code": receipt.failure_code},
+            mutations_started=max(after.mutations_started, 1),
+        )
+    if after.phase is not DataPhase.EVIDENCE_READY or after.mutations_started < 1:
+        return _failed(
+            request,
+            checks=[*checks, _check("data.terminal", "FAIL", "DATA_WORKLOAD_TERMINAL_STATE_INVALID")],
+            observations=observations,
+            mutations_started=max(after.mutations_started, 1),
+        )
+    try:
+        proofs, operation_ids, bundle_sha256 = _data_requirement_proof(request, receipt)
+        output = _output_document(request, proofs, operation_ids=operation_ids)
+    except Exception as exc:
+        return _failed(
+            request,
+            checks=[*checks, _check("data.evidence", "FAIL", "DATA_WORKLOAD_EVIDENCE_INVALID")],
+            observations={**observations, "failure_type": type(exc).__name__},
+            mutations_started=after.mutations_started,
+        )
+    observations["data_workload_bundle_sha256"] = bundle_sha256
+    checks.append(
+        _check(
+            "data.evidence",
+            "PASS",
+            "DATA_WORKLOAD_LIVE_TERMINAL_BOUND",
+            receipt.evidence.model_dump(mode="json"),
+        )
+    )
+    return await _launch_post_action_evidence(
+        request,
+        gateway,
+        owner=config.provider_owner,
+        output_document=output,
+        checks=checks,
+        observations=observations,
+        mutations_started=after.mutations_started,
+    )
 
 
 async def _launch_post_action_evidence(
@@ -2170,6 +2570,13 @@ async def execute(request: DriverRequest, gateway: McpGateway) -> TrustedDriverR
             gateway,
             checks=checks,
             observations=observations,
+        )
+    if request.requirement_id in {"FM16", "FM17", "FM18", "FM19", "FM21"}:
+        return await _execute_data_workload_scenario(
+            request,
+            spec,
+            gateway,
+            checks=checks,
         )
     if spec.action_tool is not None:
         return await _execute_claimed_action(

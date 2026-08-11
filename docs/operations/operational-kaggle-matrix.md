@@ -45,6 +45,7 @@ terminally is a typed `FAIL`, not a blocker.
 
 Existing safe production surfaces are wired now: FM01 Dataset lifecycle,
 FM02 Notebook lifecycle, FM03 bounded runtime history, FM06 durable restore,
+FM16--FM19 and FM21 through the single resumable production data workload,
 FM22 Dataset plus Notebook lifecycles, FM23 protected-resource denial, master/
 checkpoint/provider status, stale-epoch denial, blogger accounting/statistics,
 embedding coverage, claim-gated rotation, and the FM20 signed-host-evidence
@@ -57,16 +58,15 @@ driver. This remains a blocked operational state, not a readiness claim.
 
 The current internal gaps are explicit in the executor registry. They include
 empty-bootstrap selection, checkpoint candidate publication, callback/lease/
-replay fault controls, drain control, YDB batch-to-checkpoint binding, blogger
-logical hash reads, embedding submission tools, a controlled
-business-row fixture, and the accelerated soak controller. Privileged actions
+replay fault controls, drain control, and the accelerated soak controller. Privileged actions
 are not attempted until their terminal exact-run evidence contract exists.
 
 ### Evidence-plane scenarios and two-phase cleanup
 
 `MY_DATA_HUB_OPERATIONAL_EVIDENCE_DRIVER_JSON` validates as
-`my-data-hub-operational-kaggle-evidence-driver.v1`. It supplies only the exact
-provider owner and, for FM03, the runtime `(run_id, attempt_id, epoch)` key. It
+`my-data-hub-operational-kaggle-evidence-driver.v1`. It supplies the exact
+provider owner, the optional FM03 runtime `(run_id, attempt_id, epoch)` key, and
+optional owner-fixed production data-workload paths. It
 contains no credential or provider locator. Missing/invalid configuration is a
 pre-action `BLOCKED` result with `mutations_started: 0`.
 
@@ -84,7 +84,7 @@ least one `runtime.heartbeat`, and exactly one final `runtime.terminal`. FM23
 requires `evaluated=true`, `protected=true`, the exact protected-denial reason,
 and `mutation_attempted=false` before its distinct evidence Notebook launches.
 
-For FM01, FM02, FM03, FM06, FM22, and FM23 the driver returns `READY`, never
+For FM01, FM02, FM03, FM06, FM16--FM19, FM21--FM23 the driver returns `READY`, never
 PASS, after the acceptance claim is `SUCCEEDED/PENDING`. The outer matrix then:
 
 1. independently reconciles the exact numeric run with its one real
@@ -102,6 +102,40 @@ FAIL, never BLOCKED. A rerun consumes the append-only reconciliation fence and
 never launches a second logical run. The fence contains the already validated
 receipt draft, so a retry after successful deletion does not attempt to
 download the deleted Notebook again.
+
+### Matrix-wide FM16--FM19/FM21 production data workflow
+
+The `data_workload` configuration binds absolute non-symlink paths for one
+`operational-data-workload-plan.v1`, one production config, and one durable
+mode-0600 state file. The plan matrix UUID and source commit must exactly equal
+the operational request. The driver validates the control/reader/operator
+credentials and persists the initial metadata-only matrix state before it may
+invoke `scripts/provider/data_workload_evidence.py`. The production deadline is
+limited to 6,900 seconds so the child entrypoint cannot outlive the outer
+7,200-second driver budget.
+
+That single state machine performs FM16 v1 quarantine, explicit owner-authorized
+v2 replay and checkpoint; FM17 rotation/restore and logical equality; one shared
+FM18/FM19 two-model request and checkpoint; and FM21 fixed insert/checkpoint,
+delete/checkpoint, then zero-row preview. The driver accepts only the exact
+ordered `EVIDENCE_READY` bundle, requires FM18 and FM19 to share their first
+request ID and have distinct worker task IDs, and splits the five bounded
+requirement receipts into five task-run-bound evidence Notebooks. Each is then
+independently downloaded and cleaned by the normal two-phase protocol.
+
+After the exact v1 quarantine and duplicate-review projections are durably
+reconciled, FM16 may return `FM16_AWAITING_OWNER_AUTHORIZATION` as BLOCKED/0 for
+the *current* invocation. The matrix stops before dependent scenarios. A later
+run recognizes only that exact blocker, reuses the existing launch fence and
+same state/task, and supplies the owner-created mode-0600 envelope. It never
+creates a synthetic decision. Any other capability loss or ambiguous response
+after a persisted action phase is FAIL with nonzero mutation accounting, not
+BLOCKED.
+
+`EVIDENCE_READY` remains non-live intermediate metadata. PASS still requires a
+real provider lifecycle claim, terminal COMPLETE Notebook, independent outer
+run/output reconciliation, and durable claim-bound cleanup. No checked-in test
+or example is live evidence.
 
 ### Claim-gated restore and rotation
 
@@ -175,8 +209,6 @@ to reach ACTIVE, or malformed/empty search result is FAIL with
   endpoint.
 - FM14/FM15: normal runtime-authenticated checkpoint reject/restore paths exist,
   but no disposable corruption or forced restore-smoke failure selector exists.
-- FM21: preview/apply signatures are bounded, but no owner-approved exact
-  disposable business-row SQL/parameters/revision/cleanup fixture is defined.
 - FM24: status polling alone cannot prove heartbeat, read, checkpoint, recovery,
   or credential-rotation counts. No accelerated soak controller/event stream is
   exposed, so the 3,600–5,400 second scenario remains BLOCKED before mutation.

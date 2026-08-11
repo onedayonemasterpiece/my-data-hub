@@ -513,6 +513,68 @@ def test_reconciliation_fence_resumes_cleanup_after_notebook_was_deleted(
     assert fm01["outcome"] == "PASS"
 
 
+def test_fm16_owner_pause_resumes_same_launch_and_stops_dependents_until_authorized(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fm16_requests: list[dict[str, object]] = []
+
+    def blocked(request: dict[str, object], code: str) -> DriverResult:
+        return DriverResult.model_validate(
+            {
+                "schema_version": "my-data-hub-operational-kaggle-driver-result.v2",
+                "phase": "EXECUTE",
+                "outcome": "BLOCKED",
+                "scenario": request["scenario"],
+                "task_run_id": request["task_run_id"],
+                "blocker_code": code,
+                "integration_dependency": "unit-test exact dependency",
+                "mutations_started": 0,
+                "capability_checks": [],
+                "cleanup_state": "NOT_REQUIRED",
+            }
+        )
+
+    def invoke(_command: object, request: dict[str, object], *, timeout_seconds: int) -> DriverResult:
+        assert timeout_seconds == 7200
+        if request["requirement_id"] == "FM16":
+            fm16_requests.append(dict(request))
+            code = (
+                "FM16_AWAITING_OWNER_AUTHORIZATION"
+                if len(fm16_requests) == 1
+                else "FM16_OWNER_ENVELOPE_STILL_REQUIRED"
+            )
+            return blocked(request, code)
+        return blocked(request, "UNIT_TEST_REMAINDER_BLOCKED")
+
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "unit-test-token")
+    monkeypatch.setattr(matrix_module, "_exact_commit", lambda _root: "a" * 40)
+    monkeypatch.setattr(matrix_module, "_invoke_driver", invoke)
+    monkeypatch.setattr(
+        matrix_module.KaggleProviderAdapter,
+        "from_environment",
+        lambda **_: SimpleNamespace(),
+    )
+    kwargs = {
+        "ledger_path": tmp_path / "ledger.sqlite3",
+        "plan_path": tmp_path / "plan.json",
+        "receipt_path": tmp_path / "summary.json",
+        "scenario_directory": tmp_path / "scenarios",
+        "driver_command": ("trusted-driver",),
+        "matrix_id": UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+    }
+
+    assert run_operational_matrix(**kwargs) == EXTERNAL_BLOCKED  # type: ignore[arg-type]
+    assert len(fm16_requests) == 1
+    assert fm16_requests[0]["resume_only"] is False
+    assert not (tmp_path / "scenarios/17-post-import-cold-restore-equality.json").exists()
+
+    assert run_operational_matrix(**kwargs) == EXTERNAL_BLOCKED  # type: ignore[arg-type]
+    assert len(fm16_requests) == 2
+    assert fm16_requests[1]["resume_only"] is True
+    fm16 = json.loads((tmp_path / "scenarios/16-full-ydb-blogger-import-checkpoint.json").read_text())
+    assert fm16["blocker"]["code"] == "FM16_OWNER_ENVELOPE_STILL_REQUIRED"
+
+
 @pytest.mark.parametrize(
     ("schema_name", "example_name"),
     [

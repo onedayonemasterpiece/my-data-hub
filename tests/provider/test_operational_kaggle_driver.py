@@ -9,6 +9,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -18,6 +19,17 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
+import scripts.provider.operational_kaggle_driver as driver_module
+from my_data_hub.acceptance.data_production import ProductionDataWorkloadReceipt
+from my_data_hub.acceptance.data_workloads import (
+    BloggerQuarantineEvidence,
+    DataPhase,
+    DataWorkloadEvidenceBundle,
+    DataWorkloadPlan,
+    DataWorkloadState,
+    DuplicateReviewEvidence,
+    RequirementEvidence,
+)
 from my_data_hub.hashing import canonical_json_bytes
 from scripts.provider.operational_kaggle_driver import (
     EXECUTORS,
@@ -481,7 +493,7 @@ def test_driver_has_one_named_executor_and_only_unclosed_scenarios_retain_missin
     assert [item.requirement_id for item in EXECUTORS] == [f"FM{i:02d}" for i in range(1, 25)]
     assert len({item.gap_code for item in EXECUTORS}) == 24
     assert all(item.gap_code != "OPERATIONAL_DRIVER_INTERFACE_MISSING" for item in EXECUTORS)
-    closed = {"FM01", "FM02", "FM03", "FM06", "FM22", "FM23"}
+    closed = {"FM01", "FM02", "FM03", "FM06", "FM16", "FM17", "FM18", "FM19", "FM21", "FM22", "FM23"}
     assert all(
         "missing" in item.gap_code.casefold()
         for item in EXECUTORS
@@ -576,6 +588,230 @@ def test_exact_evidence_scenarios_return_ready_not_pass_before_cleanup(
         assert notebook["dataset_inputs"] == []
     if ordinal == 3:
         assert any(tool == "runtime.events.history" for _profile, tool, _args in gateway.calls)
+
+
+class _FixedDataStateStore:
+    def __init__(self, state: DataWorkloadState) -> None:
+        self.state = state
+
+    def load(self, _plan: DataWorkloadPlan) -> DataWorkloadState:
+        return self.state
+
+
+def _data_evidence(request: DriverRequest) -> tuple[DataWorkloadPlan, DataWorkloadState, ProductionDataWorkloadReceipt]:
+    plan = DataWorkloadPlan(
+        matrix_id=request.matrix_id,
+        source_commit=request.commit_sha,
+        blogger_project_id=UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        blogger_snapshot_at=datetime(2026, 8, 9, tzinfo=UTC),
+        blogger_source_revision="b" * 40,
+        embedding_probe_query_sha256="c" * 64,
+    )
+    assertion_names = {
+        spec.requirement_id: spec.assertions
+        for spec in driver_module.SCENARIOS
+        if spec.requirement_id in {"FM16", "FM17", "FM18", "FM19", "FM21"}
+    }
+    shared_request = "11111111-1111-4111-8111-111111111111"
+    requirements = tuple(
+        RequirementEvidence(
+            requirement_id=requirement_id,  # type: ignore[arg-type]
+            assertion_evidence_sha256={name: str(index) * 64 for name in assertion_names[requirement_id]},
+            operation_ids=(
+                (shared_request, f"worker-{requirement_id}")
+                if requirement_id in {"FM18", "FM19"}
+                else (f"operation-{requirement_id}",)
+            ),
+        )
+        for index, requirement_id in enumerate(("FM16", "FM17", "FM18", "FM19", "FM21"), start=1)
+    )
+    evidence = DataWorkloadEvidenceBundle(
+        matrix_id=request.matrix_id,
+        source_commit=request.commit_sha,
+        requirements=requirements,  # type: ignore[arg-type]
+    )
+    state = DataWorkloadState.initial(plan).model_copy(
+        update={"phase": DataPhase.EVIDENCE_READY, "mutations_started": 6}
+    )
+    receipt = ProductionDataWorkloadReceipt(
+        matrix_id=request.matrix_id,
+        outcome="EVIDENCE_READY",
+        state_sha256=hashlib.sha256(
+            canonical_json_bytes(state.model_dump(mode="json"))
+        ).hexdigest(),
+        evidence=evidence,
+    )
+    return plan, state, receipt
+
+
+def _set_data_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "MY_DATA_HUB_OPERATIONAL_EVIDENCE_DRIVER_JSON",
+        json.dumps(
+            {
+                "schema_version": "my-data-hub-operational-kaggle-evidence-driver.v1",
+                "provider_owner": "evidence-owner",
+                "data_workload": {
+                    "plan_path": "/owner/plan.json",
+                    "production_config_path": "/owner/production.json",
+                    "state_path": "/state/data.json",
+                },
+            }
+        ),
+    )
+
+
+def test_data_workload_preflight_persists_exact_mode_0600_matrix_claim_before_action(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    request = _request(16)
+    plan = DataWorkloadPlan(
+        matrix_id=request.matrix_id,
+        source_commit=request.commit_sha,
+        blogger_project_id=UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        blogger_snapshot_at=datetime(2026, 8, 9, tzinfo=UTC),
+        blogger_source_revision="b" * 40,
+        embedding_probe_query_sha256=hashlib.sha256(b"probe").hexdigest(),
+    )
+    production = driver_module.ProductionDataWorkloadConfig(
+        control_base_url="http://127.0.0.1:8080",
+        mcp_endpoint="https://mcp.example.test/mcp",
+        blogger_v1_operation_id=UUID("11111111-1111-4111-8111-111111111111"),
+        blogger_v2_operation_id=UUID("22222222-2222-4222-8222-222222222222"),
+        probe_query="probe",
+    )
+    plan_path = tmp_path / "plan.json"
+    production_path = tmp_path / "production.json"
+    state_path = tmp_path / "state" / "data.json"
+    plan_path.write_text(plan.model_dump_json())
+    production_path.write_text(production.model_dump_json())
+    monkeypatch.setenv("MY_DATA_HUB_DATA_MCP_READER_TOKEN", "r" * 24)
+    monkeypatch.setenv("MY_DATA_HUB_DATA_MCP_OPERATOR_TOKEN", "o" * 24)
+    config = driver_module.DataWorkloadDriverConfig(
+        plan_path=str(plan_path),
+        production_config_path=str(production_path),
+        state_path=str(state_path),
+    )
+
+    prepared = driver_module._prepare_data_workload(request, config)
+
+    assert prepared.store.load(plan).phase is DataPhase.INITIAL
+    assert state_path.stat().st_mode & 0o777 == 0o600
+    assert state_path.read_bytes()
+
+    missing_state = config.model_copy(update={"state_path": str(tmp_path / "missing-state.json")})
+    with pytest.raises(driver_module.MissingPreActionEvidence):
+        driver_module._prepare_data_workload(
+            request.model_copy(update={"resume_only": True}), missing_state
+        )
+
+
+@pytest.mark.parametrize("ordinal", [16, 17, 18, 19, 21])
+def test_data_workload_live_terminal_launches_distinct_reconciled_evidence_notebook(
+    ordinal: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request(ordinal)
+    plan, state, receipt = _data_evidence(request)
+    prepared = SimpleNamespace(plan=plan, store=_FixedDataStateStore(state))
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    _set_data_config(monkeypatch)
+    monkeypatch.setattr(driver_module, "_prepare_data_workload", lambda *_args: prepared)
+    monkeypatch.setattr(driver_module, "_invoke_data_workload_entrypoint", lambda _prepared: receipt)
+    gateway = EvidenceLifecycleGateway()
+
+    result = asyncio.run(execute(request, gateway))
+
+    assert result.outcome == "READY"
+    assert result.cleanup_state == "PENDING"
+    assert result.mutations_started == 7
+    assert result.provider_run_ref is not None
+    lifecycle = [
+        arguments
+        for _profile, tool, arguments in gateway.calls
+        if tool == "provider.acceptance.notebook.lifecycle"
+    ]
+    assert len(lifecycle) == 1
+    assert lifecycle[0]["scenario_id"] == request.requirement_id
+    assert lifecycle[0]["task_run_id"] == str(request.task_run_id)
+
+
+def test_fm16_owner_authorization_pause_is_reconciled_blocked_zero_and_resumable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(16)
+    plan, state, _receipt = _data_evidence(request)
+    state = state.model_copy(
+        update={
+            "phase": DataPhase.AWAITING_OWNER_AUTHORIZATION,
+            "mutations_started": 1,
+            "quarantine": BloggerQuarantineEvidence(
+                request_id=UUID("11111111-1111-4111-8111-111111111111"),
+                request_sha256="1" * 64,
+                operation_id=UUID("22222222-2222-4222-8222-222222222222"),
+                export_batch_id=UUID("33333333-3333-4333-8333-333333333333"),
+                failure_code="BloggerMigrationQuarantined",
+                quarantined_count=2,
+                logical_sha256="2" * 64,
+                record_id_set_sha256="3" * 64,
+                canonical_outcome_sha256="4" * 64,
+                duplicate_group_count=1,
+                duplicate_groups_pending=1,
+            ),
+            "duplicate_review": DuplicateReviewEvidence(
+                export_batch_id=UUID("33333333-3333-4333-8333-333333333333"),
+                source_request_id=UUID("11111111-1111-4111-8111-111111111111"),
+                source_operation_id=UUID("22222222-2222-4222-8222-222222222222"),
+                source_request_sha256="1" * 64,
+                duplicate_group_count=1,
+                duplicate_groups_pending=1,
+                identity_set_sha256="5" * 64,
+                member_record_id_set_sha256="6" * 64,
+                review_projection_sha256="7" * 64,
+            ),
+        }
+    )
+    receipt = ProductionDataWorkloadReceipt(
+        matrix_id=request.matrix_id,
+        outcome="AWAITING_OWNER_AUTHORIZATION",
+        state_sha256=hashlib.sha256(canonical_json_bytes(state.model_dump(mode="json"))).hexdigest(),
+    )
+    prepared = SimpleNamespace(plan=plan, store=_FixedDataStateStore(state))
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    _set_data_config(monkeypatch)
+    monkeypatch.setattr(driver_module, "_prepare_data_workload", lambda *_args: prepared)
+    monkeypatch.setattr(driver_module, "_invoke_data_workload_entrypoint", lambda _prepared: receipt)
+    gateway = EvidenceLifecycleGateway()
+
+    result = asyncio.run(execute(request, gateway))
+
+    assert result.outcome == "BLOCKED"
+    assert result.blocker_code == "FM16_AWAITING_OWNER_AUTHORIZATION"
+    assert result.mutations_started == 0
+    assert not any(tool == "provider.acceptance.notebook.lifecycle" for _p, tool, _a in gateway.calls)
+
+
+def test_data_workload_post_mutation_blocker_is_fail_not_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(17)
+    plan, state, _receipt = _data_evidence(request)
+    state = state.model_copy(update={"phase": DataPhase.FM17_RESTORE_AMBIGUOUS, "mutations_started": 3})
+    receipt = ProductionDataWorkloadReceipt(
+        matrix_id=request.matrix_id,
+        outcome="BLOCKED",
+        state_sha256=hashlib.sha256(canonical_json_bytes(state.model_dump(mode="json"))).hexdigest(),
+        blocker_code="FM17_ROTATION_RESPONSE_AMBIGUOUS",
+    )
+    prepared = SimpleNamespace(plan=plan, store=_FixedDataStateStore(state))
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    _set_data_config(monkeypatch)
+    monkeypatch.setattr(driver_module, "_prepare_data_workload", lambda *_args: prepared)
+    monkeypatch.setattr(driver_module, "_invoke_data_workload_entrypoint", lambda _prepared: receipt)
+
+    result = asyncio.run(execute(request, EvidenceLifecycleGateway()))
+
+    assert result.outcome == "FAIL"
+    assert result.mutations_started == 3
 
 
 def test_cleanup_phase_requires_exact_outer_binding_and_only_then_passes(
@@ -963,6 +1199,19 @@ def test_fm20_evidence_bundle_schema_and_runtime_validate() -> None:
     from scripts.provider.operational_kaggle_driver import FM20EvidenceBundle
 
     FM20EvidenceBundle.model_validate(example)
+
+
+def test_data_workload_driver_config_schema_example_and_runtime_validate() -> None:
+    root = Path(__file__).resolve().parents[2]
+    schema = json.loads(
+        (root / "schemas/provider/operational-kaggle-evidence-driver.v1.schema.json").read_text()
+    )
+    example = json.loads(
+        (root / "examples/provider/operational-kaggle-evidence-driver.v1.example.json").read_text()
+    )
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator(schema, format_checker=FormatChecker()).validate(example)
+    driver_module.EvidenceDriverConfig.model_validate(example)
 
 
 def test_missing_catalog_tool_is_scenario_specific(monkeypatch: pytest.MonkeyPatch) -> None:

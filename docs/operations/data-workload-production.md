@@ -88,3 +88,37 @@ SHA-256 and `REQUESTED` state. The former projection blocker is therefore closed
 This is interface evidence only: no real provider run, owner decision, H5 import,
 checkpoint, or outer reconciliation was executed, so `live_evidence` remains
 false and production acceptance remains blocked pending those live steps.
+
+## Operational matrix driver integration
+
+The operational driver consumes this protocol through the optional
+`data_workload` object in
+`MY_DATA_HUB_OPERATIONAL_EVIDENCE_DRIVER_JSON`. Its four fields are absolute
+owner-fixed paths: `plan_path`, `production_config_path`, `state_path`, and the
+optional `owner_envelope_path`. The plan and production config must be bounded
+regular non-symlink files. The driver requires the plan matrix ID/source commit
+to equal its signed launch request, requires the dedicated production control,
+reader and operator credentials, and persists a mode-0600 initial state before
+starting the CLI. A launch-fenced resume without that state is BLOCKED/0 and
+never recreates an action.
+
+One shared state produces the exact ordered FM16, FM17, FM18, FM19 and FM21
+bundle. The driver additionally proves that FM18/FM19 share one request ID and
+carry distinct worker task IDs. It does not treat the bundle as PASS: each
+requirement becomes a separate task-run-bound acceptance Notebook, followed by
+independent outer output reconciliation and exact claim cleanup.
+
+At the owner authorization boundary the CLI is invoked without an absent
+optional envelope so it can safely reach and persist the quarantine/review
+pause. The matrix records only the exact resumable
+`FM16_AWAITING_OWNER_AUTHORIZATION` blocker, stops before FM17, and on the next
+run reuses the same matrix launch and state. The envelope is admitted only when
+the file exists and the production loader verifies owner UID, non-symlink
+regular type, exact mode 0600, size, schema, and persisted review bindings.
+There is no generated or default duplicate decision.
+
+Any ordinary BLOCKED receipt is allowed through the operational driver only
+while the state is still `INITIAL` with zero mutations. A capability loss,
+deadline, malformed receipt, or transport ambiguity after a persisted action
+phase is an operational FAIL, never rewritten as BLOCKED/0. No live execution
+has been performed by this repository change.

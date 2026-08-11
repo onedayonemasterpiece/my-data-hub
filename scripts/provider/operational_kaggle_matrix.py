@@ -48,6 +48,7 @@ MINIMUM_DISTINCT_PROVIDER_RUNS = 15
 MINIMUM_SOAK_SECONDS = 60 * 60
 MAXIMUM_SOAK_SECONDS = 90 * 60
 MAX_RESULT_BYTES = 2 * 1024 * 1024
+RESUMABLE_OWNER_BLOCKER = "FM16_AWAITING_OWNER_AUTHORIZATION"
 
 
 @dataclass(frozen=True, slots=True)
@@ -893,8 +894,17 @@ def run_operational_matrix(
                 or existing.get("planned_task_run_id") != row["planned_task_run_id"]
             ):
                 raise RuntimeError(f"stale operational scenario receipt: {scenario_path}")
-            receipts.append(existing)
-            continue
+            blocker = existing.get("blocker")
+            resumable_owner_pause = (
+                row["requirement_id"] == "FM16"
+                and existing.get("outcome") == "BLOCKED"
+                and isinstance(blocker, Mapping)
+                and blocker.get("code") == RESUMABLE_OWNER_BLOCKER
+                and existing.get("driver_mutations_started") == 0
+            )
+            if not resumable_owner_pause:
+                receipts.append(existing)
+                continue
         launch_path = scenario_path.with_suffix(".launch.json")
         reconciliation_path = scenario_path.with_suffix(".reconciled.json")
         reconciliation_loaded = reconciliation_path.exists()
@@ -1067,6 +1077,17 @@ def run_operational_matrix(
             ).hexdigest()
         _atomic_write(scenario_path, receipt)
         receipts.append(receipt)
+        blocker = receipt.get("blocker")
+        if (
+            row["requirement_id"] == "FM16"
+            and receipt.get("outcome") == "BLOCKED"
+            and isinstance(blocker, Mapping)
+            and blocker.get("code") == RESUMABLE_OWNER_BLOCKER
+        ):
+            # Do not launch dependent FM17--FM21 rows until the exact same
+            # FM16 task/state resumes with an owner-provided mode-0600 envelope.
+            _atomic_write(receipt_path, _summary(plan, receipts))
+            return EXTERNAL_BLOCKED
     summary = _summary(plan, receipts)
     _atomic_write(receipt_path, summary)
     return PASS if summary["outcome"] == "PASS" else (FAIL if summary["outcome"] == "FAIL" else EXTERNAL_BLOCKED)
