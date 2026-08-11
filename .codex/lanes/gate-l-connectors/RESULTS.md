@@ -33,6 +33,23 @@
 2. No deployed root-owned connector checkpoint gateway was available in this lane. The live verifier honestly stops at `CANONICAL_COMMITTED` and fails until an external gateway returns an exact verified `DURABLE_COMPLETE` receipt. No checkpoint/provider authentication code was changed and no completion was fabricated.
 3. The API factory is ready for resolver/broker injection, but the production process composition outside this lane must supply `ActiveMasterConnectorRuntime`; absence returns `CONNECTOR_ACTIVE_MASTER_RUNTIME_UNAVAILABLE` before mutation.
 
+## Follow-up verifier audit
+
+The bounded follow-up rechecked `scripts/verify_connector_flow.py` at lane tip. The
+verifier persists the `.accepted.json` receipt only as nonterminal evidence, commits the
+batch, polls the durability endpoint through the transport contract, excludes acceptance
+receipts from the final receipt set, and requires both a delivery summary completion and
+an exact final receipt whose state is `DURABLE_COMPLETE`. Its prior live observation at
+`CANONICAL_COMMITTED` therefore remains an honest nonzero result with the spool retained.
+
+Follow-up commands:
+
+- `ruff check scripts/verify_connector_flow.py tests/test_connector_gate_l.py` — PASS.
+- `python -m compileall -q scripts/verify_connector_flow.py` — PASS.
+- `pytest tests/test_connector_gate_l.py tests/test_connectors.py -q` — PASS (`24 passed`).
+- `python scripts/verify_connector_flow.py --help` — PASS; bounded
+  `--durability-timeout-seconds` polling option exposed.
+
 ## Changed files
 
 - `docs/16-data-connectors.md`
