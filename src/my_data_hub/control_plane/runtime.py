@@ -9,6 +9,7 @@ import os
 import secrets
 import tempfile
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -28,6 +29,10 @@ from my_data_hub.acceptance.master_lifecycle import (
     require_acceptance_operator,
 )
 from my_data_hub.checkpoints import CheckpointManifest
+from my_data_hub.checkpoints.brokered_upload import (
+    BrokeredCheckpointUploadService,
+    CheckpointUploadSecretBox,
+)
 from my_data_hub.checkpoints.kaggle_runtime import (
     KaggleCheckpointRestoreVerifier,
     KaggleCheckpointVerifierAssets,
@@ -56,9 +61,6 @@ from my_data_hub.tunnel_broker_ipc import TunnelBrokerClient
 
 class MasterProviderUnavailable(RuntimeError):
     """The control plane is healthy but no authenticated provider is available."""
-
-
-CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE = "CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE"
 
 
 @dataclass(slots=True)
@@ -1002,6 +1004,7 @@ class ProductionRuntimeBuild:
     provider_status: str
     session_registrar: SessionCredentialRegistrar | None = None
     provider_adapter: KaggleProviderAdapter | None = None
+    checkpoint_broker: BrokeredCheckpointUploadService | None = None
 
 
 def build_production_runtime(
@@ -1016,9 +1019,9 @@ def build_production_runtime(
 ) -> ProductionRuntimeBuild:
     registrar = _build_session_registrar(session_credentials_path)
     if settings is None:
-        return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None)
+        return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None, None)
     if not kaggle_credentials_configured():
-        return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None)
+        return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None, None)
     journal = ControlLedgerKaggleJournal(ledger)
     factory = adapter_factory or (lambda value: KaggleProviderAdapter.from_environment(journal=value))
     try:
@@ -1026,22 +1029,70 @@ def build_production_runtime(
     except Exception:
         # Authentication/dependency failures do not make the stable control plane
         # unhealthy and must not leak provider exception/credential detail.
-        return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None)
-    # The normal master must remain able to create a verified checkpoint before it
-    # can ever become ACTIVE.  Kaggle checkpoint bytes cannot cross the devstand,
-    # and the only existing checkpoint writer constructs a second provider client
-    # inside the Notebook.  That would either require copying the central Kaggle
-    # credential into the runtime or guarantee that a launched master cannot
-    # checkpoint.  Both violate the owner-approved single-adapter topology.  Keep
-    # the central adapter available for protected control-owned operations, but do
-    # not construct a production master runtime until a provider-side checkpoint
-    # upload/copy path exists.
-    return ProductionRuntimeBuild(
-        None,
-        CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE,
-        registrar,
-        adapter,
+        return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None, None)
+    key_value = os.getenv("MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE", "").strip()
+    if not key_value:
+        return ProductionRuntimeBuild(
+            None,
+            "checkpoint_upload_broker_unavailable",
+            registrar,
+            adapter,
+            None,
+        )
+    try:
+        secret_box = CheckpointUploadSecretBox.from_file(Path(key_value))
+        verifier_source = settings.assets.dataset_files[settings.assets.checkpoint_verifier_source_file]
+        verifier_assets = KaggleCheckpointVerifierAssets(
+            notebook_ref=settings.assets.checkpoint_verifier_ref,
+            notebook_source=verifier_source,
+            timeout_seconds=1800,
+        )
+        receipt_root = (session_credentials_path or Path(tempfile.gettempdir())) / "checkpoint-verifier-receipts"
+        receipt_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        receipt_root.chmod(0o700)
+
+        def verifier_factory(operation_id: UUID, task_id: UUID) -> KaggleCheckpointRestoreVerifier:
+            return KaggleCheckpointRestoreVerifier(
+                adapter,
+                verifier_assets,
+                output_directory=receipt_root,
+                operation_id=operation_id,
+                authorization_task_id=task_id,
+                metadata_only_output=True,
+            )
+
+        checkpoint_broker = BrokeredCheckpointUploadService(
+            ledger,
+            adapter,
+            secret_box,
+            restore_verifier_factory=verifier_factory,
+        )
+    except Exception:
+        return ProductionRuntimeBuild(
+            None,
+            "checkpoint_upload_broker_unavailable",
+            registrar,
+            adapter,
+            None,
+        )
+    provider = KaggleMasterRuntimeProvider(adapter, settings.assets, status_authority=ledger)
+    coordinator = MasterCoordinator(
+        ledger,
+        provider,
+        tunnel_authority=tunnel_authority,
+        tunnel_listen_port=tunnel_listen_port,
     )
+    acceptance_root = (session_credentials_path or Path(tempfile.gettempdir())) / "acceptance-receipts"
+    runtime = ControlPlaneMasterRuntime(
+        ledger,
+        coordinator,
+        settings,
+        KaggleAcceptanceOperationExecutor(adapter, settings.assets, acceptance_root),
+        master_tls_ca_path,
+    )
+    with suppress(Exception):
+        runtime.reconcile_startup()
+    return ProductionRuntimeBuild(runtime, "available", registrar, adapter, checkpoint_broker)
 
 
 def _bounded_file(path: Path, *, max_bytes: int) -> bytes:

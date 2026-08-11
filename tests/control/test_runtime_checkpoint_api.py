@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
 from fastapi.testclient import TestClient
 
-from my_data_hub.checkpoints.manifest import RestoreProbe, build_manifest
+from my_data_hub.checkpoints.brokered_upload import (
+    BrokeredCheckpointUploadService,
+    CheckpointUploadSecretBox,
+)
+from my_data_hub.checkpoints.manifest import RestoreProbe, build_manifest, canonical_json
+from my_data_hub.checkpoints.registry import ControlLedgerCheckpointRegistry
 from my_data_hub.control_plane.app import ControlPlaneSettings, create_app
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.control_plane.runtime import ControlPlaneMasterRuntime, MasterRuntimeSettings
@@ -14,6 +19,9 @@ from my_data_hub.embeddings.production import embedding_provider_authority
 from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator
 from my_data_hub.providers.kaggle import KaggleMasterLaunchAssets
 from my_data_hub.providers.kaggle.contracts import (
+    BrokeredBlobGrant,
+    BrokeredDatasetFile,
+    KaggleKernelRunIdentity,
     MutationAction,
     ProviderEffectIntent,
     TaskResourceClaim,
@@ -26,6 +34,7 @@ MASTER = UUID("33333333-3333-4333-8333-333333333333")
 OPERATION = UUID("44444444-4444-4444-8444-444444444444")
 SERVICE = UUID("55555555-5555-4555-8555-555555555555")
 CHECKPOINT = UUID("66666666-6666-4666-8666-666666666666")
+TRIGGER_EFFECT = UUID("77777777-7777-4777-8777-777777777778")
 TOKEN = "runtime-token-that-is-long-enough"
 RUN_2 = UUID("88888888-8888-4888-8888-888888888888")
 ATTEMPT_2 = UUID("99999999-9999-4999-8999-999999999999")
@@ -71,7 +80,7 @@ def _app(tmp_path: Path):  # type: ignore[no-untyped-def]
         idempotency_key="checkpoint-api-operation",
         operation_kind="ensure_master",
         intent={"exact": True},
-        initial_state="ACTIVE",
+        initial_state="READY",
         identity={
             "run_id": str(RUN),
             "attempt_id": str(ATTEMPT),
@@ -89,8 +98,44 @@ def _app(tmp_path: Path):  # type: ignore[no-untyped-def]
         service_instance_id=str(SERVICE),
         master_instance_id=str(MASTER),
         epoch=1,
-        state="ACTIVE",
+        state="RUNNING",
     )
+    ledger.activate_service_operation(
+        operation_id=str(OPERATION),
+        expected_state="READY",
+        service_instance_id=str(SERVICE),
+        service_kind="postgres-master",
+        run_id=str(RUN),
+        attempt_id=str(ATTEMPT),
+        master_instance_id=str(MASTER),
+        epoch=1,
+        endpoint="tunnel://127.0.0.1:25432",
+        protocol="postgresql+tls",
+        tls_fingerprint="sha256:" + "b" * 64,
+        capabilities=("sql",),
+        canonical_revision=1,
+        schema_version="18",
+        lease_until=datetime.now(UTC) + timedelta(minutes=10),
+        latest_event_id="ready-event",
+    )
+    run = KaggleKernelRunIdentity(
+        task_run_id=RUN,
+        provider_ref="owner/master",
+        source_version=17,
+        source_sha256="c" * 64,
+        provider_kernel_id=117,
+        provider_run_ref="owner/master/17",
+        started_at=datetime.now(UTC),
+    )
+    ledger.plan_effect(
+        effect_id=str(TRIGGER_EFFECT),
+        operation_id=str(OPERATION),
+        idempotency_key=f"{OPERATION}:trigger_run",
+        effect_kind="trigger_run",
+        exact_identity=run.model_dump(mode="json"),
+    )
+    ledger.claim_effect(str(TRIGGER_EFFECT))
+    ledger.complete_effect(str(TRIGGER_EFFECT), {"exact_identity": run.model_dump(mode="json")})
     ledger.store_runtime_token_hash(str(RUN), str(ATTEMPT), TOKEN)
     app = create_app(
         ControlPlaneSettings(ledger_path=ledger.path),
@@ -105,6 +150,38 @@ def _app(tmp_path: Path):  # type: ignore[no-untyped-def]
         "X-MDH-Epoch": "1",
     }
     return app, ledger, headers
+
+
+class _BlobOnlyAdapter:
+    def current_private_dataset_version(self, *, provider_ref: str) -> int | None:
+        del provider_ref
+        return None
+
+    def start_brokered_dataset_blob(self, **kwargs: object) -> BrokeredBlobGrant:
+        del kwargs
+        return BrokeredBlobGrant(blob_token="opaque-control-only", create_url="https://storage.test/upload?s=secret")
+
+    def finalize_brokered_checkpoint_dataset(
+        self,
+        *,
+        provider_ref: str,
+        title: str,
+        files: tuple[BrokeredDatasetFile, ...],
+        version_notes: str,
+        expected_previous_version: int | None,
+    ) -> int:
+        del provider_ref, title, files, version_notes, expected_previous_version
+        return 1
+
+    def reconcile_brokered_checkpoint_dataset(
+        self,
+        *,
+        provider_ref: str,
+        version: int,
+        expected_files: tuple[tuple[str, int, str], ...],
+    ) -> bool:
+        del provider_ref, version, expected_files
+        return False
 
 
 def _manifest(tmp_path: Path):  # type: ignore[no-untyped-def]
@@ -143,6 +220,67 @@ def _manifest(tmp_path: Path):  # type: ignore[no-untyped-def]
         },
         restore_probe=RestoreProbe(13, 1, "a" * 64, {"hub.canonical_state": 1}),
     )
+
+
+def test_broker_api_is_metadata_only_fenced_and_secret_redacted(tmp_path: Path) -> None:
+    _unused, ledger, headers = _app(tmp_path)
+    manifest = _manifest(tmp_path)
+    ControlLedgerCheckpointRegistry(
+        ledger,
+        operation_id=str(OPERATION),
+        dataset_ref="owner/checkpoints",
+    ).add_candidate(manifest)
+    broker = BrokeredCheckpointUploadService(
+        ledger,
+        _BlobOnlyAdapter(),  # type: ignore[arg-type]
+        CheckpointUploadSecretBox(b"k" * 32),
+    )
+    app = create_app(
+        ControlPlaneSettings(ledger_path=ledger.path),
+        ledger=ledger,
+        master_runtime=_runtime(ledger),
+        checkpoint_upload_broker=broker,
+    )
+    client = TestClient(app)
+    authority = client.get("/internal/checkpoints/runtime-upload-authority", headers=headers)
+    assert authority.status_code == 200
+    assert authority.json() == {"master_run_ref": "owner/master/17"}
+
+    item = manifest.files[0]
+    payload = {
+        "operation_id": str(OPERATION),
+        "checkpoint_id": str(CHECKPOINT),
+        "master_run_ref": "owner/master/17",
+        "epoch": 1,
+        "file_name": item.path,
+        "content_length": item.byte_size,
+        "content_type": "application/octet-stream",
+        "content_sha256": item.sha256,
+        "manifest_sha256": manifest.manifest_sha256,
+    }
+    path = f"/internal/checkpoints/{CHECKPOINT}/blob-uploads/prepare"
+    prepared = client.post(path, json=payload, headers=headers)
+    assert prepared.status_code == 200, prepared.text
+    public = prepared.json()
+    assert public["create_url"].startswith("https://storage.test/")
+    assert "opaque-control-only" not in prepared.text
+    assert "opaque-control-only" not in str(broker.status(CHECKPOINT))
+    assert "storage.test" not in str(broker.status(CHECKPOINT))
+    assert canonical_json(manifest.payload()) not in prepared.content
+
+    wrong_operation = client.post(
+        path,
+        json={**payload, "operation_id": str(OPERATION_2)},
+        headers=headers,
+    )
+    assert wrong_operation.status_code == 409
+    binary_body = client.post(path, json={**payload, "binary_payload": "AAEC"}, headers=headers)
+    assert binary_body.status_code == 409
+    oversized = client.post(path, content=b"x" * (256 * 1024 + 1), headers=headers)
+    assert oversized.status_code == 413
+
+    fenced = {**headers, "X-MDH-Epoch": "2"}
+    assert client.post(path, json=payload, headers=fenced).status_code == 409
 
 
 def test_remote_journal_requires_exact_runtime_identity(tmp_path: Path) -> None:

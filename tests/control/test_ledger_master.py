@@ -166,7 +166,7 @@ def test_sqlite_pragmas_permissions_and_append_only_logs(tmp_path: Path) -> None
         .execute("SELECT version FROM control_schema_migrations ORDER BY version")
         .fetchall()
     )
-    assert migrations == [(version,) for version in range(1, 25)]
+    assert migrations == [(version,) for version in range(1, 26)]
 
     operation, _ = ledger.ensure_operation(
         operation_id=str(uuid4()),
@@ -284,9 +284,10 @@ def test_atomic_data_admission_rejects_drain_without_stranding_requests(tmp_path
     assert ledger.reconcile_abandoned_blogger_migration_request("blogger-request")["failure_code"] == (
         "ADMISSION_RUNTIME_TERMINAL_BEFORE_CLAIM"
     )
-    assert ledger.reconcile_abandoned_embedding_production_request("embedding-request")[
-        "failure_code"
-    ] == "ADMISSION_RUNTIME_TERMINAL_BEFORE_CLAIM"
+    assert (
+        ledger.reconcile_abandoned_embedding_production_request("embedding-request")["failure_code"]
+        == "ADMISSION_RUNTIME_TERMINAL_BEFORE_CLAIM"
+    )
 
     replay, created = ledger.admit_blogger_migration_request(
         request_id="blogger-request",
@@ -632,9 +633,7 @@ def test_forced_rotation_atomically_binds_the_latest_stopped_checkpoint_handoff(
         MasterState.CHECKPOINT_FAILED,
     ],
 )
-def test_every_nonterminal_master_state_blocks_distinct_epoch_allocation(
-    tmp_path: Path, state: MasterState
-) -> None:
+def test_every_nonterminal_master_state_blocks_distinct_epoch_allocation(tmp_path: Path, state: MasterState) -> None:
     ledger = ledger_at(tmp_path)
     first_identity = MasterCoordinator.identity_for(f"blocked-{state.value}")
     first, created = ledger.ensure_master_operation(
@@ -666,9 +665,7 @@ def test_every_nonterminal_master_state_blocks_distinct_epoch_allocation(
 
 
 @pytest.mark.parametrize("terminal_state", [MasterState.FAILED, MasterState.FENCED, MasterState.ORPHANED])
-def test_failed_fenced_or_orphaned_master_permits_exact_next_epoch(
-    tmp_path: Path, terminal_state: MasterState
-) -> None:
+def test_failed_fenced_or_orphaned_master_permits_exact_next_epoch(tmp_path: Path, terminal_state: MasterState) -> None:
     ledger = ledger_at(tmp_path)
     first_identity = MasterCoordinator.identity_for(f"terminal-{terminal_state.value}")
     first, _created = ledger.ensure_master_operation(

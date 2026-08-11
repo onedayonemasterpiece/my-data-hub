@@ -78,14 +78,13 @@ contains only the lightweight control ledger/process and no canonical rows.
   contracts. They have **not** yet passed the required real Kaggle matrix.
 - The checkpoint implementation has exact physical/WAL/logical artifacts,
   numeric-version readback, an independent restore verifier, and metadata-only
-  current/previous HEAD compare-and-swap.  Its former runtime factory would,
-  however, construct a second credentialed Kaggle adapter inside the master
-  Notebook.  That contradicts the owner-approved events-bot/CherryFlash topology:
-  provider credentials and provider mutations remain in the central control
-  adapter.  Production master admission therefore now stops **before provider
-  mutation** with `CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE`; it will not launch
-  an ACTIVE primary that cannot checkpoint.  No provider credential is copied
-  through the per-attempt status Dataset.
+  current/previous HEAD compare-and-swap. The runtime no longer constructs a
+  second provider client. A central split-upload broker keeps Kaggle credentials
+  and blob tokens on the control host, while the Notebook streams bytes directly
+  to a just-in-time signed Kaggle storage URL. No checkpoint bytes traverse the
+  devstand, and no provider credential is copied through the per-attempt status
+  Dataset. Deterministic local tests pass; disposable live-canary evidence remains
+  to be collected before this progress record may claim operational completion.
 - The FINAL-BLOGGER command now implements the metadata-only external closure and
   the in-master bounded YDB stage. It requires an acknowledged exact 266-row import
   receipt before checkpoint publication, then a verified exact-version checkpoint,

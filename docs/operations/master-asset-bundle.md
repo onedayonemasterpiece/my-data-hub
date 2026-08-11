@@ -52,12 +52,12 @@ bootstrap hash-validates and writes both to fixed mode-`0600` files below
 `/kaggle/working`; neither the private key nor callback token enters source, the static
 asset Dataset, ledger, receipts, or logs.
 
-These assets do not by themselves admit a production master. The current checkpoint
-writer would require a second Kaggle provider client inside the Notebook, which conflicts
-with the single central adapter and credential boundary. Production therefore returns
-`CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE` before it creates the status Dataset or
-pushes a Notebook. A provider-side checkpoint upload/copy contract must be proven and
-owner-approved before this fail-closed gate can be removed.
+These assets are consumed by the brokered checkpoint path. The Notebook contains no
+Kaggle SDK credential and performs only direct HTTPS PUTs to one-file signed upload URLs.
+The central adapter retains every opaque blob token, finalizes the exact private Dataset
+version, launches the independently pinned verifier, and advances HEAD only after the
+verified restore receipt. Missing broker key/configuration fails before master launch with
+`checkpoint_upload_broker_unavailable`.
 
 Validate the manifest before install with
 `schemas/master-asset-bundle.v1.schema.json`, then independently verify the exact approved

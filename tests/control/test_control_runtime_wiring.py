@@ -20,7 +20,6 @@ from my_data_hub.control_plane.app import (
 )
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.control_plane.runtime import (
-    CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE,
     ControlPlaneMasterRuntime,
     MasterRuntimeSettings,
     ProductionRuntimeBuild,
@@ -219,6 +218,10 @@ def runtime(ledger: ControlLedger, provider: FakeKaggleRuntime) -> ControlPlaneM
 
 def test_production_builder_constructs_single_adapter_journal_and_bridge(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("KAGGLE_API_TOKEN", "modern-token-present")
+    key = tmp_path / "checkpoint-broker.key"
+    key.write_bytes(b"k" * 32)
+    key.chmod(0o600)
+    monkeypatch.setenv("MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE", str(key))
     ledger = ControlLedger(tmp_path / "builder.sqlite3")
     adapter = object()
     seen = []
@@ -227,8 +230,9 @@ def test_production_builder_constructs_single_adapter_journal_and_bridge(monkeyp
         MasterRuntimeSettings(assets()),
         adapter_factory=lambda journal: seen.append(journal) or adapter,  # type: ignore[arg-type,return-value]
     )
-    assert built.provider_status == CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE
-    assert built.master is None
+    assert built.provider_status == "available"
+    assert built.master is not None
+    assert built.checkpoint_broker is not None
     assert built.provider_adapter is adapter
     assert len(seen) == 1
 
@@ -238,6 +242,10 @@ def test_production_builder_accepts_central_legacy_kaggle_credentials(monkeypatc
     monkeypatch.setenv("KAGGLE_CONFIG_DIR", str(tmp_path / "missing-sdk-config"))
     monkeypatch.setenv("KAGGLE_USERNAME", "automation-owner")
     monkeypatch.setenv("KAGGLE_KEY", "k" * 32)
+    key = tmp_path / "checkpoint-broker.key"
+    key.write_bytes(b"k" * 32)
+    key.chmod(0o600)
+    monkeypatch.setenv("MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE", str(key))
     ledger = ControlLedger(tmp_path / "legacy-builder.sqlite3")
     adapter = object()
     built = build_production_runtime(
@@ -245,12 +253,13 @@ def test_production_builder_accepts_central_legacy_kaggle_credentials(monkeypatc
         MasterRuntimeSettings(assets()),
         adapter_factory=lambda _journal: adapter,  # type: ignore[arg-type,return-value]
     )
-    assert built.provider_status == CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE
+    assert built.provider_status == "available"
     assert built.provider_adapter is adapter
-    assert built.master is None
+    assert built.master is not None
+    assert built.checkpoint_broker is not None
 
 
-def test_production_master_ensure_blocks_before_provider_mutation_when_checkpoint_upload_is_unavailable(
+def test_production_master_ensure_reports_missing_broker_configuration_before_provider_mutation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     ledger = ControlLedger(tmp_path / "checkpoint-path-blocked.sqlite3")
@@ -259,7 +268,7 @@ def test_production_master_ensure_blocks_before_provider_mutation_when_checkpoin
     def blocked(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         return ProductionRuntimeBuild(
             master=None,
-            provider_status=CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE,
+            provider_status="checkpoint_upload_broker_unavailable",
             provider_adapter=adapter,  # type: ignore[arg-type]
         )
 
@@ -277,7 +286,7 @@ def test_production_master_ensure_blocks_before_provider_mutation_when_checkpoin
     )
 
     assert response.status_code == 503
-    assert response.json() == {"detail": {"code": CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE}}
+    assert response.json() == {"detail": {"code": "checkpoint_upload_broker_unavailable"}}
     assert ledger.incomplete_operations() == []
 
 

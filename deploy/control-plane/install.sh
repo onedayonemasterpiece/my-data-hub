@@ -112,6 +112,7 @@ oauth_overlap_jwks="${MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE:-$runtime_root/oauth-p
 operator_gate_receipt="${MY_DATA_HUB_OPERATOR_SECURITY_GATE_RECEIPT_FILE:-$runtime_root/operator-security-gate.json}"
 operator_gate_key="${MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE:-$secret_root/mcp-write-gate.key}"
 control_gateway_token="${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:-$secret_root/mcp-control-gateway.token}"
+checkpoint_upload_broker_key="${MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE:-$secret_root/checkpoint-upload-broker.key}"
 tunnel_broker_socket_dir="${MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR:-/run/my-data-hub/tunnel-broker}"
 acceptance_socket_dir="${MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_SOCKET_DIR:-$runtime_root/acceptance-supervisor}"
 acceptance_key="${MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_KEY_FILE:-$acceptance_socket_dir/supervisor.key}"
@@ -139,6 +140,7 @@ fi
 for path_value in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$asset_dir" \
   "$tls_dir" "$tls_ca_file" "$provider_env" "$mcp_env" "$oauth_env" "$oauth_key" "$oauth_overlap_jwks" \
   "$operator_gate_receipt" "$operator_gate_key" "$control_gateway_token" "$tunnel_broker_socket_dir" \
+  "$checkpoint_upload_broker_key" \
   "$acceptance_socket_dir" "$acceptance_key" "$checkpoint_acceptance_deployment"; do
   case "$path_value" in
     *[$'\n\r\t ']* ) echo "deployment inputs may not contain whitespace" >&2; exit 2 ;;
@@ -200,6 +202,26 @@ require_private_file "$provider_env" "provider environment"
 require_private_file "$mcp_env" "remote MCP environment"
 require_private_file "$oauth_env" "OAuth environment"
 require_private_file "$oauth_key" "OAuth signing key"
+if [[ ! -e "$checkpoint_upload_broker_key" ]]; then
+  python3 - "$checkpoint_upload_broker_key" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    os.write(fd, os.urandom(32))
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+fi
+require_private_file "$checkpoint_upload_broker_key" "checkpoint upload broker key"
+if [[ "$(stat -c '%s' "$checkpoint_upload_broker_key")" != "32" ]]; then
+  echo "checkpoint upload broker key must be exactly 32 bytes" >&2
+  exit 2
+fi
 require_regular_file "$oauth_overlap_jwks" "OAuth overlap public JWKS"
 if [[ ! -e "$tls_ca_file" ]]; then
   : > "$tls_ca_file"
@@ -409,6 +431,7 @@ MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE=$oauth_overlap_jwks
 MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR=$tunnel_broker_socket_dir
 MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE=$operator_gate_key
 MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE=$control_gateway_token
+MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE=$checkpoint_upload_broker_key
 ENV
 chmod 600 "$compose_env"
 

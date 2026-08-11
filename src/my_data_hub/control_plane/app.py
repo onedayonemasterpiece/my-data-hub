@@ -19,6 +19,13 @@ from fastapi import FastAPI, Header, HTTPException, Request, status
 
 from my_data_hub.acceptance.master_lifecycle import MasterAcceptanceReceipt
 from my_data_hub.checkpoints import CheckpointManifest, ControlLedgerCheckpointRegistry
+from my_data_hub.checkpoints.brokered_upload import (
+    BrokeredCheckpointError,
+    BrokeredCheckpointUploadService,
+    CheckpointBlobCompletion,
+    CheckpointBlobSpec,
+    RuntimeUploadAuthority,
+)
 from my_data_hub.checkpoints.manifest import ManifestError
 from my_data_hub.control_plane.adapters import (
     KaggleMCPProviderGateway,
@@ -34,7 +41,6 @@ from my_data_hub.control_plane.ledger import (
     StaleRuntimeEvent,
 )
 from my_data_hub.control_plane.runtime import (
-    CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE,
     ControlPlaneMasterRuntime,
     MasterRuntimeSettings,
     SessionCredential,
@@ -61,6 +67,7 @@ from my_data_hub.providers.kaggle import (
     KaggleProviderAdapter,
 )
 from my_data_hub.providers.kaggle.contracts import (
+    KaggleKernelRunIdentity,
     MutationAction,
     ProviderEffectIntent,
     ProviderEffectReceipt,
@@ -294,6 +301,7 @@ def create_app(
     checkpoint_acceptance_launcher: object | None = None,
     checkpoint_acceptance_catalog: object | None = None,
     old_epoch_denials: object | None = None,
+    checkpoint_upload_broker: BrokeredCheckpointUploadService | None = None,
 ) -> FastAPI:
     runtime = settings or ControlPlaneSettings.from_env()
     if operator_credential_enabled is None:
@@ -325,6 +333,7 @@ def create_app(
         master_runtime = production.master
         provider_status = production.provider_status
         provider_adapter = production.provider_adapter
+        checkpoint_upload_broker = checkpoint_upload_broker or production.checkpoint_broker
         session_registrar = session_registrar or production.session_registrar
     else:
         if master_runtime.ledger.path != control_ledger.path:
@@ -437,6 +446,9 @@ def create_app(
                         reconcile_status_cleanup = getattr(master_runtime, "reconcile_status_cleanup_once", None)
                         if reconcile_status_cleanup is not None:
                             await asyncio.to_thread(reconcile_status_cleanup)
+                if checkpoint_upload_broker is not None:
+                    with suppress(Exception):
+                        await asyncio.to_thread(checkpoint_upload_broker.reconcile_pending_once)
                         # The durable request remains PENDING; provider details
                         # never enter logs/responses and bounded retry resumes.
                 try:
@@ -897,8 +909,8 @@ def create_app(
             raise HTTPException(status_code=422, detail={"code": "idempotency_key_required"})
         if master_runtime is None:
             code = (
-                CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE
-                if app.state.master_provider_status == CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE
+                "checkpoint_upload_broker_unavailable"
+                if app.state.master_provider_status == "checkpoint_upload_broker_unavailable"
                 else "provider_unavailable"
             )
             raise HTTPException(status_code=503, detail={"code": code})
@@ -2350,6 +2362,175 @@ def create_app(
             control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
         )
         return {"claim": claim}
+
+    def _broker_runtime_authority(operation: _ProviderOperationAuthority) -> RuntimeUploadAuthority:
+        if checkpoint_upload_broker is None or operation.acceptance is not None:
+            raise HTTPException(status_code=503, detail={"code": "checkpoint_upload_broker_unavailable"})
+        identity = operation.identity
+        trigger = control_ledger.get_effect_by_idempotency_key(f"{operation.operation_id}:trigger_run")
+        try:
+            run = KaggleKernelRunIdentity.model_validate(
+                trigger.receipt["exact_identity"] if trigger is not None and trigger.receipt else None
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail={"code": "master_provider_run_unresolved"}) from exc
+        if str(run.task_run_id) != str(identity.get("run_id")):
+            raise HTTPException(status_code=409, detail={"code": "master_provider_run_mismatch"})
+        snapshot = checkpoint_upload_broker.ledger.runtime_service_snapshot(
+            service_instance_id=str(identity.get("service_instance_id", "")),
+            run_id=str(identity.get("run_id", "")),
+            attempt_id=str(identity.get("attempt_id", "")),
+            master_instance_id=str(identity.get("master_instance_id", "")),
+            epoch=int(identity.get("epoch", 0)),
+        )
+        if snapshot is None:
+            raise HTTPException(status_code=409, detail={"code": "checkpoint_runtime_lease_invalid"})
+        return RuntimeUploadAuthority(
+            operation_id=operation.operation_id,
+            run_id=str(identity["run_id"]),
+            attempt_id=str(identity["attempt_id"]),
+            master_instance_id=str(identity["master_instance_id"]),
+            service_instance_id=str(identity["service_instance_id"]),
+            epoch=int(identity["epoch"]),
+            master_run_ref=run.provider_run_ref,
+            lease_until=datetime.fromisoformat(str(snapshot["lease_until"]).replace("Z", "+00:00")),
+        )
+
+    @app.get("/internal/checkpoints/runtime-upload-authority")
+    def checkpoint_runtime_upload_authority(
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, str]:
+        operation = _provider_authority(
+            request=request,
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        authority = _broker_runtime_authority(operation)
+        return {"master_run_ref": authority.master_run_ref}
+
+    @app.post("/internal/checkpoints/{checkpoint_id}/blob-uploads/prepare")
+    async def checkpoint_blob_prepare(
+        checkpoint_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        operation = _provider_authority(
+            request=request,
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        authority = _broker_runtime_authority(operation)
+        body = await _bounded_json(request)
+        if body.get("checkpoint_id") != checkpoint_id:
+            raise HTTPException(status_code=422, detail={"code": "checkpoint_upload_identity_invalid"})
+        try:
+            grant = checkpoint_upload_broker.prepare(CheckpointBlobSpec.model_validate(body), authority)  # type: ignore[union-attr]
+        except (ValueError, BrokeredCheckpointError, ControlLedgerError) as exc:
+            raise HTTPException(status_code=409, detail={"code": "checkpoint_upload_prepare_rejected"}) from exc
+        return grant.model_dump(mode="json")
+
+    @app.post("/internal/checkpoints/{checkpoint_id}/blob-uploads/complete")
+    async def checkpoint_blob_complete(
+        checkpoint_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        operation = _provider_authority(
+            request=request,
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        authority = _broker_runtime_authority(operation)
+        body = await _bounded_json(request)
+        if body.get("checkpoint_id") != checkpoint_id:
+            raise HTTPException(status_code=422, detail={"code": "checkpoint_upload_identity_invalid"})
+        try:
+            return checkpoint_upload_broker.complete(  # type: ignore[union-attr]
+                CheckpointBlobCompletion.model_validate(body), authority
+            )
+        except (ValueError, BrokeredCheckpointError, ControlLedgerError) as exc:
+            raise HTTPException(status_code=409, detail={"code": "checkpoint_upload_completion_rejected"}) from exc
+
+    @app.post("/internal/checkpoints/{checkpoint_id}/finalize")
+    async def checkpoint_blob_finalize(
+        checkpoint_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        operation = _provider_authority(
+            request=request,
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        _broker_runtime_authority(operation)
+        body = await _bounded_json(request)
+        publication = checkpoint_upload_broker.status(UUID(checkpoint_id))  # type: ignore[union-attr]
+        if body != {
+            "operation_id": operation.operation_id,
+            "manifest_sha256": publication["manifest_sha256"],
+        } or publication["state"] not in {
+            "READY_TO_FINALIZE",
+            "FINALIZING",
+            "DATASET_RESOLVED",
+            "VERIFYING",
+            "VERIFIED",
+            "PROMOTED",
+        }:
+            raise HTTPException(status_code=409, detail={"code": "checkpoint_finalize_rejected"})
+        return publication
+
+    @app.get("/internal/checkpoints/{checkpoint_id}/publication")
+    def checkpoint_blob_publication(
+        checkpoint_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        operation = _provider_authority(
+            request=request,
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        _broker_runtime_authority(operation)
+        publication = checkpoint_upload_broker.status(UUID(checkpoint_id))  # type: ignore[union-attr]
+        if publication["operation_id"] != operation.operation_id:
+            raise HTTPException(status_code=403, detail={"code": "checkpoint_publication_forbidden"})
+        return publication
 
     @app.get("/internal/checkpoints/{service_kind}/head")
     def checkpoint_head(

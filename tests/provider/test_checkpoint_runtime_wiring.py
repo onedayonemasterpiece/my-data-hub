@@ -22,6 +22,7 @@ from my_data_hub.checkpoints.kaggle_runtime import (
     RemoteCheckpointHeadSnapshot,
     RemoteControlCheckpointRegistry,
     RuntimeCheckpointCoordinator,
+    _reject_notebook_kaggle_credentials,
 )
 from my_data_hub.checkpoints.manifest import RestoreProbe, build_manifest, load_and_verify, write_manifest
 from my_data_hub.checkpoints.publisher import PublishReceipt
@@ -48,6 +49,39 @@ RUN_ID = UUID("11111111-1111-4111-8111-111111111111")
 ATTEMPT_ID = UUID("22222222-2222-4222-8222-222222222222")
 MASTER_ID = UUID("33333333-3333-4333-8333-333333333333")
 CHECKPOINT_ID = UUID("44444444-4444-4444-8444-444444444444")
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["KAGGLE_USERNAME", "KAGGLE_KEY", "KAGGLE_API_TOKEN", "KAGGLE_API_V1_TOKEN", "KAGGLE_ACCESS_TOKEN"],
+)
+def test_master_checkpoint_runtime_rejects_every_kaggle_lifecycle_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv(name, "must-not-enter-master")
+    with pytest.raises(CheckpointRuntimeError, match="forbidden in the master Notebook"):
+        _reject_notebook_kaggle_credentials()
+
+
+@pytest.mark.parametrize("relative", [".kaggle/kaggle.json", ".kaggle/access_token"])
+def test_master_checkpoint_runtime_rejects_kaggle_credential_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for name in (
+        "KAGGLE_USERNAME",
+        "KAGGLE_KEY",
+        "KAGGLE_API_TOKEN",
+        "KAGGLE_API_V1_TOKEN",
+        "KAGGLE_ACCESS_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("credential")
+    with pytest.raises(CheckpointRuntimeError, match="credential files are forbidden"):
+        _reject_notebook_kaggle_credentials()
 
 
 @pytest.fixture
@@ -121,9 +155,7 @@ def test_remote_registry_persists_metadata_only_package_identity() -> None:
     registry.package_uploaded(CHECKPOINT_ID, "c" * 64)
 
     call = transport.calls[0]
-    assert str(call["url"]).endswith(
-        f"/internal/checkpoints/{CHECKPOINT_ID}/package-identity"
-    )
+    assert str(call["url"]).endswith(f"/internal/checkpoints/{CHECKPOINT_ID}/package-identity")
     assert json.loads(call["body"]) == {
         "service_kind": "postgres-master",
         "package_sha256": "c" * 64,
@@ -326,9 +358,7 @@ def test_verifier_retry_reconciles_deterministic_run_without_second_push(
         adapter,  # type: ignore[arg-type]
         KaggleCheckpointVerifierAssets(
             notebook_ref="owner/checkpoint-verifier",
-            notebook_source=json.dumps(
-                {"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
-            ).encode(),
+            notebook_source=json.dumps({"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}).encode(),
         ),
         output_directory=output_root,
         operation_id=UUID("66666666-6666-4666-8666-666666666666"),
@@ -852,15 +882,14 @@ def test_runtime_retry_reuses_package_and_refreshes_exact_durable_claim(
     )
 
     class Publisher:
-        registry = SimpleNamespace(
-            head=CheckpointHead(generation=4, current=previous_checkpoint_id, previous=None)
-        )
+        registry = SimpleNamespace(head=CheckpointHead(generation=4, current=previous_checkpoint_id, previous=None))
         provider = SimpleNamespace(
             claim=stale_claim,
             dataset_ref="owner/private-checkpoints",
             operation_id=UUID("77777777-7777-4777-8777-777777777777"),
             resource_task_id=stale_claim.task_id,
         )
+
         def __init__(self) -> None:
             self.calls = 0
             self.packages: list[Path] = []

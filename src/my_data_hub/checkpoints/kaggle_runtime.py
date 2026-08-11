@@ -40,7 +40,6 @@ from my_data_hub.providers.kaggle.contracts import (
 from my_data_hub.providers.kaggle.control_journal import (
     AuthenticatedControlPlaneClient,
     ControlPlaneRuntimeIdentity,
-    RemoteControlLedgerKaggleJournal,
 )
 from my_data_hub.providers.models import ControlClass, ProviderKind
 from my_data_hub.runtime_sdk.lifetime import (
@@ -912,9 +911,7 @@ class KaggleCheckpointCoordinator:
             exact_version_ref=current.exact_version_ref,
             manifest_sha256=manifest.manifest_sha256,
             current_checkpoint_id=str(current.checkpoint_id),
-            previous_checkpoint_id=(
-                str(snapshot.previous.checkpoint_id) if snapshot.previous is not None else None
-            ),
+            previous_checkpoint_id=(str(snapshot.previous.checkpoint_id) if snapshot.previous is not None else None),
             upload_seconds=0.0,
             readback_seconds=0.0,
             restore_seconds=0.0,
@@ -964,7 +961,7 @@ class RuntimeCheckpointCoordinator:
         self,
         *,
         builder: KaggleCheckpointCandidateBuilder,
-        coordinator: KaggleCheckpointCoordinator,
+        coordinator: Any,
         probe_relations: tuple[str, ...],
         source_identity: str,
         claim_source: CurrentResourceClaimSource | None = None,
@@ -1020,7 +1017,7 @@ class RuntimeCheckpointCoordinator:
         _assert_kaggle_working_path(package_directory)
         head = self.coordinator.registry.head
         provider = self.coordinator.provider
-        if head.current is not None:
+        if head.current is not None and not getattr(provider, "brokered_upload", False):
             if self.claim_source is None:
                 raise CheckpointRuntimeError("existing checkpoint dataset requires its durable exact claim")
             provider.claim = self.claim_source.current_resource_claim(
@@ -1070,9 +1067,7 @@ class RuntimeCheckpointCoordinator:
                     # be retried under the same deterministic identity.
                     shutil.rmtree(package)
             elif provider_started.exists() or provider_started.is_symlink():
-                raise CheckpointRuntimeError(
-                    "provider-started checkpoint package is absent and cannot be rebuilt"
-                )
+                raise CheckpointRuntimeError("provider-started checkpoint package is absent and cannot be rebuilt")
             if manifest is None:
                 with self.connect(database_url, connect_timeout=15) as connection:
                     postgres_version, pgvector_version, checkpoint_lsn = _postgres_checkpoint_identity(connection)
@@ -1150,6 +1145,7 @@ def build_runtime_checkpoint_coordinator_from_environment(
 ) -> RuntimeCheckpointCoordinator:
     """Build the production master checkpoint composite from exact runtime inputs."""
 
+    _reject_notebook_kaggle_credentials()
     run_id = UUID(str(identity.run_id))
     master_instance_id = UUID(str(identity.master_instance_id))
     operation_id = UUID(_required_environment("MY_DATA_HUB_OPERATION_ID"))
@@ -1163,8 +1159,6 @@ def build_runtime_checkpoint_coordinator_from_environment(
             epoch=int(identity.epoch),
         ),
     )
-    journal = RemoteControlLedgerKaggleJournal(control_client)
-    adapter = KaggleProviderAdapter.from_environment(journal=journal)
     dataset_ref = _exact_owner_slug(
         _required_environment("MY_DATA_HUB_CHECKPOINT_DATASET_REF"),
         "checkpoint dataset",
@@ -1174,31 +1168,16 @@ def build_runtime_checkpoint_coordinator_from_environment(
         operation_id=str(operation_id),
         dataset_ref=dataset_ref,
     )
-    provider = KaggleCheckpointDatasetProvider(
-        adapter,
+    from .brokered_upload import (
+        BrokeredCheckpointRuntimeCoordinator,
+        BrokeredCheckpointRuntimeProvider,
+    )
+
+    provider = BrokeredCheckpointRuntimeProvider(
+        control_client,
         dataset_ref=dataset_ref,
         operation_id=operation_id,
-        resource_task_id=run_id,
     )
-    verifier_ref = _exact_owner_slug(
-        _required_environment("MY_DATA_HUB_CHECKPOINT_VERIFIER_REF"),
-        "checkpoint verifier",
-    )
-    verifier_source_path = Path(_required_environment("MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_PATH"))
-    if (
-        not verifier_source_path.is_absolute()
-        or not verifier_source_path.is_file()
-        or verifier_source_path.is_symlink()
-        or verifier_source_path.stat().st_size > 10 * 1024 * 1024
-    ):
-        raise CheckpointRuntimeError("checkpoint verifier source path is not an exact bounded file")
-    verifier_source = verifier_source_path.read_bytes()
-    expected_source_sha = _required_environment("MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_SHA256")
-    if (
-        not re.fullmatch(r"[a-f0-9]{64}", expected_source_sha)
-        or hashlib.sha256(verifier_source).hexdigest() != expected_source_sha
-    ):
-        raise CheckpointRuntimeError("checkpoint verifier source hash differs")
     try:
         raw_relations = json.loads(_required_environment("MY_DATA_HUB_CHECKPOINT_PROBE_RELATIONS_JSON"))
     except json.JSONDecodeError as exc:
@@ -1211,25 +1190,7 @@ def build_runtime_checkpoint_coordinator_from_environment(
     ):
         raise CheckpointRuntimeError("checkpoint probe relation contract is invalid")
     probe_relations = tuple(raw_relations)
-    output_directory = _KAGGLE_WORKING_ROOT / "checkpoint-verifier-outputs"
-    output_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    output_directory.chmod(0o700)
-    restore_verifier = KaggleCheckpointRestoreVerifier(
-        adapter,
-        KaggleCheckpointVerifierAssets(
-            notebook_ref=verifier_ref,
-            notebook_source=verifier_source,
-            timeout_seconds=CHECKPOINT_VERIFIER_TIMEOUT_SECONDS,
-        ),
-        output_directory=output_directory,
-        operation_id=operation_id,
-        authorization_task_id=run_id,
-    )
-    publisher = KaggleCheckpointCoordinator(
-        registry=registry,
-        provider=provider,
-        restore_verifier=restore_verifier,
-    )
+    publisher = BrokeredCheckpointRuntimeCoordinator(registry, provider)
     pg_basebackup = postgres_bin / "pg_basebackup"
     pg_dump = postgres_bin / "pg_dump"
     if any(
@@ -1243,9 +1204,33 @@ def build_runtime_checkpoint_coordinator_from_environment(
         coordinator=publisher,
         probe_relations=probe_relations,
         source_identity=_required_environment("MY_DATA_HUB_SOURCE_IDENTITY"),
-        claim_source=journal,
+        claim_source=None,
         timeout_seconds=CHECKPOINT_ARCHIVE_COMMAND_TIMEOUT_SECONDS,
     )
+
+
+def _reject_notebook_kaggle_credentials() -> None:
+    """Keep all account-level Kaggle authority in the central adapter.
+
+    A signed, one-file blob upload URL is the only provider capability the
+    broker may return to the master.  Ambient SDK credentials would silently
+    turn the Notebook into a second lifecycle client, so fail before creating
+    a checkpoint or contacting the control plane.
+    """
+
+    forbidden_environment = (
+        "KAGGLE_USERNAME",
+        "KAGGLE_KEY",
+        "KAGGLE_API_TOKEN",
+        "KAGGLE_API_V1_TOKEN",
+        "KAGGLE_ACCESS_TOKEN",
+    )
+    if any(os.environ.get(name, "").strip() for name in forbidden_environment):
+        raise CheckpointRuntimeError("Kaggle lifecycle credentials are forbidden in the master Notebook")
+    home = Path(os.environ.get("HOME", "~")).expanduser()
+    forbidden_files = (home / ".kaggle" / "kaggle.json", home / ".kaggle" / "access_token")
+    if any(path.exists() for path in forbidden_files):
+        raise CheckpointRuntimeError("Kaggle lifecycle credential files are forbidden in the master Notebook")
 
 
 def _required_environment(name: str) -> str:

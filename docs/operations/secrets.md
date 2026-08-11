@@ -50,9 +50,13 @@ installed DNS/OAuth edge secrets and has not enabled remote MCP writes.
   (`KAGGLE_API_TOKEN`, private access-token file, or
   `KAGGLE_USERNAME`/`KAGGLE_KEY`). Legacy values remain in the control process
   and are never launch bindings. No separate checkpoint User Secret, interactive browser
-  session, or refresh-cookie state is admitted. Until the single central adapter has a
-  proven provider-side checkpoint upload/copy path, production master admission returns
-  `CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE` before provider mutation.
+  session, or refresh-cookie state is admitted. The central adapter brokers one-file
+  signed upload URLs; the Notebook receives neither the Kaggle account credential nor the
+  opaque blob token.
+- checkpoint upload broker key: a distinct random 32-byte mode-`0600` host file mounted
+  only in the control container. It encrypts signed URLs and opaque blob tokens at rest;
+  rotate only when no publication is unfinished, because old sealed claims deliberately
+  become unrecoverable after rotation.
 - runtime callback authority: each attempt has an independent random token. The
   control ledger stores only its SHA-256; terminal cleanup revokes the hash and
   deletes the exact protected status Dataset containing the raw value. There is

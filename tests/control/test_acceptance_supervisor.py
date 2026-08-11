@@ -133,9 +133,7 @@ class InspectingRunner:
 
 def test_host_request_is_task_derived_signed_and_has_no_command_selector() -> None:
     request = HostRestartRequest.from_directive(directive())
-    assert request.request_id == uuid5(
-        NAMESPACE_URL, f"my-data-hub:fm08:restart:{request.command_id}"
-    )
+    assert request.request_id == uuid5(NAMESPACE_URL, f"my-data-hub:fm08:restart:{request.command_id}")
     decoded = json.loads(_signed_envelope(request, KEY))
     assert decoded["action"] == "RESTART_CONTROL_PLANE"
     assert not ({"argv", "service", "path", "url", "body", "event"} & decoded.keys())
@@ -254,9 +252,7 @@ class FakeControl:
         assert value == command()
         return self.directive
 
-    def captured_callback(
-        self, value: MasterAcceptanceCommand, armed: CallbackLossDirective
-    ) -> CallbackCapture | None:
+    def captured_callback(self, value: MasterAcceptanceCommand, armed: CallbackLossDirective) -> CallbackCapture | None:
         assert value == command()
         assert armed == self.directive
         return self.captured
@@ -283,9 +279,7 @@ class FakeControl:
         assert self.captured is not None and event_id == self.captured.event_id
         return "duplicate"
 
-    def disarm_expired_callback_loss(
-        self, value: MasterAcceptanceCommand, armed: CallbackLossDirective
-    ) -> None:
+    def disarm_expired_callback_loss(self, value: MasterAcceptanceCommand, armed: CallbackLossDirective) -> None:
         assert value == command()
         assert armed == self.directive
         self.disarmed += 1
@@ -406,7 +400,7 @@ def test_private_unix_socket_auth_and_mode(tmp_path: Path) -> None:
     assert receipt.after_boot_id == AFTER
     server.stop.set()
     # Wake accept() so shutdown does not wait for the timeout.
-    with suppress(FileNotFoundError), socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wake:
+    with suppress(FileNotFoundError, ConnectionRefusedError), socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wake:
         wake.connect(str(socket_path))
     thread.join(timeout=2)
     assert not thread.is_alive()
@@ -439,9 +433,7 @@ class FakeLedger:
             "callback_count": 0,
             "armed_at": NOW.isoformat().replace("+00:00", "Z"),
             "expires_at": expires,
-            "directive_receipt_sha256": hashlib.sha256(
-                canonical_json_bytes(receipt)
-            ).hexdigest(),
+            "directive_receipt_sha256": hashlib.sha256(canonical_json_bytes(receipt)).hexdigest(),
             "restart_from_id": None,
             "restart_to_id": None,
         }
@@ -496,14 +488,10 @@ def test_control_ledger_adapter_reconciles_exact_directive_and_restart() -> None
         callback_event_id=str(UUID(int=99)),
         callback_body_sha256=BODY_HASH,
     )
-    assert adapter.captured_callback(value, armed) == CallbackCapture(
-        event_id=UUID(int=99), body_sha256=BODY_HASH
-    )
+    assert adapter.captured_callback(value, armed) == CallbackCapture(event_id=UUID(int=99), body_sha256=BODY_HASH)
     ledger.row["restart_to_id"] = str(AFTER)
     assert adapter.project_stored_callback(value, armed, UUID(int=99)) == "duplicate"
-    adapter.record_control_restart(
-        value, armed, before_boot_id=BEFORE, after_boot_id=AFTER
-    )
+    adapter.record_control_restart(value, armed, before_boot_id=BEFORE, after_boot_id=AFTER)
     ledger.row["callback_state"] = "REPLAYED"
     assert adapter.replay_disposition(value, armed, UUID(int=99)) == "duplicate"
 
