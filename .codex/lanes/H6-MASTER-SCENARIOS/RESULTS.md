@@ -118,6 +118,11 @@ protected pre-STOPPED context capture is the remaining internal assembly gap.
   The raw one-time token exists only in the provider input Dataset and Notebook
   environment; control stores its SHA-256. Existing Bearer/header transport and
   redacted JSONL behavior are retained;
+- stable events-bot-style UIDs and typed runtime events persist custom
+  kernel/preflight/alive/report/resource/terminal phases, heartbeat elapsed and
+  progress counters, with exact-body duplicate replay/tamper rejection and a
+  bounded status projection. Provider COMPLETE alone cannot bypass this event
+  evidence;
 - only provider-side checkpoint API access may use reviewed User Secret names,
   with exactly one access-token name or a complete legacy username/key name
   pair. Values never enter source, Dataset metadata, callbacks, logs or receipts;

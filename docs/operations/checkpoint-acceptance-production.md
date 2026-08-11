@@ -130,6 +130,18 @@ Dataset is deleted through its exact disposable claim after a reconciled
 terminal run; ambiguous launch response retains it rather than risking deletion
 under an unknown live run.
 
+The fixed source adapts the canonical events-bot envelopes through
+`RuntimeClient`: stable `event_uid` values cover `kernel_started`,
+`preflight_ok`, periodic `alive`, `report_written`, resource acquire/release and
+terminal/failure. Alive progress includes the phase, monotonic elapsed seconds,
+heartbeat count and completed-step count. The append-only control event ledger
+rejects changed-body UID/sequence replay and projects bounded typed phase,
+progress, event counts and receipt hashes into acceptance status. A completed
+provider run is not ready evidence until report, resource release and terminal
+events have all been durably observed. Authentication remains only in Bearer
+and dedicated task headers; callback JSON and
+`kaggle_status_events.jsonl` contain no token.
+
 Provider-side checkpoint Dataset access may use one explicitly reviewed Kaggle
 User Secret name or the complete legacy username/key *name* pair. This narrow
 data-local exception is required because checkpoint bytes may not cross the

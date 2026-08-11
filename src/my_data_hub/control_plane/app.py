@@ -602,6 +602,54 @@ def create_app(
         inspect(value)
         return value
 
+    @app.post("/internal/acceptance/events")
+    async def checkpoint_acceptance_event(
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        authority = _provider_authority(
+            request=request,
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        if authority.acceptance is None:
+            raise HTTPException(status_code=403, detail={"code": "acceptance_identity_required"})
+        body = await _bounded_json(request)
+        try:
+            event = RuntimeEvent.model_validate(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail={"code": "acceptance_event_invalid"}) from exc
+        launch = authority.acceptance
+        exact_request = str(launch["request_id"])
+        exact_attempt = str(launch["attempt_id"])
+        if (
+            event.run_id != exact_request
+            or event.attempt_id != exact_attempt
+            or event.service_instance_id != exact_request
+            or event.source_identity != str(launch["request"]["evidence_notebook_ref"])
+            or event.source_version != str(launch["request"]["source_revision"])
+            or event.epoch != 1
+        ):
+            raise HTTPException(status_code=403, detail={"code": "acceptance_event_binding_mismatch"})
+        try:
+            receipt = control_ledger.record_checkpoint_acceptance_event(
+                request_id=exact_request,
+                attempt_id=exact_attempt,
+                event=event.model_dump(mode="json", exclude_none=True),
+            )
+        except IdempotencyConflict as exc:
+            raise HTTPException(status_code=409, detail={"code": "acceptance_event_uid_conflict"}) from exc
+        except (StaleRuntimeEvent, ValueError) as exc:
+            raise HTTPException(status_code=409, detail={"code": "acceptance_event_rejected"}) from exc
+        return {"accepted": True, **receipt}
+
     def _checkpoint_record(checkpoint_id: str | None) -> dict[str, Any] | None:
         if checkpoint_id is None:
             return None

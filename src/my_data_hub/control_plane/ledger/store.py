@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sqlite3
 import stat
 import threading
@@ -3352,6 +3353,111 @@ class ControlLedger:
         if _parse_time(str(row["expires_at"])) <= now or row["state"] not in {"REQUESTED", "RUNNING"}:
             return None
         return self._checkpoint_acceptance_launch_from_row(row)
+
+    def record_checkpoint_acceptance_event(
+        self,
+        *,
+        request_id: str,
+        attempt_id: str,
+        event: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Append one exact donor-style event under the owner-task authority."""
+
+        allowed = {
+            "runtime.started", "runtime.progress", "runtime.heartbeat", "runtime.failed",
+            "runtime.terminal", "resource.acquire", "resource.release", "job.result_available",
+        }
+        data = event.get("data")
+        if not isinstance(data, Mapping):
+            raise ValueError("checkpoint acceptance event data is invalid")
+        event_uid = data.get("donor_event_uid")
+        progress = data.get("progress", {})
+        event_type = str(event.get("event_type", ""))
+        phase = event.get("phase")
+        status = event.get("status")
+        local_sequence = event.get("local_sequence")
+        if (
+            str(event.get("run_id")) != str(UUID(request_id))
+            or str(event.get("attempt_id")) != str(UUID(attempt_id))
+            or str(event.get("service_instance_id")) != str(UUID(request_id))
+            or event_type not in allowed
+            or not isinstance(event_uid, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,199}", event_uid) is None
+            or not isinstance(local_sequence, int)
+            or isinstance(local_sequence, bool)
+            or local_sequence < 1
+            or (phase is not None and (not isinstance(phase, str) or not 1 <= len(phase) <= 100))
+            or (status is not None and (not isinstance(status, str) or not 1 <= len(status) <= 100))
+            or not isinstance(progress, Mapping)
+        ):
+            raise ValueError("checkpoint acceptance event binding is invalid")
+        body_json = _safe_json(event, max_bytes=64 * 1024)
+        progress_json = _safe_json(progress, max_bytes=8 * 1024)
+        body_sha256 = hashlib.sha256(body_json.encode()).hexdigest()
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            launch = connection.execute(
+                "SELECT attempt_id,state FROM checkpoint_acceptance_launches WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if launch is None or launch["attempt_id"] != attempt_id or launch["state"] not in {
+                "REQUESTED", "RUNNING"
+            }:
+                raise StaleRuntimeEvent("checkpoint acceptance event authority is terminal or stale")
+            existing = connection.execute(
+                "SELECT body_sha256,body_json FROM checkpoint_acceptance_events "
+                "WHERE request_id=? AND event_uid=?",
+                (request_id, event_uid),
+            ).fetchone()
+            if existing is not None:
+                if existing["body_sha256"] != body_sha256 or existing["body_json"] != body_json:
+                    raise IdempotencyConflict("checkpoint acceptance event_uid changed body")
+                return {"event_uid": event_uid, "body_sha256": body_sha256, "duplicate": True}
+            try:
+                connection.execute(
+                    "INSERT INTO checkpoint_acceptance_events(request_id,attempt_id,event_uid,event_type,"
+                    "phase,status,progress_json,body_sha256,body_json,local_sequence,received_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (request_id, attempt_id, event_uid, event_type, phase, status, progress_json,
+                     body_sha256, body_json, local_sequence, now),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise IdempotencyConflict(
+                    "checkpoint acceptance local sequence changed event body"
+                ) from exc
+            connection.execute(
+                "UPDATE checkpoint_acceptance_launches SET state='RUNNING',updated_at=? "
+                "WHERE request_id=? AND state='REQUESTED'",
+                (now, request_id),
+            )
+        return {"event_uid": event_uid, "body_sha256": body_sha256, "duplicate": False}
+
+    def checkpoint_acceptance_event_observation(self, request_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT event_uid,event_type,phase,status,progress_json,body_sha256,local_sequence "
+                "FROM checkpoint_acceptance_events WHERE request_id=? ORDER BY local_sequence",
+                (str(UUID(request_id)),),
+            ).fetchall()
+        if not rows:
+            return None
+        counts: dict[str, int] = {}
+        event_uids: list[str] = []
+        receipt_sha256s: list[str] = []
+        for row in rows:
+            counts[str(row["event_type"])] = counts.get(str(row["event_type"]), 0) + 1
+            event_uids.append(str(row["event_uid"]))
+            receipt_sha256s.append(str(row["body_sha256"]))
+        latest = rows[-1]
+        return {
+            "latest_phase": latest["phase"],
+            "latest_status": latest["status"],
+            "latest_progress": json.loads(str(latest["progress_json"])),
+            "event_counts": counts,
+            "event_uids": event_uids,
+            "event_receipt_sha256s": receipt_sha256s,
+            "last_local_sequence": int(latest["local_sequence"]),
+        }
 
     def record_checkpoint_acceptance_provider_run(
         self, *, request_id: str, provider_run: Mapping[str, Any]

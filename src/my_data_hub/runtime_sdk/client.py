@@ -11,7 +11,7 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
@@ -54,6 +54,26 @@ class DeliveryReceipt:
     durable_local: bool
 
 
+@dataclass(frozen=True, slots=True)
+class AcceptanceCallbackIdentity:
+    """Dedicated task headers for protected checkpoint acceptance callbacks."""
+
+    request_id: UUID
+    task_run_id: UUID
+    attempt_id: UUID
+
+    def __post_init__(self) -> None:
+        if self.request_id != self.task_run_id:
+            raise ValueError("acceptance callback identity must be task-bound")
+
+    def headers(self) -> dict[str, str]:
+        return {
+            "X-MDH-Acceptance-Request-ID": str(self.request_id),
+            "X-MDH-Acceptance-Task-Run-ID": str(self.task_run_id),
+            "X-MDH-Acceptance-Attempt-ID": str(self.attempt_id),
+        }
+
+
 class RuntimeClient:
     """Generic notebook callback SDK with durable local replay."""
 
@@ -75,6 +95,7 @@ class RuntimeClient:
         sleep: Callable[[float], None] | None = None,
         heartbeat_interval_seconds: float = 30.0,
         automatic_replay_limit: int = 100,
+        acceptance_identity: AcceptanceCallbackIdentity | None = None,
     ) -> None:
         parsed = urlparse(callback_url)
         if parsed.scheme.lower() != "https" or not parsed.netloc:
@@ -99,6 +120,7 @@ class RuntimeClient:
         self._sleep = sleep or time.sleep
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.automatic_replay_limit = automatic_replay_limit
+        self.acceptance_identity = acceptance_identity
         self.spool = JsonlEventSpool(spool_path)
         self._sequence = self.spool.highest_local_sequence()
         self._last_heartbeat_at: datetime | None = None
@@ -368,6 +390,8 @@ class RuntimeClient:
                 "Content-Type": "application/json",
                 "User-Agent": "my-data-hub-runtime-sdk/1",
             }
+            if self.acceptance_identity is not None:
+                headers.update(self.acceptance_identity.headers())
             delays = self.retry_policy.delays(event_id)
             attempts = 0
             for attempt in range(self.retry_policy.max_attempts):

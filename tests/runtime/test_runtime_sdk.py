@@ -3,12 +3,19 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID
 
 import jsonschema
 import pytest
 
 from my_data_hub.control_plane.clock import DeterministicClock
-from my_data_hub.runtime_sdk import RetryPolicy, RuntimeClient, RuntimeEventType, TransportResponse
+from my_data_hub.runtime_sdk import (
+    AcceptanceCallbackIdentity,
+    RetryPolicy,
+    RuntimeClient,
+    RuntimeEventType,
+    TransportResponse,
+)
 
 
 class ScriptedTransport:
@@ -67,6 +74,43 @@ def test_header_only_secret_and_sanitized_jsonl(tmp_path: Path) -> None:
     assert b"must-not-survive" not in spool_bytes
     assert runtime.spool.path.stat().st_mode & 0o777 == 0o600
     assert runtime.spool.path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_acceptance_callback_adds_only_fixed_task_identity_headers(tmp_path: Path) -> None:
+    task = UUID("11111111-1111-4111-8111-111111111111")
+    attempt = UUID("22222222-2222-4222-8222-222222222222")
+    transport = ScriptedTransport([TransportResponse(200)])
+    runtime = RuntimeClient(
+        callback_url="https://control.example/internal/acceptance/events",
+        run_secret="this-is-a-private-run-secret",
+        run_id=str(task),
+        attempt_id=str(attempt),
+        service_instance_id=str(task),
+        source_identity="owner/checkpoint-evidence",
+        source_version="a" * 40,
+        epoch=1,
+        spool_path=tmp_path / "events.jsonl",
+        transport=transport,
+        acceptance_identity=AcceptanceCallbackIdentity(
+            request_id=task, task_run_id=task, attempt_id=attempt
+        ),
+    )
+    runtime.emit_donor_envelope(
+        {
+            "event": "kernel_started",
+            "event_uid": f"{task}:kernel_started:0",
+            "run_id": str(task),
+            "phase": "bootstrap",
+            "status": "running",
+            "progress": {"completed_steps": 0},
+        }
+    )
+    headers = transport.calls[0][2]
+    assert headers["X-MDH-Acceptance-Request-ID"] == str(task)
+    assert headers["X-MDH-Acceptance-Task-Run-ID"] == str(task)
+    assert headers["X-MDH-Acceptance-Attempt-ID"] == str(attempt)
+    assert "X-MDH-Master-Instance-ID" not in headers and "X-MDH-Epoch" not in headers
+    assert b"this-is-a-private-run-secret" not in transport.calls[0][1]
 
 
 def test_outage_is_bounded_and_restart_replays_pending_terminal_event(tmp_path: Path) -> None:

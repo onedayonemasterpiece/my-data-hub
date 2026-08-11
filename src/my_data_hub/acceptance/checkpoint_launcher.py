@@ -50,6 +50,7 @@ from .scenario_operator import (
     CheckpointAcceptanceLaunchStatus,
     CheckpointDatasetInputClaim,
     CheckpointProviderRunOutput,
+    CheckpointRuntimeObservation,
     CheckpointStatusDatasetObservation,
     CheckpointVerifierInputClaim,
 )
@@ -285,6 +286,9 @@ class ControlCheckpointAcceptanceLauncher:
                     failure="CHECKPOINT_PROVIDER_RUN_FAILED",
                 )
             )
+        runtime_observation = self._runtime_observation(request)
+        if runtime_observation is None or not runtime_observation.terminal_complete:
+            return self._status(request, config, stored, state="RUNNING")
         with tempfile.TemporaryDirectory(prefix="mdh-checkpoint-acceptance-output-") as raw:
             destination = Path(raw)
             output = self.adapter.download_exact_run_output_file(
@@ -338,6 +342,7 @@ class ControlCheckpointAcceptanceLauncher:
             result_sha256=result_sha,
             provider_output=provider if state == "LIVE_EVIDENCE_READY" else None,
             status_input=self._status_input(stored),
+            runtime_observation=runtime_observation,
             result=result,
             blocker_code=result.blocker_code,
             failure_code=result.failure_code,
@@ -406,9 +411,16 @@ class ControlCheckpointAcceptanceLauncher:
             request_sha256=request.request_sha256,
             config_sha256=config.config_sha256,
             status_input=self._status_input(stored),
+            runtime_observation=self._runtime_observation(request),
             blocker_code=blocker,
             failure_code=failure,
         )
+
+    def _runtime_observation(
+        self, request: CheckpointAcceptanceLaunchRequest
+    ) -> CheckpointRuntimeObservation | None:
+        value = self.ledger.checkpoint_acceptance_event_observation(str(request.request_id))
+        return CheckpointRuntimeObservation.model_validate(value) if value is not None else None
 
     def _status_input(self, stored: Mapping[str, Any]) -> CheckpointStatusDatasetObservation | None:
         value = stored.get("status_dataset")
@@ -557,7 +569,7 @@ class ControlCheckpointAcceptanceLauncher:
         bindings = json.dumps(self.deployment.kaggle_secret_bindings, sort_keys=True)
         payload = canonical_json_bytes(config.model_dump(mode="json"))
         lines = [
-            "import hashlib, importlib.util, json, os, pathlib, shutil, subprocess, sys",
+            "import hashlib, importlib.util, json, os, pathlib, shutil, subprocess, sys, time",
             "from kaggle_secrets import UserSecretsClient",
             f"TASK_RUN_ID = {str(request.task_run_id)!r}",
             f"ATTEMPT_ID = {str(request.control_identity.attempt_id)!r}",
@@ -577,7 +589,7 @@ class ControlCheckpointAcceptanceLauncher:
             "module = importlib.util.module_from_spec(spec)",
             "spec.loader.exec_module(module)",
             (
-                "module.load_run_config(status_config, request_id=TASK_RUN_ID, "
+                "status = module.load_run_config(status_config, request_id=TASK_RUN_ID, "
                 "attempt_id=ATTEMPT_ID, notebook=NOTEBOOK_REF)"
             ),
             "secrets = UserSecretsClient()",
@@ -595,6 +607,26 @@ class ControlCheckpointAcceptanceLauncher:
                 f"{runtime.entrypoint_sha256!r}: raise RuntimeError('entrypoint hash mismatch')"
             ),
             "subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-deps', str(wheel)], check=True)",
+            "from uuid import UUID",
+            "from my_data_hub.runtime_sdk import AcceptanceCallbackIdentity, RuntimeClient",
+            "working = pathlib.Path('/kaggle/working/checkpoint-acceptance')",
+            "working.mkdir(mode=0o700)",
+            "status_client = RuntimeClient(",
+            "    callback_url=status['callback_url'].rstrip('/') + '/internal/acceptance/events',",
+            "    run_secret=os.environ['MY_DATA_HUB_RUN_SECRET'],",
+            "    run_id=TASK_RUN_ID, attempt_id=ATTEMPT_ID, service_instance_id=TASK_RUN_ID,",
+            f"    source_identity=NOTEBOOK_REF, source_version={request.source_revision!r}, epoch=1,",
+            "    spool_path=working / 'kaggle_status_events.jsonl',",
+            "    acceptance_identity=AcceptanceCallbackIdentity(",
+            "        request_id=UUID(TASK_RUN_ID), task_run_id=UUID(TASK_RUN_ID),",
+            "        attempt_id=UUID(ATTEMPT_ID)),",
+            ")",
+            "def emit(name, phase, state, progress):",
+            "    return status_client.emit_donor_envelope({",
+            "        'run_id': TASK_RUN_ID, 'event': name,",
+            "        'event_uid': f'{TASK_RUN_ID}:{name}:{progress.get(\"sequence\", 0)}',",
+            "        'phase': phase, 'status': state, 'progress': progress})",
+            "emit('kernel_started', 'bootstrap', 'running', {'sequence': 0, 'completed_steps': 0})",
             "template = pathlib.Path('/kaggle/working/checkpoint-template')",
             f"shutil.copytree(pathlib.Path({template_mount!r}), template, dirs_exist_ok=False)",
         ]
@@ -611,15 +643,51 @@ class ControlCheckpointAcceptanceLauncher:
             )
         lines.extend(
             [
-                "working = pathlib.Path('/kaggle/working/checkpoint-acceptance')",
-                "working.mkdir(mode=0o700)",
                 "config_path = working / 'checkpoint-acceptance-config.json'",
                 f"config_path.write_bytes({payload!r})",
                 "os.chmod(config_path, 0o600)",
+                "emit('preflight_ok', 'preflight', 'ready', {'sequence': 0, 'completed_steps': 1})",
                 (
-                    "subprocess.run([sys.executable, str(entrypoint), '--config', str(config_path), "
-                    "'--output', str(working / 'operational-result.json')], check=True)"
+                    "status_client.emit_donor_envelope({'run_id': TASK_RUN_ID, "
+                    "'event': 'resource_acquire', 'event_uid': f'{TASK_RUN_ID}:resource_acquire:0', "
+                    "'phase': 'execute', 'status': 'acquired', 'progress': {'sequence': 0}, "
+                    "'resource': {'kind': 'checkpoint_acceptance', 'ref': NOTEBOOK_REF}})"
                 ),
+                "started = time.monotonic()",
+                (
+                    "process = subprocess.Popen([sys.executable, str(entrypoint), '--config', "
+                    "str(config_path), '--output', str(working / 'operational-result.json')])"
+                ),
+                "heartbeat = 1",
+                "emit('alive', 'execute', 'running', {'sequence': heartbeat, 'heartbeat_count': heartbeat, "
+                "     'elapsed_seconds': 0, 'completed_steps': 1})",
+                "while process.poll() is None:",
+                "    try:",
+                "        process.wait(timeout=30)",
+                "    except subprocess.TimeoutExpired:",
+                "        heartbeat += 1",
+                "        emit('alive', 'execute', 'running', {'sequence': heartbeat, "
+                "             'heartbeat_count': heartbeat,",
+                "             'elapsed_seconds': int(time.monotonic() - started), 'completed_steps': 1})",
+                "if process.returncode != 0:",
+                "    emit('failed', 'execute', 'failed', {'sequence': heartbeat + 1, "
+                "         'heartbeat_count': heartbeat, 'completed_steps': 1})",
+                "    raise SystemExit(process.returncode)",
+                "result_path = working / 'operational-result.json'",
+                "result_sha = hashlib.sha256(result_path.read_bytes()).hexdigest()",
+                "emit('report_written', 'evidence', 'ready', {'sequence': heartbeat + 1, "
+                "     'heartbeat_count': heartbeat, 'completed_steps': 2, 'result_sha256': result_sha})",
+                (
+                    "status_client.emit_donor_envelope({'run_id': TASK_RUN_ID, "
+                    "'event': 'resource_release', 'event_uid': f'{TASK_RUN_ID}:resource_release:0', "
+                    "'phase': 'cleanup', 'status': 'released', "
+                    "'progress': {'sequence': 0, 'completed_steps': 3}, "
+                    "'resource': {'kind': 'checkpoint_acceptance', 'ref': NOTEBOOK_REF}})"
+                ),
+                "emit('terminal', 'complete', 'completed', {'sequence': heartbeat + 2, "
+                "     'heartbeat_count': heartbeat, 'completed_steps': 4, 'result_sha256': result_sha})",
+                "if not status_client.flush_pending(max_events=100):",
+                "    raise RuntimeError('checkpoint acceptance callbacks remain pending')",
             ]
         )
         encoded = ("\n".join(lines) + "\n").encode()

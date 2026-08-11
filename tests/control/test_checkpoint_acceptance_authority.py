@@ -101,6 +101,48 @@ def test_checkpoint_task_authority_is_exact_and_does_not_borrow_master_epoch(tmp
     assert head.status_code == 200
     assert head.json()["generation"] == 0
 
+    event = {
+        "schema": "content-runtime-event/v1",
+        "event_id": "33333333-3333-4333-8333-333333333333",
+        "run_id": str(TASK),
+        "attempt_id": str(launch.control_identity.attempt_id),
+        "service_instance_id": str(TASK),
+        "source_identity": launch.evidence_notebook_ref,
+        "source_version": launch.source_revision,
+        "event_type": "runtime.started",
+        "emitted_at": NOW.isoformat(),
+        "local_sequence": 1,
+        "epoch": 1,
+        "phase": "bootstrap",
+        "status": "running",
+        "data": {
+            "donor_event": "kernel_started",
+            "donor_event_uid": f"{TASK}:kernel_started:0",
+            "progress": {"completed_steps": 0, "sequence": 0},
+            "donor_body_sha256": "7" * 64,
+        },
+        "artifact_refs": [],
+        "metrics": {},
+    }
+    first_event = client.post(
+        "/internal/acceptance/events", headers=_headers(launch), json=event
+    )
+    assert first_event.status_code == 200
+    assert first_event.json()["duplicate"] is False
+    replay_event = client.post(
+        "/internal/acceptance/events", headers=_headers(launch), json=event
+    )
+    assert replay_event.status_code == 200
+    assert replay_event.json()["duplicate"] is True
+    changed = {**event, "status": "changed"}
+    assert client.post(
+        "/internal/acceptance/events", headers=_headers(launch), json=changed
+    ).status_code == 409
+    observation = ledger.checkpoint_acceptance_event_observation(str(TASK))
+    assert observation is not None
+    assert observation["latest_phase"] == "bootstrap"
+    assert observation["event_counts"] == {"runtime.started": 1}
+
     intent = ProviderEffectIntent.create(
         operation_id=launch.operation_id,
         effect_id=uuid5(NAMESPACE_URL, f"candidate:{launch.operation_id}"),

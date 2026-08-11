@@ -1,6 +1,6 @@
 """Generic, secret-safe runtime callback SDK for ephemeral notebooks."""
 
-from .client import DeliveryReceipt, RetryPolicy, RuntimeClient
+from .client import AcceptanceCallbackIdentity, DeliveryReceipt, RetryPolicy, RuntimeClient
 from .events import ArtifactRef, RuntimeEvent, RuntimeEventType
 from .lifetime import (
     CANONICAL_RUNTIME_CALLBACK_URL,
@@ -34,6 +34,7 @@ __all__ = [
     "MIN_CHECKPOINT_RESERVE_SECONDS",
     "MIN_PROCESS_EXIT_RESERVE_SECONDS",
     "PROVIDER_HARD_CUTOFF_RESERVE_SECONDS",
+    "AcceptanceCallbackIdentity",
     "ArtifactRef",
     "CallbackTransport",
     "DeliveryReceipt",

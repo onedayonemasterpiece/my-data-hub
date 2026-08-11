@@ -9,6 +9,7 @@ checkpoint or verifier bytes and never treats a ``/kaggle`` path as local.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -260,6 +261,53 @@ class CheckpointStatusDatasetObservation(BaseModel):
         return self
 
 
+class CheckpointRuntimeObservation(BaseModel):
+    """Bounded durable custom-phase/event projection from the task Notebook."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    latest_phase: str | None = Field(default=None, min_length=1, max_length=100)
+    latest_status: str | None = Field(default=None, min_length=1, max_length=100)
+    latest_progress: dict[str, Any]
+    event_counts: dict[
+        Literal[
+            "runtime.started", "runtime.progress", "runtime.heartbeat", "runtime.failed",
+            "runtime.terminal", "resource.acquire", "resource.release", "job.result_available",
+        ],
+        int,
+    ]
+    event_uids: tuple[str, ...] = Field(min_length=1, max_length=100)
+    event_receipt_sha256s: tuple[str, ...] = Field(min_length=1, max_length=100)
+    last_local_sequence: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def exact_projection(self) -> CheckpointRuntimeObservation:
+        if (
+            len(self.event_uids) != len(self.event_receipt_sha256s)
+            or len(set(self.event_uids)) != len(self.event_uids)
+            or any(
+                re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,199}", value) is None
+                for value in self.event_uids
+            )
+            or any(re.fullmatch(r"[a-f0-9]{64}", value) is None for value in self.event_receipt_sha256s)
+        ):
+            raise ValueError("checkpoint runtime event projection is invalid")
+        return self
+
+    @property
+    def terminal_complete(self) -> bool:
+        required = {
+            "runtime.started": 1,
+            "runtime.progress": 1,
+            "runtime.heartbeat": 1,
+            "resource.acquire": 1,
+            "job.result_available": 1,
+            "resource.release": 1,
+            "runtime.terminal": 1,
+        }
+        return all(self.event_counts.get(key, 0) >= count for key, count in required.items())
+
+
 class CheckpointAcceptanceLaunchStatus(BaseModel):
     """Metadata-only reconciliation result; never an operational-matrix PASS."""
 
@@ -282,6 +330,7 @@ class CheckpointAcceptanceLaunchStatus(BaseModel):
     result_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     provider_output: CheckpointProviderRunOutput | None = None
     status_input: CheckpointStatusDatasetObservation | None = None
+    runtime_observation: CheckpointRuntimeObservation | None = None
     result: CheckpointAcceptanceOperationalResult | None = None
     blocker_code: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{2,119}$")
     failure_code: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{2,119}$")
@@ -322,6 +371,8 @@ class CheckpointAcceptanceLaunchStatus(BaseModel):
                 or self.provider_output.provider_ref != self.result.locator.evidence_notebook_ref
                 or self.status_input is None
                 or not self.status_input.cleaned
+                or self.runtime_observation is None
+                or not self.runtime_observation.terminal_complete
             ):
                 raise ValueError("ready checkpoint status lacks exact provider/result reconciliation")
             calculated = hashlib.sha256(

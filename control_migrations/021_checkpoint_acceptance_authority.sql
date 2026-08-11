@@ -24,3 +24,25 @@ CREATE TABLE checkpoint_acceptance_launches (
 
 CREATE INDEX checkpoint_acceptance_launch_state_idx
     ON checkpoint_acceptance_launches(state, updated_at);
+
+CREATE TABLE checkpoint_acceptance_events (
+    request_id TEXT NOT NULL REFERENCES checkpoint_acceptance_launches(request_id),
+    attempt_id TEXT NOT NULL,
+    event_uid TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN (
+        'runtime.started','runtime.progress','runtime.heartbeat','runtime.failed',
+        'runtime.terminal','resource.acquire','resource.release','job.result_available'
+    )),
+    phase TEXT,
+    status TEXT,
+    progress_json TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL CHECK (length(body_sha256)=64),
+    body_json TEXT NOT NULL,
+    local_sequence INTEGER NOT NULL CHECK (local_sequence >= 1),
+    received_at TEXT NOT NULL,
+    PRIMARY KEY (request_id, event_uid),
+    UNIQUE (request_id, attempt_id, local_sequence)
+);
+
+CREATE INDEX checkpoint_acceptance_events_projection_idx
+    ON checkpoint_acceptance_events(request_id, local_sequence);
