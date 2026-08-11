@@ -249,8 +249,7 @@ def validate_kaggle_transport(report: Report) -> None:
                 if not (
                     finding.kind == "http"
                     and finding.line == 96
-                    and finding.detail
-                    == "https://www.kaggle.com/api/v1/datasets/download/{}?datasetVersionNumber={} "
+                    and finding.detail == "https://www.kaggle.com/api/v1/datasets/download/{}?datasetVersionNumber={} "
                 )
             ]
         if not findings:
@@ -287,8 +286,7 @@ def validate_kaggle_transport(report: Report) -> None:
     report.check((ROOT / central).is_file(), f"central Kaggle transport implementation is missing: {central}")
     report.check(
         any(
-            finding.kind == "sdk_import"
-            and finding.detail == "kaggle.api.kaggle_api_extended"
+            finding.kind == "sdk_import" and finding.detail == "kaggle.api.kaggle_api_extended"
             for finding in central_findings
         ),
         "central Kaggle adapter lost its pinned official SDK transport",
@@ -297,6 +295,8 @@ def validate_kaggle_transport(report: Report) -> None:
         implementation_files == {central},
         f"direct Kaggle transport implementation inventory drifted: {sorted(implementation_files)}",
     )
+
+
 OPERATIONAL_MVP_COMPLETE = "MY_DATA_HUB_OPERATIONAL_MVP_COMPLETE"
 OPERATIONAL_MVP_BLOCKED = "MY_DATA_HUB_OPERATIONAL_MVP_BLOCKED"
 OPERATIONAL_MVP_GATE_IDS = tuple("ABCDEFGHIJKLMN")
@@ -445,9 +445,7 @@ def validate_operational_mvp_receipt_semantics(
         if isinstance(identity, dict):
             for field in ("merge_commit", "deployed_commit", "post_deploy_verified_commit"):
                 if identity.get(field) != evaluated_commit:
-                    errors.append(
-                        f"COMPLETE receipt {field} must equal evaluated_source_commit"
-                    )
+                    errors.append(f"COMPLETE receipt {field} must equal evaluated_source_commit")
 
         gate_results = receipt.get("gate_results", [])
         gate_ids = [
@@ -462,29 +460,22 @@ def validate_operational_mvp_receipt_semantics(
             if item.get("live_evidence") is not True:
                 errors.append(f"COMPLETE evidence is not live: {evidence_id}")
             if item.get("source_commit") != evaluated_commit:
-                errors.append(
-                    f"COMPLETE evidence source commit differs from evaluated commit: {evidence_id}"
-                )
+                errors.append(f"COMPLETE evidence source commit differs from evaluated commit: {evidence_id}")
             locator = str(item.get("locator", "")).lower()
             if "examples/" in locator or "synthetic" in locator:
                 errors.append(f"COMPLETE receipt cites synthetic/example evidence: {evidence_id}")
 
-        required_ids = {
-            evidence_id
-            for refs in required_evidence.values()
-            if isinstance(refs, list)
-            for evidence_id in refs
-        } if isinstance(required_evidence, dict) else set()
+        required_ids = (
+            {evidence_id for refs in required_evidence.values() if isinstance(refs, list) for evidence_id in refs}
+            if isinstance(required_evidence, dict)
+            else set()
+        )
         for evidence_id in sorted(required_ids):
             item = evidence_by_id.get(evidence_id)
             if item is not None and item.get("storage") != "REPOSITORY_FILE":
-                errors.append(
-                    f"required COMPLETE evidence must be locally hash-verifiable: {evidence_id}"
-                )
+                errors.append(f"required COMPLETE evidence must be locally hash-verifiable: {evidence_id}")
 
-        if isinstance(counts, dict) and counts.get("bloggers_imported") != counts.get(
-            "ydb_bloggers_observed"
-        ):
+        if isinstance(counts, dict) and counts.get("bloggers_imported") != counts.get("ydb_bloggers_observed"):
             errors.append("COMPLETE receipt blogger import count differs from YDB inventory")
 
         matrix_evidence_id = matrix.get("receipt_evidence_id")
@@ -505,16 +496,10 @@ def validate_operational_mvp_receipt_semantics(
                         errors.append("operational matrix evidence must be a JSON object")
                         matrix_receipt = {}
                     matrix_schema_path = (
-                        root
-                        / "schemas"
-                        / "provider"
-                        / "operational-kaggle-matrix-receipt.v1.schema.json"
+                        root / "schemas" / "provider" / "operational-kaggle-matrix-receipt.v1.schema.json"
                     )
                     scenario_schema_path = (
-                        root
-                        / "schemas"
-                        / "provider"
-                        / "operational-kaggle-scenario-receipt.v1.schema.json"
+                        root / "schemas" / "provider" / "operational-kaggle-scenario-receipt.v1.schema.json"
                     )
                     matrix_schema_errors: list[Any] = []
                     if not matrix_schema_path.is_file() or not scenario_schema_path.is_file():
@@ -531,9 +516,7 @@ def validate_operational_mvp_receipt_semantics(
                         if matrix_schema_errors:
                             errors.append(
                                 "operational matrix evidence violates its schema: "
-                                + "; ".join(
-                                    error.message for error in matrix_schema_errors[:5]
-                                )
+                                + "; ".join(error.message for error in matrix_schema_errors[:5])
                             )
                     comparisons = {
                         "commit_sha": evaluated_commit,
@@ -548,9 +531,7 @@ def validate_operational_mvp_receipt_semantics(
                     }
                     for field, expected in comparisons.items():
                         if matrix_receipt.get(field) != expected:
-                            errors.append(
-                                f"operational matrix evidence {field} does not match final receipt"
-                            )
+                            errors.append(f"operational matrix evidence {field} does not match final receipt")
                     matrix_lifecycle = matrix_receipt.get("lifecycle_gates", {})
                     final_lifecycle = matrix.get("lifecycle_gates", {})
                     for field in (
@@ -563,9 +544,7 @@ def validate_operational_mvp_receipt_semantics(
                         "soak_duration_seconds",
                     ):
                         if matrix_lifecycle.get(field) != final_lifecycle.get(field):
-                            errors.append(
-                                f"operational matrix lifecycle field {field} does not match"
-                            )
+                            errors.append(f"operational matrix lifecycle field {field} does not match")
                     if scenario_schema_path.is_file() and not matrix_schema_errors:
                         scenario_schema = load_json(scenario_schema_path)
                         scenario_run_refs: set[str] = set()
@@ -578,16 +557,12 @@ def validate_operational_mvp_receipt_semantics(
                                 continue
                             scenario_path = matrix_path.parent / receipt_name
                             if not scenario_path.is_file():
-                                errors.append(
-                                    f"operational scenario evidence is absent: {receipt_name}"
-                                )
+                                errors.append(f"operational scenario evidence is absent: {receipt_name}")
                                 continue
                             try:
                                 scenario_receipt = load_json(scenario_path)
                             except (OSError, json.JSONDecodeError) as exc:
-                                errors.append(
-                                    f"cannot read operational scenario evidence {receipt_name}: {exc}"
-                                )
+                                errors.append(f"cannot read operational scenario evidence {receipt_name}: {exc}")
                                 continue
                             scenario_schema_errors = sorted(
                                 Draft202012Validator(
@@ -599,9 +574,7 @@ def validate_operational_mvp_receipt_semantics(
                             if scenario_schema_errors:
                                 errors.append(
                                     f"operational scenario evidence {receipt_name} violates its schema: "
-                                    + "; ".join(
-                                        error.message for error in scenario_schema_errors[:3]
-                                    )
+                                    + "; ".join(error.message for error in scenario_schema_errors[:3])
                                 )
                                 continue
                             expected_scenario = {
@@ -615,8 +588,7 @@ def validate_operational_mvp_receipt_semantics(
                             for field, expected in expected_scenario.items():
                                 if scenario_receipt.get(field) != expected:
                                     errors.append(
-                                        f"operational scenario evidence {receipt_name} "
-                                        f"has inconsistent {field}"
+                                        f"operational scenario evidence {receipt_name} has inconsistent {field}"
                                     )
                             real_identity = scenario_receipt.get("real_run_identity")
                             if isinstance(real_identity, dict):
@@ -627,24 +599,17 @@ def validate_operational_mvp_receipt_semantics(
                                 if isinstance(provider_kernel_id, int):
                                     scenario_kernel_ids.add(provider_kernel_id)
                         if scenario_run_refs != set(run_refs):
-                            errors.append(
-                                "operational scenario run identities do not match matrix summary"
-                            )
+                            errors.append("operational scenario run identities do not match matrix summary")
                         if scenario_kernel_ids != set(kernel_ids):
-                            errors.append(
-                                "operational scenario kernel IDs do not match matrix summary"
-                            )
+                            errors.append("operational scenario kernel IDs do not match matrix summary")
 
     elif verdict == OPERATIONAL_MVP_BLOCKED:
         gate_results = receipt.get("gate_results", [])
         complete_gate_ids = {
-            gate.get("gate_id")
-            for gate in gate_results
-            if isinstance(gate, dict) and gate.get("outcome") == "PASS"
+            gate.get("gate_id") for gate in gate_results if isinstance(gate, dict) and gate.get("outcome") == "PASS"
         }
         all_required_refs_present = isinstance(required_evidence, dict) and all(
-            bool(required_evidence.get(section))
-            for section in OPERATIONAL_MVP_REQUIRED_EVIDENCE_KINDS
+            bool(required_evidence.get(section)) for section in OPERATIONAL_MVP_REQUIRED_EVIDENCE_KINDS
         )
         matrix_qualifies = (
             matrix.get("passed_scenarios") == 24
@@ -655,11 +620,7 @@ def validate_operational_mvp_receipt_semantics(
             and isinstance(kernel_ids, list)
             and len(kernel_ids) >= 15
         )
-        if (
-            complete_gate_ids == set(OPERATIONAL_MVP_GATE_IDS)
-            and all_required_refs_present
-            and matrix_qualifies
-        ):
+        if complete_gate_ids == set(OPERATIONAL_MVP_GATE_IDS) and all_required_refs_present and matrix_qualifies:
             errors.append(
                 "BLOCKED receipt presents all completion gates/evidence as complete; "
                 "a blocker must correspond to an actually incomplete criterion"
@@ -684,32 +645,18 @@ def validate_json_and_schemas(report: Report) -> None:
         "notebook-result.v1.example.json": "notebook-result.v1.schema.json",
         "changeset.v1.example.json": "changeset.v1.schema.json",
         "notebook-input-manifest.v1.example.json": "notebook-input-manifest.v1.schema.json",
-        "migration-reconciliation-report.v1.example.json": (
-            "migration-reconciliation-report.v1.schema.json"
-        ),
+        "migration-reconciliation-report.v1.example.json": ("migration-reconciliation-report.v1.schema.json"),
         "data-connector-envelope.v1.example.json": "data-connector-envelope.v1.schema.json",
         "kaggle-exchange-manifest.v1.example.json": "kaggle-exchange-manifest.v1.schema.json",
-        "kaggle-real-canary-receipt.v1.example.json": (
-            "kaggle-real-canary-receipt.v1.schema.json"
-        ),
-        "kaggle-real-canary-receipt.v2.example.json": (
-            "kaggle-real-canary-receipt.v2.schema.json"
-        ),
+        "kaggle-real-canary-receipt.v1.example.json": ("kaggle-real-canary-receipt.v1.schema.json"),
+        "kaggle-real-canary-receipt.v2.example.json": ("kaggle-real-canary-receipt.v2.schema.json"),
         "workflow-receipt.v1.example.json": "workflow-receipt.v1.schema.json",
         "deployment-evidence.v1.example.json": "deployment-evidence.v1.schema.json",
         "deployment-evidence.v2.example.json": "deployment-evidence.v2.schema.json",
-        "deployment-evidence-state.v1.example.json": (
-            "deployment-evidence-state.v1.schema.json"
-        ),
-        "post-deploy-verification.v1.example.json": (
-            "post-deploy-verification.v1.schema.json"
-        ),
-        "post-deploy-verification.v2.example.json": (
-            "post-deploy-verification.v2.schema.json"
-        ),
-        "operational-mvp-acceptance-receipt.v1.example.json": (
-            "operational-mvp-acceptance-receipt.v1.schema.json"
-        ),
+        "deployment-evidence-state.v1.example.json": ("deployment-evidence-state.v1.schema.json"),
+        "post-deploy-verification.v1.example.json": ("post-deploy-verification.v1.schema.json"),
+        "post-deploy-verification.v2.example.json": ("post-deploy-verification.v2.schema.json"),
+        "operational-mvp-acceptance-receipt.v1.example.json": ("operational-mvp-acceptance-receipt.v1.schema.json"),
         "master-asset-bundle.v1.example.json": "master-asset-bundle.v1.schema.json",
     }
     checker = FormatChecker()
@@ -725,8 +672,7 @@ def validate_json_and_schemas(report: Report) -> None:
         )
         report.check(
             not errors,
-            f"{path.relative_to(ROOT)} violates {schema_name}: "
-            + "; ".join(error.message for error in errors[:5]),
+            f"{path.relative_to(ROOT)} violates {schema_name}: " + "; ".join(error.message for error in errors[:5]),
         )
         if example_name == "operational-mvp-acceptance-receipt.v1.example.json" and not errors:
             semantic_errors = validate_operational_mvp_receipt_semantics(
@@ -737,8 +683,7 @@ def validate_json_and_schemas(report: Report) -> None:
             )
             report.check(
                 not semantic_errors,
-                "synthetic operational MVP receipt is semantically invalid: "
-                + "; ".join(semantic_errors[:5]),
+                "synthetic operational MVP receipt is semantically invalid: " + "; ".join(semantic_errors[:5]),
             )
 
     blocked_receipt = (
@@ -771,8 +716,7 @@ def validate_json_and_schemas(report: Report) -> None:
             )
             report.check(
                 not semantic_errors,
-                "final operational MVP receipt is semantically invalid: "
-                + "; ".join(semantic_errors[:5]),
+                "final operational MVP receipt is semantically invalid: " + "; ".join(semantic_errors[:5]),
             )
 
     evidence_path = (
@@ -841,9 +785,7 @@ def validate_json_and_schemas(report: Report) -> None:
         "notebook-result.v1.schema.json": NotebookResult,
         "region-talk-ydb-export-manifest.v1.schema.json": YdbExportManifest,
         "region-talk-ydb-export-row.v1.schema.json": YdbExportRow,
-        "migration-reconciliation-report.v1.schema.json": (
-            MigrationReconciliationReport
-        ),
+        "migration-reconciliation-report.v1.schema.json": (MigrationReconciliationReport),
     }
 
     def normalized(schema: dict[str, Any]) -> dict[str, Any]:
@@ -988,18 +930,19 @@ def validate_notebooks(report: Report) -> None:
         "01-platform-runtime-smoke": ("runtime_smoke/runtime.py", False, True, frozenset()),
         "02-postgres-master": ("postgres_master/runtime.py", True, True, frozenset()),
         "03-checkpoint-verifier-restore-smoke": (
-            "checkpoint_verifier/runtime.py", False, True, frozenset({"import psycopg"})
+            "checkpoint_verifier/runtime.py",
+            False,
+            True,
+            frozenset({"import psycopg"}),
         ),
         "04-region-talk-ydb-bloggers-importer": (
-            "blogger_importer/runtime.py", True, True,
+            "blogger_importer/runtime.py",
+            True,
+            True,
             frozenset({"import psycopg", "import ydb"}),
         ),
-        "05-e5-blogger-embedding-worker": (
-            "embedding_workers/e5_runtime.py", False, True, frozenset()
-        ),
-        "06-bge-m3-blogger-embedding-worker": (
-            "embedding_workers/bge_m3_runtime.py", False, True, frozenset()
-        ),
+        "05-e5-blogger-embedding-worker": ("embedding_workers/e5_runtime.py", False, True, frozenset()),
+        "06-bge-m3-blogger-embedding-worker": ("embedding_workers/bge_m3_runtime.py", False, True, frozenset()),
     }
     for path in sorted((ROOT / "notebooks").glob("*/worker.ipynb")):
         try:
@@ -1123,8 +1066,7 @@ def validate_docs_and_layout(report: Report) -> None:
     report.check(idea_source is not None, "canonical idea-hub source is absent from provenance manifest")
     if idea_source:
         report.check(
-            idea_source.get("source_commit")
-            == "0c3fcf71b2ee8ba8afa49624bef4b779873802f7",
+            idea_source.get("source_commit") == "0c3fcf71b2ee8ba8afa49624bef4b779873802f7",
             "wrong target-vision source commit",
         )
         report.check(
@@ -1143,8 +1085,7 @@ def validate_docs_and_layout(report: Report) -> None:
         )
         report.check(
             not errors,
-            "Region Talk adaptation manifest violates its schema: "
-            + "; ".join(error.message for error in errors[:5]),
+            "Region Talk adaptation manifest violates its schema: " + "; ".join(error.message for error in errors[:5]),
         )
 
     region_talk_source = next(
@@ -1178,9 +1119,7 @@ def validate_docs_and_layout(report: Report) -> None:
             # Match a retired identifier, not a valid longer target name such as
             # ``hub.object_scope_relation`` or an MCP tool such as
             # ``hub.object.context.get``.
-            stale_pattern = re.compile(
-                rf"(?<![A-Za-z0-9_.]){re.escape(token)}(?![A-Za-z0-9_.])"
-            )
+            stale_pattern = re.compile(rf"(?<![A-Za-z0-9_.]){re.escape(token)}(?![A-Za-z0-9_.])")
             report.check(
                 stale_pattern.search(text) is None,
                 f"stale schema token {token!r} in {path.relative_to(ROOT)}",
@@ -1203,8 +1142,7 @@ def validate_docs_and_layout(report: Report) -> None:
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     report.check("make seed" not in readme, "README references removed make seed target")
     report.check(
-        "MY_DATA_HUB_REGION_TALK_YDB_TABLE" in readme
-        and "MY_DATA_HUB_REGION_TALK_YDB_TABLE" in env_example,
+        "MY_DATA_HUB_REGION_TALK_YDB_TABLE" in readme and "MY_DATA_HUB_REGION_TALK_YDB_TABLE" in env_example,
         "Region Talk YDB table variable is not documented consistently",
     )
     report.check(
@@ -1262,7 +1200,9 @@ def validate_deployment(report: Report) -> None:
         "bounded_bloggers_import": "completed_or_exact_blocker",
     }
     report.check(invariants.get("authority_order") == expected_authority, "owner-approved authority order drifted")
-    report.check(invariants.get("architecture") == expected_architecture, "owner-approved architecture invariants drifted")
+    report.check(
+        invariants.get("architecture") == expected_architecture, "owner-approved architecture invariants drifted"
+    )
     report.check(invariants.get("safety") == expected_safety, "owner-approved safety invariants drifted")
     report.check(
         invariants.get("remote_mcp") == expected_remote_mcp,
@@ -1273,8 +1213,7 @@ def validate_deployment(report: Report) -> None:
         "owner-approved Region Talk workload invariants drifted",
     )
     report.check(
-        invariants.get("operational_state_adr")
-        == "docs/adr/0017-operational-mvp-gated-profiles.md",
+        invariants.get("operational_state_adr") == "docs/adr/0017-operational-mvp-gated-profiles.md",
         "operational owner-decision ADR binding drifted",
     )
 
@@ -1299,17 +1238,31 @@ def validate_deployment(report: Report) -> None:
     control_path = ROOT / "compose.control-plane.yaml"
     report.check(control_path.is_file(), "production control-plane Compose contract is missing")
     control = yaml.safe_load(control_path.read_text(encoding="utf-8")) if control_path.is_file() else {}
-    report.check(control.get("x-my-data-hub-profile") == "production-lightweight-control-plane", "control profile marker drifted")
+    report.check(
+        control.get("x-my-data-hub-profile") == "production-lightweight-control-plane", "control profile marker drifted"
+    )
     report.check(
         set(control.get("services", {})) == {"control-plane", "remote-mcp", "oauth-server"},
         "production profile must contain only control API, OAuth and opt-in remote MCP services",
     )
     report.check(not control.get("volumes"), "production control plane must not declare volumes")
     control_serialized = json.dumps(control, sort_keys=True).lower()
-    for token in ("postgres", "pgdata", "pg_dump", "database_url", "db migrate", "backup_postgres", "connector-committer"):
-        report.check(token not in control_serialized, f"production control plane contains forbidden local-master token: {token}")
+    for token in (
+        "postgres",
+        "pgdata",
+        "pg_dump",
+        "database_url",
+        "db migrate",
+        "backup_postgres",
+        "connector-committer",
+    ):
+        report.check(
+            token not in control_serialized, f"production control plane contains forbidden local-master token: {token}"
+        )
     environment = control.get("services", {}).get("control-plane", {}).get("environment", {})
-    report.check(environment.get("MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED") == "false", "production publication gate is not false")
+    report.check(
+        environment.get("MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED") == "false", "production publication gate is not false"
+    )
     report.check(environment.get("MY_DATA_HUB_MCP_WRITE_ENABLED") == "false", "remote MCP write gate is not false")
     remote_mcp = control.get("services", {}).get("remote-mcp", {})
     report.check(remote_mcp.get("profiles") == ["remote-mcp"], "remote MCP must remain an explicit opt-in profile")
@@ -1332,14 +1285,19 @@ def validate_deployment(report: Report) -> None:
     )
 
     legacy = (ROOT / "deploy/same-host/install.sh").read_text(encoding="utf-8")
-    report.check("INSTALL_MY_DATA_HUB_SAME_HOST" in legacy and "exit 78" in legacy, "legacy same-host token is not hard-disabled")
+    report.check(
+        "INSTALL_MY_DATA_HUB_SAME_HOST" in legacy and "exit 78" in legacy, "legacy same-host token is not hard-disabled"
+    )
     for token in ("docker compose", "db migrate", "systemctl", "postgres.env", "pg_dump"):
         report.check(token not in legacy, f"legacy installer remains executable beyond its guard: {token}")
     control_installer = (ROOT / "deploy/control-plane/install.sh").read_text(encoding="utf-8").lower()
     for token in ("database_url", "db migrate", "pg_dump", "backup-loop", "connector-committer"):
-        report.check(token not in control_installer, f"control installer contains forbidden local-master operation: {token}")
+        report.check(
+            token not in control_installer, f"control installer contains forbidden local-master operation: {token}"
+        )
     report.check(not (ROOT / "deploy/systemd").exists(), "DB-coupled legacy systemd deployment directory remains")
     report.check(not (ROOT / "compose.same-host.yaml").exists(), "legacy same-host production Compose remains")
+
     def is_compose_filename(path: Path) -> bool:
         name = path.name.lower()
         return path.suffix.lower() in {".yml", ".yaml"} and (
@@ -1349,21 +1307,14 @@ def validate_deployment(report: Report) -> None:
     repository_files = [
         path
         for path in ROOT.rglob("*")
-        if path.is_file()
-        and not any(part in {".git", ".venv", "__pycache__"} for part in path.parts)
+        if path.is_file() and not any(part in {".git", ".venv", "__pycache__"} for part in path.parts)
     ]
-    compose_files = {
-        path.relative_to(ROOT).as_posix() for path in repository_files if is_compose_filename(path)
-    }
+    compose_files = {path.relative_to(ROOT).as_posix() for path in repository_files if is_compose_filename(path)}
     report.check(
         compose_files == {"compose.yaml", "compose.control-plane.yaml"},
         f"unclassified Compose deployment profile exists: {sorted(compose_files)}",
     )
-    deploy_files = {
-        path.relative_to(ROOT).as_posix()
-        for path in (ROOT / "deploy").rglob("*")
-        if path.is_file()
-    }
+    deploy_files = {path.relative_to(ROOT).as_posix() for path in (ROOT / "deploy").rglob("*") if path.is_file()}
     expected_deploy_files = {
         "deploy/control-plane/Dockerfile",
         "deploy/control-plane/collect_deployment_evidence.py",
@@ -1385,7 +1336,10 @@ def validate_deployment(report: Report) -> None:
     )
 
     disposable = yaml.safe_load((ROOT / "compose.yaml").read_text(encoding="utf-8"))
-    report.check(disposable.get("x-my-data-hub-profile") == "disposable-integration-test-only", "root Compose is not explicitly disposable")
+    report.check(
+        disposable.get("x-my-data-hub-profile") == "disposable-integration-test-only",
+        "root Compose is not explicitly disposable",
+    )
     report.check(not disposable.get("volumes"), "disposable integration Compose must not declare named volumes")
     disposable_services = disposable.get("services", {})
     report.check(
@@ -1394,7 +1348,9 @@ def validate_deployment(report: Report) -> None:
     )
     for service_name, service in disposable_services.items():
         report.check("volumes" not in service, f"disposable service {service_name} declares a persistent mount")
-        report.check(service.get("restart") == "no", f"disposable service {service_name} restart policy is not disabled")
+        report.check(
+            service.get("restart") == "no", f"disposable service {service_name} restart policy is not disabled"
+        )
         postgres_markers = json.dumps(
             {
                 "name": service_name,
@@ -1411,14 +1367,15 @@ def validate_deployment(report: Report) -> None:
     report.check(postgres.get("restart") == "no", "disposable PostgreSQL restart policy must be disabled")
     report.check("volumes" not in postgres, "disposable PostgreSQL must not declare bind/anonymous volumes")
     report.check(
-        postgres.get("tmpfs")
-        == ["/var/lib/postgresql:size=1g,mode=0700,uid=999,gid=999"],
+        postgres.get("tmpfs") == ["/var/lib/postgresql:size=1g,mode=0700,uid=999,gid=999"],
         "disposable PostgreSQL must use exact postgres-owned tmpfs PGDATA parent",
     )
     postgres_image = "pgvector/pgvector:0.8.6-pg18-bookworm"
     report.check(postgres.get("image") == postgres_image, "disposable PostgreSQL image is not pinned")
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-    report.check("docker compose down -v --remove-orphans" in makefile, "disposable integration cleanup does not remove volumes")
+    report.check(
+        "docker compose down -v --remove-orphans" in makefile, "disposable integration cleanup does not remove volumes"
+    )
 
     workflow_directory = ROOT / ".github/workflows"
     workflows = {
@@ -1468,9 +1425,14 @@ def validate_deployment(report: Report) -> None:
             report.check(not job_services, f"non-integration CI job {job_name} declares services")
     postgres_job = ci_jobs.get("postgres-integration", {})
     postgres_service = postgres_job.get("services", {}).get("postgres", {})
-    report.check(postgres_job.get("runs-on") == "ubuntu-latest", "PostgreSQL integration must remain GitHub-hosted disposable CI")
+    report.check(
+        postgres_job.get("runs-on") == "ubuntu-latest", "PostgreSQL integration must remain GitHub-hosted disposable CI"
+    )
     report.check(postgres_service.get("image") == postgres_image, "CI PostgreSQL image differs from integration target")
-    report.check("volumes" not in postgres_service and "docker volume create" not in ci, "CI PostgreSQL declares persistent volume state")
+    report.check(
+        "volumes" not in postgres_service and "docker volume create" not in ci,
+        "CI PostgreSQL declares persistent volume state",
+    )
     for path in repository_files:
         if path.suffix.lower() not in {".yml", ".yaml"}:
             continue
@@ -1576,7 +1538,9 @@ def validate_deployment(report: Report) -> None:
 
     pipeline = load_json(ROOT / "config/pipelines/region-talk.v1.json")
     report.check(pipeline.get("status") == "paused", "Region Talk pipeline is not paused")
-    publication = next((stage for stage in pipeline.get("stages", []) if stage.get("key") == "publication_dispatch"), {})
+    publication = next(
+        (stage for stage in pipeline.get("stages", []) if stage.get("key") == "publication_dispatch"), {}
+    )
     report.check(publication.get("enabled_by_default") is False, "Region Talk publication is not disabled")
 
     reversal_patterns = (
@@ -1625,11 +1589,16 @@ def validate_deployment(report: Report) -> None:
 
     receipt = load_json(ROOT / "docs/operations/evidence/2026-08-10-pr-a-host.json")
     report.check(receipt.get("install_confirmation") == "explicitly_rejected", "host receipt omits rejected INSTALL")
-    report.check(receipt.get("my_data_hub_container_count") == 0, "host receipt reports a deployed my-data-hub container")
+    report.check(
+        receipt.get("my_data_hub_container_count") == 0, "host receipt reports a deployed my-data-hub container"
+    )
     report.check(receipt.get("local_postgresql_process_observed") is False, "host receipt reports local PostgreSQL")
     report.check(receipt.get("legacy_user_unit", {}).get("enabled") is False, "legacy same-host unit was enabled")
     volume = receipt.get("postgres_volume", {})
-    report.check(volume.get("exists") is True and volume.get("pgdata_initialized") is False, "host residue is not disclosed accurately")
+    report.check(
+        volume.get("exists") is True and volume.get("pgdata_initialized") is False,
+        "host residue is not disclosed accurately",
+    )
     report.check(volume.get("read_only_inventory_entry_count") == 0, "validation-residue volume was not observed empty")
 
 
