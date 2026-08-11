@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from my_data_hub.control_plane.adapters import LedgerMasterResolver
@@ -66,3 +67,24 @@ def test_mcp_cold_start_request_is_durably_bridged_to_one_provider_run(
         "push_notebook": 1,
         "trigger_run": 1,
     }
+    ledger.activate_service_operation(
+        operation_id=handle.operation_id,
+        expected_state=MasterState.REGISTERING.value,
+        service_instance_id=handle.service_instance_id,
+        service_kind="postgres-master",
+        run_id=handle.run_id,
+        attempt_id=handle.attempt_id,
+        master_instance_id=handle.master_instance_id,
+        epoch=handle.epoch,
+        endpoint="postgres-master.internal:5432",
+        protocol="postgresql+tls",
+        tls_fingerprint="a" * 64,
+        capabilities=("canonical-read",),
+        canonical_revision=1,
+        schema_version="16",
+        lease_until=datetime.now(UTC) + timedelta(minutes=5),
+        latest_event_id="test-ready-provider-run-projection",
+    )
+    active = resolver.resolve_master(identity())
+    assert active.provider_run_ref == f"owner/master-runtime/run/{handle.run_id}"
+    assert active.public()["provider_run_ref"] == active.provider_run_ref

@@ -1259,12 +1259,34 @@ class LedgerMasterResolver(MasterResolver):
     def resolve_master(self, principal: AccessIdentity) -> MasterSnapshot:
         service = self.ledger.resolve_service("postgres-master")
         if service is not None:
+            provider_run_ref: str | None = None
+            provider_kernel_id: int | None = None
+            operation = self.ledger.operation_for_attempt(service.run_id, service.attempt_id)
+            trigger = (
+                self.ledger.get_effect_by_idempotency_key(f"{operation.operation_id}:trigger_run")
+                if operation is not None
+                else None
+            )
+            exact_identity = trigger.receipt.get("exact_identity") if trigger and trigger.receipt else None
+            if isinstance(exact_identity, Mapping):
+                observed_ref = exact_identity.get("provider_run_ref")
+                observed_kernel = exact_identity.get("provider_kernel_id")
+                if isinstance(observed_ref, str) and observed_ref:
+                    provider_run_ref = observed_ref
+                if isinstance(observed_kernel, int):
+                    provider_kernel_id = observed_kernel
+            if provider_run_ref is None and trigger is not None and trigger.receipt is not None:
+                observed_ref = trigger.receipt.get("exact_ref")
+                if isinstance(observed_ref, str) and observed_ref:
+                    provider_run_ref = observed_ref
             return MasterSnapshot(
                 state=MasterState.ACTIVE,
                 instance_id=service.master_instance_id,
                 epoch=service.epoch,
                 canonical_revision=service.canonical_revision,
                 lease_expires_at=service.lease_until.isoformat(),
+                provider_run_ref=provider_run_ref,
+                provider_kernel_id=provider_kernel_id,
                 capabilities=frozenset(service.capabilities),
             )
         operations = self.ledger.incomplete_operations("ensure_master")

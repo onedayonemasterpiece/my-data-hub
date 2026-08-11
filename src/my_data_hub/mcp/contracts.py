@@ -33,6 +33,8 @@ class MasterSnapshot:
     epoch: int | None = None
     canonical_revision: int | None = None
     lease_expires_at: str | None = None
+    provider_run_ref: str | None = None
+    provider_kernel_id: int | None = None
     capabilities: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
@@ -41,9 +43,13 @@ class MasterSnapshot:
                 raise ValueError("ACTIVE master requires instance_id and positive epoch")
         elif self.epoch is not None and self.epoch < 1:
             raise ValueError("master epoch must be positive")
+        if self.provider_run_ref is not None and not self.provider_run_ref:
+            raise ValueError("provider run reference must be non-empty")
+        if self.provider_kernel_id is not None and self.provider_kernel_id < 1:
+            raise ValueError("provider kernel ID must be positive")
 
     def public(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "master_state": self.state.value,
             "operation_id": self.operation_id,
             "instance_id": self.instance_id,
@@ -52,6 +58,11 @@ class MasterSnapshot:
             "lease_expires_at": self.lease_expires_at,
             "capabilities": sorted(self.capabilities),
         }
+        if self.provider_run_ref is not None:
+            result["provider_run_ref"] = self.provider_run_ref
+        if self.provider_kernel_id is not None:
+            result["provider_kernel_id"] = self.provider_kernel_id
+        return result
 
 
 @dataclass(frozen=True, slots=True)
