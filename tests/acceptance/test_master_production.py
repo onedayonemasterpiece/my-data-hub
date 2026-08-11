@@ -21,11 +21,15 @@ from my_data_hub.acceptance.master_production import (
     CallbackLossEvidence,
     ControlMasterAcceptanceExecutor,
     MasterAcceptanceOperatorAdapter,
+    OldEpochDenials,
+    PostgresH1ExpiredLeaseDenialProbe,
     ProductionAcceptanceBlocked,
+    ProductionControlAcceptanceContext,
     ProductionControlHostEffects,
     ProductionMasterAcceptanceEffectsFactory,
     StoredCallbackRef,
 )
+from my_data_hub.orchestrator.master import MasterState
 
 
 @dataclass(frozen=True)
@@ -153,6 +157,90 @@ def test_fm10_missing_h1_receipt_blocks_before_any_database_action() -> None:
     with pytest.raises(ProductionAcceptanceBlocked, match="FM10_H1_DENIAL_RECEIPT_UNAVAILABLE"):
         effects.lease_expiry_denial(_command("FM10"))
     assert connection.queries == []
+
+
+class ProbeConnection:
+    def __init__(self, command) -> None:
+        import psycopg
+
+        self.command = command
+        self.info = SimpleNamespace(transaction_status=psycopg.pq.TransactionStatus.IDLE)
+        self.queries: list[str] = []
+        self.revision_reads = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, query: str):
+        from psycopg.errors import ObjectNotInPrerequisiteState
+        from psycopg.pq import TransactionStatus
+
+        self.queries.append(query)
+        if "FROM pg_roles" in query:
+            return Cursor([(False, False, False, False, False, True, False)])
+        if "lease_until<=clock_timestamp" in query:
+            return Cursor([(True, self.command.binding.epoch, str(self.command.binding.master_instance_id))])
+        if "FROM master_control.epoch_state" in query:
+            return Cursor(
+                [(self.command.binding.epoch, str(self.command.binding.master_instance_id), object(), "open", 10)]
+            )
+        if "canonical_revision" in query:
+            self.revision_reads += 1
+            return Cursor([(7,)])
+        if "assert_session_write_epoch" in query:
+            self.info.transaction_status = TransactionStatus.INERROR
+            raise ObjectNotInPrerequisiteState("write rejected by epoch lease gate")
+        return Cursor([])
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        import psycopg
+
+        self.info.transaction_status = psycopg.pq.TransactionStatus.IDLE
+
+
+class ProbeConnections:
+    def __init__(self, connection: ProbeConnection) -> None:
+        self.connection = connection
+
+    def open(self, _binding):
+        return self.connection
+
+
+class Renewal:
+    def __init__(self) -> None:
+        self.commands = []
+
+    def suspend_exact_renewal(self, command) -> None:
+        self.commands.append(command)
+
+
+def test_fm10_real_probe_observes_55000_rollback_only_and_revision_unchanged(monkeypatch) -> None:
+    command = _command("FM10")
+    connection = ProbeConnection(command)
+    renewal = Renewal()
+    monotonic_ns = iter((0, 60_000_000_000))
+    monotonic = iter((0.0, 60.0))
+    monkeypatch.setattr("my_data_hub.acceptance.master_production.time.monotonic_ns", lambda: next(monotonic_ns))
+    monkeypatch.setattr("my_data_hub.acceptance.master_production.time.monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(
+        "my_data_hub.acceptance.master_production.time.sleep",
+        lambda _seconds: pytest.fail("fixed FM10 unit clock should not sleep"),
+    )
+    evidence = PostgresH1ExpiredLeaseDenialProbe(
+        connections=ProbeConnections(connection), renewal=renewal
+    ).prove_expired_lease_denial(command)
+    assert evidence.observed_wait_seconds == 60
+    assert evidence.transaction_state == "rollback_only"
+    assert evidence.denial_code == "MDH_EPOCH_LEASE_EXPIRED"
+    assert evidence.canonical_revision_before == evidence.canonical_revision_after == 7
+    assert renewal.commands == [command]
+    assert any(query == "UPDATE hub.project SET status=status WHERE false" for query in connection.queries) is False
 
 
 def test_fm07_blocks_before_provider_ensure_without_owner_host_cas() -> None:
@@ -307,6 +395,35 @@ def test_fm12_finalizer_uses_real_stopped_operation_and_verified_head() -> None:
     assert evidence.exact_readback_verified and evidence.restore_smoke_verified and evidence.head_promoted
 
 
+class RotationLedger(CleanLedger):
+    def runtime_event_history(self, **_identity):
+        return [{"event_type": "runtime.draining"}, {"event_type": "runtime.terminal"}]
+
+
+class OldDenialProbe:
+    def prove_old_epoch_denials(self, _binding) -> OldEpochDenials:
+        return OldEpochDenials(True, True, True, True, "1" * 64, "2" * 64)
+
+
+def test_fm11_waits_for_old_stopped_checkpoint_then_activates_new_epoch() -> None:
+    command = _command("FM11")
+    ledger = RotationLedger(command.binding.operation_id)
+    replacement = SimpleNamespace(
+        state=MasterState.ACTIVE,
+        epoch=command.binding.epoch + 1,
+        operation_id=str(UUID(int=12)),
+    )
+    runtime = SimpleNamespace(ledger=ledger, ensure=lambda _key: (replacement, False))
+    evidence = ProductionControlHostEffects(
+        runtime=runtime, old_epoch_denials=OldDenialProbe()  # type: ignore[arg-type]
+    ).execute(command)
+    assert evidence.old_runtime_draining_before_rotation
+    assert evidence.new_epoch == command.binding.epoch + 1
+    assert evidence.new_operation_id == UUID(int=12)
+    assert evidence.renew_denied and evidence.register_denied
+    assert evidence.bounded_write_denied and evidence.tunnel_denied
+
+
 class SoakSessions:
     def __init__(self) -> None:
         self.renewals = self.rotations = self.reads = self.denials = 0
@@ -356,3 +473,10 @@ def test_operator_adapter_schemas_are_closed_and_adapter_requires_scope() -> Non
         )
     with pytest.raises(ValueError, match="unknown"):
         adapter.call("master.acceptance.list", {}, Principal())
+
+
+def test_control_context_factory_installs_owner_claim_cas() -> None:
+    runtime = SimpleNamespace(ledger=object())
+    executor = ProductionControlAcceptanceContext().build(runtime)  # type: ignore[arg-type]
+    assert executor.runtime is runtime
+    assert executor.host_claims is not None and executor.host_effects is not None

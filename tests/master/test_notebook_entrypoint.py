@@ -11,6 +11,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 import pytest
 
+from my_data_hub.acceptance.master_production import ProductionMasterAcceptanceEffectsFactory
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.master_runtime.contracts import BootSource, MasterIdentity
 from my_data_hub.master_runtime.notebook_entrypoint import (
@@ -1349,10 +1350,12 @@ def test_notebook_main_resolves_exact_durable_head_and_always_wires_checkpoint_c
         config: NotebookMasterConfig,
         *,
         checkpoint_coordinator: object,
+        acceptance_effects_factory: ProductionMasterAcceptanceEffectsFactory,
         process_started_at: float,
     ) -> int:
         observed["config"] = config
         observed["coordinator"] = checkpoint_coordinator
+        observed["acceptance_effects_factory"] = acceptance_effects_factory
         observed["process_started_at"] = process_started_at
         return 17
 
@@ -1364,4 +1367,5 @@ def test_notebook_main_resolves_exact_durable_head_and_always_wires_checkpoint_c
     assert config.boot_source is (BootSource.VERIFIED_CHECKPOINT if has_head else BootSource.EMPTY_BASELINE)
     assert config.checkpoint_directory == (working / "exact-v7" if has_head else None)
     assert observed["coordinator"] is coordinator
+    assert isinstance(observed["acceptance_effects_factory"], ProductionMasterAcceptanceEffectsFactory)
     assert observed["process_started_at"] == 123.0

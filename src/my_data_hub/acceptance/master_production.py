@@ -9,11 +9,13 @@ resource name, or a duration.
 from __future__ import annotations
 
 import hashlib
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
-from uuid import UUID
+from urllib.parse import parse_qs, urlsplit
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from my_data_hub.control_plane.runtime import ControlPlaneMasterRuntime
 from my_data_hub.hashing import canonical_json_bytes
@@ -79,6 +81,170 @@ class H1ExpiredLeaseDenialPort(Protocol):
     def prove_expired_lease_denial(self, command: MasterAcceptanceCommand) -> LeaseExpiryEvidence: ...
 
 
+class LeaseExpiryRenewalPort(Protocol):
+    """Stops renewal only for the exact task-bound ACTIVE runtime."""
+
+    def suspend_exact_renewal(self, command: MasterAcceptanceCommand) -> None: ...
+
+
+class FixedOperatorConnectionFactory(Protocol):
+    def open(self, binding: MasterAcceptanceBinding) -> Any: ...
+
+
+@dataclass(frozen=True, slots=True)
+class PostgresOperatorConnectionFactory:
+    """Open the already brokered restricted H1 operator credential."""
+
+    database_url: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        parsed = urlsplit(self.database_url)
+        query = parse_qs(parsed.query)
+        if (
+            parsed.scheme not in {"postgres", "postgresql"}
+            or parsed.hostname not in {"127.0.0.1", "::1", "localhost", "postgres-master.internal"}
+            or not parsed.username
+            or not parsed.password
+            or query.get("sslmode", [""])[0] not in {"verify-ca", "verify-full"}
+            or query.get("sslrootcert", [""])[0] != "/state/master-tls/ca.pem"
+            or query.get("connect_timeout", [""])[0] != "5"
+        ):
+            raise ValueError("FM10 operator credential differs from the H1 broker contract")
+
+    def open(self, binding: MasterAcceptanceBinding) -> Any:
+        del binding  # Credential envelope itself is epoch-bound by H1.
+        import psycopg
+
+        return psycopg.connect(self.database_url, connect_timeout=5)
+
+
+@dataclass(frozen=True, slots=True)
+class PostgresH1ExpiredLeaseDenialProbe:
+    """Real FM10 assertion/rollback probe with fixed SQL owned by this task.
+
+    The bounded UPDATE is never caller supplied.  H1's mandatory
+    ``assert_session_write_epoch`` executes immediately before it and must
+    raise SQLSTATE 55000 after the lease expires, leaving the transaction in
+    PostgreSQL's rollback-only state.
+    """
+
+    connections: FixedOperatorConnectionFactory
+    renewal: LeaseExpiryRenewalPort
+
+    def prove_expired_lease_denial(self, command: MasterAcceptanceCommand) -> LeaseExpiryEvidence:
+        if command.command_kind is not MasterAcceptanceCommandKind.LEASE_EXPIRY_DENIAL:
+            raise MasterLifecycleAcceptanceError("FM10 probe received another fixed command")
+        import psycopg
+        from psycopg.pq import TransactionStatus
+
+        started = time.monotonic_ns()
+        with self.connections.open(command.binding) as connection:
+            role_row = connection.execute(
+                "SELECT r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolreplication,r.rolbypassrls,"
+                "pg_has_role(session_user,'mdh_mcp_editor','member'),"
+                "pg_has_role(session_user,'mdh_owner','member') "
+                "FROM pg_roles r WHERE r.rolname=session_user"
+            ).fetchone()
+            if (
+                role_row is None
+                or any(bool(role_row[index]) for index in range(5))
+                or not bool(role_row[5])
+                or bool(role_row[6])
+            ):
+                raise ProductionAcceptanceBlocked("FM10_OPERATOR_ROLE_NOT_RESTRICTED")
+            epoch_row = connection.execute(
+                "SELECT current_epoch,master_instance_id::text,lease_until,gate_state,"
+                "greatest(0,ceil(extract(epoch FROM (lease_until-clock_timestamp()))))::bigint "
+                "FROM master_control.epoch_state WHERE singleton=true"
+            ).fetchone()
+            revision_row = connection.execute(
+                "SELECT canonical_revision FROM hub.canonical_state WHERE singleton=true"
+            ).fetchone()
+            if epoch_row is None or revision_row is None:
+                raise ProductionAcceptanceBlocked("FM10_EPOCH_OR_REVISION_STATE_MISSING")
+            if (
+                int(epoch_row[0]) != command.binding.epoch
+                or str(epoch_row[1]) != str(command.binding.master_instance_id)
+                or str(epoch_row[3]) != "open"
+            ):
+                raise ProductionAcceptanceBlocked("FM10_ACTIVE_BINDING_MISMATCH")
+            remaining = int(epoch_row[4])
+            wait_seconds = max(60, remaining + 1)
+            if wait_seconds > 900:
+                raise ProductionAcceptanceBlocked("FM10_LEASE_EXPIRY_EXCEEDS_BOUND")
+            revision_before = int(revision_row[0])
+            connection.commit()
+            # Admission and all read-only checks precede the task-owned fault.
+            self.renewal.suspend_exact_renewal(command)
+            deadline = time.monotonic() + wait_seconds
+            while True:
+                remaining_wait = deadline - time.monotonic()
+                if remaining_wait <= 0:
+                    break
+                time.sleep(min(1.0, remaining_wait))
+            expired_row = connection.execute(
+                "SELECT lease_until<=clock_timestamp(),current_epoch,master_instance_id::text "
+                "FROM master_control.epoch_state WHERE singleton=true"
+            ).fetchone()
+            if (
+                expired_row is None
+                or expired_row[0] is not True
+                or int(expired_row[1]) != command.binding.epoch
+                or str(expired_row[2]) != str(command.binding.master_instance_id)
+            ):
+                connection.rollback()
+                raise ProductionAcceptanceBlocked("FM10_REAL_LEASE_EXPIRY_NOT_OBSERVED")
+            connection.commit()
+            denied = False
+            rollback_only = False
+            try:
+                connection.execute("SET TRANSACTION READ WRITE")
+                connection.execute("SELECT master_control.assert_session_write_epoch()")
+                connection.execute(
+                    "UPDATE hub.project SET status=status WHERE false"
+                )
+            except psycopg.Error as exc:
+                denied = exc.sqlstate == "55000"
+                rollback_only = connection.info.transaction_status == TransactionStatus.INERROR
+            if not denied or not rollback_only:
+                connection.rollback()
+                raise ProductionAcceptanceBlocked("FM10_H1_ROLLBACK_DENIAL_NOT_OBSERVED")
+            connection.rollback()
+            revision_after_row = connection.execute(
+                "SELECT canonical_revision FROM hub.canonical_state WHERE singleton=true"
+            ).fetchone()
+            if revision_after_row is None:
+                raise ProductionAcceptanceBlocked("FM10_REVISION_READBACK_MISSING")
+            revision_after = int(revision_after_row[0])
+            connection.rollback()
+        observed = math.floor((time.monotonic_ns() - started) / 1_000_000_000)
+        if not 60 <= observed <= 900 or revision_after != revision_before:
+            raise ProductionAcceptanceBlocked("FM10_WAIT_OR_REVISION_ASSERTION_FAILED")
+        operation_id = uuid5(NAMESPACE_URL, f"fm10-h1-denial:{command.task_id}")
+        receipt = {
+            "schema_version": "my-data-hub-fm10-h1-denial.v1",
+            "operator_operation_id": str(operation_id),
+            "master_instance_id": str(command.binding.master_instance_id),
+            "epoch": command.binding.epoch,
+            "sqlstate": "55000",
+            "transaction_state": "rollback_only",
+            "canonical_revision_before": revision_before,
+            "canonical_revision_after": revision_after,
+        }
+        return LeaseExpiryEvidence(
+            kind="LEASE_EXPIRY_DENIAL",
+            observed_wait_seconds=observed,
+            lease_expired=True,
+            bounded_operator_dml_denied=True,
+            transaction_state="rollback_only",
+            operator_operation_id=operation_id,
+            operator_receipt_sha256=hashlib.sha256(canonical_json_bytes(receipt)).hexdigest(),
+            denial_code="MDH_EPOCH_LEASE_EXPIRED",
+            canonical_revision_before=revision_before,
+            canonical_revision_after=revision_after,
+        )
+
+
 class OwnerBoundAcceptanceClaimPort(Protocol):
     """Separate acceptance:operate service identity, never a runtime token.
 
@@ -102,6 +268,44 @@ class OwnerBoundAcceptanceClaimPort(Protocol):
         receipt: MasterAcceptanceReceipt,
         principal: AcceptancePrincipal,
     ) -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ControlLedgerOwnerAcceptanceClaims:
+    """Production owner-host claim/CAS adapter for control migration 018."""
+
+    runtime: ControlPlaneMasterRuntime
+
+    def claim(
+        self,
+        *,
+        task_id: UUID,
+        expected_scenario: MasterAcceptanceScenario,
+        principal: AcceptancePrincipal,
+    ) -> MasterAcceptanceCommand | None:
+        require_acceptance_operator(principal)
+        payload = self.runtime.ledger.claim_master_acceptance_host_command(
+            task_id=str(task_id),
+            expected_scenario=expected_scenario.value,
+            principal_id=principal.subject,
+            client_id=principal.client_id,
+        )
+        return MasterAcceptanceCommand.model_validate(payload) if payload is not None else None
+
+    def complete(
+        self,
+        *,
+        receipt: MasterAcceptanceReceipt,
+        principal: AcceptancePrincipal,
+    ) -> dict[str, Any]:
+        require_acceptance_operator(principal)
+        return self.runtime.ledger.complete_master_acceptance_host_command(
+            command_id=str(receipt.command_id),
+            command_sha256=receipt.command_sha256,
+            principal_id=principal.subject,
+            client_id=principal.client_id,
+            receipt=receipt.model_dump(mode="json"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,6 +660,31 @@ class ProductionControlHostEffects:
         return effects.session_rotation_soak(command)
 
 
+@dataclass(frozen=True, slots=True)
+class ProductionControlAcceptanceContext:
+    """Production assembly factory for the owner-host executor."""
+
+    callback_supervisor: CallbackLossSupervisorPort | None = None
+    stored_replay: StoredReplayPort | None = None
+    old_epoch_denials: OldEpochDenialPort | None = None
+    h1_denial: H1ExpiredLeaseDenialPort | None = None
+    soak_sessions: SoakSessionPort | None = None
+
+    def build(self, runtime: ControlPlaneMasterRuntime) -> ControlMasterAcceptanceExecutor:
+        return ControlMasterAcceptanceExecutor(
+            runtime=runtime,
+            host_claims=ControlLedgerOwnerAcceptanceClaims(runtime),
+            host_effects=ProductionControlHostEffects(
+                runtime=runtime,
+                callback_supervisor=self.callback_supervisor,
+                stored_replay=self.stored_replay,
+                old_epoch_denials=self.old_epoch_denials,
+                h1_denial=self.h1_denial,
+                soak_sessions=self.soak_sessions,
+            ),
+        )
+
+
 class _UnavailableConnection:
     def execute(self, query: str) -> Any:
         del query
@@ -574,7 +803,16 @@ class ControlMasterAcceptanceExecutor:
         command = self.host_claims.claim(task_id=task_id, expected_scenario=scenario, principal=principal)
         if command is None:
             return task
-        evidence = self.host_effects.execute(command)
+        try:
+            evidence = self.host_effects.execute(command)
+        except ProductionAcceptanceBlocked as exc:
+            if exc.code in {
+                "FM11_OLD_RUNTIME_NOT_STOPPED",
+                "FM11_REPLACEMENT_NOT_ACTIVE",
+                "FM12_TERMINAL_CHECKPOINT_NOT_READY",
+            }:
+                return self.runtime.ledger.master_acceptance_task(str(task_id)) or task
+            raise
         receipt = execute_master_acceptance_command(command, _ExactEvidenceEffects(evidence))
         return self.host_claims.complete(receipt=receipt, principal=principal)
 

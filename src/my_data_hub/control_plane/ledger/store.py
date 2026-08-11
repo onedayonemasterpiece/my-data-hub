@@ -2459,7 +2459,8 @@ class ControlLedger:
                 "t.target_service_instance_id FROM master_acceptance_commands c "
                 "JOIN master_acceptance_tasks t ON t.task_id=c.task_id "
                 "WHERE t.target_run_id=? AND t.target_attempt_id=? AND t.target_epoch=? "
-                "AND t.state IN ('BOUND','CLAIMED') AND c.state IN ('PENDING','CLAIMED') "
+                "AND t.scenario_id='FM04' AND t.state IN ('BOUND','CLAIMED') "
+                "AND (c.state='PENDING' OR (c.state='CLAIMED' AND c.claim_authority='runtime')) "
                 "ORDER BY t.created_at LIMIT 1",
                 (run_id, attempt_id, epoch),
             ).fetchone()
@@ -2489,7 +2490,8 @@ class ControlLedger:
             if row["state"] == "PENDING":
                 connection.execute(
                     "UPDATE master_acceptance_commands SET state='CLAIMED',claimed_run_id=?,claimed_attempt_id=?,"
-                    "claimed_epoch=?,claimed_at=? WHERE command_id=? AND state='PENDING'",
+                    "claimed_epoch=?,claimed_at=?,claim_authority='runtime' "
+                    "WHERE command_id=? AND state='PENDING' AND claim_authority IS NULL",
                     (run_id, attempt_id, epoch, now, row["command_id"]),
                 )
                 connection.execute(
@@ -2504,6 +2506,197 @@ class ControlLedger:
                     now=now,
                 )
             return self._master_acceptance_command_from_row(row, binding)
+
+    def claim_master_acceptance_host_command(
+        self,
+        *,
+        task_id: str,
+        expected_scenario: str,
+        principal_id: str,
+        client_id: str,
+    ) -> dict[str, Any] | None:
+        """Owner-bound CAS for fixed control-host scenarios.
+
+        This is deliberately separate from the runtime-token claim.  It never
+        consults or issues a runtime secret and can only replay the same
+        principal/client claim.
+        """
+
+        host_scenarios = {"FM07", "FM08", "FM09", "FM10", "FM11", "FM12", "FM24"}
+        if expected_scenario not in host_scenarios or not principal_id or not client_id:
+            raise ValueError("master acceptance host claim identity is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT c.*,t.scenario_id,t.source_revision,t.deadline_at,t.principal_id,t.client_id,"
+                "t.target_operation_id,t.target_run_id,t.target_attempt_id,t.target_service_instance_id,"
+                "t.target_master_instance_id,t.target_epoch FROM master_acceptance_commands c "
+                "JOIN master_acceptance_tasks t ON t.task_id=c.task_id WHERE c.task_id=?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            if (
+                row["scenario_id"] != expected_scenario
+                or row["principal_id"] != principal_id
+                or row["client_id"] != client_id
+            ):
+                raise StaleRuntimeEvent("acceptance host claim differs from its task owner")
+            if _parse_time(str(row["deadline_at"])) <= self.clock.now():
+                connection.execute(
+                    "UPDATE master_acceptance_tasks SET state='FAILED',failure_code='ACCEPTANCE_TIMEOUT',"
+                    "updated_at=? WHERE task_id=? AND state IN ('BOUND','CLAIMED')",
+                    (now, task_id),
+                )
+                self._append_master_acceptance_event(
+                    connection,
+                    task_id=task_id,
+                    event_type="FAILED",
+                    evidence={"failure_code": "ACCEPTANCE_TIMEOUT"},
+                    now=now,
+                )
+                return None
+            if row["state"] in {"SUCCEEDED", "FAILED"}:
+                return None
+            if row["state"] == "PENDING":
+                changed = connection.execute(
+                    "UPDATE master_acceptance_commands SET state='CLAIMED',claimed_run_id=?,claimed_attempt_id=?,"
+                    "claimed_epoch=?,claimed_at=?,claim_authority='owner_host',claimed_principal_id=?,"
+                    "claimed_client_id=? WHERE command_id=? AND state='PENDING' AND claim_authority IS NULL",
+                    (
+                        row["target_run_id"],
+                        row["target_attempt_id"],
+                        row["target_epoch"],
+                        now,
+                        principal_id,
+                        client_id,
+                        row["command_id"],
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise StaleRuntimeEvent("acceptance host command claim lost its CAS")
+                connection.execute(
+                    "UPDATE master_acceptance_tasks SET state='CLAIMED',updated_at=? "
+                    "WHERE task_id=? AND state='BOUND'",
+                    (now, task_id),
+                )
+                self._append_master_acceptance_event(
+                    connection,
+                    task_id=task_id,
+                    event_type="HOST_CLAIMED",
+                    evidence={
+                        "command_sha256": str(row["command_sha256"]),
+                        "principal_id": principal_id,
+                        "client_id": client_id,
+                    },
+                    now=now,
+                )
+            elif (
+                row["state"] != "CLAIMED"
+                or row["claim_authority"] != "owner_host"
+                or row["claimed_principal_id"] != principal_id
+                or row["claimed_client_id"] != client_id
+            ):
+                raise StaleRuntimeEvent("acceptance command is claimed by another authority")
+            binding = {
+                "operation_id": row["target_operation_id"],
+                "run_id": row["target_run_id"],
+                "attempt_id": row["target_attempt_id"],
+                "service_instance_id": row["target_service_instance_id"],
+                "master_instance_id": row["target_master_instance_id"],
+                "epoch": int(row["target_epoch"]),
+            }
+            return self._master_acceptance_command_from_row(row, binding)
+
+    def complete_master_acceptance_host_command(
+        self,
+        *,
+        command_id: str,
+        command_sha256: str,
+        principal_id: str,
+        client_id: str,
+        receipt: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """CAS one exact owner-host claim to PASSED with metadata-only receipt."""
+
+        from my_data_hub.acceptance.master_lifecycle import MasterAcceptanceReceipt
+
+        validated_receipt = MasterAcceptanceReceipt.model_validate(receipt)
+        receipt_json = _safe_json(validated_receipt.model_dump(mode="json"), max_bytes=64 * 1024)
+        receipt_sha256 = hashlib.sha256(receipt_json.encode()).hexdigest()
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT c.*,t.principal_id,t.client_id,t.target_operation_id,t.deadline_at "
+                "FROM master_acceptance_commands c "
+                "JOIN master_acceptance_tasks t ON t.task_id=c.task_id WHERE c.command_id=?",
+                (command_id,),
+            ).fetchone()
+            if row is None:
+                raise StaleRuntimeEvent("acceptance command is unknown")
+            if _parse_time(str(row["deadline_at"])) <= self.clock.now():
+                raise StaleRuntimeEvent("acceptance host receipt arrived after its absolute deadline")
+            if (
+                row["command_sha256"] != command_sha256
+                or str(validated_receipt.command_id) != command_id
+                or validated_receipt.command_sha256 != command_sha256
+                or str(validated_receipt.binding.run_id) != row["claimed_run_id"]
+                or str(validated_receipt.binding.attempt_id) != row["claimed_attempt_id"]
+                or validated_receipt.binding.epoch != row["claimed_epoch"]
+                or str(validated_receipt.binding.operation_id) != row["target_operation_id"]
+                or row["claim_authority"] != "owner_host"
+                or row["principal_id"] != principal_id
+                or row["client_id"] != client_id
+                or row["claimed_principal_id"] != principal_id
+                or row["claimed_client_id"] != client_id
+            ):
+                raise StaleRuntimeEvent("acceptance host receipt differs from its exact owner claim")
+            if row["state"] == "SUCCEEDED":
+                if not hmac.compare_digest(str(row["receipt_sha256"]), receipt_sha256):
+                    raise IdempotencyConflict("acceptance host command already has another receipt")
+            elif row["state"] != "CLAIMED":
+                raise StaleRuntimeEvent("acceptance host command was not claimed")
+            else:
+                changed = connection.execute(
+                    "UPDATE master_acceptance_commands SET state='SUCCEEDED',receipt_json=?,receipt_sha256=?,"
+                    "completed_at=? WHERE command_id=? AND state='CLAIMED' AND claim_authority='owner_host'",
+                    (receipt_json, receipt_sha256, now, command_id),
+                ).rowcount
+                if changed != 1:
+                    raise StaleRuntimeEvent("acceptance host completion lost its CAS")
+                connection.execute(
+                    "UPDATE master_acceptance_tasks SET state='PASSED',failure_code=NULL,updated_at=? "
+                    "WHERE task_id=? AND state='CLAIMED'",
+                    (now, row["task_id"]),
+                )
+                self._append_master_acceptance_event(
+                    connection,
+                    task_id=str(row["task_id"]),
+                    event_type="SUCCEEDED",
+                    evidence={"receipt_sha256": receipt_sha256, "claim_authority": "owner_host"},
+                    now=now,
+                )
+            task = connection.execute(
+                "SELECT * FROM master_acceptance_tasks WHERE task_id=?", (row["task_id"],)
+            ).fetchone()
+            assert task is not None
+            return self._master_acceptance_task_from_connection(connection, task)
+
+    def master_acceptance_drain_directive(
+        self, *, run_id: str, attempt_id: str, epoch: int
+    ) -> dict[str, Any] | None:
+        """Return only the fixed FM11/FM12 drain directive for an owner claim."""
+
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT c.command_id,c.command_sha256,t.task_id,t.scenario_id FROM master_acceptance_commands c "
+                "JOIN master_acceptance_tasks t ON t.task_id=c.task_id "
+                "WHERE t.target_run_id=? AND t.target_attempt_id=? AND t.target_epoch=? "
+                "AND t.scenario_id IN ('FM11','FM12') AND t.state='CLAIMED' "
+                "AND c.state='CLAIMED' AND c.claim_authority='owner_host'",
+                (run_id, attempt_id, epoch),
+            ).fetchone()
+        return dict(row) if row else None
 
     def complete_master_acceptance_command(
         self,
@@ -2523,12 +2716,17 @@ class ControlLedger:
         now = _format_time(self.clock.now())
         with self._transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM master_acceptance_commands WHERE command_id=?", (command_id,)
+                "SELECT c.*,t.deadline_at FROM master_acceptance_commands c "
+                "JOIN master_acceptance_tasks t ON t.task_id=c.task_id WHERE c.command_id=?",
+                (command_id,),
             ).fetchone()
             if row is None:
                 raise StaleRuntimeEvent("acceptance command is unknown")
+            if _parse_time(str(row["deadline_at"])) <= self.clock.now():
+                raise StaleRuntimeEvent("acceptance runtime receipt arrived after its absolute deadline")
             if (
                 row["command_sha256"] != command_sha256
+                or row["claim_authority"] != "runtime"
                 or row["claimed_run_id"] != run_id
                 or row["claimed_attempt_id"] != attempt_id
                 or row["claimed_epoch"] != epoch
@@ -2670,7 +2868,8 @@ class ControlLedger:
     ) -> dict[str, Any]:
         value = dict(row)
         command = connection.execute(
-            "SELECT command_id,command_kind,command_sha256,state,receipt_sha256,claimed_at,completed_at "
+            "SELECT command_id,command_kind,command_sha256,state,claim_authority,receipt_sha256,"
+            "claimed_at,completed_at "
             "FROM master_acceptance_commands WHERE task_id=?",
             (row["task_id"],),
         ).fetchone()

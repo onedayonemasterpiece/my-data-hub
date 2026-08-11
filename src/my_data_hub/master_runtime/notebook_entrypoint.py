@@ -856,6 +856,52 @@ def _claim_master_acceptance(
     return MasterAcceptanceCommand.model_validate(body.get("command"))
 
 
+def _master_acceptance_drain_requested(
+    *, config: NotebookMasterConfig, callback_url: str, run_secret: str
+) -> bool:
+    """Poll the exact owner-host FM11/FM12 directive; it has no payload."""
+
+    request = urllib.request.Request(
+        _master_acceptance_url(callback_url, config.run_id, config.attempt_id, "/drain-directive"),
+        headers=_runtime_metadata_headers(config, run_secret),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read(16 * 1024 + 1)
+    except urllib.error.HTTPError as exc:
+        if exc.code in {502, 503, 504}:
+            return False
+        raise
+    except OSError:
+        return False
+    if len(raw) > 16 * 1024:
+        raise RuntimeError("master acceptance drain directive exceeds 16 KiB")
+    body = json.loads(raw)
+    if not isinstance(body, dict) or set(body) != {"drain", "directive"}:
+        raise RuntimeError("master acceptance drain directive differs from its exact contract")
+    if body["drain"] is not True:
+        return False
+    directive = body["directive"]
+    if not isinstance(directive, dict) or set(directive) != {
+        "command_id",
+        "command_sha256",
+        "task_id",
+        "scenario_id",
+    }:
+        raise RuntimeError("master acceptance drain identity is malformed")
+    if directive["scenario_id"] not in {"FM11", "FM12"}:
+        raise RuntimeError("master acceptance drain scenario is not fixed")
+    UUID(str(directive["command_id"]))
+    UUID(str(directive["task_id"]))
+    if (
+        not isinstance(directive["command_sha256"], str)
+        or len(directive["command_sha256"]) != 64
+        or any(character not in "0123456789abcdef" for character in directive["command_sha256"])
+    ):
+        raise RuntimeError("master acceptance drain command hash is invalid")
+    return True
+
+
 def _post_master_acceptance_receipt(
     *,
     config: NotebookMasterConfig,
@@ -1499,6 +1545,12 @@ def run_master(
             remaining_active = active_deadline - time.monotonic()
             if remaining_active <= 0:
                 break
+            if _master_acceptance_drain_requested(
+                config=config,
+                callback_url=callback_url,
+                run_secret=run_secret,
+            ):
+                break
             if acceptance_effects is not None:
                 acceptance_command = _claim_master_acceptance(
                     config=config, callback_url=callback_url, run_secret=run_secret
@@ -1934,5 +1986,6 @@ def main() -> int:
     return run_master(
         config,
         checkpoint_coordinator=coordinator,
+        acceptance_effects_factory=ProductionMasterAcceptanceEffectsFactory(),
         process_started_at=process_started_at,
     )

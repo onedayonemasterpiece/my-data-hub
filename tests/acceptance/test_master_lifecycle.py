@@ -79,11 +79,32 @@ def _intent(key: str) -> MasterIntent:
     )
 
 
-def _active_ledger(tmp_path: Path) -> tuple[ControlLedger, object]:
-    clock = DeterministicClock(datetime(2026, 8, 11, 11, 0, tzinfo=UTC))
-    ledger = ControlLedger(tmp_path / "control.sqlite3", clock=clock)
+def _control_runtime(ledger: ControlLedger) -> ControlPlaneMasterRuntime:
+    assets = KaggleMasterLaunchAssets(
+        source_identity="owner/postgres-master",
+        source_version="git:0123456789abcdef",
+        checkpoint_ref="owner/checkpoints",
+        dataset_ref="owner/master-assets",
+        notebook_ref="owner/master-runtime",
+        dataset_files={"asset.txt": b"bounded", "checkpoint-verifier.ipynb": b"{}"},
+        notebook_source=b"print('master')\n",
+        callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
+        runtime_token_secret_name="MDH_RUNTIME_ROOT",
+        checkpoint_verifier_ref="owner/checkpoint-verifier",
+        checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
+        checkpoint_probe_relations=("hub.canonical_state",),
+        notebook_kernel_type="script",
+    )
+    return ControlPlaneMasterRuntime(
+        ledger,
+        MasterCoordinator(ledger, FakeKaggleRuntime()),
+        MasterRuntimeSettings(assets=assets, runtime_token_root="runtime-root-secret-long-enough"),
+    )
+
+
+def _activate_ledger(ledger: ControlLedger, key: str = "acceptance-active") -> object:
     coordinator = MasterCoordinator(ledger, FakeKaggleRuntime())
-    handle = coordinator.ensure_master(_intent("acceptance-active"), runtime_secret=SECRET)
+    handle = coordinator.ensure_master(_intent(key), runtime_secret=SECRET)
     event = RuntimeEvent(
         event_id=str(uuid4()),
         run_id=handle.run_id,
@@ -92,7 +113,7 @@ def _active_ledger(tmp_path: Path) -> tuple[ControlLedger, object]:
         source_identity="my-data-hub/postgres-master",
         source_version="git:0123456789abcdef",
         event_type=RuntimeEventType.SERVICE_READY,
-        emitted_at=clock.now(),
+        emitted_at=ledger.clock.now(),
         local_sequence=1,
         epoch=handle.epoch,
         data={
@@ -103,7 +124,7 @@ def _active_ledger(tmp_path: Path) -> tuple[ControlLedger, object]:
             "capabilities": ["sql", "fts", "pgvector"],
             "canonical_revision": 0,
             "schema_version": "1",
-            "lease_until": (clock.now() + timedelta(minutes=5)).isoformat(),
+            "lease_until": (ledger.clock.now() + timedelta(minutes=5)).isoformat(),
             "master_instance_id": handle.master_instance_id,
             "epoch": handle.epoch,
         },
@@ -111,6 +132,13 @@ def _active_ledger(tmp_path: Path) -> tuple[ControlLedger, object]:
     coordinator.accept_runtime_event(
         event.model_dump_json(by_alias=True, exclude_none=True).encode(), header_token=SECRET
     )
+    return handle
+
+
+def _active_ledger(tmp_path: Path) -> tuple[ControlLedger, object]:
+    clock = DeterministicClock(datetime(2026, 8, 11, 11, 0, tzinfo=UTC))
+    ledger = ControlLedger(tmp_path / "control.sqlite3", clock=clock)
+    handle = _activate_ledger(ledger)
     return ledger, handle
 
 
@@ -165,40 +193,72 @@ def test_ledger_claim_is_exact_epoch_bound_and_replay_safe(tmp_path: Path) -> No
             source_revision=request.source_revision,
             target_operation_id=handle.operation_id,
         )
-    assert (
-        ledger.claim_master_acceptance_command(run_id=str(uuid4()), attempt_id=handle.attempt_id, epoch=handle.epoch)
-        is None
-    )
-    command = ledger.claim_master_acceptance_command(
-        run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch
+    with pytest.raises(StaleRuntimeEvent):
+        ledger.claim_master_acceptance_host_command(
+            task_id=str(request.task_id),
+            expected_scenario="FM10",
+            principal_id="another-owner",
+            client_id="acceptance-client",
+        )
+    command = ledger.claim_master_acceptance_host_command(
+        task_id=str(request.task_id),
+        expected_scenario="FM10",
+        principal_id="owner",
+        client_id="acceptance-client",
     )
     assert command is not None and command["command_kind"] == "LEASE_EXPIRY_DENIAL"
+    assert (
+        ledger.claim_master_acceptance_command(
+            run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch
+        )
+        is None
+    )
+    parsed = MasterAcceptanceCommand.model_validate(command)
+    receipt = execute_master_acceptance_command(
+        parsed,
+        FixedEffects(
+            LeaseExpiryEvidence(
+                kind="LEASE_EXPIRY_DENIAL",
+                observed_wait_seconds=60,
+                lease_expired=True,
+                bounded_operator_dml_denied=True,
+                transaction_state="rollback_only",
+                operator_operation_id=uuid4(),
+                operator_receipt_sha256="e" * 64,
+                denial_code="MDH_EPOCH_LEASE_EXPIRED",
+                canonical_revision_before=0,
+                canonical_revision_after=0,
+            )
+        ),
+    )
+    with pytest.raises(StaleRuntimeEvent):
+        ledger.complete_master_acceptance_host_command(
+            command_id=str(receipt.command_id),
+            command_sha256=receipt.command_sha256,
+            principal_id="another-owner",
+            client_id="acceptance-client",
+            receipt=receipt.model_dump(mode="json"),
+        )
+    completed = ledger.complete_master_acceptance_host_command(
+        command_id=str(receipt.command_id),
+        command_sha256=receipt.command_sha256,
+        principal_id="owner",
+        client_id="acceptance-client",
+        receipt=receipt.model_dump(mode="json"),
+    )
+    assert completed["state"] == "PASSED"
 
 
 def test_authenticated_runtime_endpoint_accepts_only_exact_live_receipt(tmp_path: Path) -> None:
-    ledger, handle = _active_ledger(tmp_path)
-    assets = KaggleMasterLaunchAssets(
-        source_identity="owner/postgres-master",
-        source_version="git:0123456789abcdef",
-        checkpoint_ref="owner/checkpoints",
-        dataset_ref="owner/master-assets",
-        notebook_ref="owner/master-runtime",
-        dataset_files={"asset.txt": b"bounded", "checkpoint-verifier.ipynb": b"{}"},
-        notebook_source=b"print('master')\n",
-        callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
-        runtime_token_secret_name="MDH_RUNTIME_ROOT",
-        checkpoint_verifier_ref="owner/checkpoint-verifier",
-        checkpoint_verifier_source_file="checkpoint-verifier.ipynb",
-        checkpoint_probe_relations=("hub.canonical_state",),
-        notebook_kernel_type="script",
+    ledger = ControlLedger(
+        tmp_path / "runtime-fm04.sqlite3",
+        clock=DeterministicClock(datetime(2026, 8, 11, 11, 0, tzinfo=UTC)),
     )
-    runtime = ControlPlaneMasterRuntime(
-        ledger,
-        MasterCoordinator(ledger, FakeKaggleRuntime()),
-        MasterRuntimeSettings(assets=assets, runtime_token_root="runtime-root-secret-long-enough"),
-    )
-    request = _request("FM10", operation_id=handle.operation_id)
+    runtime = _control_runtime(ledger)
+    request = _request("FM04")
     runtime.request_master_acceptance(request, Principal())
+    handle = _activate_ledger(ledger, f"master-acceptance-fm04:{request.task_id}")
+    runtime.bind_master_acceptance(str(request.task_id), handle.operation_id)
     app = create_app(ControlPlaneSettings(ledger_path=ledger.path), ledger=ledger, master_runtime=runtime)
     headers = {
         "Authorization": f"Bearer {SECRET}",
@@ -212,17 +272,12 @@ def test_authenticated_runtime_endpoint_accepts_only_exact_live_receipt(tmp_path
         )
         assert claimed.status_code == 200
         command = MasterAcceptanceCommand.model_validate(claimed.json()["command"])
-        evidence = LeaseExpiryEvidence(
-            kind="LEASE_EXPIRY_DENIAL",
-            observed_wait_seconds=60,
-            lease_expired=True,
-            bounded_operator_dml_denied=True,
-            transaction_state="rollback_only",
-            operator_operation_id=uuid4(),
-            operator_receipt_sha256="e" * 64,
-            denial_code="MDH_EPOCH_LEASE_EXPIRED",
-            canonical_revision_before=0,
-            canonical_revision_after=0,
+        evidence = EmptyBootstrapEvidence(
+            kind="EMPTY_MASTER_BOOTSTRAP",
+            boot_source="empty_baseline",
+            canonical_revision=0,
+            canonical_row_count=0,
+            service_active=True,
         )
         receipt = execute_master_acceptance_command(
             command,
@@ -323,12 +378,67 @@ def test_unclaimed_command_reaches_fixed_terminal_timeout(tmp_path: Path) -> Non
     assert isinstance(ledger.clock, DeterministicClock)
     ledger.clock.advance(1801)
     assert (
-        ledger.claim_master_acceptance_command(run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch)
+        ledger.claim_master_acceptance_host_command(
+            task_id=str(request.task_id),
+            expected_scenario="FM09",
+            principal_id="owner",
+            client_id="acceptance-client",
+        )
         is None
     )
     task = ledger.master_acceptance_task(str(request.task_id))
     assert task is not None
     assert task["state"] == "FAILED" and task["failure_code"] == "ACCEPTANCE_TIMEOUT"
+
+
+def test_owner_claim_exposes_only_exact_fm11_fm12_drain_directive(tmp_path: Path) -> None:
+    ledger, handle = _active_ledger(tmp_path)
+    request = _request("FM12", operation_id=handle.operation_id)
+    ledger.ensure_master_acceptance_task(
+        task_id=str(request.task_id),
+        scenario_id="FM12",
+        idempotency_key=request.idempotency_key,
+        request_sha256=request.request_sha256,
+        principal_id="owner",
+        client_id="acceptance-client",
+        source_revision=request.source_revision,
+        target_operation_id=handle.operation_id,
+    )
+    assert ledger.master_acceptance_drain_directive(
+        run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch
+    ) is None
+    ledger.claim_master_acceptance_host_command(
+        task_id=str(request.task_id),
+        expected_scenario="FM12",
+        principal_id="owner",
+        client_id="acceptance-client",
+    )
+    directive = ledger.master_acceptance_drain_directive(
+        run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch
+    )
+    assert directive is not None
+    assert directive["scenario_id"] == "FM12" and directive["task_id"] == str(request.task_id)
+    assert ledger.master_acceptance_drain_directive(
+        run_id=handle.run_id, attempt_id=handle.attempt_id, epoch=handle.epoch + 1
+    ) is None
+    app = create_app(
+        ControlPlaneSettings(ledger_path=ledger.path),
+        ledger=ledger,
+        master_runtime=_control_runtime(ledger),
+    )
+    headers = {
+        "Authorization": f"Bearer {SECRET}",
+        "X-MDH-Master-Instance-ID": handle.master_instance_id,
+        "X-MDH-Epoch": str(handle.epoch),
+    }
+    with TestClient(app) as client:
+        response = client.get(
+            f"/internal/runtime/master-acceptance/{handle.run_id}/{handle.attempt_id}/drain-directive",
+            headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["drain"] is True
+        assert response.json()["directive"]["task_id"] == str(request.task_id)
 
 
 class FixedEffects:

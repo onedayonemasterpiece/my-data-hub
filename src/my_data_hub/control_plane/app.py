@@ -1279,6 +1279,31 @@ def create_app(
         )
         return {"available": command is not None, "command": command}
 
+    @app.get("/internal/runtime/master-acceptance/{run_id}/{attempt_id}/drain-directive")
+    def runtime_master_acceptance_drain_directive(
+        run_id: str,
+        attempt_id: str,
+        authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        """Expose only an owner-host-claimed FM11/FM12 drain bit."""
+
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            allowed_states=frozenset({"ACTIVE"}),
+        )
+        directive = control_ledger.master_acceptance_drain_directive(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            epoch=int(operation.identity["epoch"]),
+        )
+        return {"drain": directive is not None, "directive": directive}
+
     @app.post("/internal/runtime/master-acceptance/{run_id}/{attempt_id}/receipt")
     async def runtime_master_acceptance_receipt(
         run_id: str,

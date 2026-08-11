@@ -295,22 +295,14 @@ class ControlPlaneMasterRuntime:
         receipt: MasterAcceptanceReceipt,
         principal: AcceptancePrincipal,
     ) -> dict[str, Any]:
-        """Allow the scoped control executor to close cross-epoch FM07/FM11 work.
-
-        The exact old runtime must already have claimed the command.  This path
-        does not weaken runtime claim binding; it only permits the control
-        executor that observed the replacement epoch to persist the combined
-        live receipt after the old epoch is fenced.
-        """
+        """Complete only an owner-host claim under its principal/client CAS."""
 
         require_acceptance_operator(principal)
-        return self.ledger.complete_master_acceptance_command(
+        return self.ledger.complete_master_acceptance_host_command(
             command_id=str(receipt.command_id),
             command_sha256=receipt.command_sha256,
-            run_id=str(receipt.binding.run_id),
-            attempt_id=str(receipt.binding.attempt_id),
-            epoch=receipt.binding.epoch,
-            state="SUCCEEDED",
+            principal_id=principal.subject,
+            client_id=principal.client_id,
             receipt=receipt.model_dump(mode="json"),
         )
 
