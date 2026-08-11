@@ -95,6 +95,15 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
                 expires_at=now + timedelta(minutes=4),
                 now=now,
             )
+            CredentialProvisioner(admin, gate).create(
+                principal="mdh_e1_embed_facefeed",
+                password="embedding-committer-password-long-enough",
+                group="mdh_canonical_committer",
+                identity=a,
+                credential_id=UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+                expires_at=now + timedelta(minutes=4),
+                now=now,
+            )
 
         a_url = f"postgresql://mdh_e1_writer_deadbeef:writer-a-password-long-enough@127.0.0.1:{port}/postgres"
         old = psycopg.connect(a_url)
@@ -109,12 +118,26 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
         old.execute(
             "INSERT INTO sync.audit_event(actor_id,client_id,action,outcome) VALUES ('a','a','after','blocked')"
         )
+        committer_url = (
+            f"postgresql://mdh_e1_embed_facefeed:embedding-committer-password-long-enough"
+            f"@127.0.0.1:{port}/postgres"
+        )
+        stale_committer = psycopg.connect(committer_url)
+        stale_committer.execute("SET ROLE mdh_canonical_committer")
+        stale_committer.execute(
+            "INSERT INTO sync.external_outbox(aggregate_type,effect_kind,idempotency_key,payload,required_revision) "
+            "VALUES ('embedding_import','verified_checkpoint_required','live-fenced-embedding',"
+            "'{\"artifact_id\":\"fenced\"}'::jsonb,0)"
+        )
         with psycopg.connect(admin_url) as admin:
             gate = DatabaseGate(admin)
             gate.fence(a, "forced_rotation")
         with pytest.raises(psycopg.Error, match="epoch lease gate"):
             old.commit()
         old.rollback()
+        with pytest.raises(psycopg.Error, match="epoch lease gate"):
+            stale_committer.commit()
+        stale_committer.rollback()
 
         # Epoch 2 was allocated by the owner-authoritative control ledger to a
         # failed attempt.  The next restored master must reconcile directly to 3.
@@ -151,6 +174,17 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
         with pytest.raises(psycopg.Error, match="epoch lease gate"):
             old.commit()
         old.close()
+        # The dedicated canonical committer remains rejected after a newer
+        # epoch activates, even though its PostgreSQL session is still open.
+        stale_committer.execute("SET ROLE mdh_canonical_committer")
+        stale_committer.execute(
+            "INSERT INTO sync.external_outbox(aggregate_type,effect_kind,idempotency_key,payload,required_revision) "
+            "VALUES ('embedding_import','verified_checkpoint_required','live-stale-embedding',"
+            "'{\"artifact_id\":\"stale\"}'::jsonb,0)"
+        )
+        with pytest.raises(psycopg.Error, match="epoch lease gate"):
+            stale_committer.commit()
+        stale_committer.close()
 
         b_url = f"postgresql://mdh_e3_writer_cafebabe:writer-b-password-long-enough@127.0.0.1:{port}/postgres"
         with psycopg.connect(b_url) as current:

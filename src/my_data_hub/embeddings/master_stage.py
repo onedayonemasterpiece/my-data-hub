@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.resources import files as package_files
@@ -200,9 +202,17 @@ def execute_embedding_production_stage(
     *,
     connection: Any,
     adapter: KaggleProviderAdapter,
+    canonical_connection_factory: Callable[[], AbstractContextManager[Any]],
+    lease_guard: Callable[[], None],
     importer: PostgresEmbeddingImporter | None = None,
 ) -> EmbeddingProductionStageReceipt:
-    """Dispatch both exact workers and import their exact artifacts transactionally."""
+    """Dispatch workers and import through fresh, fenced committer sessions only.
+
+    ``connection`` is deliberately used only for prerequisite/coverage reads.  A
+    fresh epoch-bound non-superuser connection is obtained for each canonical
+    import, so the database's deferred epoch guard re-evaluates the lease at the
+    actual transaction commit boundary.
+    """
 
     if not os.environ.get("KAGGLE_API_TOKEN", "").strip():
         raise EmbeddingStageError("modern Kaggle token is absent")
@@ -218,6 +228,7 @@ def execute_embedding_production_stage(
         raise EmbeddingStageError("runtime wheel hash differs")
 
     # Corpus/token validation is complete before the first provider effect.
+    lease_guard()
     documents = _load_documents(connection, context.request)
     prepared_models = _prepare(context, documents)
     launched: list[tuple[_PreparedModel, Any, Any, str]] = []
@@ -239,6 +250,7 @@ def execute_embedding_production_stage(
                 "disposable": False,
             },
         )
+        lease_guard()
         dataset = adapter.create_private_dataset(
             intent=dataset_intent,
             files=dataset_files,
@@ -246,6 +258,7 @@ def execute_embedding_production_stage(
             control_class=ControlClass.ORCHESTRATOR_PROTECTED,
             disposable=False,
         )
+        lease_guard()
         dataset_source = f"{prepared.dataset_ref}/{dataset.identity.version}"
         notebook_intent = _intent(
             context,
@@ -269,6 +282,7 @@ def execute_embedding_production_stage(
             control_class=ControlClass.ORCHESTRATOR_PROTECTED,
             disposable=False,
         )
+        lease_guard()
         if notebook is None:
             notebook = adapter.push_private_notebook(
                 intent=notebook_intent,
@@ -284,6 +298,7 @@ def execute_embedding_production_stage(
                 enable_internet=True,
                 timeout_seconds=9_000,
             )
+            lease_guard()
         launched.append((prepared, dataset, notebook, hashlib.sha256(jobs_payload).hexdigest()))
 
     import_engine = importer or PostgresEmbeddingImporter()
@@ -297,8 +312,10 @@ def execute_embedding_production_stage(
     if poll_budget <= 0:
         raise EmbeddingStageError("provider preparation exhausted the ACTIVE-stage deadline")
     for _poll in range(601):
+        lease_guard()
         for task_id, run in tuple(pending.items()):
             observed = adapter.read_run_status(run)
+            lease_guard()
             if observed.state is KernelState.COMPLETE:
                 pending.pop(task_id)
             elif observed.state is KernelState.FAILED:
@@ -308,9 +325,11 @@ def execute_embedding_production_stage(
         if adapter.monotonic() - poll_started + 15 > poll_budget:
             raise EmbeddingStageError("embedding workers exceeded the shared ACTIVE-stage deadline")
         adapter.sleep(15)
+        lease_guard()
     if pending:
         raise EmbeddingStageError("embedding workers did not complete within bounded polling")
     for prepared, dataset, notebook, jobs_sha256 in launched:
+        lease_guard()
         with tempfile.TemporaryDirectory(prefix="mdh-embedding-output-") as temporary:
             destination = Path(temporary)
             output = adapter.download_exact_run_output_file(
@@ -319,6 +338,7 @@ def execute_embedding_production_stage(
                 file_name="embedding-result.json",
                 max_bytes=_MAX_ARTIFACT_BYTES,
             )
+            lease_guard()
             raw = (destination / "embedding-result.json").read_bytes()
         manifest = EmbeddingArtifactManifest.model_validate_json(raw)
         if raw != canonical_json_bytes(manifest.model_dump(mode="json")):
@@ -331,15 +351,22 @@ def execute_embedding_production_stage(
             "vector_sha256": query_results[0].vector_sha256,
             "dimensions": query_results[0].dimensions,
         }
-        imported: EmbeddingImportReceipt = import_engine.import_manifest(
-            connection,
-            manifest=manifest,
-            expected_run_id=prepared.task_id,
-            jobs=prepared.jobs,
-            actor_ids=actor_ids,
-            ephemeral_job_keys=frozenset({prepared.query_job_key}),
-            ephemeral_query_sha256=context.request.probe_query_sha256,
-        )
+        # Never write through the owner/controller connection.  The factory
+        # provisions one new LOGIN bound to the current epoch and remaining
+        # lease; PostgreSQL rechecks that binding through a deferred trigger at
+        # commit, including transactions begun before a fence/expiry.
+        lease_guard()
+        with canonical_connection_factory() as canonical_connection:
+            imported: EmbeddingImportReceipt = import_engine.import_manifest(
+                canonical_connection,
+                manifest=manifest,
+                expected_run_id=prepared.task_id,
+                jobs=prepared.jobs,
+                actor_ids=actor_ids,
+                ephemeral_job_keys=frozenset({prepared.query_job_key}),
+                ephemeral_query_sha256=context.request.probe_query_sha256,
+            )
+        lease_guard()
         workers.append({
             "model_exact_id": prepared.model.exact_id,
             "task_run_id": str(prepared.task_id),
@@ -377,6 +404,7 @@ def execute_embedding_production_stage(
             "durability_state": imported.durability_state,
         })
 
+    lease_guard()
     with connection.cursor() as cursor:
         coverage_rows = cursor.execute(
             "SELECT model.provider_model_id || '@' || model.exact_revision,count(document.search_document_id),"

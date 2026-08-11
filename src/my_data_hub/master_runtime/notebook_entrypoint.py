@@ -6,13 +6,16 @@ import json
 import os
 import secrets
 import stat
+import threading
 import time
 import urllib.error
 import urllib.request
-from contextlib import suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from functools import partial
 from importlib.resources import as_file, files
 from itertools import pairwise
 from pathlib import Path
@@ -283,6 +286,145 @@ class EmbeddingStageExecutionError(RuntimeError):
 
 class CallbackLeaseClosingError(TimeoutError):
     """The control callback outage closed the write lease as designed."""
+
+
+class _EmbeddingLeaseMaintainer:
+    """Keep the ACTIVE epoch renewed while Gate K waits on remote providers.
+
+    The worker owns a separate PostgreSQL connection per transition; it never
+    shares the owner connection concurrently with a canonical import.  A failed
+    control heartbeat is allowed only while the already-acknowledged lease has
+    more than the safety margin remaining.  At the margin it fences immediately
+    and exposes the same failure to the foreground before any import can start.
+    """
+
+    _SAFETY_MARGIN = timedelta(seconds=15)
+
+    def __init__(
+        self,
+        *,
+        identity: MasterIdentity,
+        lease_seconds: int,
+        initial_lease_until: datetime,
+        runtime: Any,
+        tunnel: Any,
+        connection_factory: Callable[[], Any],
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        interval_seconds: float | None = None,
+    ) -> None:
+        if lease_seconds < 60:
+            raise ValueError("embedding lease maintenance requires a lease of at least 60 seconds")
+        interval = interval_seconds if interval_seconds is not None else min(30.0, lease_seconds / 3)
+        if interval <= 0 or interval >= lease_seconds - self._SAFETY_MARGIN.total_seconds():
+            raise ValueError("embedding lease maintenance interval exceeds the safe lease window")
+        self.identity = identity
+        self.lease_seconds = lease_seconds
+        self.runtime = runtime
+        self.tunnel = tunnel
+        self.connection_factory = connection_factory
+        self.now = now
+        self.interval_seconds = interval
+        self._lease_until = initial_lease_until
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._error: BaseException | None = None
+
+    @property
+    def lease_until(self) -> datetime:
+        with self._lock:
+            return self._lease_until
+
+    def check(self) -> None:
+        with self._lock:
+            error = self._error
+            lease_until = self._lease_until
+        if error is not None:
+            raise error
+        if self.now() + self._SAFETY_MARGIN >= lease_until:
+            failure = CallbackLeaseClosingError("callback unavailable; write lease is closing")
+            self._fail(failure, "embedding_lease_safety_margin")
+            raise failure
+
+    def current_lease_until(self) -> datetime:
+        return self.lease_until
+
+    def maintain_once(self) -> None:
+        self.check()
+        observed = self.now()
+        try:
+            self.tunnel.poll(now=observed)
+            proposed = observed + timedelta(seconds=self.lease_seconds)
+            delivery = self.runtime.emit(
+                RuntimeEventType.RUNTIME_HEARTBEAT,
+                phase="active",
+                status="healthy",
+                data={"lease_until": proposed.isoformat().replace("+00:00", "Z")},
+            )
+            if delivery.status == "delivered":
+                with self.connection_factory() as connection:
+                    DatabaseGate(connection).renew(self.identity, proposed)
+                with self._lock:
+                    self._lease_until = proposed
+                return
+            if self.now() + self._SAFETY_MARGIN >= self.lease_until:
+                failure = CallbackLeaseClosingError("callback unavailable; write lease is closing")
+                self._fail(failure, "embedding_control_heartbeat_lost")
+                raise failure
+        except CallbackLeaseClosingError:
+            raise
+        except BaseException as exc:
+            failure = CallbackLeaseClosingError(
+                "embedding lease maintenance lost control or database reachability"
+            )
+            self._fail(failure, "embedding_lease_maintenance_failed")
+            raise failure from exc
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("embedding lease maintainer is single-use")
+        # Prove control + gate reachability synchronously before provider work.
+        self.maintain_once()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="mdh-embedding-lease-maintainer",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self, timeout_seconds: float = 60.0) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout_seconds)
+            if thread.is_alive():
+                failure = CallbackLeaseClosingError("embedding lease maintainer did not stop")
+                self._fail(failure, "embedding_lease_maintainer_stuck")
+        self.check()
+
+    def _run(self) -> None:
+        try:
+            while not self._stop.wait(self._next_delay_seconds()):
+                self.maintain_once()
+        except BaseException as exc:
+            if self._error is None:
+                self._fail(exc, "embedding_lease_maintenance_failed")
+
+    def _next_delay_seconds(self) -> float:
+        safe_remaining = max(
+            0.0,
+            (self.lease_until - self.now() - self._SAFETY_MARGIN).total_seconds(),
+        )
+        return min(self.interval_seconds, safe_remaining)
+
+    def _fail(self, error: BaseException, reason: str) -> None:
+        with self._lock:
+            if self._error is not None:
+                return
+            self._error = error
+        self._stop.set()
+        with suppress(Exception), self.connection_factory() as connection:
+            DatabaseGate(connection).fence(self.identity, reason)
 
 
 def _runtime_deadlines(config: NotebookMasterConfig, process_started_at: float) -> tuple[float, float]:
@@ -599,23 +741,40 @@ def _register_reader_credential(
 ) -> tuple[str, datetime]:
     """Create and hand off one epoch-bound reader without logging its secret."""
 
-    from urllib.parse import quote, urlencode
-
-    if expires_at <= now or expires_at - now > timedelta(minutes=5):
-        raise ValueError("reader credential expiry is outside the broker bound")
-    credential_id = UUID(bytes=secrets.token_bytes(16), version=4)
-    principal = f"mdh_e{config.epoch}_reader_{credential_id.hex[:8]}"
-    password = secrets.token_urlsafe(36)
-    identity = MasterIdentity(config.master_instance_id, config.run_id, config.epoch)
-    CredentialProvisioner(connection, gate).create(
-        principal=principal,
-        password=password,
-        group="mdh_mcp_reader",
-        identity=identity,
-        credential_id=credential_id,
+    principals, expiry = _register_session_credentials(
+        connection=connection,
+        gate=gate,
+        config=config,
+        callback_url=callback_url,
+        run_secret=run_secret,
+        roles=("reader",),
         expires_at=expires_at,
         now=now,
     )
+    return principals[0], expiry
+
+
+def _register_session_credentials(
+    *,
+    connection: Any,
+    gate: DatabaseGate,
+    config: NotebookMasterConfig,
+    callback_url: str,
+    run_secret: str,
+    roles: tuple[Literal["reader", "operator"], ...],
+    expires_at: datetime,
+    now: datetime,
+) -> tuple[tuple[str, ...], datetime]:
+    """Issue only the roles explicitly authorized by activation, in one envelope."""
+
+    from urllib.parse import quote, urlencode
+
+    if expires_at <= now or expires_at - now > timedelta(minutes=5):
+        raise ValueError("session credential expiry is outside the broker bound")
+    if roles not in {("reader",), ("reader", "operator")}:
+        raise ValueError("activation credential roles differ from the bounded contract")
+    identity = MasterIdentity(config.master_instance_id, config.run_id, config.epoch)
+    provisioner = CredentialProvisioner(connection, gate)
     query = urlencode(
         {
             "sslmode": "verify-ca",
@@ -624,21 +783,50 @@ def _register_reader_credential(
             "connect_timeout": "5",
         }
     )
-    database_url = (
-        f"postgresql://{quote(principal, safe='')}:{quote(password, safe='')}@"
-        f"127.0.0.1:{config.tunnel_remote_port}/postgres?{query}"
-    )
+    principals: list[str] = []
+    credentials: list[dict[str, str]] = []
+    try:
+        for role in roles:
+            credential_id = UUID(bytes=secrets.token_bytes(16), version=4)
+            principal = f"mdh_e{config.epoch}_{role}_{credential_id.hex[:8]}"
+            password = secrets.token_urlsafe(36)
+            provisioner.create(
+                principal=principal,
+                password=password,
+                group="mdh_mcp_reader" if role == "reader" else "mdh_mcp_editor",
+                identity=identity,
+                credential_id=credential_id,
+                expires_at=expires_at,
+                now=now,
+            )
+            principals.append(principal)
+            database_url = (
+                f"postgresql://{quote(principal, safe='')}:{quote(password, safe='')}@"
+                f"127.0.0.1:{config.tunnel_remote_port}/postgres?{query}"
+            )
+            credentials.append(
+                {
+                    "role": role,
+                    "database_url": database_url,
+                    "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+                }
+            )
+    except Exception:
+        cleanup_failed = False
+        for principal in reversed(principals):
+            try:
+                provisioner.drop(principal)
+            except Exception:
+                cleanup_failed = True
+        if cleanup_failed:
+            with suppress(Exception):
+                gate.fence(identity, "credential_provisioning_cleanup_failed")
+        raise
     body = json.dumps(
         {
             "master_instance_id": str(config.master_instance_id),
             "epoch": config.epoch,
-            "credentials": [
-                {
-                    "role": "reader",
-                    "database_url": database_url,
-                    "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
-                }
-            ],
+            "credentials": credentials,
         },
         separators=(",", ":"),
     ).encode()
@@ -651,19 +839,117 @@ def _register_reader_credential(
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             receipt = json.loads(response.read(16 * 1024))
-        if receipt.get("registered") != 1:
-            raise RuntimeError("control plane did not accept the reader credential")
+        if receipt.get("registered") != len(roles):
+            raise RuntimeError("control plane did not accept all requested session credentials")
     except Exception:
         # No usable login may survive a failed broker handoff.
         try:
-            CredentialProvisioner(connection, gate).drop(principal)
+            for principal in reversed(principals):
+                provisioner.drop(principal)
         except Exception:
             gate.fence(identity, "credential_handoff_failed")
         raise
-    return principal, expires_at
+    return tuple(principals), expires_at
 
 
-def _wait_for_activation(url: str, token: str, identity: MasterIdentity, timeout_seconds: int = 90) -> None:
+@contextmanager
+def _fresh_canonical_committer_connection(
+    *,
+    owner_connection: Any,
+    gate: DatabaseGate,
+    identity: MasterIdentity,
+    database_url: str,
+    lease_until: Callable[[], datetime],
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> Iterator[Any]:
+    """Yield one fresh non-superuser committer and always make it unusable.
+
+    The credential expires inside the currently acknowledged lease.  The
+    importer opens its transaction with ``session_user`` fixed to this LOGIN;
+    ``SET LOCAL ROLE mdh_canonical_committer`` grants only the bounded write
+    surface, while migration 0011's deferred trigger rejects a commit after a
+    lease expiry, revocation, or epoch fence.
+    """
+
+    observed = now()
+    expiry = min(observed + timedelta(minutes=4), lease_until())
+    if expiry <= observed + timedelta(seconds=15):
+        raise CallbackLeaseClosingError("ACTIVE lease is too short for a canonical committer")
+    credential_id = UUID(bytes=secrets.token_bytes(16), version=4)
+    principal = f"mdh_e{identity.epoch}_embed_{credential_id.hex[:8]}"
+    password = secrets.token_urlsafe(36)
+    provisioner = CredentialProvisioner(owner_connection, gate)
+    provisioner.create(
+        principal=principal,
+        password=password,
+        group="mdh_canonical_committer",
+        identity=identity,
+        credential_id=credential_id,
+        expires_at=expiry,
+        now=observed,
+    )
+    connection: Any | None = None
+    cleanup_error: BaseException | None = None
+    try:
+        connection = psycopg.connect(
+            database_url,
+            user=principal,
+            password=password,
+            autocommit=True,
+        )
+        with connection.cursor() as cursor:
+            authenticated = cursor.execute(
+                "SELECT rolname,rolsuper FROM pg_roles WHERE rolname=session_user"
+            ).fetchone()
+        if authenticated != (principal, False):
+            raise RuntimeError("canonical committer LOGIN is absent or unexpectedly privileged")
+        yield connection
+    finally:
+        if connection is not None:
+            with suppress(Exception):
+                connection.close()
+        cleanup_errors: list[BaseException] = []
+        try:
+            gate.revoke_credential(credential_id, "embedding_committer_complete")
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+        try:
+            provisioner.drop(principal)
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+        if cleanup_errors:
+            cleanup_error = cleanup_errors[0]
+            with suppress(Exception):
+                gate.fence(identity, "embedding_committer_cleanup_failed")
+        if cleanup_error is not None:
+            raise RuntimeError("embedding committer cleanup failed; epoch was fenced") from cleanup_error
+
+
+def _cleanup_epoch_principals(
+    *,
+    connection: Any,
+    gate: DatabaseGate,
+    identity: MasterIdentity,
+    principals: set[str],
+) -> None:
+    """Remove handed-off LOGINs before physical checkpoint publication."""
+
+    provisioner = CredentialProvisioner(connection, gate)
+    try:
+        for principal in sorted(principals):
+            provisioner.drop(principal)
+    except BaseException as exc:
+        with suppress(Exception):
+            gate.fence(identity, "epoch_credential_cleanup_failed")
+        raise RuntimeError("epoch credential cleanup failed; epoch was fenced") from exc
+
+
+def _wait_for_activation(
+    url: str,
+    token: str,
+    identity: MasterIdentity,
+    timeout_seconds: int = 90,
+) -> tuple[Literal["reader", "operator"], ...]:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
@@ -678,7 +964,13 @@ def _wait_for_activation(url: str, token: str, identity: MasterIdentity, timeout
             and body.get("master_instance_id") == str(identity.master_instance_id)
             and int(body.get("epoch", 0)) == identity.epoch
         ):
-            return
+            raw_roles = body.get("credential_roles", ["reader"])
+            if not isinstance(raw_roles, list) or any(not isinstance(role, str) for role in raw_roles):
+                raise RuntimeError("activation credential roles are malformed")
+            roles = tuple(raw_roles)
+            if roles not in {("reader",), ("reader", "operator")}:
+                raise RuntimeError("activation credential roles exceed the bounded contract")
+            return roles  # type: ignore[return-value]
         time.sleep(2)
     raise TimeoutError("control plane did not activate the exact master epoch")
 
@@ -836,7 +1128,9 @@ def run_master(
         )
     )
     try:
-        _wait_for_activation(_activation_url(callback_url, config.run_id, config.attempt_id), run_secret, identity)
+        credential_roles = _wait_for_activation(
+            _activation_url(callback_url, config.run_id, config.attempt_id), run_secret, identity
+        )
         assert gate_connection is not None
         gate = DatabaseGate(gate_connection)
         _require_active_window(active_deadline=active_deadline)
@@ -857,12 +1151,13 @@ def run_master(
     if reader_expires_at <= credential_now + timedelta(seconds=15):
         raise RuntimeError("ACTIVE lease is too short to issue a bounded reader credential")
     try:
-        _reader_principal, reader_expires_at = _register_reader_credential(
+        session_principals, reader_expires_at = _register_session_credentials(
             connection=gate_connection,
             gate=gate,
             config=config,
             callback_url=callback_url,
             run_secret=run_secret,
+            roles=credential_roles,
             expires_at=reader_expires_at,
             now=credential_now,
         )
@@ -872,6 +1167,7 @@ def run_master(
         supervisor.stop(immediate=True)
         gate_connection.close()
         raise
+    issued_principals = set(session_principals)
     current_lease = ready.lease_until
     blogger_receipt: BloggerImportStageReceipt | None = None
     embedding_receipt: EmbeddingProductionStageReceipt | None = None
@@ -927,29 +1223,52 @@ def run_master(
                 provider = getattr(checkpoint_coordinator.coordinator.provider, "adapter", None)
                 if provider is None:
                     raise RuntimeError("embedding stage cannot resolve the single Kaggle adapter")
-                try:
-                    embedding_receipt = execute_embedding_production_stage(
-                        EmbeddingStageContext(
-                            identity=identity,
-                            operation_id=UUID(_required("MY_DATA_HUB_OPERATION_ID")),
-                            request=embedding_request,
-                            database_url=database_url,
-                            wheel_path=Path(_required("MY_DATA_HUB_WHEEL_PATH")),
-                            wheel_sha256=_required("MY_DATA_HUB_WHEEL_SHA256"),
-                            provider_owner=provider.identity.username,
-                            remaining_seconds=remaining_active,
-                        ),
-                        connection=gate_connection,
-                        adapter=provider,
-                    )
-                except Exception as exc:
-                    raise EmbeddingStageExecutionError("embedding stage did not complete") from exc
-                _post_embedding_runtime_receipt(
-                    config=config,
-                    callback_url=callback_url,
-                    run_secret=run_secret,
-                    receipt=embedding_receipt,
+                maintainer = _EmbeddingLeaseMaintainer(
+                    identity=identity,
+                    lease_seconds=config.lease_seconds,
+                    initial_lease_until=current_lease,
+                    runtime=runtime,
+                    tunnel=tunnel,
+                    connection_factory=lambda: psycopg.connect(database_url),
                 )
+                canonical_connection_factory = partial(
+                    _fresh_canonical_committer_connection,
+                    owner_connection=gate_connection,
+                    gate=gate,
+                    identity=identity,
+                    database_url=database_url,
+                    lease_until=maintainer.current_lease_until,
+                )
+                try:
+                    maintainer.start()
+                    try:
+                        embedding_receipt = execute_embedding_production_stage(
+                            EmbeddingStageContext(
+                                identity=identity,
+                                operation_id=UUID(_required("MY_DATA_HUB_OPERATION_ID")),
+                                request=embedding_request,
+                                database_url=database_url,
+                                wheel_path=Path(_required("MY_DATA_HUB_WHEEL_PATH")),
+                                wheel_sha256=_required("MY_DATA_HUB_WHEEL_SHA256"),
+                                provider_owner=provider.identity.username,
+                                remaining_seconds=remaining_active,
+                            ),
+                            connection=gate_connection,
+                            adapter=provider,
+                            canonical_connection_factory=canonical_connection_factory,
+                            lease_guard=maintainer.check,
+                        )
+                    except Exception as exc:
+                        raise EmbeddingStageExecutionError("embedding stage did not complete") from exc
+                    _post_embedding_runtime_receipt(
+                        config=config,
+                        callback_url=callback_url,
+                        run_secret=run_secret,
+                        receipt=embedding_receipt,
+                    )
+                finally:
+                    maintainer.stop()
+                    current_lease = maintainer.lease_until
                 break
             time.sleep(min(30.0, remaining_active))
             if time.monotonic() >= active_deadline:
@@ -970,19 +1289,34 @@ def run_master(
                     next_expiry = min(observed_now + timedelta(minutes=4), proposed)
                     if next_expiry <= observed_now + timedelta(seconds=15):
                         raise TimeoutError("renewed lease is too short for a broker credential")
-                    _reader_principal, reader_expires_at = _register_reader_credential(
+                    session_principals, reader_expires_at = _register_session_credentials(
                         connection=gate_connection,
                         gate=gate,
                         config=config,
                         callback_url=callback_url,
                         run_secret=run_secret,
+                        roles=credential_roles,
                         expires_at=next_expiry,
                         now=observed_now,
                     )
+                    issued_principals.update(session_principals)
             if datetime.now(UTC) + timedelta(seconds=15) >= current_lease:
                 raise CallbackLeaseClosingError("callback unavailable; write lease is closing")
     except BaseException as exc:
         active_error = exc
+
+    try:
+        _cleanup_epoch_principals(
+            connection=gate_connection,
+            gate=gate,
+            identity=identity,
+            principals=issued_principals,
+        )
+    except BaseException:
+        tunnel.stop()
+        supervisor.stop(immediate=True)
+        gate_connection.close()
+        raise
 
     if isinstance(active_error, BloggerReceiptDeliveryError):
         # Never promote a checkpoint containing the committed workload until

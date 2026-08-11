@@ -71,6 +71,27 @@ def test_drain_closes_gate_before_checkpoint() -> None:
         fence.assert_write("mdh_e1_writer_deadbeef", now=NOW + timedelta(seconds=2))
 
 
+def test_canonical_committer_cannot_cross_expiry_or_epoch_fence() -> None:
+    principal = "mdh_e1_embed_facefeed"
+    fence = EpochFence()
+    fence.acquire(A, lease_until=NOW + timedelta(seconds=60), now=NOW)
+    fence.open(A, now=NOW)
+    fence.bind(principal, A, expires_at=NOW + timedelta(seconds=45), now=NOW)
+    fence.assert_write(principal, now=NOW + timedelta(seconds=44))
+    with pytest.raises(FencingError, match="credential expired"):
+        fence.assert_write(principal, now=NOW + timedelta(seconds=45))
+
+    fence = EpochFence()
+    fence.acquire(A, lease_until=NOW + timedelta(seconds=60), now=NOW)
+    fence.open(A, now=NOW)
+    fence.bind(principal, A, expires_at=NOW + timedelta(seconds=50), now=NOW)
+    fence.fence(A, reason="forced_rotation")
+    fence.acquire(B, lease_until=NOW + timedelta(minutes=2), now=NOW + timedelta(seconds=10))
+    fence.open(B, now=NOW + timedelta(seconds=10))
+    with pytest.raises(FencingError, match="fenced epoch"):
+        fence.assert_write(principal, now=NOW + timedelta(seconds=15))
+
+
 def test_watchdog_closes_on_control_loss_or_before_lease_expiry() -> None:
     reasons: list[str] = []
     watchdog = LeaseWatchdog(

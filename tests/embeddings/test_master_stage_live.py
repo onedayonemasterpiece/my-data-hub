@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -39,9 +41,11 @@ class UnitEncoder:
 class FakeImporter:
     def __init__(self) -> None:
         self.calls = []
+        self.connections = []
 
     def import_manifest(self, connection, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append(kwargs)
+        self.connections.append(connection)
         manifest = kwargs["manifest"]
         return EmbeddingImportReceipt(
             artifact_id=manifest.artifact_id,
@@ -145,7 +149,11 @@ def test_modern_token_blocks_before_any_provider_effect(tmp_path: Path, monkeypa
     adapter = object.__new__(KaggleProviderAdapter)
     with pytest.raises(EmbeddingStageError, match="modern Kaggle token"):
         execute_embedding_production_stage(
-            _context(tmp_path), connection=FinalConnection(), adapter=adapter
+            _context(tmp_path),
+            connection=FinalConnection(),
+            adapter=adapter,
+            canonical_connection_factory=lambda: pytest.fail("no canonical writes expected"),
+            lease_guard=lambda: None,
         )
 
 
@@ -211,15 +219,103 @@ def test_single_adapter_launches_both_workers_and_imports_exact_artifacts(
     adapter.read_run_status = read_run_status
     adapter.download_exact_run_output_file = download
     importer = FakeImporter()
+    canonical_connections = [object(), object()]
+
+    @contextmanager
+    def canonical_connection_factory():  # type: ignore[no-untyped-def]
+        yield canonical_connections.pop(0)
+
     receipt = execute_embedding_production_stage(
-        _context(tmp_path), connection=FinalConnection(), adapter=adapter, importer=importer
+        _context(tmp_path),
+        connection=FinalConnection(),
+        adapter=adapter,
+        importer=importer,
+        canonical_connection_factory=canonical_connection_factory,
+        lease_guard=lambda: None,
     )
     assert len(launches) == 2 and len(set(launches)) == 2
     assert len(importer.calls) == 2
     assert all(len(call["jobs"]) == 267 for call in importer.calls)
     assert all(len(call["ephemeral_job_keys"]) == 1 for call in importer.calls)
+    assert len({id(connection) for connection in importer.connections}) == 2
     assert receipt.canonical_revision == 11
     assert all(row["completed_documents"] == 266 for row in receipt.coverage)
     assert {
         row["dimensions"] for row in receipt.query_vector_receipts.values()
     } == {768, 1024}
+
+
+def test_provider_polling_longer_than_one_lease_remains_continuously_guarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "modern-token")
+    monkeypatch.setattr("my_data_hub.embeddings.master_stage._load_documents", lambda *_: _documents())
+    adapter = object.__new__(KaggleProviderAdapter)
+    adapter.identity = KaggleProviderIdentity(username="owner")
+    clock = [0.0]
+    guard_observations: list[float] = []
+    jobs_by_dataset = {}
+    jobs_by_task = {}
+
+    def create_private_dataset(**kwargs):  # type: ignore[no-untyped-def]
+        payload = json.loads(kwargs["files"]["embedding-jobs.json"])
+        jobs_by_dataset[kwargs["intent"].provider_ref] = tuple(
+            EmbeddingJob.model_validate(item) for item in payload["jobs"]
+        )
+        return SimpleNamespace(identity=SimpleNamespace(version=1, package_sha256="a" * 64))
+
+    def push_private_notebook(**kwargs):  # type: ignore[no-untyped-def]
+        task_id = kwargs["task_run_id"]
+        dataset_ref = kwargs["dataset_sources"][0].rsplit("/", 1)[0]
+        jobs_by_task[task_id] = jobs_by_dataset[dataset_ref]
+        return SimpleNamespace(run=SimpleNamespace(
+            task_run_id=task_id,
+            provider_ref=kwargs["intent"].provider_ref,
+            provider_run_ref=f"{kwargs['intent'].provider_ref}/1",
+            provider_kernel_id=len(jobs_by_task),
+            source_version=1,
+            source_sha256=kwargs["intent"].arguments_sha256,
+        ))
+
+    def read_run_status(_run):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(
+            state=KernelState.COMPLETE if clock[0] > 135.0 else KernelState.RUNNING
+        )
+
+    def download(run, *, destination, **_kwargs):  # type: ignore[no-untyped-def]
+        jobs = jobs_by_task[run.task_run_id]
+        model = jobs[0].model
+        now = datetime(2026, 8, 11, tzinfo=UTC)
+        manifest = EmbeddingWorker(model=model, encoder=UnitEncoder(model.dimensions)).run(
+            run_id=run.task_run_id, jobs=jobs, started_at=now, completed_at=now
+        )
+        (destination / "embedding-result.json").write_bytes(
+            canonical_json_bytes(manifest.model_dump(mode="json"))
+        )
+        return SimpleNamespace(output_tree_sha256="e" * 64)
+
+    adapter.create_private_dataset = create_private_dataset
+    adapter.reconcile_private_notebook_mutation = lambda **_kwargs: None
+    adapter.push_private_notebook = push_private_notebook
+    adapter.monotonic = lambda: clock[0]
+    adapter.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    adapter.read_run_status = read_run_status
+    adapter.download_exact_run_output_file = download
+
+    @contextmanager
+    def canonical_connection_factory():  # type: ignore[no-untyped-def]
+        yield object()
+
+    execute_embedding_production_stage(
+        _context(tmp_path),
+        connection=FinalConnection(),
+        adapter=adapter,
+        importer=FakeImporter(),
+        canonical_connection_factory=canonical_connection_factory,
+        lease_guard=lambda: guard_observations.append(clock[0]),
+    )
+
+    assert clock[0] > 120.0
+    assert guard_observations[0] == 0.0
+    assert guard_observations[-1] == clock[0]
+    assert max(right - left for left, right in pairwise(guard_observations)) <= 15.0

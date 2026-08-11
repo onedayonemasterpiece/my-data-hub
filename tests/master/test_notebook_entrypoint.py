@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,10 +23,15 @@ from my_data_hub.master_runtime.notebook_entrypoint import (
     _activation_url,
     _checkpoint_before_stop,
     _checkpoint_until_deadline,
+    _cleanup_epoch_principals,
     _credential_registration_url,
+    _EmbeddingLeaseMaintainer,
     _emit_service_ready,
+    _fresh_canonical_committer_connection,
     _register_reader_credential,
+    _register_session_credentials,
     _runtime_deadlines,
+    _wait_for_activation,
     main,
     run_master,
 )
@@ -235,6 +241,297 @@ def test_reader_credential_handoff_is_epoch_bound_tls_and_not_returned(
     assert "sslrootcert=%2Fstate%2Fmaster-tls%2Fca.pem" in database_url
     assert "connect_timeout=5" in database_url
     assert "runtime-secret-long-enough" not in json.dumps(body)
+
+
+def test_activation_authorized_operator_is_issued_with_reader_in_one_bounded_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {"creates": []}
+
+    class Provisioner:
+        def __init__(self, _connection, _gate) -> None:  # type: ignore[no-untyped-def]
+            pass
+
+        def create(self, **kwargs) -> str:  # type: ignore[no-untyped-def]
+            captured["creates"].append(kwargs)  # type: ignore[union-attr]
+            return kwargs["principal"]
+
+        def drop(self, principal: str) -> None:
+            captured.setdefault("drops", []).append(principal)  # type: ignore[union-attr]
+
+    class Response:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        @staticmethod
+        def read(_limit: int) -> bytes:
+            return b'{"registered":2,"credential_refs":["reader.json","operator.json"]}'
+
+    def open_request(request, timeout):  # type: ignore[no-untyped-def]
+        assert timeout == 10
+        captured["body"] = json.loads(request.data)
+        return Response()
+
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.CredentialProvisioner", Provisioner)
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.urllib.request.urlopen", open_request)
+    config = NotebookMasterConfig(
+        master_instance_id=IDENTITY.master_instance_id,
+        run_id=IDENTITY.run_id,
+        attempt_id="attempt-1",
+        service_instance_id="service-1",
+        epoch=IDENTITY.epoch,
+        boot_source=BootSource.EMPTY_BASELINE,
+        checkpoint_directory=None,
+        lease_seconds=120,
+        postgres_bin=Path("/postgres/bin"),
+        postgres_port=15432,
+        tunnel_gateway_host="gateway.example.test",
+        tunnel_gateway_port=22,
+        tunnel_gateway_user="mdh-tunnel",
+        tunnel_remote_port=25432,
+        maximum_runtime_seconds=21_600,
+        checkpoint_reserve_seconds=10_800,
+        source_identity="owner/postgres-master",
+        source_version="1",
+    )
+    now = datetime(2026, 8, 11, tzinfo=UTC)
+    principals, _expiry = _register_session_credentials(
+        connection=object(),
+        gate=object(),  # type: ignore[arg-type]
+        config=config,
+        callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
+        run_secret="runtime-secret-long-enough",
+        roles=("reader", "operator"),
+        expires_at=now + timedelta(minutes=3),
+        now=now,
+    )
+    creates = captured["creates"]
+    assert isinstance(creates, list)
+    assert [item["group"] for item in creates] == ["mdh_mcp_reader", "mdh_mcp_editor"]
+    assert principals[0].startswith("mdh_e1_reader_")
+    assert principals[1].startswith("mdh_e1_operator_")
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert [item["role"] for item in body["credentials"]] == ["reader", "operator"]
+    assert all(set(item) == {"role", "database_url", "expires_at"} for item in body["credentials"])
+
+
+def test_activation_rejects_unrequested_or_reordered_credential_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        def __init__(self, roles: list[str]) -> None:
+            self.roles = roles
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return json.dumps(
+                {
+                    "active": True,
+                    "master_instance_id": str(IDENTITY.master_instance_id),
+                    "epoch": IDENTITY.epoch,
+                    "credential_roles": self.roles,
+                }
+            ).encode()
+
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint.urllib.request.urlopen",
+        lambda *_args, **_kwargs: Response(["reader", "operator"]),
+    )
+    assert _wait_for_activation("https://example.test", "secret", IDENTITY) == (
+        "reader",
+        "operator",
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint.urllib.request.urlopen",
+        lambda *_args, **_kwargs: Response(["operator", "reader"]),
+    )
+    with pytest.raises(RuntimeError, match="exceed the bounded contract"):
+        _wait_for_activation("https://example.test", "secret", IDENTITY)
+
+
+def test_embedding_lease_maintainer_renews_past_original_lease_and_fences_on_control_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_now = [datetime(2026, 8, 11, tzinfo=UTC)]
+    renewals: list[datetime] = []
+    fences: list[str] = []
+    tunnel_polls: list[datetime] = []
+    delivery_status = ["delivered"]
+
+    class Gate:
+        def __init__(self, _connection) -> None:  # type: ignore[no-untyped-def]
+            pass
+
+        def renew(self, identity, lease_until) -> None:  # type: ignore[no-untyped-def]
+            assert identity == IDENTITY
+            renewals.append(lease_until)
+
+        def fence(self, identity, reason) -> None:  # type: ignore[no-untyped-def]
+            assert identity == IDENTITY
+            fences.append(reason)
+
+    class Runtime:
+        def emit(self, event_type, **kwargs):  # type: ignore[no-untyped-def]
+            assert event_type is RuntimeEventType.RUNTIME_HEARTBEAT
+            assert kwargs["data"]["lease_until"].endswith("Z")
+            if delivery_status[0] == "queued":
+                observed_now[0] += timedelta(seconds=2)
+            return _Delivery(delivery_status[0])
+
+    class Tunnel:
+        def poll(self, *, now) -> None:  # type: ignore[no-untyped-def]
+            tunnel_polls.append(now)
+
+    @contextmanager
+    def connection_factory():  # type: ignore[no-untyped-def]
+        yield object()
+
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.DatabaseGate", Gate)
+    maintainer = _EmbeddingLeaseMaintainer(
+        identity=IDENTITY,
+        lease_seconds=60,
+        initial_lease_until=observed_now[0] + timedelta(seconds=60),
+        runtime=Runtime(),
+        tunnel=Tunnel(),
+        connection_factory=connection_factory,
+        now=lambda: observed_now[0],
+    )
+    observed_now[0] += timedelta(seconds=20)
+    maintainer.maintain_once()
+    observed_now[0] += timedelta(seconds=40)  # at the original 60-second lease boundary
+    maintainer.maintain_once()
+    assert renewals == [
+        datetime(2026, 8, 11, 0, 1, 20, tzinfo=UTC),
+        datetime(2026, 8, 11, 0, 2, 0, tzinfo=UTC),
+    ]
+    assert maintainer.lease_until == renewals[-1]
+    assert tunnel_polls == [
+        datetime(2026, 8, 11, 0, 0, 20, tzinfo=UTC),
+        datetime(2026, 8, 11, 0, 1, 0, tzinfo=UTC),
+    ]
+
+    delivery_status[0] = "queued"
+    observed_now[0] = maintainer.lease_until - timedelta(seconds=16)
+    with pytest.raises(CallbackLeaseClosingError, match="write lease is closing"):
+        maintainer.maintain_once()
+    assert fences == ["embedding_control_heartbeat_lost"]
+    with pytest.raises(CallbackLeaseClosingError):
+        maintainer.check()
+
+
+def test_fresh_embedding_committer_is_epoch_bound_non_superuser_and_always_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[object] = []
+
+    class Provisioner:
+        def __init__(self, connection, gate) -> None:  # type: ignore[no-untyped-def]
+            events.append(("provisioner", connection, gate))
+
+        def create(self, **kwargs) -> str:  # type: ignore[no-untyped-def]
+            events.append(("create", kwargs))
+            return kwargs["principal"]
+
+        def drop(self, principal: str) -> None:
+            events.append(("drop", principal))
+
+    class Cursor:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def execute(self, statement, _params=None):  # type: ignore[no-untyped-def]
+            events.append(("verify", statement))
+            return self
+
+        @staticmethod
+        def fetchone():  # type: ignore[no-untyped-def]
+            create = next(item[1] for item in events if item[0] == "create")
+            return (create["principal"], False)
+
+    class Connection:
+        def cursor(self):  # type: ignore[no-untyped-def]
+            return Cursor()
+
+        def close(self) -> None:
+            events.append("connection.close")
+
+    class Gate:
+        def revoke_credential(self, credential_id, reason) -> None:  # type: ignore[no-untyped-def]
+            events.append(("revoke", credential_id, reason))
+
+        def fence(self, identity, reason) -> None:  # type: ignore[no-untyped-def]
+            events.append(("fence", identity, reason))
+
+    def connect(database_url, **kwargs):  # type: ignore[no-untyped-def]
+        events.append(("connect", database_url, kwargs))
+        return Connection()
+
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.CredentialProvisioner", Provisioner)
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.psycopg.connect", connect)
+    gate = Gate()
+    now = datetime(2026, 8, 11, tzinfo=UTC)
+    with pytest.raises(RuntimeError, match="import failed"), _fresh_canonical_committer_connection(
+        owner_connection=object(),
+        gate=gate,  # type: ignore[arg-type]
+        identity=IDENTITY,
+        database_url="postgresql:///postgres",
+        lease_until=lambda: now + timedelta(minutes=5),
+        now=lambda: now,
+    ):
+        raise RuntimeError("import failed")
+
+    create = next(item[1] for item in events if item[0] == "create")
+    assert create["group"] == "mdh_canonical_committer"
+    assert create["identity"] == IDENTITY
+    assert create["principal"].startswith("mdh_e1_embed_")
+    connect_event = next(item for item in events if item[0] == "connect")
+    assert connect_event[2]["user"] == create["principal"]
+    assert connect_event[2]["autocommit"] is True
+    assert "connection.close" in events
+    assert any(item[0] == "revoke" for item in events if isinstance(item, tuple))
+    assert any(item == ("drop", create["principal"]) for item in events)
+
+
+def test_reader_cleanup_failure_fences_before_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Provisioner:
+        def __init__(self, _connection, _gate) -> None:  # type: ignore[no-untyped-def]
+            pass
+
+        def drop(self, principal: str) -> None:
+            events.append(f"drop:{principal}")
+            if principal == "reader-b":
+                raise RuntimeError("drop failed")
+
+    class Gate:
+        def fence(self, identity, reason) -> None:  # type: ignore[no-untyped-def]
+            assert identity == IDENTITY
+            events.append(f"fence:{reason}")
+
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.CredentialProvisioner", Provisioner)
+    with pytest.raises(RuntimeError, match="epoch credential cleanup failed"):
+        _cleanup_epoch_principals(
+            connection=object(),
+            gate=Gate(),  # type: ignore[arg-type]
+            identity=IDENTITY,
+            principals={"reader-a", "reader-b"},
+        )
+    assert events[-1] == "fence:epoch_credential_cleanup_failed"
 
 
 @dataclass
@@ -758,10 +1055,17 @@ def test_run_master_suppresses_only_callback_lease_closure_after_exact_terminal_
         "my_data_hub.master_runtime.notebook_entrypoint.psycopg.connect",
         lambda *args, **kwargs: connection,
     )
-    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint._wait_for_activation", lambda *args: None)
     monkeypatch.setattr(
-        "my_data_hub.master_runtime.notebook_entrypoint._register_reader_credential",
-        lambda **kwargs: ("reader", kwargs["expires_at"]),
+        "my_data_hub.master_runtime.notebook_entrypoint._wait_for_activation",
+        lambda *args: ("reader",),
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._register_session_credentials",
+        lambda **kwargs: (("reader",), kwargs["expires_at"]),
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._cleanup_epoch_principals",
+        lambda **kwargs: events.append("credentials.drop"),
     )
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint._checkpoint_until_deadline", checkpoint_until)
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.time.sleep", lambda _seconds: None)
@@ -892,10 +1196,17 @@ def test_run_master_never_checkpoints_unacknowledged_blogger_import_receipt(
         "my_data_hub.master_runtime.notebook_entrypoint.psycopg.connect",
         lambda *args, **kwargs: connection,
     )
-    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint._wait_for_activation", lambda *args: None)
     monkeypatch.setattr(
-        "my_data_hub.master_runtime.notebook_entrypoint._register_reader_credential",
-        lambda **kwargs: ("reader", kwargs["expires_at"]),
+        "my_data_hub.master_runtime.notebook_entrypoint._wait_for_activation",
+        lambda *args: ("reader",),
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._register_session_credentials",
+        lambda **kwargs: (("reader",), kwargs["expires_at"]),
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._cleanup_epoch_principals",
+        lambda **kwargs: events.append("credentials.drop"),
     )
     monkeypatch.setattr(
         "my_data_hub.master_runtime.notebook_entrypoint._claim_blogger_migration",
