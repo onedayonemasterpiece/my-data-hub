@@ -712,6 +712,110 @@ def test_master_legacy_empty_push_response_uses_exact_latest_get_kernel() -> Non
     assert len(journal.receipts) == 1 and len(journal.claims) == 1
 
 
+def test_disposable_legacy_empty_push_response_uses_exact_latest_get_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, api, journal = adapter()
+    run_id = uuid4()
+    source = f'RUN_ID = "{run_id}"\n'.encode()
+    intent = effect(
+        MutationAction.PUSH_NOTEBOOK,
+        "owner/legacy-worker",
+        task_id=run_id,
+        arguments={
+            "task_run_id": str(run_id),
+            "source_sha256": hashlib.sha256(source).hexdigest(),
+            "dataset_sources": (),
+            "control_class": "mcp_managed",
+            "disposable": True,
+        },
+    )
+    original = api.kernels_push
+
+    def empty_response(*args, **kwargs):  # type: ignore[no-untyped-def]
+        original(*args, **kwargs)
+        return SimpleNamespace(ref="", kernelId=0, versionNumber=0, error="")
+
+    api.kernels_push = empty_response  # type: ignore[method-assign]
+    result = client.push_private_notebook(
+        intent=intent,
+        task_run_id=run_id,
+        source=source,
+        title="legacy-worker",
+        code_file="run.py",
+        kernel_type="script",
+        language="python",
+        control_class=ControlClass.MCP_MANAGED,
+        disposable=True,
+    )
+    assert result.effect.outcome is EffectOutcome.APPLIED
+    assert result.run.provider_run_ref == "owner/legacy-worker/1"
+    assert result.run.provider_kernel_id == 1000
+    assert len(journal.receipts) == 1 and len(journal.claims) == 1
+    monkeypatch.setattr(
+        api,
+        "kernels_pull",
+        lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("legacy pull denied")),
+    )
+    assert client.read_run_status(result.run).state is KernelState.COMPLETE
+    cleanup = effect(
+        MutationAction.DELETE_NOTEBOOK,
+        result.run.provider_ref,
+        task_id=run_id,
+        arguments={
+            "claim_sha256": result.claim.claim_sha256,
+            "provider_version": result.claim.provider_version,
+        },
+        expected=result.claim.fingerprint,
+    )
+    receipt = client.delete_task_created_resource(intent=cleanup, claim=result.claim)
+    assert receipt.detail_code == "task_created_resource_absent"
+
+
+def test_disposable_legacy_lost_push_response_reconciles_without_second_push(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, api, _journal = adapter()
+    run_id = uuid4()
+    source = f'RUN_ID = "{run_id}"\n'.encode()
+    intent = effect(
+        MutationAction.PUSH_NOTEBOOK,
+        "owner/legacy-worker-lost",
+        task_id=run_id,
+        arguments={
+            "task_run_id": str(run_id),
+            "source_sha256": hashlib.sha256(source).hexdigest(),
+            "dataset_sources": (),
+            "control_class": "mcp_managed",
+            "disposable": True,
+        },
+    )
+    original = api.kernels_push
+    calls = 0
+
+    def lost_response(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        original(*args, **kwargs)
+        raise ConnectionError("response lost after provider commit")
+
+    monkeypatch.setattr(api, "kernels_push", lost_response)
+    result = client.push_private_notebook(
+        intent=intent,
+        task_run_id=run_id,
+        source=source,
+        title="legacy-worker-lost",
+        code_file="run.py",
+        kernel_type="script",
+        language="python",
+        control_class=ControlClass.MCP_MANAGED,
+        disposable=True,
+    )
+    assert calls == 1
+    assert result.effect.outcome is EffectOutcome.ALREADY_APPLIED
+    assert result.run.provider_run_ref == "owner/legacy-worker-lost/1"
+
+
 def test_fm08_termination_reconciles_lost_delete_response_without_second_delete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -967,20 +967,16 @@ class KaggleProviderAdapter:
             self.journal.persist_intent(intent)
             push_response_received = False
             try:
-                if pending_runtime_attestation:
-                    response = self.api.kernels_push(
-                        str(folder),
-                        timeout=str(timeout_seconds) if timeout_seconds is not None else None,
-                        acc=None,
-                    )
-                    attempts = 1
-                else:
-                    response, attempts = self.retry.call(
-                        "kernels_push",
-                        lambda: self.api.kernels_push(
-                            str(folder), timeout=str(timeout_seconds) if timeout_seconds is not None else None, acc=None
-                        ),
-                    )
+                # A Notebook push is a non-idempotent provider mutation.  The
+                # official API does not accept our effect idempotency key, so a
+                # lost response must be reconciled by exact GetKernel identity;
+                # it must never trigger a second physical push.
+                response = self.api.kernels_push(
+                    str(folder),
+                    timeout=str(timeout_seconds) if timeout_seconds is not None else None,
+                    acc=None,
+                )
+                attempts = 1
                 push_response_received = True
                 response_ref = str(_field(response, "ref") or "").strip()
                 ref = _normalized_ref(response_ref or intent.provider_ref)
@@ -989,14 +985,15 @@ class KaggleProviderAdapter:
                 error = str(_field(response, "error") or "").strip()
                 if error:
                     raise KaggleTerminalFailure(f"Kaggle rejected notebook push: {error[:500]}")
-                if pending_runtime_attestation:
+                if pending_runtime_attestation or not response_ref or version is None or provider_kernel_id is None:
                     # The pinned official SDK's legacy username/key transport can
                     # successfully commit a private Notebook while projecting an
                     # empty ApiSaveKernelResponse (ref="", version=0, id=0).  The
                     # same authenticated GetKernel(latest) call used by
                     # ``kernels_pull`` returns the exact ref, privacy, numeric id,
                     # current version, and materialized source.  Reconcile that
-                    # read-only response instead of adding a second auth flow or
+                    # read-only response for both protected masters and ordinary
+                    # disposable workers instead of adding a second auth flow or
                     # blindly pushing again.
                     readback, readback_kernel_id = self._read_latest_private_notebook_identity(
                         intent.provider_ref, expected_source_sha256=source_sha
@@ -1039,14 +1036,22 @@ class KaggleProviderAdapter:
                 else:
                     recovered = self._recover_notebook(intent.provider_ref, source_sha)
                     if recovered is None:
-                        self._persist_uncertain(intent, detail="notebook_push_ambiguous")
-                        raise KaggleAmbiguousMutation("notebook push/run outcome is not exactly reconcilable") from exc
+                        try:
+                            recovered, provider_kernel_id = self._read_latest_private_notebook_identity(
+                                intent.provider_ref, expected_source_sha256=source_sha
+                            )
+                        except Exception:
+                            self._persist_uncertain(intent, detail="notebook_push_ambiguous")
+                            raise KaggleAmbiguousMutation(
+                                "notebook push/run outcome is not exactly reconcilable"
+                            ) from exc
+                    else:
+                        _observed, _version_number, provider_kernel_id = self._find_resource(
+                            intent.provider_ref, ProviderKind.NOTEBOOK
+                        )
+                        if provider_kernel_id is None:
+                            raise KaggleIdentityError("recovered Kaggle run lacks an exact provider kernel id") from exc
                     source_identity = recovered
-                    _observed, _version_number, provider_kernel_id = self._find_resource(
-                        intent.provider_ref, ProviderKind.NOTEBOOK
-                    )
-                    if provider_kernel_id is None:
-                        raise KaggleIdentityError("recovered Kaggle run lacks an exact provider kernel id") from exc
                     attempts = 0
                     outcome = EffectOutcome.ALREADY_APPLIED
         run = KaggleKernelRunIdentity(
@@ -1152,7 +1157,7 @@ class KaggleProviderAdapter:
         return source_sha, provider_id
 
     def _read_latest_private_notebook_identity(
-        self, provider_ref: str, *, expected_source_sha256: str
+        self, provider_ref: str, *, expected_source_sha256: str | None
     ) -> tuple[KaggleKernelSourceIdentity, int]:
         """Read exact latest identity through the pinned official GetKernel API.
 
@@ -1200,7 +1205,7 @@ class KaggleProviderAdapter:
         ):
             raise KaggleIdentityError("Kaggle latest readback lacks exact private identity")
         source_sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
-        if source_sha != expected_source_sha256:
+        if expected_source_sha256 is not None and source_sha != expected_source_sha256:
             raise KaggleIdentityError("Kaggle latest readback differs from the exact pushed source")
         fingerprint = ProviderFingerprint(
             value=sha256_value(
@@ -1774,11 +1779,12 @@ class KaggleProviderAdapter:
             current = self.read_private_dataset(provider_ref=claim.provider_ref, version=claim.provider_version)
             current_fingerprint = current.fingerprint
         else:
-            current_source = self.read_private_notebook_source(
-                provider_ref=claim.provider_ref,
-                source_version=claim.provider_version,
+            current_source, _provider_kernel_id = self._read_latest_private_notebook_identity(
+                claim.provider_ref,
                 expected_source_sha256=None,
             )
+            if current_source.source_version != claim.provider_version:
+                raise KagglePolicyError("cleanup target source version is no longer current")
             current_fingerprint = current_source.fingerprint
         if current_fingerprint != claim.fingerprint or intent.expected_fingerprint != claim.fingerprint:
             raise KagglePolicyError("cleanup target differs from the exact task-created fingerprint")
@@ -1922,16 +1928,14 @@ class KaggleProviderAdapter:
         raise KaggleNotFound(f"Kaggle {kind.value} {ref} was not found in owned inventory")
 
     def _assert_current_run(self, run: KaggleKernelRunIdentity) -> None:
-        current_sha, provider_kernel_id = self._pull_private_notebook_source(run.provider_ref, None)
-        if current_sha != run.source_sha256:
-            raise KaggleIdentityError("Kaggle status/output is latest-by-slug and source has advanced")
-        if provider_kernel_id != run.provider_kernel_id:
-            raise KaggleIdentityError("Kaggle status/output belongs to a different provider kernel id")
-        self.read_private_notebook_source(
-            provider_ref=run.provider_ref,
-            source_version=run.source_version,
+        current, provider_kernel_id = self._read_latest_private_notebook_identity(
+            run.provider_ref,
             expected_source_sha256=run.source_sha256,
         )
+        if current.source_version != run.source_version:
+            raise KaggleIdentityError("Kaggle status/output is latest-by-slug and source version has advanced")
+        if provider_kernel_id != run.provider_kernel_id:
+            raise KaggleIdentityError("Kaggle status/output belongs to a different provider kernel id")
 
     def _is_absent(self, provider_ref: str, kind: ProviderKind) -> bool:
         try:
