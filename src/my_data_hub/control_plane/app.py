@@ -9,11 +9,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from uuid import UUID
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
 
+from my_data_hub.checkpoints import CheckpointManifest, ControlLedgerCheckpointRegistry
+from my_data_hub.checkpoints.manifest import ManifestError
 from my_data_hub.control_plane.adapters import LedgerMasterResolver
-from my_data_hub.control_plane.ledger import ControlLedger, EventRejected
+from my_data_hub.control_plane.ledger import ControlLedger, ControlLedgerError, EventRejected
 from my_data_hub.control_plane.runtime import (
     ControlPlaneMasterRuntime,
     MasterRuntimeSettings,
@@ -21,6 +24,13 @@ from my_data_hub.control_plane.runtime import (
     SessionCredentialRegistrar,
     build_production_runtime,
 )
+from my_data_hub.providers.kaggle import ControlLedgerKaggleJournal
+from my_data_hub.providers.kaggle.contracts import (
+    ProviderEffectIntent,
+    ProviderEffectReceipt,
+    TaskResourceClaim,
+)
+from my_data_hub.providers.models import ControlClass
 
 DATABASE_ENVIRONMENT_NAMES = (
     "MY_DATA_HUB_DATABASE_URL",
@@ -125,8 +135,7 @@ class ControlPlaneSettings:
         leaked = sorted(name for name in candidates if os.getenv(name, "").strip())
         if leaked:
             raise ControlPlaneConfigurationError(
-                "lightweight control plane must not receive master database credentials: "
-                + ", ".join(leaked)
+                "lightweight control plane must not receive master database credentials: " + ", ".join(leaked)
             )
         try:
             port = int(os.getenv("MY_DATA_HUB_CONTROL_PORT", "8080"))
@@ -141,9 +150,7 @@ class ControlPlaneSettings:
             scheduler_enabled=_disabled("MY_DATA_HUB_SCHEDULER_ENABLED"),
             production_publish_enabled=_disabled("MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED"),
             remote_mcp_writes_enabled=_disabled("MY_DATA_HUB_MCP_WRITE_ENABLED"),
-            ledger_path=Path(
-                os.getenv("MY_DATA_HUB_CONTROL_LEDGER_PATH", "/state/control.sqlite3")
-            ).expanduser(),
+            ledger_path=Path(os.getenv("MY_DATA_HUB_CONTROL_LEDGER_PATH", "/state/control.sqlite3")).expanduser(),
             master_runtime=MasterRuntimeSettings.from_env(),
             session_credentials_path=Path(
                 os.getenv("MY_DATA_HUB_MASTER_SESSION_DIR", "/state/master-sessions")
@@ -175,6 +182,7 @@ def create_app(
             raise ControlPlaneConfigurationError("master runtime and app must share one control ledger")
         provider_status = "available"
     resolver = LedgerMasterResolver(control_ledger)
+    provider_journal = ControlLedgerKaggleJournal(control_ledger)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -217,6 +225,98 @@ def create_app(
         master_runtime.reconcile_requested_once if master_runtime is not None else None
     )
 
+    def _runtime_authority(
+        *,
+        authorization: str | None,
+        run_id: str | None,
+        attempt_id: str | None,
+        master_instance_id: str | None,
+        epoch: str | None,
+        allowed_states: frozenset[str] = frozenset({"ACTIVE", "DRAINING", "CHECKPOINTING"}),
+    ):  # type: ignore[no-untyped-def]
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail={"code": "runtime_token_required"})
+        token = authorization.removeprefix("Bearer ").strip()
+        try:
+            exact_run_id = str(UUID(str(run_id)))
+            exact_attempt_id = str(UUID(str(attempt_id)))
+            exact_master_id = str(UUID(str(master_instance_id)))
+            exact_epoch = int(str(epoch))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=401, detail={"code": "runtime_identity_invalid"}) from exc
+        if exact_epoch < 1 or not control_ledger.runtime_token_valid(exact_run_id, exact_attempt_id, token):
+            raise HTTPException(status_code=401, detail={"code": "runtime_token_invalid"})
+        operation = control_ledger.operation_for_attempt(exact_run_id, exact_attempt_id)
+        if operation is None:
+            raise HTTPException(status_code=401, detail={"code": "runtime_attempt_unknown"})
+        identity = operation.identity
+        if (
+            str(identity.get("run_id")) != exact_run_id
+            or str(identity.get("attempt_id")) != exact_attempt_id
+            or str(identity.get("master_instance_id")) != exact_master_id
+            or int(identity.get("epoch", 0)) != exact_epoch
+            or control_ledger.current_epoch("postgres-master") != exact_epoch
+            or operation.state not in allowed_states
+        ):
+            raise HTTPException(status_code=409, detail={"code": "runtime_epoch_fenced"})
+        return operation
+
+    async def _bounded_json(request: Request) -> dict[str, Any]:
+        raw = await request.body()
+        if len(raw) > 256 * 1024:
+            raise HTTPException(status_code=413, detail={"code": "metadata_too_large"})
+        try:
+            value = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail={"code": "invalid_json"}) from exc
+        if not isinstance(value, dict):
+            raise HTTPException(status_code=400, detail={"code": "invalid_json_object"})
+
+        forbidden = {"authorization", "database_url", "dsn", "password", "private_key", "secret", "token"}
+
+        def inspect(candidate: object) -> None:
+            if isinstance(candidate, dict):
+                for key, nested in candidate.items():
+                    if str(key).lower() in forbidden:
+                        raise HTTPException(status_code=422, detail={"code": "secret_or_bytes_forbidden"})
+                    inspect(nested)
+            elif isinstance(candidate, list):
+                for nested in candidate:
+                    inspect(nested)
+            elif isinstance(candidate, str) and len(candidate) > 16 * 1024:
+                raise HTTPException(status_code=422, detail={"code": "inline_bytes_forbidden"})
+
+        inspect(value)
+        return value
+
+    def _checkpoint_record(checkpoint_id: str | None) -> dict[str, Any] | None:
+        if checkpoint_id is None:
+            return None
+        record = control_ledger.checkpoint_candidate(checkpoint_id)
+        if record is None or record["status"] != "VERIFIED" or not record["version_ref"]:
+            raise HTTPException(status_code=409, detail={"code": "checkpoint_head_invalid"})
+        return {
+            "checkpoint_id": record["checkpoint_id"],
+            "dataset_ref": record["dataset_ref"],
+            "exact_version_ref": record["version_ref"],
+            "manifest_sha256": record["manifest_sha256"],
+        }
+
+    def _checkpoint_head(service_kind: str) -> dict[str, Any]:
+        if service_kind != "postgres-master":
+            raise HTTPException(status_code=404, detail={"code": "checkpoint_service_unknown"})
+        head = control_ledger.checkpoint_head(service_kind)
+        return {
+            "generation": head.generation if head else 0,
+            "current": _checkpoint_record(head.current_checkpoint_id) if head else None,
+            "previous": _checkpoint_record(head.previous_checkpoint_id) if head else None,
+        }
+
+    def _assert_checkpoint_owner(checkpoint_id: str, operation_id: str, service_kind: str) -> None:
+        record = control_ledger.checkpoint_candidate(checkpoint_id)
+        if record is None or record["operation_id"] != operation_id or record["service_kind"] != service_kind:
+            raise HTTPException(status_code=403, detail={"code": "checkpoint_authority_mismatch"})
+
     def snapshot() -> dict[str, Any]:
         master = resolver.resolve_master(_system_identity())
         return {
@@ -235,9 +335,15 @@ def create_app(
         from my_data_hub.mcp.oauth import AccessIdentity
 
         return AccessIdentity(
-            subject="control-health", client_id="control-health", scopes=frozenset(),
-            audience="local-control", token_id="control-health", expires_at=2**63 - 1,
-            issuer="local-control", issued_at=0, resource="local-control",
+            subject="control-health",
+            client_id="control-health",
+            scopes=frozenset(),
+            audience="local-control",
+            token_id="control-health",
+            expires_at=2**63 - 1,
+            issuer="local-control",
+            issued_at=0,
+            resource="local-control",
         )
 
     @app.get("/health/live")
@@ -291,9 +397,7 @@ def create_app(
         }
 
     @app.post("/internal/runtime/events")
-    async def runtime_event(
-        request: Request, authorization: str | None = Header(default=None)
-    ) -> dict[str, Any]:
+    async def runtime_event(request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         # Callback ingestion exists independently of the provider worker. The
         # coordinator validates exact run/attempt/epoch and the per-run token;
         # without an attached coordinator this endpoint stays fail closed.
@@ -306,9 +410,7 @@ def create_app(
         if len(raw) > 64 * 1024:
             raise HTTPException(status_code=413, detail={"code": "runtime_event_too_large"})
         try:
-            receipt = coordinator.accept_runtime_event(
-                raw, header_token=authorization.removeprefix("Bearer ").strip()
-            )
+            receipt = coordinator.accept_runtime_event(raw, header_token=authorization.removeprefix("Bearer ").strip())
         except EventRejected as exc:
             raise HTTPException(status_code=400, detail={"code": "runtime_event_rejected"}) from exc
         return {
@@ -406,14 +508,361 @@ def create_app(
                 raise HTTPException(status_code=409, detail={"code": "active_epoch_mismatch"})
             latest_expiry = service.lease_until
         credentials = [
-            _session_credential(item, identity, now=now, latest_expiry=latest_expiry)
-            for item in body["credentials"]
+            _session_credential(item, identity, now=now, latest_expiry=latest_expiry) for item in body["credentials"]
         ]
         references: list[str] = []
         for credential in credentials:
             reference = registrar.store(credential)
             references.append(Path(reference).name)
         return {"registered": len(references), "credential_refs": references}
+
+    @app.post("/internal/provider-journal/intents")
+    async def provider_journal_intent(
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, bool]:
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        body = await _bounded_json(request)
+        if set(body) != {"intent"}:
+            raise HTTPException(status_code=422, detail={"code": "intent_envelope_invalid"})
+        try:
+            intent = ProviderEffectIntent.model_validate(body["intent"])
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail={"code": "intent_invalid"}) from exc
+        if str(intent.operation_id) != operation.operation_id or str(intent.task_id) != str(
+            operation.identity["run_id"]
+        ):
+            raise HTTPException(status_code=403, detail={"code": "provider_authority_mismatch"})
+        provider_journal.persist_intent(intent)
+        return {"persisted": True}
+
+    @app.post("/internal/provider-journal/receipts")
+    async def provider_journal_receipt(
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, bool]:
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        body = await _bounded_json(request)
+        if set(body) != {"receipt"}:
+            raise HTTPException(status_code=422, detail={"code": "receipt_envelope_invalid"})
+        try:
+            receipt = ProviderEffectReceipt.model_validate(body["receipt"])
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail={"code": "receipt_invalid"}) from exc
+        authority = control_ledger.provider_effect_authority(str(receipt.effect_id))
+        if authority is None or (
+            authority["operation_id"] != operation.operation_id
+            or authority["task_id"] != str(operation.identity["run_id"])
+            or str(receipt.operation_id) != operation.operation_id
+        ):
+            raise HTTPException(status_code=403, detail={"code": "provider_authority_mismatch"})
+        provider_journal.persist_receipt(receipt)
+        return {"persisted": True}
+
+    @app.post("/internal/provider-journal/resource-claims")
+    async def provider_journal_claim(
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, bool]:
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        body = await _bounded_json(request)
+        if set(body) != {"claim"}:
+            raise HTTPException(status_code=422, detail={"code": "claim_envelope_invalid"})
+        try:
+            claim = TaskResourceClaim.model_validate(body["claim"])
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail={"code": "claim_invalid"}) from exc
+        authority = control_ledger.provider_effect_authority(str(claim.effect_id))
+        if (
+            authority is None
+            or authority["operation_id"] != operation.operation_id
+            or authority["task_id"] != str(claim.task_id)
+            or str(claim.task_id) != str(operation.identity["run_id"])
+            or claim.control_class != ControlClass.ORCHESTRATOR_PROTECTED
+            or claim.disposable
+        ):
+            raise HTTPException(status_code=403, detail={"code": "provider_authority_mismatch"})
+        provider_journal.persist_resource_claim(claim)
+        return {"persisted": True}
+
+    @app.post("/internal/provider-journal/resource-claims/assert")
+    async def provider_journal_assert_claim(
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, bool]:
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        body = await _bounded_json(request)
+        try:
+            claim = TaskResourceClaim.model_validate(body.get("claim"))
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail={"code": "claim_invalid"}) from exc
+        authority = control_ledger.provider_effect_authority(str(claim.effect_id))
+        if (
+            authority is None
+            or authority["operation_id"] != operation.operation_id
+            or str(claim.task_id) != str(operation.identity["run_id"])
+        ):
+            raise HTTPException(status_code=403, detail={"code": "provider_authority_mismatch"})
+        try:
+            provider_journal.assert_resource_claim(claim)
+        except PermissionError:
+            return {"authorized": False}
+        return {"authorized": True}
+
+    @app.get("/internal/checkpoints/{service_kind}/head")
+    def checkpoint_head(
+        service_kind: str,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            allowed_states=frozenset({"REGISTERING", "ACTIVE", "DRAINING", "CHECKPOINTING"}),
+        )
+        return _checkpoint_head(service_kind)
+
+    @app.post("/internal/checkpoints/candidates")
+    async def checkpoint_candidate(
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, bool]:
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        body = await _bounded_json(request)
+        if set(body) != {"operation_id", "dataset_ref", "service_kind", "manifest"}:
+            raise HTTPException(status_code=422, detail={"code": "checkpoint_envelope_invalid"})
+        try:
+            manifest = CheckpointManifest.from_payload(body["manifest"])
+        except (ManifestError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail={"code": "checkpoint_manifest_invalid"}) from exc
+        configured_master = runtime.master_runtime or (
+            master_runtime.settings if master_runtime is not None else None
+        )
+        expected_dataset = configured_master.assets.checkpoint_ref if configured_master else None
+        if (
+            body["operation_id"] != operation.operation_id
+            or body["service_kind"] != "postgres-master"
+            or not expected_dataset
+            or body["dataset_ref"] != expected_dataset
+            or str(manifest.master_instance_id) != str(operation.identity["master_instance_id"])
+            or manifest.epoch != int(operation.identity["epoch"])
+            or manifest.source_run_id != str(operation.identity["run_id"])
+        ):
+            raise HTTPException(status_code=403, detail={"code": "checkpoint_authority_mismatch"})
+        registry = ControlLedgerCheckpointRegistry(
+            control_ledger,
+            operation_id=operation.operation_id,
+            dataset_ref=body["dataset_ref"],
+            service_kind=body["service_kind"],
+        )
+        try:
+            registry.add_candidate(manifest)
+        except (ValueError, ControlLedgerError) as exc:
+            raise HTTPException(status_code=409, detail={"code": "checkpoint_candidate_rejected"}) from exc
+        return {"persisted": True}
+
+    async def _checkpoint_transition_body(request: Request) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        if body.get("service_kind") != "postgres-master":
+            raise HTTPException(status_code=422, detail={"code": "checkpoint_service_invalid"})
+        return body
+
+    def _checkpoint_registry_for(operation_id: str, checkpoint_id: str) -> ControlLedgerCheckpointRegistry:
+        record = control_ledger.checkpoint_candidate(checkpoint_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail={"code": "checkpoint_not_found"})
+        _assert_checkpoint_owner(checkpoint_id, operation_id, str(record["service_kind"]))
+        return ControlLedgerCheckpointRegistry(
+            control_ledger,
+            operation_id=operation_id,
+            dataset_ref=str(record["dataset_ref"]),
+            service_kind=str(record["service_kind"]),
+        )
+
+    @app.post("/internal/checkpoints/{checkpoint_id}/uploaded")
+    async def checkpoint_uploaded(
+        checkpoint_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, bool]:
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        body = await _checkpoint_transition_body(request)
+        if set(body) != {"service_kind", "exact_version_ref"}:
+            raise HTTPException(status_code=422, detail={"code": "checkpoint_transition_invalid"})
+        _checkpoint_registry_for(operation.operation_id, checkpoint_id).uploaded(
+            UUID(checkpoint_id), str(body["exact_version_ref"])
+        )
+        return {"persisted": True}
+
+    async def _simple_checkpoint_transition(
+        checkpoint_id: str, request: Request, operation_id: str, action: str
+    ) -> dict[str, bool]:
+        body = await _checkpoint_transition_body(request)
+        registry = _checkpoint_registry_for(operation_id, checkpoint_id)
+        try:
+            if action == "readback":
+                registry.readback_verified(UUID(checkpoint_id))
+            elif action == "restore":
+                registry.restore_verified(UUID(checkpoint_id))
+            elif action == "reject":
+                if set(body) != {"service_kind", "reason"}:
+                    raise ValueError("rejection reason missing")
+                registry.reject(UUID(checkpoint_id), str(body["reason"]))
+            else:
+                raise AssertionError(action)
+        except (ValueError, ControlLedgerError) as exc:
+            raise HTTPException(status_code=409, detail={"code": "checkpoint_transition_rejected"}) from exc
+        return {"persisted": True}
+
+    @app.post("/internal/checkpoints/{checkpoint_id}/readback-verified")
+    async def checkpoint_readback_verified(
+        checkpoint_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, bool]:
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        return await _simple_checkpoint_transition(checkpoint_id, request, operation.operation_id, "readback")
+
+    @app.post("/internal/checkpoints/{checkpoint_id}/restore-verified")
+    async def checkpoint_restore_verified(
+        checkpoint_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, bool]:
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        return await _simple_checkpoint_transition(checkpoint_id, request, operation.operation_id, "restore")
+
+    @app.post("/internal/checkpoints/{checkpoint_id}/reject")
+    async def checkpoint_reject(
+        checkpoint_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, bool]:
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        return await _simple_checkpoint_transition(checkpoint_id, request, operation.operation_id, "reject")
+
+    @app.post("/internal/checkpoints/{checkpoint_id}/promote")
+    async def checkpoint_promote(
+        checkpoint_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        body = await _checkpoint_transition_body(request)
+        if set(body) != {"service_kind", "expected_generation"}:
+            raise HTTPException(status_code=422, detail={"code": "checkpoint_promotion_invalid"})
+        registry = _checkpoint_registry_for(operation.operation_id, checkpoint_id)
+        try:
+            registry.promote(UUID(checkpoint_id), expected_generation=int(body["expected_generation"]))
+        except (ValueError, ControlLedgerError) as exc:
+            raise HTTPException(status_code=409, detail={"code": "checkpoint_promotion_rejected"}) from exc
+        return _checkpoint_head(str(body["service_kind"]))
 
     @app.api_route(
         "/{data_path:path}",

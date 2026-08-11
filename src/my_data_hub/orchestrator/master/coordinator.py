@@ -215,6 +215,22 @@ class MasterCoordinator:
                 event_id=event.event_id,
             )
         elif event.event_type == RuntimeEventType.CHECKPOINT_VERIFIED:
+            checkpoint_id = str(event.data.get("checkpoint_id", ""))
+            manifest_sha256 = str(event.data.get("manifest_sha256", ""))
+            head = self.ledger.checkpoint_head(MASTER_SERVICE_KIND)
+            candidate = self.ledger.checkpoint_candidate(checkpoint_id)
+            if (
+                head is None
+                or head.current_checkpoint_id != checkpoint_id
+                or candidate is None
+                or candidate["status"] != "VERIFIED"
+                or candidate["operation_id"] != operation.operation_id
+                or candidate["master_instance_id"] != str(operation.identity["master_instance_id"])
+                or candidate["epoch"] != event.epoch
+                or candidate["manifest_sha256"] != manifest_sha256
+                or event.data.get("current_checkpoint_id") != checkpoint_id
+            ):
+                raise ValueError("checkpoint.verified is not bound to the durable verified HEAD")
             self.ledger.project_master_lifecycle(
                 operation_id=operation.operation_id,
                 service_instance_id=event.service_instance_id,

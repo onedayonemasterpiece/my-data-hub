@@ -284,6 +284,29 @@ def test_checkpoint_callbacks_project_drain_stop_and_revoke_runtime_token(tmp_pa
         epoch=handle.epoch,
     )
     coordinator.accept_runtime_event(ready, header_token=SECRET)
+    checkpoint_id = "checkpoint-lifecycle-verified"
+    manifest_sha256 = "c" * 64
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=checkpoint_id,
+        service_kind="postgres-master",
+        operation_id=handle.operation_id,
+        dataset_ref="owner/checkpoints",
+        version_ref=None,
+        manifest_sha256=manifest_sha256,
+        source_checkpoint_id=None,
+        source_head_generation=0,
+        master_instance_id=handle.master_instance_id,
+        epoch=handle.epoch,
+    )
+    ledger.mark_checkpoint_uploaded(checkpoint_id, "owner/checkpoints/1")
+    ledger.mark_checkpoint_readback_verified(checkpoint_id)
+    ledger.mark_checkpoint_restore_verified(checkpoint_id)
+    ledger.promote_checkpoint(
+        "postgres-master",
+        checkpoint_id,
+        expected_generation=0,
+        expected_parent_checkpoint_id=None,
+    )
     for sequence, event_type in enumerate(
         (
             RuntimeEventType.RUNTIME_DRAINING,
@@ -293,7 +316,16 @@ def test_checkpoint_callbacks_project_drain_stop_and_revoke_runtime_token(tmp_pa
         ),
         start=2,
     ):
-        event = runtime_event(handle, event_type, sequence, clock.now())
+        data = (
+            {
+                "checkpoint_id": checkpoint_id,
+                "manifest_sha256": manifest_sha256,
+                "current_checkpoint_id": checkpoint_id,
+            }
+            if event_type == RuntimeEventType.CHECKPOINT_VERIFIED
+            else {}
+        )
+        event = runtime_event(handle, event_type, sequence, clock.now(), **data)
         coordinator.accept_runtime_event(event, header_token=SECRET)
     operation = ledger.get_operation(handle.operation_id)
     assert operation is not None and operation.state == MasterState.STOPPED.value

@@ -1267,6 +1267,19 @@ class ControlLedger:
         if row is None or not hmac.compare_digest(row["claim_json"], claim_json):
             raise PermissionError("resource has no exact task-created claim in the durable control ledger")
 
+    def provider_effect_authority(self, effect_id: str) -> dict[str, str] | None:
+        """Return only the bounded identity needed to authorize a remote journal call."""
+
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT effect_id,operation_id,task_id,provider_ref,action "
+                "FROM provider_effect_intents WHERE effect_id=?",
+                (effect_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {key: str(value) for key, value in dict(row).items()}
+
     def acquire_resource_lease(
         self,
         *,
@@ -1577,6 +1590,23 @@ class ControlLedger:
         with self._reader() as connection:
             row = connection.execute("SELECT * FROM checkpoint_heads WHERE service_kind=?", (service_kind,)).fetchone()
         return self._checkpoint_head_from_row(row) if row else None
+
+    def checkpoint_candidate(self, checkpoint_id: str) -> dict[str, Any] | None:
+        """Return a metadata-only checkpoint projection; archive bytes never enter the ledger."""
+
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT checkpoint_id,service_kind,operation_id,dataset_ref,version_ref,manifest_sha256,"
+                "source_checkpoint_id,source_head_generation,master_instance_id,epoch,status "
+                "FROM checkpoint_candidates WHERE checkpoint_id=?",
+                (checkpoint_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["epoch"] = int(result["epoch"])
+        result["source_head_generation"] = int(result["source_head_generation"])
+        return result
 
     def revoke_oauth_reference(
         self,
