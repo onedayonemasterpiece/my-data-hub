@@ -15,15 +15,18 @@ scenario `LIVE_PASS`.
   and canonical-relation zero-row probes.
 - **FM07 — Done (implementation):** owner-host CAS drives twenty same-key
   ensures and validates a single physical provider run/operation.
-- **FM08 — Done (implementation):** task-bound callback suppression persists
-  the exact heartbeat/body, keeps retries unacknowledged, survives a real
-  independently supervised control restart, records before/after process boot
-  UUIDs, then projects the exact duplicate and marks `REPLAYED`.
+- **FM08 — Partial:** task-bound callback suppression persists the exact
+  heartbeat/body, keeps retries unacknowledged, survives a real independently
+  supervised control restart, records before/after process boot UUIDs, then
+  projects the exact duplicate and marks `REPLAYED`. This is not the required
+  abrupt *master* termination/recovery with distinct provider runs, so FM08
+  remains blocked rather than projecting invented old/new run identities.
 - **FM09 — Done (implementation):** exact stored callback replay, revoked-token
   replay, stale-epoch replay, and before/after control-state hashes are fixed.
 - **FM10 — Done (implementation):** the runtime ACKs suspension of heartbeat,
   DatabaseGate and tunnel/session renewal; the brokered H1 probe waits for real
-  expiry, observes SQLSTATE 55000/INERROR, rolls back, and proves revision/row/
+  expiry, observes both deferred and fresh immediate SQLSTATE 55000/INERROR
+  guards, rolls back, and proves invalidated write authority plus revision/row/
   outbox/audit invariance through a private atomic completion journal.
 - **FM11 — Partial (assembly):** the concrete four-denial probe and replacement
   binder are implemented and the unified opt-in fails closed unless a concrete
@@ -45,6 +48,27 @@ scenario `LIVE_PASS`.
   FM08 supervisor, FM10 session directory, and FM11 adapter. The checkpoint
   entrypoint contract is integrated, but this lane did not fabricate a provider
   launch in the absence of its protected production inputs.
+
+## 2026-08-11 remediation
+
+- centralized control Kaggle authentication now accepts either a private access
+  token or a complete legacy username/key pair; partial and mixed profiles fail
+  closed, and remote MCP/OAuth/Notebook launch metadata receives no legacy key;
+- FM10 and FM11 status receipts project newly validated observations. FM11
+  requires consecutive epochs, registry resolution to the replacement, and
+  distinct exact old/new provider run/kernel identities;
+- master carrier status validates exact push source identity and projects real
+  terminal file/tree/receipt hashes only when the official-adapter terminal
+  recovery audit exists. The actual filename is
+  `my-data-hub-master-terminal.json`; active runs retain null output fields;
+- MCP `acceptance.scenario.request` now forwards `target_operation_id`.
+
+The production `serve()` assembly remains blocked on two absent concrete
+primitives: a dedicated checkpoint-acceptance launch/status authority (it may
+not borrow an ACTIVE master runtime token), and a task-keyed FM11 pre-drain
+context supervisor providing the four old-epoch denial clients. Enabling the
+operator surface without those primitives would either crash startup or
+overstate capability, so this lane does not set a deploy opt-in flag.
 
 ## Relevant implementation commits
 
