@@ -139,6 +139,7 @@ def validate_json_and_schemas(report: Report) -> None:
         "operational-mvp-acceptance-receipt.v1.example.json": (
             "operational-mvp-acceptance-receipt.v1.schema.json"
         ),
+        "master-asset-bundle.v1.example.json": "master-asset-bundle.v1.schema.json",
     }
     checker = FormatChecker()
     for example_name, schema_name in mappings.items():

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/master-asset-bundle.v1.schema.json",
+  "title": "Master asset bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "provider_ref": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+      "maxLength": 300
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "byte_size"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(?:dataset/)?[A-Za-z0-9_.+-]+$",
+          "maxLength": 240
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 67108864
+        }
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "source_commit",
+    "source_identity",
+    "source_version",
+    "launch_dataset_ref",
+    "master_notebook_ref",
+    "checkpoint_dataset_ref",
+    "checkpoint_verifier_ref",
+    "probe_relations",
+    "assets"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-master-asset-bundle.v1"
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "source_identity": {
+      "type": "string",
+      "pattern": "^git:[0-9a-f]{40}$"
+    },
+    "source_version": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "launch_dataset_ref": {"$ref": "#/$defs/provider_ref"},
+    "master_notebook_ref": {"$ref": "#/$defs/provider_ref"},
+    "checkpoint_dataset_ref": {"$ref": "#/$defs/provider_ref"},
+    "checkpoint_verifier_ref": {"$ref": "#/$defs/provider_ref"},
+    "probe_relations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z_][a-z0-9_]*\\.[a-z_][a-z0-9_]*$"
+      }
+    },
+    "assets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["master_notebook", "checkpoint_verifier", "wheel"],
+      "properties": {
+        "master_notebook": {"$ref": "#/$defs/asset"},
+        "checkpoint_verifier": {"$ref": "#/$defs/asset"},
+        "wheel": {"$ref": "#/$defs/asset"}
+      }
+    }
+  }
+}
