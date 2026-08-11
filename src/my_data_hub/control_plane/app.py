@@ -417,7 +417,16 @@ def create_app(
         if operation is None or operation.operation_kind != "ensure_master":
             raise HTTPException(status_code=409, detail={"code": "master_operation_invalid"})
         identity = operation.identity
-        if operation.state != "ACTIVE" or control_ledger.current_epoch("postgres-master") != int(identity["epoch"]):
+        service = control_ledger.resolve_service("postgres-master")
+        if (
+            operation.state != "ACTIVE"
+            or service is None
+            or control_ledger.current_epoch("postgres-master") != int(identity["epoch"])
+            or service.epoch != int(identity["epoch"])
+            or service.run_id != str(identity["run_id"])
+            or service.attempt_id != str(identity["attempt_id"])
+            or service.master_instance_id != str(identity["master_instance_id"])
+        ):
             raise HTTPException(status_code=409, detail={"code": "master_not_active"})
         record, created = control_ledger.ensure_blogger_migration_request(
             request_id=str(migration.request_id),
