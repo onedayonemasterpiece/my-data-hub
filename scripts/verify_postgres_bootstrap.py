@@ -71,8 +71,11 @@ def main() -> int:
         )
         migrations = [(int(row[0]), str(row[1])) for row in cursor.fetchall()]
         evidence["migrations"] = migrations
-        expected_versions = list(range(1, 14))
-        if [row[0] for row in migrations] != expected_versions:
+        expected_migrations = [
+            (int(path.name[:4]), path.name)
+            for path in sorted((ROOT / "sql" / "migrations").glob("[0-9][0-9][0-9][0-9]_*.sql"))
+        ]
+        if migrations != expected_migrations:
             findings.append(f"migration history mismatch: {migrations}")
 
         cursor.execute(
@@ -85,7 +88,8 @@ def main() -> int:
             if state
             else None
         )
-        if state is None or int(state[0]) != 13 or int(state[1]) != 0:
+        expected_schema_revision = expected_migrations[-1][0]
+        if state is None or int(state[0]) != expected_schema_revision or int(state[1]) != 0:
             findings.append(f"unexpected canonical state: {state}")
 
         cursor.execute(
