@@ -31,6 +31,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from my_data_hub.acceptance.scenario_operator import CheckpointAcceptanceOperationalResult
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.providers.kaggle import KaggleProviderAdapter
@@ -49,6 +50,14 @@ MINIMUM_SOAK_SECONDS = 60 * 60
 MAXIMUM_SOAK_SECONDS = 90 * 60
 MAX_RESULT_BYTES = 2 * 1024 * 1024
 RESUMABLE_OWNER_BLOCKER = "FM16_AWAITING_OWNER_AUTHORIZATION"
+CHECKPOINT_REQUIREMENTS = frozenset({"FM05", "FM14", "FM15"})
+CHECKPOINT_SCENARIO_NAMES = frozenset(
+    {
+        "verified-empty-checkpoint-roundtrip",
+        "corrupt-candidate-head-preserved",
+        "restore-smoke-failure-head-preserved",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,6 +407,20 @@ class DriverResult(BaseModel):
             raise ValueError("READY driver result lacks exact pending cleanup evidence")
         if self.phase == "CLEANUP" and self.outcome == "PASS" and self.cleanup_state != "COMPLETE":
             raise ValueError("cleanup PASS requires COMPLETE cleanup evidence")
+        if (
+            self.phase == "EXECUTE"
+            and self.outcome == "PASS"
+            and self.scenario in CHECKPOINT_SCENARIO_NAMES
+            and (
+                self.output_receipt_sha256 is None
+                or self.output_file_sha256 is None
+                or self.output_tree_sha256 is None
+                or self.claim_task_id is None
+                or self.claim_sha256 is None
+                or self.cleanup_state != "NOT_REQUIRED"
+            )
+        ):
+            raise ValueError("checkpoint evidence locator lacks exact output receipts")
         if self.outcome == "BLOCKED" and not (self.blocker_code and self.integration_dependency):
             raise ValueError("BLOCKED driver result lacks a concrete integration dependency")
         if self.outcome == "BLOCKED" and self.mutations_started != 0:
@@ -620,6 +643,121 @@ def _invoke_driver(command: Sequence[str], request: Mapping[str, Any], *, timeou
         return result
 
 
+_CHECKPOINT_OUTPUT_STAGES: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "FM05": (
+        ("empty_candidate", "EMPTY_CANDIDATE_CREATED", "succeeded"),
+        ("private_upload", "PRIVATE_CANDIDATE_UPLOADED", "succeeded"),
+        ("exact_readback", "EXACT_READBACK_VERIFIED", "succeeded"),
+        ("independent_restore", "INDEPENDENT_RESTORE_VERIFIED", "succeeded"),
+        ("cas_promotion", "HEAD_CAS_PROMOTED", "succeeded"),
+    ),
+    "FM14": (
+        ("corrupted_candidate", "TASK_OWNED_CORRUPTION_CANDIDATE_CREATED", "succeeded"),
+        ("hash_mismatch_rejection", "EXACT_READBACK_HASH_MISMATCH_REJECTED", "rejected_expected"),
+    ),
+    "FM15": (
+        ("restore_failure_candidate", "TASK_OWNED_RESTORE_FAILURE_CANDIDATE_CREATED", "succeeded"),
+        ("exact_readback", "EXACT_READBACK_VERIFIED", "succeeded"),
+        ("forced_restore_rejection", "FORCED_DISPOSABLE_RESTORE_FAILURE_REJECTED", "rejected_expected"),
+    ),
+}
+
+
+def _checkpoint_operational_output(
+    raw: bytes,
+    *,
+    plan: Mapping[str, Any],
+    row: Mapping[str, Any],
+    locator: DriverResult,
+) -> OperationalOutput:
+    result = CheckpointAcceptanceOperationalResult.model_validate_json(raw)
+    if (
+        result.scenario != row["requirement_id"]
+        or str(result.task_run_id) != row["planned_task_run_id"]
+        or result.source_revision != plan["commit_sha"]
+        or result.outcome != "LIVE_EVIDENCE_READY"
+        or result.live_evidence is not True
+        or result.verdict != "LIVE_PASS"
+        or result.evidence_class != "live"
+        or result.receipt is None
+        or result.receipt_sha256 is None
+        or result.locator.evidence_notebook_ref != locator.provider_ref
+    ):
+        raise RuntimeError("checkpoint operational result differs from the exact matrix task")
+    expected = _CHECKPOINT_OUTPUT_STAGES[str(row["requirement_id"])]
+    actual = tuple((item.stage, item.detail_code, item.outcome) for item in result.stages)
+    if actual != expected or any(
+        item.candidate_checkpoint_id != result.candidate_checkpoint_id for item in result.stages
+    ):
+        raise RuntimeError("checkpoint operational result has unexpected stages")
+    stage = {item.stage: item.model_dump(mode="json") for item in result.stages}
+    head = {
+        "initial": result.initial_head.model_dump(mode="json") if result.initial_head else None,
+        "final": result.final_head.model_dump(mode="json") if result.final_head else None,
+        "receipt_sha256": result.receipt_sha256,
+    }
+    requirement = str(row["requirement_id"])
+    if requirement == "FM05":
+        if (
+            result.head_unchanged is not False
+            or result.initial_head is None
+            or result.final_head is None
+            or result.candidate_checkpoint_id is None
+            or result.final_head.generation != result.initial_head.generation + 1
+            or result.final_head.current_checkpoint_id != result.candidate_checkpoint_id
+            or result.final_head.previous_checkpoint_id != result.initial_head.current_checkpoint_id
+        ):
+            raise RuntimeError("FM05 result did not advance exact HEAD")
+        proofs = {
+            "candidate_uploaded": {
+                "empty_candidate": stage["empty_candidate"],
+                "private_upload": stage["private_upload"],
+            },
+            "exact_readback": stage["exact_readback"],
+            "restore_verified": stage["independent_restore"],
+            "head_advanced": {**head, "cas_promotion": stage["cas_promotion"]},
+        }
+    elif requirement == "FM14":
+        if result.head_unchanged is not True or result.initial_head != result.final_head:
+            raise RuntimeError("FM14 result changed checkpoint HEAD")
+        proofs = {
+            "corrupt_candidate_uploaded": stage["corrupted_candidate"],
+            "hash_mismatch_detected": stage["hash_mismatch_rejection"],
+            "old_head_unchanged": head,
+        }
+    else:
+        if result.head_unchanged is not True or result.initial_head != result.final_head:
+            raise RuntimeError("FM15 result changed checkpoint HEAD")
+        proofs = {
+            "restore_smoke_forced_failure": stage["forced_restore_rejection"],
+            "candidate_rejected": {
+                "candidate": stage["restore_failure_candidate"],
+                "rejection": stage["forced_restore_rejection"],
+            },
+            "old_head_unchanged": head,
+        }
+    if set(proofs) != set(row["required_assertions"]):
+        raise RuntimeError("checkpoint proofs differ from the exact assertion catalog")
+    return OperationalOutput(
+        schema_version="my-data-hub-operational-kaggle-output.v1",
+        matrix_id=plan["matrix_id"],
+        scenario=row["name"],
+        task_run_id=row["planned_task_run_id"],
+        outcome="PASS",
+        assertions=tuple(
+            AssertionResult(
+                name=name,
+                outcome="PASS",
+                evidence_sha256=hashlib.sha256(canonical_json_bytes(proofs[name])).hexdigest(),
+            )
+            for name in row["required_assertions"]
+        ),
+        lifecycle_events=(),
+        operation_ids=(str(result.operation_id),),
+        completed_at=result.completed_at,
+    )
+
+
 def _reconciled_live_receipt(
     *,
     adapter: KaggleProviderAdapter,
@@ -655,12 +793,18 @@ def _reconciled_live_receipt(
     )
     raw = (output_directory / RESULT_FILE).read_bytes()
     result_sha256 = hashlib.sha256(raw).hexdigest()
-    if locator.outcome == "READY" and (
-        locator.output_file_sha256 != result_sha256
+    if (locator.outcome == "READY" or row["requirement_id"] in CHECKPOINT_REQUIREMENTS) and (
+        locator.output_file_sha256 is None
+        or locator.output_tree_sha256 is None
+        or locator.output_file_sha256 != result_sha256
         or locator.output_tree_sha256 != identity.output_tree_sha256
     ):
         raise RuntimeError("outer output reconciliation differs from the durable output-read receipt")
-    output = OperationalOutput.model_validate_json(raw)
+    output = (
+        _checkpoint_operational_output(raw, plan=plan, row=row, locator=locator)
+        if row["requirement_id"] in CHECKPOINT_REQUIREMENTS
+        else OperationalOutput.model_validate_json(raw)
+    )
     expected_assertions = set(row["required_assertions"])
     actual_assertions = {item.name for item in output.assertions}
     if (
@@ -689,6 +833,7 @@ def _reconciled_live_receipt(
             "provider_kernel_id": run.provider_kernel_id,
             "source_version": run.source_version,
             "source_sha256": run.source_sha256,
+            "provider_claim_sha256": locator.claim_sha256,
             "provider_status": status.state.value,
             "output_tree_sha256": identity.output_tree_sha256,
             "result_sha256": result_sha256,

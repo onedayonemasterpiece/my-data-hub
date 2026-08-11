@@ -13,6 +13,8 @@ from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import ValidationError
 
 import scripts.provider.operational_kaggle_matrix as matrix_module
+from my_data_hub.acceptance.scenario_operator import CheckpointAcceptanceOperationalResult
+from my_data_hub.checkpoints.acceptance import CheckpointAcceptanceReceipt
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.providers.kaggle.contracts import KernelState
 from scripts.provider.operational_kaggle_matrix import (
@@ -39,6 +41,22 @@ def _plan() -> dict[str, object]:
         commit_sha="a" * 40,
         created_at=datetime(2026, 8, 11, tzinfo=UTC),
     )
+
+
+def _fm14_checkpoint_result(plan: dict[str, object]) -> CheckpointAcceptanceOperationalResult:
+    root = Path(__file__).resolve().parents[2]
+    rows = plan["scenarios"]
+    assert isinstance(rows, list)
+    row = rows[13]
+    result = json.loads(
+        (root / "examples/provider/checkpoint-acceptance-operational-result.v1.example.json").read_text()
+    )
+    result["task_run_id"] = row["planned_task_run_id"]
+    result["source_revision"] = plan["commit_sha"]
+    result["receipt"]["task_run_id"] = row["planned_task_run_id"]
+    receipt = CheckpointAcceptanceReceipt.model_validate(result["receipt"])
+    result["receipt_sha256"] = receipt.receipt_sha256
+    return CheckpointAcceptanceOperationalResult.model_validate(result)
 
 
 def test_operational_plan_is_exact_24_scenario_source_matrix() -> None:
@@ -353,6 +371,141 @@ def test_outer_reconciliation_binds_exact_output_before_cleanup(tmp_path: Path) 
     assert binding is not None
     assert binding.output_file_sha256 == output_sha
     assert binding.output_tree_sha256 == tree_sha
+
+
+def test_outer_reconciliation_independently_maps_exact_fm14_checkpoint_result(
+    tmp_path: Path,
+) -> None:
+    plan = _plan()
+    rows = plan["scenarios"]
+    assert isinstance(rows, list)
+    row = rows[13]
+    result = _fm14_checkpoint_result(plan)
+    raw = canonical_json_bytes(result.model_dump(mode="json"))
+    output_sha256 = hashlib.sha256(raw).hexdigest()
+    tree_sha256 = "a" * 64
+    locator = DriverResult.model_validate(
+        {
+            "schema_version": "my-data-hub-operational-kaggle-driver-result.v2",
+            "phase": "EXECUTE",
+            "outcome": "PASS",
+            "scenario": row["name"],
+            "task_run_id": row["planned_task_run_id"],
+            "provider_ref": result.locator.evidence_notebook_ref,
+            "provider_run_ref": f"{result.locator.evidence_notebook_ref}/7",
+            "provider_kernel_id": 707,
+            "source_version": 7,
+            "source_sha256": "e" * 64,
+            "blocker_code": None,
+            "integration_dependency": None,
+            "mutations_started": result.mutations_started,
+            "capability_checks": [],
+            "observation_sha256": "f" * 64,
+            "claim_task_id": row["planned_task_run_id"],
+            "claim_sha256": "f" * 64,
+            "output_receipt_sha256": "b" * 64,
+            "output_file_sha256": output_sha256,
+            "output_tree_sha256": tree_sha256,
+            "cleanup_state": "NOT_REQUIRED",
+        }
+    )
+    run = SimpleNamespace(
+        task_run_id=locator.task_run_id,
+        provider_ref=locator.provider_ref,
+        provider_run_ref=locator.provider_run_ref,
+        provider_kernel_id=locator.provider_kernel_id,
+        source_version=locator.source_version,
+        source_sha256=locator.source_sha256,
+    )
+
+    class Adapter:
+        def reconcile_private_notebook_run(self, **_: object) -> object:
+            return run
+
+        def read_run_status(self, _run: object) -> object:
+            return SimpleNamespace(state=KernelState.COMPLETE)
+
+        def download_exact_run_output_file(
+            self, _run: object, *, destination: Path, file_name: str, max_bytes: int
+        ) -> object:
+            assert max_bytes >= len(raw)
+            (destination / file_name).write_bytes(raw)
+            return SimpleNamespace(output_tree_sha256=tree_sha256, file_count=1)
+
+    receipt, binding = _reconciled_live_receipt(
+        adapter=Adapter(),  # type: ignore[arg-type]
+        plan=plan,
+        row=row,
+        locator=locator,
+        output_directory=tmp_path,
+        started_at=datetime(2026, 8, 11, tzinfo=UTC),
+    )
+
+    assert receipt["outcome"] == "PASS"
+    assert receipt["operation_ids"] == [str(result.operation_id)]
+    assert {item["name"] for item in receipt["assertions"]} == set(row["required_assertions"])
+    assert binding is None
+
+
+def test_outer_reconciliation_rejects_fm14_checkpoint_output_hash_drift(tmp_path: Path) -> None:
+    plan = _plan()
+    rows = plan["scenarios"]
+    assert isinstance(rows, list)
+    row = rows[13]
+    result = _fm14_checkpoint_result(plan)
+    raw = canonical_json_bytes(result.model_dump(mode="json"))
+    locator = DriverResult.model_validate(
+        {
+            "schema_version": "my-data-hub-operational-kaggle-driver-result.v2",
+            "phase": "EXECUTE",
+            "outcome": "PASS",
+            "scenario": row["name"],
+            "task_run_id": row["planned_task_run_id"],
+            "provider_ref": result.locator.evidence_notebook_ref,
+            "provider_run_ref": f"{result.locator.evidence_notebook_ref}/7",
+            "provider_kernel_id": 707,
+            "source_version": 7,
+            "source_sha256": "e" * 64,
+            "mutations_started": result.mutations_started,
+            "capability_checks": [],
+            "claim_task_id": row["planned_task_run_id"],
+            "claim_sha256": "f" * 64,
+            "output_receipt_sha256": "b" * 64,
+            "output_file_sha256": "0" * 64,
+            "output_tree_sha256": "a" * 64,
+            "cleanup_state": "NOT_REQUIRED",
+        }
+    )
+    run = SimpleNamespace(
+        provider_ref=locator.provider_ref,
+        provider_run_ref=locator.provider_run_ref,
+        provider_kernel_id=locator.provider_kernel_id,
+        source_version=locator.source_version,
+        source_sha256=locator.source_sha256,
+    )
+
+    class Adapter:
+        def reconcile_private_notebook_run(self, **_: object) -> object:
+            return run
+
+        def read_run_status(self, _run: object) -> object:
+            return SimpleNamespace(state=KernelState.COMPLETE)
+
+        def download_exact_run_output_file(
+            self, _run: object, *, destination: Path, file_name: str, max_bytes: int
+        ) -> object:
+            (destination / file_name).write_bytes(raw)
+            return SimpleNamespace(output_tree_sha256="a" * 64, file_count=1)
+
+    with pytest.raises(RuntimeError, match="output reconciliation differs"):
+        _reconciled_live_receipt(
+            adapter=Adapter(),  # type: ignore[arg-type]
+            plan=plan,
+            row=row,
+            locator=locator,
+            output_directory=tmp_path,
+            started_at=datetime(2026, 8, 11, tzinfo=UTC),
+        )
 
 
 def test_reconciliation_fence_resumes_cleanup_after_notebook_was_deleted(

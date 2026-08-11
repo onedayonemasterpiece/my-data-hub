@@ -102,6 +102,62 @@
       "if": {
         "properties": {
           "outcome": {
+            "const": "PASS"
+          },
+          "phase": {
+            "const": "EXECUTE"
+          },
+          "scenario": {
+            "enum": [
+              "verified-empty-checkpoint-roundtrip",
+              "corrupt-candidate-head-preserved",
+              "restore-smoke-failure-head-preserved"
+            ]
+          }
+        },
+        "required": [
+          "phase",
+          "outcome",
+          "scenario"
+        ]
+      },
+      "then": {
+        "properties": {
+          "claim_sha256": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "claim_task_id": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "cleanup_state": {
+            "const": "NOT_REQUIRED"
+          },
+          "output_file_sha256": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "output_receipt_sha256": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "output_tree_sha256": {
+            "not": {
+              "type": "null"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
             "const": "READY"
           }
         },

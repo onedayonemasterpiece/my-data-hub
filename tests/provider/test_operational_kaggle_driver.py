@@ -30,6 +30,11 @@ from my_data_hub.acceptance.data_workloads import (
     DuplicateReviewEvidence,
     RequirementEvidence,
 )
+from my_data_hub.acceptance.scenario_operator import (
+    CheckpointAcceptanceLaunchStatus,
+    CheckpointAcceptanceOperationalResult,
+)
+from my_data_hub.checkpoints.acceptance import CheckpointAcceptanceReceipt
 from my_data_hub.hashing import canonical_json_bytes
 from scripts.provider.operational_kaggle_driver import (
     EXECUTORS,
@@ -385,6 +390,88 @@ def _request(ordinal: int) -> DriverRequest:
     return DriverRequest.model_validate(_driver_request(plan, plan["scenarios"][ordinal - 1], resume_only=False))
 
 
+def _fm14_checkpoint_status(request: DriverRequest) -> dict[str, Any]:
+    root = Path(__file__).resolve().parents[2]
+    result = json.loads(
+        (root / "examples/provider/checkpoint-acceptance-operational-result.v1.example.json").read_text()
+    )
+    result["task_run_id"] = str(request.task_run_id)
+    result["source_revision"] = request.commit_sha
+    result["receipt"]["task_run_id"] = str(request.task_run_id)
+    receipt = CheckpointAcceptanceReceipt.model_validate(result["receipt"])
+    result["receipt_sha256"] = receipt.receipt_sha256
+    typed_result = CheckpointAcceptanceOperationalResult.model_validate(result)
+    result = typed_result.model_dump(mode="json")
+    result_sha256 = hashlib.sha256(canonical_json_bytes(result)).hexdigest()
+    provider_ref = result["locator"]["evidence_notebook_ref"]
+    status = {
+        "schema_version": "my-data-hub-checkpoint-acceptance-launch-status.v1",
+        "found": True,
+        "request_id": str(request.task_run_id),
+        "scenario": "FM14",
+        "operation_id": result["operation_id"],
+        "task_run_id": str(request.task_run_id),
+        "principal_id": "unit-test-owner",
+        "client_id": "unit-test-driver",
+        "request_persisted": True,
+        "state": "LIVE_EVIDENCE_READY",
+        "request_sha256": "1" * 64,
+        "config_sha256": result["config_sha256"],
+        "result_sha256": result_sha256,
+        "provider_output": {
+            "provider_ref": provider_ref,
+            "provider_run_ref": f"{provider_ref}/7",
+            "provider_kernel_id": 707,
+            "source_version": 7,
+            "source_sha256": "e" * 64,
+            "provider_claim_sha256": "f" * 64,
+            "output_file_name": "operational-result.json",
+            "output_file_sha256": result_sha256,
+            "output_tree_sha256": "a" * 64,
+            "output_receipt_sha256": "b" * 64,
+            "private": True,
+        },
+        "result": result,
+        "blocker_code": None,
+        "failure_code": None,
+        "official_adapter_observed": True,
+    }
+    return CheckpointAcceptanceLaunchStatus.model_validate(status).model_dump(mode="json")
+
+
+class CheckpointAcceptanceGateway(FakeGateway):
+    def __init__(
+        self,
+        request: DriverRequest,
+        *,
+        existing_status: dict[str, Any] | None = None,
+        lose_request_response: bool = False,
+    ) -> None:
+        super().__init__()
+        self.request = request
+        self.status = existing_status
+        self.lose_request_response = lose_request_response
+
+    async def call(self, profile: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append((profile, tool, dict(arguments)))
+        if tool == "acceptance.scenario.status":
+            return self.status or {"found": False}
+        if tool == "acceptance.scenario.request":
+            assert arguments == {
+                "task_id": str(self.request.task_run_id),
+                "scenario": "FM14",
+                "idempotency_key": (
+                    f"operational:{self.request.matrix_id}:FM14:checkpoint"
+                ),
+                "source_revision": self.request.commit_sha,
+            }
+            self.status = _fm14_checkpoint_status(self.request)
+            if self.lose_request_response:
+                raise TimeoutError("unit-test lost response after durable request")
+            return self.status
+        raise AssertionError(f"unexpected checkpoint tool call: {tool}")
+
+
 def _set_evidence_config(monkeypatch: pytest.MonkeyPatch, *, fm03: bool = False) -> None:
     value: dict[str, Any] = {
         "schema_version": "my-data-hub-operational-kaggle-evidence-driver.v1",
@@ -543,6 +630,143 @@ def test_each_executor_runs_only_safe_existing_probes_then_names_exact_gap(
         "provider.resources.run",
         "provider.resources.delete",
     }
+
+
+def test_fm14_checkpoint_executor_requests_then_returns_exact_evidence_locator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    request = _request(14)
+    gateway = CheckpointAcceptanceGateway(request)
+
+    result = asyncio.run(execute(request, gateway))
+
+    assert result.outcome == "PASS"
+    assert result.phase == "EXECUTE"
+    assert result.cleanup_state == "NOT_REQUIRED"
+    assert result.mutations_started == 2
+    assert result.provider_run_ref == "owner/checkpoint-acceptance-evidence-fm14/7"
+    assert result.claim_task_id == request.task_run_id
+    assert result.claim_sha256 == "f" * 64
+    assert result.output_receipt_sha256 == "b" * 64
+    assert result.output_file_sha256 is not None
+    assert result.output_tree_sha256 == "a" * 64
+    assert [tool for _profile, tool, _arguments in gateway.calls] == [
+        "acceptance.scenario.status",
+        "acceptance.scenario.request",
+    ]
+    DriverResult.model_validate(result.model_dump(mode="json"))
+
+
+def test_fm14_checkpoint_resume_reconciles_only_existing_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    request = _request(14).model_copy(update={"resume_only": True})
+    gateway = CheckpointAcceptanceGateway(request, existing_status=_fm14_checkpoint_status(request))
+
+    result = asyncio.run(execute(request, gateway))
+
+    assert result.outcome == "PASS"
+    assert [tool for _profile, tool, _arguments in gateway.calls] == ["acceptance.scenario.status"]
+
+
+def test_fm14_checkpoint_preflight_blocker_is_non_mutating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    request = _request(14)
+    blocked = {
+        "schema_version": "my-data-hub-checkpoint-acceptance-launch-status.v1",
+        "found": True,
+        "request_id": str(request.task_run_id),
+        "scenario": "FM14",
+        "operation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "task_run_id": str(request.task_run_id),
+        "principal_id": "unit-test-owner",
+        "client_id": "unit-test-driver",
+        "request_persisted": True,
+        "state": "BLOCKED",
+        "request_sha256": "1" * 64,
+        "config_sha256": "2" * 64,
+        "result_sha256": None,
+        "provider_output": None,
+        "result": None,
+        "blocker_code": "CHECKPOINT_OWNER_ASSETS_MISSING",
+        "failure_code": None,
+        "official_adapter_observed": False,
+    }
+    gateway = CheckpointAcceptanceGateway(request, existing_status=blocked)
+
+    result = asyncio.run(execute(request, gateway))
+
+    assert result.outcome == "BLOCKED"
+    assert result.blocker_code == "CHECKPOINT_OWNER_ASSETS_MISSING"
+    assert result.mutations_started == 0
+    assert [tool for _profile, tool, _arguments in gateway.calls] == ["acceptance.scenario.status"]
+
+
+@pytest.mark.parametrize("tool", ["acceptance.scenario.request", "acceptance.scenario.status"])
+def test_fm14_checkpoint_missing_owner_tool_blocks_before_status_or_mutation(
+    tool: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    gateway = FakeGateway(missing_tool=tool)
+
+    result = asyncio.run(execute(_request(14), gateway))
+
+    assert result.outcome == "BLOCKED"
+    assert result.blocker_code == "FM14_MCP_TOOLSET_INCOMPLETE"
+    assert result.mutations_started == 0
+    assert not gateway.calls
+
+
+def test_fm14_checkpoint_lost_request_response_reconciles_same_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    request = _request(14)
+    gateway = CheckpointAcceptanceGateway(request, lose_request_response=True)
+
+    result = asyncio.run(execute(request, gateway))
+
+    assert result.outcome == "PASS"
+    assert [tool for _profile, tool, _arguments in gateway.calls] == [
+        "acceptance.scenario.status",
+        "acceptance.scenario.request",
+        "acceptance.scenario.status",
+    ]
+
+
+def test_fm14_checkpoint_invalid_post_action_evidence_fails_not_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    request = _request(14)
+    status = _fm14_checkpoint_status(request)
+    status["result"]["source_revision"] = "f" * 40
+    gateway = CheckpointAcceptanceGateway(request, existing_status=status)
+
+    result = asyncio.run(execute(request, gateway))
+
+    assert result.outcome == "FAIL"
+    assert result.mutations_started == 1
+    assert result.blocker_code is None
+
+
+def test_checkpoint_driver_json_schema_requires_exact_output_receipts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "configured-test-token")
+    request = _request(14)
+    result = asyncio.run(execute(request, CheckpointAcceptanceGateway(request))).model_dump(mode="json")
+    root = Path(__file__).resolve().parents[2]
+    schema = json.loads((root / "schemas/provider/operational-kaggle-driver-result.v2.schema.json").read_text())
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+
+    validator.validate(result)
+    result["output_file_sha256"] = None
+    assert list(validator.iter_errors(result))
 
 
 def test_missing_profile_is_specific_and_precedes_safe_probe(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -44,7 +44,8 @@ mutation and then returns BLOCKED: every BLOCKED result requires
 terminally is a typed `FAIL`, not a blocker.
 
 Existing safe production surfaces are wired now: FM01 Dataset lifecycle,
-FM02 Notebook lifecycle, FM03 bounded runtime history, FM06 durable restore,
+FM02 Notebook lifecycle, FM03 bounded runtime history, FM05/FM14/FM15 through
+the owner-only checkpoint acceptance launcher, FM06 durable restore,
 FM16--FM19 and FM21 through the single resumable production data workload,
 FM22 Dataset plus Notebook lifecycles, FM23 protected-resource denial, master/
 checkpoint/provider status, stale-epoch denial, blogger accounting/statistics,
@@ -57,8 +58,8 @@ scenario-specific code such as `CHECKPOINT_CORRUPTION_FAULT_API_MISSING` or
 driver. This remains a blocked operational state, not a readiness claim.
 
 The current internal gaps are explicit in the executor registry. They include
-empty-bootstrap selection, checkpoint candidate publication, callback/lease/
-replay fault controls, drain control, and the accelerated soak controller. Privileged actions
+empty-bootstrap selection, callback/lease/replay fault controls, drain control,
+and the accelerated soak controller. Privileged actions
 are not attempted until their terminal exact-run evidence contract exists.
 
 ### Evidence-plane scenarios and two-phase cleanup
@@ -170,6 +171,35 @@ not claim a live run: the deployed MCP must expose the exact action schemas and
 consumer, and the owner must supply claims from real pre-launched verifier
 Notebooks. No such provider evidence is checked in.
 
+### Owner-launched checkpoint acceptance
+
+FM05, FM14, and FM15 use the exact operator-only
+`acceptance.scenario.request`/`acceptance.scenario.status` pair. The first
+status read is a non-mutating preflight. A fresh request binds the planned task
+UUID, fixed FM requirement, idempotency key, and exact 40-hex source revision;
+the driver then polls the same task for at most 900 seconds. `resume_only`
+performs status reconciliation only and never starts a replacement task.
+
+The driver accepts only `LIVE_EVIDENCE_READY` from the official adapter with a
+numeric private Notebook run locator, exact source/result/output hashes, and
+the typed `checkpoint-acceptance-operational-result.v1`. It checks the fixed
+stage sequence and exact HEAD transition: FM05 advances generation/current/
+previous through verified restore, while FM14 and FM15 preserve identical HEAD
+projections after the expected rejection. A lost request response is reconciled
+by the same task; invalid or unresolved post-request evidence is FAIL with
+nonzero mutation accounting.
+
+The returned driver PASS is only an evidence locator. The outer matrix
+independently reconciles the Kaggle run, compares the downloaded file/tree
+hashes, parses the typed checkpoint result, and derives the required assertion
+hashes before writing a scenario PASS. The checkpoint launcher has no separate
+acceptance cleanup operation, so this path records `cleanup_state=NOT_REQUIRED`
+rather than inventing a cleanup receipt. The MCP catalog is owner-only,
+requires `acceptance:operate`, and is hidden unless
+`MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED=true`; production also must inject
+the concrete unified launcher. Missing opt-in/injection remains a pre-action
+toolset BLOCKED. No checked-in receipt is live evidence.
+
 ### FM20 signed reboot and remote cold search
 
 FM20 never initiates a reboot through MCP. An owner first runs the documented
@@ -209,8 +239,6 @@ to reach ACTIVE, or malformed/empty search result is FAIL with
 - FM12: the master drains itself at its natural lifecycle boundary; there is no
   authenticated clean-drain/checkpoint/stop request or credential revocation
   endpoint.
-- FM14/FM15: normal runtime-authenticated checkpoint reject/restore paths exist,
-  but no disposable corruption or forced restore-smoke failure selector exists.
 - FM24: status polling alone cannot prove heartbeat, read, checkpoint, recovery,
   or credential-rotation counts. No accelerated soak controller/event stream is
   exposed, so the 3,600–5,400 second scenario remains BLOCKED before mutation.

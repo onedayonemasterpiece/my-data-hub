@@ -50,6 +50,7 @@ from my_data_hub.acceptance.data_workloads import (
     DataWorkloadPlan,
     DataWorkloadState,
 )
+from my_data_hub.acceptance.scenario_operator import CheckpointAcceptanceLaunchStatus
 from my_data_hub.hashing import canonical_json_bytes
 
 if not __package__:
@@ -72,10 +73,20 @@ DEFAULT_ENDPOINT = "https://mcp-datahub.kenigevents.ru/mcp"
 MAX_EVIDENCE_CLAIMS_BYTES = 64 * 1024
 ACTION_POLL_SECONDS = 5.0
 ACTION_TERMINAL_STATES = frozenset({"DURABLE_COMPLETE", "FAILED", "FENCED", "ORPHANED"})
+CHECKPOINT_ACCEPTANCE_TERMINAL_STATES = frozenset({"LIVE_EVIDENCE_READY", "BLOCKED", "FAIL"})
+CHECKPOINT_ACCEPTANCE_POLL_SECONDS = 5.0
+CHECKPOINT_ACCEPTANCE_TIMEOUT_SECONDS = 900
 FM20_MASTER_TIMEOUT_SECONDS = 1800
 FM20_MASTER_POLL_SECONDS = 5.0
 EXPECTED_SOURCE_IDENTITY = "onedayonemasterpiece/my-data-hub"
 SERVICE_NAMES = frozenset({"control-plane", "oauth-server", "remote-mcp"})
+CHECKPOINT_SCENARIO_NAMES = frozenset(
+    {
+        "verified-empty-checkpoint-roundtrip",
+        "corrupt-candidate-head-preserved",
+        "restore-smoke-failure-head-preserved",
+    }
+)
 
 
 class CleanupBinding(BaseModel):
@@ -188,6 +199,20 @@ class TrustedDriverResult(BaseModel):
             raise ValueError("driver READY lacks an exact pending cleanup binding")
         if self.phase == "CLEANUP" and self.outcome == "PASS" and self.cleanup_state != "COMPLETE":
             raise ValueError("cleanup PASS requires a COMPLETE durable claim")
+        if (
+            self.phase == "EXECUTE"
+            and self.outcome == "PASS"
+            and self.scenario in CHECKPOINT_SCENARIO_NAMES
+            and (
+                self.output_receipt_sha256 is None
+                or self.output_file_sha256 is None
+                or self.output_tree_sha256 is None
+                or self.claim_task_id is None
+                or self.claim_sha256 is None
+                or self.cleanup_state != "NOT_REQUIRED"
+            )
+        ):
+            raise ValueError("checkpoint evidence locator lacks exact output receipts")
         if self.outcome == "BLOCKED" and not (self.blocker_code and self.integration_dependency):
             raise ValueError("driver BLOCKED lacks a named integration dependency")
         if self.outcome == "BLOCKED" and self.mutations_started != 0:
@@ -459,11 +484,12 @@ EXECUTORS: tuple[ExecutorSpec, ...] = (
     ),
     ExecutorSpec(
         "FM05",
-        ("reader", "operator"),
-        (("reader", "checkpoint.status"),),
-        "checkpoint_status",
-        "CHECKPOINT_CANDIDATE_PUBLISH_TOOL_MISSING",
-        "operator checkpoint candidate publish/exact-readback/restore API",
+        ("operator",),
+        (("operator", "acceptance.scenario.request"),
+         ("operator", "acceptance.scenario.status")),
+        "catalog_only",
+        "FM05_CHECKPOINT_ACCEPTANCE_HOST_EXECUTOR_MISSING",
+        "owner-only acceptance.scenario request/status host executor and fixed checkpoint assets",
     ),
     ExecutorSpec(
         "FM06",
@@ -549,19 +575,21 @@ EXECUTORS: tuple[ExecutorSpec, ...] = (
     ),
     ExecutorSpec(
         "FM14",
-        ("reader", "operator"),
-        (("reader", "checkpoint.status"),),
-        "checkpoint_status",
-        "CHECKPOINT_CORRUPTION_FAULT_API_MISSING",
-        "candidate upload corruption/hash-mismatch injector with before/after HEAD identity",
+        ("operator",),
+        (("operator", "acceptance.scenario.request"),
+         ("operator", "acceptance.scenario.status")),
+        "catalog_only",
+        "FM14_CHECKPOINT_ACCEPTANCE_HOST_EXECUTOR_MISSING",
+        "owner-only acceptance.scenario request/status host executor and fixed FM14 task assets",
     ),
     ExecutorSpec(
         "FM15",
-        ("reader", "operator"),
-        (("reader", "checkpoint.status"),),
-        "checkpoint_status",
-        "RESTORE_SMOKE_FAILURE_FAULT_API_MISSING",
-        "restore-smoke forced-failure injector with before/after HEAD identity",
+        ("operator",),
+        (("operator", "acceptance.scenario.request"),
+         ("operator", "acceptance.scenario.status")),
+        "catalog_only",
+        "FM15_CHECKPOINT_ACCEPTANCE_HOST_EXECUTOR_MISSING",
+        "owner-only acceptance.scenario request/status host executor and fixed FM15 task assets",
     ),
     ExecutorSpec(
         "FM16",
@@ -1681,6 +1709,305 @@ async def _execute_data_workload_scenario(
     )
 
 
+_CHECKPOINT_STAGE_CONTRACT: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "FM05": (
+        ("empty_candidate", "EMPTY_CANDIDATE_CREATED", "succeeded"),
+        ("private_upload", "PRIVATE_CANDIDATE_UPLOADED", "succeeded"),
+        ("exact_readback", "EXACT_READBACK_VERIFIED", "succeeded"),
+        ("independent_restore", "INDEPENDENT_RESTORE_VERIFIED", "succeeded"),
+        ("cas_promotion", "HEAD_CAS_PROMOTED", "succeeded"),
+    ),
+    "FM14": (
+        ("corrupted_candidate", "TASK_OWNED_CORRUPTION_CANDIDATE_CREATED", "succeeded"),
+        ("hash_mismatch_rejection", "EXACT_READBACK_HASH_MISMATCH_REJECTED", "rejected_expected"),
+    ),
+    "FM15": (
+        ("restore_failure_candidate", "TASK_OWNED_RESTORE_FAILURE_CANDIDATE_CREATED", "succeeded"),
+        ("exact_readback", "EXACT_READBACK_VERIFIED", "succeeded"),
+        ("forced_restore_rejection", "FORCED_DISPOSABLE_RESTORE_FAILURE_REJECTED", "rejected_expected"),
+    ),
+}
+
+
+def _bound_checkpoint_status(
+    request: DriverRequest, status: CheckpointAcceptanceLaunchStatus
+) -> CheckpointAcceptanceLaunchStatus:
+    if (
+        status.request_id != request.task_run_id
+        or status.task_run_id != request.task_run_id
+        or status.scenario != request.requirement_id
+    ):
+        raise ValueError("checkpoint status differs from the exact matrix task")
+    return status
+
+
+def _checkpoint_assertion_proofs(
+    request: DriverRequest, status: CheckpointAcceptanceLaunchStatus
+) -> dict[str, object]:
+    result = status.result
+    output = status.provider_output
+    if (
+        status.state != "LIVE_EVIDENCE_READY"
+        or result is None
+        or output is None
+        or status.result_sha256 is None
+        or result.scenario != request.requirement_id
+        or result.task_run_id != request.task_run_id
+        or result.source_revision != request.commit_sha
+        or result.outcome != "LIVE_EVIDENCE_READY"
+        or result.live_evidence is not True
+        or result.verdict != "LIVE_PASS"
+        or result.evidence_class != "live"
+        or result.receipt is None
+        or result.receipt_sha256 is None
+        or output.provider_ref != result.locator.evidence_notebook_ref
+        or output.output_file_sha256 != status.result_sha256
+        or output.output_file_name != request.result_file
+        or not status.official_adapter_observed
+    ):
+        raise ValueError("checkpoint launch status is not exact live evidence")
+    expected = _CHECKPOINT_STAGE_CONTRACT[request.requirement_id]
+    actual = tuple((item.stage, item.detail_code, item.outcome) for item in result.stages)
+    if actual != expected or any(
+        item.candidate_checkpoint_id != result.candidate_checkpoint_id for item in result.stages
+    ):
+        raise ValueError("checkpoint acceptance stages differ from the fixed scenario")
+    receipt_hash = result.receipt_sha256
+    stage = {item.stage: item.model_dump(mode="json") for item in result.stages}
+    head = {
+        "initial": result.initial_head.model_dump(mode="json") if result.initial_head else None,
+        "final": result.final_head.model_dump(mode="json") if result.final_head else None,
+        "receipt_sha256": receipt_hash,
+    }
+    if request.requirement_id == "FM05":
+        if (
+            result.head_unchanged is not False
+            or result.initial_head is None
+            or result.final_head is None
+            or result.candidate_checkpoint_id is None
+            or result.final_head.generation != result.initial_head.generation + 1
+            or result.final_head.current_checkpoint_id != result.candidate_checkpoint_id
+            or result.final_head.previous_checkpoint_id != result.initial_head.current_checkpoint_id
+        ):
+            raise ValueError("FM05 did not advance the exact checkpoint HEAD")
+        proofs = {
+            "candidate_uploaded": {
+                "empty_candidate": stage["empty_candidate"],
+                "private_upload": stage["private_upload"],
+            },
+            "exact_readback": stage["exact_readback"],
+            "restore_verified": stage["independent_restore"],
+            "head_advanced": {**head, "cas_promotion": stage["cas_promotion"]},
+        }
+    elif request.requirement_id == "FM14":
+        if result.head_unchanged is not True or result.initial_head != result.final_head:
+            raise ValueError("FM14 changed checkpoint HEAD")
+        proofs = {
+            "corrupt_candidate_uploaded": stage["corrupted_candidate"],
+            "hash_mismatch_detected": stage["hash_mismatch_rejection"],
+            "old_head_unchanged": head,
+        }
+    else:
+        if result.head_unchanged is not True or result.initial_head != result.final_head:
+            raise ValueError("FM15 changed checkpoint HEAD")
+        proofs = {
+            "restore_smoke_forced_failure": stage["forced_restore_rejection"],
+            "candidate_rejected": {
+                "candidate": stage["restore_failure_candidate"],
+                "rejection": stage["forced_restore_rejection"],
+            },
+            "old_head_unchanged": head,
+        }
+    if set(proofs) != set(request.required_assertions):
+        raise ValueError("checkpoint evidence proofs differ from the scenario catalog")
+    return proofs
+
+
+def _checkpoint_driver_pass(
+    request: DriverRequest,
+    status: CheckpointAcceptanceLaunchStatus,
+    *,
+    checks: list[CapabilityCheck],
+    observations: Mapping[str, Any],
+) -> TrustedDriverResult:
+    output = status.provider_output
+    result = status.result
+    assert output is not None and result is not None
+    return TrustedDriverResult(
+        schema_version="my-data-hub-operational-kaggle-driver-result.v2",
+        phase="EXECUTE",
+        outcome="PASS",
+        scenario=request.scenario,
+        task_run_id=request.task_run_id,
+        provider_ref=output.provider_ref,
+        provider_run_ref=output.provider_run_ref,
+        provider_kernel_id=output.provider_kernel_id,
+        source_version=output.source_version,
+        source_sha256=output.source_sha256,
+        mutations_started=result.mutations_started,
+        capability_checks=tuple(checks),
+        observation_sha256=_sha(dict(observations)),
+        claim_task_id=request.task_run_id,
+        claim_sha256=output.provider_claim_sha256,
+        output_receipt_sha256=output.output_receipt_sha256,
+        output_file_sha256=output.output_file_sha256,
+        output_tree_sha256=output.output_tree_sha256,
+        cleanup_state="NOT_REQUIRED",
+    )
+
+
+async def _execute_checkpoint_acceptance_scenario(
+    request: DriverRequest,
+    spec: ExecutorSpec,
+    gateway: McpGateway,
+    *,
+    checks: list[CapabilityCheck],
+) -> TrustedDriverResult:
+    task_id = request.task_run_id
+    try:
+        observed = await gateway.call(
+            "operator", "acceptance.scenario.status", {"task_id": str(task_id)}
+        )
+    except Exception:
+        return _blocked(
+            request,
+            checks=[*checks, _check("checkpoint.status", "BLOCKED", "CHECKPOINT_STATUS_UNAVAILABLE")],
+            code=spec.gap_code,
+            dependency=spec.gap_dependency,
+        )
+    status: CheckpointAcceptanceLaunchStatus | None = None
+    if observed.get("found") is True:
+        try:
+            status = _bound_checkpoint_status(
+                request, CheckpointAcceptanceLaunchStatus.model_validate(observed)
+            )
+        except Exception as exc:
+            return _failed(
+                request,
+                checks=[*checks, _check("checkpoint.status", "FAIL", "CHECKPOINT_STATUS_INVALID")],
+                observations={"failure_type": type(exc).__name__, "status_sha256": _sha(observed)},
+                mutations_started=1,
+            )
+    elif observed != {"found": False}:
+        return _failed(
+            request,
+            checks=[*checks, _check("checkpoint.status", "FAIL", "CHECKPOINT_STATUS_INVALID")],
+            observations={"status_sha256": _sha(observed)},
+            mutations_started=1,
+        )
+    elif request.resume_only:
+        return _failed(
+            request,
+            checks=[*checks, _check("checkpoint.resume", "FAIL", "CHECKPOINT_TASK_MISSING_ON_RESUME")],
+            observations={"status_sha256": _sha(observed)},
+            mutations_started=1,
+        )
+    if status is None:
+        arguments = {
+            "task_id": str(task_id),
+            "scenario": request.requirement_id,
+            "idempotency_key": f"operational:{request.matrix_id}:{request.requirement_id}:checkpoint",
+            "source_revision": request.commit_sha,
+        }
+        try:
+            launched = await gateway.call("operator", "acceptance.scenario.request", arguments)
+        except Exception as exc:
+            try:
+                reconciled = await gateway.call(
+                    "operator", "acceptance.scenario.status", {"task_id": str(task_id)}
+                )
+                status = _bound_checkpoint_status(
+                    request, CheckpointAcceptanceLaunchStatus.model_validate(reconciled)
+                )
+            except Exception as reconcile_exc:
+                return _failed(
+                    request,
+                    checks=[*checks, _check("checkpoint.request", "FAIL", "CHECKPOINT_REQUEST_AMBIGUOUS")],
+                    observations={
+                        "failure_type": type(exc).__name__,
+                        "reconcile_failure_type": type(reconcile_exc).__name__,
+                    },
+                    mutations_started=1,
+                )
+        else:
+            try:
+                status = _bound_checkpoint_status(
+                    request, CheckpointAcceptanceLaunchStatus.model_validate(launched)
+                )
+            except Exception as exc:
+                return _failed(
+                    request,
+                    checks=[*checks, _check("checkpoint.request", "FAIL", "CHECKPOINT_REQUEST_INVALID")],
+                    observations={"response_sha256": _sha(launched), "failure_type": type(exc).__name__},
+                    mutations_started=1,
+                )
+    assert status is not None
+    deadline = asyncio.get_running_loop().time() + CHECKPOINT_ACCEPTANCE_TIMEOUT_SECONDS
+    while status.state not in CHECKPOINT_ACCEPTANCE_TERMINAL_STATES:
+        if asyncio.get_running_loop().time() >= deadline:
+            return _failed(
+                request,
+                checks=[*checks, _check("checkpoint.poll", "FAIL", "CHECKPOINT_ACCEPTANCE_TIMEOUT")],
+                observations={"task_id": str(task_id), "state": status.state},
+                mutations_started=1,
+            )
+        await asyncio.sleep(CHECKPOINT_ACCEPTANCE_POLL_SECONDS)
+        try:
+            polled = await gateway.call(
+                "operator", "acceptance.scenario.status", {"task_id": str(task_id)}
+            )
+            status = _bound_checkpoint_status(
+                request, CheckpointAcceptanceLaunchStatus.model_validate(polled)
+            )
+        except Exception as exc:
+            return _failed(
+                request,
+                checks=[*checks, _check("checkpoint.poll", "FAIL", "CHECKPOINT_STATUS_RECONCILIATION_FAILED")],
+                observations={"task_id": str(task_id), "failure_type": type(exc).__name__},
+                mutations_started=1,
+            )
+    observations = {
+        "task_id": str(task_id),
+        "operation_id": str(status.operation_id),
+        "request_sha256": status.request_sha256,
+        "config_sha256": status.config_sha256,
+        "state": status.state,
+    }
+    if status.state == "BLOCKED":
+        return _blocked(
+            request,
+            checks=[*checks, _check("checkpoint.terminal", "BLOCKED", "CHECKPOINT_PREFLIGHT_BLOCKED")],
+            code=str(status.blocker_code),
+            dependency="fixed owner checkpoint assets and official launch capability",
+            observations=observations,
+        )
+    if status.state == "FAIL":
+        mutations = status.result.mutations_started if status.result is not None else 1
+        return _failed(
+            request,
+            checks=[*checks, _check("checkpoint.terminal", "FAIL", "CHECKPOINT_ACCEPTANCE_FAILED")],
+            observations={**observations, "failure_code": status.failure_code},
+            mutations_started=max(mutations, 1),
+        )
+    try:
+        proofs = _checkpoint_assertion_proofs(request, status)
+    except Exception as exc:
+        return _failed(
+            request,
+            checks=[*checks, _check("checkpoint.evidence", "FAIL", "CHECKPOINT_EVIDENCE_INVALID")],
+            observations={**observations, "failure_type": type(exc).__name__},
+            mutations_started=max(status.result.mutations_started if status.result else 0, 1),
+        )
+    observations["assertion_proofs_sha256"] = _sha(proofs)
+    checks.append(_check("checkpoint.evidence", "PASS", "CHECKPOINT_LIVE_EVIDENCE_READY", proofs))
+    return _checkpoint_driver_pass(
+        request,
+        status,
+        checks=checks,
+        observations=observations,
+    )
+
+
 async def _launch_post_action_evidence(
     request: DriverRequest,
     gateway: McpGateway,
@@ -2611,6 +2938,13 @@ async def execute(request: DriverRequest, gateway: McpGateway) -> TrustedDriverR
         )
     if request.requirement_id in {"FM16", "FM17", "FM18", "FM19", "FM21"}:
         return await _execute_data_workload_scenario(
+            request,
+            spec,
+            gateway,
+            checks=checks,
+        )
+    if request.requirement_id in {"FM05", "FM14", "FM15"}:
+        return await _execute_checkpoint_acceptance_scenario(
             request,
             spec,
             gateway,
