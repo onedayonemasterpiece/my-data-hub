@@ -23,8 +23,8 @@ def policy() -> BoundedSQLPolicy:
         "SELECT * FROM hub.project",
         "SELECT * FROM pg_catalog.pg_authid",
         "SELECT pg_read_file($1)",
-        "SELECT * FROM hub.project_public_v1 FOR UPDATE",
-        "SELECT * INTO TEMP leaked FROM hub.project_public_v1",
+        "SELECT * FROM region_talk.bloggers_ru_v1 FOR UPDATE",
+        "SELECT * INTO TEMP leaked FROM region_talk.bloggers_ru_v1",
         "SET ROLE owner",
     ],
 )

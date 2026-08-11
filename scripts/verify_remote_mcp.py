@@ -102,7 +102,7 @@ async def verify_acceptance_session(
         session,
         "data.query",
         {
-            "sql": "SELECT count(*) AS row_count FROM hub.project_public_v1",
+            "sql": "SELECT count(*) AS row_count FROM region_talk.bloggers_ru_v1",
             "parameters": [],
             "max_rows": 1,
             "max_bytes": 16384,
@@ -149,7 +149,7 @@ async def verify_acceptance_session(
         session,
         "data.query",
         {
-            "sql": "SELECT count(*) AS row_count FROM hub.project_public_v1",
+            "sql": "SELECT count(*) AS row_count FROM region_talk.bloggers_ru_v1",
             "parameters": [],
             "max_rows": 1,
             "max_bytes": 16384,

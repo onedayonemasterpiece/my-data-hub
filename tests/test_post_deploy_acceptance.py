@@ -325,6 +325,9 @@ class FakeSession:
             assert arguments == {"operation_id": "operation-cold-1"}
             payload = {"found": True, "state": "REGISTERING"}
         elif name == "data.query":
+            assert arguments["sql"] == (
+                "SELECT count(*) AS row_count FROM region_talk.bloggers_ru_v1"
+            )
             self.data_calls += 1
             payload = (
                 {

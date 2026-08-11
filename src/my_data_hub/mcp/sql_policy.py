@@ -21,8 +21,6 @@ class BoundedSQLPolicy:
     read_relations: frozenset[str] = frozenset(
         {
             "region_talk.bloggers_ru_v1",
-            "hub.project_public_v1",
-            "hub.content_public_v1",
         }
     )
     change_targets: frozenset[str] = frozenset({"hub.project", "hub.content_item"})
