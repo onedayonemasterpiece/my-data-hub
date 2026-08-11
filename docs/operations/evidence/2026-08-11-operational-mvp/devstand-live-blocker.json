@@ -22,7 +22,7 @@
   },
   "kaggle_control_comparison": {
     "automated_legacy_credentials_work_from_owner_runtime": true,
-    "real_private_dataset_canary": "kaggle-private-dataset-canary-4.json",
+    "real_private_dataset_canary": "kaggle-private-dataset-canary-5.json",
     "real_runtime_attestation_canary": "kaggle-runtime-attestation-canary.json",
     "second_real_runtime_attestation_canary": "kaggle-runtime-attestation-canary-2.json"
   },
@@ -38,7 +38,7 @@
     "loopback_health_http_status": 503,
     "provider_environment_mounted": false
   },
-  "observed_at": "2026-08-11T18:17:00+00:00",
+  "observed_at": "2026-08-11T18:52:30+00:00",
   "public_endpoints": {
     "edge_server": "ycalb",
     "mcp_healthz_http_status": 502,
