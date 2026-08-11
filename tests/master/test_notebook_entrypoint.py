@@ -17,6 +17,7 @@ from my_data_hub.master_runtime.notebook_entrypoint import (
     _checkpoint_before_stop,
     _credential_registration_url,
     _register_reader_credential,
+    main,
 )
 from my_data_hub.runtime_sdk import RuntimeEventType
 
@@ -65,9 +66,10 @@ def test_master_notebook_config_requires_exact_fields_and_source_binding(tmp_pat
 
 
 def test_activation_url_is_https_and_exact() -> None:
-    assert _activation_url(
-        "https://control.example/internal/runtime/events", "run-1", "attempt-1"
-    ) == "https://control.example/internal/runtime/activation/run-1/attempt-1"
+    assert (
+        _activation_url("https://control.example/internal/runtime/events", "run-1", "attempt-1")
+        == "https://control.example/internal/runtime/activation/run-1/attempt-1"
+    )
     with pytest.raises(ValueError, match="exact HTTPS"):
         _activation_url("http://control.example/internal/runtime/events", "run", "attempt")
 
@@ -107,12 +109,8 @@ def test_reader_credential_handoff_is_epoch_bound_tls_and_not_returned(
         assert timeout == 10
         return Response()
 
-    monkeypatch.setattr(
-        "my_data_hub.master_runtime.notebook_entrypoint.CredentialProvisioner", Provisioner
-    )
-    monkeypatch.setattr(
-        "my_data_hub.master_runtime.notebook_entrypoint.urllib.request.urlopen", open_request
-    )
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.CredentialProvisioner", Provisioner)
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.urllib.request.urlopen", open_request)
     config = NotebookMasterConfig(
         master_instance_id=UUID("11111111-1111-4111-8111-111111111111"),
         run_id="run-1",
@@ -259,3 +257,47 @@ def test_checkpoint_failure_leaves_drained_master_nonterminal_and_running(tmp_pa
     if failure in {"publish", "missing"}:
         assert "runtime.terminal" not in events
         assert events[-1] == "checkpoint.failed"
+
+
+@pytest.mark.parametrize("has_head", [False, True])
+def test_notebook_main_resolves_exact_durable_head_and_always_wires_checkpoint_coordinator(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, has_head: bool
+) -> None:
+    payload = _payload()
+    payload.update(
+        {
+            "run_id": "11111111-1111-4111-8111-111111111111",
+            "attempt_id": "22222222-2222-4222-8222-222222222222",
+        }
+    )
+    config_path = tmp_path / "master.json"
+    config_path.write_text(json.dumps(payload))
+    monkeypatch.setenv("MY_DATA_HUB_MASTER_CONFIG", str(config_path))
+    working = tmp_path / "kaggle" / "working"
+    working.mkdir(parents=True)
+    monkeypatch.setenv("KAGGLE_WORKING_DIR", str(working))
+    observed: dict[str, object] = {}
+
+    class Coordinator:
+        def resolve_boot_checkpoint(self, destination: Path) -> Path | None:
+            observed["destination"] = destination
+            return working / "exact-v7" if has_head else None
+
+    coordinator = Coordinator()
+    monkeypatch.setattr(
+        "my_data_hub.checkpoints.kaggle_runtime.build_runtime_checkpoint_coordinator_from_environment",
+        lambda **kwargs: observed.update(factory=kwargs) or coordinator,
+    )
+
+    def run(config: NotebookMasterConfig, *, checkpoint_coordinator: object) -> int:
+        observed["config"] = config
+        observed["coordinator"] = checkpoint_coordinator
+        return 17
+
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.run_master", run)
+    assert main() == 17
+    config = observed["config"]
+    assert isinstance(config, NotebookMasterConfig)
+    assert config.boot_source is (BootSource.VERIFIED_CHECKPOINT if has_head else BootSource.EMPTY_BASELINE)
+    assert config.checkpoint_directory == (working / "exact-v7" if has_head else None)
+    assert observed["coordinator"] is coordinator

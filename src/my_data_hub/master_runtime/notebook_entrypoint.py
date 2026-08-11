@@ -7,7 +7,7 @@ import os
 import secrets
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -56,11 +56,24 @@ class NotebookMasterConfig:
             raise ValueError("master config must be a bounded regular file")
         raw = json.loads(path.read_text(encoding="utf-8"))
         required = {
-            "master_instance_id", "run_id", "attempt_id", "service_instance_id", "epoch",
-            "boot_source", "checkpoint_directory", "lease_seconds", "postgres_bin", "postgres_port",
-            "tunnel_gateway_host", "tunnel_gateway_port", "tunnel_gateway_user",
-            "tunnel_remote_port", "maximum_runtime_seconds", "checkpoint_reserve_seconds",
-            "source_identity", "source_version",
+            "master_instance_id",
+            "run_id",
+            "attempt_id",
+            "service_instance_id",
+            "epoch",
+            "boot_source",
+            "checkpoint_directory",
+            "lease_seconds",
+            "postgres_bin",
+            "postgres_port",
+            "tunnel_gateway_host",
+            "tunnel_gateway_port",
+            "tunnel_gateway_user",
+            "tunnel_remote_port",
+            "maximum_runtime_seconds",
+            "checkpoint_reserve_seconds",
+            "source_identity",
+            "source_version",
         }
         if not isinstance(raw, dict) or set(raw) != required:
             raise ValueError("master config fields differ from the exact contract")
@@ -140,10 +153,7 @@ def _credential_registration_url(callback_url: str, run_id: str, attempt_id: str
     suffix = "/internal/runtime/events"
     if not callback_url.startswith("https://") or not callback_url.endswith(suffix):
         raise ValueError("callback URL does not match the exact HTTPS runtime endpoint")
-    return (
-        f"{callback_url.removesuffix(suffix)}/internal/runtime/session-credentials/"
-        f"{run_id}/{attempt_id}"
-    )
+    return f"{callback_url.removesuffix(suffix)}/internal/runtime/session-credentials/{run_id}/{attempt_id}"
 
 
 def _register_reader_credential(
@@ -326,9 +336,12 @@ def run_master(
             canonical_revision = int(
                 cursor.execute("SELECT canonical_revision FROM hub.canonical_state WHERE singleton=true").fetchone()[0]
             )
-            extensions = {str(row[0]) for row in cursor.execute(
-                "SELECT extname FROM pg_extension WHERE extname IN ('vector','pgcrypto','pg_trgm','citext')"
-            ).fetchall()}
+            extensions = {
+                str(row[0])
+                for row in cursor.execute(
+                    "SELECT extname FROM pg_extension WHERE extname IN ('vector','pgcrypto','pg_trgm','citext')"
+                ).fetchall()
+            }
             if extensions != {"vector", "pgcrypto", "pg_trgm", "citext"}:
                 raise RuntimeError("required PostgreSQL extensions are absent")
         return schema_version, canonical_revision, hashlib.sha256(tls_certificate.read_bytes()).hexdigest()
@@ -350,6 +363,7 @@ def run_master(
         gate_connection = psycopg.connect(database_url)
     except Exception:
         gate_connection = None
+
     # Gate connection can exist only after PostgreSQL starts.  Use a lazy seam.
     class LazyGate:
         def _gate(self) -> DatabaseGate:
@@ -411,9 +425,7 @@ def run_master(
     # The provider hard-stop applies to the whole Notebook, not only the active
     # service loop.  Reserve a declared, testable window for drain, basebackup,
     # exact readback, independent restore and durable HEAD promotion.
-    deadline = time.monotonic() + (
-        config.maximum_runtime_seconds - config.checkpoint_reserve_seconds
-    )
+    deadline = time.monotonic() + (config.maximum_runtime_seconds - config.checkpoint_reserve_seconds)
     current_lease = ready.lease_until
     active_error: BaseException | None = None
     try:
@@ -534,4 +546,21 @@ def _checkpoint_before_stop(
 
 def main() -> int:
     config = NotebookMasterConfig.load(Path(_required("MY_DATA_HUB_MASTER_CONFIG")))
-    return run_master(config)
+    identity = MasterIdentity(config.master_instance_id, config.run_id, config.epoch)
+    from my_data_hub.checkpoints.kaggle_runtime import (
+        build_runtime_checkpoint_coordinator_from_environment,
+    )
+
+    coordinator = build_runtime_checkpoint_coordinator_from_environment(
+        identity=identity,
+        attempt_id=UUID(config.attempt_id),
+        postgres_bin=config.postgres_bin,
+    )
+    paths = MasterPaths.under(Path(os.environ.get("KAGGLE_WORKING_DIR", "/kaggle/working")))
+    boot_checkpoint = coordinator.resolve_boot_checkpoint(paths.checkpoints / "verified-head-boot")
+    config = replace(
+        config,
+        boot_source=(BootSource.VERIFIED_CHECKPOINT if boot_checkpoint is not None else BootSource.EMPTY_BASELINE),
+        checkpoint_directory=boot_checkpoint,
+    )
+    return run_master(config, checkpoint_coordinator=coordinator)

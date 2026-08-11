@@ -69,9 +69,7 @@ class KaggleMasterLaunchAssets:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dataset_files", MappingProxyType(dict(self.dataset_files)))
-        object.__setattr__(
-            self, "runtime_secret_bindings", MappingProxyType(dict(self.runtime_secret_bindings))
-        )
+        object.__setattr__(self, "runtime_secret_bindings", MappingProxyType(dict(self.runtime_secret_bindings)))
         for field_name in ("dataset_ref", "notebook_ref", "checkpoint_ref", "checkpoint_verifier_ref"):
             value = getattr(self, field_name)
             parts = value.split("/")
@@ -81,9 +79,7 @@ class KaggleMasterLaunchAssets:
             raise MasterLaunchContractError("source/checkpoint identity must be exact")
         if not self.dataset_files or not self.notebook_source:
             raise MasterLaunchContractError("master launch assets must be non-empty")
-        if not self.callback_url.startswith("https://") or not self.callback_url.endswith(
-            "/internal/runtime/events"
-        ):
+        if not self.callback_url.startswith("https://") or not self.callback_url.endswith("/internal/runtime/events"):
             raise MasterLaunchContractError("callback URL must be the exact HTTPS runtime endpoint")
         if not self.runtime_token_secret_name or len(self.runtime_token_secret_name) > 200:
             raise MasterLaunchContractError("runtime token secret name is invalid")
@@ -99,7 +95,10 @@ class KaggleMasterLaunchAssets:
             raise MasterLaunchContractError("master notebook kernel type is invalid")
         for environment_name, secret_name in self.runtime_secret_bindings.items():
             if (
-                not environment_name.startswith("MY_DATA_HUB_")
+                (
+                    environment_name not in {"KAGGLE_API_TOKEN"}
+                    and not environment_name.startswith("MY_DATA_HUB_")
+                )
                 or environment_name == "MY_DATA_HUB_RUN_SECRET"
                 or not secret_name
             ):
@@ -124,17 +123,11 @@ class KaggleMasterLaunchAssets:
         verifier_source = self.dataset_files[self.checkpoint_verifier_source_file]
         values.update(
             {
-                "MY_DATA_HUB_CONTROL_PLANE_URL": self.callback_url.removesuffix(
-                    "/internal/runtime/events"
-                ),
+                "MY_DATA_HUB_CONTROL_PLANE_URL": self.callback_url.removesuffix("/internal/runtime/events"),
                 "MY_DATA_HUB_CHECKPOINT_DATASET_REF": self.checkpoint_ref,
                 "MY_DATA_HUB_CHECKPOINT_VERIFIER_REF": self.checkpoint_verifier_ref,
-                "MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_PATH": (
-                    f"{input_root}/{self.checkpoint_verifier_source_file}"
-                ),
-                "MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_SHA256": hashlib.sha256(
-                    verifier_source
-                ).hexdigest(),
+                "MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_PATH": (f"{input_root}/{self.checkpoint_verifier_source_file}"),
+                "MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_SHA256": hashlib.sha256(verifier_source).hexdigest(),
                 "MY_DATA_HUB_CHECKPOINT_PROBE_RELATIONS_JSON": json.dumps(
                     self.checkpoint_probe_relations, separators=(",", ":")
                 ),
@@ -143,9 +136,7 @@ class KaggleMasterLaunchAssets:
         wheels = sorted(path for path in self.dataset_files if path.endswith(".whl"))
         if len(wheels) == 1:
             values["MY_DATA_HUB_WHEEL_PATH"] = f"{input_root}/{wheels[0]}"
-            values["MY_DATA_HUB_WHEEL_SHA256"] = hashlib.sha256(
-                self.dataset_files[wheels[0]]
-            ).hexdigest()
+            values["MY_DATA_HUB_WHEEL_SHA256"] = hashlib.sha256(self.dataset_files[wheels[0]]).hexdigest()
         return values
 
 
@@ -167,9 +158,7 @@ def _replace_nonsecret_markers(content: bytes, values: Mapping[str, str]) -> byt
     return rendered
 
 
-def _runtime_bootstrap(
-    values: Mapping[str, str], secret_name: str, secret_bindings: Mapping[str, str]
-) -> str:
+def _runtime_bootstrap(values: Mapping[str, str], secret_name: str, secret_bindings: Mapping[str, str]) -> str:
     # Only identities and a Kaggle User Secrets label are embedded.  The secret
     # value is fetched inside Kaggle and the per-attempt token is derived there.
     encoded = json.dumps(dict(values), sort_keys=True)
@@ -254,11 +243,15 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
                 control_class=ControlClass.ORCHESTRATOR_PROTECTED,
                 disposable=False,
             )
-            return self._receipt(effect, self.assets.dataset_ref, {
-                "provider_ref": result.identity.provider_ref,
-                "provider_version": result.identity.version,
-                "package_sha256": result.identity.package_sha256,
-            })
+            return self._receipt(
+                effect,
+                self.assets.dataset_ref,
+                {
+                    "provider_ref": result.identity.provider_ref,
+                    "provider_version": result.identity.version,
+                    "package_sha256": result.identity.package_sha256,
+                },
+            )
         if effect.effect_kind == "push_notebook":
             source = self._source(effect.exact_identity)
             intent = self._intent(
@@ -395,9 +388,7 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             exact_identity=exact_identity,
         )
 
-    def _notebook_receipt(
-        self, effect: PlannedProviderEffect, result: NotebookMutationResult
-    ) -> ProviderEffectReceipt:
+    def _notebook_receipt(self, effect: PlannedProviderEffect, result: NotebookMutationResult) -> ProviderEffectReceipt:
         return self._receipt(effect, result.run.provider_run_ref, result.run.model_dump(mode="json"))
 
     @staticmethod

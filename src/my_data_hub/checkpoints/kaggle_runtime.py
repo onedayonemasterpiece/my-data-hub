@@ -141,9 +141,7 @@ class RemoteControlCheckpointRegistry:
     def resolve_head(self) -> RemoteCheckpointHeadSnapshot:
         """Resolve boot-safe exact current/previous refs; never a dataset slug/latest."""
 
-        value = self.client.get(
-            f"/internal/checkpoints/{quote(self.service_kind, safe='')}/head"
-        )
+        value = self.client.get(f"/internal/checkpoints/{quote(self.service_kind, safe='')}/head")
         try:
             generation = int(value["generation"])
             current = _exact_checkpoint_reference(value.get("current"))
@@ -396,10 +394,7 @@ class KaggleCheckpointDatasetProvider:
             readback.package / CHECKPOINT_MANIFEST_NAME,
             readback.package,
         )
-        if (
-            manifest.checkpoint_id != reference.checkpoint_id
-            or manifest.manifest_sha256 != reference.manifest_sha256
-        ):
+        if manifest.checkpoint_id != reference.checkpoint_id or manifest.manifest_sha256 != reference.manifest_sha256:
             raise CheckpointRuntimeError("boot checkpoint differs from exact resolved HEAD metadata")
         return readback
 
@@ -657,6 +652,21 @@ class RuntimeCheckpointCoordinator:
         self.checkpoint_id_factory = checkpoint_id_factory
         self.timeout_seconds = timeout_seconds
 
+    def resolve_boot_checkpoint(self, destination: Path) -> Path | None:
+        """Download only the exact numeric verified HEAD for master bootstrap."""
+
+        _assert_kaggle_working_path(destination)
+        registry = self.coordinator.registry
+        if not isinstance(registry, RemoteControlCheckpointRegistry):
+            raise CheckpointRuntimeError("production boot requires the remote durable checkpoint registry")
+        snapshot = registry.resolve_head()
+        if snapshot.current is None:
+            return None
+        if destination.exists():
+            raise CheckpointRuntimeError("boot checkpoint destination must be absent")
+        readback = self.coordinator.provider.exact_head_readback(snapshot.current, destination)
+        return readback.package
+
     def create_and_publish(
         self,
         *,
@@ -753,9 +763,7 @@ def build_runtime_checkpoint_coordinator_from_environment(
         _required_environment("MY_DATA_HUB_CHECKPOINT_VERIFIER_REF"),
         "checkpoint verifier",
     )
-    verifier_source_path = Path(
-        _required_environment("MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_PATH")
-    )
+    verifier_source_path = Path(_required_environment("MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_PATH"))
     if (
         not verifier_source_path.is_absolute()
         or not verifier_source_path.is_file()
@@ -764,18 +772,14 @@ def build_runtime_checkpoint_coordinator_from_environment(
     ):
         raise CheckpointRuntimeError("checkpoint verifier source path is not an exact bounded file")
     verifier_source = verifier_source_path.read_bytes()
-    expected_source_sha = _required_environment(
-        "MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_SHA256"
-    )
+    expected_source_sha = _required_environment("MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_SHA256")
     if (
         not re.fullmatch(r"[a-f0-9]{64}", expected_source_sha)
         or hashlib.sha256(verifier_source).hexdigest() != expected_source_sha
     ):
         raise CheckpointRuntimeError("checkpoint verifier source hash differs")
     try:
-        raw_relations = json.loads(
-            _required_environment("MY_DATA_HUB_CHECKPOINT_PROBE_RELATIONS_JSON")
-        )
+        raw_relations = json.loads(_required_environment("MY_DATA_HUB_CHECKPOINT_PROBE_RELATIONS_JSON"))
     except json.JSONDecodeError as exc:
         raise CheckpointRuntimeError("checkpoint probe relation contract is invalid JSON") from exc
     if (
@@ -807,8 +811,7 @@ def build_runtime_checkpoint_coordinator_from_environment(
     pg_basebackup = postgres_bin / "pg_basebackup"
     pg_dump = postgres_bin / "pg_dump"
     if any(
-        not tool.is_file() or tool.is_symlink() or not os.access(tool, os.X_OK)
-        for tool in (pg_basebackup, pg_dump)
+        not tool.is_file() or tool.is_symlink() or not os.access(tool, os.X_OK) for tool in (pg_basebackup, pg_dump)
     ):
         raise CheckpointRuntimeError("exact PostgreSQL checkpoint tools are unavailable")
     return RuntimeCheckpointCoordinator(
@@ -839,9 +842,7 @@ def _exact_owner_slug(value: str, label: str) -> str:
 def _postgres_checkpoint_identity(connection: Any) -> tuple[str, str, str]:
     with connection.cursor() as cursor:
         postgres_version = str(cursor.execute("SHOW server_version").fetchone()[0])
-        row = cursor.execute(
-            "SELECT extversion FROM pg_extension WHERE extname='vector'"
-        ).fetchone()
+        row = cursor.execute("SELECT extversion FROM pg_extension WHERE extname='vector'").fetchone()
         if row is None or not str(row[0]):
             raise CheckpointRuntimeError("pgvector extension version is unavailable")
         pgvector_version = str(row[0])
@@ -908,10 +909,7 @@ def _render_verifier_source(
         "MY_DATA_HUB_CHECKPOINT_ID": str(manifest.checkpoint_id),
         "MY_DATA_HUB_CHECKPOINT_MANIFEST_SHA256": manifest.manifest_sha256,
     }
-    bootstrap = (
-        "import os as _mdh_os\n"
-        f"_mdh_os.environ.update({json.dumps(values, sort_keys=True)})\n"
-    )
+    bootstrap = f"import os as _mdh_os\n_mdh_os.environ.update({json.dumps(values, sort_keys=True)})\n"
     if assets.kernel_type == "script":
         return bootstrap.encode() + assets.notebook_source
     try:
