@@ -32,14 +32,22 @@ class FakeJournal:
         self.intents: list[ProviderEffectIntent] = []
         self.receipts: list[object] = []
         self.claims: dict[str, TaskResourceClaim] = {}
+        self.fail_receipts = 0
+        self.fail_claims = 0
 
     def persist_intent(self, intent: ProviderEffectIntent) -> None:
         self.intents.append(intent)
 
     def persist_receipt(self, receipt: object) -> None:
+        if self.fail_receipts:
+            self.fail_receipts -= 1
+            raise RuntimeError("simulated lost receipt response")
         self.receipts.append(receipt)
 
     def persist_resource_claim(self, claim: TaskResourceClaim) -> None:
+        if self.fail_claims:
+            self.fail_claims -= 1
+            raise RuntimeError("simulated lost claim response")
         self.claims[claim.claim_sha256] = claim
 
     def assert_resource_claim(self, claim: TaskResourceClaim) -> None:
@@ -385,6 +393,72 @@ def test_checkpoint_directory_upload_streams_without_bytes_mapping(tmp_path: Pat
     assert created.identity.version == 1
     assert api.datasets[created.identity.provider_ref][1]["physical/base.tar.gz"] == b"checkpoint bytes"
     assert (source / "physical/base.tar.gz").is_file()
+
+
+def test_dataset_directory_reconciliation_repairs_lost_journal_without_second_version(
+    tmp_path: Path,
+) -> None:
+    client, api, journal = adapter()
+    task_id = uuid4()
+    first_source = tmp_path / "checkpoint-v1"
+    first_source.mkdir()
+    (first_source / "checkpoint-manifest.json").write_bytes(b'{"version":1}')
+    from my_data_hub.providers.kaggle import directory_sha256
+
+    created = client.create_private_dataset_from_directory(
+        intent=effect(
+            MutationAction.CREATE_DATASET,
+            "owner/reconciled-checkpoints",
+            task_id=task_id,
+            arguments={
+                "content_tree_sha256": directory_sha256(first_source),
+                "control_class": "orchestrator_protected",
+                "disposable": False,
+            },
+        ),
+        source_directory=first_source,
+        title="Reconciled checkpoints",
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=False,
+    )
+    second_source = tmp_path / "checkpoint-v2"
+    second_source.mkdir()
+    (second_source / "checkpoint-manifest.json").write_bytes(b'{"version":2}')
+    notes = "exact checkpoint version two"
+    arguments = {
+        "content_tree_sha256": directory_sha256(second_source),
+        "previous_version": 1,
+        "version_notes_sha256": hashlib.sha256(notes.encode()).hexdigest(),
+    }
+    version_intent = effect(
+        MutationAction.VERSION_DATASET,
+        created.identity.provider_ref,
+        task_id=task_id,
+        expected=created.claim.fingerprint,
+        arguments=arguments,
+    )
+    journal.fail_claims = 1
+    with pytest.raises(RuntimeError, match="lost claim"):
+        client.create_private_dataset_version_from_directory(
+            intent=version_intent,
+            claim=created.claim,
+            source_directory=second_source,
+            version_notes=notes,
+        )
+
+    reconciled = client.reconcile_private_dataset_directory_mutation(
+        intent=version_intent,
+        source_directory=second_source,
+        expected_version=2,
+        arguments=arguments,
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=False,
+    )
+
+    assert reconciled.identity.version == 2
+    assert reconciled.effect.outcome == EffectOutcome.ALREADY_APPLIED
+    assert sum(call[0] == "dataset_create_version" for call in api.calls) == 1
+    assert journal.claims[reconciled.claim.claim_sha256] == reconciled.claim
 
 
 def test_notebook_source_run_and_output_are_bound_to_exact_version() -> None:

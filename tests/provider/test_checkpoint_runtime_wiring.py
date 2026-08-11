@@ -11,25 +11,35 @@ import pytest
 
 from my_data_hub.checkpoints.kaggle_runtime import (
     CHECKPOINT_RESTORE_RECEIPT_NAME,
+    CheckpointRetryableError,
     CheckpointRuntimeError,
     ExactCheckpointReference,
+    KaggleCheckpointCoordinator,
     KaggleCheckpointDatasetProvider,
+    KaggleCheckpointReadback,
     KaggleCheckpointRestoreVerifier,
     KaggleCheckpointVerifierAssets,
+    RemoteCheckpointHeadSnapshot,
     RemoteControlCheckpointRegistry,
     RuntimeCheckpointCoordinator,
 )
-from my_data_hub.checkpoints.manifest import RestoreProbe, build_manifest, write_manifest
+from my_data_hub.checkpoints.manifest import RestoreProbe, build_manifest, load_and_verify, write_manifest
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.checkpoints.registry import CheckpointHead
 from my_data_hub.providers.kaggle import (
     AuthenticatedControlPlaneClient,
     ControlPlaneRuntimeIdentity,
+    DatasetMutationResult,
+    EffectOutcome,
+    KaggleAmbiguousMutation,
     KaggleDatasetIdentity,
     KaggleKernelRunIdentity,
     MetadataHttpResponse,
+    MutationAction,
+    ProviderEffectReceipt,
+    TaskResourceClaim,
 )
-from my_data_hub.providers.models import ProviderFingerprint
+from my_data_hub.providers.models import ControlClass, ProviderFingerprint, ProviderKind
 
 NOW = datetime(2026, 8, 11, tzinfo=UTC)
 RUN_ID = UUID("11111111-1111-4111-8111-111111111111")
@@ -98,7 +108,12 @@ def test_remote_head_resolves_exact_numeric_current_and_previous_for_boot() -> N
     assert str(transport.calls[0]["url"]).endswith("/internal/checkpoints/postgres-master/head")
 
 
-def _manifest(package: Path):  # type: ignore[no-untyped-def]
+def _manifest(
+    package: Path,
+    *,
+    checkpoint_id: UUID = CHECKPOINT_ID,
+    parent_checkpoint_id: UUID | None = None,
+):  # type: ignore[no-untyped-def]
     for relative, content in {
         "physical/base.tar.gz": b"base",
         "physical/backup_manifest": b"native",
@@ -111,10 +126,10 @@ def _manifest(package: Path):  # type: ignore[no-untyped-def]
         target.write_bytes(content)
     manifest = build_manifest(
         package_directory=package,
-        checkpoint_id=CHECKPOINT_ID,
+        checkpoint_id=checkpoint_id,
         master_instance_id=MASTER_ID,
         epoch=9,
-        parent_checkpoint_id=None,
+        parent_checkpoint_id=parent_checkpoint_id,
         postgres_version="18.0",
         pgvector_version="0.8.1",
         schema_version=13,
@@ -142,8 +157,17 @@ class FakeVerifierAdapter:
         self.dataset = dataset
         self.run: KaggleKernelRunIdentity | None = None
         self.dataset_sources: tuple[str, ...] = ()
+        self.launched: object | None = None
+        self.push_count = 0
+        self.download_count = 0
+
+    def reconcile_private_notebook_mutation(self, **kwargs: object) -> object | None:
+        if self.launched is not None:
+            assert kwargs["task_run_id"] == self.run.task_run_id  # type: ignore[union-attr]
+        return self.launched
 
     def push_private_notebook(self, **kwargs: object) -> object:
+        self.push_count += 1
         run_id = kwargs["task_run_id"]
         assert isinstance(run_id, UUID)
         source = kwargs["source"]
@@ -159,7 +183,8 @@ class FakeVerifierAdapter:
             provider_run_ref="owner/checkpoint-verifier/4",
             started_at=NOW,
         )
-        return SimpleNamespace(run=self.run)
+        self.launched = SimpleNamespace(run=self.run)
+        return self.launched
 
     def poll_run(self, run: KaggleKernelRunIdentity, policy: object) -> object:
         assert run == self.run and policy is not None
@@ -167,6 +192,7 @@ class FakeVerifierAdapter:
 
     def download_exact_run_output_tree(self, run: KaggleKernelRunIdentity, *, destination: Path) -> object:
         assert run == self.run
+        self.download_count += 1
         destination.mkdir()
         manifest = self.manifest
         receipt = {
@@ -229,6 +255,53 @@ def test_verifier_launch_binds_exact_dataset_version_and_typed_restore_receipt(
     assert receipt["checkpoint_id"] == str(CHECKPOINT_ID)
 
 
+def test_verifier_retry_reconciles_deterministic_run_without_second_push(
+    kaggle_working: Path,
+) -> None:
+    package = kaggle_working / "candidate"
+    package.mkdir()
+    manifest = _manifest(package)
+    dataset = KaggleDatasetIdentity(
+        provider_ref="owner/private-checkpoints",
+        version=7,
+        privacy="private",
+        package_sha256="f" * 64,
+        fingerprint=ProviderFingerprint(value="a" * 64),
+        observed_at=NOW,
+    )
+    adapter = FakeVerifierAdapter(manifest, dataset)
+    output_root = kaggle_working / "verifier-output"
+    output_root.mkdir()
+    verifier = KaggleCheckpointRestoreVerifier(
+        adapter,  # type: ignore[arg-type]
+        KaggleCheckpointVerifierAssets(
+            notebook_ref="owner/checkpoint-verifier",
+            notebook_source=json.dumps(
+                {"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+            ).encode(),
+        ),
+        output_directory=output_root,
+        operation_id=UUID("66666666-6666-4666-8666-666666666666"),
+        authorization_task_id=ATTEMPT_ID,
+        clock=lambda: datetime(2026, 8, 11, 1, tzinfo=UTC),
+    )
+
+    first = verifier.verify_restore(
+        exact_version_ref="owner/private-checkpoints/7",
+        dataset_identity=dataset,
+        manifest=manifest,
+    )
+    second = verifier.verify_restore(
+        exact_version_ref="owner/private-checkpoints/7",
+        dataset_identity=dataset,
+        manifest=manifest,
+    )
+
+    assert first == second
+    assert adapter.push_count == 1
+    assert adapter.download_count == 1
+
+
 def test_boot_readback_uses_resolved_numeric_head_and_rechecks_manifest(
     kaggle_working: Path,
 ) -> None:
@@ -273,6 +346,142 @@ def test_boot_readback_uses_resolved_numeric_head_and_rechecks_manifest(
     )
     assert adapter.seen == ("owner/private-checkpoints", 7)
     assert readback.package == destination
+
+
+def test_checkpoint_provider_retry_reconciles_same_effect_without_duplicate_create(
+    kaggle_working: Path,
+) -> None:
+    package = kaggle_working / "candidate"
+    package.mkdir()
+    manifest = _manifest(package)
+
+    class AmbiguousCreateAdapter:
+        def __init__(self) -> None:
+            self.current_version: int | None = None
+            self.create_calls = 0
+            self.reconcile_calls = 0
+            self.intents: list[object] = []
+
+        def current_private_dataset_version(self, *, provider_ref: str) -> int | None:
+            assert provider_ref == "owner/private-checkpoints"
+            return self.current_version
+
+        def create_private_dataset_from_directory(self, **kwargs: object) -> object:
+            self.create_calls += 1
+            self.current_version = 1
+            self.intents.append(kwargs["intent"])
+            raise RuntimeError("provider succeeded but journal response was lost")
+
+        def reconcile_private_dataset_directory_mutation(self, **kwargs: object) -> DatasetMutationResult:
+            self.reconcile_calls += 1
+            intent = kwargs["intent"]
+            self.intents.append(intent)
+            if self.reconcile_calls == 1:
+                raise RuntimeError("control plane is still unavailable")
+            identity = KaggleDatasetIdentity(
+                provider_ref="owner/private-checkpoints",
+                version=1,
+                privacy="private",
+                package_sha256="f" * 64,
+                fingerprint=ProviderFingerprint(value="a" * 64),
+                observed_at=NOW,
+            )
+            receipt = ProviderEffectReceipt(
+                operation_id=intent.operation_id,
+                effect_id=intent.effect_id,
+                action=MutationAction.CREATE_DATASET,
+                provider_ref=identity.provider_ref,
+                outcome=EffectOutcome.ALREADY_APPLIED,
+                attempts=0,
+                observed_fingerprint=identity.fingerprint,
+                provider_version=1,
+                observed_at=NOW,
+                detail_code="reconciled",
+            )
+            claim = TaskResourceClaim.create(
+                task_id=intent.task_id,
+                effect_id=intent.effect_id,
+                provider_ref=identity.provider_ref,
+                kind=ProviderKind.DATASET,
+                control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+                disposable=False,
+                fingerprint=identity.fingerprint,
+                provider_version=1,
+                registered_at=NOW,
+            )
+            return DatasetMutationResult(identity=identity, claim=claim, effect=receipt)
+
+    adapter = AmbiguousCreateAdapter()
+    provider = KaggleCheckpointDatasetProvider(
+        adapter,  # type: ignore[arg-type]
+        dataset_ref="owner/private-checkpoints",
+        operation_id=UUID("77777777-7777-4777-8777-777777777777"),
+        resource_task_id=RUN_ID,
+    )
+
+    with pytest.raises(CheckpointRuntimeError, match="remains ambiguous"):
+        provider.upload_candidate(package, manifest)
+    exact_ref = provider.upload_candidate(package, manifest)
+
+    assert exact_ref == "owner/private-checkpoints/1"
+    assert adapter.create_calls == 1
+    assert adapter.reconcile_calls == 2
+    assert adapter.intents[0] == adapter.intents[1] == adapter.intents[2]
+
+
+def test_checkpoint_provider_never_versions_from_stale_claim(kaggle_working: Path) -> None:
+    package = kaggle_working / "candidate"
+    package.mkdir()
+    manifest = _manifest(package)
+    previous_identity = KaggleDatasetIdentity(
+        provider_ref="owner/private-checkpoints",
+        version=1,
+        privacy="private",
+        package_sha256="e" * 64,
+        fingerprint=ProviderFingerprint(value="a" * 64),
+        observed_at=NOW,
+    )
+    stale_claim = TaskResourceClaim.create(
+        task_id=RUN_ID,
+        effect_id=UUID("88888888-8888-4888-8888-888888888888"),
+        provider_ref=previous_identity.provider_ref,
+        kind=ProviderKind.DATASET,
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=False,
+        fingerprint=previous_identity.fingerprint,
+        provider_version=1,
+        registered_at=NOW,
+    )
+
+    class AdvancedAdapter:
+        version_calls = 0
+
+        def current_private_dataset_version(self, *, provider_ref: str) -> int:
+            return 2
+
+        def read_private_dataset(self, *, provider_ref: str, version: int) -> KaggleDatasetIdentity:
+            assert version == 1
+            return previous_identity
+
+        def reconcile_private_dataset_directory_mutation(self, **kwargs: object) -> object:
+            raise KaggleAmbiguousMutation("current bytes belong to another candidate")
+
+        def create_private_dataset_version_from_directory(self, **kwargs: object) -> object:
+            self.version_calls += 1
+            raise AssertionError("stale claim must never authorize a new version")
+
+    adapter = AdvancedAdapter()
+    provider = KaggleCheckpointDatasetProvider(
+        adapter,  # type: ignore[arg-type]
+        dataset_ref="owner/private-checkpoints",
+        operation_id=UUID("77777777-7777-4777-8777-777777777777"),
+        resource_task_id=RUN_ID,
+        claim=stale_claim,
+    )
+
+    with pytest.raises(CheckpointRuntimeError, match="advanced beyond"):
+        provider.upload_candidate(package, manifest)
+    assert adapter.version_calls == 0
 
 
 def test_checkpoint_runtime_rejects_devstand_byte_paths(tmp_path: Path) -> None:
@@ -387,3 +596,252 @@ def test_runtime_composite_matches_master_create_and_publish_protocol(
     assert build_identity.postgres_version == "18.1"  # type: ignore[union-attr]
     assert build_identity.pgvector_version == "0.8.1"  # type: ignore[union-attr]
     assert build_identity.checkpoint_lsn == "0/16B6C50"  # type: ignore[union-attr]
+
+
+def test_runtime_retry_reuses_package_and_refreshes_exact_durable_claim(
+    kaggle_working: Path,
+) -> None:
+    previous_checkpoint_id = UUID("55555555-5555-4555-8555-555555555555")
+    stale_claim = TaskResourceClaim.create(
+        task_id=UUID("99999999-9999-4999-8999-999999999999"),
+        effect_id=uuid4(),
+        provider_ref="owner/private-checkpoints",
+        kind=ProviderKind.DATASET,
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=False,
+        fingerprint=ProviderFingerprint(value="a" * 64),
+        provider_version=3,
+        registered_at=NOW,
+    )
+    exact_claim = TaskResourceClaim.create(
+        task_id=RUN_ID,
+        effect_id=uuid4(),
+        provider_ref="owner/private-checkpoints",
+        kind=ProviderKind.DATASET,
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=False,
+        fingerprint=ProviderFingerprint(value="b" * 64),
+        provider_version=4,
+        registered_at=NOW,
+    )
+
+    class Cursor:
+        query = ""
+
+        def __enter__(self) -> Cursor:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, query: str) -> Cursor:
+            self.query = query
+            return self
+
+        def fetchone(self) -> tuple[str] | None:
+            if self.query == "SHOW server_version":
+                return ("18.1",)
+            if "extversion" in self.query:
+                return ("0.8.1",)
+            if "pg_current_wal_lsn" in self.query:
+                return ("0/16B6C50",)
+            return None
+
+    class Connection:
+        def __enter__(self) -> Connection:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+    class ClaimSource:
+        calls = 0
+
+        def current_resource_claim(self, **kwargs: object) -> TaskResourceClaim:
+            self.calls += 1
+            assert kwargs["provider_ref"] == exact_claim.provider_ref
+            return exact_claim
+
+    class Builder:
+        calls = 0
+
+        def build(self, **kwargs: object):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            package = kwargs["package_directory"]
+            identity = kwargs["identity"]
+            assert isinstance(package, Path)
+            package.mkdir(parents=True)
+            manifest = _manifest(
+                package,
+                checkpoint_id=identity.checkpoint_id,
+                parent_checkpoint_id=identity.parent_checkpoint_id,
+            )
+            return package, package / "checkpoint-manifest.json", manifest
+
+    expected = PublishReceipt(
+        checkpoint_id=str(CHECKPOINT_ID),
+        exact_version_ref="owner/private-checkpoints/5",
+        manifest_sha256="a" * 64,
+        current_checkpoint_id=str(CHECKPOINT_ID),
+        previous_checkpoint_id=str(previous_checkpoint_id),
+        upload_seconds=1,
+        readback_seconds=2,
+        restore_seconds=3,
+        package_bytes=4,
+        restore_receipt={"ok": True},
+    )
+
+    class Publisher:
+        registry = SimpleNamespace(
+            head=CheckpointHead(generation=4, current=previous_checkpoint_id, previous=None)
+        )
+        provider = SimpleNamespace(
+            claim=stale_claim,
+            dataset_ref="owner/private-checkpoints",
+            operation_id=UUID("77777777-7777-4777-8777-777777777777"),
+            resource_task_id=stale_claim.task_id,
+        )
+        def __init__(self) -> None:
+            self.calls = 0
+            self.packages: list[Path] = []
+
+        def publish(self, **kwargs: object) -> PublishReceipt:
+            self.calls += 1
+            self.packages.append(kwargs["package"])  # type: ignore[arg-type]
+            assert self.provider.claim == exact_claim
+            assert self.provider.resource_task_id == exact_claim.task_id
+            if self.calls == 1:
+                raise CheckpointRetryableError("lost transition response")
+            return expected
+
+    builder = Builder()
+    publisher = Publisher()
+    claim_source = ClaimSource()
+    coordinator = RuntimeCheckpointCoordinator(
+        builder=builder,  # type: ignore[arg-type]
+        coordinator=publisher,  # type: ignore[arg-type]
+        probe_relations=("hub.canonical_state",),
+        source_identity="owner/postgres-master/3",
+        claim_source=claim_source,
+        connect=lambda *_args, **_kwargs: Connection(),
+        clock=lambda: NOW,
+        checkpoint_id_factory=lambda: CHECKPOINT_ID,
+    )
+    call = {
+        "database_url": "postgresql:///postgres",
+        "package_directory": kaggle_working / "checkpoints",
+        "identity": SimpleNamespace(master_instance_id=MASTER_ID, run_id=str(RUN_ID), epoch=9),
+    }
+
+    with pytest.raises(CheckpointRetryableError):
+        coordinator.create_and_publish(**call)
+    receipt = coordinator.create_and_publish(**call)
+
+    assert receipt == expected
+    assert builder.calls == 1
+    assert publisher.packages[0] == publisher.packages[1]
+    assert claim_source.calls == 2
+
+
+def test_checkpoint_coordinator_recovers_lost_promotion_response(
+    kaggle_working: Path,
+) -> None:
+    package = kaggle_working / "candidate"
+    package.mkdir()
+    _manifest(package)
+    dataset = KaggleDatasetIdentity(
+        provider_ref="owner/private-checkpoints",
+        version=7,
+        privacy="private",
+        package_sha256="f" * 64,
+        fingerprint=ProviderFingerprint(value="a" * 64),
+        observed_at=NOW,
+    )
+
+    class Registry:
+        durable_head = CheckpointHead()
+        rejected = False
+
+        @property
+        def head(self) -> CheckpointHead:
+            return self.durable_head
+
+        def add_candidate(self, _manifest: object) -> None:
+            return None
+
+        def uploaded(self, _checkpoint_id: UUID, _exact_ref: str) -> None:
+            return None
+
+        def readback_verified(self, _checkpoint_id: UUID) -> None:
+            return None
+
+        def restore_verified(self, _checkpoint_id: UUID) -> None:
+            return None
+
+        def promote(self, checkpoint_id: UUID, *, expected_generation: int) -> CheckpointHead:
+            assert expected_generation == 0
+            self.durable_head = CheckpointHead(generation=1, current=checkpoint_id, previous=None)
+            raise RuntimeError("promotion committed but response was lost")
+
+        def reject(self, _checkpoint_id: UUID, _reason: str) -> None:
+            self.rejected = True
+
+        def resolve_head(self) -> RemoteCheckpointHeadSnapshot:
+            return RemoteCheckpointHeadSnapshot(
+                generation=self.durable_head.generation,
+                current=(
+                    ExactCheckpointReference(
+                        checkpoint_id=CHECKPOINT_ID,
+                        dataset_ref="owner/private-checkpoints",
+                        exact_version_ref="owner/private-checkpoints/7",
+                        manifest_sha256=_manifest_sha,
+                    )
+                    if self.durable_head.current is not None
+                    else None
+                ),
+                previous=None,
+            )
+
+    class Provider:
+        dataset_ref = "owner/private-checkpoints"
+
+        def upload_candidate(self, _package: Path, _manifest: object) -> str:
+            return "owner/private-checkpoints/7"
+
+        def exact_readback(self, _exact_ref: str, destination: Path) -> KaggleCheckpointReadback:
+            shutil.copytree(package, destination)
+            return KaggleCheckpointReadback(package=destination, identity=dataset)
+
+    class Verifier:
+        def verify_restore(self, **_kwargs: object) -> dict[str, object]:
+            return {"ok": True}
+
+    _manifest_sha = load_and_verify(
+        package / "checkpoint-manifest.json",
+        package,
+    ).manifest_sha256
+    registry = Registry()
+    publisher = KaggleCheckpointCoordinator(
+        registry=registry,  # type: ignore[arg-type]
+        provider=Provider(),  # type: ignore[arg-type]
+        restore_verifier=Verifier(),  # type: ignore[arg-type]
+    )
+    receipt = publisher.publish(
+        package=package,
+        manifest_path=package / "checkpoint-manifest.json",
+        readback_directory=kaggle_working / "readback",
+    )
+
+    assert receipt.current_checkpoint_id == str(CHECKPOINT_ID)
+    assert receipt.exact_version_ref == "owner/private-checkpoints/7"
+    assert registry.rejected is False
+    reconciled = publisher.reconcile_promoted(
+        package=package,
+        manifest_path=package / "checkpoint-manifest.json",
+    )
+    assert reconciled is not None
+    assert reconciled.exact_version_ref == "owner/private-checkpoints/7"
+    assert reconciled.restore_receipt["reconciled_from_durable_verified_head"] is True

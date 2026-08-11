@@ -19,7 +19,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol
 from urllib.parse import quote
-from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from my_data_hub.providers.kaggle.adapter import (
     KaggleProviderAdapter,
@@ -27,6 +27,8 @@ from my_data_hub.providers.kaggle.adapter import (
     directory_sha256,
 )
 from my_data_hub.providers.kaggle.contracts import (
+    DatasetMutationResult,
+    KaggleAmbiguousMutation,
     KaggleDatasetIdentity,
     KaggleKernelRunIdentity,
     MutationAction,
@@ -61,6 +63,10 @@ _KAGGLE_WORKING_ROOT = Path("/kaggle/working")
 
 class CheckpointRuntimeError(RuntimeError):
     """A provider-side checkpoint or verifier contract failed closed."""
+
+
+class CheckpointRetryableError(PublishError):
+    """Publication is incomplete but safe to retry with the same candidate."""
 
 
 class RemoteCheckpointRegistryPort(CheckpointRegistryContract, Protocol):
@@ -328,45 +334,214 @@ class KaggleCheckpointDatasetProvider:
         _assert_kaggle_working_path(package)
         manifest.validate()
         content_sha = directory_sha256(package)
-        if self.claim is None:
-            action = MutationAction.CREATE_DATASET
-            arguments = {
-                "content_tree_sha256": content_sha,
-                "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
-                "disposable": False,
-            }
-            intent = self._intent(manifest, action, arguments)
-            result = self.adapter.create_private_dataset_from_directory(
-                intent=intent,
-                source_directory=package,
-                title=self.dataset_ref.split("/", 1)[1],
-                control_class=ControlClass.ORCHESTRATOR_PROTECTED,
-                disposable=False,
+        current_version = self.adapter.current_private_dataset_version(provider_ref=self.dataset_ref)
+
+        # First reconcile the provider current version against this exact
+        # candidate.  This repairs a lost receipt/claim response without ever
+        # issuing another create/version side effect.
+        if current_version is not None:
+            recovered = self._reconcile_current_candidate(
+                package=package,
+                manifest=manifest,
+                content_sha=content_sha,
+                current_version=current_version,
             )
+            if recovered is not None:
+                self.claim = recovered.claim
+                self.resource_task_id = recovered.claim.task_id
+                return f"{recovered.identity.provider_ref}/{recovered.identity.version}"
+
+        claim = self.claim
+        if claim is None:
+            if current_version is not None:
+                raise CheckpointRuntimeError(
+                    "checkpoint dataset exists but has no exact durable claim for a new candidate"
+                )
+            action = MutationAction.CREATE_DATASET
+            arguments = self._create_arguments(content_sha)
+            intent = self._intent(manifest, action, arguments)
+            expected_version = 1
+            try:
+                result = self.adapter.create_private_dataset_from_directory(
+                    intent=intent,
+                    source_directory=package,
+                    title=self.dataset_ref.split("/", 1)[1],
+                    control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+                    disposable=False,
+                )
+            except Exception:
+                result = self._reconcile_after_ambiguous_effect(
+                    intent=intent,
+                    package=package,
+                    arguments=arguments,
+                    expected_version=expected_version,
+                )
         else:
-            if self.claim.provider_ref != self.dataset_ref or self.claim.disposable:
-                raise CheckpointRuntimeError("checkpoint dataset claim is not permanent/exact")
-            notes = f"checkpoint {manifest.checkpoint_id} manifest {manifest.manifest_sha256}"
+            self._validate_claim(claim)
+            if current_version != claim.provider_version:
+                raise CheckpointRuntimeError(
+                    "checkpoint dataset provider version advanced beyond the exact durable claim"
+                )
+            self._assert_checkpoint_id_not_reused(
+                package=package,
+                manifest=manifest,
+                current_version=current_version,
+            )
+            notes = self._version_notes(manifest)
             action = MutationAction.VERSION_DATASET
-            arguments = {
-                "content_tree_sha256": content_sha,
-                "previous_version": self.claim.provider_version,
-                "version_notes_sha256": hashlib.sha256(notes.encode()).hexdigest(),
-            }
+            arguments = self._version_arguments(
+                content_sha=content_sha,
+                previous_version=claim.provider_version,
+                notes=notes,
+            )
             intent = self._intent(
                 manifest,
                 action,
                 arguments,
-                expected_fingerprint=self.claim.fingerprint,
+                expected_fingerprint=claim.fingerprint,
             )
-            result = self.adapter.create_private_dataset_version_from_directory(
-                intent=intent,
-                claim=self.claim,
-                source_directory=package,
-                version_notes=notes,
-            )
+            expected_version = claim.provider_version + 1
+            try:
+                result = self.adapter.create_private_dataset_version_from_directory(
+                    intent=intent,
+                    claim=claim,
+                    source_directory=package,
+                    version_notes=notes,
+                )
+            except Exception:
+                result = self._reconcile_after_ambiguous_effect(
+                    intent=intent,
+                    package=package,
+                    arguments=arguments,
+                    expected_version=expected_version,
+                )
         self.claim = result.claim
+        self.resource_task_id = result.claim.task_id
         return f"{result.identity.provider_ref}/{result.identity.version}"
+
+    def _reconcile_current_candidate(
+        self,
+        *,
+        package: Path,
+        manifest: CheckpointManifest,
+        content_sha: str,
+        current_version: int,
+    ) -> DatasetMutationResult | None:
+        if current_version == 1:
+            action = MutationAction.CREATE_DATASET
+            arguments = self._create_arguments(content_sha)
+            intent = self._intent(manifest, action, arguments)
+        else:
+            previous = self.adapter.read_private_dataset(
+                provider_ref=self.dataset_ref,
+                version=current_version - 1,
+            )
+            notes = self._version_notes(manifest)
+            action = MutationAction.VERSION_DATASET
+            arguments = self._version_arguments(
+                content_sha=content_sha,
+                previous_version=current_version - 1,
+                notes=notes,
+            )
+            intent = self._intent(
+                manifest,
+                action,
+                arguments,
+                expected_fingerprint=previous.fingerprint,
+            )
+        try:
+            return self.adapter.reconcile_private_dataset_directory_mutation(
+                intent=intent,
+                source_directory=package,
+                expected_version=current_version,
+                arguments=arguments,
+                control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+                disposable=False,
+            )
+        except KaggleAmbiguousMutation:
+            return None
+
+    def _reconcile_after_ambiguous_effect(
+        self,
+        *,
+        intent: ProviderEffectIntent,
+        package: Path,
+        arguments: dict[str, Any],
+        expected_version: int,
+    ) -> DatasetMutationResult:
+        try:
+            return self.adapter.reconcile_private_dataset_directory_mutation(
+                intent=intent,
+                source_directory=package,
+                expected_version=expected_version,
+                arguments=arguments,
+                control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+                disposable=False,
+            )
+        except Exception as reconciliation_error:
+            raise CheckpointRuntimeError(
+                "checkpoint provider effect remains ambiguous and was not repeated"
+            ) from reconciliation_error
+
+    def _validate_claim(self, claim: TaskResourceClaim) -> None:
+        if (
+            claim.provider_ref != self.dataset_ref
+            or claim.kind is not ProviderKind.DATASET
+            or claim.control_class is not ControlClass.ORCHESTRATOR_PROTECTED
+            or claim.disposable
+        ):
+            raise CheckpointRuntimeError("checkpoint dataset claim is not permanent/exact")
+
+    def _assert_checkpoint_id_not_reused(
+        self,
+        *,
+        package: Path,
+        manifest: CheckpointManifest,
+        current_version: int,
+    ) -> None:
+        scratch = package.parent / f".current-checkpoint-{manifest.checkpoint_id}"
+        shutil.rmtree(scratch, ignore_errors=True)
+        try:
+            self.adapter.download_private_dataset_exact(
+                provider_ref=self.dataset_ref,
+                version=current_version,
+                destination=scratch,
+            )
+            current_manifest = load_and_verify(
+                scratch / CHECKPOINT_MANIFEST_NAME,
+                scratch,
+            )
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        if current_manifest.checkpoint_id == manifest.checkpoint_id:
+            raise CheckpointRuntimeError(
+                "checkpoint id already exists with different provider bytes; refusing another version"
+            )
+
+    @staticmethod
+    def _create_arguments(content_sha: str) -> dict[str, Any]:
+        return {
+            "content_tree_sha256": content_sha,
+            "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
+            "disposable": False,
+        }
+
+    @staticmethod
+    def _version_notes(manifest: CheckpointManifest) -> str:
+        return f"checkpoint {manifest.checkpoint_id} manifest {manifest.manifest_sha256}"
+
+    @staticmethod
+    def _version_arguments(
+        *,
+        content_sha: str,
+        previous_version: int,
+        notes: str,
+    ) -> dict[str, Any]:
+        return {
+            "content_tree_sha256": content_sha,
+            "previous_version": previous_version,
+            "version_notes_sha256": hashlib.sha256(notes.encode()).hexdigest(),
+        }
 
     def exact_readback(self, exact_version_ref: str, destination: Path) -> KaggleCheckpointReadback:
         _assert_kaggle_working_path(destination)
@@ -451,7 +626,7 @@ class KaggleCheckpointRestoreVerifier:
         operation_id: UUID,
         authorization_task_id: UUID,
         clock: Any = lambda: datetime.now(UTC),
-        run_id_factory: Any = uuid4,
+        run_id_factory: Any | None = None,
         poll_policy: PollPolicy | None = None,
     ) -> None:
         _assert_kaggle_working_path(output_directory)
@@ -476,7 +651,14 @@ class KaggleCheckpointRestoreVerifier:
         provider_ref, version = _parse_exact_dataset_version(exact_version_ref)
         if provider_ref != dataset_identity.provider_ref or version != dataset_identity.version:
             raise CheckpointRuntimeError("verifier dataset identity differs from exact readback")
-        run_id = UUID(str(self.run_id_factory()))
+        run_id = (
+            UUID(str(self.run_id_factory()))
+            if self.run_id_factory is not None
+            else uuid5(
+                NAMESPACE_URL,
+                f"my-data-hub:checkpoint-verifier-run:{manifest.checkpoint_id}:{version}",
+            )
+        )
         source = _render_verifier_source(
             self.assets,
             run_id=run_id,
@@ -500,32 +682,74 @@ class KaggleCheckpointRestoreVerifier:
                 "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
                 "disposable": False,
             },
-            requested_at=self.clock(),
+            # The intent is append-only and may be re-submitted after a lost
+            # control-plane response.  Bind its timestamp to the immutable
+            # checkpoint rather than to the retry attempt.
+            requested_at=manifest.created_at,
         )
-        launched = self.adapter.push_private_notebook(
+        launched = self.adapter.reconcile_private_notebook_mutation(
             intent=intent,
             task_run_id=run_id,
-            source=source,
-            title=self.assets.notebook_ref.split("/", 1)[1],
-            code_file=self.assets.code_file,
-            kernel_type=self.assets.kernel_type,
-            language=self.assets.language,
+            expected_source_sha256=source_sha,
+            dataset_sources=(dataset_source,),
             control_class=ControlClass.ORCHESTRATOR_PROTECTED,
             disposable=False,
-            dataset_sources=(dataset_source,),
-            enable_internet=False,
-            timeout_seconds=self.assets.timeout_seconds,
         )
+        if launched is None:
+            try:
+                launched = self.adapter.push_private_notebook(
+                    intent=intent,
+                    task_run_id=run_id,
+                    source=source,
+                    title=self.assets.notebook_ref.split("/", 1)[1],
+                    code_file=self.assets.code_file,
+                    kernel_type=self.assets.kernel_type,
+                    language=self.assets.language,
+                    control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+                    disposable=False,
+                    dataset_sources=(dataset_source,),
+                    enable_internet=False,
+                    timeout_seconds=self.assets.timeout_seconds,
+                )
+            except Exception as push_error:
+                launched = self.adapter.reconcile_private_notebook_mutation(
+                    intent=intent,
+                    task_run_id=run_id,
+                    expected_source_sha256=source_sha,
+                    dataset_sources=(dataset_source,),
+                    control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+                    disposable=False,
+                )
+                if launched is None:
+                    raise CheckpointRuntimeError(
+                        "checkpoint verifier provider effect remains ambiguous and was not repeated"
+                    ) from push_error
         self.adapter.poll_run(launched.run, self.poll_policy)
         destination = self.output_directory / str(run_id)
-        self.adapter.download_exact_run_output_tree(launched.run, destination=destination)
-        receipt = _load_restore_receipt(destination / CHECKPOINT_RESTORE_RECEIPT_NAME)
-        _assert_restore_receipt(
-            receipt,
-            run=launched.run,
-            manifest=manifest,
-            dataset_identity=dataset_identity,
-        )
+        receipt: dict[str, object] | None = None
+        if destination.exists():
+            try:
+                receipt = _load_restore_receipt(destination / CHECKPOINT_RESTORE_RECEIPT_NAME)
+                _assert_restore_receipt(
+                    receipt,
+                    run=launched.run,
+                    manifest=manifest,
+                    dataset_identity=dataset_identity,
+                )
+            except CheckpointRuntimeError:
+                # A crash can leave a partial local output tree.  It is only a
+                # cache of the exact provider output and is safe to replace.
+                shutil.rmtree(destination, ignore_errors=True)
+                receipt = None
+        if receipt is None:
+            self.adapter.download_exact_run_output_tree(launched.run, destination=destination)
+            receipt = _load_restore_receipt(destination / CHECKPOINT_RESTORE_RECEIPT_NAME)
+            _assert_restore_receipt(
+                receipt,
+                run=launched.run,
+                manifest=manifest,
+                dataset_identity=dataset_identity,
+            )
         return {
             **receipt,
             "provider_run_ref": launched.run.provider_run_ref,
@@ -560,6 +784,10 @@ class KaggleCheckpointCoordinator:
         initial_head = self.registry.head
         self.registry.add_candidate(manifest)
         exact_ref = ""
+        upload_seconds = 0.0
+        readback_seconds = 0.0
+        restore_seconds = 0.0
+        restore_receipt: dict[str, object] = {}
         try:
             started = monotonic()
             exact_ref = self.provider.upload_candidate(package, manifest)
@@ -592,13 +820,93 @@ class KaggleCheckpointCoordinator:
                 expected_generation=initial_head.generation,
             )
         except Exception as exc:
+            durable_head: CheckpointHead | None = None
             with suppress(Exception):
-                self.registry.reject(manifest.checkpoint_id, type(exc).__name__)
-            if self.registry.head.current == manifest.checkpoint_id:
-                raise AssertionError("failed candidate advanced checkpoint HEAD") from exc
-            if isinstance(exc, PublishError):
+                durable_head = self.registry.head
+            if durable_head is not None and durable_head.current == manifest.checkpoint_id and exact_ref:
+                return self._receipt(
+                    manifest=manifest,
+                    exact_ref=exact_ref,
+                    head=durable_head,
+                    upload_seconds=upload_seconds,
+                    readback_seconds=readback_seconds,
+                    restore_seconds=restore_seconds,
+                    restore_receipt=restore_receipt,
+                )
+            if isinstance(exc, PublishError) and not isinstance(exc, CheckpointRetryableError):
+                with suppress(Exception):
+                    self.registry.reject(manifest.checkpoint_id, type(exc).__name__)
                 raise
-            raise PublishError("checkpoint candidate failed provider-side verification") from exc
+            raise CheckpointRetryableError(
+                "checkpoint candidate is incomplete and must resume with the same identity"
+            ) from exc
+        return self._receipt(
+            manifest=manifest,
+            exact_ref=exact_ref,
+            head=head,
+            upload_seconds=upload_seconds,
+            readback_seconds=readback_seconds,
+            restore_seconds=restore_seconds,
+            restore_receipt=restore_receipt,
+        )
+
+    def reconcile_promoted(
+        self,
+        *,
+        package: Path,
+        manifest_path: Path,
+    ) -> PublishReceipt | None:
+        """Recover a promotion whose success response was not observed.
+
+        Only the remote exact HEAD carries enough durable metadata to prove
+        this.  The marker in ``restore_receipt`` is reconciliation evidence,
+        not a fabricated copy of the verifier Notebook's typed receipt.
+        """
+
+        resolver = getattr(self.registry, "resolve_head", None)
+        if not callable(resolver):
+            return None
+        manifest = load_and_verify(manifest_path, package)
+        snapshot = resolver()
+        current = snapshot.current
+        if (
+            current is None
+            or current.checkpoint_id != manifest.checkpoint_id
+            or current.dataset_ref != self.provider.dataset_ref
+            or current.manifest_sha256 != manifest.manifest_sha256
+        ):
+            return None
+        return PublishReceipt(
+            checkpoint_id=str(manifest.checkpoint_id),
+            exact_version_ref=current.exact_version_ref,
+            manifest_sha256=manifest.manifest_sha256,
+            current_checkpoint_id=str(current.checkpoint_id),
+            previous_checkpoint_id=(
+                str(snapshot.previous.checkpoint_id) if snapshot.previous is not None else None
+            ),
+            upload_seconds=0.0,
+            readback_seconds=0.0,
+            restore_seconds=0.0,
+            package_bytes=sum(item.byte_size for item in manifest.files),
+            restore_receipt={
+                "reconciled_from_durable_verified_head": True,
+                "checkpoint_id": str(manifest.checkpoint_id),
+                "manifest_sha256": manifest.manifest_sha256,
+                "head_generation": snapshot.generation,
+            },
+        )
+
+    @staticmethod
+    def _receipt(
+        *,
+        manifest: CheckpointManifest,
+        exact_ref: str,
+        head: CheckpointHead,
+        upload_seconds: float,
+        readback_seconds: float,
+        restore_seconds: float,
+        restore_receipt: dict[str, object],
+    ) -> PublishReceipt:
         return PublishReceipt(
             checkpoint_id=str(manifest.checkpoint_id),
             exact_version_ref=exact_ref,
@@ -631,7 +939,7 @@ class RuntimeCheckpointCoordinator:
         claim_source: CurrentResourceClaimSource | None = None,
         connect: Any | None = None,
         clock: Any = lambda: datetime.now(UTC),
-        checkpoint_id_factory: Any = uuid4,
+        checkpoint_id_factory: Any | None = None,
         timeout_seconds: int = 1800,
     ) -> None:
         if not probe_relations or len(probe_relations) > 100:
@@ -651,6 +959,8 @@ class RuntimeCheckpointCoordinator:
         self.clock = clock
         self.checkpoint_id_factory = checkpoint_id_factory
         self.timeout_seconds = timeout_seconds
+        self._pending_checkpoint_id: UUID | None = None
+        self._pending_created_at: datetime | None = None
 
     def resolve_boot_checkpoint(self, destination: Path) -> Path | None:
         """Download only the exact numeric verified HEAD for master bootstrap."""
@@ -675,12 +985,9 @@ class RuntimeCheckpointCoordinator:
         identity: Any,
     ) -> PublishReceipt:
         _assert_kaggle_working_path(package_directory)
-        checkpoint_id = UUID(str(self.checkpoint_id_factory()))
-        package = package_directory / str(checkpoint_id)
-        readback = package_directory / f"readback-{checkpoint_id}"
         head = self.coordinator.registry.head
         provider = self.coordinator.provider
-        if provider.claim is None and head.current is not None:
+        if head.current is not None:
             if self.claim_source is None:
                 raise CheckpointRuntimeError("existing checkpoint dataset requires its durable exact claim")
             provider.claim = self.claim_source.current_resource_claim(
@@ -689,36 +996,95 @@ class RuntimeCheckpointCoordinator:
                 control_class=ControlClass.ORCHESTRATOR_PROTECTED,
             )
             provider.resource_task_id = provider.claim.task_id
+        else:
+            provider.claim = None
+        checkpoint_id = self._pending_checkpoint_id or self._derive_checkpoint_id(
+            identity=identity,
+            parent_checkpoint_id=head.current,
+        )
+        self._pending_checkpoint_id = checkpoint_id
+        self._pending_created_at = self._pending_created_at or self.clock()
+        package = package_directory / str(checkpoint_id)
+        readback = package_directory / f"readback-{checkpoint_id}"
         try:
-            with self.connect(database_url, connect_timeout=15) as connection:
-                postgres_version, pgvector_version, checkpoint_lsn = _postgres_checkpoint_identity(connection)
-                build_identity = CheckpointBuildIdentity(
-                    checkpoint_id=checkpoint_id,
-                    master_instance_id=UUID(str(identity.master_instance_id)),
-                    epoch=int(identity.epoch),
-                    parent_checkpoint_id=head.current,
-                    postgres_version=postgres_version,
-                    pgvector_version=pgvector_version,
-                    source_run_id=str(identity.run_id),
-                    source_identity=self.source_identity,
-                    created_at=self.clock(),
-                    checkpoint_lsn=checkpoint_lsn,
-                    probe_relations=self.probe_relations,
+            manifest_path = package / CHECKPOINT_MANIFEST_NAME
+            if head.current == checkpoint_id:
+                recovered = self.coordinator.reconcile_promoted(
+                    package=package,
+                    manifest_path=manifest_path,
                 )
-                _package, manifest_path, _manifest = self.builder.build(
-                    database_url=database_url,
-                    connection=connection,
-                    package_directory=package,
-                    identity=build_identity,
-                    timeout_seconds=self.timeout_seconds,
-                )
-            return self.coordinator.publish(
+                if recovered is None:
+                    raise CheckpointRuntimeError(
+                        "pending checkpoint is HEAD but its exact durable metadata cannot be reconciled"
+                    )
+                self._pending_checkpoint_id = None
+                self._pending_created_at = None
+                return recovered
+            if package.exists():
+                manifest = load_and_verify(manifest_path, package)
+                if (
+                    manifest.checkpoint_id != checkpoint_id
+                    or manifest.parent_checkpoint_id != head.current
+                    or manifest.master_instance_id != UUID(str(identity.master_instance_id))
+                    or manifest.epoch != int(identity.epoch)
+                    or manifest.source_run_id != str(identity.run_id)
+                    or manifest.source_identity != self.source_identity
+                ):
+                    raise CheckpointRuntimeError("pending checkpoint package identity changed across retry")
+            else:
+                with self.connect(database_url, connect_timeout=15) as connection:
+                    postgres_version, pgvector_version, checkpoint_lsn = _postgres_checkpoint_identity(connection)
+                    build_identity = CheckpointBuildIdentity(
+                        checkpoint_id=checkpoint_id,
+                        master_instance_id=UUID(str(identity.master_instance_id)),
+                        epoch=int(identity.epoch),
+                        parent_checkpoint_id=head.current,
+                        postgres_version=postgres_version,
+                        pgvector_version=pgvector_version,
+                        source_run_id=str(identity.run_id),
+                        source_identity=self.source_identity,
+                        created_at=self._pending_created_at,
+                        checkpoint_lsn=checkpoint_lsn,
+                        probe_relations=self.probe_relations,
+                    )
+                    _package, manifest_path, _manifest = self.builder.build(
+                        database_url=database_url,
+                        connection=connection,
+                        package_directory=package,
+                        identity=build_identity,
+                        timeout_seconds=self.timeout_seconds,
+                    )
+            receipt = self.coordinator.publish(
                 package=package,
                 manifest_path=manifest_path,
                 readback_directory=readback,
             )
+            # A completed publication is no longer retry state.  A later
+            # checkpoint request derives a new identity from the advanced
+            # durable parent HEAD.
+            self._pending_checkpoint_id = None
+            self._pending_created_at = None
+            return receipt
         finally:
             shutil.rmtree(readback, ignore_errors=True)
+
+    def _derive_checkpoint_id(
+        self,
+        *,
+        identity: Any,
+        parent_checkpoint_id: UUID | None,
+    ) -> UUID:
+        if self.checkpoint_id_factory is not None:
+            return UUID(str(self.checkpoint_id_factory()))
+        return uuid5(
+            NAMESPACE_URL,
+            (
+                "my-data-hub:checkpoint-candidate:"
+                f"{self.coordinator.provider.operation_id}:"
+                f"{identity.master_instance_id}:{identity.run_id}:{identity.epoch}:"
+                f"{parent_checkpoint_id or 'empty'}"
+            ),
+        )
 
 
 def build_runtime_checkpoint_coordinator_from_environment(

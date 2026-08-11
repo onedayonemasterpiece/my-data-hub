@@ -650,6 +650,67 @@ class KaggleProviderAdapter:
                 outcome = EffectOutcome.ALREADY_APPLIED
         return self._dataset_result(intent, identity, claim.control_class, claim.disposable, attempts, outcome)
 
+    def current_private_dataset_version(self, *, provider_ref: str) -> int | None:
+        """Return the exact owned/private current version without downloading bytes."""
+
+        try:
+            observed, version, _provider_id = self._find_resource(provider_ref, ProviderKind.DATASET)
+        except KaggleNotFound:
+            return None
+        if observed.private is not True:
+            raise KagglePolicyError("dataset privacy was not explicitly proven private")
+        if version is None:
+            raise KaggleIdentityError("current private dataset version is unavailable")
+        return version
+
+    def reconcile_private_dataset_directory_mutation(
+        self,
+        *,
+        intent: ProviderEffectIntent,
+        source_directory: Path,
+        expected_version: int,
+        arguments: Mapping[str, Any],
+        control_class: ControlClass,
+        disposable: bool,
+    ) -> DatasetMutationResult:
+        """Repair journal/claim state after an exact Kaggle dataset side effect.
+
+        Reconciliation never mutates Kaggle.  The provider current version must
+        equal the one authorized by the intent, and its complete package tree
+        must match either the staged source or an exact provider readback.
+        """
+
+        if expected_version < 1:
+            raise KaggleContractError("reconciled dataset version must be positive")
+        self._validate_control_class(control_class, kind=ProviderKind.DATASET)
+        self._validate_intent(intent, arguments=arguments)
+        current_version = self.current_private_dataset_version(provider_ref=intent.provider_ref)
+        if current_version != expected_version:
+            raise KaggleAmbiguousMutation(
+                "provider current dataset version differs from the exact reconciled version"
+            )
+        expected_package_sha = self._expected_directory_package_sha256(
+            source_directory,
+            intent=intent,
+            control_class=control_class,
+            disposable=disposable,
+        )
+        identity = self.read_private_dataset(
+            provider_ref=intent.provider_ref,
+            version=expected_version,
+        )
+        if identity.package_sha256 != expected_package_sha:
+            raise KaggleAmbiguousMutation("provider dataset version differs from the intended exact package")
+        self.journal.persist_intent(intent)
+        return self._dataset_result(
+            intent,
+            identity,
+            control_class,
+            disposable,
+            attempts=0,
+            outcome=EffectOutcome.ALREADY_APPLIED,
+        )
+
     def read_private_dataset(self, *, provider_ref: str, version: int) -> KaggleDatasetIdentity:
         with tempfile.TemporaryDirectory(prefix="my-data-hub-kaggle-readback-") as temporary:
             return self.download_private_dataset_exact(
@@ -961,6 +1022,68 @@ class KaggleProviderAdapter:
             provider_run_ref=f"{recovered.provider_ref}/{recovered.source_version}",
             started_at=self.clock(),
         )
+
+    def reconcile_private_notebook_mutation(
+        self,
+        *,
+        intent: ProviderEffectIntent,
+        task_run_id: UUID,
+        expected_source_sha256: str,
+        dataset_sources: Sequence[str],
+        control_class: ControlClass,
+        disposable: bool,
+    ) -> NotebookMutationResult | None:
+        """Repair a pushed exact notebook's remote journal without another push."""
+
+        normalized_sources = tuple(_normalized_dataset_source(item) for item in dataset_sources)
+        arguments = {
+            "task_run_id": str(task_run_id),
+            "source_sha256": expected_source_sha256,
+            "dataset_sources": normalized_sources,
+            "control_class": control_class.value,
+            "disposable": disposable,
+        }
+        self._validate_control_class(control_class, kind=ProviderKind.NOTEBOOK)
+        self._validate_intent(intent, arguments=arguments)
+        run = self.reconcile_private_notebook_run(
+            task_run_id=task_run_id,
+            provider_ref=intent.provider_ref,
+            expected_source_sha256=expected_source_sha256,
+        )
+        if run is None:
+            return None
+        source = self.read_private_notebook_source(
+            provider_ref=run.provider_ref,
+            source_version=run.source_version,
+            expected_source_sha256=expected_source_sha256,
+        )
+        receipt = ProviderEffectReceipt(
+            operation_id=intent.operation_id,
+            effect_id=intent.effect_id,
+            action=intent.action,
+            provider_ref=intent.provider_ref,
+            outcome=EffectOutcome.ALREADY_APPLIED,
+            attempts=0,
+            observed_fingerprint=source.fingerprint,
+            provider_version=source.source_version,
+            observed_at=self.clock(),
+            detail_code="private_notebook_exact_reconciliation",
+        )
+        claim = TaskResourceClaim.create(
+            task_id=intent.task_id,
+            effect_id=intent.effect_id,
+            provider_ref=intent.provider_ref,
+            kind=ProviderKind.NOTEBOOK,
+            control_class=control_class,
+            disposable=disposable,
+            fingerprint=source.fingerprint,
+            provider_version=source.source_version,
+            registered_at=self.clock(),
+        )
+        self.journal.persist_intent(intent)
+        self.journal.persist_receipt(receipt)
+        self.journal.persist_resource_claim(claim)
+        return NotebookMutationResult(source=source, run=run, claim=claim, effect=receipt)
 
     def poll_run(self, run: KaggleKernelRunIdentity, policy: PollPolicy | None = None) -> KaggleKernelStatus:
         policy = policy or PollPolicy()
@@ -1280,6 +1403,27 @@ class KaggleProviderAdapter:
     def _write_dataset_metadata(self, folder: Path, provider_ref: str, title: str) -> None:
         metadata = {"title": title, "id": provider_ref, "licenses": [{"name": "CC0-1.0"}]}
         (folder / "dataset-metadata.json").write_bytes(canonical_json_bytes(metadata))
+
+    def _expected_directory_package_sha256(
+        self,
+        source: Path,
+        *,
+        intent: ProviderEffectIntent,
+        control_class: ControlClass,
+        disposable: bool,
+    ) -> str:
+        directory_sha256(source)
+        with tempfile.TemporaryDirectory(prefix="my-data-hub-kaggle-reconcile-") as temporary:
+            staged = Path(temporary)
+            _copy_files(source, staged)
+            self._write_control_manifest(
+                staged,
+                intent,
+                ProviderKind.DATASET,
+                control_class,
+                disposable,
+            )
+            return tree_sha256(staged)
 
     def _write_control_manifest(
         self,
