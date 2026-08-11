@@ -34,6 +34,7 @@ from my_data_hub.control_plane.clock import DeterministicClock
 from my_data_hub.control_plane.ledger import ControlLedger, IdempotencyConflict, StaleRuntimeEvent
 from my_data_hub.control_plane.runtime import ControlPlaneMasterRuntime, MasterRuntimeSettings
 from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator, MasterIntent
+from my_data_hub.orchestrator.master.provider import ProviderEffectReceipt
 from my_data_hub.providers.kaggle import KaggleMasterLaunchAssets, derive_runtime_secret
 from my_data_hub.runtime_sdk import RuntimeEvent, RuntimeEventType
 from my_data_hub.runtime_sdk.transport import json_body
@@ -104,8 +105,39 @@ def _control_runtime(ledger: ControlLedger) -> ControlPlaneMasterRuntime:
     )
 
 
-def _activate_ledger(ledger: ControlLedger, key: str = "acceptance-active") -> object:
-    coordinator = MasterCoordinator(ledger, FakeKaggleRuntime())
+class _ExactRunIdentityFake(FakeKaggleRuntime):
+    def execute(self, effect) -> ProviderEffectReceipt:
+        receipt = super().execute(effect)
+        if effect.effect_kind != "trigger_run":
+            return receipt
+        source_version = 7
+        provider_ref = "private/postgres-master"
+        return ProviderEffectReceipt(
+            provider=receipt.provider,
+            effect_kind=receipt.effect_kind,
+            exact_ref=f"{provider_ref}/{source_version}",
+            source_identity=receipt.source_identity,
+            source_version=receipt.source_version,
+            exact_identity={
+                "task_run_id": effect.exact_identity["run_id"],
+                "provider_ref": provider_ref,
+                "source_version": source_version,
+                "source_sha256": "f" * 64,
+                "provider_kernel_id": 71,
+                "provider_run_ref": f"{provider_ref}/{source_version}",
+                "started_at": "2026-08-11T11:00:00Z",
+            },
+        )
+
+
+def _activate_ledger(
+    ledger: ControlLedger,
+    key: str = "acceptance-active",
+    *,
+    exact_run_identity: bool = False,
+) -> object:
+    provider = _ExactRunIdentityFake() if exact_run_identity else FakeKaggleRuntime()
+    coordinator = MasterCoordinator(ledger, provider)
     handle = coordinator.ensure_master(_intent(key), runtime_secret=SECRET)
     event = RuntimeEvent(
         event_id=str(uuid4()),
@@ -140,7 +172,7 @@ def _activate_ledger(ledger: ControlLedger, key: str = "acceptance-active") -> o
 def _active_ledger(tmp_path: Path) -> tuple[ControlLedger, object]:
     clock = DeterministicClock(datetime(2026, 8, 11, 11, 0, tzinfo=UTC))
     ledger = ControlLedger(tmp_path / "control.sqlite3", clock=clock)
-    handle = _activate_ledger(ledger)
+    handle = _activate_ledger(ledger, exact_run_identity=True)
     return ledger, handle
 
 
@@ -249,6 +281,20 @@ def test_ledger_claim_is_exact_epoch_bound_and_replay_safe(tmp_path: Path) -> No
         receipt=receipt.model_dump(mode="json"),
     )
     assert completed["state"] == "PASSED"
+    assert completed["operation_id"] == handle.operation_id
+    assert completed["command"]["receipt"] == receipt.model_dump(mode="json")
+    assert completed["command"]["receipt_sha256"] == receipt.receipt_sha256
+    assert completed["provider_carrier"] == {
+        "provider_ref": "private/postgres-master",
+        "provider_run_ref": "private/postgres-master/7",
+        "provider_kernel_id": 71,
+        "source_version": 7,
+        "source_sha256": "f" * 64,
+        "output_file_name": None,
+        "output_file_sha256": None,
+        "output_tree_sha256": None,
+        "output_receipt_sha256": None,
+    }
 
 
 def test_authenticated_runtime_endpoint_accepts_only_exact_live_receipt(tmp_path: Path) -> None:

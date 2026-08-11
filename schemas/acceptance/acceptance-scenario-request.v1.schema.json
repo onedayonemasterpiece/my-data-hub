@@ -40,6 +40,14 @@
       "pattern": "^[a-f0-9]{40}$",
       "title": "Source Revision",
       "type": "string"
+    },
+    "target_operation_id": {
+      "anyOf": [
+        {"type": "string", "format": "uuid"},
+        {"type": "null"}
+      ],
+      "default": null,
+      "title": "Target Operation Id"
     }
   },
   "required": [

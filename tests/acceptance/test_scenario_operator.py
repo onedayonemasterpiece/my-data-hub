@@ -102,12 +102,15 @@ def _catalog() -> CheckpointAcceptanceLaunchCatalog:
 
 
 def _request(scenario: str, task_id: UUID | None = None) -> dict[str, Any]:
-    return {
+    value = {
         "task_id": str(task_id or uuid4()),
         "scenario": scenario,
         "idempotency_key": f"acceptance-fixed-{scenario.lower()}-request",
         "source_revision": "a" * 40,
     }
+    if scenario not in {"FM04", "FM05", "FM07", "FM14", "FM15"}:
+        value["target_operation_id"] = str(uuid4())
+    return value
 
 
 def test_checkpoint_request_builds_exact_provider_only_launch_metadata() -> None:
@@ -172,6 +175,14 @@ def test_unified_adapter_has_only_request_status_and_requires_owner_scope() -> N
         adapter.call("acceptance.scenario.list", {}, Principal())
     with pytest.raises(ValidationError):
         AcceptanceScenarioRequest.model_validate({**_request("FM05"), "clock": "now"})
+    with pytest.raises(ValidationError, match="exact target operation"):
+        AcceptanceScenarioRequest.model_validate(
+            {key: value for key, value in _request("FM10").items() if key != "target_operation_id"}
+        )
+    with pytest.raises(ValidationError, match="cannot select"):
+        AcceptanceScenarioRequest.model_validate(
+            {**_request("FM05"), "target_operation_id": str(uuid4())}
+        )
 
 
 def test_status_prefers_exact_checkpoint_request_and_never_lists_tasks() -> None:

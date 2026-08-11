@@ -3145,7 +3145,7 @@ class ControlLedger:
     ) -> dict[str, Any]:
         value = dict(row)
         command = connection.execute(
-            "SELECT command_id,command_kind,command_sha256,state,claim_authority,receipt_sha256,"
+            "SELECT command_id,command_kind,command_sha256,state,claim_authority,receipt_json,receipt_sha256,"
             "claimed_at,completed_at "
             "FROM master_acceptance_commands WHERE task_id=?",
             (row["task_id"],),
@@ -3155,7 +3155,46 @@ class ControlLedger:
             "FROM master_acceptance_events WHERE task_id=? ORDER BY sequence LIMIT 100",
             (row["task_id"],),
         ).fetchall()
-        value["command"] = dict(command) if command else None
+        if command is not None:
+            command_value = dict(command)
+            raw_receipt = command_value.pop("receipt_json")
+            if raw_receipt is not None:
+                from my_data_hub.acceptance.master_lifecycle import MasterAcceptanceReceipt
+
+                receipt = MasterAcceptanceReceipt.model_validate_json(str(raw_receipt))
+                command_value["receipt"] = receipt.model_dump(mode="json")
+            else:
+                command_value["receipt"] = None
+            value["command"] = command_value
+        else:
+            value["command"] = None
+        value["operation_id"] = value.get("target_operation_id")
+        value["provider_carrier"] = None
+        operation_id = value.get("target_operation_id")
+        if operation_id is not None:
+            launch = connection.execute(
+                "SELECT receipt_json FROM effects WHERE operation_id=? AND effect_kind='trigger_run' "
+                "AND state='APPLIED' AND receipt_json IS NOT NULL ORDER BY planned_at LIMIT 1",
+                (operation_id,),
+            ).fetchone()
+            if launch is not None:
+                from my_data_hub.providers.kaggle.contracts import KaggleKernelRunIdentity
+
+                launch_receipt = json.loads(str(launch["receipt_json"]))
+                run_identity = launch_receipt.get("exact_identity")
+                if isinstance(run_identity, dict):
+                    run = KaggleKernelRunIdentity.model_validate(run_identity)
+                    value["provider_carrier"] = {
+                        "provider_ref": run.provider_ref,
+                        "provider_run_ref": run.provider_run_ref,
+                        "provider_kernel_id": run.provider_kernel_id,
+                        "source_version": run.source_version,
+                        "source_sha256": run.source_sha256,
+                        "output_file_name": None,
+                        "output_file_sha256": None,
+                        "output_tree_sha256": None,
+                        "output_receipt_sha256": None,
+                    }
         value["events"] = [
             {
                 **{key: event[key] for key in ("sequence", "event_type", "evidence_sha256", "recorded_at")},

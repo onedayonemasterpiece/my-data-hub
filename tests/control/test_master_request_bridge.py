@@ -86,5 +86,7 @@ def test_mcp_cold_start_request_is_durably_bridged_to_one_provider_run(
         latest_event_id="test-ready-provider-run-projection",
     )
     active = resolver.resolve_master(identity())
+    assert active.operation_id == handle.operation_id
+    assert active.public()["operation_id"] == handle.operation_id
     assert active.provider_run_ref == f"owner/master-runtime/run/{handle.run_id}"
     assert active.public()["provider_run_ref"] == active.provider_run_ref

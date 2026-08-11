@@ -61,6 +61,17 @@ class AcceptanceScenarioRequest(BaseModel):
     scenario: AcceptanceScenarioId
     idempotency_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
     source_revision: str = Field(pattern=r"^[a-f0-9]{40}$")
+    target_operation_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def exact_target(self) -> AcceptanceScenarioRequest:
+        preboot = self.scenario.value in {"FM04", "FM07"}
+        checkpoint = self.scenario.value in CHECKPOINT_SCENARIOS
+        if checkpoint and self.target_operation_id is not None:
+            raise ValueError("checkpoint acceptance cannot select a master operation")
+        if not checkpoint and preboot == (self.target_operation_id is not None):
+            raise ValueError("active master scenarios require one exact target operation")
+        return self
 
 
 class CheckpointDatasetInputClaim(BaseModel):
@@ -396,6 +407,7 @@ class UnifiedAcceptanceScenarioExecutor:
                     scenario=MasterAcceptanceScenario(request.scenario.value),
                     idempotency_key=request.idempotency_key,
                     source_revision=request.source_revision,
+                    target_operation_id=request.target_operation_id,
                 ),
                 principal,
             )

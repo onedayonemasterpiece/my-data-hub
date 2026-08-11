@@ -1520,6 +1520,7 @@ class LedgerMasterResolver(MasterResolver):
                     provider_run_ref = observed_ref
             return MasterSnapshot(
                 state=MasterState.ACTIVE,
+                operation_id=(operation.operation_id if operation is not None else None),
                 instance_id=service.master_instance_id,
                 epoch=service.epoch,
                 canonical_revision=service.canonical_revision,
