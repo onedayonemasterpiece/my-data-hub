@@ -44,6 +44,18 @@ contains only the lightweight control ledger/process and no canonical rows.
   Streamable HTTP client proves discovery and `platform.status` with
   `master_state=ABSENT`; revoked JWTs, database environment leakage, and reader
   write-tool discovery are denied in tests.
+- Nightly and weekly/manual acceptance runners now execute bounded real-provider
+  inventory, MCP authentication negatives, lifecycle-receipt checks, and
+  checkpoint/master/provider/embedding evaluations.  Their current
+  credential-free receipt exits `78` with 14 explicit `BLOCKED` checks; it does
+  not turn absent live interfaces or credentials into a pass.
+- The post-deploy workflow now requires an exact checked-out deployment commit,
+  DNS and CA-valid TLS, OAuth metadata/JWKS, Host/Origin/authentication negatives,
+  a cold `ABSENT` to fenced `ACTIVE` master read, forbidden-public-port probes,
+  and fresh Ed25519-signed metadata-only host evidence for the three supervised
+  services, absence of local database state, process replacement and reboot
+  recovery.  This is tested automation only: no public endpoint or signed live
+  host receipt exists yet.
 - Operational notebook sources are deterministic and bind exact wheel/source
   hashes. PostgreSQL master fencing, typed blogger import, separate E5/BGE spaces,
   deterministic RRF, and checkpoint verification have executable unit/integration
@@ -55,13 +67,13 @@ contains only the lightweight control ledger/process and no canonical rows.
   restore verifier Notebook, and advances metadata-only current/previous HEAD by
   compare-and-swap. A later master boots only from that exact verified HEAD.
   These statements describe tested code contracts, not a completed real checkpoint.
-- At integration commit `b6e2ba8`, local validation reports 2,866 repository
-  checks with zero errors, 510 tests pass with only the separately opt-in live
-  PostgreSQL test skipped, and that disposable PostgreSQL 18 fencing test passes
-  when explicitly enabled. The previous exact-head security review findings on
-  checkpoint ambiguity, callback recovery, provider lifetime, OAuth admission,
-  disabled clients, signing-key overlap and three-process autostart are remediated
-  in code and await a new exact-head review. This is not real-provider evidence.
+- At pre-documentation integration commit
+  `c600fd41d68d78787decb889cbdbc997332afbda`, local validation reports 2,891
+  repository checks with zero errors and 561 tests pass with only the separately
+  opt-in live PostgreSQL test skipped (562 collected). That disposable PostgreSQL
+  18 fencing test passes when explicitly enabled. Hosted contracts and PostgreSQL
+  integration jobs also pass at that exact commit. These results are code and
+  disposable-integration evidence, not real-provider or deployment acceptance.
 
 ## Exact external blocker
 
