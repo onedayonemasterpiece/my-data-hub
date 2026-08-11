@@ -586,6 +586,82 @@ class ControlLedger:
             assert completed is not None
             return self._effect_from_row(completed)
 
+    def fail_unstarted_master_after_tunnel_expiry(
+        self,
+        *,
+        operation_id: str,
+        effect_id: str,
+        run_id: str,
+        attempt_id: str,
+        service_instance_id: str,
+        epoch: int,
+    ) -> OperationRecord:
+        """Atomically terminalize an ABSENT trigger after its broker lease expired."""
+
+        now = _format_time(self.clock.now())
+        metadata = _safe_json({"code": "TRIGGER_ABSENT_AFTER_TUNNEL_LEASE_EXPIRY", "epoch": epoch})
+        with self._transaction() as connection:
+            operation = connection.execute(
+                "SELECT * FROM operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            effect = connection.execute(
+                "SELECT * FROM effects WHERE effect_id=? AND operation_id=? AND effect_kind='trigger_run'",
+                (effect_id, operation_id),
+            ).fetchone()
+            attempt = connection.execute(
+                "SELECT * FROM run_attempts WHERE operation_id=? AND run_id=? AND attempt_id=? "
+                "AND service_instance_id=? AND epoch=?",
+                (operation_id, run_id, attempt_id, service_instance_id, epoch),
+            ).fetchone()
+            current = connection.execute(
+                "SELECT current_epoch FROM service_epochs WHERE service_kind='postgres-master'"
+            ).fetchone()
+            if operation is None or effect is None or attempt is None or current is None:
+                raise StaleRuntimeEvent("expired unstarted master identity is incomplete")
+            if operation["state"] == "FAILED" and effect["state"] == EffectState.FAILED.value:
+                return self._operation_from_row(operation)
+            if (
+                operation["state"] != "RESTORING"
+                or effect["state"] != EffectState.IN_PROGRESS.value
+                or int(current[0]) != epoch
+            ):
+                raise StaleRuntimeEvent("expired unstarted master is no longer terminalizable")
+            connection.execute(
+                "UPDATE effects SET state='FAILED',updated_at=? WHERE effect_id=? AND state='IN_PROGRESS'",
+                (now, effect_id),
+            )
+            connection.execute(
+                "INSERT INTO effect_log(effect_id,operation_id,state,recorded_at,metadata_json) VALUES (?,?,?,?,?)",
+                (effect_id, operation_id, EffectState.FAILED.value, now, metadata),
+            )
+            connection.execute(
+                "UPDATE operations SET state='FAILED',updated_at=? WHERE operation_id=? AND state='RESTORING'",
+                (now, operation_id),
+            )
+            connection.execute(
+                "INSERT INTO operation_log(operation_id,from_state,to_state,recorded_at,metadata_json) "
+                "VALUES (?,'RESTORING','FAILED',?,?)",
+                (operation_id, now, metadata),
+            )
+            connection.execute(
+                "UPDATE run_attempts SET state='FENCED',updated_at=? WHERE attempt_id=? AND run_id=? AND epoch=?",
+                (now, attempt_id, run_id, epoch),
+            )
+            connection.execute(
+                "UPDATE services SET state='FENCED',updated_at=? WHERE service_instance_id=? AND epoch=? "
+                "AND state IN ('REGISTERING','ACTIVE','DRAINING')",
+                (now, service_instance_id, epoch),
+            )
+            connection.execute(
+                "UPDATE runtime_token_hashes SET revoked_at=? WHERE run_id=? AND attempt_id=?",
+                (now, run_id, attempt_id),
+            )
+            terminal = connection.execute(
+                "SELECT * FROM operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert terminal is not None
+            return self._operation_from_row(terminal)
+
     def pending_effects(self, operation_id: str | None = None) -> list[EffectRecord]:
         query = "SELECT * FROM effects WHERE state IN ('PLANNED','IN_PROGRESS')"
         params: tuple[str, ...] = ()

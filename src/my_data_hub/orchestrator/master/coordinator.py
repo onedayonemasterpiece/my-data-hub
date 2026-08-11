@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
@@ -159,7 +160,9 @@ class MasterCoordinator:
             effect_kind, signal, exact_ref = step
             receipt = self._apply_effect(operation_id, effect_kind, exact_ref, intent, operation.identity)
             if receipt is None:
-                return self._handle(operation)
+                latest = self.ledger.get_operation(operation_id)
+                assert latest is not None
+                return self._handle(latest)
             transition = transition_master(state, signal)
             try:
                 self.ledger.transition_operation(
@@ -627,6 +630,27 @@ class MasterCoordinator:
                 return None
             if reconciliation.status == ReconciliationStatus.ABSENT:
                 if effect_kind == "trigger_run":
+                    if self.ledger.clock.now() >= effect.updated_at + self.lease_ttl:
+                        # The broker's same-epoch lease is a one-way safety
+                        # boundary.  Retrying activation after this deadline
+                        # can never be valid, so terminalize the ABSENT attempt
+                        # instead of stranding admission behind IN_PROGRESS.
+                        with suppress(Exception):
+                            self._deactivate_tunnel_authority(
+                                identity, "trigger_absent_after_lease_expiry"
+                            )
+                        # An already-expired/reconciled broker may have no
+                        # matching active lease to deactivate.  The durable
+                        # high-water mark still prevents revival.
+                        self.ledger.fail_unstarted_master_after_tunnel_expiry(
+                            operation_id=operation_id,
+                            effect_id=effect.effect_id,
+                            run_id=str(identity["run_id"]),
+                            attempt_id=str(identity["attempt_id"]),
+                            service_instance_id=str(identity["service_instance_id"]),
+                            epoch=int(identity["epoch"]),
+                        )
+                        return None
                     self._activate_tunnel_authority(identity)
                 receipt = self.provider.execute(planned)
             else:

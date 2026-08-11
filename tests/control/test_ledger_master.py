@@ -15,6 +15,7 @@ import pytest
 from my_data_hub.control_plane.clock import DeterministicClock
 from my_data_hub.control_plane.ledger import (
     ControlLedger,
+    EffectState,
     EventDisposition,
     EventRejected,
     MasterAdmissionRejected,
@@ -626,6 +627,69 @@ def test_crash_before_provider_effect_retries_only_after_exact_absence(tmp_path:
     recovered = MasterCoordinator(ControlLedger(ledger.path), fake).ensure_master(request, runtime_secret=SECRET)
     assert recovered.state == MasterState.REGISTERING
     assert fake.physical_effect_counts["ensure_dataset"] == 1
+
+
+def test_absent_trigger_after_tunnel_expiry_fences_attempt_and_allows_next_epoch(
+    tmp_path: Path,
+) -> None:
+    clock = DeterministicClock(datetime(2026, 8, 11, 13, 0, tzinfo=UTC))
+    ledger = ledger_at(tmp_path, clock)
+    fake = FakeKaggleRuntime({"trigger_run": [RuntimeError("response lost before provider mutation")]})
+
+    class ExpiringAuthority:
+        def __init__(self) -> None:
+            self.highest_epoch = 0
+            self.active: dict[str, object] | None = None
+            self.overlap = False
+
+        def activate(self, **kwargs):  # type: ignore[no-untyped-def]
+            epoch = int(kwargs["epoch"])
+            if self.active is not None and self.active["epoch"] != epoch:
+                self.overlap = True
+            if epoch <= self.highest_epoch:
+                raise RuntimeError("expired tunnel activation cannot be revived at the same epoch")
+            self.highest_epoch = epoch
+            self.active = dict(kwargs)
+            return object()
+
+        def renew(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return object()
+
+        def deactivate(self, **kwargs):  # type: ignore[no-untyped-def]
+            if self.active is None or self.active["epoch"] != kwargs["epoch"]:
+                raise RuntimeError("already absent")
+            self.active = None
+
+    authority = ExpiringAuthority()
+    first = MasterCoordinator(ledger, fake, tunnel_authority=authority)
+    first_intent = intent("expired-trigger-first")
+    with pytest.raises(RuntimeError, match="response lost"):
+        first.ensure_master(first_intent, runtime_secret=SECRET)
+    identity = MasterCoordinator.identity_for(first_intent.idempotency_key)
+    old = ledger.get_operation(identity["operation_id"])
+    assert old is not None and old.state == MasterState.RESTORING.value
+    trigger = ledger.get_effect_by_idempotency_key(f"{old.operation_id}:trigger_run")
+    assert trigger is not None and trigger.state == EffectState.IN_PROGRESS
+    assert authority.active is not None and authority.active["epoch"] == 1
+
+    clock.advance(301)
+    restarted = MasterCoordinator(ledger, fake, tunnel_authority=authority)
+    recovered = restarted.reconcile_operation(old.operation_id, first_intent)
+    assert recovered.state == MasterState.FAILED
+    assert ledger.get_effect_by_idempotency_key(f"{old.operation_id}:trigger_run").state == EffectState.FAILED  # type: ignore[union-attr]
+    assert not ledger.runtime_token_valid(identity["run_id"], identity["attempt_id"], SECRET)
+    with sqlite3.connect(ledger.path) as connection:
+        attempt_state = connection.execute(
+            "SELECT state FROM run_attempts WHERE attempt_id=?", (identity["attempt_id"],)
+        ).fetchone()
+    assert attempt_state == (MasterState.FENCED.value,)
+    assert authority.active is None
+
+    replacement = restarted.ensure_master(intent("expired-trigger-replacement"), runtime_secret=SECRET)
+    assert replacement.epoch == 2
+    assert replacement.state == MasterState.REGISTERING
+    assert authority.active is not None and authority.active["epoch"] == 2
+    assert not authority.overlap
 
 
 def test_callbacks_dedupe_coalesce_size_and_fence_stale_epoch(tmp_path: Path) -> None:
