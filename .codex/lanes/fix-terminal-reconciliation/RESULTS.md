@@ -48,7 +48,7 @@ token ordering.
 - `pytest -q tests/control/test_ledger_master.py tests/provider/test_master_runtime_bridge.py`: pass (26 tests)
 - `pytest -q`: pass (two existing skips)
 - `python -m compileall -q src tests`: pass
-- `python scripts/validate_repository.py`: pass (`2866` checks, zero errors)
+- `python scripts/validate_repository.py`: pass (`2867` checks, zero errors)
 - `ruff check .`: pass
 - `git diff --check`: pass
 
