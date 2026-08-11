@@ -4,7 +4,7 @@
   "evaluated_source_commit": "87921d6709eb0fe480db1b79ce1f2b030e48d0fe",
   "architecture_source_sha256": "c7efb28231223caa6fd02fcc001a38e0f16bcc3fa4c4cd53e744721b2eac0852",
   "completed_at": "2026-08-11T08:40:00Z",
-  "summary": "Implementation and disposable gates are complete and the public TLS edge is provisioned, but real Kaggle runs, canonical import/embeddings, owner OAuth configuration, merged deployment and live recovery acceptance remain blocked.",
+  "summary": "Automated Kaggle authentication and two private runtime diagnostics are proven, but no qualifying matrix run exists because the devstand control/MCP/OAuth backends and their secrets are not deployed; canonical import, embeddings, recovery and owner acceptance remain blocked.",
   "counts": {
     "real_kaggle_run_ids": 0,
     "ydb_bloggers_observed": 266,
@@ -31,7 +31,7 @@
     {
       "name": "real_kaggle_run_matrix",
       "outcome": "BLOCKED",
-      "evidence": "Exact 24-scenario runner and trusted driver are implemented, but no qualifying Notebook run identity or scenario PASS exists"
+      "evidence": "Two automated legacy-auth private diagnostics reached COMPLETE with source attestation/events/cleanup, but no qualifying control-bound scenario PASS exists"
     },
     {
       "name": "bounded_blogger_import",
@@ -56,14 +56,14 @@
   ],
   "blockers": [
     {
-      "code": "KAGGLE_MODERN_API_TOKEN_REQUIRED",
-      "missing": "Modern Kaggle OAuth token required for exact private Notebook source/status/output and all live master/worker operations",
-      "closure_proof": "Run .venv/bin/kaggle auth login locally, then python scripts/provider/operational_kaggle_matrix.py preflight; never commit or paste the token"
+      "code": "DEVSTAND_CONTROL_CALLBACK_UNAVAILABLE",
+      "missing": "Deployed control/MCP/OAuth backends and owner-managed service secrets; public endpoints currently return 502 although automated Kaggle launches succeed",
+      "closure_proof": "Install the reviewed release with exactly one control-side automated Kaggle credential, verify authenticated runtime callbacks, then run the pinned control-owned operational driver"
     },
     {
       "code": "REAL_KAGGLE_OPERATIONAL_MATRIX_NOT_EXECUTED",
       "missing": "All 24 live master/callback/checkpoint/import/embedding/fault/soak scenarios and at least 15 exact provider run identities",
-      "closure_proof": "After installing the modern token and live control stack, run the exact command in docs/operations/operational-kaggle-matrix.md and require a schema-valid PASS receipt"
+      "closure_proof": "After installing the live control stack, run the exact pinned command in docs/operations/operational-kaggle-matrix.md and require a schema-valid PASS receipt"
     },
     {
       "code": "BLOGGER_IMPORT_NOT_EXECUTED",

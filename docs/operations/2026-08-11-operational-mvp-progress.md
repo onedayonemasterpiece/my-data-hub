@@ -120,34 +120,31 @@ contains only the lightweight control ledger/process and no canonical rows.
 
 ## Exact external blocker
 
-The installed legacy Kaggle username/key can mutate private datasets and submit a
-private kernel, but Kaggle rejects exact source/status/output reads for newly
-created private kernels with HTTP 403. The supported `kaggle==2.2.4` OAuth flow
-requires a modern access/refresh token and an interactive owner sign-in. No
-`KAGGLE_API_TOKEN` or `~/.kaggle/access_token` is present. The failed task-created
-kernel was deleted and its absence observed; no unknown resource was modified.
+Kaggle authentication is **not** the current blocker. The installed automated
+legacy username/key profile uses the same non-interactive official SDK path as
+the existing events-bot/CherryFlash launchers. Two fresh private runtime
+diagnostics reached `COMPLETE`; the latest emitted `kernel_started`,
+`preflight_ok`, `alive`, `report_written`, and `terminal`, attested its executed
+source hash, returned bounded output, and was then deleted with absence observed.
+
+The actual blocker is the undeployed devstand application/control path:
+`mcp-datahub.kenigevents.ru`, the MCP endpoint, and the identity discovery
+endpoint currently return 502, while the GitHub repository and `devstand`
+Environment contain no deployment/Kaggle/OAuth secrets. Therefore a Kaggle
+Notebook can run, but it cannot yet deliver authenticated callbacks to this
+orchestrator or participate in the qualifying lifecycle matrix.
 
 Sanitized evidence:
 
-- [legacy-auth kernel failure and cleanup](evidence/2026-08-11-operational-mvp/kaggle-notebook-legacy-auth-failure.json)
-- [modern-token blocker](evidence/2026-08-11-operational-mvp/kaggle-modern-token-blocker.json)
+- [first automated runtime-attestation canary](evidence/2026-08-11-operational-mvp/kaggle-runtime-attestation-canary.json)
+- [second automated runtime-attestation canary](evidence/2026-08-11-operational-mvp/kaggle-runtime-attestation-canary-2.json)
+- [observed devstand deployment blocker](evidence/2026-08-11-operational-mvp/devstand-live-blocker.json)
 
-Owner closure command (run locally without sharing the token):
-
-```bash
-cd /home/dev/.codex/worktrees/my-data-hub/operational-mvp
-.venv/bin/kaggle auth login
-```
-
-Proof after sign-in:
-
-```bash
-cd /home/dev/.codex/worktrees/my-data-hub/operational-mvp
-.venv/bin/python scripts/provider/real_kaggle_matrix.py notebook-canary
-```
-
-The receipt must show an exact private source version, terminal output identity,
-and claim-bound cleanup before any permanent master resource is created.
+Closure requires installing the reviewed control-plane release with the existing
+automated Kaggle credential only in the control service, restoring the public
+callback/MCP/OAuth backends, and then running the pinned control-owned operational
+driver. No interactive OAuth login and no Kaggle credential copied into Notebook
+source, callback bodies, remote MCP, or evidence is part of this design.
 
 ## Gates not claimed
 
