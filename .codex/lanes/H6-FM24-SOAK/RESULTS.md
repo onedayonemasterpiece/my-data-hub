@@ -4,8 +4,8 @@
 
 - Lane: `H6-FM24-SOAK`
 - Branch: `agent/h6-fm24-soak`
-- Exact base: `9b2da3791bb4f113347a9793194815c901f1d01b`
-- Implementation commit: `d3dfc2d51f9e315375387429726b37f32e06e28a`
+- Exact base: `9b2da3725be857c7e04a0dc9f414fefd920647cb`
+- Implementation commit: `d3dfc2d0c1526f56ad9850224cbd1c4d3ffdd98e`
 - Status: implementation and injected contract validation complete; **no live soak claimed**.
 
 The lane changed only the new FM24 module, focused tests, its state schema/example,
@@ -40,7 +40,7 @@ catalog/server/service, master notebook/entrypoint, deploy/provider driver, H1 o
 ## Validation
 
 All checks ran in the isolated lane worktree on implementation commit
-`d3dfc2d51f9e315375387429726b37f32e06e28a`.
+`d3dfc2d0c1526f56ad9850224cbd1c4d3ffdd98e`.
 
 - Focused FM24: `7 passed`.
 - Full repository: `953 collected`, therefore `951 passed, 2 skipped`; exit status 0.
