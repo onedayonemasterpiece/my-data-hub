@@ -199,13 +199,25 @@ class MasterCoordinator:
         key = f"{operation_id}:{effect_kind}"
         effect_id = str(uuid5(NAMESPACE_URL, key))
         exact_identity = {
+            "operation_id": operation_id,
             "exact_ref": exact_ref,
             "run_id": identity["run_id"],
             "attempt_id": identity["attempt_id"],
             "source_identity": intent.source_identity,
             "source_version": intent.source_version,
             "epoch": identity["epoch"],
+            "service_instance_id": identity["service_instance_id"],
+            "master_instance_id": identity["master_instance_id"],
+            "checkpoint_ref": intent.checkpoint_ref,
         }
+        if effect_kind == "trigger_run":
+            source_effect = self.ledger.get_effect_by_idempotency_key(
+                f"{operation_id}:push_notebook"
+            )
+            if source_effect is None or source_effect.state != EffectState.APPLIED:
+                return None
+            assert source_effect.receipt is not None
+            exact_identity["notebook_launch"] = source_effect.receipt.get("exact_identity")
         effect, _ = self.ledger.plan_effect(
             effect_id=effect_id,
             operation_id=operation_id,

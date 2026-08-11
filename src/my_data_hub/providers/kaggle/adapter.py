@@ -715,6 +715,41 @@ class KaggleProviderAdapter:
             observed_at=self.clock(),
         )
 
+    def reconcile_private_notebook_run(
+        self,
+        *,
+        task_run_id: UUID,
+        provider_ref: str,
+        expected_source_sha256: str,
+    ) -> KaggleKernelRunIdentity | None:
+        """Find an exact pushed source/run without launching a second version.
+
+        Kaggle status is latest-by-slug, so reconciliation first binds the
+        current private source hash and numeric kernel identity.  A different
+        current source is deliberately ambiguous to the lifecycle bridge.
+        """
+
+        recovered = self._recover_notebook(provider_ref, expected_source_sha256)
+        if recovered is None:
+            return None
+        try:
+            _observed, _version_number, provider_kernel_id = self._find_resource(
+                recovered.provider_ref, ProviderKind.NOTEBOOK
+            )
+        except Exception:
+            return None
+        if provider_kernel_id is None:
+            return None
+        return KaggleKernelRunIdentity(
+            task_run_id=task_run_id,
+            provider_ref=recovered.provider_ref,
+            source_version=recovered.source_version,
+            source_sha256=recovered.source_sha256,
+            provider_kernel_id=provider_kernel_id,
+            provider_run_ref=f"{recovered.provider_ref}/{recovered.source_version}",
+            started_at=self.clock(),
+        )
+
     def poll_run(self, run: KaggleKernelRunIdentity, policy: PollPolicy | None = None) -> KaggleKernelStatus:
         policy = policy or PollPolicy()
         started = self.monotonic()

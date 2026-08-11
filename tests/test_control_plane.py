@@ -72,23 +72,21 @@ def test_control_plane_data_operations_fail_closed() -> None:
     assert read_response.status_code == 503
 
 
-def test_control_plane_ensure_is_durable_idempotent_and_survives_restart(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_control_plane_ensure_fails_closed_when_provider_is_unavailable(tmp_path) -> None:  # type: ignore[no-untyped-def]
     settings = ControlPlaneSettings(ledger_path=tmp_path / "control.sqlite3")
     first = TestClient(create_app(settings)).post(
         "/control/v1/master/ensure",
         json={"idempotency_key": "same-cold-start", "intent": "test"},
     )
-    assert first.status_code == 200
-    assert first.json()["duplicate"] is False
+    assert first.status_code == 503
+    assert first.json()["detail"]["code"] == "provider_unavailable"
     restarted = TestClient(create_app(settings)).post(
         "/control/v1/master/ensure",
         json={"idempotency_key": "same-cold-start", "intent": "test"},
     )
-    assert restarted.status_code == 200
-    assert restarted.json()["duplicate"] is True
-    assert restarted.json()["operation_id"] == first.json()["operation_id"]
+    assert restarted.status_code == 503
     ready = TestClient(create_app(settings)).get("/health/ready")
-    assert ready.json()["master_state"] == "REQUESTED"
+    assert ready.json()["master_state"] == "ABSENT"
 
 
 def test_runtime_callback_is_fail_closed_without_provider_coordinator(tmp_path) -> None:  # type: ignore[no-untyped-def]

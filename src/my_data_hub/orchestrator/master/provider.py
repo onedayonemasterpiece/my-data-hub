@@ -20,15 +20,19 @@ class ProviderEffectReceipt:
     exact_ref: str
     source_identity: str
     source_version: str
+    exact_identity: dict[str, Any] | None = None
 
-    def as_dict(self) -> dict[str, str]:
-        return {
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "provider": self.provider,
             "effect_kind": self.effect_kind,
             "exact_ref": self.exact_ref,
             "source_identity": self.source_identity,
             "source_version": self.source_version,
         }
+        if self.exact_identity is not None:
+            payload["exact_identity"] = self.exact_identity
+        return payload
 
 
 class ReconciliationStatus(StrEnum):

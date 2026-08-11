@@ -46,6 +46,13 @@ from .contracts import (
     UnauthenticatedDatasetProbe,
 )
 from .control_journal import ControlLedgerKaggleJournal
+from .master_runtime import (
+    KaggleMasterLaunchAssets,
+    KaggleMasterRuntimeProvider,
+    MasterLaunchContractError,
+    derive_runtime_secret,
+    render_notebook_source,
+)
 from .provenance import DonorCompatibilityPin, compatibility_inventory
 from .retry import BoundedRetry, ClassifiedFailure, RetryPolicy, classify_failure, parse_retry_after
 
@@ -72,6 +79,8 @@ __all__ = [
     "KaggleKernelRunIdentity",
     "KaggleKernelSourceIdentity",
     "KaggleKernelStatus",
+    "KaggleMasterLaunchAssets",
+    "KaggleMasterRuntimeProvider",
     "KaggleNotFound",
     "KagglePolicyError",
     "KagglePollingTimeout",
@@ -82,6 +91,7 @@ __all__ = [
     "KaggleRetryExhausted",
     "KaggleTerminalFailure",
     "KernelState",
+    "MasterLaunchContractError",
     "MutationAction",
     "NotebookCanaryReceipt",
     "NotebookMutationResult",
@@ -98,7 +108,9 @@ __all__ = [
     "UnauthenticatedDatasetProbe",
     "classify_failure",
     "compatibility_inventory",
+    "derive_runtime_secret",
     "mapping_sha256",
     "parse_retry_after",
+    "render_notebook_source",
     "tree_sha256",
 ]
