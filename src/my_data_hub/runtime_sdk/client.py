@@ -239,32 +239,80 @@ class RuntimeClient:
         return result
 
     def emit_donor_envelope(self, envelope: Mapping[str, Any]) -> DeliveryReceipt:
-        """Adapt the proven status-client shape while moving its token to the header."""
+        """Adapt the proven events-bot status shape without weakening replay safety.
+
+        events-bot/CherryFlash uses a caller-stable ``event_uid`` for callback
+        deduplication.  Preserve that contract by replaying the first durable
+        body for a repeated UID rather than manufacturing a new event with a
+        different timestamp/local sequence.  The legacy body token is ignored;
+        this runtime always authenticates with its per-attempt header secret.
+        """
 
         donor_run_id = envelope.get("run_id")
         if donor_run_id is not None and str(donor_run_id) != self.run_id:
             raise ValueError("donor envelope run_id does not match this exact runtime")
         donor_event = str(envelope.get("event", "progress")).lower()
+        donor_event_uid = envelope.get("event_uid")
+        if donor_event_uid is not None and (
+            not isinstance(donor_event_uid, str) or not 1 <= len(donor_event_uid) <= 200
+        ):
+            raise ValueError("donor event_uid must be a bounded non-empty string")
         event_type = {
+            "alive": RuntimeEventType.RUNTIME_HEARTBEAT,
             "heartbeat": RuntimeEventType.RUNTIME_HEARTBEAT,
+            "kernel_started": RuntimeEventType.RUNTIME_STARTED,
+            "started": RuntimeEventType.RUNTIME_STARTED,
             "terminal": RuntimeEventType.RUNTIME_TERMINAL,
             "completed": RuntimeEventType.RUNTIME_TERMINAL,
+            "done": RuntimeEventType.RUNTIME_TERMINAL,
             "failed": RuntimeEventType.RUNTIME_FAILED,
             "error": RuntimeEventType.RUNTIME_FAILED,
             "service.ready": RuntimeEventType.SERVICE_READY,
+            "resource_acquire": RuntimeEventType.RESOURCE_ACQUIRE,
+            "resource.acquire": RuntimeEventType.RESOURCE_ACQUIRE,
+            "resource_renew": RuntimeEventType.RESOURCE_RENEW,
+            "resource.renew": RuntimeEventType.RESOURCE_RENEW,
+            "resource_release": RuntimeEventType.RESOURCE_RELEASE,
+            "resource.release": RuntimeEventType.RESOURCE_RELEASE,
+            "report_written": RuntimeEventType.JOB_RESULT_AVAILABLE,
         }.get(donor_event, RuntimeEventType.RUNTIME_PROGRESS)
         data = {
-            "donor_event_uid": envelope.get("event_uid"),
+            "donor_event": donor_event,
+            "donor_event_uid": donor_event_uid,
             "progress": envelope.get("progress", {}),
             "resource": envelope.get("resource"),
             "message": envelope.get("message"),
         }
-        return self.emit(
-            event_type,
-            phase=str(envelope["phase"]) if envelope.get("phase") is not None else None,
-            status=str(envelope["status"]) if envelope.get("status") is not None else None,
-            data={key: value for key, value in data.items() if value is not None},
-        )
+        normalized_data = {key: value for key, value in data.items() if value is not None}
+        donor_body_sha256 = hashlib.sha256(
+            json_body(
+                {
+                    "event_type": event_type.value,
+                    "phase": envelope.get("phase"),
+                    "status": envelope.get("status"),
+                    "data": sanitize(normalized_data, secrets=(self._run_secret,)),
+                }
+            )
+        ).hexdigest()
+        normalized_data["donor_body_sha256"] = donor_body_sha256
+        with self._delivery_lock:
+            self.replay_pending(max_events=self.automatic_replay_limit)
+            if donor_event_uid is not None:
+                for event in self.spool.events():
+                    event_data = event.get("data")
+                    if not isinstance(event_data, dict) or event_data.get("donor_event_uid") != donor_event_uid:
+                        continue
+                    if event_data.get("donor_body_sha256") != donor_body_sha256:
+                        raise ValueError("donor event_uid was reused with a different callback body")
+                    return self._deliver(event)
+            return self._emit_new(
+                event_type,
+                phase=str(envelope["phase"]) if envelope.get("phase") is not None else None,
+                status=str(envelope["status"]) if envelope.get("status") is not None else None,
+                data=normalized_data,
+                artifact_refs=(),
+                metrics=None,
+            )
 
     def acquire_resource(self, resource_kind: str, resource_ref: str, lease_until: datetime) -> DeliveryReceipt:
         return self.emit(

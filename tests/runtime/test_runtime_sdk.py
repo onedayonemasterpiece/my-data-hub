@@ -205,3 +205,59 @@ def test_donor_status_envelope_is_adapted_without_body_token(tmp_path: Path) -> 
     assert b"legacy-body-token" not in body
     with pytest.raises(ValueError, match="exact runtime"):
         runtime.emit_donor_envelope({"event": "heartbeat", "run_id": "stale-run"})
+
+
+def test_donor_event_uid_replays_exact_body_and_rejects_conflicting_reuse(tmp_path: Path) -> None:
+    clock = DeterministicClock(datetime(2026, 8, 10, tzinfo=UTC))
+    transport = ScriptedTransport([TransportResponse(200), TransportResponse(200)])
+    runtime = client(tmp_path, transport, clock)
+    envelope = {
+        "event": "report_written",
+        "event_uid": "cherryflash:report:1",
+        "run_id": "run-1",
+        "phase": "report",
+        "status": "done",
+        "progress": {"done": 1, "total": 1, "progress_label": "report 1/1"},
+    }
+
+    first = runtime.emit_donor_envelope(envelope)
+    clock.advance(10)
+    duplicate = runtime.emit_donor_envelope(envelope)
+
+    assert first.status == duplicate.status == "delivered"
+    assert transport.calls[0][1] == transport.calls[1][1]
+    body = json.loads(transport.calls[0][1])
+    assert body["event_type"] == "job.result_available"
+    assert body["data"]["donor_event"] == "report_written"
+    assert body["data"]["donor_event_uid"] == "cherryflash:report:1"
+    with pytest.raises(ValueError, match="different callback body"):
+        runtime.emit_donor_envelope({**envelope, "status": "failed"})
+
+
+@pytest.mark.parametrize(
+    ("donor_event", "runtime_event"),
+    [
+        ("alive", "runtime.heartbeat"),
+        ("kernel_started", "runtime.started"),
+        ("resource_acquire", "resource.acquire"),
+        ("resource_renew", "resource.renew"),
+        ("resource_release", "resource.release"),
+    ],
+)
+def test_donor_custom_runtime_states_keep_typed_event_semantics(
+    tmp_path: Path, donor_event: str, runtime_event: str
+) -> None:
+    clock = DeterministicClock(datetime(2026, 8, 10, tzinfo=UTC))
+    transport = ScriptedTransport([TransportResponse(200)])
+    runtime = client(tmp_path / donor_event, transport, clock)
+    runtime.emit_donor_envelope(
+        {
+            "event": donor_event,
+            "event_uid": f"uid:{donor_event}",
+            "run_id": "run-1",
+            "phase": "runtime",
+            "status": "running",
+            "resource": {"kind": "telegram_session", "ref": "s22"},
+        }
+    )
+    assert json.loads(transport.calls[0][1])["event_type"] == runtime_event
