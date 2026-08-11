@@ -1,0 +1,427 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/broker-live-canary-receipt.v1.schema.json",
+  "title": "BrokerLiveCanaryReceipt",
+  "$defs": {
+    "CleanupEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "dataset",
+            "notebook"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "provider_ref": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Provider Ref",
+          "type": "string"
+        },
+        "claim_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Claim Sha256",
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "applied",
+            "already_applied"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "detail_code": {
+          "enum": [
+            "task_created_resource_absent",
+            "task_created_resource_already_absent"
+          ],
+          "title": "Detail Code",
+          "type": "string"
+        },
+        "receipt_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Receipt Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "provider_ref",
+        "claim_sha256",
+        "outcome",
+        "detail_code",
+        "receipt_sha256"
+      ],
+      "title": "CleanupEvidence",
+      "type": "object"
+    },
+    "DatasetEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "provider_ref": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Provider Ref",
+          "type": "string"
+        },
+        "exact_version_ref": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Exact Version Ref",
+          "type": "string"
+        },
+        "provider_version": {
+          "minimum": 1,
+          "title": "Provider Version",
+          "type": "integer"
+        },
+        "privacy": {
+          "const": "private",
+          "title": "Privacy",
+          "type": "string"
+        },
+        "file_name": {
+          "const": "broker-canary.bin",
+          "title": "File Name",
+          "type": "string"
+        },
+        "byte_size": {
+          "maximum": 1048576,
+          "minimum": 1,
+          "title": "Byte Size",
+          "type": "integer"
+        },
+        "file_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "File Sha256",
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
+        },
+        "metadata_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Metadata Sha256",
+          "type": "string"
+        },
+        "claim_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Claim Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_ref",
+        "exact_version_ref",
+        "provider_version",
+        "privacy",
+        "file_name",
+        "byte_size",
+        "file_sha256",
+        "manifest_sha256",
+        "metadata_sha256",
+        "claim_sha256"
+      ],
+      "title": "DatasetEvidence",
+      "type": "object"
+    },
+    "NotebookEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "provider_ref": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "title": "Provider Ref",
+          "type": "string"
+        },
+        "provider_run_ref": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Provider Run Ref",
+          "type": "string"
+        },
+        "provider_kernel_id": {
+          "minimum": 1,
+          "title": "Provider Kernel Id",
+          "type": "integer"
+        },
+        "source_version": {
+          "minimum": 1,
+          "title": "Source Version",
+          "type": "integer"
+        },
+        "source_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "output_tree_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Output Tree Sha256",
+          "type": "string"
+        },
+        "output_receipt_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Output Receipt Sha256",
+          "type": "string"
+        },
+        "result_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Result Sha256",
+          "type": "string"
+        },
+        "credential_free": {
+          "const": true,
+          "title": "Credential Free",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "provider_ref",
+        "provider_run_ref",
+        "provider_kernel_id",
+        "source_version",
+        "source_sha256",
+        "output_tree_sha256",
+        "output_receipt_sha256",
+        "result_sha256",
+        "credential_free"
+      ],
+      "title": "NotebookEvidence",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Public receipt.  Signed URLs and opaque blob tokens have no fields here.",
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-broker-live-canary-receipt.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "evidence_origin": {
+      "enum": [
+        "observed",
+        "test",
+        "example"
+      ],
+      "title": "Evidence Origin",
+      "type": "string"
+    },
+    "execution_mode": {
+      "enum": [
+        "live",
+        "test",
+        "not_run"
+      ],
+      "title": "Execution Mode",
+      "type": "string"
+    },
+    "outcome": {
+      "enum": [
+        "PASS",
+        "SIMULATED",
+        "NOT_RUN"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "live_provider_mutations": {
+      "title": "Live Provider Mutations",
+      "type": "boolean"
+    },
+    "canary_id": {
+      "format": "uuid",
+      "title": "Canary Id",
+      "type": "string"
+    },
+    "task_id": {
+      "format": "uuid",
+      "title": "Task Id",
+      "type": "string"
+    },
+    "commit_sha": {
+      "pattern": "^[a-f0-9]{40}$",
+      "title": "Commit Sha",
+      "type": "string"
+    },
+    "broker_operation_id": {
+      "format": "uuid",
+      "title": "Broker Operation Id",
+      "type": "string"
+    },
+    "epoch": {
+      "minimum": 1,
+      "title": "Epoch",
+      "type": "integer"
+    },
+    "producer": {
+      "$ref": "#/$defs/NotebookEvidence"
+    },
+    "dataset": {
+      "$ref": "#/$defs/DatasetEvidence"
+    },
+    "verifier": {
+      "$ref": "#/$defs/NotebookEvidence"
+    },
+    "cleanup": {
+      "maxItems": 3,
+      "minItems": 3,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/CleanupEvidence"
+        },
+        {
+          "$ref": "#/$defs/CleanupEvidence"
+        },
+        {
+          "$ref": "#/$defs/CleanupEvidence"
+        }
+      ],
+      "title": "Cleanup",
+      "type": "array"
+    },
+    "inventory_absent": {
+      "const": true,
+      "title": "Inventory Absent",
+      "type": "boolean"
+    },
+    "inventory_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Inventory Sha256",
+      "type": "string"
+    },
+    "data_path": {
+      "const": "credential_free_notebook_to_signed_kaggle_blob",
+      "title": "Data Path",
+      "type": "string"
+    },
+    "devstand_checkpoint_bytes": {
+      "const": 0,
+      "title": "Devstand Checkpoint Bytes",
+      "type": "integer"
+    },
+    "central_kaggle_adapter_instances": {
+      "const": 1,
+      "title": "Central Kaggle Adapter Instances",
+      "type": "integer"
+    },
+    "secret_scan_passed": {
+      "const": true,
+      "title": "Secret Scan Passed",
+      "type": "boolean"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "evidence_origin",
+    "execution_mode",
+    "outcome",
+    "live_provider_mutations",
+    "canary_id",
+    "task_id",
+    "commit_sha",
+    "broker_operation_id",
+    "epoch",
+    "producer",
+    "dataset",
+    "verifier",
+    "cleanup",
+    "inventory_absent",
+    "inventory_sha256",
+    "data_path",
+    "devstand_checkpoint_bytes",
+    "central_kaggle_adapter_instances",
+    "secret_scan_passed",
+    "started_at",
+    "completed_at"
+  ],
+  "type": "object",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "PASS"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "evidence_origin": {
+            "const": "observed"
+          },
+          "execution_mode": {
+            "const": "live"
+          },
+          "live_provider_mutations": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "SIMULATED"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "evidence_origin": {
+            "const": "test"
+          },
+          "execution_mode": {
+            "const": "test"
+          },
+          "live_provider_mutations": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "NOT_RUN"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "evidence_origin": {
+            "const": "example"
+          },
+          "execution_mode": {
+            "const": "not_run"
+          },
+          "live_provider_mutations": {
+            "const": false
+          }
+        }
+      }
+    }
+  ]
+}

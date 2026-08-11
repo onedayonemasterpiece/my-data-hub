@@ -1,0 +1,59 @@
+{
+  "schema_version": "my-data-hub-broker-live-canary-receipt.v1",
+  "evidence_origin": "example",
+  "execution_mode": "not_run",
+  "outcome": "NOT_RUN",
+  "live_provider_mutations": false,
+  "canary_id": "11111111-1111-4111-8111-111111111111",
+  "task_id": "22222222-2222-4222-8222-222222222222",
+  "commit_sha": "0000000000000000000000000000000000000000",
+  "broker_operation_id": "33333333-3333-4333-8333-333333333333",
+  "epoch": 1,
+  "producer": {
+    "provider_ref": "example/mdh-broker-producer-example",
+    "provider_run_ref": "example/mdh-broker-producer-example/1",
+    "provider_kernel_id": 1,
+    "source_version": 1,
+    "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "output_tree_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "output_receipt_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "result_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "credential_free": true
+  },
+  "dataset": {
+    "provider_ref": "example/mdh-broker-canary-example",
+    "exact_version_ref": "example/mdh-broker-canary-example/1",
+    "provider_version": 1,
+    "privacy": "private",
+    "file_name": "broker-canary.bin",
+    "byte_size": 4096,
+    "file_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "metadata_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "claim_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "verifier": {
+    "provider_ref": "example/mdh-broker-verifier-example",
+    "provider_run_ref": "example/mdh-broker-verifier-example/1",
+    "provider_kernel_id": 2,
+    "source_version": 1,
+    "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "output_tree_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "output_receipt_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "result_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "credential_free": true
+  },
+  "cleanup": [
+    {"kind":"notebook","provider_ref":"example/mdh-broker-verifier-example","claim_sha256":"0000000000000000000000000000000000000000000000000000000000000000","outcome":"applied","detail_code":"task_created_resource_absent","receipt_sha256":"0000000000000000000000000000000000000000000000000000000000000000"},
+    {"kind":"dataset","provider_ref":"example/mdh-broker-canary-example","claim_sha256":"0000000000000000000000000000000000000000000000000000000000000000","outcome":"applied","detail_code":"task_created_resource_absent","receipt_sha256":"0000000000000000000000000000000000000000000000000000000000000000"},
+    {"kind":"notebook","provider_ref":"example/mdh-broker-producer-example","claim_sha256":"0000000000000000000000000000000000000000000000000000000000000000","outcome":"applied","detail_code":"task_created_resource_absent","receipt_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}
+  ],
+  "inventory_absent": true,
+  "inventory_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "data_path": "credential_free_notebook_to_signed_kaggle_blob",
+  "devstand_checkpoint_bytes": 0,
+  "central_kaggle_adapter_instances": 1,
+  "secret_scan_passed": true,
+  "started_at": "2026-08-11T00:00:00Z",
+  "completed_at": "2026-08-11T00:00:00Z"
+}

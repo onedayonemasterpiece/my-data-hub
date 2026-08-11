@@ -62,3 +62,47 @@ deletes the canary Dataset and both Notebooks. The receipt records only provider
 numeric version, sizes, hashes, operation IDs, cleanup hashes and secret-scan status.
 Until that receipt exists, this implementation is code-complete but not operationally
 accepted.
+
+The executable implementation is `scripts/provider/broker_live_canary.py`. It preserves
+the production split rather than testing a convenient local upload:
+
+1. The central process constructs exactly one `KaggleProviderAdapter` from the pinned
+   official SDK and starts one brokered Dataset blob.
+2. A private disposable producer Notebook is pushed without a Kaggle credential. Its
+   source contains only the short-lived signed `create_url`; it deterministically creates
+   the opaque 4 KiB canary and performs the direct HTTPS `PUT`. The blob token never
+   leaves the central process.
+3. Central finalization uses `BrokeredDatasetFile` and the same canonical description
+   fields as the deployed checkpoint broker (`operation_id`, `master_run_ref`, `epoch`,
+   manifest/file SHA-256, and total bytes). It must reconcile private Dataset version 1
+   exactly before continuing.
+4. A second credential-free Notebook is attached to the exact numeric Dataset input. It
+   independently verifies the byte count and SHA-256 and emits bounded status JSON.
+5. Claim-bound deletion removes the verifier Notebook, Dataset, and producer Notebook.
+   A final paginated owned-inventory read must prove all three exact refs absent.
+
+The runner uses an atomic, mode-`0600`, metadata-only custom-state file, following the
+status-file pattern used by the established Kaggle runners. The state and public receipt
+reject `create_url` and `blob_token`; neither stores a capability. A small central
+readback of this disposable canary is used only to derive the adapter's exact deletion
+fingerprint. Production checkpoint bytes still travel only Notebook → signed Kaggle blob
+and never through the devstand.
+
+Run only from a clean deployed commit and keep all mutable evidence outside the checkout:
+
+```bash
+set -a
+. /path/to/private/provider.env
+set +a
+uv run --no-project --with-editable . --with kaggle==2.2.4 \
+  python scripts/provider/broker_live_canary.py \
+  --ledger /private/evidence/broker-live-canary.sqlite \
+  --state /private/evidence/broker-live-canary-state.json \
+  --receipt /private/evidence/broker-live-canary-receipt.json
+```
+
+No `--fake`, CLI, `kagglehub`, direct second client, or skip-cleanup mode exists. Missing
+credentials exit with code 78 before a mutation. Unit-test adapters produce only a
+`SIMULATED` receipt; the receipt model/schema permit `PASS` only for `observed` + `live`
+execution with provider mutations, all three cleanup receipts, and inventory absence.
+The checked-in example is explicitly `NOT_RUN` and cannot be presented as live evidence.
