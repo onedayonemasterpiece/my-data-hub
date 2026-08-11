@@ -23,14 +23,16 @@ from uuid import UUID, uuid5
 from my_data_hub.hashing import canonical_json_bytes
 
 from .master_stage import (
+    EXPECTED_BLOGGER_ROWS,
     BloggerImportStageReceipt,
     BloggerMigrationRequest,
-    EXPECTED_BLOGGER_ROWS,
 )
 
 EXTERNAL_BLOCKED = 78
 FINAL_RECEIPT_SCHEMA = "my-data-hub-blogger-closure.v1"
 FINAL_RECEIPT_MAX_BYTES = 256 * 1024
+LOCAL_CONTROL_URL = "http://127.0.0.1:8080"
+CANONICAL_MCP_URL = "https://mcp-datahub.kenigevents.ru/mcp"
 _CLOSURE_NAMESPACE = UUID("650bb578-a4b2-54f2-8783-8c104265017c")
 
 
@@ -59,7 +61,6 @@ class ClosureMcp(Protocol):
 @dataclass(frozen=True, slots=True)
 class ClosureConfig:
     control_url: str
-    control_token: str
     idempotency_key: str
     project_id: UUID
     snapshot_at: datetime
@@ -69,10 +70,18 @@ class ClosureConfig:
 
     def __post_init__(self) -> None:
         parsed = urlsplit(self.control_url)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise ValueError("control URL must be credential-free HTTPS")
-        if not 24 <= len(self.control_token) <= 4096 or any(c.isspace() for c in self.control_token):
-            raise ValueError("control bearer token is invalid")
+        if (
+            self.control_url != LOCAL_CONTROL_URL
+            or parsed.scheme != "http"
+            or parsed.hostname != "127.0.0.1"
+            or parsed.port != 8080
+            or parsed.path not in {"", "/"}
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("control URL must be the exact loopback-only control endpoint")
         if not 8 <= len(self.idempotency_key) <= 200:
             raise ValueError("blogger closure idempotency key is invalid")
         if self.snapshot_at.tzinfo is None:
@@ -85,7 +94,7 @@ class ClosureConfig:
             raise ValueError("blogger closure polling interval is invalid")
 
 
-class HttpsClosureControl:
+class LocalClosureControl:
     def __init__(self, config: ClosureConfig) -> None:
         self.config = config
 
@@ -96,7 +105,6 @@ class HttpsClosureControl:
             data=body,
             headers={
                 "Accept": "application/json",
-                "Authorization": f"Bearer {self.config.control_token}",
                 "Content-Type": "application/json",
             },
             method=method,
@@ -132,8 +140,18 @@ class HttpsClosureControl:
 class StreamableHttpClosureMcp:
     def __init__(self, endpoint: str, token: str) -> None:
         parsed = urlsplit(endpoint)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.path != "/mcp" or parsed.query or parsed.fragment:
-            raise ValueError("MCP endpoint must be exact credential-free HTTPS /mcp")
+        if (
+            endpoint != CANONICAL_MCP_URL
+            or parsed.scheme != "https"
+            or parsed.hostname != "mcp-datahub.kenigevents.ru"
+            or parsed.port is not None
+            or parsed.username
+            or parsed.password
+            or parsed.path != "/mcp"
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("MCP endpoint must be the owner-approved canonical HTTPS resource")
         if not 24 <= len(token) <= 4096 or any(c.isspace() for c in token):
             raise ValueError("MCP bearer token is invalid")
         self.endpoint = endpoint
@@ -144,18 +162,21 @@ class StreamableHttpClosureMcp:
         from mcp import ClientSession
         from mcp.client.streamable_http import streamable_http_client
 
-        async with httpx2.AsyncClient(
-            headers={"Authorization": f"Bearer {self._token}"},
-            follow_redirects=False,
-            timeout=httpx2.Timeout(30.0, connect=5.0),
-        ) as client, streamable_http_client(self.endpoint, http_client=client) as streams:
+        async with (
+            httpx2.AsyncClient(
+                headers={"Authorization": f"Bearer {self._token}"},
+                follow_redirects=False,
+                timeout=httpx2.Timeout(30.0, connect=5.0),
+            ) as client,
+            streamable_http_client(self.endpoint, http_client=client) as streams,
+        ):
             read_stream, write_stream = streams
             async with ClientSession(read_stream, write_stream, read_timeout_seconds=30) as session:
                 await session.initialize()
                 result = await session.call_tool(tool, arguments)
-                if bool(getattr(result, "isError", False)):
+                if bool(getattr(result, "is_error", getattr(result, "isError", False))):
                     raise BloggerClosureError(f"MCP {tool} returned an error")
-                structured = getattr(result, "structuredContent", None)
+                structured = getattr(result, "structured_content", getattr(result, "structuredContent", None))
                 if isinstance(structured, dict):
                     return structured
                 for content in getattr(result, "content", ()):
@@ -236,9 +257,13 @@ def run_blogger_closure(
     deadline = time.monotonic() + config.timeout_seconds
     ensure = control.ensure_master(f"{config.idempotency_key}:master")
     operation_id = UUID(str(ensure.get("operation_id")))
-    master = _wait(
-        deadline, config.poll_seconds, control.master_status,
-        lambda value: value.get("master_state") == "ACTIVE" and value.get("master_instance_id") and value.get("master_epoch"),
+    _wait(
+        deadline,
+        config.poll_seconds,
+        control.master_status,
+        lambda value: (
+            value.get("master_state") == "ACTIVE" and value.get("master_instance_id") and value.get("master_epoch")
+        ),
     )
     request_id = uuid5(_CLOSURE_NAMESPACE, config.idempotency_key)
     request = BloggerMigrationRequest(
@@ -252,7 +277,9 @@ def run_blogger_closure(
     if created.get("request_sha256") != request.request_sha256:
         raise BloggerClosureError("control plane stored a different blogger request")
     request_status = _wait(
-        deadline, config.poll_seconds, lambda: control.request_status(request_id),
+        deadline,
+        config.poll_seconds,
+        lambda: control.request_status(request_id),
         lambda value: value.get("state") in {"CHECKPOINT_VERIFIED", "FAILED"},
     )
     if request_status.get("state") != "CHECKPOINT_VERIFIED":
@@ -277,14 +304,17 @@ def run_blogger_closure(
     if not rotation_operation_id:
         raise BloggerClosureError("rotation did not return a durable operation identity")
     rotation_status = _wait(
-        deadline, config.poll_seconds,
+        deadline,
+        config.poll_seconds,
         lambda: mcp.call("operation.get", {"operation_id": rotation_operation_id}),
         lambda value: value.get("state") in {"DURABLE_COMPLETE", "FAILED", "FENCED", "ORPHANED"},
     )
     if rotation_status.get("state") != "DURABLE_COMPLETE":
         raise BloggerClosureError("cold-restore rotation did not become DURABLE_COMPLETE")
     cold_master = _wait(
-        deadline, config.poll_seconds, lambda: mcp.call("master.status", {}),
+        deadline,
+        config.poll_seconds,
+        lambda: mcp.call("master.status", {}),
         lambda value: value.get("master_state") == "ACTIVE" and int(value.get("master_epoch") or 0) > imported.epoch,
     )
     accounting = _require_accounting(
@@ -294,7 +324,10 @@ def run_blogger_closure(
     statistics = mcp.call("bloggers.statistics", {})
     if statistics.get("canonical_revision") != imported.canonical_revision:
         raise BloggerClosureError("blogger statistics revision differs from the restored import")
-    if not isinstance(statistics.get("statistics"), dict) or statistics["statistics"].get("bloggers") != EXPECTED_BLOGGER_ROWS:
+    if (
+        not isinstance(statistics.get("statistics"), dict)
+        or statistics["statistics"].get("bloggers") != EXPECTED_BLOGGER_ROWS
+    ):
         raise BloggerClosureError("blogger statistics do not prove exactly 266 canonical bloggers")
     receipt_id = uuid5(_CLOSURE_NAMESPACE, f"receipt:{request_id}")
     receipt: dict[str, Any] = {

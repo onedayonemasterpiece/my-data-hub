@@ -1,8 +1,12 @@
 # FINAL-BLOGGER production closure
 
-Run `python3 scripts/bloggers/run_final_closure.py run ...` only from the protected
-operator environment. The command is fail closed and returns `78` before any
-control-plane request when a modern Kaggle token is absent.
+Run `python3 scripts/bloggers/run_final_closure.py run ...` only on the protected
+devstand operator account. The control client is pinned to
+`http://127.0.0.1:8080`; it does not transmit a reusable control credential and
+cannot target a remote host. The MCP client is pinned to the owner-approved
+`https://mcp-datahub.kenigevents.ru/mcp` audience before it attaches the operator
+token. The command is fail closed and returns `78` before any control-plane
+request when a modern Kaggle token is absent.
 
 The command first calls `POST /control/v1/master/ensure`. It then stores one
 secret-free, exact request bound to that ensure operation. The request is claimed

@@ -13,7 +13,10 @@ from jsonschema import Draft202012Validator, RefResolver
 
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.workloads.bloggers.closure import (
+    CANONICAL_MCP_URL,
+    LOCAL_CONTROL_URL,
     ClosureConfig,
+    StreamableHttpClosureMcp,
     modern_kaggle_token_configured,
     run_blogger_closure,
 )
@@ -84,10 +87,12 @@ class FakeControl:
 
     def request_status(self, request_id: UUID) -> dict[str, object]:
         assert request_id == self.created.request_id  # type: ignore[union-attr]
-        receipt = imported().model_copy(update={
-            "request_id": self.created.request_id,
-            "request_sha256": self.created.request_sha256,
-        })
+        receipt = imported().model_copy(
+            update={
+                "request_id": self.created.request_id,
+                "request_sha256": self.created.request_sha256,
+            }
+        )
         return {
             "state": "CHECKPOINT_VERIFIED",
             "claimed_run_id": receipt.run_id,
@@ -159,14 +164,16 @@ class FakeMcp:
                 },
             }
         if tool == "bloggers.statistics":
-            return {"canonical_revision": 9, "statistics": {"bloggers": 266, "requires_review": 0, "with_public_accounts": 210}}
+            return {
+                "canonical_revision": 9,
+                "statistics": {"bloggers": 266, "requires_review": 0, "with_public_accounts": 210},
+            }
         raise AssertionError(tool)
 
 
 def config() -> ClosureConfig:
     return ClosureConfig(
-        control_url="https://control.example",
-        control_token="control-token-long-enough-for-validation",
+        control_url=LOCAL_CONTROL_URL,
         idempotency_key="final-blogger-test",
         project_id=PROJECT,
         snapshot_at=datetime(2026, 8, 9, tzinfo=UTC),
@@ -174,6 +181,46 @@ def config() -> ClosureConfig:
         timeout_seconds=600,
         poll_seconds=1,
     )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://control.example",
+        "http://localhost:8080",
+        "http://127.0.0.1:8081",
+        "http://user@127.0.0.1:8080",
+    ],
+)
+def test_closure_control_rejects_noncanonical_or_nonloopback_url(url: str) -> None:
+    with pytest.raises(ValueError, match="loopback-only"):
+        ClosureConfig(
+            control_url=url,
+            idempotency_key="final-blogger-test",
+            project_id=PROJECT,
+            snapshot_at=datetime(2026, 8, 9, tzinfo=UTC),
+            source_revision="b" * 40,
+            timeout_seconds=600,
+            poll_seconds=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://attacker.example/mcp",
+        "https://user@mcp-datahub.kenigevents.ru/mcp",
+        "https://mcp-datahub.kenigevents.ru:444/mcp",
+        "https://mcp-datahub.kenigevents.ru/mcp?redirect=attacker",
+    ],
+)
+def test_closure_mcp_rejects_noncanonical_token_audience(url: str) -> None:
+    with pytest.raises(ValueError, match="owner-approved"):
+        StreamableHttpClosureMcp(url, "reader-token-long-enough-for-validation")
+
+
+def test_closure_mcp_accepts_only_canonical_token_audience() -> None:
+    StreamableHttpClosureMcp(CANONICAL_MCP_URL, "reader-token-long-enough-for-validation")
 
 
 def test_final_closure_reaches_durable_complete_only_after_restore_and_mcp() -> None:
@@ -185,8 +232,12 @@ def test_final_closure_reaches_durable_complete_only_after_restore_and_mcp() -> 
     assert receipt["checkpoint"]["checkpoint_id"] == str(CHECKPOINT)
     assert receipt["cold_restore"]["epoch"] == 8
     assert [name for name, _ in mcp.calls] == [
-        "checkpoint.status", "master.rotation.request", "operation.get", "master.status",
-        "bloggers.migration.accounting", "bloggers.statistics",
+        "checkpoint.status",
+        "master.rotation.request",
+        "operation.get",
+        "master.status",
+        "bloggers.migration.accounting",
+        "bloggers.statistics",
     ]
 
 
@@ -238,13 +289,18 @@ def test_control_ledger_claims_one_exact_runtime_and_preserves_metadata_only(tmp
     ledger = ControlLedger(tmp_path / "control.sqlite3")
     value = request()
     record, created = ledger.ensure_blogger_migration_request(
-        request_id=str(REQUEST), operation_id=str(OPERATION), request_sha256=value.request_sha256,
+        request_id=str(REQUEST),
+        operation_id=str(OPERATION),
+        request_sha256=value.request_sha256,
         request=value.model_dump(mode="json"),
     )
     assert created and record["state"] == "REQUESTED"
     claimed = ledger.claim_blogger_migration_request(
-        operation_id=str(OPERATION), run_id="run", attempt_id="attempt",
-        master_instance_id=str(MASTER), epoch=7,
+        operation_id=str(OPERATION),
+        run_id="run",
+        attempt_id="attempt",
+        master_instance_id=str(MASTER),
+        epoch=7,
     )
     assert claimed is not None and claimed["claimed_epoch"] == 7
     serialized = json.dumps(claimed).lower()
@@ -253,8 +309,11 @@ def test_control_ledger_claims_one_exact_runtime_and_preserves_metadata_only(tmp
     assert "ydb_access_token" not in serialized
     with pytest.raises(Exception, match="another runtime epoch"):
         ledger.claim_blogger_migration_request(
-            operation_id=str(OPERATION), run_id="other", attempt_id="attempt",
-            master_instance_id=str(MASTER), epoch=7,
+            operation_id=str(OPERATION),
+            run_id="other",
+            attempt_id="attempt",
+            master_instance_id=str(MASTER),
+            epoch=7,
         )
 
 
@@ -265,14 +324,25 @@ def test_cli_exits_78_before_control_or_receipt_mutation_without_modern_token(tm
     environment["KAGGLE_CONFIG_DIR"] = str(tmp_path / "no-token")
     completed = subprocess.run(
         [
-            sys.executable, "scripts/bloggers/run_final_closure.py", "run",
-            "--idempotency-key", "no-token-test",
-            "--project-id", str(PROJECT),
-            "--snapshot-at", "2026-08-09T00:00:00Z",
-            "--source-revision", "b" * 40,
-            "--receipt", str(receipt),
+            sys.executable,
+            "scripts/bloggers/run_final_closure.py",
+            "run",
+            "--idempotency-key",
+            "no-token-test",
+            "--project-id",
+            str(PROJECT),
+            "--snapshot-at",
+            "2026-08-09T00:00:00Z",
+            "--source-revision",
+            "b" * 40,
+            "--receipt",
+            str(receipt),
         ],
-        cwd=Path.cwd(), env=environment, check=False, capture_output=True, text=True,
+        cwd=Path.cwd(),
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
     )
     assert completed.returncode == 78
     assert not receipt.exists()
@@ -294,33 +364,53 @@ def test_in_master_stage_uses_epoch_bound_migration_login_and_drops_it(monkeypat
     events: list[str] = []
 
     class Provisioner:
-        def __init__(self, connection): events.append("provisioner")
+        def __init__(self, connection):
+            events.append("provisioner")
+
         def create(self, **kwargs):
             events.append("credential.create")
             assert kwargs["group"] == "mdh_migration_operator"
             assert kwargs["policy"].connection_limit == 1
-        def drop(self, principal): events.append("credential.drop")
+
+        def drop(self, principal):
+            events.append("credential.drop")
 
     class Cursor:
-        def __enter__(self): return self
-        def __exit__(self, *args): return None
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
         def execute(self, statement):
             events.append(statement)
 
     class Connection:
-        def __enter__(self): return self
-        def __exit__(self, *args): return None
-        def cursor(self): return Cursor()
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def cursor(self):
+            return Cursor()
 
     class Snapshot:
-        def __init__(self, driver): pass
-        def assert_write_denied(self): events.append("ydb.denied")
+        def __init__(self, driver):
+            pass
+
+        def assert_write_denied(self):
+            events.append("ydb.denied")
+
         def iter_rows(self):
             class Rows:
                 def __enter__(self):
                     events.append("ydb.rows")
                     return iter(())
-                def __exit__(self, *args): return None
+
+                def __exit__(self, *args):
+                    return None
+
             return Rows()
 
     export = BloggerExportReceipt(
@@ -369,4 +459,9 @@ def test_in_master_stage_uses_epoch_bound_migration_login_and_drops_it(monkeypat
     )
     assert receipt.transaction_committed is True
     assert receipt.row_count == receipt.distinct_record_ids == receipt.actor_count == 266
-    assert events.index("credential.create") < events.index("ydb.denied") < events.index("postgres.import") < events.index("credential.drop")
+    assert (
+        events.index("credential.create")
+        < events.index("ydb.denied")
+        < events.index("postgres.import")
+        < events.index("credential.drop")
+    )
