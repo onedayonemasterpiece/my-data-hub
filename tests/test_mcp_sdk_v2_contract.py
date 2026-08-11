@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from my_data_hub.config import Settings
-from my_data_hub.mcp.server import create_server, oauth_resource_metadata_url
+from my_data_hub.mcp.server import MCPDependencies, create_server, oauth_resource_metadata_url
 
 mcp_server_module = pytest.importorskip("mcp.server")
 
@@ -49,6 +49,40 @@ async def test_mcp_v2_read_only_tool_catalog(monkeypatch: pytest.MonkeyPatch) ->
     names = {tool.name for tool in tools}
     assert names == READ_ONLY_TOOLS
     assert names.isdisjoint(WRITE_TOOLS)
+
+
+@pytest.mark.asyncio
+async def test_acceptance_scenario_tools_require_explicit_executor_opt_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    token = tmp_path / "gateway.token"
+    token.write_text("g" * 32)
+    token.chmod(0o600)
+    monkeypatch.setenv("MY_DATA_HUB_DATABASE_URL", "postgresql://contract:contract@127.0.0.1:5432/contract")
+    monkeypatch.setenv("MY_DATA_HUB_ENVIRONMENT", "test")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_REMOTE_ENABLED", "false")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_SCOPES", "acceptance:operate,data:write")
+    monkeypatch.setenv(
+        "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL",
+        "http://control-plane:8080/internal/mcp-provider/invoke",
+    )
+    monkeypatch.setenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE", str(token))
+    settings = Settings.from_env()
+    disabled = create_server(settings)
+    assert not {
+        "acceptance.scenario.request",
+        "acceptance.scenario.status",
+    } & {tool.name for tool in await disabled.list_tools()}
+    enabled = create_server(
+        settings,
+        dependencies=MCPDependencies(acceptance_scenarios_enabled=True),
+    )
+    assert {
+        "acceptance.scenario.request",
+        "acceptance.scenario.status",
+    } <= {tool.name for tool in await enabled.list_tools()}
 
 
 def test_mcp_v2_streamable_http_builder_accepts_security_limits(

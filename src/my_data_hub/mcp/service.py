@@ -56,6 +56,8 @@ _CONTROL_TOOLS = frozenset(
         "provider.resources.read",
         "provider.acceptance.claim.get",
         "runtime.events.history",
+        "acceptance.scenario.request",
+        "acceptance.scenario.status",
         "data.change.status",
     }
 )

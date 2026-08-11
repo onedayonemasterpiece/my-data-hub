@@ -1106,6 +1106,7 @@ class LedgerControlReader(ControlPlaneReader):
         write_gate: LedgerWriteGate | None = None,
         provider_gateway: KaggleMCPProviderGateway | None = None,
         acceptance_evidence: AcceptanceEvidenceController | None = None,
+        acceptance_scenarios: object | None = None,
     ) -> None:
         if deployed_commit is not None and (
             len(deployed_commit) != 40 or any(character not in "0123456789abcdef" for character in deployed_commit)
@@ -1118,8 +1119,17 @@ class LedgerControlReader(ControlPlaneReader):
         self.acceptance_evidence = acceptance_evidence or (
             AcceptanceEvidenceController(ledger, provider_gateway) if provider_gateway is not None else None
         )
+        self.acceptance_scenarios = acceptance_scenarios
 
     def invoke_control(self, tool: str, arguments: dict[str, Any], principal: AccessIdentity) -> dict[str, Any]:
+        if tool in {"acceptance.scenario.request", "acceptance.scenario.status"}:
+            adapter = self.acceptance_scenarios
+            if adapter is None:
+                raise PermissionError("acceptance scenario executor is not configured")
+            call = getattr(adapter, "call", None)
+            if not callable(call):
+                raise PermissionError("acceptance scenario executor is invalid")
+            return call(tool, arguments, principal)
         if tool == "platform.status":
             return {
                 "control_plane_ready": True,

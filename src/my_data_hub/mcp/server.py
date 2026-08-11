@@ -46,6 +46,7 @@ class MCPDependencies:
     write_gate: WriteGate | None = None
     audit: MCPAuditSink | None = None
     sql_policy: BoundedSQLPolicy | None = None
+    acceptance_scenarios_enabled: bool = False
 
 
 def _local_identity(settings: Settings) -> AccessIdentity | None:
@@ -109,12 +110,23 @@ def create_server(
         async def list_tools(self):  # type: ignore[no-untyped-def]
             tools = await super().list_tools()
             allowed = visible_tools(self._identity())
+            if not deps.acceptance_scenarios_enabled:
+                allowed -= {"acceptance.scenario.request", "acceptance.scenario.status"}
             return [tool for tool in tools if tool.name in allowed]
 
         async def call_tool(self, name, arguments, context=None):  # type: ignore[no-untyped-def]
             identity = self._identity()
             contract = TOOL_CONTRACTS.get(name)
-            if contract is None or identity is None or contract.scope not in identity.scopes:
+            acceptance_disabled = (
+                str(name).startswith("acceptance.scenario.")
+                and not deps.acceptance_scenarios_enabled
+            )
+            if (
+                contract is None
+                or identity is None
+                or contract.scope not in identity.scopes
+                or acceptance_disabled
+            ):
                 if identity is not None and deps.audit is not None:
                     recorded = deps.audit.record_mcp_audit(
                         OAuthAuditEvent(
@@ -170,6 +182,19 @@ def create_server(
 
     async def checkpoint_status() -> dict[str, Any]:
         return await service.invoke("checkpoint.status", {})
+
+    async def acceptance_scenario_request(
+        task_id: str,
+        scenario: Literal[
+            "FM04", "FM05", "FM07", "FM08", "FM09", "FM10", "FM11", "FM12", "FM14", "FM15", "FM24"
+        ],
+        idempotency_key: str,
+        source_revision: str,
+    ) -> dict[str, Any]:
+        return await service.invoke("acceptance.scenario.request", locals())
+
+    async def acceptance_scenario_status(task_id: str) -> dict[str, Any]:
+        return await service.invoke("acceptance.scenario.status", locals())
 
     async def checkpoint_restore_request(
         target: str,
@@ -425,6 +450,8 @@ def create_server(
         "master.ensure": master_ensure,
         "operation.get": operation_get,
         "checkpoint.status": checkpoint_status,
+        "acceptance.scenario.request": acceptance_scenario_request,
+        "acceptance.scenario.status": acceptance_scenario_status,
         "checkpoint.restore.request": checkpoint_restore_request,
         "master.rotation.request": master_rotation_request,
         "connector.coverage": connector_coverage,

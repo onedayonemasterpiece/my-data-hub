@@ -28,6 +28,8 @@ _REMOTE_PROVIDER_TOOLS = frozenset(
         "provider.acceptance.notebook.lifecycle",
         "provider.acceptance.claim.get",
         "provider.acceptance.claim.cleanup",
+        "acceptance.scenario.request",
+        "acceptance.scenario.status",
     }
 )
 
@@ -64,7 +66,7 @@ class AuthenticatedProviderControlClient(ControlPlaneReader):
         self, tool: str, arguments: Mapping[str, Any], principal: AccessIdentity
     ) -> dict[str, Any]:
         if tool not in _REMOTE_PROVIDER_TOOLS:
-            raise PermissionError("control gateway accepts only exact provider operations")
+            raise PermissionError("control gateway accepts only exact provider/acceptance operations")
         return await asyncio.to_thread(self._invoke_sync, tool, dict(arguments), principal)
 
     def _invoke_sync(

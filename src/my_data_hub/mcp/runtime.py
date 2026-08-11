@@ -131,6 +131,7 @@ def build_remote_runtime(
         write_gate=write_gate,
         audit=authority,
         sql_policy=exact_sql_policy,
+        acceptance_scenarios_enabled=runtime_settings.mcp_acceptance_scenarios_enabled,
     )
     app = create_streamable_http_app(
         runtime_settings,

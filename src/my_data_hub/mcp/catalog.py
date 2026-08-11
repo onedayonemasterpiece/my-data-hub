@@ -56,6 +56,20 @@ _WRITES = (
         "provider.protected_resource.probe", "acceptance:probe", True, idempotent=True, role="operator"
     ),
     ToolContract("runtime.events.history", "acceptance:probe", True, idempotent=True, role="operator"),
+    ToolContract(
+        "acceptance.scenario.request",
+        "acceptance:operate",
+        False,
+        idempotent=True,
+        role="operator",
+    ),
+    ToolContract(
+        "acceptance.scenario.status",
+        "acceptance:operate",
+        True,
+        idempotent=True,
+        role="operator",
+    ),
     ToolContract("data.change.preview", "data:write", False, role="operator"),
     ToolContract("data.change.apply", "data:write", False, destructive=True, role="operator"),
     ToolContract("bloggers.import.preview", "migration:operate", False, role="migration_operator"),

@@ -91,6 +91,7 @@ class Settings:
     mcp_trusted_proxies: tuple[str, ...] = ()
     mcp_token_max_lifetime_seconds: int = 3600
     mcp_operator_profile_enabled: bool = False
+    mcp_acceptance_scenarios_enabled: bool = False
     mcp_control_gateway_url: str = ""
     mcp_control_gateway_token_file: Path | None = None
     application_database_url: str = ""
@@ -175,6 +176,9 @@ class Settings:
             ),
             mcp_operator_profile_enabled=_bool(
                 "MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED", False
+            ),
+            mcp_acceptance_scenarios_enabled=_bool(
+                "MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED", False
             ),
             mcp_control_gateway_url=os.getenv(
                 "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL", ""
@@ -337,6 +341,15 @@ class Settings:
             raise ConfigurationError("OAuth access token maximum lifetime must be 60..86400 seconds")
         if self.mcp_operator_profile_enabled and not self.mcp_write_enabled:
             raise ConfigurationError("database operator profile requires the MCP write gate")
+        if self.mcp_acceptance_scenarios_enabled and (
+            not self.mcp_write_enabled
+            or "acceptance:operate" not in self.mcp_scopes
+            or not self.mcp_control_gateway_url
+            or self.mcp_control_gateway_token_file is None
+        ):
+            raise ConfigurationError(
+                "acceptance scenarios require write opt-in, acceptance:operate and the single control gateway"
+            )
         if self.mcp_control_gateway_url:
             gateway = urlsplit(self.mcp_control_gateway_url)
             if (

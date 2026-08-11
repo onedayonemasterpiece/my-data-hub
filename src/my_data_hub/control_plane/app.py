@@ -232,6 +232,7 @@ class ControlPlaneSettings:
     session_credentials_path: Path | None = None
     operator_credentials_enabled: bool = False
     provider_gateway_enabled: bool = False
+    acceptance_scenarios_enabled: bool = False
 
     def __post_init__(self) -> None:
         if not self.host or not 1 <= self.port <= 65535:
@@ -240,6 +241,10 @@ class ControlPlaneSettings:
             raise ControlPlaneConfigurationError("PR-A control-plane write and publication gates must remain false")
         if self.provider_gateway_enabled and not self.operator_credentials_enabled:
             raise ControlPlaneConfigurationError("provider gateway requires the explicit operator credential gate")
+        if self.acceptance_scenarios_enabled and not self.provider_gateway_enabled:
+            raise ControlPlaneConfigurationError(
+                "acceptance scenarios require the authenticated single control gateway"
+            )
 
     @classmethod
     def from_env(cls) -> ControlPlaneSettings:
@@ -264,6 +269,9 @@ class ControlPlaneSettings:
             ).expanduser(),
             operator_credentials_enabled=_boolean("MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED"),
             provider_gateway_enabled=_boolean("MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED"),
+            acceptance_scenarios_enabled=_boolean(
+                "MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED"
+            ),
         )
 
 
@@ -278,6 +286,7 @@ def create_app(
     tunnel_certificate_broker: TunnelCertificateBroker | None = None,
     provider_gateway: KaggleMCPProviderGateway | None = None,
     provider_gateway_token: bytes | None = None,
+    acceptance_scenario_adapter: object | None = None,
 ) -> FastAPI:
     runtime = settings or ControlPlaneSettings.from_env()
     if operator_credential_enabled is None:
@@ -335,10 +344,18 @@ def create_app(
             byte < 33 or byte > 126 for byte in provider_gateway_token
         ):
             raise ControlPlaneConfigurationError("provider gateway token violates the bounded contract")
+    if runtime.acceptance_scenarios_enabled and acceptance_scenario_adapter is None:
+        raise ControlPlaneConfigurationError(
+            "acceptance scenario opt-in requires a concrete unified executor"
+        )
     resolver = LedgerMasterResolver(control_ledger)
     provider_journal = ControlLedgerKaggleJournal(control_ledger)
     provider_control = (
-        LedgerControlReader(control_ledger, provider_gateway=provider_gateway)
+        LedgerControlReader(
+            control_ledger,
+            provider_gateway=provider_gateway,
+            acceptance_scenarios=acceptance_scenario_adapter,
+        )
         if runtime.provider_gateway_enabled and provider_gateway is not None
         else None
     )
@@ -551,6 +568,11 @@ def create_app(
                 "provider.acceptance.notebook.lifecycle",
                 "provider.acceptance.claim.get",
                 "provider.acceptance.claim.cleanup",
+                *(
+                    {"acceptance.scenario.request", "acceptance.scenario.status"}
+                    if runtime.acceptance_scenarios_enabled
+                    else set()
+                ),
             }
         )
 
