@@ -441,7 +441,7 @@ def test_partial_blogger_receipt_is_rejected_before_request(path: tuple[str, ...
     assert control.created == 0
 
 
-def test_cli_missing_modern_token_exits_78_before_reading_prerequisite(
+def test_cli_missing_central_provider_credential_exits_78_before_reading_prerequisite(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)

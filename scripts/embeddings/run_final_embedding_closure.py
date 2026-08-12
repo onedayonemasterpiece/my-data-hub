@@ -20,7 +20,7 @@ from my_data_hub.workloads.bloggers.closure import (
     CANONICAL_MCP_URL,
     LOCAL_CONTROL_URL,
     StreamableHttpClosureMcp,
-    modern_kaggle_token_configured,
+    central_kaggle_credentials_configured,
 )
 
 
@@ -40,8 +40,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    # First decision: never touch prerequisite/control/MCP state without a modern token.
-    if not modern_kaggle_token_configured():
+    # Match the sole control-owned adapter's supported credential shapes.  The
+    # CLI itself never constructs a provider client or projects these values.
+    if not central_kaggle_credentials_configured():
         return EXTERNAL_BLOCKED
     if not args.blogger_receipt.is_file() or args.blogger_receipt.is_symlink():
         return EXTERNAL_BLOCKED
