@@ -181,8 +181,9 @@ sufficient evidence for the multi-hour matrix.
 `provider-real.yml` consequently targets only a self-hosted Linux runner carrying the
 dedicated `my-data-hub-devstand` label. The runner service supplies only the absolute local
 file path through `MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE`; the workflow does not define that
-variable and does not receive any MCP access or refresh token from GitHub. The checked-in
-controller preflight requires the self-hosted runner identity, validates the owner-owned
+variable and does not receive any MCP access or refresh token from GitHub. Before the
+acceptance controller performs any live action, the checked-in preflight requires the
+self-hosted runner identity, validates the owner-owned
 mode-0600 file outside both the workspace and runner temporary directory, requires the
 `reader`, `operator`, and `provider` refresh families, and rejects inherited static MCP
 bearer variables. A GitHub-hosted dispatch cannot run this job because no matching runner
