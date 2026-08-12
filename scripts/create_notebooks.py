@@ -503,13 +503,20 @@ def _operational_source(spec: OperationalNotebookSpec) -> str:
 def build_operational_notebook(spec: OperationalNotebookSpec):  # type: ignore[no-untyped-def]
     source = _operational_source(spec)
     source_sha256 = hashlib.sha256(source.encode()).hexdigest()
+    embedding_dependency_assets = (
+        ["embedding_dependency_manifest_sha256", "embedding_dependency_smoke_receipt_sha256"]
+        if spec.model_id is not None
+        else []
+    )
     pin_contract = {
         "schema": EXECUTION_PINS_SCHEMA,
         "notebook": spec.directory,
         "supported_python_series": SUPPORTED_PYTHON_SERIES,
         "kaggle_runtime_image_identity": "required-immutable-sha256-at-launch",
         "input_dataset_versions": "required-exact-numeric-private-refs-at-launch",
-        "immutable_assets": ["my_data_hub_wheel_sha256", "primary_source_sha256"],
+        "immutable_assets": [
+            "my_data_hub_wheel_sha256", "primary_source_sha256", *embedding_dependency_assets
+        ],
         "output_contract": spec.runtime_contract,
         "model": (
             {"id": spec.model_id, "revision": spec.model_revision}
@@ -520,6 +527,145 @@ def build_operational_notebook(spec: OperationalNotebookSpec):  # type: ignore[n
         "resource_class": spec.resource_class,
         "cleanup_retention_policy": OPERATIONAL_CLEANUP_RETENTION_POLICY,
     }
+    dependency_hash_bootstrap = ""
+    dependency_bootstrap = ""
+    dependency_import = ""
+    project_install_index_option = ""
+    if spec.model_id is not None:
+        project_install_index_option = "'--no-index', "
+        dependency_import = "import importlib.metadata\n"
+        dependency_hash_bootstrap = (
+            "expected_dependency_sha = os.environ.get(\n"
+            "    'MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_SHA256', ''\n"
+            ")\n"
+            "expected_smoke_sha = os.environ.get(\n"
+            "    'MY_DATA_HUB_EMBEDDING_DEPENDENCY_SMOKE_RECEIPT_SHA256', ''\n"
+            ")\n"
+            "if (not re.fullmatch(r'[a-f0-9]{64}', expected_dependency_sha) or\n"
+            "        not re.fullmatch(r'[a-f0-9]{64}', expected_smoke_sha)):\n"
+            "    raise RuntimeError('embedding dependency hashes are required')\n"
+            "expected_assets.update({\n"
+            "    'embedding_dependency_manifest_sha256': expected_dependency_sha,\n"
+            "    'embedding_dependency_smoke_receipt_sha256': expected_smoke_sha,\n"
+            "})\n"
+        )
+        dependency_bootstrap = (
+            "dependency_manifest_path = Path(os.environ.get(\n"
+            "    'MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_PATH',\n"
+            "    str(wheel.parent / 'embedding-worker-dependencies.json'),\n"
+            "))\n"
+            "wheelhouse_path = Path(os.environ.get(\n"
+            "    'MY_DATA_HUB_EMBEDDING_WHEELHOUSE_PATH',\n"
+            "    str(wheel.parent / 'embedding-worker-wheelhouse'),\n"
+            "))\n"
+            "smoke_receipt_path = Path(os.environ.get(\n"
+            "    'MY_DATA_HUB_EMBEDDING_DEPENDENCY_SMOKE_RECEIPT_PATH', ''\n"
+            "))\n"
+            "expected_dependency_sha = pins['immutable_asset_sha256s'].get(\n"
+            "    'embedding_dependency_manifest_sha256', ''\n"
+            ")\n"
+            "expected_smoke_sha = pins['immutable_asset_sha256s'].get(\n"
+            "    'embedding_dependency_smoke_receipt_sha256', ''\n"
+            ")\n"
+            "if (not dependency_manifest_path.is_file() or dependency_manifest_path.is_symlink() or\n"
+            "        not wheelhouse_path.is_dir() or wheelhouse_path.is_symlink() or\n"
+            "        not smoke_receipt_path.is_file() or smoke_receipt_path.is_symlink() or\n"
+            "        not re.fullmatch(r'[a-f0-9]{64}', expected_dependency_sha) or\n"
+            "        not re.fullmatch(r'[a-f0-9]{64}', expected_smoke_sha)):\n"
+            "    raise RuntimeError('verified offline embedding dependency inputs are required')\n"
+            "dependency_body = dependency_manifest_path.read_bytes()\n"
+            "smoke_body = smoke_receipt_path.read_bytes()\n"
+            "if hashlib.sha256(dependency_body).hexdigest() != expected_dependency_sha:\n"
+            "    raise RuntimeError('embedding dependency manifest hash mismatch')\n"
+            "if hashlib.sha256(smoke_body).hexdigest() != expected_smoke_sha:\n"
+            "    raise RuntimeError('embedding dependency smoke receipt hash mismatch')\n"
+            "dependencies = json.loads(dependency_body)\n"
+            "smoke = json.loads(smoke_body)\n"
+            "if dependency_body != json.dumps(\n"
+            "        dependencies, sort_keys=True, separators=(',', ':'), ensure_ascii=False\n"
+            "    ).encode():\n"
+            "    raise RuntimeError('embedding dependency manifest is not canonical JSON')\n"
+            "if smoke_body != json.dumps(\n"
+            "        smoke, sort_keys=True, separators=(',', ':'), ensure_ascii=False\n"
+            "    ).encode():\n"
+            "    raise RuntimeError('embedding dependency smoke receipt is not canonical JSON')\n"
+            "dependency_keys = {\n"
+            "    'schema_version', 'source_lock_sha256', 'index_url', 'runtime',\n"
+            "    'install_order', 'required_image_distributions', 'wheels',\n"
+            "    'smoke_requirement',\n"
+            "}\n"
+            "if (not isinstance(dependencies, dict) or set(dependencies) != dependency_keys or\n"
+            "        dependencies['schema_version'] !=\n"
+            "        'my-data-hub-embedding-worker-dependencies.v1' or\n"
+            "        dependencies['runtime'].get('image_identity') != image_identity or\n"
+            "        dependencies['runtime'].get('source_commit') != source_commit or\n"
+            "        dependencies['runtime'].get('python_abi') != 'cp312' or\n"
+            "        dependencies['runtime'].get('platform') != 'manylinux2014_x86_64'):\n"
+            "    raise RuntimeError('embedding dependency manifest runtime differs')\n"
+            "wheels = dependencies['wheels']\n"
+            "required_image_distributions = dependencies['required_image_distributions']\n"
+            "smoke_requirement = dependencies['smoke_requirement']\n"
+            "if (not isinstance(wheels, list) or not wheels or\n"
+            "        not isinstance(required_image_distributions, list) or\n"
+            "        not required_image_distributions or\n"
+            "        len(required_image_distributions) != len(set(required_image_distributions)) or\n"
+            "        not isinstance(smoke_requirement, dict) or\n"
+            "        smoke_requirement.get('schema_version') !=\n"
+            "        'my-data-hub-embedding-dependency-smoke-receipt.v1' or\n"
+            "        smoke_requirement.get('observation_schema_version') !=\n"
+            "        'my-data-hub-embedding-dependency-smoke-observation.v1' or\n"
+            "        smoke_requirement.get('receipt_source') !=\n"
+            "        'central-provider-exact-private-kaggle-run' or\n"
+            "        smoke_requirement.get('worker_admission') !=\n"
+            "        'deny-without-verified-receipt' or\n"
+            "        smoke_requirement.get('required') is not True or\n"
+            "        dependencies['install_order'] != [item.get('filename') for item in wheels]):\n"
+            "    raise RuntimeError('embedding dependency install order is invalid')\n"
+            "expected_wheel_hashes = {item['filename']: item['sha256'] for item in wheels}\n"
+            "if ({path.name for path in wheelhouse_path.iterdir()} != set(expected_wheel_hashes) or\n"
+            "        any(path.is_symlink() or not path.is_file() for path in wheelhouse_path.iterdir())):\n"
+            "    raise RuntimeError('embedding wheelhouse inventory differs from manifest')\n"
+            "smoke_keys = {\n"
+            "    'schema_version', 'status', 'observed_at', 'provider_run_ref',\n"
+            "    'observation_sha256', 'image_identity',\n"
+            "    'image_source_commit', 'python_version', 'dependency_manifest_sha256',\n"
+            "    'project_wheel_sha256', 'wheel_sha256s', 'imports',\n"
+            "    'psycopg_implementation', 'distributions', 'notebook_private',\n"
+            "    'internet_enabled', 'verified_by_central_adapter',\n"
+            "}\n"
+            "if (not isinstance(smoke, dict) or set(smoke) != smoke_keys or\n"
+            "        smoke['schema_version'] !=\n"
+            "        'my-data-hub-embedding-dependency-smoke-receipt.v1' or\n"
+            "        smoke['status'] != 'pass' or smoke['image_identity'] != image_identity or\n"
+            "        smoke['image_source_commit'] != source_commit or\n"
+            "        not str(smoke['python_version']).startswith(pins['python_series'] + '.') or\n"
+            "        smoke['dependency_manifest_sha256'] != expected_dependency_sha or\n"
+            "        smoke['project_wheel_sha256'] != expected_wheel_sha or\n"
+            "        smoke['wheel_sha256s'] != expected_wheel_hashes or\n"
+            "        smoke['imports'] != dependencies['smoke_requirement']['imports'] or\n"
+            "        smoke['psycopg_implementation'] != 'binary' or\n"
+            "        not isinstance(smoke['distributions'], dict) or\n"
+            "        smoke['notebook_private'] is not True or smoke['internet_enabled'] is not False or\n"
+            "        smoke['verified_by_central_adapter'] is not True or\n"
+            "        not re.fullmatch(r'[a-f0-9]{64}', str(smoke['observation_sha256'])) or\n"
+            "        not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*',\n"
+            "                         str(smoke['provider_run_ref']))):\n"
+            "    raise RuntimeError('embedding dependency smoke receipt is not verified')\n"
+            "for item in wheels:\n"
+            "    dependency_wheel = wheelhouse_path / item['filename']\n"
+            "    if hashlib.sha256(dependency_wheel.read_bytes()).hexdigest() != item['sha256']:\n"
+            "        raise RuntimeError('embedding dependency wheel hash mismatch')\n"
+            "    subprocess.run(\n"
+            "        [sys.executable, '-m', 'pip', 'install', '--no-index', '--no-deps',\n"
+            "         '--disable-pip-version-check', str(dependency_wheel)], check=True\n"
+            "    )\n"
+            "for distribution in [\n"
+            "        *required_image_distributions,\n"
+            "        *(item['distribution'] for item in wheels),\n"
+            "    ]:\n"
+            "    if smoke['distributions'].get(distribution) != importlib.metadata.version(distribution):\n"
+            "        raise RuntimeError('embedding dependency smoke version differs from runtime')\n"
+        )
     nb = nbformat.v4.new_notebook()
     nb.nbformat = 4
     nb.nbformat_minor = 5
@@ -557,6 +703,7 @@ def build_operational_notebook(spec: OperationalNotebookSpec):  # type: ignore[n
             "code",
             "from __future__ import annotations\n\n"
             "import hashlib\n"
+            f"{dependency_import}"
             "import json\n"
             "import os\n"
             "import platform\n"
@@ -629,10 +776,12 @@ def build_operational_notebook(spec: OperationalNotebookSpec):  # type: ignore[n
             "    'my_data_hub_wheel_sha256': expected_wheel_sha,\n"
             "    'primary_source_sha256': EXPECTED_SOURCE_SHA256,\n"
             "}\n"
+            f"{dependency_hash_bootstrap}"
             "if pins['immutable_asset_sha256s'] != expected_assets:\n"
             "    raise RuntimeError('immutable dependency/source asset hashes differ from execution pins')\n"
+            f"{dependency_bootstrap}"
             "subprocess.run(\n"
-            "    [sys.executable, '-m', 'pip', 'install', '--no-deps', "
+            f"    [sys.executable, '-m', 'pip', 'install', {project_install_index_option}'--no-deps', "
             "'--disable-pip-version-check', str(wheel)],\n"
             "    check=True,\n"
             ")",
@@ -661,7 +810,15 @@ def operational_kernel_metadata(spec: OperationalNotebookSpec) -> str:
         "supported_python_series": SUPPORTED_PYTHON_SERIES,
         "kaggle_runtime_image_identity": "required-immutable-sha256-at-launch",
         "input_dataset_versions": "required-exact-numeric-private-refs-at-launch",
-        "immutable_assets": ["my_data_hub_wheel_sha256", "primary_source_sha256"],
+        "immutable_assets": [
+            "my_data_hub_wheel_sha256",
+            "primary_source_sha256",
+            *(
+                ["embedding_dependency_manifest_sha256", "embedding_dependency_smoke_receipt_sha256"]
+                if spec.model_id is not None
+                else []
+            ),
+        ],
         "output_contract": spec.runtime_contract,
         "model": (
             {"id": spec.model_id, "revision": spec.model_revision}

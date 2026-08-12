@@ -25,7 +25,9 @@
       },
       "immutable_assets": [
         "my_data_hub_wheel_sha256",
-        "primary_source_sha256"
+        "primary_source_sha256",
+        "embedding_dependency_manifest_sha256",
+        "embedding_dependency_smoke_receipt_sha256"
       ],
       "input_dataset_versions": "required-exact-numeric-private-refs-at-launch",
       "kaggle_runtime_image_identity": "required-immutable-sha256-at-launch",

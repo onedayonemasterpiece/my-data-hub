@@ -57,6 +57,38 @@
       "path": "dataset/bge-worker.json",
       "sha256": "9999999999999999999999999999999999999999999999999999999999999999",
       "byte_size": 4096
+    },
+    "embedding_dependency_manifest": {
+      "path": "dataset/embedding-worker-dependencies.json",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "byte_size": 2048
+    },
+    "embedding_dependency_smoke_runner": {
+      "path": "dataset/embedding-dependency-smoke.py",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "byte_size": 8192
     }
-  }
+  },
+  "embedding_dependency_wheels": [
+    {
+      "path": "dataset/embedding-worker-wheelhouse/flagembedding-1.4.0-py3-none-any.whl",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "byte_size": 247714
+    },
+    {
+      "path": "dataset/embedding-worker-wheelhouse/ir_datasets-0.5.11-py3-none-any.whl",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "byte_size": 1695430
+    },
+    {
+      "path": "dataset/embedding-worker-wheelhouse/psycopg-3.3.4-py3-none-any.whl",
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "byte_size": 213001
+    },
+    {
+      "path": "dataset/embedding-worker-wheelhouse/psycopg_binary-3.3.4-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "byte_size": 4444444
+    }
+  ]
 }

@@ -10,6 +10,7 @@ checkout:
   --postgres-runtime-archive /private/reviewed/postgresql-18-runtime.tar.gz \
   --postgres-runtime-sha256 40bf34fb4a97a248537d0221127e38deb98c9b35208d474dd1b93f773c2558b5 \
   --tunnel-known-hosts /private/reviewed/hashed-known-hosts \
+  --embedding-wheelhouse /private/reviewed/embedding-worker-wheelhouse \
   --output /tmp/my-data-hub-master-assets-$(git rev-parse HEAD)
 ```
 
@@ -22,6 +23,57 @@ digest-pinned, both upstream archives are SHA-256 pinned, pgvector disables host
 `OPTFLAGS`, and the output tar/gzip metadata is deterministic. The artifact bytes stay
 outside Git and must match the explicit CLI digest; the known-host file must already use
 OpenSSH hashed-host syntax.
+
+## Offline E5/BGE dependency closure
+
+`scripts/provider/assets/embedding-worker-wheel-lock.v1.json` is the canonical source
+contract for the small private overlay on the official Kaggle CPU v170 image. It binds
+the PyPI simple index, exact `files.pythonhosted.org` wheel URLs, filenames, versions and
+SHA-256 values for:
+
+- FlagEmbedding 1.4.0 and its separately pinned `ir-datasets` runtime dependency;
+- psycopg 3.3.4; and
+- the matching psycopg-binary 3.3.4 CPython 3.12 manylinux x86-64 wheel.
+
+The reviewed upstream records are the
+[official Kaggle v170 CPU release](https://github.com/Kaggle/docker-python/releases/tag/v170-CPU-c1fa4de30bc268e601e6dcddb6ceb2519b9adde3527dbbfb05e6bdfbbbdcd1a2),
+[FlagEmbedding 1.4.0 PyPI metadata](https://pypi.org/project/FlagEmbedding/1.4.0/),
+and [Psycopg binary installation contract](https://www.psycopg.org/psycopg3/docs/basic/install.html#binary-installation).
+
+Materialize those four files from the lock into a private staging directory. Do not add
+the wheel bytes to Git, accept a source distribution, resolve `latest`, or add an
+unreviewed file. The builder rejects a missing, extra, symlinked or hash-mismatched file,
+then packages the exact files below `dataset/embedding-worker-wheelhouse/` and emits the
+canonical `dataset/embedding-worker-dependencies.json`. The independent verifier repeats
+the lock, inventory, size, hash, generated worker and smoke-runner checks. Neither command
+downloads or imports the dependencies, and neither requires the roughly 9 GB official
+image on the lightweight devstand.
+
+The generated E5 and BGE workers validate both the dependency manifest and a central
+provider-verified smoke receipt before installing anything. Each wheel is hash-checked
+and installed individually with `pip --no-index --no-deps`; the project wheel uses the
+same offline flags. These installs run before the embedded primary source can import E5,
+BGE, psycopg, torch or transformers. A package index is never consulted at worker runtime.
+
+`dataset/embedding-dependency-smoke.py` is a credential-free bounded runner for a
+disposable private Notebook using the same exact asset Dataset and official v170 image.
+It produces only an **observation** matching
+`embedding-dependency-smoke-observation.v1.schema.json`: source commit, Python version,
+hashes, import results, psycopg implementation and installed distribution versions. It
+does not claim provider verification. The central Kaggle adapter must independently bind
+the exact numeric private run, digest-pinned image, `enable_internet=false` launch setting
+and observation into `embedding-dependency-smoke-receipt.v1.schema.json`.
+The final receipt includes the SHA-256 of the exact canonical observation; this prevents
+a central PASS from being detached from the provider-produced import evidence.
+
+The normal asset build/install remains deployable without that provider run. Worker
+admission does not: E5/BGE fail before dependency installation unless execution pins and
+environment contain the exact receipt and manifest hashes and the receipt says
+`verified_by_central_adapter=true`, private Notebook, internet disabled, exact v170 and
+matching wheel inventory. The boolean is not an authorization signature by itself;
+Gate K must admit only a receipt already verified and durably recorded by the central
+adapter. Until that production wiring runs, embedding launches are intentionally blocked,
+not reported as smoke-proven.
 
 The reviewed local input may retain its `.tar.gz` name, but the Dataset package stores
 the exact same bytes as `dataset/postgresql-18-runtime.bundle`. A real Kaggle upload on

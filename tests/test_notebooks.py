@@ -139,10 +139,15 @@ def test_operational_notebook_metadata_declares_complete_fail_closed_pin_contrac
         assert pin_contract["schema"] == "my-data-hub-notebook-execution-pins/v1"
         assert pin_contract["notebook"] == spec.directory
         assert pin_contract["supported_python_series"] == "3.12"
-        assert pin_contract["immutable_assets"] == [
+        expected_assets = [
             "my_data_hub_wheel_sha256",
             "primary_source_sha256",
         ]
+        if spec.model_id is not None:
+            expected_assets.extend(
+                ["embedding_dependency_manifest_sha256", "embedding_dependency_smoke_receipt_sha256"]
+            )
+        assert pin_contract["immutable_assets"] == expected_assets
         assert pin_contract["input_dataset_versions"] == "required-exact-numeric-private-refs-at-launch"
         assert pin_contract["kaggle_runtime_image_identity"] == "required-immutable-sha256-at-launch"
         assert pin_contract["output_contract"] == spec.runtime_contract
@@ -175,6 +180,22 @@ def test_operational_notebook_fails_before_install_without_hashed_execution_pins
     with pytest.raises(RuntimeError, match="hashed execution pins"):
         exec(compile(source, "<generated-install-cell>", "exec"), {})
     assert not invoked
+
+
+def test_embedding_workers_require_hash_bound_offline_dependencies_before_imports() -> None:
+    for spec in create_notebooks.OPERATIONAL_SPECS:
+        if spec.model_id is None:
+            continue
+        notebook = create_notebooks.build_operational_notebook(spec)
+        install = notebook.cells[1].source
+        assert "MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_SHA256" in install
+        assert "MY_DATA_HUB_EMBEDDING_DEPENDENCY_SMOKE_RECEIPT_SHA256" in install
+        assert "my-data-hub-embedding-dependency-smoke-receipt.v1" in install
+        assert "observation_sha256" in install
+        assert "importlib.metadata.version(distribution)" in install
+        assert "for item in wheels:" in install
+        assert "'pip', 'install', '--no-index', '--no-deps'" in install
+        assert notebook.cells[2].source.startswith("PRIMARY_SOURCE = ")
 
 
 def test_operational_notebook_accepts_only_exact_runtime_bound_pinset(

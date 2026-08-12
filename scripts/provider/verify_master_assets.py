@@ -17,6 +17,9 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 PROVIDER_REF = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 RELATION = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$")
 WHEEL_PATH = re.compile(r"^dataset/my_data_hub-[A-Za-z0-9_.+-]+\.whl$")
+DEPENDENCY_WHEEL_PATH = re.compile(
+    r"^dataset/embedding-worker-wheelhouse/[A-Za-z0-9_.+-]+\.whl$"
+)
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_ASSET_BYTES = 64 * 1024 * 1024
 POSTGRES_BUILDER_IMAGE = "ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f"
@@ -32,6 +35,29 @@ KAGGLE_CPU_IMAGE_IDENTITY = (
 KAGGLE_CPU_IMAGE_RELEASE = "https://github.com/Kaggle/docker-python/releases/tag/v170-CPU-c1fa4de30bc268e601e6dcddb6ceb2519b9adde3527dbbfb05e6bdfbbbdcd1a2"
 KAGGLE_CPU_IMAGE_SOURCE_COMMIT = "fc61d5cda7da39530055bae9bd0e92865f995cd9"
 KAGGLE_CPU_IMAGE_PYTHON_SERIES = "3.12"
+EMBEDDING_DEPENDENCY_MANIFEST_NAME = "embedding-worker-dependencies.json"
+EMBEDDING_WHEELHOUSE_NAME = "embedding-worker-wheelhouse"
+EMBEDDING_WHEEL_LOCK_PATH = "assets/embedding-worker-wheel-lock.v1.json"
+DEPENDENCY_SMOKE_IMPORTS = [
+    "FlagEmbedding.BGEM3FlagModel",
+    "psycopg",
+    "torch",
+    "transformers.AutoModel",
+    "transformers.AutoTokenizer",
+]
+DEPENDENCY_IMAGE_DISTRIBUTIONS = [
+    "accelerate",
+    "datasets",
+    "packaging",
+    "peft",
+    "protobuf",
+    "sentence-transformers",
+    "sentencepiece",
+    "torch",
+    "transformers",
+    "typing-extensions",
+]
+EMBEDDING_DEPENDENCY_SMOKE_RUNNER_NAME = "embedding-dependency-smoke.py"
 
 
 class AssetVerificationError(RuntimeError):
@@ -92,6 +118,11 @@ def _expected_environment(manifest: dict[str, Any]) -> dict[str, str]:
         "MY_DATA_HUB_EMBEDDING_RUNTIME_SOURCE_COMMIT": manifest["worker_runtime"]["source_commit"],
         "MY_DATA_HUB_EMBEDDING_WHEEL_RELATIVE_PATH": Path(manifest["assets"]["wheel"]["path"]).name,
         "MY_DATA_HUB_EMBEDDING_WHEEL_SHA256": manifest["assets"]["wheel"]["sha256"],
+        "MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_RELATIVE_PATH": EMBEDDING_DEPENDENCY_MANIFEST_NAME,
+        "MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_SHA256": manifest["assets"][
+            "embedding_dependency_manifest"
+        ]["sha256"],
+        "MY_DATA_HUB_EMBEDDING_WHEELHOUSE_RELATIVE_PATH": EMBEDDING_WHEELHOUSE_NAME,
         "MY_DATA_HUB_MASTER_TUNNEL_KNOWN_HOSTS_PATH": "/master-assets/dataset/tunnel-known-hosts",
         "MY_DATA_HUB_EMBEDDING_RUNTIME_PYTHON_SERIES": manifest["worker_runtime"]["python_series"],
     }
@@ -113,7 +144,31 @@ def _parse_environment(body: bytes) -> dict[str, str]:
     return values
 
 
-def verify_bundle(*, bundle: Path, expected_commit: str) -> dict[str, object]:
+def _verify_embedding_worker_asset(body: bytes) -> None:
+    try:
+        notebook = json.loads(body)
+        source = "\n".join(
+            "".join(cell.get("source", []))
+            if isinstance(cell.get("source"), list)
+            else str(cell.get("source", ""))
+            for cell in notebook["cells"]
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise AssetVerificationError("generated embedding worker asset is invalid") from exc
+    required = (
+        "MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_SHA256",
+        "MY_DATA_HUB_EMBEDDING_DEPENDENCY_SMOKE_RECEIPT_SHA256",
+        "my-data-hub-embedding-dependency-smoke-receipt.v1",
+        "'pip', 'install', '--no-index', '--no-deps'",
+        "for item in wheels:",
+    )
+    if any(marker not in source for marker in required):
+        raise AssetVerificationError("generated embedding worker omits offline dependency admission")
+
+
+def verify_bundle(
+    *, bundle: Path, expected_commit: str, dependency_lock: Path | None = None
+) -> dict[str, object]:
     if not SHA40.fullmatch(expected_commit):
         raise AssetVerificationError("expected commit is not an exact lowercase SHA")
     bundle = bundle.resolve()
@@ -140,6 +195,7 @@ def verify_bundle(*, bundle: Path, expected_commit: str) -> dict[str, object]:
         "probe_relations",
         "worker_runtime",
         "assets",
+        "embedding_dependency_wheels",
     }
     if set(manifest) != expected_keys or manifest.get("schema_version") != SCHEMA_VERSION:
         raise AssetVerificationError("master asset manifest shape is not exact")
@@ -184,6 +240,8 @@ def verify_bundle(*, bundle: Path, expected_commit: str) -> dict[str, object]:
         "tunnel_known_hosts",
         "embedding_e5_worker",
         "embedding_bge_worker",
+        "embedding_dependency_manifest",
+        "embedding_dependency_smoke_runner",
     }:
         raise AssetVerificationError("master asset inventory is invalid")
     expected_paths = {
@@ -194,6 +252,8 @@ def verify_bundle(*, bundle: Path, expected_commit: str) -> dict[str, object]:
         "tunnel_known_hosts": "dataset/tunnel-known-hosts",
         "embedding_e5_worker": "dataset/e5-worker.json",
         "embedding_bge_worker": "dataset/bge-worker.json",
+        "embedding_dependency_manifest": f"dataset/{EMBEDDING_DEPENDENCY_MANIFEST_NAME}",
+        "embedding_dependency_smoke_runner": f"dataset/{EMBEDDING_DEPENDENCY_SMOKE_RUNNER_NAME}",
     }
     verified_assets: dict[str, dict[str, object]] = {}
     for name, raw in assets.items():
@@ -221,6 +281,124 @@ def verify_bundle(*, bundle: Path, expected_commit: str) -> dict[str, object]:
             "sha256": digest,
             "byte_size": byte_size,
         }
+    dependency_wheel_assets = manifest.get("embedding_dependency_wheels")
+    if not isinstance(dependency_wheel_assets, list) or not dependency_wheel_assets:
+        raise AssetVerificationError("embedding dependency wheel inventory is absent")
+    verified_dependency_wheels: list[dict[str, object]] = []
+    dependency_paths: set[str] = set()
+    for raw in dependency_wheel_assets:
+        if not isinstance(raw, dict) or set(raw) != {"path", "sha256", "byte_size"}:
+            raise AssetVerificationError("embedding dependency wheel asset is invalid")
+        relative = raw.get("path")
+        digest = raw.get("sha256")
+        byte_size = raw.get("byte_size")
+        if (
+            not isinstance(relative, str)
+            or not DEPENDENCY_WHEEL_PATH.fullmatch(relative)
+            or relative in dependency_paths
+            or not isinstance(digest, str)
+            or not SHA256.fullmatch(digest)
+            or not isinstance(byte_size, int)
+            or not 1 <= byte_size <= MAX_ASSET_BYTES
+        ):
+            raise AssetVerificationError("embedding dependency wheel asset identity is invalid")
+        body = _private_file(bundle / relative, maximum=MAX_ASSET_BYTES)
+        if len(body) != byte_size or _sha256(body) != digest:
+            raise AssetVerificationError("embedding dependency wheel bytes do not match the manifest")
+        dependency_paths.add(relative)
+        verified_dependency_wheels.append(raw)
+
+    dependency_manifest_body = (bundle / str(assets["embedding_dependency_manifest"]["path"])).read_bytes()
+    try:
+        dependency_manifest: Any = json.loads(dependency_manifest_body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AssetVerificationError("embedding dependency manifest is invalid JSON") from exc
+    lock_path = dependency_lock or (Path(__file__).resolve().parent / EMBEDDING_WHEEL_LOCK_PATH)
+    lock_body = lock_path.read_bytes()
+    lock = json.loads(lock_body)
+    if lock_body != json.dumps(
+        lock, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode():
+        raise AssetVerificationError("embedding dependency source lock is not canonical JSON")
+    expected_dependency_keys = {
+        "schema_version", "source_lock_sha256", "index_url", "runtime",
+        "install_order", "required_image_distributions", "wheels", "smoke_requirement",
+    }
+    smoke = dependency_manifest.get("smoke_requirement") if isinstance(dependency_manifest, dict) else None
+    dependency_wheels = dependency_manifest.get("wheels") if isinstance(dependency_manifest, dict) else None
+    if (
+        not isinstance(dependency_manifest, dict)
+        or set(dependency_manifest) != expected_dependency_keys
+        or dependency_manifest.get("schema_version")
+        != "my-data-hub-embedding-worker-dependencies.v1"
+        or dependency_manifest.get("source_lock_sha256") != _sha256(lock_body)
+        or dependency_manifest.get("index_url") != "https://pypi.org/simple"
+        or dependency_manifest.get("runtime") != lock.get("runtime")
+        or dependency_manifest.get("required_image_distributions")
+        != DEPENDENCY_IMAGE_DISTRIBUTIONS
+        or not isinstance(dependency_wheels, list)
+        or not isinstance(smoke, dict)
+        or smoke != {
+            "schema_version": "my-data-hub-embedding-dependency-smoke-receipt.v1",
+            "observation_schema_version": (
+                "my-data-hub-embedding-dependency-smoke-observation.v1"
+            ),
+            "required": True,
+            "receipt_source": "central-provider-exact-private-kaggle-run",
+            "worker_admission": "deny-without-verified-receipt",
+            "imports": DEPENDENCY_SMOKE_IMPORTS,
+        }
+    ):
+        raise AssetVerificationError("embedding dependency provenance is invalid")
+    lock_wheels = lock.get("wheels")
+    if not isinstance(lock_wheels, list) or len(lock_wheels) != len(dependency_wheels):
+        raise AssetVerificationError("embedding dependency lock is inconsistent")
+    expected_install_order: list[str] = []
+    expected_wheel_assets: list[dict[str, object]] = []
+    for locked, generated in zip(lock_wheels, dependency_wheels, strict=True):
+        if not isinstance(locked, dict) or not isinstance(generated, dict):
+            raise AssetVerificationError("embedding dependency wheel manifest is invalid")
+        expected_generated = {
+            "distribution": locked.get("distribution"),
+            "version": locked.get("version"),
+            "filename": locked.get("filename"),
+            "sha256": locked.get("sha256"),
+            "byte_size": generated.get("byte_size"),
+        }
+        if (
+            generated != expected_generated
+            or not isinstance(generated.get("byte_size"), int)
+            or not 1 <= generated["byte_size"] <= MAX_ASSET_BYTES
+        ):
+            raise AssetVerificationError("embedding dependency wheel differs from the source lock")
+        filename = str(locked["filename"])
+        expected_install_order.append(filename)
+        expected_wheel_assets.append(
+            {
+                "path": f"dataset/{EMBEDDING_WHEELHOUSE_NAME}/{filename}",
+                "sha256": locked["sha256"],
+                "byte_size": generated["byte_size"],
+            }
+        )
+    if (
+        dependency_manifest.get("install_order") != expected_install_order
+        or verified_dependency_wheels != expected_wheel_assets
+        or dependency_manifest_body
+        != json.dumps(dependency_manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ):
+        raise AssetVerificationError("embedding dependency inventory is not exact")
+    smoke_runner_source = Path(__file__).resolve().parent / "assets/embedding_dependency_smoke.py"
+    if (
+        smoke_runner_source.is_symlink()
+        or not smoke_runner_source.is_file()
+        or _sha256(smoke_runner_source.read_bytes())
+        != assets["embedding_dependency_smoke_runner"]["sha256"]
+    ):
+        raise AssetVerificationError("embedding dependency smoke runner differs from the release")
+    for name in ("embedding_e5_worker", "embedding_bge_worker"):
+        _verify_embedding_worker_asset(
+            (bundle / str(assets[name]["path"])).read_bytes()
+        )
     runtime_manifest = json.loads((bundle / str(assets["postgres_runtime_manifest"]["path"])).read_bytes())
     runtime_archive = assets["postgres_runtime"]
     expected_runtime_keys = {
@@ -277,10 +455,13 @@ def verify_bundle(*, bundle: Path, expected_commit: str) -> dict[str, object]:
         "master-asset-bundle.json",
         "master-assets.env",
         *(str(item["path"]) for item in verified_assets.values()),
+        *(str(item["path"]) for item in verified_dependency_wheels),
     }
     observed_files = {path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.is_file()}
     observed_directories = {path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.is_dir()}
-    if observed_files != expected_files or observed_directories != {"dataset"}:
+    if observed_files != expected_files or observed_directories != {
+        "dataset", f"dataset/{EMBEDDING_WHEELHOUSE_NAME}"
+    }:
         raise AssetVerificationError("master asset bundle contains unexpected paths")
     canonical_manifest = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     if manifest_body != canonical_manifest:
@@ -289,7 +470,7 @@ def verify_bundle(*, bundle: Path, expected_commit: str) -> dict[str, object]:
         "schema_version": SCHEMA_VERSION,
         "source_commit": expected_commit,
         "manifest_sha256": _sha256(manifest_body),
-        "asset_count": len(verified_assets),
+        "asset_count": len(verified_assets) + len(verified_dependency_wheels),
         "verified": True,
     }
 

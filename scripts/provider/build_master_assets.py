@@ -24,6 +24,9 @@ MAX_ASSET_BYTES = 64 * 1024 * 1024
 POSTGRES_RUNTIME_NAME = "postgresql-18-runtime.bundle"
 POSTGRES_RUNTIME_MANIFEST_NAME = "postgresql-18-runtime.json"
 TUNNEL_KNOWN_HOSTS_NAME = "tunnel-known-hosts"
+EMBEDDING_DEPENDENCY_MANIFEST_NAME = "embedding-worker-dependencies.json"
+EMBEDDING_WHEELHOUSE_NAME = "embedding-worker-wheelhouse"
+EMBEDDING_WHEEL_LOCK_PATH = "scripts/provider/assets/embedding-worker-wheel-lock.v1.json"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 REJECTED_POSTGRES_RUNTIME_SHA256 = {
     # Built with pgvector's host-native OPTFLAGS and therefore not portable.
@@ -42,6 +45,27 @@ KAGGLE_CPU_IMAGE_RELEASE = (
 )
 KAGGLE_CPU_IMAGE_SOURCE_COMMIT = "fc61d5cda7da39530055bae9bd0e92865f995cd9"
 KAGGLE_CPU_IMAGE_PYTHON_SERIES = "3.12"
+DEPENDENCY_SMOKE_IMPORTS = (
+    "FlagEmbedding.BGEM3FlagModel",
+    "psycopg",
+    "torch",
+    "transformers.AutoModel",
+    "transformers.AutoTokenizer",
+)
+DEPENDENCY_IMAGE_DISTRIBUTIONS = (
+    "accelerate",
+    "datasets",
+    "packaging",
+    "peft",
+    "protobuf",
+    "sentence-transformers",
+    "sentencepiece",
+    "torch",
+    "transformers",
+    "typing-extensions",
+)
+EMBEDDING_DEPENDENCY_SMOKE_RUNNER_PATH = "scripts/provider/assets/embedding_dependency_smoke.py"
+EMBEDDING_DEPENDENCY_SMOKE_RUNNER_NAME = "embedding-dependency-smoke.py"
 
 
 class AssetBundleError(RuntimeError):
@@ -95,6 +119,118 @@ def _build_wheel(root: Path, destination: Path) -> Path:
     return wheels[0]
 
 
+def _load_dependency_lock(path: Path) -> tuple[dict[str, object], bytes]:
+    body = _read_bounded(path, maximum=64 * 1024)
+    try:
+        lock = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AssetBundleError("embedding dependency lock is invalid JSON") from exc
+    expected_keys = {"schema_version", "index_url", "runtime", "wheels"}
+    expected_runtime = {
+        "image_identity": KAGGLE_CPU_IMAGE_IDENTITY,
+        "source_commit": KAGGLE_CPU_IMAGE_SOURCE_COMMIT,
+        "python_abi": "cp312",
+        "platform": "manylinux2014_x86_64",
+    }
+    wheels = lock.get("wheels") if isinstance(lock, dict) else None
+    if (
+        not isinstance(lock, dict)
+        or set(lock) != expected_keys
+        or lock.get("schema_version") != "my-data-hub-embedding-worker-wheel-lock.v1"
+        or lock.get("index_url") != "https://pypi.org/simple"
+        or lock.get("runtime") != expected_runtime
+        or not isinstance(wheels, list)
+        or not wheels
+    ):
+        raise AssetBundleError("embedding dependency lock shape is not exact")
+    expected_distributions = {"flagembedding", "ir-datasets", "psycopg", "psycopg-binary"}
+    seen: set[str] = set()
+    for raw in wheels:
+        if not isinstance(raw, dict) or set(raw) != {
+            "distribution", "version", "filename", "sha256", "source_url"
+        }:
+            raise AssetBundleError("embedding dependency lock wheel is invalid")
+        distribution = raw.get("distribution")
+        filename = raw.get("filename")
+        digest = raw.get("sha256")
+        version = raw.get("version")
+        source_url = raw.get("source_url")
+        if (
+            not isinstance(distribution, str)
+            or distribution in seen
+            or distribution not in expected_distributions
+            or not isinstance(version, str)
+            or not re.fullmatch(r"[0-9]+(?:\.[0-9A-Za-z]+)+", version)
+            or not isinstance(filename, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.+-]+\.whl", filename)
+            or not isinstance(digest, str)
+            or not SHA256.fullmatch(digest)
+            or not isinstance(source_url, str)
+            or source_url != f"https://files.pythonhosted.org/{source_url.removeprefix('https://files.pythonhosted.org/')}"
+            or not source_url.endswith("/" + filename)
+        ):
+            raise AssetBundleError("embedding dependency lock wheel identity is invalid")
+        seen.add(distribution)
+    if seen != expected_distributions:
+        raise AssetBundleError("embedding dependency lock is incomplete")
+    if body != canonical_json_bytes(lock):
+        raise AssetBundleError("embedding dependency lock is not canonical JSON")
+    return lock, body
+
+
+def _verify_wheelhouse(lock: dict[str, object], wheelhouse: Path) -> list[dict[str, object]]:
+    if wheelhouse.is_symlink() or not wheelhouse.is_dir():
+        raise AssetBundleError("embedding wheelhouse must be a regular directory")
+    raw_wheels = lock["wheels"]
+    assert isinstance(raw_wheels, list)
+    expected_names = {str(raw["filename"]) for raw in raw_wheels}
+    observed_names = {path.name for path in wheelhouse.iterdir() if path.is_file()}
+    if any(path.is_symlink() or not path.is_file() for path in wheelhouse.iterdir()):
+        raise AssetBundleError("embedding wheelhouse contains a non-regular path")
+    if observed_names != expected_names:
+        raise AssetBundleError("embedding wheelhouse inventory differs from the exact lock")
+    verified: list[dict[str, object]] = []
+    for raw in raw_wheels:
+        assert isinstance(raw, dict)
+        path = wheelhouse / str(raw["filename"])
+        body = _read_bounded(path, maximum=MAX_ASSET_BYTES)
+        if _sha256(body) != raw["sha256"]:
+            raise AssetBundleError(f"embedding wheel differs from lock: {path.name}")
+        verified.append(
+            {
+                "distribution": raw["distribution"],
+                "version": raw["version"],
+                "filename": raw["filename"],
+                "sha256": raw["sha256"],
+                "byte_size": len(body),
+            }
+        )
+    return verified
+
+
+def _verify_embedding_worker_asset(body: bytes) -> None:
+    try:
+        notebook = json.loads(body)
+        cells = notebook["cells"]
+        source = "\n".join(
+            "".join(cell.get("source", []))
+            if isinstance(cell.get("source"), list)
+            else str(cell.get("source", ""))
+            for cell in cells
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise AssetBundleError("generated embedding worker asset is invalid") from exc
+    required = (
+        "MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_SHA256",
+        "MY_DATA_HUB_EMBEDDING_DEPENDENCY_SMOKE_RECEIPT_SHA256",
+        "my-data-hub-embedding-dependency-smoke-receipt.v1",
+        "'pip', 'install', '--no-index', '--no-deps'",
+        "for item in wheels:",
+    )
+    if any(marker not in source for marker in required):
+        raise AssetBundleError("generated embedding worker omits offline dependency admission")
+
+
 def build_bundle(
     *,
     root: Path,
@@ -108,6 +244,8 @@ def build_bundle(
     postgres_runtime_archive: Path,
     postgres_runtime_sha256: str,
     tunnel_known_hosts: Path,
+    embedding_wheelhouse: Path,
+    embedding_dependency_lock: Path,
     wheel_builder: Callable[[Path, Path], Path] = _build_wheel,
 ) -> dict[str, object]:
     root = root.resolve()
@@ -140,6 +278,8 @@ def build_bundle(
     os.chmod(output, 0o700)
     dataset_dir = output / "dataset"
     dataset_dir.mkdir(mode=0o700)
+    embedded_wheelhouse_dir = dataset_dir / EMBEDDING_WHEELHOUSE_NAME
+    embedded_wheelhouse_dir.mkdir(mode=0o700)
 
     master_path = root / "notebooks/02-postgres-master/worker.ipynb"
     verifier_path = root / "notebooks/03-checkpoint-verifier-restore-smoke/worker.ipynb"
@@ -147,12 +287,37 @@ def build_bundle(
     verifier = _read_bounded(verifier_path, maximum=8 * 1024 * 1024)
     e5_worker = _read_bounded(root / "src/my_data_hub/embeddings/assets/e5-worker.json", maximum=1024 * 1024)
     bge_worker = _read_bounded(root / "src/my_data_hub/embeddings/assets/bge-worker.json", maximum=1024 * 1024)
+    _verify_embedding_worker_asset(e5_worker)
+    _verify_embedding_worker_asset(bge_worker)
+    dependency_lock, dependency_lock_body = _load_dependency_lock(embedding_dependency_lock)
+    dependency_wheels = _verify_wheelhouse(dependency_lock, embedding_wheelhouse)
     with tempfile.TemporaryDirectory(prefix="mdh-master-wheel-") as temporary:
         wheel_path = wheel_builder(root, Path(temporary))
         wheel = _read_bounded(wheel_path, maximum=MAX_ASSET_BYTES)
         wheel_name = wheel_path.name
         if not re.fullmatch(r"my_data_hub-[A-Za-z0-9_.+-]+\.whl", wheel_name):
             raise AssetBundleError("wheel name does not identify my-data-hub")
+    smoke_runner = _read_bounded(root / EMBEDDING_DEPENDENCY_SMOKE_RUNNER_PATH, maximum=64 * 1024)
+    dependency_manifest = {
+        "schema_version": "my-data-hub-embedding-worker-dependencies.v1",
+        "source_lock_sha256": _sha256(dependency_lock_body),
+        "index_url": dependency_lock["index_url"],
+        "runtime": dependency_lock["runtime"],
+        "install_order": [item["filename"] for item in dependency_wheels],
+        "required_image_distributions": list(DEPENDENCY_IMAGE_DISTRIBUTIONS),
+        "wheels": dependency_wheels,
+        "smoke_requirement": {
+            "schema_version": "my-data-hub-embedding-dependency-smoke-receipt.v1",
+            "observation_schema_version": (
+                "my-data-hub-embedding-dependency-smoke-observation.v1"
+            ),
+            "required": True,
+            "receipt_source": "central-provider-exact-private-kaggle-run",
+            "worker_admission": "deny-without-verified-receipt",
+            "imports": list(DEPENDENCY_SMOKE_IMPORTS),
+        },
+    }
+    dependency_manifest_body = canonical_json_bytes(dependency_manifest)
     postgres_runtime = _read_bounded(postgres_runtime_archive, maximum=MAX_ASSET_BYTES)
     if (
         not SHA256.fullmatch(postgres_runtime_sha256)
@@ -195,7 +360,14 @@ def build_bundle(
         dataset_dir / TUNNEL_KNOWN_HOSTS_NAME: known_hosts,
         dataset_dir / "e5-worker.json": e5_worker,
         dataset_dir / "bge-worker.json": bge_worker,
+        dataset_dir / EMBEDDING_DEPENDENCY_MANIFEST_NAME: dependency_manifest_body,
+        dataset_dir / EMBEDDING_DEPENDENCY_SMOKE_RUNNER_NAME: smoke_runner,
     }
+    for item in dependency_wheels:
+        name = str(item["filename"])
+        files[embedded_wheelhouse_dir / name] = _read_bounded(
+            embedding_wheelhouse / name, maximum=MAX_ASSET_BYTES
+        )
     for path, body in files.items():
         path.write_bytes(body)
         os.chmod(path, 0o600)
@@ -251,7 +423,25 @@ def build_bundle(
             "embedding_bge_worker": {
                 "path": "dataset/bge-worker.json", "sha256": _sha256(bge_worker), "byte_size": len(bge_worker),
             },
+            "embedding_dependency_manifest": {
+                "path": f"dataset/{EMBEDDING_DEPENDENCY_MANIFEST_NAME}",
+                "sha256": _sha256(dependency_manifest_body),
+                "byte_size": len(dependency_manifest_body),
+            },
+            "embedding_dependency_smoke_runner": {
+                "path": f"dataset/{EMBEDDING_DEPENDENCY_SMOKE_RUNNER_NAME}",
+                "sha256": _sha256(smoke_runner),
+                "byte_size": len(smoke_runner),
+            },
         },
+        "embedding_dependency_wheels": [
+            {
+                "path": f"dataset/{EMBEDDING_WHEELHOUSE_NAME}/{item['filename']}",
+                "sha256": item["sha256"],
+                "byte_size": item["byte_size"],
+            }
+            for item in dependency_wheels
+        ],
     }
     manifest_body = canonical_json_bytes(manifest)
     manifest_path = output / "master-asset-bundle.json"
@@ -274,6 +464,9 @@ def build_bundle(
         "MY_DATA_HUB_EMBEDDING_RUNTIME_SOURCE_COMMIT": KAGGLE_CPU_IMAGE_SOURCE_COMMIT,
         "MY_DATA_HUB_EMBEDDING_WHEEL_RELATIVE_PATH": wheel_name,
         "MY_DATA_HUB_EMBEDDING_WHEEL_SHA256": _sha256(wheel),
+        "MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_RELATIVE_PATH": EMBEDDING_DEPENDENCY_MANIFEST_NAME,
+        "MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_SHA256": _sha256(dependency_manifest_body),
+        "MY_DATA_HUB_EMBEDDING_WHEELHOUSE_RELATIVE_PATH": EMBEDDING_WHEELHOUSE_NAME,
         "MY_DATA_HUB_MASTER_TUNNEL_KNOWN_HOSTS_PATH": "/master-assets/dataset/tunnel-known-hosts",
         "MY_DATA_HUB_EMBEDDING_RUNTIME_PYTHON_SERIES": KAGGLE_CPU_IMAGE_PYTHON_SERIES,
     }
@@ -298,6 +491,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--postgres-runtime-archive", type=Path, required=True)
     parser.add_argument("--postgres-runtime-sha256", required=True)
     parser.add_argument("--tunnel-known-hosts", type=Path, required=True)
+    parser.add_argument("--embedding-wheelhouse", type=Path, required=True)
     return parser.parse_args()
 
 
@@ -320,6 +514,8 @@ def main() -> int:
         postgres_runtime_archive=args.postgres_runtime_archive.expanduser().resolve(),
         postgres_runtime_sha256=args.postgres_runtime_sha256,
         tunnel_known_hosts=args.tunnel_known_hosts.expanduser().resolve(),
+        embedding_wheelhouse=args.embedding_wheelhouse.expanduser().resolve(),
+        embedding_dependency_lock=root / EMBEDDING_WHEEL_LOCK_PATH,
     )
     print(
         json.dumps(
