@@ -28,6 +28,12 @@ EvidenceClass = Literal["injected", "live"]
 StageOutcome = Literal["succeeded", "rejected_expected"]
 
 
+def checkpoint_acceptance_candidate_id(scenario: Scenario, operation_id: UUID, task_run_id: UUID) -> UUID:
+    """Deterministic task-owned candidate identity shared with restart recovery."""
+
+    return uuid5(_CANDIDATE_NAMESPACE, f"{scenario}:{operation_id}:{task_run_id}")
+
+
 class CheckpointAcceptanceError(RuntimeError):
     """A fixed acceptance operation violated its durable safety contract."""
 
@@ -54,21 +60,15 @@ class _AcceptanceRequest(BaseModel):
 
 
 class EmptyCheckpointRoundtripRequest(_AcceptanceRequest):
-    schema_version: Literal[
-        "my-data-hub-checkpoint-acceptance-fm05.v1"
-    ] = "my-data-hub-checkpoint-acceptance-fm05.v1"
+    schema_version: Literal["my-data-hub-checkpoint-acceptance-fm05.v1"] = "my-data-hub-checkpoint-acceptance-fm05.v1"
 
 
 class CorruptCheckpointRejectionRequest(_AcceptanceRequest):
-    schema_version: Literal[
-        "my-data-hub-checkpoint-acceptance-fm14.v1"
-    ] = "my-data-hub-checkpoint-acceptance-fm14.v1"
+    schema_version: Literal["my-data-hub-checkpoint-acceptance-fm14.v1"] = "my-data-hub-checkpoint-acceptance-fm14.v1"
 
 
 class ForcedRestoreFailureRequest(_AcceptanceRequest):
-    schema_version: Literal[
-        "my-data-hub-checkpoint-acceptance-fm15.v1"
-    ] = "my-data-hub-checkpoint-acceptance-fm15.v1"
+    schema_version: Literal["my-data-hub-checkpoint-acceptance-fm15.v1"] = "my-data-hub-checkpoint-acceptance-fm15.v1"
 
 
 class CheckpointAcceptanceIntent(BaseModel):
@@ -76,9 +76,7 @@ class CheckpointAcceptanceIntent(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[
-        "my-data-hub-checkpoint-acceptance-intent.v1"
-    ] = ACCEPTANCE_INTENT_SCHEMA
+    schema_version: Literal["my-data-hub-checkpoint-acceptance-intent.v1"] = ACCEPTANCE_INTENT_SCHEMA
     scenario: Scenario
     operation_id: UUID
     task_run_id: UUID
@@ -121,9 +119,7 @@ class CheckpointAcceptanceReceipt(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[
-        "my-data-hub-checkpoint-acceptance-receipt.v1"
-    ] = ACCEPTANCE_RECEIPT_SCHEMA
+    schema_version: Literal["my-data-hub-checkpoint-acceptance-receipt.v1"] = ACCEPTANCE_RECEIPT_SCHEMA
     scenario: Scenario
     verdict: Literal["CONTRACT_PASS", "LIVE_PASS"]
     evidence_class: EvidenceClass
@@ -204,25 +200,17 @@ class TaskOwnedCheckpointEffects(Protocol):
 
     def head(self) -> CheckpointAcceptanceHead: ...
 
-    def ensure_fm05_empty_candidate(
-        self, intent: CheckpointAcceptanceIntent
-    ) -> CheckpointAcceptanceStageReceipt: ...
+    def ensure_fm05_empty_candidate(self, intent: CheckpointAcceptanceIntent) -> CheckpointAcceptanceStageReceipt: ...
 
-    def ensure_fm05_private_upload(
-        self, intent: CheckpointAcceptanceIntent
-    ) -> CheckpointAcceptanceStageReceipt: ...
+    def ensure_fm05_private_upload(self, intent: CheckpointAcceptanceIntent) -> CheckpointAcceptanceStageReceipt: ...
 
-    def ensure_fm05_exact_readback(
-        self, intent: CheckpointAcceptanceIntent
-    ) -> CheckpointAcceptanceStageReceipt: ...
+    def ensure_fm05_exact_readback(self, intent: CheckpointAcceptanceIntent) -> CheckpointAcceptanceStageReceipt: ...
 
     def ensure_fm05_independent_restore(
         self, intent: CheckpointAcceptanceIntent
     ) -> CheckpointAcceptanceStageReceipt: ...
 
-    def ensure_fm05_cas_promotion(
-        self, intent: CheckpointAcceptanceIntent
-    ) -> CheckpointAcceptanceStageReceipt: ...
+    def ensure_fm05_cas_promotion(self, intent: CheckpointAcceptanceIntent) -> CheckpointAcceptanceStageReceipt: ...
 
     def ensure_fm14_corrupted_candidate(
         self, intent: CheckpointAcceptanceIntent
@@ -236,9 +224,7 @@ class TaskOwnedCheckpointEffects(Protocol):
         self, intent: CheckpointAcceptanceIntent
     ) -> CheckpointAcceptanceStageReceipt: ...
 
-    def ensure_fm15_exact_readback(
-        self, intent: CheckpointAcceptanceIntent
-    ) -> CheckpointAcceptanceStageReceipt: ...
+    def ensure_fm15_exact_readback(self, intent: CheckpointAcceptanceIntent) -> CheckpointAcceptanceStageReceipt: ...
 
     def ensure_fm15_forced_restore_rejection(
         self, intent: CheckpointAcceptanceIntent
@@ -279,19 +265,13 @@ class CheckpointAcceptanceCoordinator:
         self.effects = effects
         self.now = now
 
-    def run_empty_roundtrip(
-        self, request: EmptyCheckpointRoundtripRequest
-    ) -> CheckpointAcceptanceReceipt:
+    def run_empty_roundtrip(self, request: EmptyCheckpointRoundtripRequest) -> CheckpointAcceptanceReceipt:
         return self._run("FM05", request)
 
-    def run_corruption_rejection(
-        self, request: CorruptCheckpointRejectionRequest
-    ) -> CheckpointAcceptanceReceipt:
+    def run_corruption_rejection(self, request: CorruptCheckpointRejectionRequest) -> CheckpointAcceptanceReceipt:
         return self._run("FM14", request)
 
-    def run_forced_restore_failure(
-        self, request: ForcedRestoreFailureRequest
-    ) -> CheckpointAcceptanceReceipt:
+    def run_forced_restore_failure(self, request: ForcedRestoreFailureRequest) -> CheckpointAcceptanceReceipt:
         return self._run("FM15", request)
 
     def _intent(
@@ -300,10 +280,7 @@ class CheckpointAcceptanceCoordinator:
         request: _AcceptanceRequest,
         initial_head: CheckpointAcceptanceHead,
     ) -> CheckpointAcceptanceIntent:
-        candidate_id = uuid5(
-            _CANDIDATE_NAMESPACE,
-            f"{scenario}:{request.operation_id}:{request.task_run_id}",
-        )
+        candidate_id = checkpoint_acceptance_candidate_id(scenario, request.operation_id, request.task_run_id)
         if candidate_id in {
             initial_head.current_checkpoint_id,
             initial_head.previous_checkpoint_id,
@@ -406,8 +383,7 @@ class CheckpointAcceptanceCoordinator:
             intent.scenario != scenario
             or intent.operation_id != request.operation_id
             or intent.task_run_id != request.task_run_id
-            or intent.idempotency_key_sha256
-            != hashlib.sha256(request.idempotency_key.encode()).hexdigest()
+            or intent.idempotency_key_sha256 != hashlib.sha256(request.idempotency_key.encode()).hexdigest()
             or intent.source_revision != request.source_revision
             or intent.candidate_checkpoint_id != expected_candidate
             or intent.evidence_class != self.effects.evidence_class
@@ -449,11 +425,15 @@ class CheckpointAcceptanceCoordinator:
             or receipt.outcome != expected_outcome
         ):
             raise CheckpointAcceptanceError("provider stage differs from the fixed task-owned contract")
-        if scenario == "FM05" and index == 0 and (
-            receipt.canonical_revision != 0
-            or receipt.canonical_row_count != 0
-            or receipt.manifest_sha256 is None
-            or receipt.package_sha256 is None
+        if (
+            scenario == "FM05"
+            and index == 0
+            and (
+                receipt.canonical_revision != 0
+                or receipt.canonical_row_count != 0
+                or receipt.manifest_sha256 is None
+                or receipt.package_sha256 is None
+            )
         ):
             raise CheckpointAcceptanceError("FM05 candidate is not the fixed empty checkpoint")
         if index == 0 and (
@@ -468,10 +448,14 @@ class CheckpointAcceptanceCoordinator:
             or receipt.expected_content_sha256 != receipt.observed_content_sha256
         ):
             raise CheckpointAcceptanceError("exact checkpoint readback hash did not match")
-        if scenario == "FM14" and index == 1 and (
-            receipt.expected_content_sha256 is None
-            or receipt.observed_content_sha256 is None
-            or receipt.expected_content_sha256 == receipt.observed_content_sha256
+        if (
+            scenario == "FM14"
+            and index == 1
+            and (
+                receipt.expected_content_sha256 is None
+                or receipt.observed_content_sha256 is None
+                or receipt.expected_content_sha256 == receipt.observed_content_sha256
+            )
         ):
             raise CheckpointAcceptanceError("FM14 did not prove a deterministic hash mismatch")
 

@@ -65,6 +65,7 @@ class CheckpointUploadLedger:
         expected_total_bytes: int,
         authority_kind: str = "master",
         acceptance_scenario: str | None = None,
+        source_previous_checkpoint_id: str | None = None,
     ) -> dict[str, Any]:
         if (
             not all(
@@ -105,6 +106,7 @@ class CheckpointUploadLedger:
             expected_total_bytes,
             authority_kind,
             acceptance_scenario,
+            source_previous_checkpoint_id,
         )
         with self.ledger._transaction() as connection:
             connection.execute(
@@ -112,8 +114,8 @@ class CheckpointUploadLedger:
                 "checkpoint_id,operation_id,run_id,attempt_id,master_instance_id,service_instance_id,master_run_ref,"
                 "epoch,dataset_ref,"
                 "manifest_sha256,source_head_generation,expected_file_count,expected_total_bytes,"
-                "authority_kind,acceptance_scenario,state,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PREPARING',?,?) ON CONFLICT(checkpoint_id) DO NOTHING",
+                "authority_kind,acceptance_scenario,source_previous_checkpoint_id,state,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PREPARING',?,?) ON CONFLICT(checkpoint_id) DO NOTHING",
                 (checkpoint_id, *expected, now, now),
             )
             row = connection.execute(
@@ -134,6 +136,7 @@ class CheckpointUploadLedger:
                 "expected_total_bytes",
                 "authority_kind",
                 "acceptance_scenario",
+                "source_previous_checkpoint_id",
             )
             if row is None or tuple(row[key] for key in keys) != expected:
                 raise IdempotencyConflict("checkpoint upload publication identity collision")

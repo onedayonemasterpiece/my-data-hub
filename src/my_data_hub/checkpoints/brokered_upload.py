@@ -592,6 +592,7 @@ class BrokeredCheckpointUploadService:
                 self._fail(spec.checkpoint_id, "BLOB_PREPARE_CONFLICT", quarantine=True)
             raise
         generation = int(candidate["source_head_generation"])
+        source_head = self.control.checkpoint_head("postgres-master")
         manifest_bytes = canonical_json(manifest.payload()) + b"\n"
         expected_total_bytes = sum(item.byte_size for item in manifest.files) + len(manifest_bytes)
         self.ledger.ensure_publication(
@@ -610,6 +611,7 @@ class BrokeredCheckpointUploadService:
             expected_total_bytes=expected_total_bytes,
             authority_kind=authority.authority_kind,
             acceptance_scenario=authority.acceptance_scenario,
+            source_previous_checkpoint_id=(source_head.previous_checkpoint_id if source_head is not None else None),
         )
         expires_at = min(authority.lease_until, self.control.clock.now() + UPLOAD_GRANT_TTL)
         if expires_at <= self.control.clock.now() + timedelta(seconds=30):
@@ -1223,6 +1225,7 @@ class BrokeredCheckpointUploadService:
                     "epoch",
                     "manifest_sha256",
                     "source_head_generation",
+                    "source_previous_checkpoint_id",
                     "state",
                     "exact_version_ref",
                     "verifier_run_ref",
@@ -1310,11 +1313,7 @@ class BrokeredCheckpointUploadService:
         config = launch.get("config")
         request = launch.get("request")
         provider_run = launch.get("provider_run")
-        if (
-            not isinstance(config, dict)
-            or not isinstance(request, dict)
-            or not isinstance(provider_run, dict)
-        ):
+        if not isinstance(config, dict) or not isinstance(request, dict) or not isinstance(provider_run, dict):
             raise LeaseRejected("checkpoint acceptance launch binding is unavailable")
         expected_verifier = config.get("verifier")
         if (

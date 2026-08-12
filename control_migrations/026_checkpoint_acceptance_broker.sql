@@ -8,3 +8,6 @@ CHECK (acceptance_scenario IS NULL OR acceptance_scenario IN ('FM05','FM14','FM1
 
 ALTER TABLE checkpoint_blob_publications
 ADD COLUMN verifier_evidence_json TEXT;
+
+ALTER TABLE checkpoint_blob_publications
+ADD COLUMN source_previous_checkpoint_id TEXT;

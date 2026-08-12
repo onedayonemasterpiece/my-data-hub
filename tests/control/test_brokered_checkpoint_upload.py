@@ -277,6 +277,9 @@ def test_broker_uploads_direct_metadata_and_promotes_once(tmp_path: Path) -> Non
     head = ledger.checkpoint_head("postgres-master")
     assert head is not None and head.generation == 1
     assert head.current_checkpoint_id == str(CHECKPOINT) and head.previous_checkpoint_id is None
+    ControlLedgerCheckpointRegistry(ledger, operation_id=str(OPERATION), dataset_ref="owner/checkpoints").add_candidate(
+        manifest
+    )
     assert service.finalize(CHECKPOINT, authority)["state"] == "PROMOTED"
     assert adapter.finalized == 1
 

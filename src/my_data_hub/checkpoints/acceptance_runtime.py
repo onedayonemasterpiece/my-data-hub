@@ -64,6 +64,7 @@ from .acceptance import (
     EvidenceClass,
     ForcedRestoreFailureRequest,
     Scenario,
+    checkpoint_acceptance_candidate_id,
 )
 from .brokered_upload import BrokeredCheckpointRuntimeProvider
 from .kaggle_runtime import (
@@ -1556,6 +1557,27 @@ class BrokeredAcceptanceCheckpointEffects(KaggleTaskOwnedCheckpointEffects):
             timeout_seconds=900,
         )
         self._status: dict[str, Any] | None = None
+        candidate_id = checkpoint_acceptance_candidate_id(binding.scenario, binding.operation_id, binding.task_run_id)
+        try:
+            recovered = client.get(f"/internal/checkpoints/{candidate_id}/publication")
+        except Exception:
+            recovered = {}
+        self._status = recovered if recovered.get("state") in {"PROMOTED", "FAILED"} else None
+        self._recovered_initial_head: CheckpointAcceptanceHead | None = None
+        self._head_calls = 0
+        if binding.scenario == "FM05" and recovered.get("state") == "PROMOTED":
+            current = registry.head
+            if current.current != candidate_id or current.generation < 1:
+                raise CheckpointAcceptanceError("FM05 terminal broker state differs from durable HEAD")
+            self._recovered_initial_head = CheckpointAcceptanceHead(
+                generation=current.generation - 1,
+                current_checkpoint_id=current.previous,
+                previous_checkpoint_id=(
+                    UUID(str(recovered["source_previous_checkpoint_id"]))
+                    if recovered.get("source_previous_checkpoint_id") is not None
+                    else None
+                ),
+            )
 
     @property
     def evidence_class(self) -> EvidenceClass:
@@ -1568,6 +1590,9 @@ class BrokeredAcceptanceCheckpointEffects(KaggleTaskOwnedCheckpointEffects):
         )
 
     def head(self) -> CheckpointAcceptanceHead:
+        self._head_calls += 1
+        if self._recovered_initial_head is not None and self._head_calls <= 2:
+            return self._recovered_initial_head
         value = self.registry.head
         return CheckpointAcceptanceHead(
             generation=value.generation,

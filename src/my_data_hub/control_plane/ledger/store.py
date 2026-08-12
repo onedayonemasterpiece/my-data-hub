@@ -73,10 +73,7 @@ def _safe_json(value: Mapping[str, Any] | None, *, max_bytes: int = MAX_METADATA
             for key, nested in candidate.items():
                 lowered = str(key).lower()
                 safe_boolean_observation = lowered == "credentials_invalidated" and nested is True
-                if (
-                    any(fragment in lowered for fragment in _SECRET_FRAGMENTS)
-                    and not safe_boolean_observation
-                ):
+                if any(fragment in lowered for fragment in _SECRET_FRAGMENTS) and not safe_boolean_observation:
                     raise EventRejected(f"secret-bearing field is forbidden in the control ledger: {key}")
                 inspect(nested)
         elif isinstance(candidate, (list, tuple)):
@@ -322,9 +319,7 @@ class ControlLedger:
             if (predecessor is None and current_epoch != 0) or (
                 predecessor is not None and predecessor_epoch != current_epoch
             ):
-                raise MasterAdmissionRejected(
-                    "master admission rejected: lifecycle and epoch ledgers are inconsistent"
-                )
+                raise MasterAdmissionRejected("master admission rejected: lifecycle and epoch ledgers are inconsistent")
 
             if predecessor is not None and predecessor["state"] == "STOPPED":
                 assert predecessor_identity is not None
@@ -357,9 +352,7 @@ class ControlLedger:
                     or rotation["operation_kind"] != "forced_master_rotation"
                     or rotation["state"] != "REQUESTED"
                 ):
-                    raise MasterAdmissionRejected(
-                        "master admission rejected: forced rotation binding is invalid"
-                    )
+                    raise MasterAdmissionRejected("master admission rejected: forced rotation binding is invalid")
                 try:
                     rotation_identity = json.loads(str(rotation["identity_json"]))
                     expected_epoch = int(rotation_identity["expected_active_epoch"])
@@ -387,9 +380,7 @@ class ControlLedger:
                     else None
                 )
                 if source is None:
-                    raise MasterAdmissionRejected(
-                        "master admission rejected: forced rotation source is invalid"
-                    )
+                    raise MasterAdmissionRejected("master admission rejected: forced rotation source is invalid")
                 try:
                     source_identity = json.loads(str(source["identity_json"]))
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -433,9 +424,7 @@ class ControlLedger:
                 "VALUES (?,NULL,'REQUESTED',?,?)",
                 (operation_id, now, _safe_json({"reason": "master_admitted", "epoch": epoch})),
             )
-            row = connection.execute(
-                "SELECT * FROM operations WHERE operation_id=?", (operation_id,)
-            ).fetchone()
+            row = connection.execute("SELECT * FROM operations WHERE operation_id=?", (operation_id,)).fetchone()
             assert row is not None
             return self._operation_from_row(row), True
 
@@ -606,9 +595,7 @@ class ControlLedger:
         now = _format_time(self.clock.now())
         metadata = _safe_json({"code": "TRIGGER_ABSENT_AFTER_TUNNEL_LEASE_EXPIRY", "epoch": epoch})
         with self._transaction() as connection:
-            operation = connection.execute(
-                "SELECT * FROM operations WHERE operation_id=?", (operation_id,)
-            ).fetchone()
+            operation = connection.execute("SELECT * FROM operations WHERE operation_id=?", (operation_id,)).fetchone()
             effect = connection.execute(
                 "SELECT * FROM effects WHERE effect_id=? AND operation_id=? AND effect_kind='trigger_run'",
                 (effect_id, operation_id),
@@ -661,9 +648,7 @@ class ControlLedger:
                 "UPDATE runtime_token_hashes SET revoked_at=? WHERE run_id=? AND attempt_id=?",
                 (now, run_id, attempt_id),
             )
-            terminal = connection.execute(
-                "SELECT * FROM operations WHERE operation_id=?", (operation_id,)
-            ).fetchone()
+            terminal = connection.execute("SELECT * FROM operations WHERE operation_id=?", (operation_id,)).fetchone()
             assert terminal is not None
             return self._operation_from_row(terminal)
 
@@ -837,8 +822,17 @@ class ControlLedger:
                 "INSERT INTO master_status_dataset_authorities(operation_id,run_id,attempt_id,"
                 "token_sha256,creator_claim_until,expected_content_tree_sha256,resource_lease_json,"
                 "state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'CREATING',?,?)",
-                (operation_id, run_id, attempt_id, token_sha256, claim_until,
-                 expected_content_tree_sha256, resource_lease_json, now, now),
+                (
+                    operation_id,
+                    run_id,
+                    attempt_id,
+                    token_sha256,
+                    claim_until,
+                    expected_content_tree_sha256,
+                    resource_lease_json,
+                    now,
+                    now,
+                ),
             )
             connection.execute(
                 "INSERT INTO runtime_token_hashes(run_id,attempt_id,token_sha256,created_at) "
@@ -866,9 +860,7 @@ class ControlLedger:
             ).fetchone()
         return self._master_status_dataset_from_row(row) if row is not None else None
 
-    def record_master_status_dataset(
-        self, *, operation_id: str, status_dataset: Mapping[str, Any]
-    ) -> dict[str, Any]:
+    def record_master_status_dataset(self, *, operation_id: str, status_dataset: Mapping[str, Any]) -> dict[str, Any]:
         payload = _safe_json(status_dataset, max_bytes=32 * 1024)
         now = _format_time(self.clock.now())
         with self._transaction() as connection:
@@ -944,23 +936,19 @@ class ControlLedger:
             assert current is not None
             return self._master_status_dataset_from_row(current)
 
-    def claim_master_status_dataset_cleanup(
-        self, operation_id: str, *, claim_until: datetime
-    ) -> bool:
+    def claim_master_status_dataset_cleanup(self, operation_id: str, *, claim_until: datetime) -> bool:
         now = self.clock.now()
         if claim_until <= now:
             raise ValueError("master status cleanup claim must expire in the future")
         with self._transaction() as connection:
             row = connection.execute(
-                "SELECT state,cleanup_claim_until FROM master_status_dataset_authorities "
-                "WHERE operation_id=?",
+                "SELECT state,cleanup_claim_until FROM master_status_dataset_authorities WHERE operation_id=?",
                 (operation_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(operation_id)
             reclaim = row["state"] == "CLEANING" and (
-                row["cleanup_claim_until"] is not None
-                and _parse_time(str(row["cleanup_claim_until"])) <= now
+                row["cleanup_claim_until"] is not None and _parse_time(str(row["cleanup_claim_until"])) <= now
             )
             if row["state"] != "READY" and not reclaim:
                 return False
@@ -971,9 +959,7 @@ class ControlLedger:
             ).rowcount
             return changed == 1
 
-    def terminal_master_status_dataset_authorities(
-        self, *, limit: int = 10
-    ) -> list[dict[str, Any]]:
+    def terminal_master_status_dataset_authorities(self, *, limit: int = 10) -> list[dict[str, Any]]:
         if not 1 <= limit <= 100:
             raise ValueError("master status cleanup limit is invalid")
         with self._reader() as connection:
@@ -1017,8 +1003,13 @@ class ControlLedger:
                 connection.execute(
                     "INSERT INTO operation_log(operation_id,from_state,to_state,recorded_at,metadata_json) "
                     "VALUES (?,?,?,?,?)",
-                    (operation_id, operation["state"], "FAILED", _format_time(now),
-                     _safe_json({"code": "MASTER_STATUS_DATASET_RESPONSE_AMBIGUOUS"})),
+                    (
+                        operation_id,
+                        operation["state"],
+                        "FAILED",
+                        _format_time(now),
+                        _safe_json({"code": "MASTER_STATUS_DATASET_RESPONSE_AMBIGUOUS"}),
+                    ),
                 )
             connection.execute(
                 "UPDATE runtime_token_hashes SET revoked_at=? WHERE run_id=? AND attempt_id=?",
@@ -1968,8 +1959,7 @@ class ControlLedger:
                 ),
             )
             connection.execute(
-                "INSERT INTO mcp_write_events(operation_id,state,metadata_json,recorded_at) "
-                "VALUES (?,'REQUESTED',?,?)",
+                "INSERT INTO mcp_write_events(operation_id,state,metadata_json,recorded_at) VALUES (?,'REQUESTED',?,?)",
                 (operation_id, _safe_json({"request_sha256": request_sha256}), now),
             )
             row = connection.execute(
@@ -2088,7 +2078,8 @@ class ControlLedger:
                 raise StaleRuntimeEvent("canonical receipt differs from the durable MCP write intent")
             if record["state"] != "APPLYING":
                 if (
-                    record["state"] in {
+                    record["state"]
+                    in {
                         "COMMITTED_PENDING_CHECKPOINT",
                         "CHECKPOINTING",
                         "CHECKPOINT_VERIFIED",
@@ -2338,8 +2329,7 @@ class ControlLedger:
 
         with self._reader() as connection:
             row = connection.execute(
-                "SELECT receipt_json FROM provider_effect_receipts WHERE effect_id=? "
-                "ORDER BY sequence DESC LIMIT 1",
+                "SELECT receipt_json FROM provider_effect_receipts WHERE effect_id=? ORDER BY sequence DESC LIMIT 1",
                 (effect_id,),
             ).fetchone()
         return json.loads(str(row["receipt_json"])) if row else None
@@ -2829,8 +2819,7 @@ class ControlLedger:
                 if changed != 1:
                     raise StaleRuntimeEvent("acceptance host command claim lost its CAS")
                 connection.execute(
-                    "UPDATE master_acceptance_tasks SET state='CLAIMED',updated_at=? "
-                    "WHERE task_id=? AND state='BOUND'",
+                    "UPDATE master_acceptance_tasks SET state='CLAIMED',updated_at=? WHERE task_id=? AND state='BOUND'",
                     (now, task_id),
                 )
                 self._append_master_acceptance_event(
@@ -3166,9 +3155,7 @@ class ControlLedger:
             assert current is not None
             return self._fm11_old_epoch_context_from_row(current)
 
-    def release_fm11_old_epoch_context(
-        self, *, task_id: str, context_sha256: str, result_receipt_sha256: str
-    ) -> None:
+    def release_fm11_old_epoch_context(self, *, task_id: str, context_sha256: str, result_receipt_sha256: str) -> None:
         for value in (context_sha256, result_receipt_sha256):
             if len(value) != 64:
                 raise ValueError("FM11 context release digest is invalid")
@@ -3198,9 +3185,7 @@ class ControlLedger:
             ).fetchone()
         return self._fm11_old_epoch_context_from_row(row) if row is not None else None
 
-    def fm11_retired_admission_observation(
-        self, *, task_id: str, replacement_operation_id: str
-    ) -> dict[str, Any]:
+    def fm11_retired_admission_observation(self, *, task_id: str, replacement_operation_id: str) -> dict[str, Any]:
         """Project fixed runtime/register denial facts from canonical admission state."""
 
         with self._reader() as connection:
@@ -3347,11 +3332,7 @@ class ControlLedger:
         recovery_receipt_sha256: str | None,
         active: bool,
     ) -> dict[str, Any]:
-        run_json = (
-            _safe_json(replacement_run, max_bytes=16 * 1024)
-            if replacement_run is not None
-            else None
-        )
+        run_json = _safe_json(replacement_run, max_bytes=16 * 1024) if replacement_run is not None else None
         if active and (run_json is None or recovery_receipt_sha256 is None):
             raise ValueError("FM08 active recovery requires its exact provider receipt")
         if recovery_receipt_sha256 is not None and (
@@ -3434,39 +3415,74 @@ class ControlLedger:
         return value
 
     def arm_master_acceptance_callback_loss(
-        self, *, task_id: str, command_id: str, command_sha256: str,
-        run_id: str, attempt_id: str, master_instance_id: str, epoch: int,
+        self,
+        *,
+        task_id: str,
+        command_id: str,
+        command_sha256: str,
+        run_id: str,
+        attempt_id: str,
+        master_instance_id: str,
+        epoch: int,
         before_boot_id: str,
     ) -> dict[str, Any]:
         """Arm exactly one task-bound FM08 heartbeat response loss."""
 
         return self._ensure_master_acceptance_runtime_control(
-            task_id=task_id, command_id=command_id, command_sha256=command_sha256,
-            scenario_id="FM08", run_id=run_id, attempt_id=attempt_id,
-            master_instance_id=master_instance_id, epoch=epoch,
-            callback_state="ARMED", renewal_suspended=False,
+            task_id=task_id,
+            command_id=command_id,
+            command_sha256=command_sha256,
+            scenario_id="FM08",
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            callback_state="ARMED",
+            renewal_suspended=False,
             before_boot_id=before_boot_id,
         )
 
     def suspend_master_acceptance_renewal(
-        self, *, task_id: str, command_id: str, command_sha256: str,
-        run_id: str, attempt_id: str, master_instance_id: str, epoch: int,
+        self,
+        *,
+        task_id: str,
+        command_id: str,
+        command_sha256: str,
+        run_id: str,
+        attempt_id: str,
+        master_instance_id: str,
+        epoch: int,
     ) -> dict[str, Any]:
         """Suspend both heartbeat and database-gate renewal for exact FM10."""
 
         return self._ensure_master_acceptance_runtime_control(
-            task_id=task_id, command_id=command_id, command_sha256=command_sha256,
-            scenario_id="FM10", run_id=run_id, attempt_id=attempt_id,
-            master_instance_id=master_instance_id, epoch=epoch,
-            callback_state="DISARMED", renewal_suspended=True,
+            task_id=task_id,
+            command_id=command_id,
+            command_sha256=command_sha256,
+            scenario_id="FM10",
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            callback_state="DISARMED",
+            renewal_suspended=True,
             before_boot_id=None,
         )
 
     def _ensure_master_acceptance_runtime_control(
-        self, *, task_id: str, command_id: str, command_sha256: str,
-        scenario_id: str, run_id: str, attempt_id: str,
-        master_instance_id: str, epoch: int, callback_state: str,
-        renewal_suspended: bool, before_boot_id: str | None,
+        self,
+        *,
+        task_id: str,
+        command_id: str,
+        command_sha256: str,
+        scenario_id: str,
+        run_id: str,
+        attempt_id: str,
+        master_instance_id: str,
+        epoch: int,
+        callback_state: str,
+        renewal_suspended: bool,
+        before_boot_id: str | None,
     ) -> dict[str, Any]:
         try:
             for value in (task_id, command_id, run_id, attempt_id, master_instance_id):
@@ -3479,10 +3495,7 @@ class ControlLedger:
             raise ValueError("acceptance runtime control binding is invalid")
         now = _format_time(self.clock.now())
         armed_at = now if callback_state == "ARMED" else None
-        expires_at = (
-            _format_time(self.clock.now() + timedelta(seconds=900))
-            if callback_state == "ARMED" else None
-        )
+        expires_at = _format_time(self.clock.now() + timedelta(seconds=900)) if callback_state == "ARMED" else None
         directive_receipt_sha256 = (
             hashlib.sha256(
                 _safe_json(
@@ -3502,20 +3515,26 @@ class ControlLedger:
                     }
                 ).encode()
             ).hexdigest()
-            if callback_state == "ARMED" else None
+            if callback_state == "ARMED"
+            else None
         )
         with self._transaction() as connection:
             command = connection.execute(
                 "SELECT c.command_id,c.command_sha256,c.state,c.claim_authority,t.task_id,t.scenario_id,"
                 "t.target_run_id,t.target_attempt_id,t.target_master_instance_id,t.target_epoch "
                 "FROM master_acceptance_commands c JOIN master_acceptance_tasks t ON t.task_id=c.task_id "
-                "WHERE t.task_id=?", (task_id,),
+                "WHERE t.task_id=?",
+                (task_id,),
             ).fetchone()
             if (
-                command is None or command["command_id"] != command_id
-                or command["command_sha256"] != command_sha256 or command["state"] != "CLAIMED"
-                or command["claim_authority"] != "owner_host" or command["scenario_id"] != scenario_id
-                or command["target_run_id"] != run_id or command["target_attempt_id"] != attempt_id
+                command is None
+                or command["command_id"] != command_id
+                or command["command_sha256"] != command_sha256
+                or command["state"] != "CLAIMED"
+                or command["claim_authority"] != "owner_host"
+                or command["scenario_id"] != scenario_id
+                or command["target_run_id"] != run_id
+                or command["target_attempt_id"] != attempt_id
                 or command["target_master_instance_id"] != master_instance_id
                 or int(command["target_epoch"]) != epoch
             ):
@@ -3524,9 +3543,14 @@ class ControlLedger:
                 "SELECT * FROM master_acceptance_runtime_controls WHERE task_id=?", (task_id,)
             ).fetchone()
             exact = {
-                "task_id": task_id, "command_id": command_id, "command_sha256": command_sha256,
-                "scenario_id": scenario_id, "run_id": run_id, "attempt_id": attempt_id,
-                "master_instance_id": master_instance_id, "epoch": epoch,
+                "task_id": task_id,
+                "command_id": command_id,
+                "command_sha256": command_sha256,
+                "scenario_id": scenario_id,
+                "run_id": run_id,
+                "attempt_id": attempt_id,
+                "master_instance_id": master_instance_id,
+                "epoch": epoch,
             }
             if existing is None:
                 connection.execute(
@@ -3534,9 +3558,23 @@ class ControlLedger:
                     "scenario_id,run_id,attempt_id,master_instance_id,epoch,callback_state,renewal_suspended,"
                     "armed_at,expires_at,before_boot_id,directive_receipt_sha256,updated_at) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (task_id, command_id, command_sha256, scenario_id, run_id, attempt_id,
-                     master_instance_id, epoch, callback_state, int(renewal_suspended),
-                     armed_at, expires_at, before_boot_id, directive_receipt_sha256, now),
+                    (
+                        task_id,
+                        command_id,
+                        command_sha256,
+                        scenario_id,
+                        run_id,
+                        attempt_id,
+                        master_instance_id,
+                        epoch,
+                        callback_state,
+                        int(renewal_suspended),
+                        armed_at,
+                        expires_at,
+                        before_boot_id,
+                        directive_receipt_sha256,
+                        now,
+                    ),
                 )
             else:
                 if any(existing[key] != value for key, value in exact.items()):
@@ -3551,7 +3589,8 @@ class ControlLedger:
                 if renewal_suspended and not bool(existing["renewal_suspended"]):
                     connection.execute(
                         "UPDATE master_acceptance_runtime_controls SET renewal_suspended=1,updated_at=? "
-                        "WHERE task_id=?", (now, task_id),
+                        "WHERE task_id=?",
+                        (now, task_id),
                     )
             row = connection.execute(
                 "SELECT * FROM master_acceptance_runtime_controls WHERE task_id=?", (task_id,)
@@ -3560,7 +3599,12 @@ class ControlLedger:
             return dict(row)
 
     def master_acceptance_runtime_directive(
-        self, *, run_id: str, attempt_id: str, master_instance_id: str, epoch: int,
+        self,
+        *,
+        run_id: str,
+        attempt_id: str,
+        master_instance_id: str,
+        epoch: int,
     ) -> dict[str, Any]:
         """Return only fixed booleans/counters for the exact runtime."""
 
@@ -3572,13 +3616,18 @@ class ControlLedger:
                 (run_id, attempt_id, master_instance_id, epoch),
             ).fetchone()
         return (
-            {"available": False, "renewal_suspended": False,
-             "soak_requested_step": 0, "soak_completed_step": 0}
-            if row is None else {"available": True, **dict(row)}
+            {"available": False, "renewal_suspended": False, "soak_requested_step": 0, "soak_completed_step": 0}
+            if row is None
+            else {"available": True, **dict(row)}
         )
 
     def acknowledge_master_acceptance_renewal_suspension(
-        self, *, run_id: str, attempt_id: str, master_instance_id: str, epoch: int,
+        self,
+        *,
+        run_id: str,
+        attempt_id: str,
+        master_instance_id: str,
+        epoch: int,
     ) -> None:
         now = _format_time(self.clock.now())
         with self._transaction() as connection:
@@ -3592,7 +3641,11 @@ class ControlLedger:
                 raise StaleRuntimeEvent("FM10 renewal suspension acknowledgement is stale")
 
     def armed_master_acceptance_callback_loss(
-        self, *, run_id: str, attempt_id: str, epoch: int,
+        self,
+        *,
+        run_id: str,
+        attempt_id: str,
+        epoch: int,
     ) -> dict[str, Any] | None:
         now = _format_time(self.clock.now())
         with self._transaction() as connection:
@@ -3614,8 +3667,13 @@ class ControlLedger:
         return dict(row) if row is not None else None
 
     def restarted_master_acceptance_callback(
-        self, *, run_id: str, attempt_id: str, epoch: int,
-        event_id: str, body_sha256: str,
+        self,
+        *,
+        run_id: str,
+        attempt_id: str,
+        epoch: int,
+        event_id: str,
+        body_sha256: str,
     ) -> dict[str, Any] | None:
         """Find one exact captured callback after its process restart is durable."""
 
@@ -3629,7 +3687,11 @@ class ControlLedger:
         return dict(row) if row is not None else None
 
     def capture_master_acceptance_callback(
-        self, *, task_id: str, event_id: str, body_sha256: str,
+        self,
+        *,
+        task_id: str,
+        event_id: str,
+        body_sha256: str,
     ) -> dict[str, Any]:
         now = _format_time(self.clock.now())
         with self._transaction() as connection:
@@ -3643,8 +3705,12 @@ class ControlLedger:
             row = connection.execute(
                 "SELECT * FROM master_acceptance_runtime_controls WHERE task_id=?", (task_id,)
             ).fetchone()
-            if (row is None or row["callback_state"] != "CAPTURED"
-                    or row["callback_event_id"] != event_id or row["callback_body_sha256"] != body_sha256):
+            if (
+                row is None
+                or row["callback_state"] != "CAPTURED"
+                or row["callback_event_id"] != event_id
+                or row["callback_body_sha256"] != body_sha256
+            ):
                 raise StaleRuntimeEvent("FM08 callback capture lost its exact CAS")
             return dict(row)
 
@@ -3656,7 +3722,11 @@ class ControlLedger:
         return dict(row) if row is not None else None
 
     def record_master_acceptance_restart(
-        self, *, task_id: str, restart_from_id: str, restart_to_id: str | None,
+        self,
+        *,
+        task_id: str,
+        restart_from_id: str,
+        restart_to_id: str | None,
     ) -> dict[str, Any]:
         try:
             UUID(restart_from_id)
@@ -3682,7 +3752,8 @@ class ControlLedger:
                 raise StaleRuntimeEvent("FM08 restart result changed")
             connection.execute(
                 "UPDATE master_acceptance_runtime_controls SET restart_from_id=?,restart_to_id=?,updated_at=? "
-                "WHERE task_id=?", (restart_from_id, restart_to_id, now, task_id),
+                "WHERE task_id=?",
+                (restart_from_id, restart_to_id, now, task_id),
             )
             updated = connection.execute(
                 "SELECT * FROM master_acceptance_runtime_controls WHERE task_id=?", (task_id,)
@@ -3691,7 +3762,11 @@ class ControlLedger:
             return dict(updated)
 
     def mark_master_acceptance_callback_replayed(
-        self, *, task_id: str, event_id: str, body_sha256: str,
+        self,
+        *,
+        task_id: str,
+        event_id: str,
+        body_sha256: str,
     ) -> None:
         now = _format_time(self.clock.now())
         with self._transaction() as connection:
@@ -3704,10 +3779,15 @@ class ControlLedger:
             if changed != 1:
                 row = connection.execute(
                     "SELECT callback_state,callback_event_id,callback_body_sha256 "
-                    "FROM master_acceptance_runtime_controls WHERE task_id=?", (task_id,),
+                    "FROM master_acceptance_runtime_controls WHERE task_id=?",
+                    (task_id,),
                 ).fetchone()
-                if (row is None or row["callback_state"] != "REPLAYED"
-                        or row["callback_event_id"] != event_id or row["callback_body_sha256"] != body_sha256):
+                if (
+                    row is None
+                    or row["callback_state"] != "REPLAYED"
+                    or row["callback_event_id"] != event_id
+                    or row["callback_body_sha256"] != body_sha256
+                ):
                     raise StaleRuntimeEvent("FM08 callback replay lost its exact CAS")
 
     def project_master_acceptance_callback_replay(
@@ -3726,20 +3806,16 @@ class ControlLedger:
             UUID(event_id)
         except ValueError as exc:
             raise ValueError("FM08 callback replay requires exact UUID identities") from exc
-        if len(body_sha256) != 64 or any(
-            character not in "0123456789abcdef" for character in body_sha256
-        ):
+        if len(body_sha256) != 64 or any(character not in "0123456789abcdef" for character in body_sha256):
             raise ValueError("FM08 callback replay body hash is invalid")
         now = _format_time(self.clock.now())
         with self._transaction() as connection:
             control = connection.execute(
-                "SELECT * FROM master_acceptance_runtime_controls WHERE task_id=? "
-                "AND scenario_id='FM08'",
+                "SELECT * FROM master_acceptance_runtime_controls WHERE task_id=? AND scenario_id='FM08'",
                 (task_id,),
             ).fetchone()
             event = connection.execute(
-                "SELECT event_id,run_id,attempt_id,epoch,body_sha256 FROM runtime_events "
-                "WHERE event_id=?",
+                "SELECT event_id,run_id,attempt_id,epoch,body_sha256 FROM runtime_events WHERE event_id=?",
                 (event_id,),
             ).fetchone()
             if (
@@ -3766,9 +3842,7 @@ class ControlLedger:
                     raise StaleRuntimeEvent("FM08 stored callback replay lost its exact CAS")
         return "duplicate"
 
-    def master_acceptance_drain_directive(
-        self, *, run_id: str, attempt_id: str, epoch: int
-    ) -> dict[str, Any] | None:
+    def master_acceptance_drain_directive(self, *, run_id: str, attempt_id: str, epoch: int) -> dict[str, Any] | None:
         """Return only the fixed FM11/FM12 drain directive for an owner claim."""
 
         with self._reader() as connection:
@@ -4067,7 +4141,11 @@ class ControlLedger:
         """Persist one owner-task checkpoint launch before provider mutation."""
 
         required = {
-            "request_id", "scenario", "operation_id", "task_run_id", "idempotency_key",
+            "request_id",
+            "scenario",
+            "operation_id",
+            "task_run_id",
+            "idempotency_key",
             "control_identity",
         }
         if not required.issubset(request) or request["scenario"] not in {"FM05", "FM14", "FM15"}:
@@ -4086,10 +4164,10 @@ class ControlLedger:
             or str(identity.get("request_id")) != values["request_id"]
             or str(identity.get("task_run_id")) != values["task_run_id"]
             or identity.get("scope") != "acceptance:operate"
-            or any(len(value) != 64 or any(c not in "0123456789abcdef" for c in value)
-                   for value in (
-                       request_sha256, token_sha256, config_sha256, expected_source_sha256
-                   ))
+            or any(
+                len(value) != 64 or any(c not in "0123456789abcdef" for c in value)
+                for value in (request_sha256, token_sha256, config_sha256, expected_source_sha256)
+            )
             or expires_at.tzinfo is None
         ):
             raise ValueError("checkpoint acceptance launch binding is invalid")
@@ -4125,11 +4203,27 @@ class ControlLedger:
                 "request_sha256,request_json,principal_id,client_id,token_sha256,expires_at,state,"
                 "creator_claim_until,config_sha256,config_json,expected_source_sha256,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (values["request_id"], request["scenario"], values["operation_id"],
-                 values["task_run_id"], values["attempt_id"], request["idempotency_key"],
-                 request_sha256, request_json, principal_id, client_id, token_sha256, expiry,
-                 "REQUESTED", creator_claim_until, config_sha256, config_json,
-                 expected_source_sha256, now, now),
+                (
+                    values["request_id"],
+                    request["scenario"],
+                    values["operation_id"],
+                    values["task_run_id"],
+                    values["attempt_id"],
+                    request["idempotency_key"],
+                    request_sha256,
+                    request_json,
+                    principal_id,
+                    client_id,
+                    token_sha256,
+                    expiry,
+                    "REQUESTED",
+                    creator_claim_until,
+                    config_sha256,
+                    config_json,
+                    expected_source_sha256,
+                    now,
+                    now,
+                ),
             )
             row = connection.execute(
                 "SELECT * FROM checkpoint_acceptance_launches WHERE request_id=?",
@@ -4167,8 +4261,7 @@ class ControlLedger:
                 else "MISMATCH"
             )
             if row["observed_source_sha256"] is not None and (
-                row["observed_source_sha256"] != observed_source_sha256
-                or row["source_attestation_state"] != state
+                row["observed_source_sha256"] != observed_source_sha256 or row["source_attestation_state"] != state
             ):
                 raise IdempotencyConflict("checkpoint acceptance source attestation changed")
             connection.execute(
@@ -4208,8 +4301,14 @@ class ControlLedger:
         """Append one exact donor-style event under the owner-task authority."""
 
         allowed = {
-            "runtime.started", "runtime.progress", "runtime.heartbeat", "runtime.failed",
-            "runtime.terminal", "resource.acquire", "resource.release", "job.result_available",
+            "runtime.started",
+            "runtime.progress",
+            "runtime.heartbeat",
+            "runtime.failed",
+            "runtime.terminal",
+            "resource.acquire",
+            "resource.release",
+            "job.result_available",
         }
         data = event.get("data")
         if not isinstance(data, Mapping):
@@ -4244,13 +4343,10 @@ class ControlLedger:
                 "SELECT attempt_id,state FROM checkpoint_acceptance_launches WHERE request_id=?",
                 (request_id,),
             ).fetchone()
-            if launch is None or launch["attempt_id"] != attempt_id or launch["state"] not in {
-                "REQUESTED", "RUNNING"
-            }:
+            if launch is None or launch["attempt_id"] != attempt_id or launch["state"] not in {"REQUESTED", "RUNNING"}:
                 raise StaleRuntimeEvent("checkpoint acceptance event authority is terminal or stale")
             existing = connection.execute(
-                "SELECT body_sha256,body_json FROM checkpoint_acceptance_events "
-                "WHERE request_id=? AND event_uid=?",
+                "SELECT body_sha256,body_json FROM checkpoint_acceptance_events WHERE request_id=? AND event_uid=?",
                 (request_id, event_uid),
             ).fetchone()
             if existing is not None:
@@ -4262,13 +4358,22 @@ class ControlLedger:
                     "INSERT INTO checkpoint_acceptance_events(request_id,attempt_id,event_uid,event_type,"
                     "phase,status,progress_json,body_sha256,body_json,local_sequence,received_at) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    (request_id, attempt_id, event_uid, event_type, phase, status, progress_json,
-                     body_sha256, body_json, local_sequence, now),
+                    (
+                        request_id,
+                        attempt_id,
+                        event_uid,
+                        event_type,
+                        phase,
+                        status,
+                        progress_json,
+                        body_sha256,
+                        body_json,
+                        local_sequence,
+                        now,
+                    ),
                 )
             except sqlite3.IntegrityError as exc:
-                raise IdempotencyConflict(
-                    "checkpoint acceptance local sequence changed event body"
-                ) from exc
+                raise IdempotencyConflict("checkpoint acceptance local sequence changed event body") from exc
             connection.execute(
                 "UPDATE checkpoint_acceptance_launches SET state='RUNNING',updated_at=? "
                 "WHERE request_id=? AND state='REQUESTED'",
@@ -4382,8 +4487,7 @@ class ControlLedger:
             if row["cleanup_receipt_json"] is not None and row["cleanup_receipt_json"] != payload:
                 raise IdempotencyConflict("checkpoint acceptance cleanup receipt changed")
             connection.execute(
-                "UPDATE checkpoint_acceptance_launches SET cleanup_receipt_json=?,updated_at=? "
-                "WHERE request_id=?",
+                "UPDATE checkpoint_acceptance_launches SET cleanup_receipt_json=?,updated_at=? WHERE request_id=?",
                 (payload, now, request_id),
             )
             current = connection.execute(
@@ -4438,9 +4542,7 @@ class ControlLedger:
         status_dataset = value.pop("status_dataset_json")
         cleanup = value.pop("cleanup_receipt_json")
         result = value.pop("result_json")
-        value["status_dataset"] = (
-            json.loads(str(status_dataset)) if status_dataset is not None else None
-        )
+        value["status_dataset"] = json.loads(str(status_dataset)) if status_dataset is not None else None
         value["provider_run"] = json.loads(str(provider)) if provider is not None else None
         value["cleanup_receipt"] = json.loads(str(cleanup)) if cleanup is not None else None
         value["result"] = json.loads(str(result)) if result is not None else None
@@ -4468,9 +4570,7 @@ class ControlLedger:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def exact_stored_runtime_event_identity(
-        self, *, run_id: str, attempt_id: str, epoch: int
-    ) -> dict[str, str] | None:
+    def exact_stored_runtime_event_identity(self, *, run_id: str, attempt_id: str, epoch: int) -> dict[str, str] | None:
         """Select one immutable ACKed event without returning its stored body."""
 
         try:
@@ -4591,9 +4691,7 @@ class ControlLedger:
             raise StaleRuntimeEvent("FM09 has no older epoch to submit")
         return {"retired_runtime_auth_rejected": True, "stale_epoch_rejected": True}
 
-    def latest_revoked_runtime_identity(
-        self, *, exclude_run_id: str, exclude_attempt_id: str
-    ) -> dict[str, str] | None:
+    def latest_revoked_runtime_identity(self, *, exclude_run_id: str, exclude_attempt_id: str) -> dict[str, str] | None:
         """Return a retired token identity only; no token hash or secret leaves."""
 
         with self._reader() as connection:
@@ -4658,9 +4756,7 @@ class ControlLedger:
 
     def resource_lease(self, lease_id: str) -> ResourceLeaseRecord | None:
         with self._reader() as connection:
-            row = connection.execute(
-                "SELECT * FROM resource_leases WHERE lease_id=?", (lease_id,)
-            ).fetchone()
+            row = connection.execute("SELECT * FROM resource_leases WHERE lease_id=?", (lease_id,)).fetchone()
         return self._resource_lease_from_row(row) if row is not None else None
 
     def renew_resource_lease(self, lease_id: str, holder_id: str, epoch: int, lease_until: datetime) -> None:
@@ -4760,6 +4856,31 @@ class ControlLedger:
         if len(manifest_sha256) != 64:
             raise ValueError("manifest_sha256 must be an exact SHA-256")
         with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT service_kind,operation_id,dataset_ref,manifest_sha256,source_checkpoint_id,"
+                "source_head_generation,master_instance_id,epoch "
+                "FROM checkpoint_candidates WHERE checkpoint_id=?",
+                (checkpoint_id,),
+            ).fetchone()
+            if existing is not None:
+                replay_generation = (
+                    int(existing["source_head_generation"])
+                    if source_head_generation is None
+                    else source_head_generation
+                )
+                immutable = (
+                    service_kind,
+                    operation_id,
+                    dataset_ref,
+                    manifest_sha256,
+                    source_checkpoint_id,
+                    replay_generation,
+                    master_instance_id,
+                    epoch,
+                )
+                if tuple(existing) != immutable:
+                    raise StaleRuntimeEvent("checkpoint idempotency identity conflicts with durable candidate")
+                return
             head = connection.execute(
                 "SELECT generation,current_checkpoint_id FROM checkpoint_heads WHERE service_kind=?",
                 (service_kind,),
@@ -4792,24 +4913,7 @@ class ControlLedger:
                 (*values, _safe_json(manifest_payload) if manifest_payload is not None else None),
             ).rowcount
             if changed == 0:
-                existing = connection.execute(
-                    "SELECT service_kind,operation_id,dataset_ref,manifest_sha256,source_checkpoint_id,"
-                    "source_head_generation,master_instance_id,epoch "
-                    "FROM checkpoint_candidates WHERE checkpoint_id=?",
-                    (checkpoint_id,),
-                ).fetchone()
-                immutable = (
-                    service_kind,
-                    operation_id,
-                    dataset_ref,
-                    manifest_sha256,
-                    source_checkpoint_id,
-                    expected_generation,
-                    master_instance_id,
-                    epoch,
-                )
-                if existing is None or tuple(existing) != immutable:
-                    raise StaleRuntimeEvent("checkpoint idempotency identity conflicts with durable candidate")
+                raise StaleRuntimeEvent("checkpoint candidate creation lost its exact insert")
 
     def mark_checkpoint_uploaded(self, checkpoint_id: str, version_ref: str) -> None:
         if not version_ref or len(version_ref) > 512:
@@ -5251,10 +5355,7 @@ class ControlLedger:
             ).fetchone()
             if row is None:
                 return None
-            if (
-                row["state"] == "REQUESTED"
-                and row["operation_state"] in {"STOPPED", "FAILED", "FENCED", "ORPHANED"}
-            ):
+            if row["state"] == "REQUESTED" and row["operation_state"] in {"STOPPED", "FAILED", "FENCED", "ORPHANED"}:
                 connection.execute(
                     "UPDATE blogger_migration_requests SET state='FAILED',failure_code=?,updated_at=? "
                     "WHERE request_id=? AND state='REQUESTED'",
@@ -5321,9 +5422,7 @@ class ControlLedger:
         quarantine_receipt_json = value.pop("quarantine_receipt_json")
         value["import_receipt"] = json.loads(import_receipt_json) if import_receipt_json else None
         value["checkpoint_receipt"] = json.loads(checkpoint_receipt_json) if checkpoint_receipt_json else None
-        value["quarantine_receipt"] = (
-            json.loads(quarantine_receipt_json) if quarantine_receipt_json else None
-        )
+        value["quarantine_receipt"] = json.loads(quarantine_receipt_json) if quarantine_receipt_json else None
         if value["claimed_epoch"] is not None:
             value["claimed_epoch"] = int(value["claimed_epoch"])
         return value
@@ -5354,7 +5453,10 @@ class ControlLedger:
                 "SELECT * FROM embedding_production_requests WHERE request_id=?", (request_id,)
             ).fetchone()
             if row is None or (
-                row["operation_id"], row["idempotency_key_sha256"], row["request_sha256"], row["request_json"]
+                row["operation_id"],
+                row["idempotency_key_sha256"],
+                row["request_sha256"],
+                row["request_json"],
             ) != (operation_id, idempotency_key_sha256, request_sha256, request_json):
                 raise IdempotencyConflict("embedding request identity was reused for different metadata")
             return self._embedding_request_from_row(row), bool(changed)
@@ -5532,9 +5634,7 @@ class ControlLedger:
             ).fetchone()
         return self._embedding_request_from_row(row) if row else None
 
-    def reconcile_abandoned_embedding_production_request(
-        self, request_id: str
-    ) -> dict[str, Any] | None:
+    def reconcile_abandoned_embedding_production_request(self, request_id: str) -> dict[str, Any] | None:
         """Fail a claim only after its exact runtime is durably terminal."""
 
         with self._transaction() as connection:

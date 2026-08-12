@@ -198,6 +198,19 @@ class ControlLedgerCheckpointRegistry:
 
     def add_candidate(self, manifest: CheckpointManifest) -> None:
         manifest.validate()
+        existing = self.ledger.checkpoint_candidate(str(manifest.checkpoint_id))
+        if existing is not None:
+            if (
+                existing["operation_id"] != self.operation_id
+                or existing["dataset_ref"] != self.dataset_ref
+                or existing["manifest_sha256"] != manifest.manifest_sha256
+                or existing["source_checkpoint_id"]
+                != (str(manifest.parent_checkpoint_id) if manifest.parent_checkpoint_id else None)
+                or existing["master_instance_id"] != str(manifest.master_instance_id)
+                or int(existing["epoch"]) != manifest.epoch
+            ):
+                raise ValueError("candidate replay differs from its immutable identity")
+            return
         initial = self.head
         if manifest.parent_checkpoint_id != initial.current:
             raise ValueError("candidate parent is not current durable HEAD")
