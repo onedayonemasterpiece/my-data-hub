@@ -78,7 +78,7 @@ REVOKE INSERT, UPDATE, DELETE ON hub.canonical_state FROM mdh_mcp_reader, mdh_mc
 GRANT USAGE ON SCHEMA hub, integration, sync TO mdh_canonical_committer;
 GRANT SELECT ON hub.canonical_state, integration.batch, integration.batch_payload,
     integration.data_product, integration.daily_statistic, integration.watermark,
-    integration.quarantine, integration.connector_durability,
+    integration.quarantine, integration.receipt, integration.connector_durability,
     sync.external_outbox TO mdh_canonical_committer;
 GRANT UPDATE (status, committed_at) ON integration.batch TO mdh_canonical_committer;
 GRANT UPDATE (

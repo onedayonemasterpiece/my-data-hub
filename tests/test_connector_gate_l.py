@@ -37,6 +37,7 @@ def test_durability_schema_and_example_match_runtime_contract() -> None:
 def test_connector_durability_grants_do_not_expand_mcp_reader() -> None:
     roles = (ROOT / "sql/admin/role_contract.sql").read_text()
     assert "integration.receipt, integration.connector_durability TO mdh_connector_intake" in roles
+    assert "integration.quarantine, integration.receipt, integration.connector_durability" in roles
     reader_grant = roles.split("GRANT SELECT ON integration.connector", 2)[-1].split(
         "TO mdh_mcp_reader", 1
     )[0]
