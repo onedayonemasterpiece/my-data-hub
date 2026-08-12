@@ -1175,6 +1175,16 @@ class KaggleProviderAdapter:
             raise KagglePolicyError("pending worker attestation requires a disposable protected notebook")
         return self._push_private_notebook(pending_runtime_attestation=True, **kwargs)
 
+    def push_private_dependency_smoke_notebook(self, **kwargs: Any) -> NotebookMutationResult:
+        """Push the one disposable protected, private, offline dependency smoke."""
+        if (
+            kwargs.get("control_class") is not ControlClass.ORCHESTRATOR_PROTECTED
+            or kwargs.get("disposable") is not True
+            or kwargs.get("enable_internet") is not False
+        ):
+            raise KagglePolicyError("dependency smoke requires a disposable protected offline notebook")
+        return self._push_private_notebook(pending_runtime_attestation=True, **kwargs)
+
     def _push_private_notebook(
         self,
         *,

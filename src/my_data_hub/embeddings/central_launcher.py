@@ -74,6 +74,8 @@ class EmbeddingWorkerLaunchConfig:
     callback_url: str
     runtime_python_series: str = "3.12"
     runtime_image_source_commit: str = ""
+    dependency_manifest_sha256: str = ""
+    dependency_smoke_receipt: bytes = b""
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +201,16 @@ class CentralEmbeddingWorkerLauncher:
             },
         }
         files["execution-pins.json"] = canonical_json_bytes(pins)
+        if self.config.dependency_manifest_sha256:
+            if not self.config.dependency_smoke_receipt:
+                raise ValueError("verified embedding dependency smoke receipt is required")
+            smoke_sha = hashlib.sha256(self.config.dependency_smoke_receipt).hexdigest()
+            pins["immutable_asset_sha256s"].update({
+                "embedding_dependency_manifest_sha256": self.config.dependency_manifest_sha256,
+                "embedding_dependency_smoke_receipt_sha256": smoke_sha,
+            })
+            files["execution-pins.json"] = canonical_json_bytes(pins)
+            files["embedding-dependency-smoke-receipt.json"] = self.config.dependency_smoke_receipt
         if secret_path is not None and (saved is None or saved.get("direct_access") is None):
             self._write_secret(secret_path, files["embedding-worker.json"])
             self._states[metadata.task_run_id].update({
@@ -519,6 +531,11 @@ class CentralEmbeddingWorkerLauncher:
             f'os.environ["MY_DATA_HUB_KAGGLE_RUNTIME_SOURCE_COMMIT"]={self.config.runtime_image_source_commit!r}',
             'os.environ["MY_DATA_HUB_NOTEBOOK_IS_PRIVATE"]="true"',
             'os.environ["MY_DATA_HUB_INPUT_DATASET_VERSIONS_JSON"]=json.dumps(r["input_dataset_versions"])',
+            *( [
+                f'os.environ["MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_SHA256"]={self.config.dependency_manifest_sha256!r}',
+                f'os.environ["MY_DATA_HUB_EMBEDDING_DEPENDENCY_SMOKE_RECEIPT_PATH"]=str(pathlib.Path({status_mount!r},"embedding-dependency-smoke-receipt.json"))',
+                f'os.environ["MY_DATA_HUB_EMBEDDING_DEPENDENCY_SMOKE_RECEIPT_SHA256"]={hashlib.sha256(self.config.dependency_smoke_receipt).hexdigest()!r}',
+            ] if self.config.dependency_manifest_sha256 else []),
             'asset="e5-worker.json" if "multilingual-e5" in m["model_exact_id"] else "bge-worker.json"',
             f'n=json.loads(pathlib.Path({runtime_mount!r},asset).read_text())',
             'for c in n["cells"]:',

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from my_data_hub.embeddings.dependency_smoke import EmbeddingDependencySmokeReceipt
 from my_data_hub.embeddings.production_assembly import build_embedding_production_assembly
+from my_data_hub.hashing import canonical_json_bytes
 
 
 def test_embedding_production_assembly_absent_is_fail_closed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -41,16 +44,29 @@ def test_opt_in_assembles_only_with_exact_numeric_asset_claim(monkeypatch, tmp_p
         "MY_DATA_HUB_MASTER_TUNNEL_KNOWN_HOSTS_PATH": str(known),
         "MY_DATA_HUB_EMBEDDING_RUNTIME_PYTHON_SERIES": "3.12",
         "MY_DATA_HUB_EMBEDDING_RUNTIME_SOURCE_COMMIT": "f" * 40,
+        "MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_SHA256": "c" * 64,
     }
     for key, value in values.items():
         monkeypatch.setenv(key, value)
+    receipt_path = tmp_path / "smoke.json"
+    receipt_path.write_bytes(canonical_json_bytes(EmbeddingDependencySmokeReceipt(
+        observed_at=datetime.now(UTC), provider_run_ref="owner/smoke/1",
+        observation_sha256="d" * 64, image_identity=values["MY_DATA_HUB_EMBEDDING_RUNTIME_IMAGE_IDENTITY"],
+        image_source_commit="f" * 40, python_version="3.12.3",
+        dependency_manifest_sha256="c" * 64, project_wheel_sha256="b" * 64,
+        wheel_sha256s={"dependency.whl": "e" * 64}, imports=["psycopg"],
+        psycopg_implementation="binary", distributions={"psycopg": "3.2"},
+    ).model_dump(mode="json")))
+    receipt_path.chmod(0o600)
     assembled = build_embedding_production_assembly(
         object(), broker=object(), master_instance=lambda: "instance",
         runtime_dataset_exact_ref="owner/master-assets/7",
+        dependency_smoke_receipt_path=receipt_path,
     )
     assert assembled is not None
     with pytest.raises(ValueError, match="exact numeric"):
         build_embedding_production_assembly(
             object(), broker=object(), master_instance=lambda: "instance",
             runtime_dataset_exact_ref="owner/master-assets",
+            dependency_smoke_receipt_path=receipt_path,
         )

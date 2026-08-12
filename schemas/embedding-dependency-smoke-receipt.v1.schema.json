@@ -1,0 +1,115 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "dependency_manifest_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Dependency Manifest Sha256",
+      "type": "string"
+    },
+    "distributions": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Distributions",
+      "type": "object"
+    },
+    "image_identity": {
+      "title": "Image Identity",
+      "type": "string"
+    },
+    "image_source_commit": {
+      "pattern": "^[a-f0-9]{40}$",
+      "title": "Image Source Commit",
+      "type": "string"
+    },
+    "imports": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Imports",
+      "type": "array"
+    },
+    "internet_enabled": {
+      "const": false,
+      "default": false,
+      "title": "Internet Enabled",
+      "type": "boolean"
+    },
+    "notebook_private": {
+      "const": true,
+      "default": true,
+      "title": "Notebook Private",
+      "type": "boolean"
+    },
+    "observation_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Observation Sha256",
+      "type": "string"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "project_wheel_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Project Wheel Sha256",
+      "type": "string"
+    },
+    "provider_run_ref": {
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+      "title": "Provider Run Ref",
+      "type": "string"
+    },
+    "psycopg_implementation": {
+      "const": "binary",
+      "title": "Psycopg Implementation",
+      "type": "string"
+    },
+    "python_version": {
+      "title": "Python Version",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "my-data-hub-embedding-dependency-smoke-receipt.v1",
+      "default": "my-data-hub-embedding-dependency-smoke-receipt.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "status": {
+      "const": "pass",
+      "default": "pass",
+      "title": "Status",
+      "type": "string"
+    },
+    "verified_by_central_adapter": {
+      "const": true,
+      "default": true,
+      "title": "Verified By Central Adapter",
+      "type": "boolean"
+    },
+    "wheel_sha256s": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Wheel Sha256S",
+      "type": "object"
+    }
+  },
+  "required": [
+    "observed_at",
+    "provider_run_ref",
+    "observation_sha256",
+    "image_identity",
+    "image_source_commit",
+    "python_version",
+    "dependency_manifest_sha256",
+    "project_wheel_sha256",
+    "wheel_sha256s",
+    "imports",
+    "psycopg_implementation",
+    "distributions"
+  ],
+  "title": "EmbeddingDependencySmokeReceipt",
+  "type": "object"
+}

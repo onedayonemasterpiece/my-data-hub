@@ -18,11 +18,13 @@ from my_data_hub.embeddings.central_launcher import (
     EmbeddingWorkerLaunchConfig,
 )
 from my_data_hub.embeddings.credential_authority import DirectoryEmbeddingCredentialAuthority
+from my_data_hub.embeddings.dependency_smoke import EmbeddingDependencySmokeReceipt
 from my_data_hub.embeddings.direct_access_factory import (
     ExistingEpochEmbeddingAccessFactory,
     WorkerReachableTunnel,
 )
 from my_data_hub.embeddings.direct_plane import EmbeddingLaunchMetadata
+from my_data_hub.hashing import canonical_json_bytes
 
 
 @dataclass(slots=True)
@@ -73,7 +75,7 @@ class SSHEmbeddingAccessFactory:
 
 def build_embedding_production_assembly(
     adapter: object, *, broker: Any = None, master_instance: Callable[[], str] | None = None,
-    runtime_dataset_exact_ref: str | None = None,
+    runtime_dataset_exact_ref: str | None = None, dependency_smoke_receipt_path: Path | None = None,
 ) -> tuple[
     CentralEmbeddingWorkerLauncher, DirectoryEmbeddingCredentialAuthority
 ] | None:
@@ -93,10 +95,29 @@ def build_embedding_production_assembly(
         "MY_DATA_HUB_EMBEDDING_RUNTIME_SOURCE_COMMIT",
     )
     values = {name: os.getenv(name, "").strip() for name in names}
-    if not all(values.values()) or runtime_dataset_exact_ref is None:
+    if not all(values.values()) or runtime_dataset_exact_ref is None or dependency_smoke_receipt_path is None:
         raise ValueError("embedding production assembly environment is incomplete")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*", runtime_dataset_exact_ref):
         raise ValueError("embedding runtime Dataset claim is not exact numeric")
+    if (
+        dependency_smoke_receipt_path.is_symlink()
+        or not dependency_smoke_receipt_path.is_file()
+        or dependency_smoke_receipt_path.stat().st_mode & 0o077
+    ):
+        raise ValueError("embedding dependency smoke receipt is unavailable or unsafe")
+    smoke_body = dependency_smoke_receipt_path.read_bytes()
+    smoke = EmbeddingDependencySmokeReceipt.model_validate_json(smoke_body)
+    if smoke_body != canonical_json_bytes(smoke.model_dump(mode="json")):
+        raise ValueError("embedding dependency smoke receipt is not canonical")
+    dependency_manifest_sha256 = os.getenv("MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_SHA256", "")
+    if (
+        smoke.image_identity != values[names[4]]
+        or smoke.image_source_commit != values[names[11]]
+        or smoke.project_wheel_sha256 != values[names[6]]
+        or smoke.dependency_manifest_sha256 != dependency_manifest_sha256
+        or not smoke.python_version.startswith(values[names[10]] + ".")
+    ):
+        raise ValueError("embedding dependency smoke receipt differs from runtime assembly")
     authority = DirectoryEmbeddingCredentialAuthority(Path(values[names[0]]))
     tunnel = WorkerReachableTunnel(
         values[names[1]], int(values[names[2]]), Path(values[names[3]])
@@ -114,6 +135,8 @@ def build_embedding_production_assembly(
             runtime_image_identity=values[names[4]], wheel_relative_path=values[names[5]],
             wheel_sha256=values[names[6]], callback_url=values[names[7]],
             runtime_python_series=values[names[10]], runtime_image_source_commit=values[names[11]],
+            dependency_manifest_sha256=dependency_manifest_sha256,
+            dependency_smoke_receipt=smoke_body,
         ),
         journal_path=Path(values[names[0]]) / "launcher-journal.json",
     )

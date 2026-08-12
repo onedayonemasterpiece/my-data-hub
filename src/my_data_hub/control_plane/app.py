@@ -54,6 +54,7 @@ from my_data_hub.embeddings.credential_authority import (
     DirectoryEmbeddingCredentialAuthority,
     EmbeddingCredentialRegistration,
 )
+from my_data_hub.embeddings.dependency_smoke import CentralDependencySmoke
 from my_data_hub.embeddings.direct_plane import EmbeddingLaunchMetadata
 from my_data_hub.embeddings.master_stage import execute_embedding_production_stage
 from my_data_hub.embeddings.production import (
@@ -391,22 +392,8 @@ def create_app(
             # claim; never assemble a mixed-release worker runtime.
             return None
         return claim
-    if embedding_direct_plane_launcher is None and embedding_credential_authority is None and provider_adapter:
-        asset_settings = runtime.master_runtime
-        asset_claim = _exact_master_asset_claim(asset_settings)
-        exact_asset_ref = (
-            f"{asset_claim['provider_ref']}/{asset_claim['provider_version']}"
-            if asset_claim is not None else None
-        )
-        embedding_assembly = (
-            build_embedding_production_assembly(
-                provider_adapter, broker=tunnel_certificate_broker,
-                master_instance=lambda: str(control_ledger.resolve_service("postgres-master").master_instance_id),
-                runtime_dataset_exact_ref=exact_asset_ref,
-            ) if exact_asset_ref is not None else None
-        )
-        if embedding_assembly is not None:
-            embedding_direct_plane_launcher, embedding_credential_authority = embedding_assembly
+    # Provider mutations are deferred to the lifespan reconciler; app
+    # construction remains side-effect free and embedding admission closed.
     if runtime.provider_gateway_enabled:
         if not operator_credential_enabled or provider_gateway is None:
             raise ControlPlaneConfigurationError("provider gateway requires the single authenticated control adapter")
@@ -536,12 +523,33 @@ def create_app(
                     claim = _exact_master_asset_claim(settings)
                     if claim is not None:
                         with suppress(Exception):
+                            exact_ref = f"{claim['provider_ref']}/{claim['provider_version']}"
+                            manifest_sha = os.getenv("MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_SHA256", "")
+                            smoke_path = None
+                            if manifest_sha:
+                                credential_dir = Path(os.environ["MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR"])
+                                smoke = CentralDependencySmoke(
+                                    adapter=provider_adapter, owner=os.environ["MY_DATA_HUB_KAGGLE_OWNER"],
+                                    runtime_dataset_exact_ref=exact_ref,
+                                    image_identity=os.environ["MY_DATA_HUB_EMBEDDING_RUNTIME_IMAGE_IDENTITY"],
+                                    image_source_commit=os.environ["MY_DATA_HUB_EMBEDDING_RUNTIME_SOURCE_COMMIT"],
+                                    project_wheel_sha256=os.environ["MY_DATA_HUB_EMBEDDING_WHEEL_SHA256"],
+                                    project_wheel_relative_path=os.environ["MY_DATA_HUB_EMBEDDING_WHEEL_RELATIVE_PATH"],
+                                    dependency_manifest_sha256=manifest_sha,
+                                    state_path=credential_dir / "dependency-smoke-state.json",
+                                    receipt_path=credential_dir / "dependency-smoke-receipt.json",
+                                )
+                                smoke_receipt = await asyncio.to_thread(smoke.run_once)
+                                if smoke_receipt is None:
+                                    raise RuntimeError("dependency smoke remains pending")
+                                smoke_path = smoke.receipt_path
                             assembled = build_embedding_production_assembly(
                                 provider_adapter, broker=tunnel_certificate_broker,
                                 master_instance=lambda: str(
                                     control_ledger.resolve_service("postgres-master").master_instance_id
                                 ),
-                                runtime_dataset_exact_ref=f"{claim['provider_ref']}/{claim['provider_version']}",
+                                runtime_dataset_exact_ref=exact_ref,
+                                dependency_smoke_receipt_path=smoke_path,
                             )
                             if assembled is not None:
                                 (

@@ -1335,3 +1335,36 @@ def test_private_dataset_proof_includes_unauthenticated_denial() -> None:
         client.prove_private_dataset_access(
             provider_ref="owner/private-proof", version=1, unauthenticated_probe=DeniedProbe(500)
         )
+
+
+def test_dependency_smoke_disposable_push_uses_exact_offline_image_contract() -> None:
+    client, api, journal = adapter()
+    run_id = uuid4()
+    source = f'TASK_RUN_ID = "{run_id}"\n'.encode()
+    intent = effect(
+        MutationAction.PUSH_NOTEBOOK,
+        "owner/dependency-smoke",
+        task_id=run_id,
+        arguments={
+            "task_run_id": str(run_id),
+            "source_sha256": hashlib.sha256(source).hexdigest(),
+            "dataset_sources": ("owner/runtime/12",),
+            "control_class": "orchestrator_protected",
+            "disposable": True,
+            "docker_image": TEST_RUNTIME_IMAGE,
+            "docker_image_pinning_type": "original",
+        },
+    )
+    result = client.push_private_dependency_smoke_notebook(
+        intent=intent, task_run_id=run_id, source=source, title="dependency-smoke",
+        code_file="smoke.py", kernel_type="script", language="python",
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED, disposable=True,
+        dataset_sources=("owner/runtime/12",), enable_internet=False,
+        docker_image=TEST_RUNTIME_IMAGE, docker_image_pinning_type="original",
+    )
+    metadata = api.kernel_metadata[result.run.provider_ref]
+    assert metadata["enable_internet"] is False and metadata["is_private"] is True
+    assert metadata["docker_image"] == TEST_RUNTIME_IMAGE
+    assert metadata["docker_image_pinning_type"] == "original"
+    assert metadata["dataset_sources"] == ["owner/runtime/12"]
+    assert len(journal.claims) == 1
