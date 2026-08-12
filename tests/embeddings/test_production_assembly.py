@@ -15,6 +15,7 @@ def test_embedding_production_assembly_absent_is_fail_closed(monkeypatch) -> Non
 
 
 def test_embedding_production_assembly_rejects_partial_environment(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED", "true")
     monkeypatch.setenv("MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR", str(tmp_path))
     with pytest.raises(ValueError, match="incomplete"):
         build_embedding_production_assembly(object())

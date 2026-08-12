@@ -75,17 +75,20 @@ def build_embedding_production_assembly(
 ) -> tuple[
     CentralEmbeddingWorkerLauncher, DirectoryEmbeddingCredentialAuthority
 ] | None:
+    enabled = os.getenv("MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED", "false").strip().lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return None
+    if enabled not in {"1", "true", "yes", "on"}:
+        raise ValueError("embedding worker enablement must be boolean")
     names = (
-        "MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR", "MY_DATA_HUB_EMBEDDING_WORKER_TUNNEL_HOST",
-        "MY_DATA_HUB_EMBEDDING_WORKER_TUNNEL_PORT", "MY_DATA_HUB_MASTER_TLS_CA_PATH",
+        "MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR", "MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_HOST",
+        "MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_PORT", "MY_DATA_HUB_MASTER_TLS_CA_PATH",
         "MY_DATA_HUB_EMBEDDING_RUNTIME_DATASET_EXACT_REF", "MY_DATA_HUB_EMBEDDING_RUNTIME_IMAGE_IDENTITY",
         "MY_DATA_HUB_EMBEDDING_WHEEL_RELATIVE_PATH", "MY_DATA_HUB_EMBEDDING_WHEEL_SHA256",
         "MY_DATA_HUB_CALLBACK_URL", "MY_DATA_HUB_KAGGLE_OWNER",
         "MY_DATA_HUB_MASTER_TUNNEL_KNOWN_HOSTS_PATH",
     )
     values = {name: os.getenv(name, "").strip() for name in names}
-    if not any(values.values()):
-        return None
     if not all(values.values()):
         raise ValueError("embedding production assembly environment is incomplete")
     authority = DirectoryEmbeddingCredentialAuthority(Path(values[names[0]]))

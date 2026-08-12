@@ -102,6 +102,7 @@ env_root="${MY_DATA_HUB_CONTROL_ENV_DIR:-$runtime_root/env}"
 secret_root="${MY_DATA_HUB_CONTROL_SECRET_DIR:-$runtime_root/secrets}"
 ledger_dir="${MY_DATA_HUB_CONTROL_LEDGER_DIR:-$runtime_root/control-ledger}"
 session_dir="${MY_DATA_HUB_MASTER_SESSION_DIR:-$runtime_root/master-sessions}"
+embedding_credential_dir="${MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR:-$runtime_root/embedding-credentials}"
 asset_dir="${MY_DATA_HUB_MASTER_ASSET_DIR:-$runtime_root/master-assets}"
 tls_dir="${MY_DATA_HUB_MASTER_TLS_DIR:-$runtime_root/master-tls}"
 tls_ca_file="$tls_dir/ca.pem"
@@ -159,7 +160,8 @@ for path_value in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$asse
     *[$'\n\r\t ']* ) echo "deployment inputs may not contain whitespace" >&2; exit 2 ;;
   esac
 done
-mkdir -p "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$tls_dir" "$HOME/.config/systemd/user"
+mkdir -p "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$embedding_credential_dir" "$tls_dir" "$HOME/.config/systemd/user"
+chmod 700 "$embedding_credential_dir"
 for private_dir in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$tls_dir"; do
   [[ ! -L "$private_dir" ]] || { echo "private runtime directories may not be symbolic links" >&2; exit 2; }
 done
@@ -495,6 +497,8 @@ MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR=$tunnel_broker_socket_dir
 MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE=$operator_gate_key
 MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE=$control_gateway_token
 MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE=$checkpoint_upload_broker_key
+MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR=$embedding_credential_dir
+MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED=${MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED:-false}
 ENV
 chmod 600 "$compose_env"
 

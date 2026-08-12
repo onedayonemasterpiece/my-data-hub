@@ -475,6 +475,10 @@ def create_app(
                         await asyncio.to_thread(checkpoint_upload_broker.reconcile_pending_once)
                         # The durable request remains PENDING; provider details
                         # never enter logs/responses and bounded retry resumes.
+                launcher = app.state.embedding_direct_plane_launcher
+                if launcher is not None:
+                    with suppress(Exception):
+                        await asyncio.to_thread(launcher.reconcile_timeouts)
                 try:
                     await asyncio.wait_for(stopped.wait(), timeout=5.0)
                 except TimeoutError:

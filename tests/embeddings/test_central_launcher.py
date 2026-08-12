@@ -167,3 +167,89 @@ def test_restart_loads_secret_free_journal_and_cleans_without_relaunch(tmp_path)
     restarted = CentralEmbeddingWorkerLauncher(adapter, Access(), config, clock=lambda: now, journal_path=journal)
     restarted.cleanup(receipt.task_run_id)
     assert len(adapter.runs) == 1 and len(revoked) == 1
+
+
+def test_journal_records_every_effect_boundary(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    adapter = Adapter()
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    class Access:
+        def __call__(self, *_args):  # type: ignore[no-untyped-def]
+            return EmbeddingWorkerDirectAccess(
+                database_url="postgresql://w:s@d/h", tls_ca_pem="ca",
+                expires_at=now + timedelta(minutes=5), epoch=7, tunnel_endpoint="d:1",
+                credential_id=UUID("33333333-3333-4333-8333-333333333333"))
+        def revoke(self, *_args, **_kwargs): return None  # type: ignore[no-untyped-def]
+    launcher = CentralEmbeddingWorkerLauncher(
+        adapter, Access(), EmbeddingWorkerLaunchConfig(
+            "owner", "owner/runtime/12", "image", "wheel", "e"*64, "https://c/e"),
+        clock=lambda: now, journal_path=tmp_path / "journal.json")
+    receipt = launcher.launch(_metadata())
+    assert launcher._states[receipt.task_run_id]["state"] == "LAUNCHED"
+    launcher.cleanup(receipt.task_run_id)
+    assert launcher._states[receipt.task_run_id]["state"] == "COMPLETE"
+
+
+def test_restart_reuses_exact_capability_after_status_response_loss(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    adapter = Adapter()
+    original = adapter.create_private_dataset
+    calls = 0
+    def ambiguous(**kwargs):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        result = original(**kwargs)
+        if calls == 1:
+            raise RuntimeError("lost response")
+        return result
+    adapter.create_private_dataset = ambiguous  # type: ignore[method-assign]
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    class Access:
+        calls = 0
+        def __call__(self, *_args):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            return EmbeddingWorkerDirectAccess(
+                database_url="postgresql://w:s@d/h", tls_ca_pem="ca", expires_at=now+timedelta(minutes=5),
+                epoch=7, tunnel_endpoint="d:1", credential_id=UUID("33333333-3333-4333-8333-333333333333"))
+    access = Access()
+    journal = tmp_path / "journal.json"
+    config = EmbeddingWorkerLaunchConfig("owner", "owner/runtime/12", "image", "wheel", "e"*64, "https://c/e")
+    with pytest.raises(RuntimeError, match="lost response"):
+        CentralEmbeddingWorkerLauncher(
+            adapter, access, config, clock=lambda: now, journal_path=journal
+        ).launch(_metadata())
+    restarted = CentralEmbeddingWorkerLauncher(adapter, access, config, clock=lambda: now, journal_path=journal)
+    restarted.launch(_metadata())
+    assert access.calls == 1
+    assert adapter.datasets[0]["files"] == adapter.datasets[1]["files"]
+
+
+def test_restart_replays_push_response_loss_without_new_access(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    adapter = Adapter()
+    original = adapter.push_private_notebook_pending_runtime_attestation
+    calls = 0
+    def ambiguous(**kwargs):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        result = original(**kwargs)
+        if calls == 1:
+            raise RuntimeError("lost push response")
+        return result
+    adapter.push_private_notebook_pending_runtime_attestation = ambiguous  # type: ignore[method-assign]
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    class Access:
+        calls = 0
+        def __call__(self, *_args):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            return EmbeddingWorkerDirectAccess(
+                database_url="postgresql://w:s@d/h", tls_ca_pem="ca", expires_at=now+timedelta(minutes=5),
+                epoch=7, tunnel_endpoint="d:1", credential_id=UUID("33333333-3333-4333-8333-333333333333"))
+    access = Access()
+    journal = tmp_path / "journal.json"
+    config = EmbeddingWorkerLaunchConfig("owner", "owner/runtime/12", "image", "wheel", "e"*64, "https://c/e")
+    with pytest.raises(RuntimeError, match="lost push"):
+        CentralEmbeddingWorkerLauncher(
+            adapter, access, config, clock=lambda: now, journal_path=journal
+        ).launch(_metadata())
+    CentralEmbeddingWorkerLauncher(
+        adapter, access, config, clock=lambda: now, journal_path=journal
+    ).launch(_metadata())
+    assert access.calls == 1 and calls == 2
