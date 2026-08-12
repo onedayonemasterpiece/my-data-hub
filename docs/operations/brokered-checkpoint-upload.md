@@ -24,6 +24,22 @@ lifecycle adapter and the active, epoch-fenced master:
    current checkpoint becomes previous. Any mismatch leaves HEAD unchanged and marks the
    candidate failed or quarantined.
 
+The runtime coordinator registers the immutable candidate before requesting its first
+blob grant. Publication status exposes only completed file name/size/SHA-256 metadata;
+after a restart the Notebook skips an exact completed file instead of trying to reissue
+its one-time signed URL.
+
+## Task-bound acceptance
+
+The FM05/FM14/FM15 evidence Notebook uses the same metadata client and central adapter.
+Its authority is checkpoint-bound and derives from the persisted acceptance launch,
+source-attested provider run, fixed deployment config and expiry. FM05 shares the normal
+checkpoint Dataset and follows exact-version verifier→readback/restore proof→CAS
+promotion ordering. FM14/FM15 create disposable private Datasets and never promote HEAD;
+their expected rejection codes are terminal acceptance evidence rather than a successful
+normal publication. Typed verifier evidence is bounded and secret-scanned before it is
+retained in the private ledger/public metadata projection.
+
 ## Security boundaries
 
 - `KAGGLE_USERNAME`, `KAGGLE_KEY`, token files, Kaggle CLI and kagglehub are forbidden in

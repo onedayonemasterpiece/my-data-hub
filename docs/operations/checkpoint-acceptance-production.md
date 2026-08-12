@@ -148,15 +148,23 @@ The deployment contract requires `brokered_checkpoint_upload: true` and rejects
 the former `kaggle_secret_bindings` shape. The rendered source contains no
 `kaggle_secrets`, `KAGGLE_USERNAME`, `KAGGLE_KEY`, or `KAGGLE_API_TOKEN`.
 
-The remaining FM05/FM14/FM15 integration must use the same brokered direct-upload
-control service as the normal master: metadata goes to control, the one central
-adapter creates per-file signed PUT capabilities and retains blob tokens, and
-checkpoint bytes flow Notebook→Kaggle. Until that task-owned broker wiring is
-complete, production `ControlCheckpointAcceptanceLauncher` durably returns
-`CHECKPOINT_ACCEPTANCE_BROKERED_UPLOAD_NOT_ASSEMBLED` before creating its status
-Dataset or evidence Notebook. The Notebook-side factory also fails closed and
-never constructs an account-authenticated adapter. Injected fake-adapter tests
-remain contract-only and can never emit live evidence.
+FM05/FM14/FM15 use the same brokered direct-upload control service as the normal
+master: metadata goes to control, the one central adapter creates per-file signed
+PUT capabilities and retains blob tokens, and checkpoint bytes flow
+Notebook→Kaggle. The task-bound authority comes only from the persisted launch,
+source-attested evidence run, fixed scenario/config and absolute expiry; it does
+not impersonate a master epoch. The Notebook-side factory never constructs an
+account-authenticated adapter. Injected fake-adapter tests remain contract-only
+and can never emit live evidence.
+
+FM05 must name the configured normal checkpoint Dataset and advances its exact
+next version only after the central independent verifier passes. FM14 and FM15
+remain disposable Datasets and leave HEAD unchanged. FM14 permits only the fixed
+same-size `physical/base.tar.gz` hash mismatch. FM15 launches its fixed verifier
+through the central adapter and validates the bounded output of the exact failed
+run. Broker publication status retains typed verifier run/source/output/receipt
+hashes and exact completed-file metadata so a restarted evidence Notebook skips
+already uploaded files without asking for another signed URL.
 
 The fixed local journal is
 `<working_directory>/checkpoint-acceptance-control.sqlite3`, mode `0600`. A
