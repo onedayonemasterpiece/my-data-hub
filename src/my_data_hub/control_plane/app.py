@@ -250,6 +250,7 @@ class ControlPlaneSettings:
     master_tls_ca_path: Path | None = None
     operator_credentials_enabled: bool = False
     provider_gateway_enabled: bool = False
+    provider_only_mode: bool = False
     acceptance_scenarios_enabled: bool = False
     connector_runtime_enabled: bool = False
 
@@ -263,6 +264,16 @@ class ControlPlaneSettings:
         if self.acceptance_scenarios_enabled and not self.provider_gateway_enabled:
             raise ControlPlaneConfigurationError(
                 "acceptance scenarios require the authenticated single control gateway"
+            )
+        if self.provider_only_mode and (
+            not self.provider_gateway_enabled
+            or not self.operator_credentials_enabled
+            or self.master_runtime is not None
+            or self.acceptance_scenarios_enabled
+            or self.connector_runtime_enabled
+        ):
+            raise ControlPlaneConfigurationError(
+                "provider-only control requires only the authenticated provider gateway"
             )
 
     @classmethod
@@ -291,6 +302,7 @@ class ControlPlaneSettings:
             ).expanduser(),
             operator_credentials_enabled=_boolean("MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED"),
             provider_gateway_enabled=_boolean("MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED"),
+            provider_only_mode=_boolean("MY_DATA_HUB_PROVIDER_ONLY_MODE"),
             acceptance_scenarios_enabled=_boolean("MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED"),
             connector_runtime_enabled=_boolean("MY_DATA_HUB_CONNECTOR_RUNTIME_ENABLED"),
         )
@@ -341,6 +353,7 @@ def create_app(
                 tunnel_certificate_broker if isinstance(tunnel_certificate_broker, TunnelBrokerClient) else None
             ),
             tunnel_listen_port=tunnel_listen_port,
+            provider_only=runtime.provider_only_mode,
         )
         master_runtime = production.master
         provider_status = production.provider_status
@@ -847,7 +860,7 @@ def create_app(
 
     def snapshot() -> dict[str, Any]:
         master = resolver.resolve_master(_system_identity())
-        return {
+        result = {
             "control_plane_ready": True,
             "data_plane_ready": master.state.value == "ACTIVE",
             "master_state": master.state.value,
@@ -858,6 +871,12 @@ def create_app(
             "production_publication": runtime.production_publish_enabled,
             "remote_mcp_writes": runtime.remote_mcp_writes_enabled,
         }
+        if runtime.provider_only_mode:
+            result.update(
+                provider_only_mode=True,
+                provider_gateway_ready=app.state.provider_gateway is not None,
+            )
+        return result
 
     def _system_identity():  # type: ignore[no-untyped-def]
         from my_data_hub.mcp.oauth import AccessIdentity
@@ -887,26 +906,43 @@ def create_app(
         return {"ok": True, "control_boot_id": str(app.state.control_boot_id), **snapshot()}
 
     if runtime.provider_gateway_enabled:
-        provider_tools = frozenset(
-            {
-                "provider.resources.create",
-                "provider.resources.version",
-                "provider.resources.run",
-                "provider.resources.read",
-                "provider.resources.list",
-                "provider.resources.download",
-                "provider.inventory.live",
-                "provider.resources.delete",
-                "provider.acceptance.dataset.lifecycle",
-                "provider.acceptance.notebook.lifecycle",
-                "provider.acceptance.claim.get",
-                "provider.acceptance.claim.cleanup",
-                *(
-                    {"acceptance.scenario.request", "acceptance.scenario.status"}
-                    if runtime.acceptance_scenarios_enabled
-                    else set()
-                ),
-            }
+        provider_tools = (
+            frozenset(
+                {
+                    "provider.resources.create",
+                    "provider.resources.version",
+                    "provider.resources.run",
+                    "provider.resources.read",
+                    "provider.resources.list",
+                    "provider.resources.download",
+                    "provider.inventory.live",
+                    "provider.resources.delete",
+                    "provider.acceptance.claim.get",
+                    "provider.acceptance.claim.cleanup",
+                }
+            )
+            if runtime.provider_only_mode
+            else frozenset(
+                {
+                    "provider.resources.create",
+                    "provider.resources.version",
+                    "provider.resources.run",
+                    "provider.resources.read",
+                    "provider.resources.list",
+                    "provider.resources.download",
+                    "provider.inventory.live",
+                    "provider.resources.delete",
+                    "provider.acceptance.dataset.lifecycle",
+                    "provider.acceptance.notebook.lifecycle",
+                    "provider.acceptance.claim.get",
+                    "provider.acceptance.claim.cleanup",
+                    *(
+                        {"acceptance.scenario.request", "acceptance.scenario.status"}
+                        if runtime.acceptance_scenarios_enabled
+                        else set()
+                    ),
+                }
+            )
         )
 
         @app.post("/internal/mcp-provider/invoke")

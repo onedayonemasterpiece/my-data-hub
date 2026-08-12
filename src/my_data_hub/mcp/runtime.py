@@ -8,7 +8,11 @@ status and cold-start requests remain useful while ACTIVE data reads fail closed
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
+import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,11 +26,18 @@ from my_data_hub.control_plane.adapters import (
 )
 from my_data_hub.control_plane.app import assert_no_database_environment
 from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.hashing import canonical_json_bytes
+from my_data_hub.mcp.contracts import MasterSnapshot, MasterState, WriteGate, WritePermit
 from my_data_hub.mcp.control_gateway import (
     AuthenticatedProviderControlClient,
     SplitControlPlaneReader,
 )
-from my_data_hub.mcp.oauth import OAuthBearerValidator, OAuthValidationPolicy, VerifiedTokenDecoder
+from my_data_hub.mcp.oauth import (
+    AccessIdentity,
+    OAuthBearerValidator,
+    OAuthValidationPolicy,
+    VerifiedTokenDecoder,
+)
 from my_data_hub.mcp.oauth_jwt import JwksJwtDecoder
 from my_data_hub.mcp.postgres_broker import (
     DirectoryEpochCredentialSource,
@@ -44,12 +55,108 @@ class RemoteMCPRuntime:
     app: object
 
 
+_PROVIDER_ONLY_MUTATIONS = frozenset(
+    {
+        "provider.resources.create",
+        "provider.resources.version",
+        "provider.resources.run",
+        "provider.resources.delete",
+        "provider.acceptance.claim.cleanup",
+    }
+)
+
+
+class ProviderOnlyWriteGate:
+    """Authorize private provider effects without inventing canonical DB durability."""
+
+    def __init__(self, signing_secret: bytes, *, clock=time.time) -> None:  # type: ignore[no-untyped-def]
+        if len(signing_secret) < 32:
+            raise ValueError("provider-only write-gate secret must contain at least 32 bytes")
+        self._secret = signing_secret
+        self._clock = clock
+
+    def authorize_write(
+        self,
+        *,
+        principal: AccessIdentity,
+        tool: str,
+        arguments: Mapping[str, object],
+        master: MasterSnapshot,
+    ) -> WritePermit:
+        if tool not in _PROVIDER_ONLY_MUTATIONS or "provider:write" not in principal.scopes:
+            raise PermissionError("provider-only write gate rejects this tool or scope")
+        if master.state is not MasterState.ABSENT:
+            raise PermissionError("provider-only write gate requires canonical master ABSENT")
+        resource_class = (
+            "mcp_managed"
+            if tool == "provider.acceptance.claim.cleanup"
+            else str(arguments.get("control_class", ""))
+        )
+        if resource_class not in {"mcp_managed", "mcp_exchange"}:
+            raise PermissionError("provider-only write gate accepts only MCP-controlled resources")
+        if tool != "provider.acceptance.claim.cleanup" and arguments.get("private") is not True:
+            raise PermissionError("provider-only write gate accepts only private resources")
+        expires_at = int(self._clock()) + 120
+        payload = {
+            "tool": tool,
+            "principal": principal.subject,
+            "client_id": principal.client_id,
+            "arguments_sha256": hashlib.sha256(
+                canonical_json_bytes(dict(arguments))
+            ).hexdigest(),
+            "expires_at": expires_at,
+        }
+        permit_id = hmac.new(
+            self._secret,
+            canonical_json_bytes(payload),
+            hashlib.sha256,
+        ).hexdigest()
+        return WritePermit(
+            permit_id=permit_id,
+            tool=tool,
+            principal=principal.subject,
+            client_id=principal.client_id,
+            master_epoch=0,
+            canonical_revision=0,
+            expires_at=expires_at,
+            preview_bound=True,
+            checkpoint_lifecycle_bound=False,
+            pre_change_checkpoint_verified=False,
+            allowed_resource_class=resource_class,
+            private_resource_only=True,
+            canonical_data_independent=True,
+        )
+
+    def record_write_result(
+        self, *, permit: WritePermit, result: Mapping[str, object]
+    ) -> Mapping[str, object]:
+        del permit, result
+        raise PermissionError("provider-only gate has no canonical write result path")
+
+    def reconciliation_request(
+        self,
+        *,
+        principal: AccessIdentity,
+        master: MasterSnapshot,
+        operation_id: str | None = None,
+        arguments: Mapping[str, object] | None = None,
+    ) -> None:
+        del principal, master, operation_id, arguments
+        return None
+
+    def record_reconciled_write(
+        self, *, operation_id: str, receipt: Mapping[str, object]
+    ) -> Mapping[str, object]:
+        del operation_id, receipt
+        raise PermissionError("provider-only gate has no canonical reconciliation path")
+
+
 def build_remote_runtime(
     *,
     settings: Settings | None = None,
     ledger: ControlLedger | None = None,
     decoder: VerifiedTokenDecoder | None = None,
-    write_gate: LedgerWriteGate | None = None,
+    write_gate: WriteGate | None = None,
     provider_control: object | None = None,
     sql_policy: BoundedSQLPolicy | None = None,
 ) -> RemoteMCPRuntime:
@@ -67,8 +174,13 @@ def build_remote_runtime(
         Path(os.getenv("MY_DATA_HUB_CONTROL_LEDGER_PATH", "/state/control.sqlite3")).expanduser()
     )
     if runtime_settings.mcp_write_enabled:
-        if not runtime_settings.mcp_operator_profile_enabled:
-            raise ConfigurationError("remote MCP writes require the explicit owner/operator profile")
+        if not (
+            runtime_settings.mcp_operator_profile_enabled
+            or runtime_settings.mcp_provider_profile_enabled
+        ):
+            raise ConfigurationError(
+                "remote MCP writes require an explicit owner/operator or provider-only profile"
+            )
         if write_gate is None:
             secret_path = Path(os.getenv("MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE", "")).expanduser()
             if not secret_path.is_absolute() or secret_path.is_symlink() or not secret_path.is_file():
@@ -79,7 +191,11 @@ def build_remote_runtime(
             secret = secret_path.read_bytes().strip()
             if mode & 0o077 or not 32 <= len(secret) <= 256:
                 raise ConfigurationError("operator write-gate secret violates the bounded private-file contract")
-            write_gate = LedgerWriteGate(control_ledger, signing_secret=secret)
+            write_gate = (
+                ProviderOnlyWriteGate(secret)
+                if runtime_settings.mcp_provider_profile_enabled
+                else LedgerWriteGate(control_ledger, signing_secret=secret)
+            )
         if provider_control is None:
             try:
                 provider_control = AuthenticatedProviderControlClient.from_token_file(
@@ -132,6 +248,7 @@ def build_remote_runtime(
         audit=authority,
         sql_policy=exact_sql_policy,
         acceptance_scenarios_enabled=runtime_settings.mcp_acceptance_scenarios_enabled,
+        provider_only_profile_enabled=runtime_settings.mcp_provider_profile_enabled,
     )
     app = create_streamable_http_app(
         runtime_settings,

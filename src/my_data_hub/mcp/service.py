@@ -484,18 +484,32 @@ class HubService:
         )
         if not isinstance(permit, WritePermit):
             raise HubPermissionError("write gate returned no valid permit")
+        provider_only = (
+            permit.canonical_data_independent
+            and tool in _PROVIDER_WRITES
+            and master.state is MasterState.ABSENT
+            and master.epoch is None
+            and permit.master_epoch == 0
+            and permit.canonical_revision == 0
+            and not permit.checkpoint_lifecycle_bound
+            and not permit.pre_change_checkpoint_verified
+        )
         if (
             permit.tool != tool
             or permit.principal != identity.subject
             or permit.client_id != identity.client_id
             or permit.master_epoch != (master.epoch or 0)
             or permit.expires_at <= int(self.clock())
-            or not permit.checkpoint_lifecycle_bound
+            or (not provider_only and not permit.checkpoint_lifecycle_bound)
         ):
             raise HubPermissionError("write permit binding is invalid or expired")
         if tool.endswith(".apply") and not permit.preview_bound:
             raise HubPermissionError("apply requires an exact bound preview receipt")
-        if TOOL_CONTRACTS[tool].destructive and not permit.pre_change_checkpoint_verified:
+        if (
+            TOOL_CONTRACTS[tool].destructive
+            and not permit.pre_change_checkpoint_verified
+            and not provider_only
+        ):
             raise HubPermissionError("destructive write requires a verified pre-change checkpoint")
         return permit
 

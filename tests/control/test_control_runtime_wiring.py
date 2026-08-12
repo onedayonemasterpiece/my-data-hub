@@ -259,6 +259,50 @@ def test_production_builder_accepts_central_legacy_kaggle_credentials(monkeypatc
     assert built.checkpoint_broker is not None
 
 
+def test_provider_only_builder_constructs_one_adapter_without_master_assets_or_checkpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("KAGGLE_USERNAME", "automation-owner")
+    monkeypatch.setenv("KAGGLE_KEY", "k" * 32)
+    monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
+    ledger = ControlLedger(tmp_path / "provider-only.sqlite3")
+    adapter = object()
+    journals = []
+
+    built = build_production_runtime(
+        ledger,
+        None,
+        provider_only=True,
+        adapter_factory=lambda journal: journals.append(journal) or adapter,  # type: ignore[arg-type,return-value]
+    )
+
+    assert built.provider_status == "available"
+    assert built.provider_adapter is adapter
+    assert built.master is None
+    assert built.checkpoint_broker is None
+    assert built.session_registrar is None
+    assert len(journals) == 1
+
+
+def test_provider_only_control_settings_reject_master_or_acceptance_coupling(tmp_path: Path) -> None:
+    with pytest.raises(Exception, match="provider-only"):
+        ControlPlaneSettings(
+            ledger_path=tmp_path / "invalid.sqlite3",
+            provider_only_mode=True,
+            operator_credentials_enabled=True,
+            provider_gateway_enabled=True,
+            master_runtime=MasterRuntimeSettings(assets()),
+        )
+    with pytest.raises(Exception, match="provider-only"):
+        ControlPlaneSettings(
+            ledger_path=tmp_path / "invalid-acceptance.sqlite3",
+            provider_only_mode=True,
+            operator_credentials_enabled=True,
+            provider_gateway_enabled=True,
+            acceptance_scenarios_enabled=True,
+        )
+
+
 def test_production_master_ensure_reports_missing_broker_configuration_before_provider_mutation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -916,11 +960,13 @@ def test_runtime_can_register_bounded_reader_credential_without_echoing_secret(t
         },
     )
     assert (
-        TestClient(app).post(
+        TestClient(app)
+        .post(
             "/internal/runtime/events",
             content=ready.model_dump_json(by_alias=True, exclude_none=True).encode(),
             headers={"Authorization": f"Bearer {token}"},
-        ).status_code
+        )
+        .status_code
         == 200
     )
     connector_url = secret_url.replace(
@@ -1071,14 +1117,14 @@ def test_embedding_admission_accepts_first_request_and_replays_without_completio
     assert capability.status_code == 503
     assert capability.json() == {"detail": {"code": "embedding_production_unavailable"}}
     observed = LedgerControlReader(ledger).invoke_control(
-        "embedding.production.capabilities", {}, object(),  # type: ignore[arg-type]
+        "embedding.production.capabilities",
+        {},
+        object(),  # type: ignore[arg-type]
     )
     assert observed == {
         "admission_ready": False,
         "blocker_code": "EMBEDDING_DIRECT_DATA_PLANE_UNAVAILABLE",
     }
-    rejected = client.post(
-        "/control/v1/embedding-production/requests", json=request.model_dump(mode="json")
-    )
+    rejected = client.post("/control/v1/embedding-production/requests", json=request.model_dump(mode="json"))
     assert rejected.status_code == 409
     assert ledger.embedding_production_request(str(request.request_id)) is None

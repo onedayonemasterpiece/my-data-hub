@@ -30,6 +30,23 @@ from my_data_hub.mcp.service import HubService
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
 from my_data_hub.mcp.transport import ToolSecurityMetadataMiddleware
 
+PROVIDER_ONLY_TOOLS = frozenset(
+    {
+        "platform.status",
+        "provider.resources.status",
+        "provider.resources.create",
+        "provider.resources.version",
+        "provider.resources.run",
+        "provider.resources.read",
+        "provider.resources.list",
+        "provider.resources.download",
+        "provider.inventory.live",
+        "provider.resources.delete",
+        "provider.acceptance.claim.get",
+        "provider.acceptance.claim.cleanup",
+    }
+)
+
 
 def oauth_resource_metadata_url(resource: str) -> str:
     """Backward-compatible name for the RFC 9728 path-derived URL."""
@@ -49,6 +66,7 @@ class MCPDependencies:
     audit: MCPAuditSink | None = None
     sql_policy: BoundedSQLPolicy | None = None
     acceptance_scenarios_enabled: bool = False
+    provider_only_profile_enabled: bool = False
 
 
 def _local_identity(settings: Settings) -> AccessIdentity | None:
@@ -114,6 +132,8 @@ def create_server(
             allowed = visible_tools(self._identity())
             if not deps.acceptance_scenarios_enabled:
                 allowed -= {"acceptance.scenario.request", "acceptance.scenario.status"}
+            if deps.provider_only_profile_enabled:
+                allowed &= PROVIDER_ONLY_TOOLS
             return [tool for tool in tools if tool.name in allowed]
 
         async def call_tool(self, name, arguments, context=None):  # type: ignore[no-untyped-def]
@@ -123,11 +143,15 @@ def create_server(
                 str(name).startswith("acceptance.scenario.")
                 and not deps.acceptance_scenarios_enabled
             )
+            provider_only_denied = (
+                deps.provider_only_profile_enabled and str(name) not in PROVIDER_ONLY_TOOLS
+            )
             if (
                 contract is None
                 or identity is None
                 or contract.scope not in identity.scopes
                 or acceptance_disabled
+                or provider_only_denied
             ):
                 if identity is not None and deps.audit is not None:
                     recorded = deps.audit.record_mcp_audit(
@@ -551,10 +575,15 @@ def create_streamable_http_app(
             allowed_origins=list(settings.mcp_allowed_origins),
         ),
     )
+    metadata_tools = (
+        PROVIDER_ONLY_TOOLS if dependencies.provider_only_profile_enabled else TOOL_CONTRACTS
+    )
     resource_metadata = ProtectedResourceMetadata(
         resource=settings.mcp_oauth_resource,
         authorization_servers=(settings.mcp_oauth_issuer,),
-        scopes_supported=frozenset(TOOL_CONTRACTS[name].scope for name in TOOL_CONTRACTS),
+        scopes_supported=frozenset(
+            TOOL_CONTRACTS[name].scope for name in metadata_tools if name in TOOL_CONTRACTS
+        ),
     )
     metadata_url = oauth_resource_metadata_url(settings.mcp_oauth_resource)
     metadata_path = urlsplit(metadata_url).path

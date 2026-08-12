@@ -4,6 +4,7 @@ umask 077
 
 action="${1:-}"
 operator_profile=false
+provider_only=false
 acceptance_supervisor=false
 acceptance_scenarios=false
 connector_runtime=false
@@ -14,9 +15,12 @@ fi
 if [[ "$action" == "INSTALL_MY_DATA_HUB_CONTROL_PLANE_OPERATOR" ]]; then
   operator_profile=true
 fi
+if [[ "$action" == "INSTALL_MY_DATA_HUB_PROVIDER_MCP" ]]; then
+  provider_only=true
+fi
 if [[ "$action" != "PREPARE_CONTROL_PLANE" && "$action" != "INSTALL_MY_DATA_HUB_CONTROL_PLANE" \
-  && "$operator_profile" != true ]]; then
-  echo "usage: $0 PREPARE_CONTROL_PLANE|INSTALL_MY_DATA_HUB_CONTROL_PLANE|INSTALL_MY_DATA_HUB_CONTROL_PLANE_OPERATOR" >&2
+  && "$operator_profile" != true && "$provider_only" != true ]]; then
+  echo "usage: $0 PREPARE_CONTROL_PLANE|INSTALL_MY_DATA_HUB_CONTROL_PLANE|INSTALL_MY_DATA_HUB_CONTROL_PLANE_OPERATOR|INSTALL_MY_DATA_HUB_PROVIDER_MCP" >&2
   exit 2
 fi
 
@@ -123,6 +127,7 @@ acceptance_socket_dir="${MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_SOCKET_DIR:-$runtime_
 acceptance_key="${MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_KEY_FILE:-$acceptance_socket_dir/supervisor.key}"
 checkpoint_acceptance_deployment="${MY_DATA_HUB_CHECKPOINT_ACCEPTANCE_DEPLOYMENT_FILE:-$runtime_root/checkpoint-acceptance-deployment.json}"
 if [[ -n "${MY_DATA_HUB_ENABLE_CONNECTOR_RUNTIME:-}" ]]; then
+  [[ "$provider_only" != true ]] || { echo "provider-only install forbids connector runtime" >&2; exit 2; }
   if [[ "${MY_DATA_HUB_ENABLE_CONNECTOR_RUNTIME}" != "I_ACKNOWLEDGE_CONNECTOR_CANONICAL_WRITES" ]]; then
     echo "connector runtime requires the exact canonical-write acknowledgement" >&2
     exit 2
@@ -130,6 +135,7 @@ if [[ -n "${MY_DATA_HUB_ENABLE_CONNECTOR_RUNTIME:-}" ]]; then
   connector_runtime=true
 fi
 if [[ -n "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SCENARIOS:-}" ]]; then
+  [[ "$provider_only" != true ]] || { echo "provider-only install forbids acceptance scenarios" >&2; exit 2; }
   if [[ "$operator_profile" != true \
     || "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SCENARIOS}" != "I_ACKNOWLEDGE_PROTECTED_ACCEPTANCE_EFFECTS" ]]; then
     echo "acceptance scenarios require operator install and the exact protected-effects acknowledgement" >&2
@@ -138,6 +144,7 @@ if [[ -n "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SCENARIOS:-}" ]]; then
   acceptance_scenarios=true
 fi
 if [[ -n "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SUPERVISOR:-}" ]]; then
+  [[ "$provider_only" != true ]] || { echo "provider-only install forbids acceptance supervisor" >&2; exit 2; }
   if [[ "$operator_profile" != true \
     || "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SUPERVISOR}" != "I_ACKNOWLEDGE_TASK_BOUND_CONTROL_RESTART" ]]; then
     echo "acceptance supervisor requires operator install and the exact restart acknowledgement" >&2
@@ -160,14 +167,19 @@ for path_value in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$asse
     *[$'\n\r\t ']* ) echo "deployment inputs may not contain whitespace" >&2; exit 2 ;;
   esac
 done
-mkdir -p "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$embedding_credential_dir" "$tls_dir" "$HOME/.config/systemd/user"
-chmod 700 "$embedding_credential_dir"
-for private_dir in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$tls_dir"; do
+mkdir -p "$env_root" "$secret_root" "$ledger_dir" "$HOME/.config/systemd/user"
+private_dirs=("$env_root" "$secret_root" "$ledger_dir")
+if [[ "$provider_only" != true ]]; then
+  mkdir -p "$session_dir" "$embedding_credential_dir" "$tls_dir"
+  chmod 700 "$embedding_credential_dir"
+  private_dirs+=("$session_dir" "$tls_dir")
+fi
+for private_dir in "${private_dirs[@]}"; do
   [[ ! -L "$private_dir" ]] || { echo "private runtime directories may not be symbolic links" >&2; exit 2; }
 done
-chmod 700 "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$tls_dir" "$HOME/.config/systemd/user"
+chmod 700 "${private_dirs[@]}" "$HOME/.config/systemd/user"
 runtime_uid="$(id -u)"
-for private_dir in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$tls_dir"; do
+for private_dir in "${private_dirs[@]}"; do
   if [[ "$(stat -c '%u' "$private_dir")" != "$runtime_uid" \
     || "$(stat -c '%a' "$private_dir")" != "700" ]]; then
     echo "private runtime directory must be owned by the service user with mode 0700" >&2
@@ -239,7 +251,7 @@ if [[ "$(stat -c '%s' "$owner_portal_state_key")" != "32" ]]; then
   echo "owner portal state key must be exactly 32 bytes" >&2
   exit 2
 fi
-if [[ ! -e "$checkpoint_upload_broker_key" ]]; then
+if [[ "$provider_only" != true && ! -e "$checkpoint_upload_broker_key" ]]; then
   python3 - "$checkpoint_upload_broker_key" <<'PY'
 import os
 import sys
@@ -254,25 +266,27 @@ finally:
     os.close(fd)
 PY
 fi
-require_private_file "$checkpoint_upload_broker_key" "checkpoint upload broker key"
-if [[ "$(stat -c '%s' "$checkpoint_upload_broker_key")" != "32" ]]; then
-  echo "checkpoint upload broker key must be exactly 32 bytes" >&2
-  exit 2
-fi
 require_regular_file "$oauth_overlap_jwks" "OAuth overlap public JWKS"
-if [[ ! -e "$tls_ca_file" ]]; then
-  : > "$tls_ca_file"
-  chmod 600 "$tls_ca_file"
+if [[ "$provider_only" != true ]]; then
+  require_private_file "$checkpoint_upload_broker_key" "checkpoint upload broker key"
+  if [[ "$(stat -c '%s' "$checkpoint_upload_broker_key")" != "32" ]]; then
+    echo "checkpoint upload broker key must be exactly 32 bytes" >&2
+    exit 2
+  fi
+  if [[ ! -e "$tls_ca_file" ]]; then
+    : > "$tls_ca_file"
+    chmod 600 "$tls_ca_file"
+  fi
+  require_private_file "$tls_ca_file" "master TLS CA publication target"
+  [[ -d "$tunnel_broker_socket_dir" && ! -L "$tunnel_broker_socket_dir" \
+    && -S "$tunnel_broker_socket_dir/control.sock" ]] || {
+    echo "root-installed epoch tunnel broker socket is required before control deployment" >&2
+    exit 2
+  }
+  [[ -d "$asset_dir" && ! -L "$asset_dir" ]] || { echo "master asset directory is required" >&2; exit 2; }
+  python3 "$release/scripts/provider/verify_master_assets.py" \
+    --bundle "$asset_dir" --expected-commit "$commit" >/dev/null
 fi
-require_private_file "$tls_ca_file" "master TLS CA publication target"
-[[ -d "$tunnel_broker_socket_dir" && ! -L "$tunnel_broker_socket_dir" \
-  && -S "$tunnel_broker_socket_dir/control.sock" ]] || {
-  echo "root-installed epoch tunnel broker socket is required before control deployment" >&2
-  exit 2
-}
-[[ -d "$asset_dir" && ! -L "$asset_dir" ]] || { echo "master asset directory is required" >&2; exit 2; }
-python3 "$release/scripts/provider/verify_master_assets.py" \
-  --bundle "$asset_dir" --expected-commit "$commit" >/dev/null
 for env_file in "$provider_env" "$mcp_env" "$oauth_env"; do
   reject_data_plane_environment "$env_file" "$(basename "$env_file")"
 done
@@ -291,6 +305,7 @@ reject_environment_keys "$mcp_env" "remote MCP environment" \
   'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_OAUTH_SIGNING_KEY|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)'
 reject_environment_keys "$oauth_env" "OAuth environment" \
   'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)|MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET|MY_DATA_HUB_OWNER_PORTAL_STATE_KEY'
+if [[ "$provider_only" != true ]]; then
 python3 - "$provider_env" <<'PY'
 import json
 import re
@@ -338,9 +353,12 @@ if not isinstance(bindings, dict) or set(bindings) - {"YDB_ACCESS_TOKEN_CREDENTI
 if any(not isinstance(value, str) or not value or len(value) > 200 for value in bindings.values()):
     raise SystemExit("master optional secret name is invalid")
 PY
+fi
 
 operator_override=""
 operator_compose_arg=""
+provider_only_override=""
+provider_only_compose_arg=""
 acceptance_override=""
 acceptance_compose_arg=""
 connector_override=""
@@ -348,6 +366,132 @@ connector_compose_arg=""
 connector_profile_arg=""
 connector_service=""
 connector_output_service=""
+require_central_kaggle_credentials() {
+  local kaggle_token_count kaggle_username_count kaggle_key_count
+  kaggle_token_count="$(grep -Eic '^[[:space:]]*KAGGLE_API_TOKEN[[:space:]]*=[^[:space:]].*$' "$provider_env" || true)"
+  kaggle_username_count="$(grep -Eic '^[[:space:]]*KAGGLE_USERNAME[[:space:]]*=[^[:space:]].*$' "$provider_env" || true)"
+  kaggle_key_count="$(grep -Eic '^[[:space:]]*KAGGLE_KEY[[:space:]]*=[^[:space:]].*$' "$provider_env" || true)"
+  if ! { [[ "$kaggle_token_count" == 1 && "$kaggle_username_count" == 0 && "$kaggle_key_count" == 0 ]] \
+    || [[ "$kaggle_token_count" == 0 && "$kaggle_username_count" == 1 && "$kaggle_key_count" == 1 ]]; }; then
+    echo "provider-only control plane requires one central Kaggle credential mode and requires access token OR one legacy username/key pair" >&2
+    exit 2
+  fi
+}
+if [[ "$provider_only" == true ]]; then
+  require_private_file "$operator_gate_key" "operator write-gate signing key"
+  require_private_file "$control_gateway_token" "provider gateway token"
+  python3 - "$operator_gate_key" "$control_gateway_token" <<'PY'
+import sys
+from pathlib import Path
+
+for path, label in zip(sys.argv[1:], ("operator write-gate signing key", "provider gateway token"), strict=True):
+    value = Path(path).read_bytes().strip()
+    if not 32 <= len(value) <= 256 or any(byte < 0x21 or byte > 0x7E for byte in value):
+        raise SystemExit(f"{label} must contain 32..256 printable non-whitespace bytes")
+PY
+  require_central_kaggle_credentials
+  provider_oauth_client_id="$(python3 - "$oauth_env" <<'PY'
+import json
+import sys
+from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
+
+values = {}
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    if "=" not in stripped:
+        raise SystemExit("PROVIDER_OAUTH_CLIENT_UNAVAILABLE: oauth environment contains an invalid line")
+    key, value = stripped.split("=", 1)
+    key = key.strip()
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        value = value[1:-1]
+    if key in values:
+        raise SystemExit("PROVIDER_OAUTH_CLIENT_UNAVAILABLE: oauth environment contains a duplicate key")
+    values[key] = value
+
+try:
+    clients = json.loads(values.get("MY_DATA_HUB_OAUTH_CLIENTS_JSON", ""))
+except json.JSONDecodeError as exc:
+    raise SystemExit("PROVIDER_OAUTH_CLIENT_UNAVAILABLE: OAuth clients JSON is invalid") from exc
+required_scopes = {"openid", "offline_access", "platform:read", "provider:read", "provider:write"}
+if not isinstance(clients, list) or not 1 <= len(clients) <= 4:
+    raise SystemExit("PROVIDER_OAUTH_CLIENT_UNAVAILABLE: one to four static OAuth clients are required")
+eligible = []
+for client in clients:
+    if not isinstance(client, dict) or set(client) != {"client_id", "redirect_uris", "allowed_scopes"}:
+        continue
+    client_id = client.get("client_id")
+    redirects = client.get("redirect_uris")
+    scopes = client.get("allowed_scopes")
+    if not isinstance(client_id, str) or not 1 <= len(client_id) <= 255:
+        continue
+    if not isinstance(scopes, list) or not required_scopes.issubset(scopes):
+        continue
+    if not isinstance(redirects, list) or not 1 <= len(redirects) <= 8 or len(set(redirects)) != len(redirects):
+        continue
+    valid_redirects = True
+    for redirect in redirects:
+        if not isinstance(redirect, str) or len(redirect) > 2048:
+            valid_redirects = False
+            break
+        parsed = urlsplit(redirect)
+        reserved = {key for key, _ in parse_qsl(parsed.query, keep_blank_values=True)}
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or reserved.intersection({"code", "state", "error", "error_description"})
+        ):
+            valid_redirects = False
+            break
+    if valid_redirects:
+        eligible.append(client_id)
+print(sorted(eligible)[0] if eligible else "")
+PY
+)"
+  reject_environment_keys "$mcp_env" "remote MCP environment" \
+    'MY_DATA_HUB_MCP_(CANARY|ACCEPTANCE_OPERATOR|MIGRATION_OPERATOR|PROVIDER_OPERATOR|DATA_MCP)_TOKEN|MY_DATA_HUB_MCP_STATIC_BEARER_TOKEN|AUTHORIZATION|BEARER_TOKEN'
+  reject_environment_keys "$oauth_env" "OAuth environment" \
+    'MY_DATA_HUB_MCP_(CANARY|ACCEPTANCE_OPERATOR|MIGRATION_OPERATOR|PROVIDER_OPERATOR|DATA_MCP)_TOKEN|MY_DATA_HUB_MCP_STATIC_BEARER_TOKEN|AUTHORIZATION|BEARER_TOKEN'
+  provider_only_override="$runtime_root/provider-only.$commit.yaml"
+  cat > "$provider_only_override" <<'YAML'
+services:
+  control-plane:
+    env_file: !override
+      - path: "${MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE:?provider environment is required}"
+        required: true
+    environment:
+      MY_DATA_HUB_PROVIDER_ONLY_MODE: "true"
+      MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED: "true"
+      MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED: "true"
+      MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE: /run/secrets/mcp-control-gateway.token
+      MY_DATA_HUB_TUNNEL_BROKER_SOCKET: ""
+      MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED: "false"
+    volumes: !override
+      - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:?control ledger directory is required}:/ledger"
+      - "${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:?provider gateway token is required}:/run/secrets/mcp-control-gateway.token:ro"
+  remote-mcp:
+    environment:
+      MY_DATA_HUB_MCP_WRITE_ENABLED: "true"
+      MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED: "false"
+      MY_DATA_HUB_MCP_PROVIDER_PROFILE_ENABLED: "true"
+      MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "false"
+      MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL: http://control-plane:8080/internal/mcp-provider/invoke
+      MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE: /run/secrets/mcp-control-gateway.token
+      MY_DATA_HUB_MCP_SCOPES: platform:read,provider:read,provider:write
+    volumes: !override
+      - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:?control ledger directory is required}:/ledger"
+      - "${MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE:?write gate key is required}:/run/secrets/mcp-write-gate.key:ro"
+      - "${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:?provider gateway token is required}:/run/secrets/mcp-control-gateway.token:ro"
+YAML
+  chmod 600 "$provider_only_override"
+  provider_only_compose_arg=" -f $provider_only_override"
+fi
 if [[ "$connector_runtime" == true ]]; then
   connector_override="$runtime_root/connector-runtime.$commit.yaml"
   cat > "$connector_override" <<'YAML'
@@ -370,14 +514,7 @@ if [[ "$operator_profile" == true ]]; then
   require_private_file "$operator_gate_receipt" "operator security gate receipt"
   require_private_file "$operator_gate_key" "operator write-gate signing key"
   require_private_file "$control_gateway_token" "provider control gateway token"
-  kaggle_token_count="$(grep -Eic '^[[:space:]]*KAGGLE_API_TOKEN[[:space:]]*=[^[:space:]].*$' "$provider_env" || true)"
-  kaggle_username_count="$(grep -Eic '^[[:space:]]*KAGGLE_USERNAME[[:space:]]*=[^[:space:]].*$' "$provider_env" || true)"
-  kaggle_key_count="$(grep -Eic '^[[:space:]]*KAGGLE_KEY[[:space:]]*=[^[:space:]].*$' "$provider_env" || true)"
-  if ! { [[ "$kaggle_token_count" == 1 && "$kaggle_username_count" == 0 && "$kaggle_key_count" == 0 ]] \
-    || [[ "$kaggle_token_count" == 0 && "$kaggle_username_count" == 1 && "$kaggle_key_count" == 1 ]]; }; then
-    echo "single control provider environment requires access token OR one legacy username/key pair" >&2
-    exit 2
-  fi
+  require_central_kaggle_credentials
   python3 "$release/scripts/operator_profile_gate.py" verify \
     --commit "$commit" --receipt "$operator_gate_receipt" --signing-key-file "$operator_gate_key"
   operator_override="$runtime_root/operator-profile.$commit.yaml"
@@ -506,6 +643,9 @@ compose_files=(-f "$release/compose.control-plane.yaml")
 if [[ -n "$operator_override" ]]; then
   compose_files+=(-f "$operator_override")
 fi
+if [[ -n "$provider_only_override" ]]; then
+  compose_files+=(-f "$provider_only_override")
+fi
 if [[ -n "$acceptance_override" ]]; then
   compose_files+=(-f "$acceptance_override")
 fi
@@ -567,9 +707,9 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=$compose_env
 ExecStartPre=$docker_path info
-ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up --remove-orphans control-plane remote-mcp oauth-server$connector_service
-ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up -d --wait --remove-orphans control-plane remote-mcp oauth-server$connector_service
-ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg down --remove-orphans
+ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$provider_only_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up --remove-orphans control-plane remote-mcp oauth-server$connector_service
+ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$provider_only_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up -d --wait --remove-orphans control-plane remote-mcp oauth-server$connector_service
+ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$provider_only_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg down --remove-orphans
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=300
@@ -692,12 +832,41 @@ if [[ "$connector_runtime" == true ]]; then
   wait_http connector-intake http://127.0.0.1:8081/health/ready
 fi
 
+ready_receipt="$runtime_root/ready.$commit.json"
 curl --fail --silent --show-error --connect-timeout 2 --max-time 5 \
-  http://127.0.0.1:8080/health/ready > "$runtime_root/ready.$commit.json"
+  http://127.0.0.1:8080/health/ready > "$ready_receipt"
+if [[ "$provider_only" == true ]]; then
+  python3 - "$ready_receipt" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+receipt = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if not (
+    receipt.get("ok") is True
+    and receipt.get("provider_only_mode") is True
+    and receipt.get("provider_gateway_ready") is True
+    and receipt.get("master_state") == "ABSENT"
+    and receipt.get("data_plane_ready") is False
+):
+    raise SystemExit("provider-only readiness did not prove the central adapter gateway")
+PY
+fi
 next_link="$release_root/.current.$commit"
 ln -sfn "$release" "$next_link"
 mv -Tf "$next_link" "$current"
 trap - ERR
 rm -f "$unit_backup"
 rm -f "$supervisor_unit_backup"
-printf 'installed_control_plane_commit=%s\nservices=control-plane,remote-mcp,oauth-server%s\noperator_profile=%s\nconnector_runtime=%s\nacceptance_scenarios=%s\nacceptance_supervisor=%s\nmaster_state=ABSENT_or_durable_runtime_state\n' "$commit" "$connector_output_service" "$operator_profile" "$connector_runtime" "$acceptance_scenarios" "$acceptance_supervisor"
+provider_only_mode="disabled"
+if [[ "$provider_only" == true ]]; then
+  provider_only_mode="provider-only-mcp"
+fi
+printf 'installed_control_plane_commit=%s\nservices=control-plane,remote-mcp,oauth-server%s\noperator_profile=%s\nprovider_only_mode=%s\nconnector_runtime=%s\nacceptance_scenarios=%s\nacceptance_supervisor=%s\nmaster_state=ABSENT_or_durable_runtime_state\n' "$commit" "$connector_output_service" "$operator_profile" "$provider_only_mode" "$connector_runtime" "$acceptance_scenarios" "$acceptance_supervisor"
+if [[ "$provider_only" == true ]]; then
+  if [[ -n "$provider_oauth_client_id" ]]; then
+    printf 'provider_oauth_client_id=%s\n' "$provider_oauth_client_id"
+  else
+    printf '%s\n' 'CHATGPT_OAUTH_CLIENT_CONFIGURATION_REQUIRED: configure an exact HTTPS ChatGPT callback with openid, offline_access, platform:read, provider:read and provider:write'
+  fi
+fi

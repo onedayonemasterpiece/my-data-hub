@@ -1669,6 +1669,50 @@ def validate_deployment(report: Report) -> None:
         report.check(
             token not in control_installer, f"control installer contains forbidden local-master operation: {token}"
         )
+    report.check(
+        "install_my_data_hub_provider_mcp" in control_installer,
+        "provider-only MCP install action is not explicit",
+    )
+    report.check(
+        "my_data_hub_mcp_scopes: platform:read,provider:read,provider:write"
+        in control_installer,
+        "provider-only MCP profile does not pin the exact provider OAuth scopes",
+    )
+    provider_override_start = control_installer.find('cat > "$provider_only_override"')
+    provider_override_end = control_installer.find(
+        'chmod 600 "$provider_only_override"', provider_override_start
+    )
+    report.check(
+        provider_override_start >= 0 and provider_override_end > provider_override_start,
+        "provider-only runtime Compose override is missing",
+    )
+    if provider_override_start >= 0 and provider_override_end > provider_override_start:
+        provider_override = control_installer[provider_override_start:provider_override_end]
+        report.check(
+            "!override" in provider_override,
+            "provider-only Compose does not replace inherited master mounts",
+        )
+        for token in (
+            "my_data_hub_master_asset_dir",
+            "my_data_hub_tunnel_broker_socket_dir",
+            "my_data_hub_checkpoint_upload_broker_key_file",
+            "kaggle_api_token",
+            "kaggle_username",
+            "kaggle_key",
+            "acceptance:operate",
+        ):
+            report.check(
+                token not in provider_override,
+                f"provider-only Compose crosses a forbidden authority boundary: {token}",
+            )
+    report.check(
+        "chatgpt_oauth_client_configuration_required" in control_installer,
+        "provider-only install does not disclose the bounded ChatGPT OAuth client follow-up",
+    )
+    report.check(
+        "provider-only readiness did not prove the central adapter gateway" in control_installer,
+        "provider-only install lacks its central adapter readiness receipt gate",
+    )
     report.check(not (ROOT / "deploy/systemd").exists(), "DB-coupled legacy systemd deployment directory remains")
     report.check(not (ROOT / "compose.same-host.yaml").exists(), "legacy same-host production Compose remains")
 

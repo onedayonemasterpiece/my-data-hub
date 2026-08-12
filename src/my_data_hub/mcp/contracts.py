@@ -172,6 +172,7 @@ class WritePermit:
     pre_change_checkpoint_verified: bool = False
     allowed_resource_class: str | None = None
     private_resource_only: bool = True
+    canonical_data_independent: bool = False
 
 
 @runtime_checkable

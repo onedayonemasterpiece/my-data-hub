@@ -1026,10 +1026,23 @@ def build_production_runtime(
     master_tls_ca_path: Path | None = None,
     tunnel_authority: TunnelBrokerClient | None = None,
     tunnel_listen_port: int = 25432,
+    provider_only: bool = False,
 ) -> ProductionRuntimeBuild:
-    registrar = _build_session_registrar(session_credentials_path)
+    if provider_only and settings is not None:
+        raise ValueError("provider-only runtime cannot receive master settings")
+    registrar = None if provider_only else _build_session_registrar(session_credentials_path)
     if settings is None:
-        return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None, None)
+        if not provider_only or not kaggle_credentials_configured():
+            return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None, None)
+        journal = ControlLedgerKaggleJournal(ledger)
+        factory = adapter_factory or (
+            lambda value: KaggleProviderAdapter.from_environment(journal=value)
+        )
+        try:
+            adapter = factory(journal)
+        except Exception:
+            return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None, None)
+        return ProductionRuntimeBuild(None, "available", None, adapter, None)
     if not kaggle_credentials_configured():
         return ProductionRuntimeBuild(None, "provider_unavailable", registrar, None, None)
     journal = ControlLedgerKaggleJournal(ledger)

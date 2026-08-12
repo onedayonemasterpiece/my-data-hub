@@ -15,8 +15,11 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from my_data_hub.control_plane.app import DATABASE_ENVIRONMENT_NAMES
-from my_data_hub.mcp.oauth import TokenValidationError
-from my_data_hub.mcp.runtime import build_remote_runtime
+from my_data_hub.mcp.catalog import ALL_SCOPES, TOOL_CONTRACTS
+from my_data_hub.mcp.contracts import MasterSnapshot, MasterState
+from my_data_hub.mcp.oauth import AccessIdentity, TokenValidationError
+from my_data_hub.mcp.runtime import ProviderOnlyWriteGate, build_remote_runtime
+from my_data_hub.mcp.server import PROVIDER_ONLY_TOOLS, MCPDependencies, create_server
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
 
 RESOURCE = "https://mcp-datahub.kenigevents.ru/mcp"
@@ -56,7 +59,7 @@ def _configure(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
     monkeypatch.setenv("MY_DATA_HUB_MCP_SCOPES", ",".join(sorted(READER_SCOPES)))
 
 
-def _claims(*, revoked: bool = False) -> dict[str, object]:
+def _claims(*, revoked: bool = False, scopes: list[str] | None = None) -> dict[str, object]:
     now = int(time.time())
     return {
         "iss": ISSUER,
@@ -68,7 +71,7 @@ def _claims(*, revoked: bool = False) -> dict[str, object]:
         "iat": now - 5,
         "nbf": now - 5,
         "exp": now + 120,
-        "scope": " ".join(sorted(READER_SCOPES)),
+        "scope": " ".join(sorted(scopes or READER_SCOPES)),
     }
 
 
@@ -85,9 +88,7 @@ async def _lifespan(app: Any) -> AsyncIterator[None]:
     async def send(message: dict[str, Any]) -> None:
         await send_queue.put(message)
 
-    task = asyncio.create_task(
-        app({"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}}, receive, send)
-    )
+    task = asyncio.create_task(app({"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}}, receive, send))
     await receive_queue.put({"type": "lifespan.startup"})
     startup = await send_queue.get()
     assert startup["type"] == "lifespan.startup.complete"
@@ -146,9 +147,7 @@ async def test_remote_runtime_serves_rfc9728_metadata_without_master(
     _configure(monkeypatch, tmp_path)
     runtime = build_remote_runtime(decoder=lambda _token: _claims())
     transport = httpx.ASGITransport(app=runtime.app)  # type: ignore[arg-type]
-    async with httpx.AsyncClient(
-        transport=transport, base_url="https://mcp-datahub.kenigevents.ru"
-    ) as client:
+    async with httpx.AsyncClient(transport=transport, base_url="https://mcp-datahub.kenigevents.ru") as client:
         response = await client.get(
             "/.well-known/oauth-protected-resource/mcp",
             headers={"Host": "mcp-datahub.kenigevents.ru"},
@@ -179,9 +178,15 @@ async def test_standard_mcp_client_lists_reader_catalog_and_reads_absent_status(
             "Origin": "https://chatgpt.com",
         },
     )
-    async with _lifespan(runtime.app), client, streamable_http_client(
-        "https://mcp-datahub.kenigevents.ru/mcp", http_client=client
-    ) as (read_stream, write_stream), ClientSession(read_stream, write_stream) as session:
+    async with (
+        _lifespan(runtime.app),
+        client,
+        streamable_http_client("https://mcp-datahub.kenigevents.ru/mcp", http_client=client) as (
+            read_stream,
+            write_stream,
+        ),
+        ClientSession(read_stream, write_stream) as session,
+    ):
         await session.initialize()
         tools = await session.list_tools()
         result = await session.call_tool("platform.status", {})
@@ -192,9 +197,7 @@ async def test_standard_mcp_client_lists_reader_catalog_and_reads_absent_status(
     assert result.structured_content["master_state"] == "ABSENT"
 
 
-def test_remote_runtime_rejects_any_database_environment(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_remote_runtime_rejects_any_database_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _configure(monkeypatch, tmp_path)
     monkeypatch.setenv("PGSSLKEY", "/secret/client.key")
     with pytest.raises(Exception, match="must not receive master database credentials"):
@@ -223,6 +226,169 @@ def test_remote_operator_runtime_requires_and_accepts_only_injected_dependencies
 
     assert runtime.settings.mcp_write_enabled is True
     assert runtime.settings.mcp_operator_profile_enabled is True
+
+
+def test_remote_provider_only_profile_has_exact_catalog_and_no_master_checkpoint_or_data_tools(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_PROVIDER_PROFILE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_SCOPES", "platform:read,provider:read,provider:write")
+    gate = tmp_path / "provider-write-gate.key"
+    gate.write_text("w" * 32, encoding="ascii")
+    gate.chmod(0o600)
+    monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE", str(gate))
+    gateway_token = tmp_path / "provider-gateway.token"
+    gateway_token.write_text("g" * 32, encoding="ascii")
+    gateway_token.chmod(0o600)
+    monkeypatch.setenv(
+        "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL",
+        "http://control-plane:8080/internal/mcp-provider/invoke",
+    )
+    monkeypatch.setenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE", str(gateway_token))
+    runtime = build_remote_runtime(
+        decoder=lambda _token: _claims(scopes=["platform:read", "provider:read", "provider:write"]),
+        provider_control=object(),
+    )
+    assert runtime.settings.mcp_provider_profile_enabled is True
+    assert runtime.settings.mcp_operator_profile_enabled is False
+    assert runtime.settings.mcp_scopes == {
+        "platform:read",
+        "provider:read",
+        "provider:write",
+    }
+
+    async def resource_metadata() -> dict[str, object]:
+        transport = httpx.ASGITransport(app=runtime.app)  # type: ignore[arg-type]
+        async with httpx.AsyncClient(
+            transport=transport, base_url="https://mcp-datahub.kenigevents.ru"
+        ) as client:
+            response = await client.get(
+                "/.well-known/oauth-protected-resource/mcp",
+                headers={"Host": "mcp-datahub.kenigevents.ru"},
+            )
+        assert response.status_code == 200
+        return response.json()  # type: ignore[no-any-return]
+
+    assert set(asyncio.run(resource_metadata())["scopes_supported"]) == {
+        "platform:read",
+        "provider:read",
+        "provider:write",
+    }
+
+    identity = AccessIdentity(
+        subject="provider-owner",
+        client_id="provider-operator",
+        scopes=frozenset({"platform:read", "provider:read", "provider:write"}),
+        audience="https://mcp-datahub.kenigevents.ru/mcp",
+        token_id="provider-jti",
+        expires_at=2**31,
+        issuer="https://identity.kenigevents.ru",
+        issued_at=1,
+        resource="https://mcp-datahub.kenigevents.ru/mcp",
+    )
+    allowed = PROVIDER_ONLY_TOOLS & TOOL_CONTRACTS.keys()
+    server = create_server(
+        runtime.settings,
+        dependencies=MCPDependencies(provider_only_profile_enabled=True),
+        default_identity=identity,
+    )
+    assert {tool.name for tool in asyncio.run(server.list_tools())} == allowed
+    for forbidden in TOOL_CONTRACTS.keys() - allowed:
+        result = asyncio.run(server.call_tool(forbidden, {}))
+        assert result.is_error is True
+
+
+@pytest.mark.parametrize(
+    "scopes",
+    [
+        "provider:read,provider:write",
+        "platform:read,provider:write",
+        *[
+            "platform:read,provider:read,provider:write," + scope
+            for scope in sorted(ALL_SCOPES - {"platform:read", "provider:read", "provider:write"})
+        ],
+    ],
+)
+def test_remote_provider_only_profile_rejects_missing_or_extra_scope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scopes: str
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_PROVIDER_PROFILE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_SCOPES", scopes)
+    with pytest.raises(Exception, match="provider-only"):
+        build_remote_runtime(decoder=lambda _token: _claims())
+
+
+def test_provider_only_write_gate_is_canonical_independent_and_private() -> None:
+    identity = AccessIdentity(
+        subject="provider-owner",
+        client_id="provider-client",
+        scopes=frozenset({"provider:write"}),
+        audience=RESOURCE,
+        token_id="write-jti",
+        expires_at=2**31,
+        issuer=ISSUER,
+        issued_at=1,
+        resource=RESOURCE,
+    )
+    gate = ProviderOnlyWriteGate(b"w" * 32, clock=lambda: 1000)
+    permit = gate.authorize_write(
+        principal=identity,
+        tool="provider.resources.run",
+        arguments={"control_class": "mcp_managed", "private": True},
+        master=MasterSnapshot(MasterState.ABSENT),
+    )
+    assert permit.canonical_data_independent is True
+    assert permit.master_epoch == 0
+    assert permit.canonical_revision == 0
+    assert permit.checkpoint_lifecycle_bound is False
+    assert permit.pre_change_checkpoint_verified is False
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "master"),
+    [
+        ("data.change.apply", {"control_class": "mcp_managed", "private": True}, MasterSnapshot(MasterState.ABSENT)),
+        ("master.ensure", {"control_class": "mcp_managed", "private": True}, MasterSnapshot(MasterState.ABSENT)),
+        ("checkpoint.restore", {"control_class": "mcp_managed", "private": True}, MasterSnapshot(MasterState.ABSENT)),
+        (
+            "provider.resources.run",
+            {"control_class": "orchestrator_protected", "private": True},
+            MasterSnapshot(MasterState.ABSENT),
+        ),
+        (
+            "provider.resources.run",
+            {"control_class": "mcp_managed", "private": False},
+            MasterSnapshot(MasterState.ABSENT),
+        ),
+        (
+            "provider.resources.run",
+            {"control_class": "mcp_managed", "private": True},
+            MasterSnapshot(MasterState.ACTIVE, instance_id="master", epoch=1),
+        ),
+    ],
+)
+def test_provider_only_write_gate_rejects_non_provider_or_canonical_effects(
+    tool: str, arguments: dict[str, object], master: MasterSnapshot
+) -> None:
+    identity = AccessIdentity(
+        subject="provider-owner",
+        client_id="provider-client",
+        scopes=frozenset({"provider:write"}),
+        audience=RESOURCE,
+        token_id="write-jti",
+        expires_at=2**31,
+        issuer=ISSUER,
+        issued_at=1,
+        resource=RESOURCE,
+    )
+    with pytest.raises(PermissionError, match="provider-only"):
+        ProviderOnlyWriteGate(b"w" * 32).authorize_write(
+            principal=identity, tool=tool, arguments=arguments, master=master
+        )
 
 
 def test_remote_runtime_never_accepts_or_constructs_kaggle_provider_authority(

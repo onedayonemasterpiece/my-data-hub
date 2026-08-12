@@ -33,6 +33,7 @@ def test_deployment_tokens_are_explicit_and_legacy_token_remains_forbidden() -> 
     )
     assert legacy.returncode == 78
     assert "no local database" in legacy.stderr
+    assert "INSTALL_MY_DATA_HUB_PROVIDER_MCP" in installer_source()
 
 
 def test_prepare_gate_cannot_start_or_enable_runtime() -> None:
@@ -75,11 +76,7 @@ def test_install_unit_reconciles_all_opted_in_processes_across_failure_and_reboo
 def test_connector_runtime_install_is_explicit_default_off_and_restart_managed() -> None:
     source = installer_source()
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
-    assert (
-        compose["services"]["control-plane"]["environment"]
-        ["MY_DATA_HUB_CONNECTOR_RUNTIME_ENABLED"]
-        == "false"
-    )
+    assert compose["services"]["control-plane"]["environment"]["MY_DATA_HUB_CONNECTOR_RUNTIME_ENABLED"] == "false"
     assert "I_ACKNOWLEDGE_CONNECTOR_CANONICAL_WRITES" in source
     assert 'require_private_file "$connector_env" "connector environment"' in source
     assert 'reject_data_plane_environment "$connector_env"' in source
@@ -106,9 +103,7 @@ def test_compose_has_exact_opt_in_profile_split_secret_boundaries_and_loopback_p
         "-m",
         "my_data_hub.api.connector_runtime",
     ]
-    assert connector["depends_on"] == {
-        "control-plane": {"condition": "service_healthy"}
-    }
+    assert connector["depends_on"] == {"control-plane": {"condition": "service_healthy"}}
     assert services["remote-mcp"]["profiles"] == ["remote-mcp"]
     assert services["oauth-server"]["profiles"] == ["remote-mcp"]
     assert services["remote-mcp"]["depends_on"] == {
@@ -130,17 +125,12 @@ def test_compose_has_exact_opt_in_profile_split_secret_boundaries_and_loopback_p
         "${MY_DATA_HUB_MASTER_TLS_DIR:-./.state/master-tls}:/state/master-tls:ro",
     }
     assert connector["extra_hosts"] == ["master-tunnel.internal:host-gateway"]
-    assert not any(
-        "DATABASE_URL" in name or name.startswith("PG")
-        for name in connector["environment"]
-    )
+    assert not any("DATABASE_URL" in name or name.startswith("PG") for name in connector["environment"])
     oauth = services["oauth-server"]
     assert oauth["environment"]["MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE"] == (
         "/run/secrets/owner-oidc-client-secret"
     )
-    assert oauth["environment"]["MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE"] == (
-        "/run/secrets/owner-portal-state.key"
-    )
+    assert oauth["environment"]["MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE"] == ("/run/secrets/owner-portal-state.key")
     assert all(":ro" in binding for binding in oauth["volumes"] if "/run/secrets/" in binding)
 
     for service in services.values():
@@ -186,10 +176,13 @@ def test_install_requires_private_split_inputs_without_static_master_credentials
 
 def test_operator_profile_keeps_kaggle_authority_only_in_control_process() -> None:
     source = installer_source()
+    start = source.index('cat > "$operator_override"')
+    end = source.index('chmod 600 "$operator_override"', start)
+    operator_override = source[start:end]
     assert "MY_DATA_HUB_MCP_OPERATOR_PROVIDER_ENV_FILE" not in source
     assert 'MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED: "true"' in source
     assert "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL" in source
-    assert source.count("mcp-control-gateway.token:ro") == 2
+    assert operator_override.count("mcp-control-gateway.token:ro") == 2
     assert "kaggle_token_count=" in source
     assert "kaggle_username_count=" in source
     assert "kaggle_key_count=" in source
@@ -198,6 +191,50 @@ def test_operator_profile_keeps_kaggle_authority_only_in_control_process() -> No
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
     assert compose["services"]["control-plane"]["environment"]["MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED"] == "false"
     assert "KAGGLE_API_TOKEN" not in json.dumps(compose["services"]["remote-mcp"])
+
+
+def test_provider_only_mcp_action_is_explicit_and_skips_master_only_prerequisites() -> None:
+    source = installer_source()
+    assert "provider_only=true" in source
+    assert "provider-only.$commit.yaml" in source
+    assert 'MY_DATA_HUB_PROVIDER_ONLY_MODE: "true"' in source
+    assert 'MY_DATA_HUB_MCP_PROVIDER_PROFILE_ENABLED: "true"' in source
+    assert "MY_DATA_HUB_MCP_SCOPES: platform:read,provider:read,provider:write" in source
+    assert 'provider_only_mode="provider-only-mcp"' in source
+    assert 'provider gateway token"' in source
+    assert 'operator write-gate signing key"' in source
+    assert "provider-only control plane requires one central Kaggle credential mode" in source
+    assert "provider-only readiness did not prove the central adapter gateway" in source
+    assert "CHATGPT_OAUTH_CLIENT_CONFIGURATION_REQUIRED" in source
+    assert "provider_oauth_client_id=%s" in source
+    assert '"openid", "offline_access", "platform:read", "provider:read", "provider:write"' in source
+    assert "!override" in source
+
+    provider_branch = source[source.index('if [[ "$provider_only" == true ]]') :]
+    assert "verify_master_assets.py" not in provider_branch.split("else", 1)[0]
+    assert "root-installed epoch tunnel broker socket is required" not in provider_branch.split("else", 1)[0]
+    assert "operator_profile_gate.py" not in provider_branch.split("else", 1)[0]
+
+
+def test_provider_only_override_removes_master_mounts_and_static_bearers() -> None:
+    source = installer_source()
+    start = source.index('cat > "$provider_only_override"')
+    end = source.index('chmod 600 "$provider_only_override"', start)
+    override = source[start:end]
+    assert "MY_DATA_HUB_MASTER_ASSET_DIR" not in override
+    assert "MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR" not in override
+    assert "MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE" not in override
+    assert "connector-intake" not in override
+    assert "acceptance:operate" not in override
+    for forbidden in (
+        "MY_DATA_HUB_MCP_CANARY_TOKEN",
+        "MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN",
+        "MY_DATA_HUB_MCP_PROVIDER_OPERATOR_TOKEN",
+        "KAGGLE_API_TOKEN",
+        "KAGGLE_USERNAME",
+        "KAGGLE_KEY",
+    ):
+        assert forbidden not in override
 
 
 def test_fm08_host_supervisor_is_explicit_private_and_has_one_restart_target() -> None:
@@ -234,7 +271,9 @@ def test_acceptance_scenarios_are_owner_opt_in_and_use_provider_status_input() -
     assert '"kaggle_secret_bindings" in value' in source
     assert "checkpoint acceptance Kaggle credentials are forbidden in the Notebook" in source
     assert 'value.get("brokered_checkpoint_upload") is not True' in source
-    assert 'MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "false"' not in source
+    start = source.index('cat > "$acceptance_scenarios_override"')
+    end = source.index('chmod 600 "$acceptance_scenarios_override"', start)
+    assert 'MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "false"' not in source[start:end]
     assert "MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED" not in COMPOSE.read_text()
 
 
