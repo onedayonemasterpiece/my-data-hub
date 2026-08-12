@@ -20,17 +20,39 @@ tests continue to reject Basic/client-secret token authentication and refresh re
 
 ## Deployment evidence and boundary
 
-The inspected devstand OAuth environment is a private mode-`0600` regular file with one
-existing static reader client and no OpenCode client. The active deployment predates this
-change and would reject the HTTP loopback URI. Therefore this lane did not mutate the live
-environment or restart/deploy services. Registration must be applied additively only after
-this exact commit is reviewed, integrated, and installed; the existing client must be
-preserved.
+Before integration, the inspected devstand OAuth environment was a private mode-`0600`
+regular file with one existing static reader client and no OpenCode client. The then-active
+deployment predated this change and would have rejected the HTTP loopback URI, so no live
+mutation was attempted until review, integration, and explicit approval. The subsequent
+deployment is recorded below.
 
 The installed OpenCode version was `1.18.15`. Its bundled schema confirms support for a
 pre-registered `clientId`, space-delimited `scope`, `callbackPort`, and exact
 `redirectUri`, with the required callback as its default. No stored OAuth credentials were
 read or emitted.
+
+## Live deployment
+
+After integration as `fe46224da025c2a895da31f3d3e1713a52291a32`, the owner approved
+the provider-only install. The private mode-`0600` OAuth environment was updated
+additively: `bootstrap-reader` remains present and `opencode-my-data-hub` matches the exact
+redirect and scope contract. The approved installer then made that exact release current;
+the control plane, OAuth server, and remote MCP containers are healthy, autostart is
+enabled, and readiness still proves the provider gateway with master `ABSENT`.
+
+Public discovery proves authorization code plus refresh, PKCE S256, token authentication
+method `none`, the required scopes, and no DCR endpoint. A noninteractive authorization
+probe using the exact client/redirect/scope/resource was accepted and redirected to the
+HTTPS owner login portal. OpenCode `1.18.15` debug discovered the protected-resource
+challenge and reported the pre-registered client ID. No owner login was completed and no
+tokens were created or recorded. Sanitized evidence is in
+`docs/operations/evidence/2026-08-12-operational-mvp/opencode-oauth-live.json`.
+
+The only remaining owner action is:
+
+```bash
+opencode mcp auth my-data-hub
+```
 
 ## Validation
 
