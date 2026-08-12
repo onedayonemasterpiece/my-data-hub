@@ -44,7 +44,7 @@
     "model_id": "BAAI/bge-m3",
     "model_revision": "5617a9f61b028005a4858fdac845db406aefb181",
     "primary_source": "embedding_workers/bge_m3_runtime.py",
-    "primary_source_sha256": "dafba3b1969f3234365872fa27fcdc5f6e32c863dc655f21c04fe295ec705dc8",
+    "primary_source_sha256": "0f6cc421287d14658c30cf5c0ec499d095d0ad8acf32a88ff503b65f1424be34",
     "privacy": "private",
     "production_ready": false,
     "resource_class": "orchestrator_protected",

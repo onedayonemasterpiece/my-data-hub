@@ -44,7 +44,7 @@
     "model_id": "intfloat/multilingual-e5-base",
     "model_revision": "d128750597153bb5987e10b1c3493a34e5a4502a",
     "primary_source": "embedding_workers/e5_runtime.py",
-    "primary_source_sha256": "6fc1b2c7227c812e3eb1b7dec34a705aca27c77459642da102e0a6c3d0f7dff9",
+    "primary_source_sha256": "5eddc79bca897b8ff31c398d447c66275abaaa8092a59f27d5c77037e0dd7b55",
     "privacy": "private",
     "production_ready": false,
     "resource_class": "orchestrator_protected",

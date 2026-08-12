@@ -11,7 +11,8 @@ from FlagEmbedding import BGEM3FlagModel
 from huggingface_hub import snapshot_download
 
 from my_data_hub.embeddings.direct_plane import (
-    claim_direct_embedding_jobs, submit_direct_embedding_result,
+    claim_direct_embedding_jobs,
+    submit_direct_embedding_result,
 )
 from my_data_hub.embeddings.models import BGE_M3
 from my_data_hub.embeddings.worker import EmbeddingWorker

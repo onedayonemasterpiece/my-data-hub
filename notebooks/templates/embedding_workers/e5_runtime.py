@@ -11,7 +11,8 @@ import torch
 from transformers import AutoModel, AutoTokenizer
 
 from my_data_hub.embeddings.direct_plane import (
-    claim_direct_embedding_jobs, submit_direct_embedding_result,
+    claim_direct_embedding_jobs,
+    submit_direct_embedding_result,
 )
 from my_data_hub.embeddings.models import E5_MULTILINGUAL_BASE
 from my_data_hub.embeddings.worker import EmbeddingWorker
