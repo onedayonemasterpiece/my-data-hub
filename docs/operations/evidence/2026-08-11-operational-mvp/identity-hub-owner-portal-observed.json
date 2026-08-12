@@ -18,12 +18,26 @@
     "issuer": "https://identity.kenigevents.ru",
     "status": "BOOTSTRAP_ONLY_AWAITING_CHATGPT_DISPLAYED_CALLBACK"
   },
-  "observed_at": "2026-08-12T00:29:00Z",
+  "observed_at": "2026-08-12T00:41:00Z",
   "oidc_application_id": "ek0ogb6pmhuhd28r98fl",
   "owner_subject": "one explicitly assigned organization-owner account; identifier omitted",
   "portal_preflight": {
     "authorization_metadata_http_status": 200,
+    "container_user": "1000:1000",
+    "disposable_sqlite_initialized": true,
+    "exact_image_commit": "feba2abc4e80142fbe89f4438f3471245bd4f74b",
+    "exact_image_id": "sha256:97379bb45ffcbc5025a0028d5f3d05a69acf3a791206d84509239096a391ba2b",
+    "grant_types": [
+      "authorization_code",
+      "refresh_token"
+    ],
+    "metadata_bytes": 719,
+    "metadata_http_status": 200,
     "owner_login_http_status": 303,
+    "pkce_methods": [
+      "S256"
+    ],
+    "secret_in_metadata": false,
     "secret_in_redirect": false
   },
   "redirect_uris": [
