@@ -41,6 +41,7 @@ The surviving legacy effects required a second in-Notebook Kaggle client.
 - Ruff on all touched Python files: PASS.
 - Full suite: PASS after updating the contiguous migration expectation (two discovered
   integration regressions fixed); no live mutation attempted.
+- Repository/schema/notebook validation: PASS (`4046` checks, zero errors/notes).
 
 ## Collision note
 
