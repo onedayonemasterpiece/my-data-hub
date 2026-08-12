@@ -23,6 +23,22 @@ listen restriction. This follows the upstream
 [`sshd_config(5)`](https://man.openbsd.org/sshd_config) and
 [`ssh-keygen(1)`](https://man.openbsd.org/ssh-keygen) contracts.
 
+Embedding workers authenticate through a second dedicated
+`mdh-embedding-worker` account. Its separate principal file and `Match User`
+block permit only the opposite direction:
+
+```text
+AllowTcpForwarding local
+PermitOpen 127.0.0.1:25432
+PermitListen none
+GatewayPorts no
+MaxSessions 0
+```
+
+This does not create a public PostgreSQL listener. Deployment separately supplies
+the reviewed SSH gateway host/port and hashed `known_hosts` asset; the broker only
+authorizes connection from that SSH session to the existing loopback reverse-forward.
+
 ## Authenticated certificate protocol
 
 The runtime-to-control protocol is:
@@ -51,6 +67,27 @@ state stores only UUID/epoch/lease, serial, key ID, public-key SHA-256, expiry, 
 revocation metadata. It cannot represent database URLs, passwords, rows, artifacts,
 or checkpoint bytes.
 
+## Task-bound embedding-worker certificates
+
+Control generates each worker Ed25519 keypair outside the broker and sends only the
+one-line public key. The bounded IPC action is:
+
+```text
+issue_worker_public_key(master_instance_id, epoch, task_run_id, credential_id,
+                        public_key, valid_before, now)
+```
+
+The broker requires the exact ACTIVE master instance/epoch and an expiry within its
+unexpired lease. It persists task/credential identity, serial, key/public-certificate
+metadata and returns only public material: certificate, account, principal, expiry,
+task/credential IDs, and `connect_host=127.0.0.1`, `connect_port=25432`. It cannot
+accept a private key. An exact replay returns the same certificate; a changed key,
+expiry, epoch or revoked identity fails closed. Cleanup calls
+`revoke_worker_certificate(...)` with the exact task, credential and serial.
+
+Epoch rotation/deactivation/expiry revokes all associated master and worker serials,
+blanks both principal files and terminates sshd children for both dedicated accounts.
+
 ## Lifecycle calls
 
 The authenticated control lifecycle maps to these broker calls:
@@ -61,6 +98,8 @@ The authenticated control lifecycle maps to these broker calls:
 | ACTIVE lease renewed | `renew(instance, run, attempt, epoch, lease_until, now)` |
 | certificate requested | `issue_public_key(instance, run, attempt, epoch, public_key, valid_before, now)` |
 | one certificate rejected | `revoke(instance, run, attempt, epoch, serial, reason)` |
+| embedding worker admitted | `issue_worker_public_key(instance, epoch, task_run, credential, public_key, valid_before, now)` |
+| embedding worker terminal | `revoke_worker_certificate(instance, epoch, task_run, credential, serial, reason)` |
 | fence, terminal, rotation, or drain completion | `deactivate(instance, run, attempt, epoch, reason)` |
 | every five seconds and at boot | `reconcile(now)` |
 
