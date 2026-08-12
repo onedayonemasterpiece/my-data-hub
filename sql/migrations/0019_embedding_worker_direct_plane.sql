@@ -188,6 +188,7 @@ REVOKE ALL ON search.embedding_dispatch,search.embedding_result_landing FROM PUB
 REVOKE ALL ON FUNCTION search.stage_embedding_dispatch(uuid,uuid,text,text,jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION search.claim_embedding_dispatch(uuid,uuid,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION search.submit_embedding_result(uuid,uuid,text,text,jsonb) FROM PUBLIC;
+GRANT USAGE ON SCHEMA search TO mdh_embedding_worker;
 GRANT EXECUTE ON FUNCTION search.stage_embedding_dispatch(uuid,uuid,text,text,jsonb) TO mdh_canonical_committer;
 GRANT EXECUTE ON FUNCTION search.claim_embedding_dispatch(uuid,uuid,text) TO mdh_embedding_worker;
 GRANT EXECUTE ON FUNCTION search.submit_embedding_result(uuid,uuid,text,text,jsonb) TO mdh_embedding_worker;

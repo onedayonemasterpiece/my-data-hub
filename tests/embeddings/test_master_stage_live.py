@@ -9,7 +9,6 @@ from uuid import UUID
 import pytest
 
 from my_data_hub.embeddings.blogger_documents import CanonicalBloggerDocument
-from my_data_hub.embeddings.contracts import EmbeddingJob
 from my_data_hub.embeddings.documents import SearchDocument
 from my_data_hub.embeddings.importer import EmbeddingImportReceipt
 from my_data_hub.embeddings.master_stage import (

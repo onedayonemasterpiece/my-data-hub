@@ -12,7 +12,9 @@ from uuid import UUID, uuid5
 from my_data_hub.embeddings.blogger_documents import CanonicalBloggerDocument, build_compact_blogger_documents
 from my_data_hub.embeddings.contracts import EmbeddingJob
 from my_data_hub.embeddings.direct_plane import (
-    EmbeddingLaunchMetadata, PostgresEmbeddingWorkerExchange, StagedEmbeddingBatch,
+    EmbeddingLaunchMetadata,
+    PostgresEmbeddingWorkerExchange,
+    StagedEmbeddingBatch,
 )
 from my_data_hub.embeddings.documents import SearchDocument
 from my_data_hub.embeddings.importer import EmbeddingImportReceipt, PostgresEmbeddingImporter

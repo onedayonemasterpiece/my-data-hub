@@ -41,6 +41,7 @@ def test_direct_plane_migration_is_epoch_guarded_and_role_bounded() -> None:
     assert "CREATE TABLE search.embedding_result_landing" in sql
     assert sql.count("CREATE CONSTRAINT TRIGGER mdh_epoch_write_guard") == 2
     assert "mdh_embedding_worker" in ALLOWED_GROUPS
+    assert "GRANT USAGE ON SCHEMA search TO mdh_embedding_worker" in sql
     assert "GRANT EXECUTE ON FUNCTION search.claim_embedding_dispatch" in sql
     assert "GRANT EXECUTE ON FUNCTION search.submit_embedding_result" in sql
     assert "GRANT SELECT ON search.embedding_result_landing TO mdh_embedding_worker" not in sql

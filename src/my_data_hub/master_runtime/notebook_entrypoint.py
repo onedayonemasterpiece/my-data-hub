@@ -36,8 +36,8 @@ from my_data_hub.acceptance.master_production import ProductionMasterAcceptanceE
 from my_data_hub.checkpoints import load_and_verify, restore_physical_archive
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.db.migrations import migrate
-from my_data_hub.embeddings.master_stage import EmbeddingStageContext, execute_embedding_production_stage
 from my_data_hub.embeddings.direct_plane import PostgresEmbeddingWorkerExchange
+from my_data_hub.embeddings.master_stage import EmbeddingStageContext, execute_embedding_production_stage
 from my_data_hub.embeddings.production import EmbeddingProductionRequest, EmbeddingProductionStageReceipt
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.providers.kaggle.source_attestation import observed_kaggle_source_sha256
