@@ -284,7 +284,7 @@ def test_enabled_app_assembles_checkpoint_launcher_without_runtime_impersonation
             "entrypoint_sha256": "8" * 64,
         },
         "control_base_url": "https://control.example.test",
-        "kaggle_secret_bindings": {"KAGGLE_API_TOKEN": "MDH_KAGGLE_API_TOKEN"},
+        "brokered_checkpoint_upload": True,
     }
     deployment_path = tmp_path / "checkpoint-deployment.json"
     deployment_path.write_text(json.dumps(deployment))

@@ -381,13 +381,10 @@ if value.get("schema_version") != "my-data-hub-checkpoint-acceptance-deployment.
     raise SystemExit("checkpoint acceptance deployment schema is invalid")
 if "runtime_root_secret_name" in value:
     raise SystemExit("checkpoint callback roots may not be provisioned as Kaggle User Secrets")
-bindings = value.get("kaggle_secret_bindings")
-if not isinstance(bindings, dict) or set(bindings) not in (
-    {"KAGGLE_API_TOKEN"}, {"KAGGLE_USERNAME", "KAGGLE_KEY"}
-):
-    raise SystemExit("checkpoint provider secret-name binding is incomplete")
-if any(not isinstance(item, str) or not item or len(item) > 200 for item in bindings.values()):
-    raise SystemExit("checkpoint provider secret names are invalid")
+if "kaggle_secret_bindings" in value:
+    raise SystemExit("checkpoint acceptance Kaggle credentials are forbidden in the Notebook")
+if value.get("brokered_checkpoint_upload") is not True:
+    raise SystemExit("checkpoint acceptance requires brokered direct upload")
 PY
   acceptance_scenarios_override="$runtime_root/acceptance-scenarios.$commit.yaml"
   cat > "$acceptance_scenarios_override" <<YAML

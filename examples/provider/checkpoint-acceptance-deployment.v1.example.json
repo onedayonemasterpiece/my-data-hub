@@ -1,51 +1,48 @@
 {
-  "schema_version": "my-data-hub-checkpoint-acceptance-deployment.v1",
-  "provider_owner": "owner",
-  "evidence_notebook_ref": "owner/checkpoint-acceptance-evidence",
+  "brokered_checkpoint_upload": true,
   "candidate_dataset_refs": {
     "FM05": "owner/checkpoint-acceptance-fm05",
     "FM14": "owner/checkpoint-acceptance-fm14",
     "FM15": "owner/checkpoint-acceptance-fm15"
   },
+  "control_base_url": "https://control.example.test",
+  "evidence_notebook_ref": "owner/checkpoint-acceptance-evidence",
+  "provider_owner": "owner",
+  "runtime_input": {
+    "claim_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+    "entrypoint_file": "checkpoint_acceptance_evidence.py",
+    "entrypoint_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "exact_version_ref": "owner/checkpoint-acceptance-runtime/9",
+    "provider_ref": "owner/checkpoint-acceptance-runtime",
+    "wheel_file": "my_data_hub-0.1.0-py3-none-any.whl",
+    "wheel_sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+  },
+  "schema_version": "my-data-hub-checkpoint-acceptance-deployment.v1",
   "template_input": {
-    "provider_ref": "owner/checkpoint-empty-template",
-    "exact_version_ref": "owner/checkpoint-empty-template/3",
     "claim_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "content_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "exact_version_ref": "owner/checkpoint-empty-template/3",
     "manifest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
-    "content_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    "provider_ref": "owner/checkpoint-empty-template"
   },
   "verifier_inputs": {
     "FM05": {
-      "provider_ref": "owner/checkpoint-verifier-fm05-assets",
-      "exact_version_ref": "owner/checkpoint-verifier-fm05-assets/5",
       "claim_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
-      "source_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
-      "code_file": "worker.py"
+      "code_file": "worker.py",
+      "exact_version_ref": "owner/checkpoint-verifier-fm05-assets/5",
+      "provider_ref": "owner/checkpoint-verifier-fm05-assets",
+      "source_sha256": "5555555555555555555555555555555555555555555555555555555555555555"
     },
     "FM15": {
-      "provider_ref": "owner/checkpoint-verifier-fm15-assets",
-      "exact_version_ref": "owner/checkpoint-verifier-fm15-assets/7",
       "claim_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
-      "source_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
-      "code_file": "worker.py"
+      "code_file": "worker.py",
+      "exact_version_ref": "owner/checkpoint-verifier-fm15-assets/7",
+      "provider_ref": "owner/checkpoint-verifier-fm15-assets",
+      "source_sha256": "7777777777777777777777777777777777777777777777777777777777777777"
     }
   },
   "verifier_notebook_refs": {
     "FM05": "owner/checkpoint-verifier-fm05",
     "FM15": "owner/checkpoint-verifier-fm15"
-  },
-  "runtime_input": {
-    "provider_ref": "owner/checkpoint-acceptance-runtime",
-    "exact_version_ref": "owner/checkpoint-acceptance-runtime/9",
-    "claim_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
-    "wheel_file": "my_data_hub-0.1.0-py3-none-any.whl",
-    "wheel_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
-    "entrypoint_file": "checkpoint_acceptance_evidence.py",
-    "entrypoint_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  },
-  "control_base_url": "https://control.example.test",
-  "kaggle_secret_bindings": {
-    "KAGGLE_USERNAME": "MY_DATA_HUB_KAGGLE_USERNAME",
-    "KAGGLE_KEY": "MY_DATA_HUB_KAGGLE_KEY"
   }
 }

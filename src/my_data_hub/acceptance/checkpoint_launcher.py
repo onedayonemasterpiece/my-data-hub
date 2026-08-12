@@ -11,7 +11,6 @@ Datasets, callbacks, logs, or receipts.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import secrets
 import tempfile
@@ -132,20 +131,13 @@ class CheckpointAcceptanceDeployment(BaseModel):
     verifier_notebook_refs: dict[Literal["FM05", "FM15"], str]
     runtime_input: CheckpointRuntimeInput
     control_base_url: str
-    kaggle_secret_bindings: dict[str, str]
+    brokered_checkpoint_upload: Literal[True]
 
     @model_validator(mode="after")
     def exact_deployment(self) -> CheckpointAcceptanceDeployment:
         _catalog = self.catalog  # validate the complete fixed catalog
         if self.runtime_input.provider_ref.split("/", 1)[0] != self.provider_owner:
             raise ValueError("checkpoint runtime input has another owner")
-        keys = set(self.kaggle_secret_bindings)
-        if keys not in ({"KAGGLE_API_TOKEN"}, {"KAGGLE_USERNAME", "KAGGLE_KEY"}):
-            raise ValueError("checkpoint runtime requires access token OR complete legacy pair")
-        if any(not value or len(value) > 200 for value in self.kaggle_secret_bindings.values()):
-            raise ValueError("checkpoint runtime User Secret names are invalid")
-        if len(set(self.kaggle_secret_bindings.values())) != len(self.kaggle_secret_bindings):
-            raise ValueError("checkpoint runtime User Secret names must be distinct")
         return self
 
     @property
@@ -165,6 +157,7 @@ class ControlCheckpointAcceptanceLauncher:
     ledger: ControlLedger
     adapter: KaggleProviderAdapter
     deployment: CheckpointAcceptanceDeployment
+    brokered_upload_ready: bool = False
 
     def launch_checkpoint_acceptance(
         self, request: CheckpointAcceptanceLaunchRequest
@@ -177,7 +170,19 @@ class ControlCheckpointAcceptanceLauncher:
                 or existing["client_id"] != request.control_identity.client_id
             ):
                 raise ValueError("checkpoint acceptance request identity changed")
+            if existing["result"] is not None:
+                return CheckpointAcceptanceLaunchStatus.model_validate(existing["result"])
             config = CheckpointAcceptanceProductionConfig.model_validate(existing["config"])
+            if not self.brokered_upload_ready:
+                return self._terminal(
+                    self._status(
+                        request,
+                        config,
+                        existing,
+                        state="BLOCKED",
+                        blocker="CHECKPOINT_ACCEPTANCE_BROKERED_UPLOAD_NOT_ASSEMBLED",
+                    )
+                )
             if existing["status_dataset"] is None:
                 if self._creator_claim_fresh(existing):
                     return self._status(request, config, existing, state="REQUESTED")
@@ -233,6 +238,16 @@ class ControlCheckpointAcceptanceLauncher:
                         failure="CHECKPOINT_STATUS_INPUT_RESPONSE_AMBIGUOUS",
                     )
                 )
+        if not self.brokered_upload_ready:
+            return self._terminal(
+                self._status(
+                    request,
+                    config,
+                    stored,
+                    state="BLOCKED",
+                    blocker="CHECKPOINT_ACCEPTANCE_BROKERED_UPLOAD_NOT_ASSEMBLED",
+                )
+            )
         if stored["provider_run"] is not None:
             return self._reconcile(stored, request, config)
         if not created and stored["status_dataset"] is not None:
@@ -687,11 +702,9 @@ class ControlCheckpointAcceptanceLauncher:
             if request.verifier_input is not None
             else None
         )
-        bindings = json.dumps(self.deployment.kaggle_secret_bindings, sort_keys=True)
         payload = canonical_json_bytes(config.model_dump(mode="json"))
         lines = [
             "import hashlib, importlib.util, json, os, pathlib, shutil, subprocess, sys, time",
-            "from kaggle_secrets import UserSecretsClient",
             f"TASK_RUN_ID = {str(request.task_run_id)!r}",
             f"ATTEMPT_ID = {str(request.control_identity.attempt_id)!r}",
             f"NOTEBOOK_REF = {request.evidence_notebook_ref!r}",
@@ -714,9 +727,6 @@ class ControlCheckpointAcceptanceLauncher:
                 "status = module.load_run_config(status_config, request_id=TASK_RUN_ID, "
                 "attempt_id=ATTEMPT_ID, notebook=NOTEBOOK_REF)"
             ),
-            "secrets = UserSecretsClient()",
-            f"for env_name, secret_name in {bindings}.items():",
-            "    os.environ[env_name] = secrets.get_secret(secret_name)",
             f"runtime_root = pathlib.Path({runtime_mount!r})",
             f"wheel = runtime_root / {runtime.wheel_file!r}",
             f"entrypoint = runtime_root / {runtime.entrypoint_file!r}",

@@ -188,7 +188,9 @@ def test_acceptance_scenarios_are_owner_opt_in_and_use_provider_status_input() -
     assert "acceptance:operate" in source
     assert '"runtime_root_secret_name" in value' in source
     assert "callback roots may not be provisioned as Kaggle User Secrets" in source
-    assert '{"KAGGLE_USERNAME", "KAGGLE_KEY"}' in source
+    assert '"kaggle_secret_bindings" in value' in source
+    assert "checkpoint acceptance Kaggle credentials are forbidden in the Notebook" in source
+    assert 'value.get("brokered_checkpoint_upload") is not True' in source
     assert 'MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "false"' not in source
     assert "MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED" not in COMPOSE.read_text()
 

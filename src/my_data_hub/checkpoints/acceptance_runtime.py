@@ -718,19 +718,19 @@ def build_production_checkpoint_acceptance_runtime(
     environ: Mapping[str, str] | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     control_transport: Any | None = None,
-    adapter_factory: Callable[..., KaggleProviderAdapter] = KaggleProviderAdapter.from_environment,
     ledger_factory: Callable[[Path], ControlLedger] = ControlLedger,
 ) -> ProductionCheckpointAcceptanceRuntime:
-    """Preflight and assemble one exact official production acceptance runtime.
+    """Preflight the credential-free evidence runtime and fail closed.
 
-    The modern control token is read only from ``MY_DATA_HUB_RUN_SECRET``.  A
-    runtime-authenticated, read-only HEAD resolution happens before local
-    journal creation and before any provider mutation.  Test injections cannot
-    produce a live runtime because the concrete official types are checked.
+    FM05/FM14/FM15 production effects may not construct an account-authenticated
+    Kaggle client inside the Notebook.  Until their task-owned flows are fully
+    routed through the brokered direct-upload control service, this entrypoint
+    returns a precise pre-provider blocker.
     """
 
     values = os.environ if environ is None else environ
     token = _required_runtime_token(values)
+    del ledger_factory
     now = clock()
     if now.tzinfo is None or now.utcoffset() is None:
         raise CheckpointAcceptanceEntrypointBlocker("CHECKPOINT_RUNTIME_CLOCK_INVALID")
@@ -798,64 +798,11 @@ def build_production_checkpoint_acceptance_runtime(
     except Exception as exc:
         raise CheckpointAcceptanceEntrypointBlocker("CHECKPOINT_ACCEPTANCE_ASSET_PREFLIGHT_FAILED") from exc
 
-    remote_journal = RemoteControlLedgerKaggleJournal(client)
-    try:
-        adapter = adapter_factory(journal=remote_journal, clock=clock)
-        api_type = type(adapter.api)
-        if (
-            type(adapter) is not KaggleProviderAdapter
-            or not api_type.__module__.startswith("kaggle.")
-            or api_type.__name__ != "KaggleApi"
-            or type(adapter.journal) is not RemoteControlLedgerKaggleJournal
-            or type(registry) is not RemoteControlCheckpointRegistry
-        ):
-            raise TypeError("injected checkpoint adapter cannot produce live evidence")
-        effects = KaggleTaskOwnedCheckpointEffects(
-            adapter=adapter,
-            registry=registry,
-            binding=binding,
-            clock=clock,
-        )
-        if effects.evidence_class != "live":
-            raise TypeError("checkpoint runtime is not exact official live evidence")
-    except Exception as exc:
-        raise CheckpointAcceptanceEntrypointBlocker("CHECKPOINT_KAGGLE_AUTH_PREFLIGHT_FAILED") from exc
+    del binding, registry
+    raise CheckpointAcceptanceEntrypointBlocker(
+        "CHECKPOINT_ACCEPTANCE_BROKERED_UPLOAD_NOT_ASSEMBLED"
+    )
 
-    journal_path = config.journal_path
-    try:
-        if journal_path.exists():
-            if journal_path.is_symlink() or not journal_path.is_file():
-                raise ValueError("checkpoint acceptance journal is not a regular file")
-            if journal_path.stat().st_mode & 0o777 != 0o600:
-                raise ValueError("checkpoint acceptance journal mode differs from 0600")
-        ledger = ledger_factory(journal_path)
-        journal = ControlLedgerCheckpointAcceptanceJournal(ledger)
-    except Exception as exc:
-        raise CheckpointAcceptanceRuntimeAmbiguity("checkpoint acceptance journal initialization failed") from exc
-
-    idempotency_key = (
-        f"checkpoint-acceptance:{config.scenario}:{config.operation_id}:{config.task_run_id}:{config.source_revision}"
-    )
-    request_type: type[
-        EmptyCheckpointRoundtripRequest | CorruptCheckpointRejectionRequest | ForcedRestoreFailureRequest
-    ]
-    if config.scenario == "FM05":
-        request_type = EmptyCheckpointRoundtripRequest
-    elif config.scenario == "FM14":
-        request_type = CorruptCheckpointRejectionRequest
-    else:
-        request_type = ForcedRestoreFailureRequest
-    request = request_type(
-        operation_id=config.operation_id,
-        task_run_id=config.task_run_id,
-        idempotency_key=idempotency_key,
-        source_revision=config.source_revision,
-    )
-    return ProductionCheckpointAcceptanceRuntime(
-        config=config,
-        coordinator=CheckpointAcceptanceCoordinator(journal=journal, effects=effects, now=clock),
-        request=request,
-    )
 
 
 class KaggleTaskOwnedCheckpointEffects:

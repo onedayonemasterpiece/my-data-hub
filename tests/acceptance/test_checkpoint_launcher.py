@@ -86,10 +86,7 @@ def _deployment() -> CheckpointAcceptanceDeployment:
                 "entrypoint_sha256": "8" * 64,
             },
             "control_base_url": "https://control.example.test",
-            "kaggle_secret_bindings": {
-                "KAGGLE_USERNAME": "MDH_KAGGLE_USERNAME",
-                "KAGGLE_KEY": "MDH_KAGGLE_KEY",
-            },
+            "brokered_checkpoint_upload": True,
         }
     )
 
@@ -230,6 +227,24 @@ class FakeAdapter:
         )
 
 
+def test_production_default_blocks_before_status_dataset_or_notebook_mutation(tmp_path: Path) -> None:
+    ledger = ControlLedger(tmp_path / "ledger.sqlite3", clock=DeterministicClock(NOW))
+    adapter = FakeAdapter(ledger)
+    launcher = ControlCheckpointAcceptanceLauncher(
+        ledger=ledger, adapter=adapter, deployment=_deployment()  # type: ignore[arg-type]
+    )
+
+    result = launcher.launch_checkpoint_acceptance(_request())
+
+    assert result.state == "BLOCKED"
+    assert result.blocker_code == "CHECKPOINT_ACCEPTANCE_BROKERED_UPLOAD_NOT_ASSEMBLED"
+    assert result.status_input is None
+    assert adapter.dataset_calls == 0
+    assert adapter.push_calls == 0
+    replay = launcher.launch_checkpoint_acceptance(_request())
+    assert replay == result
+
+
 def test_launcher_persists_then_attaches_exact_private_status_dataset(tmp_path: Path) -> None:
     ledger = ControlLedger(tmp_path / "ledger.sqlite3", clock=DeterministicClock(NOW))
     adapter = FakeAdapter(ledger)
@@ -237,6 +252,7 @@ def test_launcher_persists_then_attaches_exact_private_status_dataset(tmp_path: 
         ledger=ledger,
         adapter=adapter,  # type: ignore[arg-type]
         deployment=_deployment(),
+        brokered_upload_ready=True,
     )
 
     result = launcher.launch_checkpoint_acceptance(_request())
@@ -253,7 +269,11 @@ def test_launcher_persists_then_attaches_exact_private_status_dataset(tmp_path: 
     assert status["resource_leases"][0]["resource_ref"] == "owner/checkpoint-evidence"
     assert status["resource_leases"][0]["holder_id"] == str(TASK)
     assert token not in adapter.source.decode()
-    assert "MDH_KAGGLE_USERNAME" in adapter.source.decode()
+    source_text = adapter.source.decode()
+    assert "kaggle_secrets" not in source_text
+    assert "KAGGLE_USERNAME" not in source_text
+    assert "KAGGLE_KEY" not in source_text
+    assert "KAGGLE_API_TOKEN" not in source_text
     for marker in (
         "kernel_started",
         "preflight_ok",
@@ -290,6 +310,7 @@ def test_lost_push_response_is_not_retried_or_status_input_deleted(tmp_path: Pat
         ledger=ledger,
         adapter=adapter,  # type: ignore[arg-type]
         deployment=_deployment(),
+        brokered_upload_ready=True,
     )
     request = _request()
 
@@ -315,6 +336,7 @@ def test_crash_after_launch_intent_never_regenerates_token_or_mutates(tmp_path: 
         ledger=ledger,
         adapter=adapter,  # type: ignore[arg-type]
         deployment=_deployment(),
+        brokered_upload_ready=True,
     )
     request = _request()
 
@@ -342,6 +364,7 @@ def test_twenty_concurrent_exact_requests_create_one_status_input_and_one_run(
         ledger=ledger,
         adapter=adapter,  # type: ignore[arg-type]
         deployment=_deployment(),
+        brokered_upload_ready=True,
     )
     request = _request()
     barrier = threading.Barrier(20)
@@ -374,6 +397,7 @@ def test_follower_does_not_terminalize_creator_between_status_record_and_push(
         ledger=ledger,
         adapter=adapter,  # type: ignore[arg-type]
         deployment=_deployment(),
+        brokered_upload_ready=True,
     )
     request = _request()
     with ThreadPoolExecutor(max_workers=1) as pool:

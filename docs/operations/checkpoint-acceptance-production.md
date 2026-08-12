@@ -143,17 +143,20 @@ events have all been durably observed. Authentication remains only in Bearer
 and dedicated task headers; callback JSON and
 `kaggle_status_events.jsonl` contain no token.
 
-Provider-side checkpoint Dataset access may use one explicitly reviewed Kaggle
-User Secret name or the complete legacy username/key *name* pair. This narrow
-data-local exception is required because checkpoint bytes may not cross the
-devstand. Secret values are absent from deployment JSON, Notebook source,
-Datasets, callback bodies, control rows, logs and status responses. There is no
-interactive OAuth/session credential or CLI/config override. Before creating the local acceptance journal
-or permitting any adapter/provider mutation, the factory validates the modern
-task authority by resolving the bounded remote checkpoint HEAD. It then verifies
-the template and verifier assets and requires the exact official
-`KaggleProviderAdapter`, Kaggle `KaggleApi`, remote provider journal and remote
-checkpoint registry types. An injected adapter can never emit live evidence.
+Checkpoint acceptance Notebooks receive **no Kaggle credential or User Secret**.
+The deployment contract requires `brokered_checkpoint_upload: true` and rejects
+the former `kaggle_secret_bindings` shape. The rendered source contains no
+`kaggle_secrets`, `KAGGLE_USERNAME`, `KAGGLE_KEY`, or `KAGGLE_API_TOKEN`.
+
+The remaining FM05/FM14/FM15 integration must use the same brokered direct-upload
+control service as the normal master: metadata goes to control, the one central
+adapter creates per-file signed PUT capabilities and retains blob tokens, and
+checkpoint bytes flow Notebook→Kaggle. Until that task-owned broker wiring is
+complete, production `ControlCheckpointAcceptanceLauncher` durably returns
+`CHECKPOINT_ACCEPTANCE_BROKERED_UPLOAD_NOT_ASSEMBLED` before creating its status
+Dataset or evidence Notebook. The Notebook-side factory also fails closed and
+never constructs an account-authenticated adapter. Injected fake-adapter tests
+remain contract-only and can never emit live evidence.
 
 The fixed local journal is
 `<working_directory>/checkpoint-acceptance-control.sqlite3`, mode `0600`. A
@@ -182,7 +185,7 @@ Config and sanitized result examples live under `examples/provider/`.
 
 `MY_DATA_HUB_CHECKPOINT_ACCEPTANCE_DEPLOYMENT_FILE` points to one private,
 bounded `my-data-hub-checkpoint-acceptance-deployment.v1` document containing
-only exact provider refs/version claims/hashes and reviewed User Secret names.
+only exact provider refs/version claims/hashes and the literal brokered-upload requirement.
 The schema and example are
 `schemas/checkpoint-acceptance-deployment.v1.schema.json` and
 `examples/provider/checkpoint-acceptance-deployment.v1.example.json`.
