@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from my_data_hub.mcp.contracts import MasterSnapshot, MasterState
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.mcp.service import HubService
 from my_data_hub.providers.exchange import manifest_sha256
+from my_data_hub.providers.inventory import InventoryPage
 from my_data_hub.providers.kaggle import ControlLedgerKaggleJournal
 from my_data_hub.providers.kaggle.contracts import (
     DatasetMutationResult,
@@ -30,7 +32,7 @@ from my_data_hub.providers.kaggle.contracts import (
     ProviderEffectReceipt,
     TaskResourceClaim,
 )
-from my_data_hub.providers.models import ProviderFingerprint, ProviderKind
+from my_data_hub.providers.models import ObservedProviderResource, ProviderFingerprint, ProviderKind
 
 
 def principal(subject: str = "owner") -> AccessIdentity:
@@ -447,6 +449,64 @@ def _dataset_input(result: dict[str, object]) -> dict[str, object]:
         "claim_sha256": result["claim_sha256"],
         "control_class": "mcp_managed",
     }
+
+
+class InventoryOnlyAdapter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[ProviderKind, str | None, int]] = []
+
+    def list_resources(
+        self, *, kind: ProviderKind, cursor: str | None, limit: int
+    ) -> InventoryPage:
+        self.calls.append((kind, cursor, limit))
+        slug = "checkpoints" if kind is ProviderKind.DATASET else "master"
+        return InventoryPage(
+            resources=(
+                ObservedProviderResource(
+                    provider="kaggle",
+                    provider_ref=f"owner/{slug}",
+                    kind=kind,
+                    owner="owner",
+                    private=True,
+                    fingerprint=ProviderFingerprint(value=("a" if kind is ProviderKind.DATASET else "b") * 64),
+                    state="complete",
+                    observed_at=datetime(2026, 8, 12, tzinfo=UTC),
+                ),
+            ),
+            next_cursor=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_live_inventory_uses_only_injected_control_adapter_and_operator_scope(
+    tmp_path: Path,
+) -> None:
+    ledger = ControlLedger(tmp_path / "provider.sqlite3")
+    adapter = InventoryOnlyAdapter()
+    gateway = KaggleMCPProviderGateway(ledger, adapter)  # type: ignore[arg-type]
+    control = LedgerControlReader(ledger, provider_gateway=gateway)
+    service = HubService(
+        control=control,
+        fallback_identity=principal(),
+        scopes=principal().scopes,
+    )
+
+    result = await service.invoke("provider.inventory.live", {"limit": 100})
+
+    assert result["bounded"] is True
+    assert result["complete"] is True
+    assert result["count"] == 2
+    assert [item["provider_ref"] for item in result["resources"]] == [
+        "owner/checkpoints",
+        "owner/master",
+    ]
+    assert [call[0] for call in adapter.calls] == [ProviderKind.DATASET, ProviderKind.NOTEBOOK]
+    with pytest.raises(PermissionError, match="provider operator scope"):
+        gateway.invoke(
+            "provider.inventory.live",
+            {"limit": 100},
+            replace(principal(), scopes=frozenset({"provider:read"})),
+        )
 
 
 def _run_request(

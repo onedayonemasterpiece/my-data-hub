@@ -54,6 +54,7 @@ _CONTROL_TOOLS = frozenset(
         "embedding.production.capabilities",
         "provider.resources.status",
         "provider.resources.read",
+        "provider.inventory.live",
         "provider.acceptance.claim.get",
         "runtime.events.history",
         "acceptance.scenario.request",

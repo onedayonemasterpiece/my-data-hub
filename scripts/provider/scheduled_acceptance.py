@@ -21,17 +21,8 @@ from enum import StrEnum
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.catalog import TOOL_CONTRACTS
-from my_data_hub.providers import BoundedInventory, ProviderKind, ProviderRegistry
-from my_data_hub.providers.kaggle import KaggleProviderAdapter
-from my_data_hub.providers.kaggle.control_journal import ControlLedgerKaggleJournal
-
-try:
-    from scripts.provider.kaggle_credential_preflight import kaggle_credentials_configured
-except ModuleNotFoundError:  # direct ``python scripts/provider/...`` execution
-    from kaggle_credential_preflight import kaggle_credentials_configured
 
 PASS = 0
 FAIL = 1
@@ -68,12 +59,6 @@ class Outcome(StrEnum):
     PASS = "PASS"
     FAIL = "FAIL"
     BLOCKED = "BLOCKED"
-
-
-def modern_token_configured() -> bool:
-    """Backward-compatible name for supported automated Kaggle credentials."""
-
-    return kaggle_credentials_configured()
 
 
 @dataclass(frozen=True, slots=True)
@@ -675,6 +660,28 @@ async def _collect_mcp(endpoint: str, token: str) -> dict[str, object]:
             return await _collect_mcp_session(session)
 
 
+async def _collect_live_inventory(endpoint: str, token: str) -> dict[str, object]:
+    """Read Kaggle inventory through the deployed control-owned adapter only."""
+
+    import httpx2
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    timeout = httpx2.Timeout(20.0, connect=5.0)
+    async with httpx2.AsyncClient(
+        headers={"Authorization": f"Bearer {token}"},
+        follow_redirects=False,
+        timeout=timeout,
+    ) as client, streamable_http_client(endpoint, http_client=client) as streams:
+        read_stream, write_stream = streams
+        async with ClientSession(read_stream, write_stream, read_timeout_seconds=20) as session:
+            await session.initialize()
+            result = await session.call_tool("provider.inventory.live", {"limit": 100})
+            if _result_is_error(result):
+                raise RuntimeError("MCP provider.inventory.live returned an error")
+            return _structured_result(result)
+
+
 async def _collect_operator_session(
     session: object,
     *,
@@ -902,6 +909,7 @@ def collect_live(
     endpoint: str,
     token: str,
     operator_token: str,
+    provider_token: str,
     mode: Mode,
     workflow_run_id: str,
     expected_commit: str,
@@ -909,36 +917,7 @@ def collect_live(
     lifecycle_paths: Mapping[str, Path],
 ) -> Observations:
     observations = Observations()
-    if not modern_token_configured():
-        observations.blockers["kaggle_inventory"] = (
-            "KAGGLE_AUTOMATED_CREDENTIAL_REQUIRED",
-            "one control-side SDK credential mode: access token or username/key profile",
-        )
-    else:
-        try:
-            ledger = ControlLedger(ledger_path)
-            adapter = KaggleProviderAdapter.from_environment(
-                journal=ControlLedgerKaggleJournal(ledger)
-            )
-            inventory = BoundedInventory(adapter, ProviderRegistry())
-            resources = [
-                *inventory.collect(ProviderKind.DATASET),
-                *inventory.collect(ProviderKind.NOTEBOOK),
-            ]
-            observations.live_resources = [
-                {
-                    "provider_ref": item.provider_ref,
-                    "kind": item.kind.value,
-                    "private": item.private,
-                    "state": item.state,
-                }
-                for item in resources
-            ]
-        except Exception as exc:
-            observations.blockers["kaggle_inventory"] = (
-                "KAGGLE_INVENTORY_UNAVAILABLE",
-                f"single KaggleProviderAdapter inventory ({type(exc).__name__})",
-            )
+    del ledger_path  # Durable provider effects exist only in the deployed control ledger.
     if (
         not _canonical_mcp_endpoint(endpoint)
         or not token
@@ -984,6 +963,34 @@ def collect_live(
             observations.blockers["mcp"] = (
                 "MCP_SCHEDULED_OBSERVATION_UNAVAILABLE",
                 f"bounded MCP status/auth probes ({type(exc).__name__})",
+            )
+    if not _canonical_mcp_endpoint(endpoint) or not provider_token:
+        observations.blockers["kaggle_inventory"] = (
+            "PROVIDER_OPERATOR_MCP_CREDENTIAL_OR_ENDPOINT_MISSING",
+            "exact provider-operator MCP credential and canonical endpoint",
+        )
+    else:
+        try:
+            inventory = asyncio.run(_collect_live_inventory(endpoint, provider_token))
+            resources = inventory.get("resources")
+            if (
+                inventory.get("bounded") is not True
+                or inventory.get("complete") is not True
+                or not isinstance(resources, list)
+                or len(resources) > 100
+                or inventory.get("count") != len(resources)
+                or not all(
+                    isinstance(item, Mapping)
+                    and set(item) == {"provider_ref", "kind", "private", "state", "observed_at"}
+                    for item in resources
+                )
+            ):
+                raise RuntimeError("central provider inventory is incomplete or malformed")
+            observations.live_resources = [dict(item) for item in resources]
+        except Exception as exc:
+            observations.blockers["kaggle_inventory"] = (
+                "CENTRAL_PROVIDER_INVENTORY_UNAVAILABLE",
+                f"control-owned adapter MCP observation ({type(exc).__name__})",
             )
     if observations.checkpoint_status is not None:
         if not operator_token:
@@ -1129,6 +1136,7 @@ def main() -> int:
     endpoint = os.getenv("MY_DATA_HUB_MCP_CANARY_ENDPOINT", "").strip()
     token = os.getenv("MY_DATA_HUB_MCP_CANARY_TOKEN", "").strip()
     operator_token = os.getenv("MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN", "").strip()
+    provider_token = os.getenv("MY_DATA_HUB_MCP_PROVIDER_OPERATOR_TOKEN", "").strip()
     expected_commit = os.getenv("MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT", "").strip()
     source_commit = os.getenv("GITHUB_SHA", "").strip()
     workflow_run_id = os.getenv("GITHUB_RUN_ID", "local")
@@ -1144,6 +1152,7 @@ def main() -> int:
         endpoint=endpoint,
         token=token,
         operator_token=operator_token,
+        provider_token=provider_token,
         mode=mode,
         workflow_run_id=workflow_run_id,
         expected_commit=expected_commit,

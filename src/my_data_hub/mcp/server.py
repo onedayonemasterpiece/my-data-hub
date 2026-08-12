@@ -434,6 +434,9 @@ def create_server(
             provider_arguments(resource_ref, control_class, private, payload),
         )
 
+    async def provider_inventory_live(limit: int = 100) -> dict[str, Any]:
+        return await service.invoke("provider.inventory.live", {"limit": limit})
+
     async def provider_resources_delete(
         resource_ref: str,
         control_class: Literal["mcp_managed", "mcp_exchange"],
@@ -470,6 +473,7 @@ def create_server(
         "provider.resources.version": provider_resources_version,
         "provider.resources.run": provider_resources_run,
         "provider.resources.read": provider_resources_read,
+        "provider.inventory.live": provider_inventory_live,
         "provider.resources.delete": provider_resources_delete,
         "bloggers.list": bloggers_list,
         "bloggers.get": bloggers_get,

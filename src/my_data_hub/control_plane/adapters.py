@@ -440,6 +440,8 @@ class KaggleMCPProviderGateway:
         self.policy = ProviderPolicy()
 
     def invoke(self, tool: str, arguments: Mapping[str, Any], principal: AccessIdentity) -> dict[str, Any]:
+        if tool == "provider.inventory.live":
+            return self._live_inventory(arguments, principal)
         provider_ref = str(arguments.get("resource_ref", ""))
         control_class = ControlClass(str(arguments.get("control_class", "")))
         if control_class not in {ControlClass.MCP_MANAGED, ControlClass.MCP_EXCHANGE}:
@@ -460,6 +462,67 @@ class KaggleMCPProviderGateway:
         if tool == "provider.resources.delete":
             return self._delete(provider_ref, control_class, payload, principal)
         raise ValueError("unsupported provider gateway tool")
+
+    def _live_inventory(
+        self, arguments: Mapping[str, Any], principal: AccessIdentity
+    ) -> dict[str, Any]:
+        """Read the provider account only through the injected central adapter."""
+
+        if set(arguments) != {"limit"}:
+            raise ValueError("provider live inventory requires only an exact limit")
+        limit = arguments["limit"]
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("provider live inventory limit must be between 1 and 100")
+        if "provider:write" not in principal.scopes:
+            raise PermissionError("provider live inventory requires the provider operator scope")
+        resources: list[dict[str, Any]] = []
+        seen_resources: set[tuple[str, str]] = set()
+        for kind in (ProviderKind.DATASET, ProviderKind.NOTEBOOK):
+            cursor: str | None = None
+            seen_cursors: set[str] = set()
+            for _ in range(20):
+                page = self.adapter.list_resources(
+                    kind=kind,
+                    cursor=cursor,
+                    limit=min(50, max(1, limit + 1 - len(resources))),
+                )
+                for observed in page.resources:
+                    identity = (observed.provider, observed.provider_ref)
+                    if observed.kind != kind or identity in seen_resources:
+                        raise ValueError("provider live inventory returned an invalid resource page")
+                    seen_resources.add(identity)
+                    resources.append(
+                        {
+                            "provider_ref": observed.provider_ref,
+                            "kind": observed.kind.value,
+                            "private": observed.private,
+                            "state": observed.state,
+                            "observed_at": observed.observed_at.isoformat(),
+                        }
+                    )
+                    if len(resources) > limit:
+                        return {
+                            "resources": [],
+                            "count": len(resources),
+                            "bounded": True,
+                            "complete": False,
+                            "blocker_code": "PROVIDER_INVENTORY_LIMIT_EXCEEDED",
+                        }
+                if page.next_cursor is None:
+                    break
+                if page.next_cursor == cursor or page.next_cursor in seen_cursors:
+                    raise ValueError("provider live inventory repeated a cursor")
+                seen_cursors.add(page.next_cursor)
+                cursor = page.next_cursor
+            else:
+                raise ValueError("provider live inventory exceeded its page bound")
+        resources.sort(key=lambda item: (str(item["kind"]), str(item["provider_ref"])))
+        return {
+            "resources": resources,
+            "count": len(resources),
+            "bounded": True,
+            "complete": True,
+        }
 
     def _create(
         self,
@@ -1280,6 +1343,7 @@ class LedgerControlReader(ControlPlaneReader):
             "provider.resources.version",
             "provider.resources.run",
             "provider.resources.read",
+            "provider.inventory.live",
             "provider.resources.delete",
         }:
             if self.provider_gateway is None:

@@ -563,6 +563,10 @@ def test_workflows_execute_scheduled_runner_and_upload_its_receipts() -> None:
     assert "scheduled-provider-real.json" in provider
     assert "MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN" in nightly
     assert "MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN" in provider
+    assert "MY_DATA_HUB_MCP_PROVIDER_OPERATOR_TOKEN" in nightly
+    assert "KAGGLE_API_TOKEN" not in nightly
+    assert "KAGGLE_USERNAME" not in nightly
+    assert "KAGGLE_KEY" not in nightly
     assert "MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT: ${{ vars.MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT }}" in nightly
 
 

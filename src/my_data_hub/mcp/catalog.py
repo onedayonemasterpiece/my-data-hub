@@ -81,6 +81,13 @@ _WRITES = (
     ToolContract("provider.resources.run", "provider:write", False, open_world=True, role="provider_operator"),
     ToolContract("provider.resources.read", "provider:write", True, open_world=True, role="provider_operator"),
     ToolContract(
+        "provider.inventory.live",
+        "provider:write",
+        True,
+        open_world=True,
+        role="provider_operator",
+    ),
+    ToolContract(
         "provider.acceptance.dataset.lifecycle",
         "provider:write",
         False,

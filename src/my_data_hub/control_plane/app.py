@@ -772,6 +772,7 @@ def create_app(
                 "provider.resources.version",
                 "provider.resources.run",
                 "provider.resources.read",
+                "provider.inventory.live",
                 "provider.resources.delete",
                 "provider.acceptance.dataset.lifecycle",
                 "provider.acceptance.notebook.lifecycle",
