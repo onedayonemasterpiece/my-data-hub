@@ -50,6 +50,17 @@
           "title": "Claim Sha256",
           "type": "string"
         },
+        "docker_image": {
+          "maxLength": 300,
+          "pattern": "^[^@\\s]+@sha256:[a-f0-9]{64}$",
+          "title": "Docker Image",
+          "type": "string"
+        },
+        "docker_image_pinning_type": {
+          "const": "original",
+          "title": "Docker Image Pinning Type",
+          "type": "string"
+        },
         "entrypoint_file": {
           "const": "checkpoint_acceptance_evidence.py",
           "default": "checkpoint_acceptance_evidence.py",
@@ -67,10 +78,20 @@
           "title": "Exact Version Ref",
           "type": "string"
         },
+        "image_source_commit": {
+          "pattern": "^[a-f0-9]{40}$",
+          "title": "Image Source Commit",
+          "type": "string"
+        },
         "provider_ref": {
           "maxLength": 300,
           "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
           "title": "Provider Ref",
+          "type": "string"
+        },
+        "python_series": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "title": "Python Series",
           "type": "string"
         },
         "wheel_file": {
@@ -91,7 +112,11 @@
         "claim_sha256",
         "wheel_file",
         "wheel_sha256",
-        "entrypoint_sha256"
+        "entrypoint_sha256",
+        "docker_image",
+        "docker_image_pinning_type",
+        "image_source_commit",
+        "python_series"
       ],
       "title": "CheckpointRuntimeInput",
       "type": "object"

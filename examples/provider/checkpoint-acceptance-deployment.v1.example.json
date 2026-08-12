@@ -10,10 +10,14 @@
   "provider_owner": "owner",
   "runtime_input": {
     "claim_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+    "docker_image": "gcr.io/kaggle-images/python@sha256:c1fa4de30bc268e601e6dcddb6ceb2519b9adde3527dbbfb05e6bdfbbbdcd1a2",
+    "docker_image_pinning_type": "original",
     "entrypoint_file": "checkpoint_acceptance_evidence.py",
     "entrypoint_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "exact_version_ref": "owner/checkpoint-acceptance-runtime/9",
+    "image_source_commit": "fc61d5cda7da39530055bae9bd0e92865f995cd9",
     "provider_ref": "owner/checkpoint-acceptance-runtime",
+    "python_series": "3.12",
     "wheel_file": "my_data_hub-0.1.0-py3-none-any.whl",
     "wheel_sha256": "9999999999999999999999999999999999999999999999999999999999999999"
   },

@@ -121,7 +121,8 @@ token, Kaggle credential, PostgreSQL URL, checkpoint bytes or verifier bytes.
 The control process creates a unique private disposable status Dataset before
 the Notebook push. Its exact version contains only bounded `kaggle_run.json`
 (`run_id`, `attempt_id`, kind, Notebook, credential-free callback URL,
-one-time token and the exact bounded Notebook resource lease) plus the fixed bootstrap helper.
+one-time token, the exact bounded Notebook resource lease and the execution-pins
+hash), the fixed bootstrap helper, and a credential-free `execution-pins.json`.
 The ledger stores only the token hash and exact Dataset claim/hashes. The
 Notebook verifies both files, exports `MY_DATA_HUB_RUN_SECRET` locally and then
 uses the existing Bearer/header transport with redacted JSONL fallback. It
@@ -142,6 +143,18 @@ provider run is not ready evidence until report, resource release and terminal
 events have all been durably observed. Authentication remains only in Bearer
 and dedicated task headers; callback JSON and
 `kaggle_status_events.jsonl` contain no token.
+
+The deployment runtime input is fail-closed on one immutable Kaggle image
+digest, `docker_image_pinning_type: original`, the image source commit and the
+CPython series. The central adapter binds those fields and the exact numeric
+private Dataset inputs to the push intent and generated Kaggle metadata. Before
+copying a template or starting the checkpoint entrypoint, the rendered script
+verifies the hashed execution-pins document, the observed `/etc/git_commit`, the
+running Python series, and that `/kaggle/input` exposes exactly the pinned
+Dataset slugs as regular directories. Its synchronous `kernel_started` event
+carries only the executed source hash and sanitized pin/image/Dataset metadata;
+the control ledger must accept the expected source hash before the checkpoint
+broker authorizes any mutation.
 
 Checkpoint acceptance Notebooks receive **no Kaggle credential or User Secret**.
 The deployment contract requires `brokered_checkpoint_upload: true` and rejects
@@ -193,7 +206,8 @@ Config and sanitized result examples live under `examples/provider/`.
 
 `MY_DATA_HUB_CHECKPOINT_ACCEPTANCE_DEPLOYMENT_FILE` points to one private,
 bounded `my-data-hub-checkpoint-acceptance-deployment.v1` document containing
-only exact provider refs/version claims/hashes and the literal brokered-upload requirement.
+only exact provider refs/version claims/hashes, immutable runtime image
+provenance and the literal brokered-upload requirement.
 The schema and example are
 `schemas/checkpoint-acceptance-deployment.v1.schema.json` and
 `examples/provider/checkpoint-acceptance-deployment.v1.example.json`.

@@ -4,9 +4,9 @@ The control process persists an owner-task authority, creates one private,
 disposable status Dataset containing bounded ``kaggle_run.json`` plus a fixed
 helper, and attaches its exact numeric version to the protected evidence
 Notebook.  Only the callback token hash enters the control ledger.  Provider
-API credential *names* may be bound as Kaggle User Secrets for the narrowly
-reviewed data-local checkpoint adapter; their values never enter source,
-Datasets, callbacks, logs, or receipts.
+API credentials are never bound to the Notebook. Checkpoint publication uses
+only the task-bound broker capability exposed by the control plane; credentials
+never enter source, Datasets, callbacks, logs, or receipts.
 """
 from __future__ import annotations
 
@@ -60,6 +60,7 @@ _AUTHORITY_TTL_SECONDS = 900
 _MAX_SOURCE_BYTES = 512 * 1024
 _MAX_RESULT_BYTES = 256 * 1024
 _MAX_STATUS_BYTES = 16 * 1024
+_EXECUTION_PINS_NAME = "execution-pins.json"
 
 # Provider-side bootstrap only. RuntimeClient remains the authenticated
 # Bearer/header transport and owns redacted JSONL fallback/event_uid replay.
@@ -72,7 +73,7 @@ _STATUS_HELPER = (
     b'        raise RuntimeError("status input size invalid")\n'
     b"    value = json.loads(raw)\n"
     b'    expected = {"schema_version","run_id","attempt_id","kind","notebook",'
-    b'"callback_url","token","resource_leases"}\n'
+    b'"callback_url","token","resource_leases","execution_pins_sha256"}\n'
     b"    if set(value) != expected:\n"
     b'        raise RuntimeError("status input shape invalid")\n'
     b'    if value["schema_version"] != "my-data-hub-kaggle-run.v1":\n'
@@ -109,6 +110,10 @@ class CheckpointRuntimeInput(BaseModel):
         "checkpoint_acceptance_evidence.py"
     )
     entrypoint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    docker_image: str = Field(pattern=r"^[^@\s]+@sha256:[a-f0-9]{64}$", max_length=300)
+    docker_image_pinning_type: Literal["original"]
+    image_source_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+    python_series: str = Field(pattern=r"^[0-9]+\.[0-9]+$")
 
     @model_validator(mode="after")
     def exact_ref(self) -> CheckpointRuntimeInput:
@@ -210,7 +215,8 @@ class ControlCheckpointAcceptanceLauncher:
             return self._reconcile(existing, request, config)
 
         token = secrets.token_hex(32)
-        status_files = self._status_files(request, token)
+        execution_pins = self._execution_pins(request)
+        status_files = self._status_files(request, token, execution_pins=execution_pins)
         config = self._config(request, status_files)
         source = self._render_source(request, config)
         stored, created = self.ledger.ensure_checkpoint_acceptance_launch(
@@ -291,6 +297,7 @@ class ControlCheckpointAcceptanceLauncher:
                     "content_tree_sha256": mapping_sha256(status_files),
                     "status_config_sha256": _sha256(status_files["kaggle_run.json"]),
                     "status_helper_sha256": _sha256(_STATUS_HELPER),
+                    "execution_pins_sha256": _sha256(status_files[_EXECUTION_PINS_NAME]),
                     "resource_lease": {
                         **lease_payload,
                         "epoch": lease.epoch,
@@ -310,6 +317,8 @@ class ControlCheckpointAcceptanceLauncher:
             dataset_sources=self._dataset_sources(request),
             enable_internet=True,
             timeout_seconds=request.timeout_seconds,
+            docker_image=self.deployment.runtime_input.docker_image,
+            docker_image_pinning_type=self.deployment.runtime_input.docker_image_pinning_type,
         )
         if result.run.task_run_id != request.task_run_id or (
             result.run.provider_ref != request.evidence_notebook_ref
@@ -581,7 +590,13 @@ class ControlCheckpointAcceptanceLauncher:
             ).isoformat(),
         }
 
-    def _status_files(self, request: CheckpointAcceptanceLaunchRequest, token: str) -> dict[str, bytes]:
+    def _status_files(
+        self,
+        request: CheckpointAcceptanceLaunchRequest,
+        token: str,
+        *,
+        execution_pins: bytes,
+    ) -> dict[str, bytes]:
         value = {
             "schema_version": "my-data-hub-kaggle-run.v1",
             "run_id": str(request.request_id),
@@ -591,11 +606,33 @@ class ControlCheckpointAcceptanceLauncher:
             "callback_url": self.deployment.control_base_url,
             "token": token,
             "resource_leases": [self._resource_lease_payload(request)],
+            "execution_pins_sha256": _sha256(execution_pins),
         }
         encoded = canonical_json_bytes(value)
         if len(encoded) > _MAX_STATUS_BYTES:
             raise ValueError("checkpoint status config exceeds 16 KiB")
-        return {"kaggle_run.json": encoded, "kaggle_status_client.py": _STATUS_HELPER}
+        return {
+            "kaggle_run.json": encoded,
+            "kaggle_status_client.py": _STATUS_HELPER,
+            _EXECUTION_PINS_NAME: execution_pins,
+        }
+
+    def _execution_pins(self, request: CheckpointAcceptanceLaunchRequest) -> bytes:
+        runtime = self.deployment.runtime_input
+        return canonical_json_bytes(
+            {
+                "schema": "my-data-hub-checkpoint-acceptance-execution-pins/v1",
+                "task_run_id": str(request.task_run_id),
+                "notebook_ref": request.evidence_notebook_ref,
+                "python_series": runtime.python_series,
+                "image_source_commit": runtime.image_source_commit,
+                "docker_image": runtime.docker_image,
+                "docker_image_pinning_type": runtime.docker_image_pinning_type,
+                "input_dataset_versions": list(self._dataset_sources(request)),
+                "privacy": "private",
+                "source_attestation": "control_expected_source_sha256",
+            }
+        )
 
     def _status_create_intent(
         self, request: CheckpointAcceptanceLaunchRequest, files: Mapping[str, bytes]
@@ -631,6 +668,10 @@ class ControlCheckpointAcceptanceLauncher:
                 "dataset_sources": self._dataset_sources(request),
                 "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
                 "disposable": False,
+                "docker_image": self.deployment.runtime_input.docker_image,
+                "docker_image_pinning_type": (
+                    self.deployment.runtime_input.docker_image_pinning_type
+                ),
             },
             requested_at=request.started_at,
         )
@@ -688,6 +729,9 @@ class ControlCheckpointAcceptanceLauncher:
             refs.append(request.verifier_input.exact_version_ref)
         if len(refs) != len(set(refs)):
             raise ValueError("checkpoint acceptance inputs must be distinct exact versions")
+        slugs = [ref.split("/")[1] for ref in refs]
+        if len(slugs) != len(set(slugs)):
+            raise ValueError("checkpoint acceptance input Dataset slugs must be distinct")
         return tuple(refs)
 
     def _render_source(
@@ -702,9 +746,24 @@ class ControlCheckpointAcceptanceLauncher:
             if request.verifier_input is not None
             else None
         )
+        expected_pins = {
+            "schema": "my-data-hub-checkpoint-acceptance-execution-pins/v1",
+            "task_run_id": str(request.task_run_id),
+            "notebook_ref": request.evidence_notebook_ref,
+            "python_series": runtime.python_series,
+            "image_source_commit": runtime.image_source_commit,
+            "docker_image": runtime.docker_image,
+            "docker_image_pinning_type": runtime.docker_image_pinning_type,
+            "input_dataset_versions": list(self._dataset_sources(request)),
+            "privacy": "private",
+            "source_attestation": "control_expected_source_sha256",
+        }
         payload = canonical_json_bytes(config.model_dump(mode="json"))
         lines = [
-            "import hashlib, importlib.util, json, os, pathlib, shutil, subprocess, sys, time",
+            (
+                "import hashlib, importlib.util, json, os, pathlib, platform, re, "
+                "shutil, subprocess, sys, time"
+            ),
             f"TASK_RUN_ID = {str(request.task_run_id)!r}",
             f"ATTEMPT_ID = {str(request.control_identity.attempt_id)!r}",
             f"NOTEBOOK_REF = {request.evidence_notebook_ref!r}",
@@ -712,6 +771,7 @@ class ControlCheckpointAcceptanceLauncher:
             f"status_root = pathlib.Path({status_mount!r})",
             "status_config = status_root / 'kaggle_run.json'",
             "status_helper = status_root / 'kaggle_status_client.py'",
+            f"execution_pins_path = status_root / {_EXECUTION_PINS_NAME!r}",
             (
                 "if hashlib.sha256(status_config.read_bytes()).hexdigest() != "
                 f"{config.status_config_sha256!r}: raise RuntimeError('status config hash mismatch')"
@@ -726,6 +786,43 @@ class ControlCheckpointAcceptanceLauncher:
             (
                 "status = module.load_run_config(status_config, request_id=TASK_RUN_ID, "
                 "attempt_id=ATTEMPT_ID, notebook=NOTEBOOK_REF)"
+            ),
+            "execution_pins_bytes = execution_pins_path.read_bytes()",
+            "execution_pins_sha256 = hashlib.sha256(execution_pins_bytes).hexdigest()",
+            (
+                "if execution_pins_sha256 != status['execution_pins_sha256']: "
+                "raise RuntimeError('execution pins hash mismatch')"
+            ),
+            "execution_pins = json.loads(execution_pins_bytes)",
+            f"expected_execution_pins = {expected_pins!r}",
+            (
+                "if execution_pins != expected_execution_pins: "
+                "raise RuntimeError('execution pins contract mismatch')"
+            ),
+            "observed_image_commit = pathlib.Path('/etc/git_commit').read_text().strip()",
+            (
+                "if observed_image_commit != execution_pins['image_source_commit']: "
+                "raise RuntimeError('runtime image source commit mismatch')"
+            ),
+            (
+                "if not platform.python_version().startswith(execution_pins['python_series'] + '.'): "
+                "raise RuntimeError('runtime Python series mismatch')"
+            ),
+            "dataset_versions = execution_pins['input_dataset_versions']",
+            (
+                "if not dataset_versions or any(not re.fullmatch("
+                "r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*', ref) "
+                "for ref in dataset_versions): raise RuntimeError('input Dataset version is not exact')"
+            ),
+            "expected_mounts = {ref.split('/')[1] for ref in dataset_versions}",
+            "input_root = pathlib.Path('/kaggle/input')",
+            (
+                "observed_mounts = {path.name for path in input_root.iterdir() "
+                "if path.is_dir() and not path.is_symlink()}"
+            ),
+            (
+                "if observed_mounts != expected_mounts: "
+                "raise RuntimeError('attached private Dataset set differs from execution pins')"
             ),
             f"runtime_root = pathlib.Path({runtime_mount!r})",
             f"wheel = runtime_root / {runtime.wheel_file!r}",
@@ -759,7 +856,11 @@ class ControlCheckpointAcceptanceLauncher:
             "        'event_uid': f'{TASK_RUN_ID}:{name}:{progress.get(\"sequence\", 0)}',",
             "        'phase': phase, 'status': state, 'progress': progress})",
             "emit('kernel_started', 'bootstrap', 'running', {'sequence': 0, 'completed_steps': 0,",
-            "     'runtime_source_sha256': EXECUTED_SOURCE_SHA256})",
+            "     'runtime_source_sha256': EXECUTED_SOURCE_SHA256,",
+            "     'execution_pins_sha256': execution_pins_sha256,",
+            "     'image_source_commit': observed_image_commit,",
+            "     'python_series': execution_pins['python_series'],",
+            "     'input_dataset_versions': dataset_versions})",
             "template = pathlib.Path('/kaggle/working/checkpoint-template')",
             f"shutil.copytree(pathlib.Path({template_mount!r}), template, dirs_exist_ok=False)",
         ]
