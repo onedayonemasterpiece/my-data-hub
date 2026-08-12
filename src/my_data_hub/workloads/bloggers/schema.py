@@ -81,13 +81,22 @@ def _text(value: object, name: str, *, required: bool, limit: int = 16_384) -> s
 
 
 def _timestamp(value: object, name: str) -> datetime:
-    if isinstance(value, str):
+    from_text = isinstance(value, str)
+    if from_text:
         try:
+            assert isinstance(value, str)
             value = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError as exc:
             raise BloggerSourceError(f"{name} is not an ISO timestamp") from exc
-    if not isinstance(value, datetime) or value.tzinfo is None:
+    if not isinstance(value, datetime):
         raise BloggerSourceError(f"{name} must be timezone-aware")
+    if value.tzinfo is None:
+        # YDB Timestamp is an absolute UTC instant, while ydb-python 3.31
+        # materializes the primitive as a naive datetime.  Accept only that
+        # typed SDK representation; timezone-less text remains ambiguous.
+        if from_text:
+            raise BloggerSourceError(f"{name} must be timezone-aware")
+        value = value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
 
 

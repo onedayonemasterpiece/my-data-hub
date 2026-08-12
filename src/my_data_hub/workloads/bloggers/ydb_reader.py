@@ -189,6 +189,44 @@ class YdbSnapshotError(RuntimeError):
     """The exact read-only snapshot could not be established."""
 
 
+def _is_exact_write_access_denial(ydb: Any, error: BaseException) -> bool:
+    """Accept the exact current YDB wrapper for a table ACL denial.
+
+    YDB documents schema-object denial as ``UNAUTHORIZED``.  The current
+    serverless Query Service can instead wrap the same denial as ``ABORTED``
+    with two structured issues.  Do not accept ABORTED generally: bind the
+    provider status, issue codes, severities, exact table and empty children.
+    """
+
+    if isinstance(error, ydb.issues.Unauthorized):
+        return True
+    aborted = getattr(ydb.issues, "Aborted", None)
+    if aborted is None or not isinstance(error, aborted) or getattr(error, "status", None) != 400040:
+        return False
+    raw_issues = getattr(error, "issues", None)
+    try:
+        issues = tuple(raw_issues or ())
+    except TypeError:
+        return False
+    if len(issues) != 2:
+        return False
+    expected = (
+        (
+            2028,
+            1,
+            f"Failed to resolve table `{SOURCE_DATABASE_PATH}/{SOURCE_TABLE}` status: AccessDenied.",
+        ),
+        (2019, 1, "Query invalidated on scheme/internal error during Data execution"),
+    )
+    return all(
+        getattr(issue, "issue_code", None) == code
+        and getattr(issue, "severity", None) == severity
+        and getattr(issue, "message", None) == message
+        and not tuple(getattr(issue, "issues", ()))
+        for issue, (code, severity, message) in zip(issues, expected, strict=True)
+    )
+
+
 class YdbBloggerSnapshot:
     """Consumes one QuerySnapshotReadOnly result without writing it to disk.
 
@@ -225,8 +263,10 @@ class YdbBloggerSnapshot:
                     # for a successful denial probe.
                     for _response in responses:
                         pass
-                except ydb.issues.Unauthorized:
-                    return
+                except Exception as error:
+                    if _is_exact_write_access_denial(ydb, error):
+                        return
+                    raise
                 raise YdbSnapshotError("YDB viewer write-denial probe unexpectedly succeeded")
         finally:
             pool.stop(timeout=5)

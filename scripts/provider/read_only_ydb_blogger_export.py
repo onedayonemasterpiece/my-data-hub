@@ -119,7 +119,13 @@ def _retryable(error: BaseException) -> bool:
 
     return isinstance(
         error,
-        (ydb.issues.Overloaded, ydb.issues.Unavailable, ydb.issues.Timeout, ydb.issues.ConnectionError),
+        (
+            ydb.issues.Aborted,
+            ydb.issues.Overloaded,
+            ydb.issues.Unavailable,
+            ydb.issues.Timeout,
+            ydb.issues.ConnectionError,
+        ),
     )
 
 

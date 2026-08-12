@@ -3,8 +3,10 @@
 The production path has two read-only authorities and never materializes a row
 artifact on the devstand. First, an owner runs the provider preflight with the
 dedicated database-scoped `ydb.viewer` service account. The preflight proves the
-zero-row write probe returns the SDK's exact `UNAUTHORIZED` status and performs
-two non-overlapping ordered `QuerySnapshotReadOnly` scans. Source values remain
+zero-row write probe returns either the SDK's exact `UNAUTHORIZED` status or the
+current serverless Query Service's exact structured `ABORTED` wrapper containing
+the table-bound `AccessDenied` issues, and performs two non-overlapping ordered
+`QuerySnapshotReadOnly` scans. Source values remain
 in process only. Its sole output is a mode-0600 detached receipt containing
 bounded counts, set/logical hashes, timestamps, source/query/schema identities,
 source revision, the viewer binding hash, and deterministic snapshot/batch

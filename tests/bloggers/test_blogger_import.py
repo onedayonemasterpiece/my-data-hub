@@ -79,6 +79,20 @@ def test_unknown_or_missing_source_field_is_not_silently_discarded() -> None:
         BloggerSourceRow.from_mapping(missing)
 
 
+def test_typed_ydb_timestamp_is_utc_but_timezone_less_text_is_rejected() -> None:
+    typed = source_row()
+    typed["ingested_at"] = datetime(2026, 8, 3, 13, 30)
+    typed["updated_at"] = datetime(2026, 8, 3, 13, 31)
+    observed = BloggerSourceRow.from_mapping(typed)
+    assert observed.ingested_at == datetime(2026, 8, 3, 13, 30, tzinfo=UTC)
+    assert observed.updated_at == datetime(2026, 8, 3, 13, 31, tzinfo=UTC)
+
+    ambiguous = source_row()
+    ambiguous["updated_at"] = "2026-08-03T13:31:00"
+    with pytest.raises(BloggerSourceError, match="updated_at must be timezone-aware"):
+        BloggerSourceRow.from_mapping(ambiguous)
+
+
 def test_invalid_source_values_produce_bounded_terminal_quarantine_evidence() -> None:
     unknown = _observe(source_row(extra_secret="x" * 200_000), 0)
     assert unknown.row is None
