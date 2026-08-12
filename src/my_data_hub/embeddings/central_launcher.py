@@ -115,6 +115,8 @@ class CentralEmbeddingWorkerLauncher:
                 "updated_at": now.isoformat(),
             }
             self._save_journal()
+        elif prior["state"] in {"STATUS_CREATED", "CLEANUP_REQUESTED", "COMPLETE"}:
+            raise ValueError("partial embedding launch requires idempotent cleanup before relaunch")
         secret_path = self._secret_path(metadata.task_run_id)
         saved = self._read_secret(secret_path, metadata) if secret_path is not None and secret_path.exists() else None
         if saved is not None and saved.get("direct_access") is not None:
@@ -225,7 +227,7 @@ class CentralEmbeddingWorkerLauncher:
         self._states[metadata.task_run_id]["status_claim"] = dataset.claim.model_dump(mode="json")
         self._save_journal()
         exact_status = f"{status_ref}/{dataset.claim.provider_version}"
-        source = self._render_source(status_ref)
+        source = self._render_source(status_ref, metadata.task_run_id)
         source_sha = hashlib.sha256(source).hexdigest()
         self._states[metadata.task_run_id]["expected_source_sha256"] = source_sha
         self._save_journal()
@@ -287,27 +289,47 @@ class CentralEmbeddingWorkerLauncher:
         state["runtime_attested"] = True
         self._save_journal()
 
-    def cleanup(self, task_run_id: UUID) -> tuple[object, object]:
+    def cleanup(self, task_run_id: UUID) -> tuple[object | None, object | None]:
         """Idempotently revoke access then delete exact disposable resources."""
 
         self._load_journal()
         receipt = self._receipts.get(task_run_id)
-        if receipt is None or receipt.status_claim is None or receipt.notebook_claim is None:
-            raise ValueError("embedding worker cleanup lacks its exact durable claims")
+        state = self._states.get(task_run_id)
+        if state is None:
+            raise ValueError("embedding worker cleanup lacks durable launch state")
+        if state["state"] == "COMPLETE":
+            return None, None
         revoke = getattr(self.access_factory, "revoke", None)
         if not callable(revoke):
             raise ValueError("embedding worker access revocation is unavailable")
-        self._states[task_run_id]["state"] = "CLEANUP_REQUESTED"
-        self._states[task_run_id]["updated_at"] = self.clock().astimezone(UTC).isoformat()
+        state["state"] = "CLEANUP_REQUESTED"
+        state["updated_at"] = self.clock().astimezone(UTC).isoformat()
         self._save_journal()
-        revoke(receipt.credential_id, task_run_id=task_run_id, serial=receipt.ssh_certificate_serial,
-               epoch=receipt.epoch)
+        secret_path = self._secret_path(task_run_id)
+        metadata = EmbeddingLaunchMetadata.model_validate(state["metadata"])
+        secret = self._read_secret(secret_path, metadata) if secret_path is not None else None
+        direct = secret.get("direct_access") if isinstance(secret, dict) else None
+        credential_id = receipt.credential_id if receipt is not None else UUID(str(state["credential_id"]))
+        certificate_serial = (
+            receipt.ssh_certificate_serial if receipt is not None
+            else direct.get("ssh_certificate_serial") if isinstance(direct, dict) else None
+        )
+        epoch = receipt.epoch if receipt is not None else metadata.epoch
+        revoke(credential_id, task_run_id=task_run_id, serial=certificate_serial, epoch=epoch)
         operation_id = uuid5(NAMESPACE_URL, f"embedding-worker-cleanup:{task_run_id}")
-        results = []
-        for label, claim, action in (
-            ("notebook", receipt.notebook_claim, MutationAction.DELETE_NOTEBOOK),
-            ("status", receipt.status_claim, MutationAction.DELETE_DATASET),
-        ):
+        claims: list[tuple[str, Any, MutationAction]] = []
+        if receipt is not None:
+            claims.extend((
+                ("notebook", receipt.notebook_claim, MutationAction.DELETE_NOTEBOOK),
+                ("status", receipt.status_claim, MutationAction.DELETE_DATASET),
+            ))
+        elif state.get("status_claim") is not None:
+            from my_data_hub.providers.kaggle.contracts import TaskResourceClaim
+            claims.append((
+                "status", TaskResourceClaim.model_validate(state["status_claim"]), MutationAction.DELETE_DATASET,
+            ))
+        results: list[object] = []
+        for label, claim, action in claims:
             intent = ProviderEffectIntent.create(
                 operation_id=operation_id,
                 effect_id=uuid5(NAMESPACE_URL, f"embedding-worker-cleanup:{label}:{task_run_id}"),
@@ -321,11 +343,12 @@ class CentralEmbeddingWorkerLauncher:
             results.append(self.adapter.delete_task_created_resource(intent=intent, claim=claim))
         self._receipts.pop(task_run_id, None)
         self._states[task_run_id]["state"] = "COMPLETE"
-        secret_path = self._secret_path(task_run_id)
         if secret_path is not None:
             secret_path.unlink(missing_ok=True)
         self._save_journal()
-        return results[0], results[1]
+        if receipt is not None:
+            return results[0], results[1]
+        return (results[0] if results else None), None
 
     def reconcile_timeouts(self, *, now: datetime | None = None) -> tuple[UUID, ...]:
         self._load_journal()
@@ -448,17 +471,19 @@ class CentralEmbeddingWorkerLauncher:
                 epoch=int(value["epoch"]),
             )
 
-    def _render_source(self, status_ref: str) -> bytes:
+    def _render_source(self, status_ref: str, task_run_id: UUID) -> bytes:
         status_mount = f"/kaggle/input/{status_ref.split('/', 1)[1]}"
         runtime_mount = f"/kaggle/input/{self.config.runtime_dataset_exact_ref.split('/', 1)[1]}"
         lines = [
             "import json, os, pathlib, subprocess, time",
+            f'EXPECTED_TASK_RUN_ID={str(task_run_id)!r}',
             f's=json.loads(pathlib.Path({status_mount!r}, "embedding-worker.json").read_text())',
             'assert s["schema_version"] == "embedding-worker-status.v1"',
             f'pins=pathlib.Path({status_mount!r},"execution-pins.json")',
             'os.environ["MY_DATA_HUB_EXECUTION_PINS_PATH"]=str(pins)',
             'os.environ["MY_DATA_HUB_EXECUTION_PINS_SHA256"]=__import__("hashlib").sha256(pins.read_bytes()).hexdigest()',
             'a=s["direct_access"]; m=s["launch"]; r=s["runtime"]',
+            'if m["task_run_id"] != EXPECTED_TASK_RUN_ID: raise RuntimeError("task run mismatch")',
             'if int(a["epoch"]) != int(m["epoch"]): raise RuntimeError("epoch mismatch")',
             'observed_commit=pathlib.Path("/etc/git_commit").read_text().strip()',
             'body=json.dumps({"task_run_id":m["task_run_id"],"source_sha256":__import__("hashlib").sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),"image_identity":r["image_identity"],"image_source_commit":observed_commit,"epoch":m["epoch"]}).encode()',
