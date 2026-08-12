@@ -1,0 +1,67 @@
+mode: worktree_worker
+repo: /home/dev/projects/my-data-hub
+base_ref: 35866f9b9d1e46e0f47c340d5816d1b18a678f80
+base_branch: integration/operational-mvp
+integration_branch: integration/operational-mvp
+global_constraints:
+  - Preserve the single central Kaggle adapter and credential boundary.
+  - Never persist canonical business rows on the devstand.
+  - Never claim live evidence from mocks or schemas.
+  - Provider-only deployment remains pending explicit restart confirmation.
+verification_owner: /root
+stop_conditions:
+  - Any production data or credential would cross the control ledger or devstand.
+  - A lane requires a destructive runtime mutation without owner confirmation.
+lanes:
+  - id: checkpoint-verifier-live-closure
+    role: worker
+    requirement_ids: [C1]
+    target: Close exact image/runtime asset/mount and PostgreSQL 18 restore-verifier proof gaps.
+    depends_on: []
+    execution_mode: parallel
+    branch: agent/operational-mvp/checkpoint-verifier-live-closure-final
+    worktree: /home/dev/.codex/worktrees/my-data-hub/checkpoint-verifier-live-closure-final
+    writable_files:
+      - src/my_data_hub/checkpoints/
+      - directly related checkpoint schemas, tests, docs, and lane RESULTS
+    forbidden_files:
+      - src/my_data_hub/control_plane/app.py
+      - src/my_data_hub/embeddings/
+      - deploy/
+      - YDB/blogger files
+    expected_output: Clean tested commit with real-adapter contract coverage and no live mutation.
+    verification_scope: full_local
+    status: spawned
+  - id: ydb-blogger-topology-closure
+    role: worker
+    requirement_ids: [Y1]
+    target: Remove the hard-coded 266 invariant and eliminate devstand row-byte export topology.
+    depends_on: []
+    execution_mode: parallel
+    branch: agent/operational-mvp/ydb-blogger-topology-closure
+    worktree: /home/dev/.codex/worktrees/my-data-hub/ydb-blogger-topology-closure
+    writable_files:
+      - scripts/provider/read_only_ydb_blogger_export.py
+      - src/my_data_hub/bloggers/
+      - directly related master-stage blogger integration, schemas, tests, docs, and lane RESULTS
+    forbidden_files:
+      - src/my_data_hub/control_plane/app.py
+      - src/my_data_hub/checkpoints/
+      - deploy/
+      - embeddings
+    expected_output: Clean tested commit preserving direct ACTIVE-master data flow and metadata-only receipts.
+    verification_scope: full_local
+    status: spawned
+  - id: integration-and-live-operations
+    role: merge_reviewer
+    requirement_ids: [M1, F1]
+    target: Integrate lanes, deploy provider-only MCP after confirmation, then continue live acceptance.
+    depends_on: [checkpoint-verifier-live-closure, ydb-blogger-topology-closure]
+    execution_mode: serial_after_dependency
+    branch: integration/operational-mvp
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-mvp
+    writable_files: [integration-only conflict resolution, evidence, and plans]
+    forbidden_files: [worker-owned dirty worktrees]
+    expected_output: Integrated gates, live receipts, and exact remaining external blockers.
+    verification_scope: full_local
+    status: planned
