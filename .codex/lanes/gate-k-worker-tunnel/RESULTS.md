@@ -30,4 +30,5 @@ Status: code gates complete; no host install or live mutation performed.
 - Installer `bash -n`: PASS.
 - Compileall: PASS.
 - Repository validator: PASS (3,984 checks, zero errors/notes).
-- Full suite: pending in final evidence update.
+- Full suite: PASS; only the pre-existing `jsonschema.RefResolver` deprecation
+  warnings from `tests/bloggers/test_final_closure.py` were emitted.
