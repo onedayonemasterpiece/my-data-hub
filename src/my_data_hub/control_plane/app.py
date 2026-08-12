@@ -1567,6 +1567,14 @@ def create_app(
                 task = asyncio.create_task(asyncio.to_thread(launcher.launch, metadata))
                 app.state.embedding_launch_tasks.add(task)
                 task.add_done_callback(app.state.embedding_launch_tasks.discard)
+            if event.event_type in {RuntimeEventType.JOB_COMPLETED, RuntimeEventType.JOB_FAILED}:
+                progress = event.data.get("progress")
+                task_run_id = progress.get("task_run_id") if isinstance(progress, dict) else None
+                launcher = app.state.embedding_direct_plane_launcher
+                if task_run_id and launcher is not None:
+                    task = asyncio.create_task(asyncio.to_thread(launcher.cleanup, UUID(str(task_run_id))))
+                    app.state.embedding_launch_tasks.add(task)
+                    task.add_done_callback(app.state.embedding_launch_tasks.discard)
             if event.event_type in {RuntimeEventType.RUNTIME_TERMINAL, RuntimeEventType.RUNTIME_FAILED}:
                 reconcile_status_cleanup = getattr(master_runtime, "reconcile_status_cleanup_once", None)
                 if reconcile_status_cleanup is not None:

@@ -13,7 +13,8 @@ from my_data_hub.embeddings.central_launcher import (
     EmbeddingWorkerLaunchConfig,
 )
 from my_data_hub.embeddings.direct_plane import EmbeddingLaunchMetadata
-from my_data_hub.providers.models import ProviderFingerprint
+from my_data_hub.providers.kaggle.contracts import TaskResourceClaim
+from my_data_hub.providers.models import ControlClass, ProviderFingerprint, ProviderKind
 
 
 class Adapter:
@@ -23,23 +24,27 @@ class Adapter:
 
     def create_private_dataset(self, **kwargs):  # type: ignore[no-untyped-def]
         self.datasets.append(kwargs)
-        return SimpleNamespace(claim=SimpleNamespace(
-            provider_ref="owner/status", provider_version=1, claim_sha256="e" * 64,
-            fingerprint=ProviderFingerprint(value="f" * 64),
-        ))
+        return SimpleNamespace(claim=self._claim("owner/status", ProviderKind.DATASET))
 
     def push_private_notebook_pending_runtime_attestation(self, **kwargs):  # type: ignore[no-untyped-def]
         self.runs.append(kwargs)
         return SimpleNamespace(
             run=SimpleNamespace(provider_run_ref="owner/kernel/runs/1"),
-            claim=SimpleNamespace(
-                provider_ref="owner/kernel", provider_version=1, claim_sha256="d" * 64,
-                fingerprint=ProviderFingerprint(value="a" * 64),
-            ),
+            claim=self._claim("owner/kernel", ProviderKind.NOTEBOOK),
         )
 
     def delete_task_created_resource(self, **kwargs):  # type: ignore[no-untyped-def]
         return kwargs["claim"].provider_ref
+
+    @staticmethod
+    def _claim(ref, kind):  # type: ignore[no-untyped-def]
+        return TaskResourceClaim.create(
+            task_id=UUID("22222222-2222-4222-8222-222222222222"),
+            effect_id=UUID("33333333-3333-4333-8333-333333333333"), provider_ref=ref,
+            kind=kind, control_class=ControlClass.ORCHESTRATOR_PROTECTED, disposable=True,
+            fingerprint=ProviderFingerprint(value="a" * 64), provider_version=1,
+            registered_at=datetime(2026, 8, 12, tzinfo=UTC),
+        )
 
 
 def _metadata() -> EmbeddingLaunchMetadata:
@@ -141,3 +146,24 @@ def test_cleanup_requires_revocation_and_deletes_exact_claims() -> None:
     assert deleted == ("owner/kernel", "owner/status")
     with pytest.raises(ValueError, match="exact durable claims"):
         launcher.cleanup(receipt.task_run_id)
+
+
+def test_restart_loads_secret_free_journal_and_cleans_without_relaunch(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    adapter = Adapter()
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    revoked = []
+    class Access:
+        def __call__(self, *_args):  # type: ignore[no-untyped-def]
+            return EmbeddingWorkerDirectAccess(
+                database_url="postgresql://w:s@d/h", tls_ca_pem="ca",
+                expires_at=now + timedelta(minutes=5), epoch=7, tunnel_endpoint="d:1",
+                credential_id=UUID("33333333-3333-4333-8333-333333333333"))
+        def revoke(self, credential_id, *, task_run_id): revoked.append((credential_id, task_run_id))  # type: ignore[no-untyped-def]
+    config = EmbeddingWorkerLaunchConfig("owner", "owner/runtime/12", "image", "wheel", "e"*64, "https://c/e")
+    journal = tmp_path / "launches.json"
+    first = CentralEmbeddingWorkerLauncher(adapter, Access(), config, clock=lambda: now, journal_path=journal)
+    receipt = first.launch(_metadata())
+    assert "opaque-secret" not in journal.read_text() and journal.stat().st_mode & 0o777 == 0o600
+    restarted = CentralEmbeddingWorkerLauncher(adapter, Access(), config, clock=lambda: now, journal_path=journal)
+    restarted.cleanup(receipt.task_run_id)
+    assert len(adapter.runs) == 1 and len(revoked) == 1

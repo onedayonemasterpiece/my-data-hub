@@ -8,10 +8,14 @@ accepted by this component.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import secrets
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -34,6 +38,12 @@ class EmbeddingWorkerDirectAccess(BaseModel):
     epoch: int = Field(ge=1)
     tunnel_endpoint: str = Field(min_length=3, max_length=300)
     credential_id: UUID
+    ssh_private_key: SecretStr | None = None
+    ssh_certificate: SecretStr | None = None
+    ssh_known_hosts: SecretStr | None = None
+    ssh_gateway_host: str | None = None
+    ssh_gateway_port: int | None = None
+    ssh_account: str | None = None
 
     @field_validator("expires_at")
     @classmethod
@@ -82,9 +92,11 @@ class CentralEmbeddingWorkerLauncher:
     access_factory: WorkerAccessFactory
     config: EmbeddingWorkerLaunchConfig
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
+    journal_path: Path | None = None
     _receipts: dict[UUID, EmbeddingWorkerLaunchReceipt] = field(default_factory=dict, init=False)
 
     def launch(self, metadata: EmbeddingLaunchMetadata) -> EmbeddingWorkerLaunchReceipt:
+        self._load_journal()
         existing = self._receipts.get(metadata.task_run_id)
         if existing is not None:
             return existing
@@ -106,6 +118,12 @@ class CentralEmbeddingWorkerLauncher:
                 "epoch": access.epoch,
                 "tunnel_endpoint": access.tunnel_endpoint,
                 "credential_id": str(access.credential_id),
+                "ssh_private_key": access.ssh_private_key.get_secret_value() if access.ssh_private_key else None,
+                "ssh_certificate": access.ssh_certificate.get_secret_value() if access.ssh_certificate else None,
+                "ssh_known_hosts": access.ssh_known_hosts.get_secret_value() if access.ssh_known_hosts else None,
+                "ssh_gateway_host": access.ssh_gateway_host,
+                "ssh_gateway_port": access.ssh_gateway_port,
+                "ssh_account": access.ssh_account,
             },
             "callback": {"url": self.config.callback_url, "task_token": task_token},
             "runtime": {
@@ -152,7 +170,7 @@ class CentralEmbeddingWorkerLauncher:
             intent=push_intent, task_run_id=metadata.task_run_id, source=source,
             title=notebook_ref.split("/", 1)[1], code_file="worker.py", kernel_type="script",
             language="python", control_class=ControlClass.ORCHESTRATOR_PROTECTED,
-            disposable=False, dataset_sources=sources, enable_internet=True,
+            disposable=True, dataset_sources=sources, enable_internet=True,
             timeout_seconds=10_800,
         )
         receipt = EmbeddingWorkerLaunchReceipt(
@@ -162,11 +180,13 @@ class CentralEmbeddingWorkerLauncher:
             status_claim=dataset.claim, notebook_claim=run.claim,
         )
         self._receipts[metadata.task_run_id] = receipt
+        self._save_journal()
         return receipt
 
     def cleanup(self, task_run_id: UUID) -> tuple[object, object]:
         """Idempotently revoke access then delete exact disposable resources."""
 
+        self._load_journal()
         receipt = self._receipts.get(task_run_id)
         if receipt is None or receipt.status_claim is None or receipt.notebook_claim is None:
             raise ValueError("embedding worker cleanup lacks its exact durable claims")
@@ -192,19 +212,87 @@ class CentralEmbeddingWorkerLauncher:
             )
             results.append(self.adapter.delete_task_created_resource(intent=intent, claim=claim))
         self._receipts.pop(task_run_id, None)
+        self._save_journal()
         return results[0], results[1]
+
+    def _save_journal(self) -> None:
+        if self.journal_path is None:
+            return
+        if not self.journal_path.is_absolute() or self.journal_path.is_symlink():
+            raise ValueError("embedding launcher journal path is unsafe")
+        payload = {str(task): {
+            "task_run_id": str(r.task_run_id), "status_dataset_exact_ref": r.status_dataset_exact_ref,
+            "provider_run_ref": r.provider_run_ref, "source_sha256": r.source_sha256,
+            "credential_id": str(r.credential_id), "credential_expires_at": r.credential_expires_at.isoformat(),
+            "status_claim": r.status_claim.model_dump(mode="json"),
+            "notebook_claim": r.notebook_claim.model_dump(mode="json"),
+        } for task, r in self._receipts.items()}
+        encoded = canonical_json_bytes({"schema_version": "embedding-launch-journal.v1", "tasks": payload}) + b"\n"
+        if len(encoded) > 1024 * 1024:
+            raise ValueError("embedding launcher journal is oversized")
+        parent = self.journal_path.parent
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        parent.chmod(0o700)
+        descriptor, raw = tempfile.mkstemp(prefix=".embedding-launches.", dir=parent)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(raw, self.journal_path)
+            directory = os.open(parent, os.O_RDONLY)
+            os.fsync(directory)
+            os.close(directory)
+        finally:
+            Path(raw).unlink(missing_ok=True)
+
+    def _load_journal(self) -> None:
+        if self._receipts or self.journal_path is None or not self.journal_path.exists():
+            return
+        from my_data_hub.providers.kaggle.contracts import TaskResourceClaim
+        if (self.journal_path.is_symlink() or not self.journal_path.is_file()
+                or self.journal_path.stat().st_mode & 0o077 or self.journal_path.stat().st_size > 1024 * 1024):
+            raise ValueError("embedding launcher journal is unsafe")
+        envelope = json.loads(self.journal_path.read_text())
+        if set(envelope) != {"schema_version", "tasks"} or envelope["schema_version"] != "embedding-launch-journal.v1":
+            raise ValueError("embedding launcher journal schema differs")
+        for task, value in envelope["tasks"].items():
+            self._receipts[UUID(task)] = EmbeddingWorkerLaunchReceipt(
+                task_run_id=UUID(value["task_run_id"]), status_dataset_exact_ref=value["status_dataset_exact_ref"],
+                provider_run_ref=value["provider_run_ref"], source_sha256=value["source_sha256"],
+                credential_id=UUID(value["credential_id"]),
+                credential_expires_at=datetime.fromisoformat(value["credential_expires_at"]),
+                status_claim=TaskResourceClaim.model_validate(value["status_claim"]),
+                notebook_claim=TaskResourceClaim.model_validate(value["notebook_claim"]),
+            )
 
     def _render_source(self, status_ref: str) -> bytes:
         status_mount = f"/kaggle/input/{status_ref.split('/', 1)[1]}"
         runtime_mount = f"/kaggle/input/{self.config.runtime_dataset_exact_ref.split('/', 1)[1]}"
         lines = [
-            "import json, os, pathlib",
+            "import json, os, pathlib, subprocess, time",
             f's=json.loads(pathlib.Path({status_mount!r}, "embedding-worker.json").read_text())',
             'assert s["schema_version"] == "embedding-worker-status.v1"',
             'a=s["direct_access"]; m=s["launch"]; r=s["runtime"]',
             'if int(a["epoch"]) != int(m["epoch"]): raise RuntimeError("epoch mismatch")',
             'ca=pathlib.Path("/kaggle/working/mdh-worker-ca.pem")',
             'ca.write_text(a["tls_ca_pem"]); ca.chmod(0o600)',
+            'if a.get("ssh_private_key"):',
+            '    key=pathlib.Path("/kaggle/working/mdh-worker-ssh")',
+            '    key.write_text(a["ssh_private_key"]); key.chmod(0o600)',
+            '    cert=key.with_name(key.name+"-cert.pub")',
+            '    cert.write_text(a["ssh_certificate"]+"\\n"); cert.chmod(0o600)',
+            '    known=pathlib.Path("/kaggle/working/mdh-known-hosts")',
+            '    known.write_text(a["ssh_known_hosts"]); known.chmod(0o600)',
+            '    local_port=25433',
+            '    destination=f"{a[\"ssh_account\"]}@{a[\"ssh_gateway_host\"]}"',
+            '    ssh=subprocess.Popen(["ssh","-N","-L",',
+            '      f"127.0.0.1:{local_port}:127.0.0.1:25432","-i",str(key),',
+            '      "-o",f"CertificateFile={cert}","-o",f"UserKnownHostsFile={known}",',
+            '      "-o","StrictHostKeyChecking=yes","-p",str(a["ssh_gateway_port"]),destination])',
+            '    time.sleep(2); assert ssh.poll() is None',
+            '    a["database_url"]=a["database_url"].replace(a["tunnel_endpoint"],f"127.0.0.1:{local_port}")',
             'os.environ["MY_DATA_HUB_EMBEDDING_DIRECT_DATABASE_URL"]=a["database_url"]',
             'os.environ["PGSSLROOTCERT"]=str(ca)',
             'os.environ["MY_DATA_HUB_EMBEDDING_REQUEST_ID"]=m["request_id"]',
