@@ -61,7 +61,7 @@ class Adapter:
             observed_at=datetime(2026, 8, 12, tzinfo=UTC),
         )
 
-    def download_attested_master_output_file(self, run, *, destination, file_name, **kwargs):  # type: ignore[no-untyped-def]
+    def download_exact_run_output_file(self, run, *, destination, file_name, **kwargs):  # type: ignore[no-untyped-def]
         (destination / file_name).write_bytes(self.observation)
 
     def delete_task_created_resource(self, **kwargs):  # type: ignore[no-untyped-def]

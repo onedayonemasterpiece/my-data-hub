@@ -7,7 +7,7 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -181,8 +181,11 @@ class CentralDependencySmoke:
             or state.get("source_sha256") != source_sha
             or state.get("state")
             not in {"REQUESTED", "LAUNCHED", "RECEIPT", "CLEANUP_REQUESTED", "COMPLETE"}
+            or not isinstance(state.get("created_at"), str)
         ):
             raise ValueError("dependency smoke state differs from the exact runtime Dataset/source")
+        if state is not None and self.clock() > datetime.fromisoformat(state["created_at"]) + timedelta(minutes=30):
+            raise TimeoutError("dependency smoke exceeded its fixed 30-minute deadline")
         if receipt is not None and state is not None:
             if state["state"] != "COMPLETE":
                 self._cleanup(state, task_id, operation_id)
@@ -193,6 +196,7 @@ class CentralDependencySmoke:
                 "state": "REQUESTED",
                 "task_id": str(task_id),
                 "source_sha256": source_sha,
+                "created_at": self.clock().isoformat(),
             }
             self._persist(state)
         if state["state"] == "REQUESTED":
@@ -242,11 +246,13 @@ class CentralDependencySmoke:
 
         run = KaggleKernelRunIdentity.model_validate(state["run"])
         status = self.adapter.read_run_status(run)
+        if str(status.state) == "failed":
+            raise RuntimeError("dependency smoke provider run failed")
         if str(status.state) != "complete":
             return None
         with tempfile.TemporaryDirectory(prefix="mdh-dependency-smoke-") as folder:
             target = Path(folder)
-            self.adapter.download_attested_master_output_file(
+            self.adapter.download_exact_run_output_file(
                 run, destination=target, file_name=OBSERVATION, max_bytes=256 * 1024
             )
             raw = (target / OBSERVATION).read_bytes()
