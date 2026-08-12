@@ -67,4 +67,67 @@ the authorization server validates both on every cache miss. There is no wildcar
 client secret, DCR endpoint, or static bearer fallback. Existing exact static clients remain
 compatible and their nonsecret client ID is also reported when configured.
 
+### Pre-registered OpenCode public client
+
+OpenCode is a native public client: it has no client secret and listens only for the
+authorization response on its local loopback interface. Add this exact entry to the
+existing `MY_DATA_HUB_OAUTH_CLIENTS_JSON` array in the private `oauth.env`; do not replace
+the existing static or ChatGPT configuration:
+
+```json
+{
+  "client_id": "opencode-my-data-hub",
+  "redirect_uris": ["http://127.0.0.1:19876/mcp/oauth/callback"],
+  "allowed_scopes": [
+    "openid",
+    "offline_access",
+    "platform:read",
+    "provider:read",
+    "provider:write"
+  ]
+}
+```
+
+This is the only HTTP static redirect form accepted: the IPv4 loopback literal and an
+explicit port are mandatory. `localhost`, other IP addresses, user information,
+fragments, implicit ports, and noncanonical port spellings fail closed. HTTPS static
+clients and ChatGPT CIMD continue to use their existing validation paths. The token
+endpoint accepts no HTTP Basic authorization or `client_secret`; OpenCode must use PKCE
+S256, authorization code, and rotating refresh tokens.
+
+For the currently deployed OpenCode 1.x configuration, add the following server entry
+without putting tokens in the file:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "my-data-hub": {
+      "type": "remote",
+      "url": "https://mcp-datahub.kenigevents.ru/mcp",
+      "oauth": {
+        "clientId": "opencode-my-data-hub",
+        "scope": "openid offline_access platform:read provider:read provider:write",
+        "callbackPort": 19876,
+        "redirectUri": "http://127.0.0.1:19876/mcp/oauth/callback"
+      }
+    }
+  }
+}
+```
+
+After installing the exact reviewed server commit and preserving mode `0600` on
+`oauth.env`, verify discovery before starting an interactive login:
+
+```bash
+curl --fail --silent --show-error \
+  https://identity.kenigevents.ru/.well-known/oauth-authorization-server
+opencode mcp debug my-data-hub
+opencode mcp auth my-data-hub
+```
+
+The final command requires the owner browser login ceremony. It stores credentials in
+OpenCode's credential storage, not in repository configuration, installer arguments,
+artifacts, or logs. Do not run it with command tracing enabled.
+
 No live install or restart was performed while implementing this profile.

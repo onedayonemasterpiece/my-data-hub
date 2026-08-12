@@ -41,6 +41,7 @@ NOW = int(time.time())
 class ControlLedger:
     def __init__(self) -> None:
         self.enabled = True
+        self.client_id = CLIENT_ID
         self.allowed_scopes = frozenset({"openid", "data:read", "data:write"})
         self.events: list[OAuthAuditEvent] = []
 
@@ -48,7 +49,7 @@ class ControlLedger:
         return False
 
     def get_client(self, issuer: str, client_id: str) -> OAuthClientRecord | None:
-        if issuer != ISSUER or client_id != CLIENT_ID:
+        if issuer != ISSUER or client_id != self.client_id:
             return None
         return OAuthClientRecord(issuer, client_id, self.enabled, self.allowed_scopes)
 
@@ -166,6 +167,104 @@ def test_rfc8414_oidc_discovery_and_public_jwks(harness: Harness) -> None:
     assert jwks["keys"][0]["kid"] == "key-1"
     assert jwks["keys"][0]["alg"] == "RS256"
     assert "d" not in jwks["keys"][0]
+
+
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "http://localhost:19876/mcp/oauth/callback",
+        "http://0.0.0.0:19876/mcp/oauth/callback",
+        "http://127.0.0.2:19876/mcp/oauth/callback",
+        "http://127.0.0.1/mcp/oauth/callback",
+        "http://127.0.0.1:019876/mcp/oauth/callback",
+        "http://user@127.0.0.1:19876/mcp/oauth/callback",
+        "http://127.0.0.1:19876/mcp/oauth/callback#fragment",
+    ],
+)
+def test_static_native_redirect_rejects_every_nonexact_loopback(redirect_uri: str) -> None:
+    with pytest.raises(ValueError, match="loopback"):
+        StaticClient(
+            client_id="opencode-my-data-hub",
+            redirect_uris=(redirect_uri,),
+            allowed_scopes=frozenset({"openid"}),
+        )
+
+
+def test_opencode_loopback_public_client_uses_pkce_code_and_rotating_refresh(
+    harness: Harness,
+) -> None:
+    client_id = "opencode-my-data-hub"
+    redirect_uri = "http://127.0.0.1:19876/mcp/oauth/callback"
+    requested_scopes = (
+        "openid offline_access platform:read provider:read provider:write"
+    )
+    allowed_scopes = frozenset(requested_scopes.split())
+    ledger = ControlLedger()
+    ledger.client_id = client_id
+    ledger.allowed_scopes = allowed_scopes
+    service = AuthorizationService(
+        settings=replace(
+            harness.service.settings,
+            clients=(
+                StaticClient(
+                    client_id=client_id,
+                    redirect_uris=(redirect_uri,),
+                    allowed_scopes=allowed_scopes,
+                ),
+            ),
+        ),
+        control_ledger=ledger,
+        grant_store=MemoryOAuthGrantStore(),
+        clock=lambda: NOW,
+    )
+    client = TestClient(
+        create_authorization_app(service=service, owner_authenticator=Owner()),
+        base_url=ISSUER,
+    )
+    authorization = client.get(
+        "/authorize",
+        params={
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "resource": RESOURCE,
+            "scope": requested_scopes,
+            "state": "opencode-state",
+            "nonce": "opencode-nonce",
+            "code_challenge": CHALLENGE,
+            "code_challenge_method": "S256",
+        },
+        follow_redirects=False,
+    )
+    assert authorization.status_code == 303
+    assert authorization.headers["location"].startswith(f"{redirect_uri}?")
+    code = parse_qs(urlsplit(authorization.headers["location"]).query)["code"][0]
+    token_response = client.post(
+        "/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": VERIFIER,
+            "redirect_uri": redirect_uri,
+            "client_id": client_id,
+            "resource": RESOURCE,
+        },
+    )
+    assert token_response.status_code == 200
+    first_refresh = token_response.json()["refresh_token"]
+    assert token_response.json()["scope"] == requested_scopes
+
+    refreshed = client.post(
+        "/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": first_refresh,
+            "client_id": client_id,
+            "resource": RESOURCE,
+        },
+    )
+    assert refreshed.status_code == 200
+    assert refreshed.json()["refresh_token"] != first_refresh
 
 
 def test_jwks_rotation_publishes_bounded_overlap_but_signs_only_with_active_key(

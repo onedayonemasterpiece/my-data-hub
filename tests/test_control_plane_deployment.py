@@ -4,6 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,28 @@ COMPOSE = ROOT / "compose.control-plane.yaml"
 
 def installer_source() -> str:
     return INSTALLER.read_text(encoding="utf-8")
+
+
+def provider_oauth_client_probe_source() -> str:
+    source = installer_source()
+    marker = 'provider_oauth_client_id="$(python3 - "$oauth_env" <<\'PY\'\n'
+    start = source.index(marker) + len(marker)
+    return source[start : source.index("\nPY\n)", start)]
+
+
+def run_provider_oauth_client_probe(tmp_path: Path, clients: list[object]) -> subprocess.CompletedProcess[str]:
+    oauth_env = tmp_path / "oauth.env"
+    oauth_env.write_text(
+        f"MY_DATA_HUB_OAUTH_CLIENTS_JSON='{json.dumps(clients)}'\n",
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        ["python3", "-", str(oauth_env)],
+        input=provider_oauth_client_probe_source(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
 def test_deployment_tokens_are_explicit_and_legacy_token_remains_forbidden() -> None:
@@ -227,6 +250,66 @@ def test_provider_only_mcp_action_is_explicit_and_skips_master_only_prerequisite
     assert "verify_master_assets.py" not in provider_branch.split("else", 1)[0]
     assert "root-installed epoch tunnel broker socket is required" not in provider_branch.split("else", 1)[0]
     assert "operator_profile_gate.py" not in provider_branch.split("else", 1)[0]
+
+
+def test_provider_only_probe_recognizes_exact_opencode_public_loopback_client(tmp_path: Path) -> None:
+    result = run_provider_oauth_client_probe(
+        tmp_path,
+        [
+            {
+                "client_id": "bootstrap-reader",
+                "redirect_uris": ["https://identity.example/bootstrap/callback"],
+                "allowed_scopes": ["openid", "offline_access", "provider:read"],
+            },
+            {
+                "client_id": "opencode-my-data-hub",
+                "redirect_uris": ["http://127.0.0.1:19876/mcp/oauth/callback"],
+                "allowed_scopes": [
+                    "openid",
+                    "offline_access",
+                    "platform:read",
+                    "provider:read",
+                    "provider:write",
+                ],
+            },
+        ],
+    )
+    assert result.returncode == 0
+    assert result.stdout == "opencode-my-data-hub\n"
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "http://localhost:19876/mcp/oauth/callback",
+        "http://0.0.0.0:19876/mcp/oauth/callback",
+        "http://127.0.0.1/mcp/oauth/callback",
+        "http://127.0.0.1:019876/mcp/oauth/callback",
+        "http://127.0.0.1:19876/mcp/oauth/callback#fragment",
+    ],
+)
+def test_provider_only_probe_rejects_nonexact_http_redirect(
+    tmp_path: Path, redirect_uri: str
+) -> None:
+    result = run_provider_oauth_client_probe(
+        tmp_path,
+        [
+            {
+                "client_id": "opencode-my-data-hub",
+                "redirect_uris": [redirect_uri],
+                "allowed_scopes": [
+                    "openid",
+                    "offline_access",
+                    "platform:read",
+                    "provider:read",
+                    "provider:write",
+                ],
+            }
+        ],
+    )
+    assert result.returncode == 0
+    assert result.stdout == "\n"
 
 
 def test_provider_only_override_removes_master_mounts_and_static_bearers() -> None:

@@ -62,7 +62,18 @@ def test_production_oauth_runtime_uses_durable_ledger_and_external_owner_login(
                     "client_id": "chatgpt-reader",
                     "redirect_uris": ["https://chatgpt.example.test/oauth/callback"],
                     "allowed_scopes": ["bloggers:read", "data:read"],
-                }
+                },
+                {
+                    "client_id": "opencode-my-data-hub",
+                    "redirect_uris": ["http://127.0.0.1:19876/mcp/oauth/callback"],
+                    "allowed_scopes": [
+                        "openid",
+                        "offline_access",
+                        "platform:read",
+                        "provider:read",
+                        "provider:write",
+                    ],
+                },
             ]
         ),
         "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED": "true",
@@ -82,6 +93,19 @@ def test_production_oauth_runtime_uses_durable_ledger_and_external_owner_login(
         "https://auth.example.test", "chatgpt-reader"
     )
     assert client_record is not None and client_record["profile_kind"] == "reader"
+    opencode_record = ledger.oauth_client(
+        "https://auth.example.test", "opencode-my-data-hub"
+    )
+    assert opencode_record is not None
+    assert opencode_record["allowed_scopes"] == frozenset(
+        {
+            "offline_access",
+            "openid",
+            "platform:read",
+            "provider:read",
+            "provider:write",
+        }
+    )
     client = TestClient(runtime.app, base_url="https://auth.example.test")
     metadata = client.get("/.well-known/oauth-authorization-server")
     assert metadata.status_code == 200

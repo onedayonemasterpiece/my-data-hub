@@ -50,6 +50,35 @@ def _exact_https_url(value: str, *, allow_query: bool = False, root_only: bool =
     return value.rstrip("/") if root_only else value
 
 
+def _exact_static_redirect_uri(value: str) -> str:
+    """Validate an exact web or native loopback redirect URI.
+
+    Static browser clients retain the HTTPS-only contract.  A pre-registered
+    native public client may additionally use an explicit IPv4 loopback port;
+    hostnames, other IP literals, and implicit ports remain fail-closed.
+    """
+
+    parsed = urlsplit(value)
+    if parsed.scheme == "https":
+        return _exact_https_url(value, allow_query=True)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("OAuth loopback redirects require an exact valid port") from exc
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or port is None
+        or not 1 <= port <= 65535
+        or parsed.netloc != f"127.0.0.1:{port}"
+    ):
+        raise ValueError("OAuth HTTP redirects require an exact 127.0.0.1 loopback URI and port")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class StaticClient:
     client_id: str
@@ -62,7 +91,7 @@ class StaticClient:
         if not self.redirect_uris or len(set(self.redirect_uris)) != len(self.redirect_uris):
             raise ValueError("redirect URI allowlist must be non-empty and unique")
         for redirect_uri in self.redirect_uris:
-            _exact_https_url(redirect_uri, allow_query=True)
+            _exact_static_redirect_uri(redirect_uri)
             reserved = {name for name, _ in parse_qsl(urlsplit(redirect_uri).query, keep_blank_values=True)}
             if reserved.intersection({"code", "state", "error", "error_description"}):
                 raise ValueError("redirect URI query must not contain OAuth response parameters")

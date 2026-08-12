@@ -439,13 +439,29 @@ for client in clients:
             break
         parsed = urlsplit(redirect)
         reserved = {key for key, _ in parse_qsl(parsed.query, keep_blank_values=True)}
-        if (
-            parsed.scheme != "https"
-            or not parsed.netloc
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.fragment
-            or reserved.intersection({"code", "state", "error", "error_description"})
+        https_redirect = (
+            parsed.scheme == "https"
+            and bool(parsed.netloc)
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.fragment
+        )
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        loopback_redirect = (
+            parsed.scheme == "http"
+            and parsed.hostname == "127.0.0.1"
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.fragment
+            and port is not None
+            and 1 <= port <= 65535
+            and parsed.netloc == f"127.0.0.1:{port}"
+        )
+        if not (https_redirect or loopback_redirect) or reserved.intersection(
+            {"code", "state", "error", "error_description"}
         ):
             valid_redirects = False
             break
