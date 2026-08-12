@@ -8,12 +8,43 @@ import importlib.metadata
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
+
+_STAGE = "startup"
+
+
+def _stage(value: str) -> None:
+    global _STAGE
+    _STAGE = value
+
+
+def _write_failure(exc: BaseException) -> None:
+    raw = str(exc)
+    message = re.sub(r"https?://\\S+", "<redacted-url>", raw)
+    message = re.sub(
+        r"(?i)(token|secret|password|api[_-]?key)\\s*[=:]\\s*\\S+",
+        r"\\1=<redacted>",
+        message,
+    )[:512]
+    output = Path(os.environ.get("MY_DATA_HUB_DEPENDENCY_SMOKE_FAILURE_PATH", ""))
+    if not output.name or output.is_symlink() or output.exists():
+        return
+    value = {
+        "schema_version": "my-data-hub-embedding-dependency-smoke-failure.v1",
+        "stage": _STAGE,
+        "exception_type": type(exc).__name__,
+        "message": message,
+        "message_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+    }
+    output.write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -29,6 +60,7 @@ def _required_path(name: str, *, directory: bool = False) -> Path:
 
 
 def main() -> int:
+    _stage("asset_paths")
     manifest_path = _required_path("MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_PATH")
     wheelhouse = _required_path("MY_DATA_HUB_EMBEDDING_WHEELHOUSE_PATH", directory=True)
     project_wheel = _required_path("MY_DATA_HUB_WHEEL_PATH")
@@ -36,6 +68,7 @@ def main() -> int:
     if not output.name or output.is_symlink() or output.exists():
         raise RuntimeError("fresh smoke observation output path is required")
     manifest_body = manifest_path.read_bytes()
+    _stage("manifest")
     manifest = json.loads(manifest_body)
     if manifest_body != json.dumps(
         manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -51,6 +84,7 @@ def main() -> int:
     ):
         raise RuntimeError("smoke runtime differs from the dependency manifest")
     expected_project_sha = os.environ.get("MY_DATA_HUB_WHEEL_SHA256", "")
+    _stage("runtime_identity")
     if _sha256(project_wheel) != expected_project_sha:
         raise RuntimeError("project wheel hash mismatch")
     wheels = manifest["wheels"]
@@ -61,6 +95,7 @@ def main() -> int:
     target = Path("/tmp/my-data-hub-embedding-dependency-smoke")
     target.mkdir(mode=0o700)
     for entry in wheels:
+        _stage(f"install:{entry['distribution']}")
         wheel = wheelhouse / entry["filename"]
         if wheel.is_symlink() or not wheel.is_file() or _sha256(wheel) != entry["sha256"]:
             raise RuntimeError("wheel hash mismatch before smoke install")
@@ -94,6 +129,7 @@ def main() -> int:
         ],
         check=True,
     )
+    _stage("imports")
     sys.path.insert(0, str(target))
     import psycopg  # noqa: F401
     import torch  # noqa: F401
@@ -104,6 +140,7 @@ def main() -> int:
     if pq.__impl__ != "binary":
         raise RuntimeError("psycopg binary implementation is not active")
     overlay = {canonicalize_name(entry["distribution"]) for entry in wheels}
+    _stage("dependency_closure")
     queue = list(overlay)
     seen: set[str] = set()
     versions: dict[str, str] = {}
@@ -146,4 +183,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        exit_code = main()
+    except Exception as exc:
+        _write_failure(exc)
+        raise
+    raise SystemExit(exit_code)

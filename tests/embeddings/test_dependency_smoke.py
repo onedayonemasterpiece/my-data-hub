@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +30,16 @@ class Adapter:
         self.pushes = 0
         self.deletes = 0
         self.kwargs = None
+        self.failed = False
+        self.failure = canonical_json_bytes(
+            {
+                "schema_version": "my-data-hub-embedding-dependency-smoke-failure.v1",
+                "stage": "dependency_closure",
+                "exception_type": "PackageNotFoundError",
+                "message": "No package metadata was found for trec-car-tools",
+                "message_sha256": "f" * 64,
+            }
+        )
 
     def push_private_dependency_smoke_notebook(self, **kwargs):  # type: ignore[no-untyped-def]
         self.pushes += 1
@@ -56,13 +70,30 @@ class Adapter:
     def read_run_status(self, run):  # type: ignore[no-untyped-def]
         return KaggleKernelStatus(
             run=run,
-            state=KernelState.COMPLETE,
-            provider_status="complete",
+            state=KernelState.FAILED if self.failed else KernelState.COMPLETE,
+            provider_status="failed" if self.failed else "complete",
             observed_at=datetime(2026, 8, 12, tzinfo=UTC),
         )
 
     def download_exact_run_output_file(self, run, *, destination, file_name, **kwargs):  # type: ignore[no-untyped-def]
         (destination / file_name).write_bytes(self.observation)
+
+    def download_exact_failed_run_output_file(
+        self, run, *, destination, file_name, **kwargs
+    ):  # type: ignore[no-untyped-def]
+        from my_data_hub.providers.kaggle.contracts import KaggleKernelFailureOutputIdentity
+
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / file_name).write_bytes(self.failure)
+        return KaggleKernelFailureOutputIdentity(
+            run=run,
+            terminal_state=KernelState.FAILED,
+            provider_status="failed",
+            output_tree_sha256="a" * 64,
+            receipt_sha256=__import__("hashlib").sha256(self.failure).hexdigest(),
+            file_count=1,
+            observed_at=datetime(2026, 8, 12, tzinfo=UTC),
+        )
 
     def delete_task_created_resource(self, **kwargs):  # type: ignore[no-untyped-def]
         self.deletes += 1
@@ -145,3 +176,41 @@ def test_cleanup_response_loss_is_replayed_by_new_coordinator(tmp_path: Path) ->
     receipt = smoke(tmp_path, adapter).run_once()
     assert receipt is not None
     assert adapter.pushes == 1 and adapter.deletes == 2
+
+
+def test_failed_run_captures_bounded_evidence_before_cleanup_and_replays_locally(
+    tmp_path: Path,
+) -> None:
+    adapter = Adapter(observation())
+    adapter.failed = True
+    instance = smoke(tmp_path, adapter)
+    with pytest.raises(RuntimeError, match="dependency_closure: PackageNotFoundError"):
+        instance.run_once()
+    assert adapter.pushes == adapter.deletes == 1
+    assert instance.failure_path.stat().st_mode & 0o777 == 0o600
+    saved = json.loads(instance.failure_path.read_bytes())
+    assert saved["failure"]["message"] == "No package metadata was found for trec-car-tools"
+    with pytest.raises(RuntimeError, match="dependency_closure: PackageNotFoundError"):
+        smoke(tmp_path, adapter).run_once()
+    assert adapter.pushes == adapter.deletes == 1
+
+
+def test_provider_runner_writes_bounded_failure_receipt_before_reraising(tmp_path: Path) -> None:
+    failure = tmp_path / "failure.json"
+    runner = Path(__file__).parents[2] / "scripts/provider/assets/embedding_dependency_smoke.py"
+    result = subprocess.run(
+        [sys.executable, str(runner)],
+        env={
+            "PATH": os.environ["PATH"],
+            "MY_DATA_HUB_DEPENDENCY_SMOKE_FAILURE_PATH": str(failure),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    evidence = json.loads(failure.read_bytes())
+    assert evidence["schema_version"] == "my-data-hub-embedding-dependency-smoke-failure.v1"
+    assert evidence["stage"] == "asset_paths"
+    assert evidence["exception_type"] == "RuntimeError"
+    assert "http://" not in evidence["message"] and "https://" not in evidence["message"]

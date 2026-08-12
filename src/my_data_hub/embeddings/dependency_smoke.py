@@ -19,6 +19,7 @@ from my_data_hub.providers.kaggle.contracts import MutationAction, ProviderEffec
 from my_data_hub.providers.models import ControlClass
 
 OBSERVATION = "embedding-dependency-smoke-observation.json"
+FAILURE = "embedding-dependency-smoke-failure.json"
 
 
 class EmbeddingDependencySmokeReceipt(BaseModel):
@@ -68,10 +69,11 @@ class CentralDependencySmoke:
             "MY_DATA_HUB_KAGGLE_RUNTIME_IMAGE_IDENTITY": self.image_identity,
             "MY_DATA_HUB_KAGGLE_RUNTIME_SOURCE_COMMIT": self.image_source_commit,
             "MY_DATA_HUB_DEPENDENCY_SMOKE_OBSERVATION_PATH": f"/kaggle/working/{OBSERVATION}",
+            "MY_DATA_HUB_DEPENDENCY_SMOKE_FAILURE_PATH": f"/kaggle/working/{FAILURE}",
         }
         code = (
             f"TASK_RUN_ID={str(task_id)!r}\n"
-            "import os,runpy\nfrom pathlib import Path\n"
+            "import hashlib,json,os,re,runpy\nfrom pathlib import Path\n"
             "if any(os.environ.get(k) for k in ('KAGGLE_USERNAME','KAGGLE_KEY','KAGGLE_API_TOKEN')): "
             "raise RuntimeError('Kaggle credential env is forbidden')\n"
             "if any(p.exists() for p in (Path.home()/'.kaggle'/'kaggle.json',"
@@ -87,7 +89,17 @@ class CentralDependencySmoke:
             "os.environ['MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_PATH']=str(manifest)\n"
             "os.environ['MY_DATA_HUB_EMBEDDING_WHEELHOUSE_PATH']=str(manifest.parent/'embedding-worker-wheelhouse')\n"
             "os.environ['MY_DATA_HUB_WHEEL_PATH']=str(project)\n"
-            "runpy.run_path(str(runner),run_name='__main__')\n"
+            "failure=Path(os.environ['MY_DATA_HUB_DEPENDENCY_SMOKE_FAILURE_PATH'])\n"
+            "try:\n"
+            "    runpy.run_path(str(runner),run_name='__main__')\n"
+            "except Exception as exc:\n"
+            "    if not failure.exists():\n"
+            "        message=re.sub(r'https?://\\S+','<redacted-url>',str(exc))[:512]\n"
+            "        body={'schema_version':'my-data-hub-embedding-dependency-smoke-failure.v1',"
+            "'stage':'bootstrap','exception_type':type(exc).__name__,"
+            "'message':message,'message_sha256':hashlib.sha256(str(exc).encode()).hexdigest()}\n"
+            "        failure.write_text(json.dumps(body,sort_keys=True,separators=(',',':')),encoding='utf-8')\n"
+            "    raise\n"
         )
         return code.encode()
 
@@ -155,6 +167,73 @@ class CentralDependencySmoke:
         finally:
             Path(raw).unlink(missing_ok=True)
 
+    @property
+    def failure_path(self) -> Path:
+        return self.receipt_path.with_name("dependency-smoke-failure.json")
+
+    def _capture_failure(self, run: Any) -> dict[str, Any]:
+        if self.failure_path.exists():
+            if self.failure_path.is_symlink() or self.failure_path.stat().st_mode & 0o077:
+                raise ValueError("dependency smoke failure evidence is unsafe")
+            return json.loads(self.failure_path.read_bytes())
+        with tempfile.TemporaryDirectory(prefix="mdh-dependency-smoke-failure-") as folder:
+            target = Path(folder)
+            identity = self.adapter.download_exact_failed_run_output_file(
+                run, destination=target, file_name=FAILURE, max_bytes=64 * 1024
+            )
+            raw = (target / FAILURE).read_bytes()
+        remote = json.loads(raw)
+        required = {
+            "schema_version",
+            "stage",
+            "exception_type",
+            "message",
+            "message_sha256",
+        }
+        if (
+            raw != canonical_json_bytes(remote)
+            or set(remote) != required
+            or remote["schema_version"] != "my-data-hub-embedding-dependency-smoke-failure.v1"
+            or not isinstance(remote["stage"], str)
+            or not remote["stage"]
+            or not isinstance(remote["exception_type"], str)
+            or not remote["exception_type"]
+            or not isinstance(remote["message"], str)
+            or len(remote["message"].encode()) > 1024
+            or "http://" in remote["message"].casefold()
+            or "https://" in remote["message"].casefold()
+            or not isinstance(remote["message_sha256"], str)
+            or len(remote["message_sha256"]) != 64
+        ):
+            raise ValueError("dependency smoke failure evidence differs from the bounded contract")
+        evidence = {
+            "schema_version": "my-data-hub-embedding-dependency-smoke-central-failure.v1",
+            "provider_run_ref": run.provider_run_ref,
+            "remote_receipt_sha256": identity.receipt_sha256,
+            "failure": remote,
+        }
+        self._write_private_json(self.failure_path, evidence)
+        return evidence
+
+    def _write_private_json(self, path: Path, value: dict[str, Any]) -> None:
+        if not path.is_absolute() or path.is_symlink():
+            raise ValueError("dependency smoke evidence path must be absolute and non-symlink")
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.parent.chmod(0o700)
+        fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(canonical_json_bytes(value))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(raw, path)
+            directory = os.open(path.parent, os.O_RDONLY)
+            os.fsync(directory)
+            os.close(directory)
+        finally:
+            Path(raw).unlink(missing_ok=True)
+
     def _cleanup(self, state: dict[str, Any], task_id: UUID, operation_id: UUID) -> None:
         from my_data_hub.providers.kaggle.contracts import TaskResourceClaim
 
@@ -191,7 +270,15 @@ class CentralDependencySmoke:
             or state.get("task_id") != str(task_id)
             or state.get("source_sha256") != source_sha
             or state.get("state")
-            not in {"REQUESTED", "LAUNCHED", "RECEIPT", "CLEANUP_REQUESTED", "COMPLETE"}
+            not in {
+                "REQUESTED",
+                "LAUNCHED",
+                "RECEIPT",
+                "FAILURE_CAPTURED",
+                "CLEANUP_REQUESTED",
+                "COMPLETE",
+                "TERMINAL_FAILED",
+            }
             or not isinstance(state.get("created_at"), str)
         ):
             raise ValueError("dependency smoke state differs from the exact runtime Dataset/source")
@@ -201,6 +288,16 @@ class CentralDependencySmoke:
             if state["state"] != "COMPLETE":
                 self._cleanup(state, task_id, operation_id)
             return receipt
+        if state is not None and state["state"] == "TERMINAL_FAILED":
+            evidence = self._capture_failure(
+                __import__(
+                    "my_data_hub.providers.kaggle.contracts", fromlist=["KaggleKernelRunIdentity"]
+                ).KaggleKernelRunIdentity.model_validate(state["run"])
+            )
+            failure = evidence["failure"]
+            raise RuntimeError(
+                f"dependency smoke failed at {failure['stage']}: {failure['exception_type']}"
+            )
         if state is None:
             state = {
                 "schema_version": "embedding-dependency-smoke-state.v1",
@@ -258,8 +355,16 @@ class CentralDependencySmoke:
         run = KaggleKernelRunIdentity.model_validate(state["run"])
         status = self.adapter.read_run_status(run)
         if str(status.state) == "failed":
+            evidence = self._capture_failure(run)
+            state["state"] = "FAILURE_CAPTURED"
+            self._persist(state)
             self._cleanup(state, task_id, operation_id)
-            raise RuntimeError("dependency smoke provider run failed")
+            state["state"] = "TERMINAL_FAILED"
+            self._persist(state)
+            failure = evidence["failure"]
+            raise RuntimeError(
+                f"dependency smoke failed at {failure['stage']}: {failure['exception_type']}"
+            )
         if str(status.state) != "complete":
             return None
         with tempfile.TemporaryDirectory(prefix="mdh-dependency-smoke-") as folder:
