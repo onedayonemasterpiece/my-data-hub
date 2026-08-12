@@ -927,8 +927,12 @@ def validate_notebooks(report: Report) -> None:
             True,
             frozenset({"import psycopg", "import ydb"}),
         ),
-        "05-e5-blogger-embedding-worker": ("embedding_workers/e5_runtime.py", False, True, frozenset()),
-        "06-bge-m3-blogger-embedding-worker": ("embedding_workers/bge_m3_runtime.py", False, True, frozenset()),
+        "05-e5-blogger-embedding-worker": (
+            "embedding_workers/e5_runtime.py", False, True, frozenset({"import psycopg"})
+        ),
+        "06-bge-m3-blogger-embedding-worker": (
+            "embedding_workers/bge_m3_runtime.py", False, True, frozenset({"import psycopg"})
+        ),
     }
     for path in sorted((ROOT / "notebooks").glob("*/worker.ipynb")):
         try:

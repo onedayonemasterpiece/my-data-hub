@@ -22,6 +22,7 @@ ALLOWED_GROUPS = frozenset(
         "mdh_canonical_committer",
         "mdh_monitoring",
         "mdh_checkpoint",
+        "mdh_embedding_worker",
     }
 )
 _PRINCIPAL = re.compile(r"^mdh_e[1-9][0-9]*_[a-z][a-z0-9_]{0,40}_[a-f0-9]{8}$")

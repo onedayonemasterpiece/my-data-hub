@@ -3,20 +3,17 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import os
-import tempfile
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from importlib.resources import files as package_files
-from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid5
 
 from my_data_hub.embeddings.blogger_documents import CanonicalBloggerDocument, build_compact_blogger_documents
-from my_data_hub.embeddings.contracts import EmbeddingArtifactManifest, EmbeddingJob
+from my_data_hub.embeddings.contracts import EmbeddingJob
+from my_data_hub.embeddings.direct_plane import (
+    EmbeddingLaunchMetadata, PostgresEmbeddingWorkerExchange, StagedEmbeddingBatch,
+)
 from my_data_hub.embeddings.documents import SearchDocument
 from my_data_hub.embeddings.importer import EmbeddingImportReceipt, PostgresEmbeddingImporter
 from my_data_hub.embeddings.models import BGE_M3, E5_MULTILINGUAL_BASE, EmbeddingModelContract
@@ -25,22 +22,13 @@ from my_data_hub.embeddings.production import (
     WORKER_ASSETS,
     EmbeddingProductionRequest,
     EmbeddingProductionStageReceipt,
-    embedding_provider_authority,
+    embedding_worker_task_id,
 )
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.master_runtime.contracts import MasterIdentity
-from my_data_hub.providers.kaggle.adapter import KaggleProviderAdapter, _canonical_notebook_source, mapping_sha256
-from my_data_hub.providers.kaggle.contracts import (
-    KernelState,
-    MutationAction,
-    ProviderEffectIntent,
-)
-from my_data_hub.providers.models import ControlClass
 
-_NAMESPACE = UUID("ce45cd9b-511b-5b30-a3df-0b9a0b35a565")
 _QUERY_NAMESPACE = UUID("f2963298-c621-5786-9951-32f844a23aec")
 _MODELS = (E5_MULTILINGUAL_BASE, BGE_M3)
-_MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 
 
 class EmbeddingStageError(RuntimeError):
@@ -53,9 +41,6 @@ class EmbeddingStageContext:
     operation_id: UUID
     request: EmbeddingProductionRequest
     database_url: str
-    wheel_path: Path
-    wheel_sha256: str
-    provider_owner: str
     remaining_seconds: float
 
 
@@ -64,21 +49,9 @@ class _PreparedModel:
     model: EmbeddingModelContract
     asset_index: int
     task_id: UUID
-    dataset_ref: str
-    notebook_ref: str
     jobs: tuple[EmbeddingJob, ...]
     query_job_key: str
-    source: bytes
-    source_sha256: str
-
-
-def _requested_at(request_id: UUID) -> datetime:
-    # Stable across process restarts; ProviderEffectIntent identity must not drift.
-    return datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=request_id.int % (180 * 24 * 3600))
-
-
-def _effect(request_id: UUID, suffix: str) -> UUID:
-    return uuid5(_NAMESPACE, f"{request_id}:{suffix}")
+    worker_source_sha256: str
 
 
 def _query_job(request: EmbeddingProductionRequest, model: EmbeddingModelContract) -> EmbeddingJob:
@@ -111,89 +84,44 @@ def _load_documents(connection: Any, request: EmbeddingProductionRequest) -> tup
     )
 
 
-def _render_source(asset_index: int, *, dataset_slug: str, task_id: UUID, wheel_sha256: str) -> bytes:
-    name = "e5-worker.json" if asset_index == 0 else "bge-worker.json"
-    body = json.loads(package_files("my_data_hub.embeddings.assets").joinpath(name).read_text(encoding="utf-8"))
-    bootstrap = {
-        "cell_type": "code",
-        "execution_count": None,
-        "metadata": {},
-        "outputs": [],
-        "source": (
-            "import os\n"
-            f"os.environ['MY_DATA_HUB_EMBEDDING_JOBS']='/kaggle/input/{dataset_slug}/embedding-jobs.json'\n"
-            f"os.environ['MY_DATA_HUB_RUN_ID']='{task_id}'\n"
-            f"os.environ['MY_DATA_HUB_WHEEL_PATH']='/kaggle/input/{dataset_slug}/my-data-hub.whl'\n"
-            f"os.environ['MY_DATA_HUB_WHEEL_SHA256']='{wheel_sha256}'\n"
-        ),
-    }
-    body["cells"].insert(0, bootstrap)
-    return canonical_json_bytes(body)
-
-
 def _prepare(
     context: EmbeddingStageContext,
     documents: tuple[CanonicalBloggerDocument, ...],
 ) -> tuple[_PreparedModel, ...]:
-    authority = embedding_provider_authority(context.provider_owner, context.request.request_id)
     prepared: list[_PreparedModel] = []
     for index, model in enumerate(_MODELS):
-        alias = "e5" if index == 0 else "bge"
-        dataset_ref, task_id = authority[f"{alias}_input"]
-        notebook_ref, notebook_task = authority[f"{alias}_worker"]
-        if task_id != notebook_task:
-            raise EmbeddingStageError("dataset and worker task identities differ")
-        jobs = tuple(
-            sorted(
-                (
-                    *(EmbeddingJob.create(
-                        document=item.document,
-                        model=model,
-                        canonical_revision=context.request.blogger_canonical_revision,
-                    ) for item in documents),
-                    _query_job(context.request, model),
-                ),
-                key=lambda item: item.job_key,
-            )
-        )
-        source = _render_source(
-            index,
-            dataset_slug=dataset_ref.split("/", 1)[1],
-            task_id=task_id,
-            wheel_sha256=context.wheel_sha256,
-        )
+        task_id = embedding_worker_task_id(context.request.request_id, model.exact_id)
+        jobs = tuple(sorted((
+            *(EmbeddingJob.create(
+                document=item.document, model=model,
+                canonical_revision=context.request.blogger_canonical_revision,
+            ) for item in documents),
+            _query_job(context.request, model),
+        ), key=lambda item: item.job_key))
         prepared.append(_PreparedModel(
-            model=model,
-            asset_index=index,
-            task_id=task_id,
-            dataset_ref=dataset_ref,
-            notebook_ref=notebook_ref,
-            jobs=jobs,
+            model=model, asset_index=index, task_id=task_id, jobs=jobs,
             query_job_key=_query_job(context.request, model).job_key,
-            source=source,
-            source_sha256=hashlib.sha256(_canonical_notebook_source(source, kernel_type="notebook")).hexdigest(),
+            worker_source_sha256=WORKER_ASSETS[index].primary_source_sha256,
         ))
     return tuple(prepared)
 
 
-def _intent(
-    context: EmbeddingStageContext,
-    prepared: _PreparedModel,
-    *,
-    action: MutationAction,
-    provider_ref: str,
-    arguments: dict[str, Any],
-    suffix: str,
-) -> ProviderEffectIntent:
-    return ProviderEffectIntent.create(
-        operation_id=context.operation_id,
-        effect_id=_effect(context.request.request_id, suffix),
-        idempotency_key=f"embedding:{context.request.request_id}:{suffix}",
-        task_id=prepared.task_id,
-        action=action,
-        provider_ref=provider_ref,
-        arguments=arguments,
-        requested_at=_requested_at(context.request.request_id),
+def _launch_metadata(context: EmbeddingStageContext, prepared: _PreparedModel) -> EmbeddingLaunchMetadata:
+    payload = canonical_json_bytes({
+        "schema_version": "embedding-jobs-batch.v1",
+        "jobs": [job.model_dump(mode="json") for job in prepared.jobs],
+    })
+    return EmbeddingLaunchMetadata(
+        schema_version="embedding-central-launch-metadata.v1",
+        request_id=context.request.request_id,
+        request_sha256=context.request.request_sha256,
+        task_run_id=prepared.task_id,
+        model_exact_id=prepared.model.exact_id,
+        input_jobs_sha256=hashlib.sha256(payload).hexdigest(),
+        job_count=len(prepared.jobs),
+        worker_source_sha256=prepared.worker_source_sha256,
+        worker_primary_source_sha256=prepared.worker_source_sha256,
+        epoch=context.identity.epoch,
     )
 
 
@@ -201,148 +129,45 @@ def execute_embedding_production_stage(
     context: EmbeddingStageContext,
     *,
     connection: Any,
-    adapter: KaggleProviderAdapter,
+    exchange: PostgresEmbeddingWorkerExchange,
+    runtime_client: Any,
     canonical_connection_factory: Callable[[], AbstractContextManager[Any]],
     lease_guard: Callable[[], None],
     importer: PostgresEmbeddingImporter | None = None,
 ) -> EmbeddingProductionStageReceipt:
-    """Dispatch workers and import through fresh, fenced committer sessions only.
+    """Stage business bytes on the master and exchange only launch metadata with control."""
 
-    ``connection`` is deliberately used only for prerequisite/coverage reads.  A
-    fresh epoch-bound non-superuser connection is obtained for each canonical
-    import, so the database's deferred epoch guard re-evaluates the lease at the
-    actual transaction commit boundary.
-    """
-
-    if not os.environ.get("KAGGLE_API_TOKEN", "").strip():
-        raise EmbeddingStageError("modern Kaggle token is absent")
-    if not isinstance(adapter, KaggleProviderAdapter):
-        raise EmbeddingStageError("Gate K requires the repository's single concrete Kaggle adapter")
     if context.remaining_seconds < 10_200:
         raise EmbeddingStageError("ACTIVE lease lacks the bounded concurrent worker/checkpoint allocation")
-    active_deadline = adapter.monotonic() + context.remaining_seconds
-    if context.wheel_path.is_symlink() or not context.wheel_path.is_file():
-        raise EmbeddingStageError("exact runtime wheel is absent")
-    wheel = context.wheel_path.read_bytes()
-    if hashlib.sha256(wheel).hexdigest() != context.wheel_sha256:
-        raise EmbeddingStageError("runtime wheel hash differs")
-
-    # Corpus/token validation is complete before the first provider effect.
+    deadline = __import__("time").monotonic() + context.remaining_seconds - 60.0
     lease_guard()
     documents = _load_documents(connection, context.request)
     prepared_models = _prepare(context, documents)
-    launched: list[tuple[_PreparedModel, Any, Any, str]] = []
     for prepared in prepared_models:
-        jobs_payload = canonical_json_bytes({
-            "schema_version": "embedding-jobs-batch.v1",
-            "jobs": [job.model_dump(mode="json") for job in prepared.jobs],
+        metadata = _launch_metadata(context, prepared)
+        exchange.stage(connection, StagedEmbeddingBatch(metadata=metadata, jobs=prepared.jobs))
+        # Reuse CherryFlash's caller-stable event_uid semantics.  The envelope is
+        # metadata only; documents, credentials and vectors never enter callbacks.
+        runtime_client.emit_donor_envelope({
+            "run_id": context.identity.run_id,
+            "event": "job.claimed",
+            "event_uid": f"embedding:{context.request.request_id}:{prepared.task_id}:claimed",
+            "phase": "embedding_dispatch",
+            "status": "claimed",
+            "progress": metadata.model_dump(mode="json"),
         })
-        dataset_files = {"embedding-jobs.json": jobs_payload, "my-data-hub.whl": wheel}
-        dataset_intent = _intent(
-            context,
-            prepared,
-            action=MutationAction.CREATE_DATASET,
-            provider_ref=prepared.dataset_ref,
-            suffix=f"{prepared.asset_index}:dataset",
-            arguments={
-                "content_tree_sha256": mapping_sha256(dataset_files),
-                "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
-                "disposable": False,
-            },
-        )
-        lease_guard()
-        dataset = adapter.create_private_dataset(
-            intent=dataset_intent,
-            files=dataset_files,
-            title=prepared.dataset_ref.split("/", 1)[1],
-            control_class=ControlClass.ORCHESTRATOR_PROTECTED,
-            disposable=False,
-        )
-        lease_guard()
-        dataset_source = f"{prepared.dataset_ref}/{dataset.identity.version}"
-        notebook_intent = _intent(
-            context,
-            prepared,
-            action=MutationAction.PUSH_NOTEBOOK,
-            provider_ref=prepared.notebook_ref,
-            suffix=f"{prepared.asset_index}:worker",
-            arguments={
-                "task_run_id": str(prepared.task_id),
-                "source_sha256": prepared.source_sha256,
-                "dataset_sources": (dataset_source,),
-                "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
-                "disposable": False,
-            },
-        )
-        notebook = adapter.reconcile_private_notebook_mutation(
-            intent=notebook_intent,
-            task_run_id=prepared.task_id,
-            expected_source_sha256=prepared.source_sha256,
-            dataset_sources=(dataset_source,),
-            control_class=ControlClass.ORCHESTRATOR_PROTECTED,
-            disposable=False,
-        )
-        lease_guard()
-        if notebook is None:
-            notebook = adapter.push_private_notebook(
-                intent=notebook_intent,
-                task_run_id=prepared.task_id,
-                source=prepared.source,
-                title=prepared.notebook_ref.split("/", 1)[1],
-                code_file="worker.ipynb",
-                kernel_type="notebook",
-                language="python",
-                control_class=ControlClass.ORCHESTRATOR_PROTECTED,
-                disposable=False,
-                dataset_sources=(dataset_source,),
-                enable_internet=True,
-                timeout_seconds=9_000,
-            )
-            lease_guard()
-        launched.append((prepared, dataset, notebook, hashlib.sha256(jobs_payload).hexdigest()))
 
     import_engine = importer or PostgresEmbeddingImporter()
     workers: list[dict[str, Any]] = []
     imports: list[dict[str, Any]] = []
     query_vector_receipts: dict[str, dict[str, Any]] = {}
     actor_ids = {item.document.document_id: item.actor_id for item in documents}
-    pending = {item[2].run.task_run_id: item[2].run for item in launched}
-    poll_started = adapter.monotonic()
-    poll_budget = min(9_000.0, active_deadline - poll_started - 60.0)
-    if poll_budget <= 0:
-        raise EmbeddingStageError("provider preparation exhausted the ACTIVE-stage deadline")
-    for _poll in range(601):
-        lease_guard()
-        for task_id, run in tuple(pending.items()):
-            observed = adapter.read_run_status(run)
-            lease_guard()
-            if observed.state is KernelState.COMPLETE:
-                pending.pop(task_id)
-            elif observed.state is KernelState.FAILED:
-                raise EmbeddingStageError("embedding worker reached a failed provider terminal state")
-        if not pending:
-            break
-        if adapter.monotonic() - poll_started + 15 > poll_budget:
-            raise EmbeddingStageError("embedding workers exceeded the shared ACTIVE-stage deadline")
-        adapter.sleep(15)
-        lease_guard()
-    if pending:
-        raise EmbeddingStageError("embedding workers did not complete within bounded polling")
-    for prepared, dataset, notebook, jobs_sha256 in launched:
-        lease_guard()
-        with tempfile.TemporaryDirectory(prefix="mdh-embedding-output-") as temporary:
-            destination = Path(temporary)
-            output = adapter.download_exact_run_output_file(
-                notebook.run,
-                destination=destination,
-                file_name="embedding-result.json",
-                max_bytes=_MAX_ARTIFACT_BYTES,
-            )
-            lease_guard()
-            raw = (destination / "embedding-result.json").read_bytes()
-        manifest = EmbeddingArtifactManifest.model_validate_json(raw)
-        if raw != canonical_json_bytes(manifest.model_dump(mode="json")):
-            raise EmbeddingStageError("embedding artifact is not canonical JSON")
+    for prepared in prepared_models:
+        metadata = _launch_metadata(context, prepared)
+        manifest = exchange.wait_result(
+            connection, request_id=context.request.request_id, task_run_id=prepared.task_id,
+            expected_sha256=metadata.input_jobs_sha256, deadline=deadline, lease_guard=lease_guard,
+        )
         query_results = [item for item in manifest.successful_results if item.job_key == prepared.query_job_key]
         if len(query_results) != 1:
             raise EmbeddingStageError("exact query vector is absent or duplicated")
@@ -351,57 +176,38 @@ def execute_embedding_production_stage(
             "vector_sha256": query_results[0].vector_sha256,
             "dimensions": query_results[0].dimensions,
         }
-        # Never write through the owner/controller connection.  The factory
-        # provisions one new LOGIN bound to the current epoch and remaining
-        # lease; PostgreSQL rechecks that binding through a deferred trigger at
-        # commit, including transactions begun before a fence/expiry.
         lease_guard()
         with canonical_connection_factory() as canonical_connection:
             imported: EmbeddingImportReceipt = import_engine.import_manifest(
-                canonical_connection,
-                manifest=manifest,
-                expected_run_id=prepared.task_id,
-                jobs=prepared.jobs,
-                actor_ids=actor_ids,
+                canonical_connection, manifest=manifest, expected_run_id=prepared.task_id,
+                jobs=prepared.jobs, actor_ids=actor_ids,
                 ephemeral_job_keys=frozenset({prepared.query_job_key}),
                 ephemeral_query_sha256=context.request.probe_query_sha256,
             )
-        lease_guard()
+        artifact_sha = hashlib.sha256(canonical_json_bytes(manifest.model_dump(mode="json"))).hexdigest()
         workers.append({
-            "model_exact_id": prepared.model.exact_id,
-            "task_run_id": str(prepared.task_id),
-            "provider_ref": notebook.run.provider_ref,
-            "provider_run_ref": notebook.run.provider_run_ref,
-            "provider_kernel_id": notebook.run.provider_kernel_id,
-            "source_version": notebook.run.source_version,
-            "source_sha256": notebook.run.source_sha256,
-            "primary_source_sha256": WORKER_ASSETS[prepared.asset_index].primary_source_sha256,
-            "provider_status": "complete",
-            "privacy": "private",
-            "control_class": "orchestrator_protected",
-            "output_tree_sha256": output.output_tree_sha256,
-            "artifact_sha256": hashlib.sha256(raw).hexdigest(),
+            "model_exact_id": prepared.model.exact_id, "task_run_id": str(prepared.task_id),
+            "provider_status": "complete", "transport": "direct_active_master",
+            "input_jobs_sha256": metadata.input_jobs_sha256, "artifact_sha256": artifact_sha,
             "artifact_id": str(manifest.artifact_id),
-            "artifact_run_id": str(manifest.run_id),
-            "input_dataset": {
-                "provider_ref": prepared.dataset_ref,
-                "provider_version": dataset.identity.version,
-                "package_sha256": dataset.identity.package_sha256,
-                "jobs_sha256": jobs_sha256,
-            },
         })
         imports.append({
-            "model_exact_id": prepared.model.exact_id,
-            "artifact_id": str(imported.artifact_id),
-            "run_id": str(prepared.task_id),
-            "artifact_sha256": hashlib.sha256(raw).hexdigest(),
-            "outbox_id": str(imported.outbox_id),
-            "canonical_revision": imported.canonical_revision,
-            "inserted_count": imported.inserted_count,
-            "stale_count": imported.stale_count,
-            "failed_count": imported.failed_count,
-            "replayed": imported.replayed,
+            "model_exact_id": prepared.model.exact_id, "artifact_id": str(imported.artifact_id),
+            "run_id": str(prepared.task_id), "artifact_sha256": artifact_sha,
+            "outbox_id": str(imported.outbox_id), "canonical_revision": imported.canonical_revision,
+            "inserted_count": imported.inserted_count, "stale_count": imported.stale_count,
+            "failed_count": imported.failed_count, "replayed": imported.replayed,
             "durability_state": imported.durability_state,
+        })
+        runtime_client.emit_donor_envelope({
+            "run_id": context.identity.run_id,
+            "event": "job.completed",
+            "event_uid": f"embedding:{context.request.request_id}:{prepared.task_id}:completed",
+            "phase": "embedding_import", "status": "completed",
+            "progress": {"request_id": str(context.request.request_id),
+                         "task_run_id": str(prepared.task_id),
+                         "model_exact_id": prepared.model.exact_id,
+                         "artifact_sha256": artifact_sha},
         })
 
     lease_guard()
@@ -422,14 +228,8 @@ def execute_embedding_production_stage(
         "completed_documents": int(row[2]), "coverage": int(row[2]) / int(row[1]),
     } for row in coverage_rows)
     return EmbeddingProductionStageReceipt(
-        request_id=context.request.request_id,
-        request_sha256=context.request.request_sha256,
-        master_instance_id=context.identity.master_instance_id,
-        run_id=UUID(context.identity.run_id),
-        epoch=context.identity.epoch,
-        workers=tuple(workers),
-        imports=tuple(imports),
-        coverage=coverage,
-        query_vector_receipts=query_vector_receipts,
-        canonical_revision=canonical_revision,
+        request_id=context.request.request_id, request_sha256=context.request.request_sha256,
+        master_instance_id=context.identity.master_instance_id, run_id=UUID(context.identity.run_id),
+        epoch=context.identity.epoch, workers=tuple(workers), imports=tuple(imports), coverage=coverage,
+        query_vector_receipts=query_vector_receipts, canonical_revision=canonical_revision,
     )

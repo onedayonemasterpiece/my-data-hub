@@ -1,0 +1,74 @@
+{
+  "$id": "https://my-data-hub.invalid/schemas/embeddings/embedding-central-launch-metadata.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Secret-free, business-data-free launch notification for central control.",
+  "properties": {
+    "epoch": {
+      "minimum": 1,
+      "title": "Epoch",
+      "type": "integer"
+    },
+    "input_jobs_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Input Jobs Sha256",
+      "type": "string"
+    },
+    "job_count": {
+      "maximum": 10000,
+      "minimum": 1,
+      "title": "Job Count",
+      "type": "integer"
+    },
+    "model_exact_id": {
+      "maxLength": 500,
+      "minLength": 3,
+      "title": "Model Exact Id",
+      "type": "string"
+    },
+    "request_id": {
+      "format": "uuid",
+      "title": "Request Id",
+      "type": "string"
+    },
+    "request_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Request Sha256",
+      "type": "string"
+    },
+    "schema_version": {
+      "pattern": "^embedding-central-launch-metadata\\.v1$",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_run_id": {
+      "format": "uuid",
+      "title": "Task Run Id",
+      "type": "string"
+    },
+    "worker_primary_source_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Worker Primary Source Sha256",
+      "type": "string"
+    },
+    "worker_source_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Worker Source Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "request_id",
+    "request_sha256",
+    "task_run_id",
+    "model_exact_id",
+    "input_jobs_sha256",
+    "job_count",
+    "worker_source_sha256",
+    "worker_primary_source_sha256",
+    "epoch"
+  ],
+  "title": "EmbeddingLaunchMetadata",
+  "type": "object"
+}

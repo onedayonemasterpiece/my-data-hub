@@ -9,7 +9,7 @@ BEGIN
         'mdh_owner', 'mdh_migrator', 'mdh_application', 'mdh_orchestrator',
         'mdh_connector_intake', 'mdh_mcp_reader', 'mdh_mcp_editor',
         'mdh_migration_operator', 'mdh_canonical_committer', 'mdh_backup', 'mdh_monitoring',
-        'mdh_authenticator', 'mdh_master_controller', 'mdh_checkpoint'
+        'mdh_authenticator', 'mdh_master_controller', 'mdh_checkpoint', 'mdh_embedding_worker'
     ] LOOP
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
             EXECUTE format('CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS', role_name);
@@ -29,7 +29,7 @@ GRANT mdh_owner TO mdh_migrator;
 DO $$
 BEGIN
     EXECUTE format('REVOKE ALL ON DATABASE %I FROM PUBLIC', current_database());
-    EXECUTE format('GRANT CONNECT ON DATABASE %I TO mdh_migrator, mdh_application, mdh_orchestrator, mdh_connector_intake, mdh_mcp_reader, mdh_mcp_editor, mdh_migration_operator, mdh_canonical_committer, mdh_backup, mdh_monitoring, mdh_authenticator, mdh_master_controller, mdh_checkpoint', current_database());
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO mdh_migrator, mdh_application, mdh_orchestrator, mdh_connector_intake, mdh_mcp_reader, mdh_mcp_editor, mdh_migration_operator, mdh_canonical_committer, mdh_backup, mdh_monitoring, mdh_authenticator, mdh_master_controller, mdh_checkpoint, mdh_embedding_worker', current_database());
     EXECUTE format('GRANT CREATE, TEMPORARY ON DATABASE %I TO mdh_migrator', current_database());
     EXECUTE format('GRANT TEMPORARY ON DATABASE %I TO mdh_application, mdh_orchestrator', current_database());
 END

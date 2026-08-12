@@ -37,6 +37,7 @@ from my_data_hub.checkpoints import load_and_verify, restore_physical_archive
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.db.migrations import migrate
 from my_data_hub.embeddings.master_stage import EmbeddingStageContext, execute_embedding_production_stage
+from my_data_hub.embeddings.direct_plane import PostgresEmbeddingWorkerExchange
 from my_data_hub.embeddings.production import EmbeddingProductionRequest, EmbeddingProductionStageReceipt
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.providers.kaggle.source_attestation import observed_kaggle_source_sha256
@@ -1934,11 +1935,6 @@ def run_master(
                 config=config, callback_url=callback_url, run_secret=run_secret
             )
             if embedding_request is not None:
-                if checkpoint_coordinator is None:
-                    raise RuntimeError("embedding stage requires the production checkpoint/provider coordinator")
-                provider = getattr(checkpoint_coordinator.coordinator.provider, "adapter", None)
-                if provider is None:
-                    raise RuntimeError("embedding stage cannot resolve the single Kaggle adapter")
                 maintainer = _EmbeddingLeaseMaintainer(
                     identity=identity,
                     lease_seconds=config.lease_seconds,
@@ -1964,13 +1960,11 @@ def run_master(
                                 operation_id=UUID(_required("MY_DATA_HUB_OPERATION_ID")),
                                 request=embedding_request,
                                 database_url=database_url,
-                                wheel_path=Path(_required("MY_DATA_HUB_WHEEL_PATH")),
-                                wheel_sha256=_required("MY_DATA_HUB_WHEEL_SHA256"),
-                                provider_owner=provider.identity.username,
                                 remaining_seconds=remaining_active,
                             ),
                             connection=gate_connection,
-                            adapter=provider,
+                            exchange=PostgresEmbeddingWorkerExchange(),
+                            runtime_client=runtime,
                             canonical_connection_factory=canonical_connection_factory,
                             lease_guard=maintainer.check,
                         )

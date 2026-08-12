@@ -1,9 +1,7 @@
 """Fail-closed orchestration contract for the post-blogger embedding closure.
 
-The external command moves metadata only.  The required live control interface
-executes the stage inside the ACTIVE master, where compact canonical documents
-can be dispatched through the repository's single Kaggle adapter and returned
-artifacts can be imported transactionally without crossing the control plane.
+The external command moves metadata only.  Central control owns the sole Kaggle
+adapter, while jobs and results use the direct ACTIVE-master data plane.
 """
 
 from __future__ import annotations
@@ -23,7 +21,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from my_data_hub.embeddings.models import BGE_M3, E5_MULTILINGUAL_BASE, EmbeddingModelContract
 from my_data_hub.hashing import canonical_json_bytes
-from my_data_hub.providers.kaggle.contracts import KAGGLE_API_PACKAGE, KAGGLE_API_VERSION
 from my_data_hub.workloads.bloggers.closure import LOCAL_CONTROL_URL
 from my_data_hub.workloads.bloggers.master_stage import (
     EXPECTED_BLOGGER_ROWS,
@@ -31,7 +28,7 @@ from my_data_hub.workloads.bloggers.master_stage import (
 )
 
 EXTERNAL_BLOCKED = 78
-CAPABILITY_SCHEMA = "my-data-hub-embedding-production-capabilities.v2"
+CAPABILITY_SCHEMA = "my-data-hub-embedding-production-capabilities.v3"
 REQUEST_SCHEMA = "my-data-hub-embedding-production-request.v1"
 RECEIPT_SCHEMA = "my-data-hub-embedding-production-closure.v1"
 MAX_METADATA_BYTES = 256 * 1024
@@ -60,13 +57,13 @@ WORKER_ASSETS: tuple[WorkerAsset, ...] = (
     WorkerAsset(
         notebook_slug="05-e5-blogger-embedding-worker",
         notebook_path="notebooks/05-e5-blogger-embedding-worker/worker.ipynb",
-        primary_source_sha256="9cfe2210c0f6d689445aadf917f1638dcaa173178e36f48832e91bfdeeafebfd",
+        primary_source_sha256="6fc1b2c7227c812e3eb1b7dec34a705aca27c77459642da102e0a6c3d0f7dff9",
         model=E5_MULTILINGUAL_BASE,
     ),
     WorkerAsset(
         notebook_slug="06-bge-m3-blogger-embedding-worker",
         notebook_path="notebooks/06-bge-m3-blogger-embedding-worker/worker.ipynb",
-        primary_source_sha256="10e26e7da6bad0e65d048debce89f25c2b8dea715e058b788e9fd5b79a654682",
+        primary_source_sha256="dafba3b1969f3234365872fa27fcdc5f6e32c863dc655f21c04fe295ec705dc8",
         model=BGE_M3,
     ),
 )
@@ -90,11 +87,11 @@ class EmbeddingProductionCapabilities(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["my-data-hub-embedding-production-capabilities.v2"] = CAPABILITY_SCHEMA
+    schema_version: Literal["my-data-hub-embedding-production-capabilities.v3"] = CAPABILITY_SCHEMA
     interface: Literal["control_executor", "mcp_observer"]
     admission_ready: Literal[True]
     binding: EmbeddingProductionAdmissionBinding
-    execution_location: Literal["active_kaggle_master"]
+    execution_location: Literal["central_kaggle_workers_direct_active_master"]
     request_acceptance: Literal["durable_idempotent_ledger.v1"]
     stage_contract: Literal["transactional_import_then_checkpoint.v1"]
     completion_evidence: Literal["terminal_request_status_and_closure_receipt_only"]
@@ -121,10 +118,7 @@ class EmbeddingProductionCapabilities(BaseModel):
         if self.interface == "control_executor":
             if any(value is None for value in executor_fields):
                 raise ValueError("control admission does not prove an executable runner and safe adapter")
-            if (
-                self.provider_adapter_package != KAGGLE_API_PACKAGE
-                or self.provider_adapter_version != KAGGLE_API_VERSION
-            ):
+            if self.provider_adapter_package != "kaggle" or self.provider_adapter_version != "2.2.4":
                 raise ValueError("live interface does not use the repository's pinned Kaggle adapter")
         elif any(value is not None for value in executor_fields):
             raise ValueError("MCP observer must not claim execution-runner or provider-adapter availability")
@@ -172,6 +166,14 @@ def embedding_provider_authority(owner: str, request_id: UUID) -> dict[str, tupl
         result[f"{alias}_input"] = (f"{owner}/mdh-embed-{short}-{alias}", task_id)
         result[f"{alias}_worker"] = (f"{owner}/{asset.notebook_slug}", task_id)
     return result
+
+
+def embedding_worker_task_id(request_id: UUID, model_exact_id: str) -> UUID:
+    """Provider-owner-independent task identity safe to compute in the master."""
+
+    if not model_exact_id or len(model_exact_id) > 500:
+        raise ValueError("embedding model identity is invalid")
+    return uuid5(_PROVIDER_NAMESPACE, f"{request_id}:{model_exact_id}")
 
 
 class EmbeddingProductionStageReceipt(BaseModel):

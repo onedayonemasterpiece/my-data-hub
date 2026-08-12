@@ -1,0 +1,373 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/embeddings/embedding-production-capabilities.v3.schema.json",
+  "$defs": {
+    "EmbeddingModelContract": {
+      "additionalProperties": false,
+      "description": "Exact, immutable identity and encoder behavior for one vector space.",
+      "properties": {
+        "model_key": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Model Key",
+          "type": "string"
+        },
+        "revision": {
+          "pattern": "^[a-f0-9]{40}$",
+          "title": "Revision",
+          "type": "string"
+        },
+        "dimensions": {
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Dimensions",
+          "type": "integer"
+        },
+        "max_tokens": {
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Max Tokens",
+          "type": "integer"
+        },
+        "pooling": {
+          "enum": [
+            "attention_mask_mean",
+            "model_native_dense"
+          ],
+          "title": "Pooling",
+          "type": "string"
+        },
+        "normalization": {
+          "const": "l2",
+          "title": "Normalization",
+          "type": "string"
+        },
+        "query_prefix": {
+          "title": "Query Prefix",
+          "type": "string"
+        },
+        "document_prefix": {
+          "title": "Document Prefix",
+          "type": "string"
+        },
+        "output_modes": {
+          "items": {
+            "const": "dense",
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Output Modes",
+          "type": "array"
+        },
+        "encoder_contract_version": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Encoder Contract Version",
+          "type": "string"
+        },
+        "vector_space": {
+          "pattern": "^[a-z][a-z0-9_]{0,99}$",
+          "title": "Vector Space",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_key",
+        "revision",
+        "dimensions",
+        "max_tokens",
+        "pooling",
+        "normalization",
+        "query_prefix",
+        "document_prefix",
+        "output_modes",
+        "encoder_contract_version",
+        "vector_space"
+      ],
+      "title": "EmbeddingModelContract",
+      "type": "object"
+    },
+    "EmbeddingProductionAdmissionBinding": {
+      "additionalProperties": false,
+      "description": "Exact prerequisite and ACTIVE-master identity observed during admission.",
+      "properties": {
+        "master_instance_id": {
+          "format": "uuid",
+          "title": "Master Instance Id",
+          "type": "string"
+        },
+        "run_id": {
+          "format": "uuid",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "attempt_id": {
+          "format": "uuid",
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "epoch": {
+          "minimum": 1,
+          "title": "Epoch",
+          "type": "integer"
+        },
+        "canonical_revision": {
+          "minimum": 1,
+          "title": "Canonical Revision",
+          "type": "integer"
+        },
+        "blogger_checkpoint_id": {
+          "format": "uuid",
+          "title": "Blogger Checkpoint Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "master_instance_id",
+        "run_id",
+        "attempt_id",
+        "epoch",
+        "canonical_revision",
+        "blogger_checkpoint_id"
+      ],
+      "title": "EmbeddingProductionAdmissionBinding",
+      "type": "object"
+    },
+    "WorkerAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "notebook_slug": {
+          "maxLength": 100,
+          "pattern": "^[a-z0-9-]+$",
+          "title": "Notebook Slug",
+          "type": "string"
+        },
+        "notebook_path": {
+          "pattern": "^notebooks/[a-z0-9-]+/worker\\.ipynb$",
+          "title": "Notebook Path",
+          "type": "string"
+        },
+        "primary_source_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Primary Source Sha256",
+          "type": "string"
+        },
+        "model": {
+          "$ref": "#/$defs/EmbeddingModelContract"
+        }
+      },
+      "required": [
+        "notebook_slug",
+        "notebook_path",
+        "primary_source_sha256",
+        "model"
+      ],
+      "title": "WorkerAsset",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Read-only embedding admission evidence. It never proves stage completion, coverage, checkpoint verification, or cold restore.",
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-embedding-production-capabilities.v3",
+      "default": "my-data-hub-embedding-production-capabilities.v3",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "interface": {
+      "enum": [
+        "control_executor",
+        "mcp_observer"
+      ],
+      "title": "Interface",
+      "type": "string"
+    },
+    "admission_ready": {
+      "const": true,
+      "title": "Admission Ready",
+      "type": "boolean"
+    },
+    "binding": {
+      "$ref": "#/$defs/EmbeddingProductionAdmissionBinding"
+    },
+    "execution_location": {
+      "const": "central_kaggle_workers_direct_active_master",
+      "title": "Execution Location",
+      "type": "string"
+    },
+    "request_acceptance": {
+      "const": "durable_idempotent_ledger.v1",
+      "title": "Request Acceptance",
+      "type": "string"
+    },
+    "stage_contract": {
+      "const": "transactional_import_then_checkpoint.v1",
+      "title": "Stage Contract",
+      "type": "string"
+    },
+    "completion_evidence": {
+      "const": "terminal_request_status_and_closure_receipt_only",
+      "title": "Completion Evidence",
+      "type": "string"
+    },
+    "runner_implementation": {
+      "anyOf": [
+        {
+          "const": "my_data_hub.embeddings.master_stage.execute_embedding_production_stage",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Runner Implementation"
+    },
+    "provider_adapter_package": {
+      "anyOf": [
+        {
+          "const": "kaggle",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Adapter Package"
+    },
+    "provider_adapter_version": {
+      "anyOf": [
+        {
+          "const": "2.2.4",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Adapter Version"
+    },
+    "provider_adapter_implementation": {
+      "anyOf": [
+        {
+          "const": "my_data_hub.providers.kaggle.KaggleProviderAdapter",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Adapter Implementation"
+    },
+    "single_provider_adapter": {
+      "anyOf": [
+        {
+          "const": true,
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Single Provider Adapter"
+    },
+    "worker_assets": {
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/WorkerAsset"
+        },
+        {
+          "$ref": "#/$defs/WorkerAsset"
+        }
+      ],
+      "title": "Worker Assets",
+      "type": "array"
+    }
+  },
+  "required": [
+    "interface",
+    "admission_ready",
+    "binding",
+    "execution_location",
+    "request_acceptance",
+    "stage_contract",
+    "completion_evidence",
+    "worker_assets"
+  ],
+  "title": "EmbeddingProductionCapabilities",
+  "type": "object",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "interface": {
+            "const": "control_executor"
+          }
+        },
+        "required": [
+          "interface"
+        ]
+      },
+      "then": {
+        "required": [
+          "runner_implementation",
+          "provider_adapter_package",
+          "provider_adapter_version",
+          "provider_adapter_implementation",
+          "single_provider_adapter"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "interface": {
+            "const": "mcp_observer"
+          }
+        },
+        "required": [
+          "interface"
+        ]
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "runner_implementation"
+              ]
+            },
+            {
+              "required": [
+                "provider_adapter_package"
+              ]
+            },
+            {
+              "required": [
+                "provider_adapter_version"
+              ]
+            },
+            {
+              "required": [
+                "provider_adapter_implementation"
+              ]
+            },
+            {
+              "required": [
+                "single_provider_adapter"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

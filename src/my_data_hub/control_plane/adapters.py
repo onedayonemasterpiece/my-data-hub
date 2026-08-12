@@ -1352,51 +1352,14 @@ class LedgerControlReader(ControlPlaneReader):
         if tool == "embedding.coverage":
             return {"e5": {"coverage": 0.0}, "bge_m3": {"coverage": 0.0}, "master_state": "ABSENT"}
         if tool == "embedding.production.capabilities":
-            service = self.ledger.resolve_service("postgres-master")
-            operation = (
-                self.ledger.operation_for_attempt(service.run_id, service.attempt_id)
-                if service is not None
-                else None
-            )
-            head = self.ledger.checkpoint_head("postgres-master")
-            if (
-                service is None
-                or service.state != "ACTIVE"
-                or service.master_instance_id is None
-                or service.canonical_revision is None
-                or operation is None
-                or operation.state != "ACTIVE"
-                or head is None
-                or head.current_checkpoint_id is None
-            ):
-                return {
-                    "admission_ready": False,
-                    "master_state": "ACTIVE" if service is not None else "ABSENT",
-                    "blocker_code": "EMBEDDING_PRODUCTION_PREREQUISITE_ABSENT",
-                }
-            from my_data_hub.embeddings.production import (
-                WORKER_ASSETS,
-                EmbeddingProductionAdmissionBinding,
-                EmbeddingProductionCapabilities,
-            )
-
-            return EmbeddingProductionCapabilities(
-                interface="mcp_observer",
-                admission_ready=True,
-                binding=EmbeddingProductionAdmissionBinding(
-                    master_instance_id=service.master_instance_id,
-                    run_id=service.run_id,
-                    attempt_id=service.attempt_id,
-                    epoch=service.epoch,
-                    canonical_revision=service.canonical_revision,
-                    blogger_checkpoint_id=head.current_checkpoint_id,
-                ),
-                execution_location="active_kaggle_master",
-                request_acceptance="durable_idempotent_ledger.v1",
-                stage_contract="transactional_import_then_checkpoint.v1",
-                completion_evidence="terminal_request_status_and_closure_receipt_only",
-                worker_assets=WORKER_ASSETS,
-            ).model_dump(mode="json", exclude_none=True)
+            # The generic MCP observer cannot prove that central control has a
+            # live worker-to-master credential/tunnel broker.  Until that exact
+            # capability is durably projected, fail closed instead of treating
+            # ACTIVE master metadata as execution readiness.
+            return {
+                "admission_ready": False,
+                "blocker_code": "EMBEDDING_DIRECT_DATA_PLANE_UNAVAILABLE",
+            }
         raise ValueError(f"unsupported bounded control tool: {tool}")
 
     def _checkpoint_projection(self, candidate: dict[str, Any] | None) -> dict[str, Any] | None:

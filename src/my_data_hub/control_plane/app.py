@@ -484,6 +484,10 @@ def create_app(
     app.state.session_registrar = session_registrar
     app.state.tunnel_certificate_broker = tunnel_certificate_broker
     app.state.embedding_stage_runner = embedding_stage_runner or execute_embedding_production_stage
+    # This must be a real central launcher that can deliver an epoch-bound
+    # direct-master credential/tunnel to both workers.  Mere adapter presence
+    # must never advertise Gate K readiness.
+    app.state.embedding_direct_plane_launcher = None
     app.state.provider_gateway = provider_gateway if runtime.provider_gateway_enabled else None
     app.state.acceptance_scenario_adapter = acceptance_scenario_adapter
     # Process invocation identity, not the host/kernel boot ID. A real control
@@ -1040,7 +1044,7 @@ def create_app(
             interface="control_executor",
             admission_ready=True,
             binding=binding,
-            execution_location="active_kaggle_master",
+            execution_location="central_kaggle_workers_direct_active_master",
             request_acceptance="durable_idempotent_ledger.v1",
             stage_contract="transactional_import_then_checkpoint.v1",
             completion_evidence="terminal_request_status_and_closure_receipt_only",
@@ -1063,6 +1067,7 @@ def create_app(
         if (
             app.state.embedding_stage_runner is not execute_embedding_production_stage
             or app.state.master_provider_status != "available"
+            or app.state.embedding_direct_plane_launcher is None
             or not isinstance(adapter, KaggleProviderAdapter)
             or service is None
             or service.state != "ACTIVE"
@@ -1110,6 +1115,7 @@ def create_app(
         if (
             app.state.embedding_stage_runner is not execute_embedding_production_stage
             or app.state.master_provider_status != "available"
+            or app.state.embedding_direct_plane_launcher is None
             or not isinstance(provider, KaggleMasterRuntimeProvider)
             or not isinstance(provider.adapter, KaggleProviderAdapter)
         ):

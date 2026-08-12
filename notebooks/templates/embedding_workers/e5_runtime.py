@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,7 +10,9 @@ from uuid import UUID
 import torch
 from transformers import AutoModel, AutoTokenizer
 
-from my_data_hub.embeddings.contracts import EmbeddingJob
+from my_data_hub.embeddings.direct_plane import (
+    claim_direct_embedding_jobs, submit_direct_embedding_result,
+)
 from my_data_hub.embeddings.models import E5_MULTILINGUAL_BASE
 from my_data_hub.embeddings.worker import EmbeddingWorker
 from my_data_hub.hashing import canonical_json_bytes
@@ -35,11 +36,31 @@ class E5Encoder:
 
 
 def main() -> int:
-    payload = json.loads(Path(os.environ["MY_DATA_HUB_EMBEDDING_JOBS"]).read_text())
-    jobs = tuple(EmbeddingJob.model_validate(item) for item in payload["jobs"])
-    now = datetime.now(UTC)
-    result = EmbeddingWorker(model=E5_MULTILINGUAL_BASE, encoder=E5Encoder()).run(
-        run_id=UUID(os.environ["MY_DATA_HUB_RUN_ID"]), jobs=jobs, started_at=now, completed_at=datetime.now(UTC)
+    import psycopg
+
+    request_id = UUID(os.environ["MY_DATA_HUB_EMBEDDING_REQUEST_ID"])
+    task_run_id = UUID(os.environ["MY_DATA_HUB_RUN_ID"])
+    input_jobs_sha256 = os.environ["MY_DATA_HUB_EMBEDDING_INPUT_JOBS_SHA256"]
+    # The short-lived URL is injected only through the private per-run status
+    # Dataset and is never written to output or callbacks.
+    with psycopg.connect(os.environ["MY_DATA_HUB_EMBEDDING_DIRECT_DATABASE_URL"]) as connection:
+        jobs = claim_direct_embedding_jobs(
+            connection, request_id=request_id, task_run_id=task_run_id,
+            input_jobs_sha256=input_jobs_sha256,
+        )
+        now = datetime.now(UTC)
+        result = EmbeddingWorker(model=E5_MULTILINGUAL_BASE, encoder=E5Encoder()).run(
+            run_id=task_run_id, jobs=jobs, started_at=now, completed_at=datetime.now(UTC)
+        )
+        artifact_sha256 = submit_direct_embedding_result(
+            connection, request_id=request_id, task_run_id=task_run_id,
+            input_jobs_sha256=input_jobs_sha256, manifest=result,
+        )
+    Path("/kaggle/working/embedding-result-metadata.json").write_bytes(
+        canonical_json_bytes({
+            "schema_version": "embedding-direct-result-metadata.v1",
+            "request_id": str(request_id), "task_run_id": str(task_run_id),
+            "input_jobs_sha256": input_jobs_sha256, "artifact_sha256": artifact_sha256,
+        })
     )
-    Path("/kaggle/working/embedding-result.json").write_bytes(canonical_json_bytes(result.model_dump(mode="json")))
     return 0

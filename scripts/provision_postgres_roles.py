@@ -49,6 +49,7 @@ def main() -> int:
                     "mdh_backup",
                     "mdh_monitoring",
                     "mdh_authenticator",
+                    "mdh_embedding_worker",
                 ],
             ),
         )
@@ -65,7 +66,7 @@ def main() -> int:
             }
             for row in cursor.fetchall()
         ]
-    ok = len(roles) == 12 and all(
+    ok = len(roles) == 13 and all(
         not any(value for key, value in role.items() if key != "role")
         for role in roles
     )

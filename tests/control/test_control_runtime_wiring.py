@@ -986,24 +986,17 @@ def test_embedding_admission_accepts_first_request_and_replays_without_completio
     wired.coordinator.provider = KaggleMasterRuntimeProvider(adapter, assets())
 
     capability = client.get("/control/v1/embedding-production/capabilities")
-    assert capability.status_code == 200
-    assert capability.json()["admission_ready"] is True
-    assert capability.json()["binding"]["blogger_checkpoint_id"] == checkpoint_id
-    assert "verified_checkpoint_restore" not in capability.json()
-    assert "mcp_hybrid_search" not in capability.json()
+    assert capability.status_code == 503
+    assert capability.json() == {"detail": {"code": "embedding_production_unavailable"}}
     observed = LedgerControlReader(ledger).invoke_control(
-        "embedding.production.capabilities",
-        {},
-        object(),  # type: ignore[arg-type]
+        "embedding.production.capabilities", {}, object(),  # type: ignore[arg-type]
     )
-    assert observed["interface"] == "mcp_observer"
-    assert observed["binding"] == capability.json()["binding"]
-    assert "runner_implementation" not in observed
-    assert "provider_adapter_implementation" not in observed
-
-    first = client.post("/control/v1/embedding-production/requests", json=request.model_dump(mode="json"))
-    replay = client.post("/control/v1/embedding-production/requests", json=request.model_dump(mode="json"))
-    assert first.status_code == replay.status_code == 200
-    assert first.json()["created"] is True
-    assert replay.json()["created"] is False
-    assert first.json()["state"] == replay.json()["state"] == "REQUESTED"
+    assert observed == {
+        "admission_ready": False,
+        "blocker_code": "EMBEDDING_DIRECT_DATA_PLANE_UNAVAILABLE",
+    }
+    rejected = client.post(
+        "/control/v1/embedding-production/requests", json=request.model_dump(mode="json")
+    )
+    assert rejected.status_code == 409
+    assert ledger.embedding_production_request(str(request.request_id)) is None

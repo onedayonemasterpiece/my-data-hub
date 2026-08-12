@@ -137,7 +137,7 @@ def _capabilities(interface: str = "control_executor") -> dict[str, object]:
             canonical_revision=9,
             blogger_checkpoint_id=BLOGGER_CHECKPOINT,
         ),
-        execution_location="active_kaggle_master",
+        execution_location="central_kaggle_workers_direct_active_master",
         request_acceptance="durable_idempotent_ledger.v1",
         stage_contract="transactional_import_then_checkpoint.v1",
         completion_evidence="terminal_request_status_and_closure_receipt_only",
@@ -531,7 +531,7 @@ def test_cli_rejects_bearer_token_in_process_arguments(monkeypatch: pytest.Monke
     "stem",
     [
         "embedding-production-capabilities.v1",
-        "embedding-production-capabilities.v2",
+        "embedding-production-capabilities.v3",
         "embedding-production-request.v1",
         "embedding-production-closure.v1",
     ],

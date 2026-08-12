@@ -309,6 +309,11 @@ class RuntimeClient:
             "resource_release": RuntimeEventType.RESOURCE_RELEASE,
             "resource.release": RuntimeEventType.RESOURCE_RELEASE,
             "report_written": RuntimeEventType.JOB_RESULT_AVAILABLE,
+            "job.claimed": RuntimeEventType.JOB_CLAIMED,
+            "job.progress": RuntimeEventType.JOB_PROGRESS,
+            "job.result_available": RuntimeEventType.JOB_RESULT_AVAILABLE,
+            "job.completed": RuntimeEventType.JOB_COMPLETED,
+            "job.failed": RuntimeEventType.JOB_FAILED,
         }.get(donor_event, RuntimeEventType.RUNTIME_PROGRESS)
         data = {
             "donor_event": donor_event,
