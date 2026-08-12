@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import yaml
 from jsonschema import Draft202012Validator, FormatChecker
 
 from scripts.validate_repository import (
@@ -607,38 +608,25 @@ def test_synthetic_or_blocker_free_blocked_receipt_cannot_claim_completion() -> 
 
 def test_connector_intake_compose_service_is_bounded_and_default_off() -> None:
     report = Report()
+    compose = yaml.safe_load((ROOT / "compose.control-plane.yaml").read_text(encoding="utf-8"))
 
-    validate_connector_intake_compose_service(
-        report,
-        {
-            "image": "my-data-hub:local",
-            "profiles": ["connector-intake"],
-            "read_only": True,
-            "environment": {"MY_DATA_HUB_CONNECTOR_INTAKE_ENABLED": "true"},
-        },
-    )
+    validate_connector_intake_compose_service(report, compose["services"]["connector-intake"])
 
     assert report.errors == []
 
 
 def test_connector_intake_compose_service_rejects_data_plane_surfaces() -> None:
     report = Report()
+    compose = yaml.safe_load((ROOT / "compose.control-plane.yaml").read_text(encoding="utf-8"))
+    service = copy.deepcopy(compose["services"]["connector-intake"])
+    service["ports"] = ["0.0.0.0:9999:9999"]
+    service["expose"] = ["25432"]
+    service["environment"]["MY_DATA_HUB_DB_HOST"] = "master.internal"
+    service["environment"]["MY_DATA_HUB_DATA_PLANE_ENDPOINT"] = "postgresql://master.internal/db"
 
-    validate_connector_intake_compose_service(
-        report,
-        {
-            "profiles": ["connector-intake"],
-            "read_only": True,
-            "ports": ["127.0.0.1:9999:9999"],
-            "expose": ["25432"],
-            "environment": {
-                "MY_DATA_HUB_DB_HOST": "master.internal",
-                "MY_DATA_HUB_DATA_PLANE_ENDPOINT": "postgresql://master.internal/db",
-            },
-        },
-    )
+    validate_connector_intake_compose_service(report, service)
 
-    assert any("publish a Compose port" in error for error in report.errors)
-    assert any("expose a Compose port" in error for error in report.errors)
-    assert any("database/data-plane environment" in error for error in report.errors)
+    assert any("reviewed loopback port" in error for error in report.errors)
+    assert any("unbounded Compose port" in error for error in report.errors)
+    assert any("reviewed lightweight control boundary" in error for error in report.errors)
     assert any("embeds a database/PGDATA/data-plane endpoint" in error for error in report.errors)
