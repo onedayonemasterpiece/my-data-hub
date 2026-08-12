@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run bounded real Kaggle gates through the repository's single adapter."""
+"""Historical fakeable platform-smoke contracts; production execution is centrally brokered.
+
+The callable CLI is intentionally non-mutating.  Live provider acceptance is owned by
+``operational_kaggle_matrix.py`` through the deployed MCP/control gateway so this
+module can never instantiate a second account-authenticated Kaggle client.
+"""
 
 from __future__ import annotations
 
@@ -10,14 +15,10 @@ import os
 import subprocess
 import sys
 import tempfile
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -26,7 +27,6 @@ from my_data_hub.hashing import canonical_json_bytes, sha256_value
 from my_data_hub.notebooks.contracts import NotebookResult
 from my_data_hub.providers.kaggle import (
     KaggleIdentityError,
-    KaggleProviderAdapter,
     mapping_sha256,
 )
 from my_data_hub.providers.kaggle.contracts import (
@@ -34,17 +34,14 @@ from my_data_hub.providers.kaggle.contracts import (
     PollPolicy,
     ProviderEffectIntent,
 )
-from my_data_hub.providers.kaggle.control_journal import ControlLedgerKaggleJournal
 from my_data_hub.providers.models import ControlClass
 
 try:
     from scripts.provider.kaggle_credential_preflight import (
-        kaggle_credentials_configured,
         kaggle_exact_kernel_read_credentials_configured,
     )
 except ModuleNotFoundError:  # direct ``python scripts/provider/...`` execution
     from kaggle_credential_preflight import (
-        kaggle_credentials_configured,
         kaggle_exact_kernel_read_credentials_configured,
     )
 
@@ -78,32 +75,12 @@ def clean_repository_commit() -> str:
     return commit
 
 
-class _AnonymousDatasetProbeError(RuntimeError):
-    """Shape an anonymous HTTP denial for the adapter's retry classifier."""
-
-    def __init__(self, status_code: int) -> None:
-        super().__init__(f"anonymous Kaggle dataset request denied with HTTP {status_code}")
-        self.response = SimpleNamespace(status_code=status_code, headers={})
-
-
-class AnonymousDatasetProbe:
-    """Prove that an exact authenticated dataset version is not public."""
+class _NoDirectPrivacyProbe:
+    """Deny accidental network use from the superseded diagnostic module."""
 
     def read_dataset(self, provider_ref: str, version: int) -> object:
-        owner, slug = provider_ref.split("/", 1)
-        quoted = "/".join(urllib.parse.quote(value, safe="") for value in (owner, slug))
-        url = f"https://www.kaggle.com/api/v1/datasets/download/{quoted}?datasetVersionNumber={version}"
-        request = urllib.request.Request(
-            url,
-            headers={"Accept": "application/zip", "User-Agent": "my-data-hub-private-proof/1"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                # A successful response is deliberately not read or persisted.  The
-                # adapter treats any success as a privacy failure.
-                return {"status": response.status}
-        except urllib.error.HTTPError as exc:
-            raise _AnonymousDatasetProbeError(exc.code) from exc
+        del provider_ref, version
+        raise RuntimeError("privacy proof must run through the central provider authority")
 
 
 def modern_token_configured() -> bool:
@@ -161,226 +138,38 @@ Path("/kaggle/working/smoke-output.json").write_text(
 """.encode()
 
 
-def run_dataset_canary(*, ledger_path: Path, receipt_path: Path) -> int:
-    if not kaggle_credentials_configured():
-        receipt_path.parent.mkdir(parents=True, exist_ok=True)
-        receipt_path.write_bytes(
-            canonical_json_bytes(
-                {
-                    "schema_version": "my-data-hub-real-kaggle-blocker.v1",
-                    "gate": "private_dataset_exact_read_cleanup",
-                    "outcome": "BLOCKED",
-                    "blocker_code": "KAGGLE_MODERN_API_TOKEN_REQUIRED",
-                    "mutations_started": 0,
-                    "observed_at": datetime.now(UTC).isoformat(),
-                }
-            )
-        )
-        return EXTERNAL_BLOCKED
-    commit_sha = clean_repository_commit()
-    ledger = ControlLedger(ledger_path)
-    adapter = KaggleProviderAdapter.from_environment(journal=ControlLedgerKaggleJournal(ledger))
-    task_id = uuid4()
-    run_id = uuid4()
-    started_at = datetime.now(UTC)
-    slug = f"mdh-private-canary-{str(run_id)[:8]}"
-    ref = f"{adapter.provider_identity().username}/{slug}"
-    content = canonical_json_bytes(
-        {
-            "schema_version": "my-data-hub-provider-canary.v1",
-            "task_id": str(task_id),
-            "run_id": str(run_id),
-        }
-    )
-    content_tree_sha = hashlib.sha256(
+def _write_central_authority_blocker(*, receipt_path: Path, gate: str) -> int:
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_bytes(
         canonical_json_bytes(
             {
-                "files": [
-                    {
-                        "path": "canary.json",
-                        "sha256": hashlib.sha256(content).hexdigest(),
-                        "byte_size": len(content),
-                    }
-                ]
+                "schema_version": "my-data-hub-real-kaggle-blocker.v1",
+                "gate": gate,
+                "outcome": "BLOCKED",
+                "blocker_code": "SUPERSEDED_BY_CENTRAL_OPERATIONAL_MATRIX",
+                "mutations_started": 0,
+                "observed_at": datetime.now(UTC).isoformat(),
             }
         )
-    ).hexdigest()
-    create = _effect(
-        action=MutationAction.CREATE_DATASET,
-        ref=ref,
-        task_id=task_id,
-        arguments={
-            "content_tree_sha256": content_tree_sha,
-            "control_class": ControlClass.MCP_MANAGED.value,
-            "disposable": True,
-        },
     )
-    claim = None
-    result = None
-    proof = None
-    cleanup = None
-    try:
-        result = adapter.create_private_dataset(
-            intent=create,
-            files={"canary.json": content},
-            title=slug,
-            control_class=ControlClass.MCP_MANAGED,
-            disposable=True,
-        )
-        claim = result.claim
-        proof = adapter.prove_private_dataset_access(
-            provider_ref=ref,
-            version=result.identity.version,
-            unauthenticated_probe=AnonymousDatasetProbe(),
-        )
-    finally:
-        if claim is not None:
-            delete = _effect(
-                action=MutationAction.DELETE_DATASET,
-                ref=ref,
-                task_id=task_id,
-                arguments={
-                    "claim_sha256": claim.claim_sha256,
-                    "provider_version": claim.provider_version,
-                },
-                expected=claim.fingerprint,
-            )
-            cleanup = adapter.delete_task_created_resource(intent=delete, claim=claim)
-    if result is None or proof is None or cleanup is None:
-        raise RuntimeError("dataset canary has no exact create/privacy/cleanup receipt")
-    receipt = {
-        "schema_version": "my-data-hub-real-kaggle-canary.v2",
-        "scenario": "private_dataset_create_exact_readback_unauthenticated_denial_delete",
-        "task_id": str(task_id),
-        "run_id": str(run_id),
-        "commit_sha": commit_sha,
-        "provider_ref": ref,
-        "provider_version": result.identity.version,
-        "package_sha256": result.identity.package_sha256,
-        "claim_sha256": result.claim.claim_sha256,
-        "privacy": result.identity.privacy,
-        "unauthenticated_http_status": proof.unauthenticated_http_status,
-        "denial_class": proof.denial_class,
-        "cleanup": cleanup.detail_code,
-        "cleanup_outcome": "complete",
-        "counts": {"created": 1, "exact_readback": 1, "deleted": 1},
-        "gate_results": [
-            {"name": "private_create", "outcome": "PASS"},
-            {"name": "exact_version_readback", "outcome": "PASS"},
-            {"name": "unauthenticated_access_denied", "outcome": "PASS"},
-            {"name": "claim_bound_cleanup", "outcome": "PASS"},
-        ],
-        "blockers": [],
-        "started_at": started_at.isoformat(),
-        "completed_at": datetime.now(UTC).isoformat(),
-    }
-    receipt_path.parent.mkdir(parents=True, exist_ok=True)
-    receipt_path.write_bytes(canonical_json_bytes(receipt))
-    return 0
+    return EXTERNAL_BLOCKED
 
+
+def run_dataset_canary(*, ledger_path: Path, receipt_path: Path) -> int:
+    """Refuse the historical local-client canary before ledger/provider mutation."""
+
+    del ledger_path
+    return _write_central_authority_blocker(
+        receipt_path=receipt_path, gate="private_dataset_exact_read_cleanup"
+    )
 
 def run_notebook_canary(*, ledger_path: Path, receipt_path: Path) -> int:
-    if not modern_token_configured():
-        receipt_path.parent.mkdir(parents=True, exist_ok=True)
-        receipt_path.write_bytes(
-            canonical_json_bytes(
-                {
-                    "schema_version": "my-data-hub-real-kaggle-blocker.v1",
-                    "gate": "private_notebook_exact_read_run_output",
-                    "outcome": "BLOCKED",
-                    "blocker_code": "KAGGLE_MODERN_API_TOKEN_REQUIRED",
-                    "credential_location": "KAGGLE_API_TOKEN or ~/.kaggle/access_token",
-                    "proof_command": (
-                        "kaggle auth login && python scripts/provider/real_kaggle_matrix.py notebook-canary"
-                    ),
-                    "observed_at": datetime.now(UTC).isoformat(),
-                }
-            )
-        )
-        return EXTERNAL_BLOCKED
-    ledger = ControlLedger(ledger_path)
-    adapter = KaggleProviderAdapter.from_environment(journal=ControlLedgerKaggleJournal(ledger))
-    task_id = uuid4()
-    task_run_id = uuid4()
-    slug = f"mdh-private-smoke-{str(task_run_id)[:8]}"
-    ref = f"{adapter.provider_identity().username}/{slug}"
-    source = _notebook_source(task_run_id=task_run_id, provider_ref=ref)
-    canonical_source = source
-    source_sha = hashlib.sha256(canonical_source).hexdigest()
-    create_arguments = {
-        "task_run_id": str(task_run_id),
-        "source_sha256": source_sha,
-        "dataset_sources": (),
-        "control_class": ControlClass.MCP_MANAGED.value,
-        "disposable": True,
-    }
-    create = _effect(
-        action=MutationAction.PUSH_NOTEBOOK,
-        ref=ref,
-        task_id=task_id,
-        arguments=create_arguments,
-    )
-    claim = None
-    result = None
-    cleanup = None
-    try:
-        result = adapter.push_private_notebook(
-            intent=create,
-            task_run_id=task_run_id,
-            source=source,
-            title=slug,
-            code_file="run.py",
-            kernel_type="script",
-            language="python",
-            control_class=ControlClass.MCP_MANAGED,
-            disposable=True,
-            enable_internet=False,
-            timeout_seconds=900,
-        )
-        claim = result.claim
-        terminal = adapter.poll_run(
-            result.run,
-            PollPolicy(interval_seconds=15, timeout_seconds=900, max_polls=60),
-        )
-        output = adapter.read_exact_run_output(result.run)
-        receipt = {
-            "schema_version": "my-data-hub-real-kaggle-run.v1",
-            "scenario": "private_notebook_exact_source_run_output_delete",
-            "task_id": str(task_id),
-            "task_run_id": str(task_run_id),
-            "provider_ref": ref,
-            "provider_kernel_id": result.run.provider_kernel_id,
-            "source_version": result.run.source_version,
-            "source_sha256": result.run.source_sha256,
-            "provider_run_ref": result.run.provider_run_ref,
-            "terminal_state": terminal.state.value,
-            "output_tree_sha256": output.output_tree_sha256,
-            "output_receipt_sha256": output.receipt_sha256,
-            "privacy": result.source.privacy,
-            "control_class": result.claim.control_class.value,
-            "completed_at": datetime.now(UTC).isoformat(),
-        }
-    finally:
-        if claim is not None:
-            delete_arguments = {
-                "claim_sha256": claim.claim_sha256,
-                "provider_version": claim.provider_version,
-            }
-            delete = _effect(
-                action=MutationAction.DELETE_NOTEBOOK,
-                ref=ref,
-                task_id=task_id,
-                arguments=delete_arguments,
-                expected=claim.fingerprint,
-            )
-            cleanup = adapter.delete_task_created_resource(intent=delete, claim=claim)
-    if result is None or cleanup is None:
-        raise RuntimeError("notebook canary has no exact create/cleanup receipt")
-    receipt["cleanup"] = cleanup.detail_code
-    receipt_path.parent.mkdir(parents=True, exist_ok=True)
-    receipt_path.write_bytes(canonical_json_bytes(receipt))
-    return 0
+    """Refuse the historical local-client canary before ledger/provider mutation."""
 
+    del ledger_path
+    return _write_central_authority_blocker(
+        receipt_path=receipt_path, gate="private_notebook_exact_read_run_output"
+    )
 
 @dataclass(frozen=True, slots=True)
 class MatrixScenarioSpec:
@@ -809,17 +598,21 @@ def run_real_matrix(
     wheel_builder: Callable[[Path, str], tuple[str, bytes]] | None = None,
     root: Path | None = None,
 ) -> int:
-    """Run the real disposable matrix; never instantiate the adapter without a modern token."""
+    """Run only an injected contract smoke; production uses the central MCP gateway.
 
-    live_evidence = commit_sha is None and adapter_factory is None and wheel_builder is None and root is None
-    if not modern_token_configured():
+    A missing ``adapter_factory`` is the CLI/live path.  It is rejected before
+    credentials, ledger, plan, or provider state are touched so this historical
+    module cannot become a second Kaggle lifecycle authority.
+    """
+
+    if adapter_factory is None:
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
         receipt_path.write_bytes(
             canonical_json_bytes(
                 {
                     "schema_version": "my-data-hub-real-kaggle-matrix-blocker.v1",
                     "outcome": "BLOCKED",
-                    "blocker_code": "KAGGLE_MODERN_API_TOKEN_REQUIRED",
+                    "blocker_code": "SUPERSEDED_BY_CENTRAL_OPERATIONAL_MATRIX",
                     "planned_runs": len(MATRIX_SCENARIOS),
                     "mutations_started": 0,
                     "observed_at": datetime.now(UTC).isoformat(),
@@ -827,6 +620,7 @@ def run_real_matrix(
             )
         )
         return EXTERNAL_BLOCKED
+    live_evidence = False
     repository_root = root or Path(__file__).resolve().parents[2]
     exact_commit = commit_sha or clean_repository_commit()
     plan = _load_or_create_plan(
@@ -876,10 +670,7 @@ def run_real_matrix(
             raise RuntimeError("unsafe or stale completed matrix summary receipt")
     scenario_receipt_dir.mkdir(parents=True, exist_ok=True)
     ledger = ControlLedger(ledger_path)
-    factory = adapter_factory or (
-        lambda value: KaggleProviderAdapter.from_environment(journal=ControlLedgerKaggleJournal(value))
-    )
-    adapter = factory(ledger)
+    adapter = adapter_factory(ledger)
     username = adapter.provider_identity().username
     build = wheel_builder or (lambda path, commit: _build_exact_wheel(root=path, commit_sha=commit))
     wheel_name, wheel_bytes = build(repository_root, exact_commit)
@@ -935,7 +726,7 @@ def run_real_matrix(
         privacy = adapter.prove_private_dataset_access(
             provider_ref=input_ref,
             version=input_result.identity.version,
-            unauthenticated_probe=AnonymousDatasetProbe(),
+            unauthenticated_probe=_NoDirectPrivacyProbe(),
         )
         if input_result.identity.privacy != "private" or privacy.unauthenticated_http_status not in {401, 403, 404}:
             raise RuntimeError("matrix input Dataset privacy was not exactly proven")
@@ -1228,12 +1019,13 @@ def main() -> int:
     args = parse_args()
     if args.command == "preflight":
         payload = {
-            "modern_token_configured": modern_token_configured(),
-            "legacy_credentials_present": (Path("~/.kaggle/kaggle.json").expanduser().is_file()),
-            "private_notebook_exact_read_ready": modern_token_configured(),
+            "ready": False,
+            "blocker_code": "SUPERSEDED_BY_CENTRAL_OPERATIONAL_MATRIX",
+            "production_entrypoint": "scripts/provider/operational_kaggle_matrix.py",
+            "mutations_started": 0,
         }
         print(json.dumps(payload, sort_keys=True))
-        return 0 if payload["private_notebook_exact_read_ready"] else EXTERNAL_BLOCKED
+        return EXTERNAL_BLOCKED
     if args.command == "dataset-canary":
         receipt = args.receipt or Path(".codex/operational-mvp/evidence/real-kaggle/dataset-canary.json")
         return run_dataset_canary(ledger_path=args.ledger, receipt_path=receipt)

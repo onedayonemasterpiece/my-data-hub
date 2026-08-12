@@ -238,20 +238,6 @@ def validate_kaggle_transport(report: Report) -> None:
         except SyntaxError as exc:
             report.fail(f"cannot parse Kaggle transport surface {relative}: {exc}")
             continue
-        if relative == "scripts/provider/real_kaggle_matrix.py":
-            # Reviewed, deliberately unauthenticated privacy-denial proof.  It
-            # neither authenticates nor mutates and therefore is not a provider
-            # transport implementation.  Pin its exact call site so any drift
-            # requires another review.
-            findings = [
-                finding
-                for finding in findings
-                if not (
-                    finding.kind == "http"
-                    and finding.line == 96
-                    and finding.detail == "https://www.kaggle.com/api/v1/datasets/download/{}?datasetVersionNumber={} "
-                )
-            ]
         if not findings:
             continue
         implementation_files.add(relative)

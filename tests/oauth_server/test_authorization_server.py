@@ -261,7 +261,10 @@ def test_authorization_code_issues_exact_short_lived_access_and_id_tokens(harnes
         algorithms=["RS256"],
         audience=AUDIENCE,
         issuer=ISSUER,
+        options={"verify_exp": False},
     )
+    assert claims["iat"] == NOW
+    assert claims["exp"] == NOW + 120
     assert claims["aud"] == AUDIENCE
     assert claims["resource"] == RESOURCE
     assert claims["scope"] == "openid data:read"
@@ -273,6 +276,7 @@ def test_authorization_code_issues_exact_short_lived_access_and_id_tokens(harnes
         algorithms=["RS256"],
         audience=CLIENT_ID,
         issuer=ISSUER,
+        options={"verify_exp": False},
     )
     assert id_claims["sub"] == "owner-1"
     assert id_claims["nonce"] == "nonce-1"
@@ -283,6 +287,7 @@ def test_authorization_code_issues_exact_short_lived_access_and_id_tokens(harnes
             algorithms=["RS256"],
             audience=f"{AUDIENCE}/wrong",
             issuer=ISSUER,
+            options={"verify_exp": False},
         )
 
 

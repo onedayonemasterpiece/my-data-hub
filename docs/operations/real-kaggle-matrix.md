@@ -11,9 +11,18 @@ example is evidence that Kaggle was contacted.
 
 ## Safety boundary
 
-`scripts/provider/real_kaggle_matrix.py matrix` checks for the modern Kaggle API token (`KAGGLE_API_TOKEN` or a regular, non-symlinked `access_token` in `KAGGLE_CONFIG_DIR`) before it constructs the ledger, adapter, plan, wheel, or starts a provider mutation. A missing token produces a bounded blocker receipt, records `mutations_started: 0`, and exits 78. Legacy `kaggle.json` credentials do not satisfy this gate.
+The historical CLI is permanently non-mutating in production. `preflight`,
+`dataset-canary`, `notebook-canary`, and the uninjected `matrix` command return
+`SUPERSEDED_BY_CENTRAL_OPERATIONAL_MATRIX`, record `mutations_started: 0`, and
+exit 78 before creating a ledger, plan, adapter, or provider resource. This
+prevents the diagnostic module from constructing a second account-authenticated
+Kaggle client.
 
-The driver uses the repository's single `KaggleProviderAdapter`. It does not implement another HTTP/CLI transport. It creates one disposable private input Dataset containing the exact source wheel and one typed input manifest per scenario. Each scenario renders the existing generated `notebooks/00-platform-smoke/worker.ipynb` contract, launches a distinct private Notebook with a distinct task run ID, downloads only the exact `matrix-result.json`, validates typed per-item accounting, and deletes the Notebook using its exact task-created claim. The shared input Dataset is also claim-cleaned in `finally`.
+The production acceptance path is
+`scripts/provider/operational_kaggle_matrix.py`; all provider effects and live
+inventory go through the deployed MCP/control gateway and its one central
+`KaggleProviderAdapter`. The fake-adapter unit seam below remains only for
+deterministic contract tests and can never mark evidence live.
 
 ## Matrix and evidence
 
@@ -40,15 +49,13 @@ Only the uninjected CLI path marks receipts `live_evidence: true`. Fake-adapter 
 
 ## Invocation
 
-This diagnostic is local/manual only. A local opt-in invocation is:
+The only supported manual action is the non-mutating supersession proof:
 
 ```bash
 python scripts/provider/real_kaggle_matrix.py preflight
-python scripts/provider/real_kaggle_matrix.py matrix \
-  --ledger artifacts/provider-matrix-effects.sqlite3 \
-  --plan artifacts/kaggle-matrix-plan.json \
-  --scenario-receipts artifacts/kaggle-matrix-scenarios \
-  --receipt artifacts/kaggle-matrix.json
 ```
 
-Keep the plan, ledger, scenario launch fences, and completed scenario receipts together to resume after a process interruption. A completed exact receipt prevents relaunch of that scenario; an incomplete scenario is reconciled against the exact planned task run/source. A durable launch fence with no exact physical run fails closed and requires a new matrix identity rather than launching a second physical run under the same task run ID. Stale or mismatched state fails closed. Validation against `schemas/kaggle-real-matrix-receipt.v1.schema.json` proves only the explicitly named platform-smoke scope; it can never close full operational acceptance.
+It exits 78 and names `scripts/provider/operational_kaggle_matrix.py` as the
+production entrypoint. Do not attach Kaggle credentials to this historical
+module. Schema examples and injected fake-adapter tests remain useful for
+contract regression only; they cannot close operational acceptance.
