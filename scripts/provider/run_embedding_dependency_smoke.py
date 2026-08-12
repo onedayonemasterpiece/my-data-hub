@@ -184,12 +184,16 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     deadline = time.monotonic() + 1800
     receipt = None
-    while receipt is None and time.monotonic() < deadline:
-        receipt = smoke.run_once()
+    try:
+        while receipt is None and time.monotonic() < deadline:
+            receipt = smoke.run_once()
+            if receipt is None:
+                time.sleep(10)
         if receipt is None:
-            time.sleep(10)
-    if receipt is None:
-        raise TimeoutError("dependency smoke did not complete in 30 minutes")
+            raise TimeoutError("dependency smoke did not complete in 30 minutes")
+    except Exception:
+        _delete(adapter, created.claim, operation_id)
+        raise
     _delete(adapter, created.claim, operation_id)
     notebook_ref = f"{owner}/mdh-embedding-dependency-smoke"
     inventory_sha = _inventory_absence(adapter, {dataset_ref, notebook_ref})

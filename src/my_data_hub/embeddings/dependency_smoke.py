@@ -63,11 +63,7 @@ class CentralDependencySmoke:
     clock: Any = lambda: datetime.now(UTC)
 
     def _source(self, task_id: UUID) -> bytes:
-        mount = f"/kaggle/input/{self.runtime_dataset_exact_ref.split('/')[1]}"
         values = {
-            "MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_PATH": f"{mount}/embedding-worker-dependencies.json",
-            "MY_DATA_HUB_EMBEDDING_WHEELHOUSE_PATH": f"{mount}/embedding-worker-wheelhouse",
-            "MY_DATA_HUB_WHEEL_PATH": f"{mount}/{self.project_wheel_relative_path}",
             "MY_DATA_HUB_WHEEL_SHA256": self.project_wheel_sha256,
             "MY_DATA_HUB_KAGGLE_RUNTIME_IMAGE_IDENTITY": self.image_identity,
             "MY_DATA_HUB_KAGGLE_RUNTIME_SOURCE_COMMIT": self.image_source_commit,
@@ -75,8 +71,23 @@ class CentralDependencySmoke:
         }
         code = (
             f"TASK_RUN_ID={str(task_id)!r}\n"
-            f"import os,runpy\nos.environ.update({values!r})\n"
-            f"runpy.run_path({mount + '/embedding-dependency-smoke.py'!r},run_name='__main__')\n"
+            "import os,runpy\nfrom pathlib import Path\n"
+            "if any(os.environ.get(k) for k in ('KAGGLE_USERNAME','KAGGLE_KEY','KAGGLE_API_TOKEN')): "
+            "raise RuntimeError('Kaggle credential env is forbidden')\n"
+            "if any(p.exists() for p in (Path.home()/'.kaggle'/'kaggle.json',"
+            "Path.home()/'.kaggle'/'access_token')): raise RuntimeError('Kaggle credential file is forbidden')\n"
+            "def one(name):\n"
+            "    matches=[p for p in Path('/kaggle/input').rglob(name) if p.is_file() and not p.is_symlink()]\n"
+            "    if len(matches)!=1: raise RuntimeError('exact dependency smoke input is absent or ambiguous')\n"
+            "    return matches[0]\n"
+            "manifest=one('embedding-worker-dependencies.json')\n"
+            "runner=one('embedding-dependency-smoke.py')\n"
+            f"project=one({Path(self.project_wheel_relative_path).name!r})\n"
+            f"os.environ.update({values!r})\n"
+            "os.environ['MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_PATH']=str(manifest)\n"
+            "os.environ['MY_DATA_HUB_EMBEDDING_WHEELHOUSE_PATH']=str(manifest.parent/'embedding-worker-wheelhouse')\n"
+            "os.environ['MY_DATA_HUB_WHEEL_PATH']=str(project)\n"
+            "runpy.run_path(str(runner),run_name='__main__')\n"
         )
         return code.encode()
 
@@ -247,6 +258,7 @@ class CentralDependencySmoke:
         run = KaggleKernelRunIdentity.model_validate(state["run"])
         status = self.adapter.read_run_status(run)
         if str(status.state) == "failed":
+            self._cleanup(state, task_id, operation_id)
             raise RuntimeError("dependency smoke provider run failed")
         if str(status.state) != "complete":
             return None
