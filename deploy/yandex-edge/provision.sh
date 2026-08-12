@@ -96,7 +96,7 @@ edge_rule_count="$(yc vpc security-group get --id "$edge_sg_id" --format json | 
 alb_rule_count="$(yc vpc security-group get --id "$alb_sg_id" --format json | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("rules",[])))')"
 if [[ "$edge_rule_count" == 0 ]]; then
   yc vpc security-group update-rules --id "$edge_sg_id" \
-    --add-rule "description=ALB-to-nginx,direction=ingress,port=8080,protocol=tcp,security-group-id=$alb_sg_id" \
+    --add-rule 'description=ALB-to-nginx,direction=ingress,port=8080,protocol=tcp,v4-cidrs=10.210.0.0/24' \
     --add-rule 'description=ALB-healthcheck,direction=ingress,port=8080,protocol=tcp,predefined=loadbalancer_healthchecks' \
     --add-rule 'description=restricted-SSH-tunnel,direction=egress,port=22,protocol=tcp,v4-cidrs=188.227.84.107/32' \
     --add-rule 'description=HTTPS-APIs,direction=egress,port=443,protocol=tcp,v4-cidrs=0.0.0.0/0' \

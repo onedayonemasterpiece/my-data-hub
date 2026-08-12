@@ -92,6 +92,8 @@ def test_edge_admission_and_network_contract_are_exact() -> None:
     assert "aws-v1-http-endpoint=enabled,aws-v1-http-token=disabled" in provision
     assert "ipv4-address=10.210.0.10" in provision
     assert "public-TLS,direction=ingress,port=443" in provision
+    assert "ALB-to-nginx,direction=ingress,port=8080,protocol=tcp,v4-cidrs=10.210.0.0/24" in provision
+    assert "ALB-to-nginx,direction=ingress,port=8080,protocol=tcp,security-group-id=" not in provision
     assert "restricted-SSH-tunnel,direction=egress,port=22" in provision
     assert "v4-cidrs=188.227.84.107/32" in provision
     assert "port=5432" not in provision
