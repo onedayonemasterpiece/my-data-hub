@@ -245,7 +245,17 @@ class ControlLedgerCheckpointRegistry:
 
     def promote(self, checkpoint_id: UUID, *, expected_generation: int) -> CheckpointHead:
         initial = self.head
-        if initial.generation != expected_generation:
+        candidate = self.ledger.checkpoint_candidate(str(checkpoint_id))
+        already_promoted = (
+            initial.current == checkpoint_id
+            and initial.generation == expected_generation + 1
+            and candidate is not None
+            and candidate["status"] == "VERIFIED"
+            and int(candidate["source_head_generation"]) == expected_generation
+            and candidate["source_checkpoint_id"]
+            == (str(initial.previous) if initial.previous else None)
+        )
+        if initial.generation != expected_generation and not already_promoted:
             raise ValueError("checkpoint HEAD generation changed concurrently")
         durable = self.ledger.promote_checkpoint(
             self.service_kind,

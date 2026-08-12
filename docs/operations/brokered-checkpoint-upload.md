@@ -29,6 +29,32 @@ blob grant. Publication status exposes only completed file name/size/SHA-256 met
 after a restart the Notebook skips an exact completed file instead of trying to reissue
 its one-time signed URL.
 
+## Deterministic restart boundaries
+
+The mode-`0600` SQLite ledger, not process memory, is the restart journal. Focused tests
+close the production boundaries with a newly constructed `ControlLedger`, broker service
+and runtime provider over the same on-disk ledger:
+
+- If the process disappears after one or several PUT completions were durably accepted,
+  the new runtime reads the exact `completed_files` identities and skips them. It neither
+  requests another blob grant nor repeats the PUT. Public status and the database file
+  contain no plaintext URL, signature or blob token; the encrypted token remains only in
+  the protected ledger until Dataset resolution.
+- `FINALIZING` persists the expected numeric Dataset version before the provider effect.
+  Loss of the finalize response is recovered by exact version and file-description
+  reconciliation in a fresh service; finalization is not issued twice.
+- `VERIFIED` persists the bounded, secret-scanned typed verifier receipt, its SHA-256,
+  provider run reference and exact Dataset ref before HEAD CAS. A fresh service uses that
+  evidence without launching another verifier and advances HEAD once.
+- If the process disappears after the HEAD transaction commits but before the broker
+  journal records `PROMOTED`, the durable registry recognizes the exact candidate at
+  generation `source_head_generation + 1`. It reconciles the journal without a second
+  generation advance. Any different generation/current identity remains a hard conflict.
+
+Failure tests start with both an empty HEAD and an existing verified HEAD. Dataset or
+verifier failure leaves current and previous exactly unchanged; no failure path promotes
+a candidate or rewrites the prior pair.
+
 ## Task-bound acceptance
 
 The FM05/FM14/FM15 evidence Notebook uses the same metadata client and central adapter.

@@ -829,6 +829,7 @@ class BrokeredCheckpointUploadService:
                     evidence={"receipt_sha256": receipt_sha256},
                     verifier_run_ref=str(receipt["provider_run_ref"]),
                     verifier_receipt_sha256=receipt_sha256,
+                    verifier_evidence=receipt,
                 )
             refreshed = self.ledger.publication_runtime_authority(str(checkpoint_id))
             if refreshed is None:

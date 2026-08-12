@@ -40,6 +40,10 @@ SERVICE = UUID("55555555-5555-4555-8555-555555555555")
 CHECKPOINT = UUID("66666666-6666-4666-8666-666666666666")
 
 
+class SimulatedProcessLoss(BaseException):
+    """Abrupt process boundary: bypasses in-process exception recovery by design."""
+
+
 class FakeBrokeredKaggle:
     def __init__(self) -> None:
         self.current_version: int | None = None
@@ -268,6 +272,71 @@ def _upload_all(
             authority,
         )
     return grants
+
+
+def _restarted_service(
+    ledger: ControlLedger,
+    adapter: FakeBrokeredKaggle,
+    verifier: FakeRestoreVerifier,
+) -> tuple[ControlLedger, BrokeredCheckpointUploadService]:
+    restarted_ledger = ControlLedger(ledger.path, clock=ledger.clock)
+    return restarted_ledger, BrokeredCheckpointUploadService(
+        restarted_ledger,
+        adapter,
+        CheckpointUploadSecretBox(b"k" * 32),
+        verifier,
+    )
+
+
+class _ServiceMetadataClient:
+    """Runtime metadata transport backed by a restartable durable broker service."""
+
+    def __init__(
+        self,
+        service: BrokeredCheckpointUploadService,
+        authority: RuntimeUploadAuthority,
+        *,
+        lose_completion_response_after: int | None = None,
+    ) -> None:
+        self.service = service
+        self.authority = authority
+        self.lose_completion_response_after = lose_completion_response_after
+        self.completions = 0
+
+    def get(self, path: str) -> dict[str, object]:
+        if path == "/internal/checkpoints/runtime-upload-authority":
+            return {"master_run_ref": self.authority.master_run_ref}
+        if path.endswith("/publication"):
+            return self.service.status(CHECKPOINT)
+        if path == "/internal/checkpoints/postgres-master/head":
+            head = self.service.control.checkpoint_head("postgres-master")
+            assert head is not None
+            return {
+                "current": {"checkpoint_id": head.current_checkpoint_id},
+                "previous": (
+                    {"checkpoint_id": head.previous_checkpoint_id}
+                    if head.previous_checkpoint_id is not None
+                    else None
+                ),
+            }
+        raise AssertionError(path)
+
+    def post(self, path: str, payload: dict[str, object]) -> dict[str, object]:
+        if path.endswith("/blob-uploads/prepare"):
+            return self.service.prepare(
+                CheckpointBlobSpec.model_validate(payload), self.authority
+            ).model_dump(mode="json")
+        if path.endswith("/blob-uploads/complete"):
+            result = self.service.complete(
+                CheckpointBlobCompletion.model_validate(payload), self.authority
+            )
+            self.completions += 1
+            if self.completions == self.lose_completion_response_after:
+                raise SimulatedProcessLoss("process lost after durable completion")
+            return result
+        if path.endswith("/finalize"):
+            return self.service.finalize(CHECKPOINT, self.authority)
+        raise AssertionError(path)
 
 
 def test_broker_uploads_direct_metadata_and_promotes_once(tmp_path: Path) -> None:
@@ -500,6 +569,105 @@ def test_lost_dataset_version_response_reconciles_without_duplicate(tmp_path: Pa
     assert ledger.checkpoint_head("postgres-master").generation == 1  # type: ignore[union-attr]
 
 
+def test_fresh_process_reconciles_lost_dataset_finalize_response_without_duplicate(
+    tmp_path: Path,
+) -> None:
+    ledger, package, manifest, adapter, verifier, service, authority = _fixture(tmp_path)
+    _upload_all(package, manifest, service, authority)
+    original = adapter.finalize_brokered_checkpoint_dataset
+
+    def process_lost(**kwargs: object) -> int:
+        original(**kwargs)
+        raise SimulatedProcessLoss("process lost after exact Dataset finalize")
+
+    adapter.finalize_brokered_checkpoint_dataset = process_lost  # type: ignore[method-assign]
+    with pytest.raises(SimulatedProcessLoss):
+        service.finalize(CHECKPOINT, authority)
+
+    assert service.status(CHECKPOINT)["state"] == "FINALIZING"
+    assert ledger.checkpoint_head("postgres-master") is None
+    adapter.finalize_brokered_checkpoint_dataset = original  # type: ignore[method-assign]
+    restarted_ledger, restarted = _restarted_service(ledger, adapter, verifier)
+    receipt = restarted.finalize(CHECKPOINT, authority)
+
+    assert receipt["state"] == "PROMOTED"
+    assert receipt["exact_version_ref"] == "owner/checkpoints/1"
+    assert adapter.finalized == 1
+    assert verifier.calls == 1
+    head = restarted_ledger.checkpoint_head("postgres-master")
+    assert head is not None and head.generation == 1
+    assert head.current_checkpoint_id == str(CHECKPOINT) and head.previous_checkpoint_id is None
+
+
+def test_fresh_process_resumes_verified_evidence_before_head_cas_once(
+    tmp_path: Path,
+) -> None:
+    ledger, package, manifest, adapter, verifier, service, authority = _fixture(tmp_path)
+    _upload_all(package, manifest, service, authority)
+
+    def process_lost_before_cas(*_args: object, **_kwargs: object) -> object:
+        raise SimulatedProcessLoss("process lost after verified journal before HEAD CAS")
+
+    service.control.promote_checkpoint = process_lost_before_cas  # type: ignore[method-assign]
+    with pytest.raises(SimulatedProcessLoss):
+        service.finalize(CHECKPOINT, authority)
+
+    before = service.status(CHECKPOINT)
+    assert before["state"] == "VERIFIED"
+    assert before["exact_version_ref"] == "owner/checkpoints/1"
+    assert before["verifier_run_ref"] == "owner/checkpoint-verifier/31"
+    assert before["verifier_evidence"] == {
+        "ok": True,
+        "provider_run_ref": "owner/checkpoint-verifier/31",
+        "checkpoint_id": str(CHECKPOINT),
+        "package_sha256": before["verifier_evidence"]["package_sha256"],
+    }
+    assert ledger.checkpoint_head("postgres-master") is None
+
+    restarted_ledger, restarted = _restarted_service(ledger, adapter, verifier)
+    after = restarted.finalize(CHECKPOINT, authority)
+    head = restarted_ledger.checkpoint_head("postgres-master")
+
+    assert after["state"] == "PROMOTED"
+    assert after["verifier_evidence"] == before["verifier_evidence"]
+    assert adapter.finalized == 1 and verifier.calls == 1
+    assert head is not None and head.generation == 1
+    assert head.current_checkpoint_id == str(CHECKPOINT) and head.previous_checkpoint_id is None
+
+
+def test_fresh_process_reconciles_head_cas_response_loss_without_second_advance(
+    tmp_path: Path,
+) -> None:
+    ledger, package, manifest, adapter, verifier, service, authority = _fixture(tmp_path)
+    _upload_all(package, manifest, service, authority)
+    original_transition = service.ledger.transition
+
+    def process_lost_before_promoted_journal(*args: object, **kwargs: object) -> dict[str, object]:
+        if kwargs.get("state") == "PROMOTED":
+            raise SimulatedProcessLoss("process lost after HEAD CAS")
+        return original_transition(*args, **kwargs)
+
+    service.ledger.transition = process_lost_before_promoted_journal  # type: ignore[method-assign]
+    with pytest.raises(SimulatedProcessLoss):
+        service.finalize(CHECKPOINT, authority)
+
+    head_after_loss = ledger.checkpoint_head("postgres-master")
+    assert head_after_loss is not None and head_after_loss.generation == 1
+    assert head_after_loss.current_checkpoint_id == str(CHECKPOINT)
+    assert head_after_loss.previous_checkpoint_id is None
+    assert service.status(CHECKPOINT)["state"] == "VERIFIED"
+
+    restarted_ledger, restarted = _restarted_service(ledger, adapter, verifier)
+    receipt = restarted.finalize(CHECKPOINT, authority)
+    head = restarted_ledger.checkpoint_head("postgres-master")
+
+    assert receipt["state"] == "PROMOTED"
+    assert receipt["verifier_evidence"]["provider_run_ref"] == "owner/checkpoint-verifier/31"
+    assert adapter.finalized == 1 and verifier.calls == 1
+    assert head is not None and head.generation == 1
+    assert head.current_checkpoint_id == str(CHECKPOINT) and head.previous_checkpoint_id is None
+
+
 def test_missing_dataset_version_exhausts_bounded_reconcile_and_quarantines(tmp_path: Path) -> None:
     ledger, package, manifest, adapter, _verifier, service, authority = _fixture(tmp_path)
     _upload_all(package, manifest, service, authority)
@@ -537,6 +705,69 @@ def test_verifier_failure_preserves_head_and_fails_candidate(tmp_path: Path, fai
     assert ledger.checkpoint_head("postgres-master") is None
     assert ledger.checkpoint_candidate(str(CHECKPOINT))["status"] == "FAILED"  # type: ignore[index]
     assert service.status(CHECKPOINT)["state"] == "FAILED"
+
+
+def test_failed_second_candidate_preserves_exact_current_and_previous_head(tmp_path: Path) -> None:
+    ledger, package, manifest, adapter, verifier, service, authority = _fixture(tmp_path)
+    _upload_all(package, manifest, service, authority)
+    service.finalize(CHECKPOINT, authority)
+    original_head = ledger.checkpoint_head("postgres-master")
+    assert original_head is not None
+
+    next_checkpoint = UUID("88888888-8888-4888-8888-888888888888")
+    next_package = tmp_path / "failed-package"
+    values = {
+        "physical/base.tar.gz": b"failed-base",
+        "physical/backup_manifest": b"failed-native-manifest",
+        "physical/pg_wal.tar.gz": b"failed-wal",
+        "logical/hub.dump": b"failed-logical",
+        "receipts/verification.json": b'{"ok":true,"candidate":2}',
+    }
+    for relative, content in values.items():
+        target = next_package / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    next_manifest = build_manifest(
+        package_directory=next_package,
+        checkpoint_id=next_checkpoint,
+        master_instance_id=MASTER,
+        epoch=1,
+        parent_checkpoint_id=CHECKPOINT,
+        postgres_version="18.4",
+        pgvector_version="0.8.6",
+        schema_version=18,
+        canonical_revision=8,
+        source_run_id=str(RUN),
+        source_identity="owner/master/17",
+        created_at=NOW,
+        checkpoint_lsn="0/16B6C70",
+        file_kinds={
+            "physical/base.tar.gz": "physical",
+            "physical/backup_manifest": "postgres_backup_manifest",
+            "physical/pg_wal.tar.gz": "physical",
+            "logical/hub.dump": "logical",
+            "receipts/verification.json": "verification_receipt",
+        },
+        restore_probe=RestoreProbe(18, 8, "e" * 64, {"hub.canonical_state": 1}),
+    )
+    ControlLedgerCheckpointRegistry(
+        ledger, operation_id=str(OPERATION), dataset_ref="owner/checkpoints"
+    ).add_candidate(next_manifest)
+    failed = BrokeredCheckpointUploadService(
+        ledger,
+        adapter,
+        CheckpointUploadSecretBox(b"k" * 32),
+        FailingRestoreVerifier(RuntimeError("restore failed")),
+    )
+    _upload_all(next_package, next_manifest, failed, authority)
+
+    with pytest.raises(RuntimeError, match="restore failed"):
+        failed.finalize(next_checkpoint, authority)
+
+    assert ledger.checkpoint_head("postgres-master") == original_head
+    assert ledger.checkpoint_candidate(str(next_checkpoint))["status"] == "FAILED"  # type: ignore[index]
+    assert failed.status(next_checkpoint)["state"] == "FAILED"
+    assert adapter.finalized == 2 and verifier.calls == 1
 
 
 def test_partial_upload_and_expired_authority_cannot_promote(tmp_path: Path) -> None:
@@ -666,6 +897,59 @@ def test_runtime_provider_restart_skips_exact_completed_blob(tmp_path: Path, mon
     provider.publish(package=package, manifest_path=manifest_path)
     assert first.path not in puts
     assert len(puts) == len(manifest.files)
+
+
+@pytest.mark.parametrize("completed_before_loss", [1, 3])
+def test_fresh_runtime_process_skips_durable_completed_put_without_capability_leak_or_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, completed_before_loss: int
+) -> None:
+    ledger, package, manifest, adapter, verifier, service, authority = _fixture(tmp_path)
+    manifest_path = tmp_path / "checkpoint-manifest.json"
+    write_manifest(manifest_path, manifest)
+    lost_client = _ServiceMetadataClient(
+        service, authority, lose_completion_response_after=completed_before_loss
+    )
+    first_provider = BrokeredCheckpointRuntimeProvider(
+        lost_client,
+        dataset_ref="owner/checkpoints",
+        operation_id=OPERATION,
+        timeout_seconds=60,
+    )
+    puts: list[str] = []
+
+    def put_once(_url: str, path: Path, **_kwargs: object) -> None:
+        puts.append(path.relative_to(package).as_posix() if path.is_relative_to(package) else path.name)
+
+    monkeypatch.setattr(first_provider, "_put_exact", put_once)
+    with pytest.raises(SimulatedProcessLoss):
+        first_provider.publish(package=package, manifest_path=manifest_path)
+
+    durable = service.status(CHECKPOINT)
+    assert durable["state"] == "UPLOADING"
+    assert len(durable["completed_files"]) == completed_before_loss
+    encoded = str(durable)
+    assert "storage.example.test" not in encoded
+    assert "signature=secret" not in encoded
+    assert "opaque-token" not in encoded
+    assert b"storage.example.test" not in ledger.path.read_bytes()
+    assert b"signature=secret" not in ledger.path.read_bytes()
+    assert b"opaque-token" not in ledger.path.read_bytes()
+
+    _restarted_ledger, restarted_service = _restarted_service(ledger, adapter, verifier)
+    restarted_provider = BrokeredCheckpointRuntimeProvider(
+        _ServiceMetadataClient(restarted_service, authority),
+        dataset_ref="owner/checkpoints",
+        operation_id=OPERATION,
+        timeout_seconds=60,
+    )
+    monkeypatch.setattr(restarted_provider, "_put_exact", put_once)
+    receipt = restarted_provider.publish(package=package, manifest_path=manifest_path)
+
+    expected_files = {item.path for item in manifest.files} | {"checkpoint-manifest.json"}
+    assert receipt.exact_version_ref == "owner/checkpoints/1"
+    assert set(puts) == expected_files and len(puts) == len(expected_files)
+    assert set(adapter.started) == expected_files and len(adapter.started) == len(expected_files)
+    assert adapter.finalized == 1 and verifier.calls == 1
 
 
 def test_runtime_coordinator_registers_candidate_before_first_blob_prepare(
