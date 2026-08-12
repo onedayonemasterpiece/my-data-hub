@@ -131,7 +131,7 @@ def test_cleanup_requires_revocation_and_deletes_exact_claims() -> None:
                 credential_id=UUID("33333333-3333-4333-8333-333333333333"),
             )
 
-        def revoke(self, credential_id, *, task_run_id):  # type: ignore[no-untyped-def]
+        def revoke(self, credential_id, *, task_run_id, **_kwargs):  # type: ignore[no-untyped-def]
             revoked.append((credential_id, task_run_id))
 
     launcher = CentralEmbeddingWorkerLauncher(
@@ -158,7 +158,7 @@ def test_restart_loads_secret_free_journal_and_cleans_without_relaunch(tmp_path)
                 database_url="postgresql://w:s@d/h", tls_ca_pem="ca",
                 expires_at=now + timedelta(minutes=5), epoch=7, tunnel_endpoint="d:1",
                 credential_id=UUID("33333333-3333-4333-8333-333333333333"))
-        def revoke(self, credential_id, *, task_run_id): revoked.append((credential_id, task_run_id))  # type: ignore[no-untyped-def]
+        def revoke(self, credential_id, *, task_run_id, **_kwargs): revoked.append((credential_id, task_run_id))  # type: ignore[no-untyped-def]
     config = EmbeddingWorkerLaunchConfig("owner", "owner/runtime/12", "image", "wheel", "e"*64, "https://c/e")
     journal = tmp_path / "launches.json"
     first = CentralEmbeddingWorkerLauncher(adapter, Access(), config, clock=lambda: now, journal_path=journal)

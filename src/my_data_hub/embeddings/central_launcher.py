@@ -44,6 +44,7 @@ class EmbeddingWorkerDirectAccess(BaseModel):
     ssh_gateway_host: str | None = None
     ssh_gateway_port: int | None = None
     ssh_account: str | None = None
+    ssh_certificate_serial: int | None = None
 
     @field_validator("expires_at")
     @classmethod
@@ -82,6 +83,8 @@ class EmbeddingWorkerLaunchReceipt:
     credential_expires_at: datetime
     status_claim: Any = None
     notebook_claim: Any = None
+    ssh_certificate_serial: int | None = None
+    epoch: int = 1
 
 
 @dataclass(slots=True)
@@ -178,6 +181,8 @@ class CentralEmbeddingWorkerLauncher:
             provider_run_ref=run.run.provider_run_ref, source_sha256=source_sha,
             credential_id=access.credential_id, credential_expires_at=access.expires_at,
             status_claim=dataset.claim, notebook_claim=run.claim,
+            ssh_certificate_serial=access.ssh_certificate_serial,
+            epoch=access.epoch,
         )
         self._receipts[metadata.task_run_id] = receipt
         self._save_journal()
@@ -193,7 +198,8 @@ class CentralEmbeddingWorkerLauncher:
         revoke = getattr(self.access_factory, "revoke", None)
         if not callable(revoke):
             raise ValueError("embedding worker access revocation is unavailable")
-        revoke(receipt.credential_id, task_run_id=task_run_id)
+        revoke(receipt.credential_id, task_run_id=task_run_id, serial=receipt.ssh_certificate_serial,
+               epoch=receipt.epoch)
         operation_id = uuid5(NAMESPACE_URL, f"embedding-worker-cleanup:{task_run_id}")
         results = []
         for label, claim, action in (
@@ -226,6 +232,8 @@ class CentralEmbeddingWorkerLauncher:
             "credential_id": str(r.credential_id), "credential_expires_at": r.credential_expires_at.isoformat(),
             "status_claim": r.status_claim.model_dump(mode="json"),
             "notebook_claim": r.notebook_claim.model_dump(mode="json"),
+            "ssh_certificate_serial": r.ssh_certificate_serial,
+            "epoch": r.epoch,
         } for task, r in self._receipts.items()}
         encoded = canonical_json_bytes({"schema_version": "embedding-launch-journal.v1", "tasks": payload}) + b"\n"
         if len(encoded) > 1024 * 1024:
@@ -265,6 +273,8 @@ class CentralEmbeddingWorkerLauncher:
                 credential_expires_at=datetime.fromisoformat(value["credential_expires_at"]),
                 status_claim=TaskResourceClaim.model_validate(value["status_claim"]),
                 notebook_claim=TaskResourceClaim.model_validate(value["notebook_claim"]),
+                ssh_certificate_serial=value.get("ssh_certificate_serial"),
+                epoch=int(value["epoch"]),
             )
 
     def _render_source(self, status_ref: str) -> bytes:

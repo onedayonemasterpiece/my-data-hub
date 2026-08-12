@@ -353,7 +353,10 @@ def create_app(
     if provider_gateway is None and provider_adapter is not None:
         provider_gateway = KaggleMCPProviderGateway(control_ledger, provider_adapter)
     if embedding_direct_plane_launcher is None and embedding_credential_authority is None and provider_adapter:
-        embedding_assembly = build_embedding_production_assembly(provider_adapter)
+        embedding_assembly = build_embedding_production_assembly(
+            provider_adapter, broker=tunnel_certificate_broker,
+            master_instance=lambda: str(control_ledger.resolve_service("postgres-master").master_instance_id),
+        )
         if embedding_assembly is not None:
             embedding_direct_plane_launcher, embedding_credential_authority = embedding_assembly
     if runtime.provider_gateway_enabled:
