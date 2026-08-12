@@ -48,4 +48,4 @@
 
 ## Head SHA
 
-Populated after commit.
+`4ac0c3728dc47d8e3f3f1bcd7b695bb04122d1d0` (implementation commit).
