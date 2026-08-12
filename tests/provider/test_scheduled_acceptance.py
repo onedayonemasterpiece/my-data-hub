@@ -103,6 +103,7 @@ async def test_live_mcp_collection_rejects_pinned_sdk_snake_case_error() -> None
 @pytest.mark.asyncio
 async def test_http_auth_rotates_refresh_family_after_simulated_300_seconds(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     import httpx2
 
@@ -157,6 +158,9 @@ async def test_http_auth_rotates_refresh_family_after_simulated_300_seconds(
     assert json.loads(credential.read_text())["profiles"]["reader"]["refresh_token"].startswith(
         "refresh-2-"
     )
+    assert "access-1-" not in caplog.text
+    assert "access-2-" not in caplog.text
+    assert "refresh-initial-" not in caplog.text
 
 
 @pytest.mark.asyncio
