@@ -1238,8 +1238,34 @@ def validate_deployment(report: Report) -> None:
         control.get("x-my-data-hub-profile") == "production-lightweight-control-plane", "control profile marker drifted"
     )
     report.check(
-        set(control.get("services", {})) == {"control-plane", "remote-mcp", "oauth-server"},
-        "production profile must contain only control API, OAuth and opt-in remote MCP services",
+        set(control.get("services", {}))
+        == {"control-plane", "connector-intake", "remote-mcp", "oauth-server"},
+        "production profile must contain only control API, connector intake, OAuth and opt-in remote MCP services",
+    )
+    connector_service = control.get("services", {}).get("connector-intake", {})
+    report.check(
+        connector_service.get("profiles") == ["connectors"],
+        "connector intake must remain an explicit opt-in profile",
+    )
+    report.check(connector_service.get("read_only") is True, "connector intake filesystem is not read-only")
+    connector_ports = connector_service.get("ports", [])
+    report.check(
+        connector_ports == ["127.0.0.1:${MY_DATA_HUB_CONNECTOR_PORT:-8081}:8081"],
+        "connector intake must bind only the reviewed loopback port",
+    )
+    connector_environment = connector_service.get("environment", {})
+    report.check(
+        set(connector_environment)
+        == {
+            "MY_DATA_HUB_ENVIRONMENT",
+            "MY_DATA_HUB_API_HOST",
+            "MY_DATA_HUB_API_PORT",
+            "MY_DATA_HUB_CONTROL_LEDGER_PATH",
+            "MY_DATA_HUB_MASTER_SESSION_DIRECTORY",
+            "MY_DATA_HUB_SCHEDULER_ENABLED",
+            "MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED",
+        },
+        "connector intake environment crossed its lightweight control boundary",
     )
     report.check(not control.get("volumes"), "production control plane must not declare volumes")
     control_serialized = json.dumps(control, sort_keys=True).lower()
