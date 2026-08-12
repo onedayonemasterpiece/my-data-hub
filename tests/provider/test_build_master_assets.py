@@ -61,6 +61,11 @@ def _dependency_inputs(tmp_path: Path) -> tuple[Path, Path]:
     specs = (
         ("flagembedding", "1.4.0", "flagembedding-1.4.0-py3-none-any.whl"),
         ("ir-datasets", "0.6.2", "ir_datasets-0.6.2-py3-none-any.whl"),
+        (
+            "lz4",
+            "4.4.5",
+            "lz4-4.4.5-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+        ),
         ("psycopg", "3.3.4", "psycopg-3.3.4-py3-none-any.whl"),
         (
             "psycopg-binary",
@@ -152,7 +157,7 @@ def test_build_bundle_is_exact_secret_free_and_schema_valid(tmp_path: Path) -> N
         "schema_version": "my-data-hub-master-asset-bundle.v1",
         "source_commit": COMMIT,
         "manifest_sha256": hashlib.sha256((output / "master-asset-bundle.json").read_bytes()).hexdigest(),
-        "asset_count": 14,
+        "asset_count": 15,
         "verified": True,
     }
 

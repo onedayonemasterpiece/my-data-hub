@@ -143,7 +143,13 @@ def _load_dependency_lock(path: Path) -> tuple[dict[str, object], bytes]:
         or not wheels
     ):
         raise AssetBundleError("embedding dependency lock shape is not exact")
-    expected_distributions = {"flagembedding", "ir-datasets", "psycopg", "psycopg-binary"}
+    expected_distributions = {
+        "flagembedding",
+        "ir-datasets",
+        "lz4",
+        "psycopg",
+        "psycopg-binary",
+    }
     seen: set[str] = set()
     for raw in wheels:
         if not isinstance(raw, dict) or set(raw) != {
