@@ -10,9 +10,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "aiohttp>=3.11,<4",
+  "cryptography>=44,<51",
   "fastapi>=0.115,<1",
   "jsonschema>=4.23,<5",
-  "mcp>=2,<3",
+  "mcp==2.0.0",
   "nbformat>=5.10,<6",
   "pglast>=7,<8",
   "psycopg[binary,pool]>=3.2,<4",
@@ -28,10 +29,12 @@ dev = [
   "httpx>=0.28,<1",
   "pytest>=8.3,<10",
   "pytest-asyncio>=0.25,<1",
+  "hypothesis>=6.138,<7",
+  "mypy>=1.15,<2",
   "ruff>=0.9,<1",
 ]
-ydb = ["ydb>=3.18,<4"]
-kaggle = ["kagglehub>=0.3,<1"]
+ydb = ["ydb==3.31.2"]
+kaggle = ["kaggle==2.2.4"]
 
 [project.scripts]
 my-data-hub = "my_data_hub.cli:main"
@@ -39,6 +42,10 @@ my-data-hub-mcp = "my_data_hub.mcp.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/my_data_hub"]
+
+[tool.hatch.build.force-include]
+"sql/migrations" = "my_data_hub/master_runtime/sql/migrations"
+"sql/admin/role_contract.sql" = "my_data_hub/master_runtime/sql/admin/role_contract.sql"
 
 [tool.pytest.ini_options]
 addopts = "-q"
@@ -55,3 +62,16 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 "notebooks/**" = ["E501"]
 "scripts/validate_repository.py" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+follow_imports = "skip"
+files = [
+  "src/my_data_hub/checkpoints/manifest.py",
+  "src/my_data_hub/control_plane/ledger/models.py",
+  "src/my_data_hub/mcp/contracts.py",
+  "src/my_data_hub/orchestrator/master/evidence.py",
+  "src/my_data_hub/orchestrator/master/provider.py",
+]

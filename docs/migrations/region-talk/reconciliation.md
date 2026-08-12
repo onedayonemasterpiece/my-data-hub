@@ -57,6 +57,15 @@ show all aliases, provenance and the union of platform/project/pipeline relation
 deduplicated pre-existing target must visibly gain Region Talk relation without being marked
 as newly originated in Region Talk.
 
+For bounded blogger duplicate replay also prove: one durable group per shared
+identity hash; an exact member-set hash; one explicit canonical source/actor;
+zero groups without an append-only resolution; original quarantined
+dispositions still present; effective replay dispositions containing one
+canonical normalization (or an already-existing canonical target) and explicit
+deduplications; and exactly one revision/checkpoint effect across later exact
+replays. `actor_count` is the number of distinct explicit canonical targets, not
+an assumed copy of the 266-row source count.
+
 ## Scope reconciliation
 
 Prove from direct keys/FKs and reproducible queries, not schema-name inference:

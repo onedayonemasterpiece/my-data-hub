@@ -11,12 +11,24 @@ A worker receives `MY_DATA_HUB_NOTEBOOK_INPUT_MANIFEST` and writes
 but it may not connect to canonical PostgreSQL, mutate YDB, publish to Telegram/VK or
 advance a queue cursor. The local reconciler validates and commits results.
 
-`00-platform-smoke` and `80-region-talk-migration-reconciliation` have implemented adapters.
+`01` through `06` are the operational MVP notebooks generated from reviewed Python templates.
+They remain marked `production_ready=false` until an exact real-provider receipt proves the
+source, input versions, privacy and terminal output. `00-platform-smoke` and
+`80-region-talk-migration-reconciliation` have implemented legacy typed-worker adapters.
 Other Region Talk notebooks contain complete contract, accounting, error and atomic-output
 plumbing; their `process_item()` adapters intentionally fail with
 `PROCESSOR_ADAPTER_NOT_PORTED` until code is adapted from an exact donor revision and covered
 by golden fixtures. A placeholder notebook therefore cannot be mistaken for a working
 production stage.
+
+Every operational notebook also fails before installing or executing code unless a hashed
+`my-data-hub-notebook-execution-pins/v1` manifest binds the exact CPython patch version,
+immutable Kaggle image digest, numeric private Dataset versions, task wheel and embedded source
+hashes, output contract, model revision (when applicable), resource class, and cleanup/retention
+policy. Launch-time values are used because Dataset versions and the Kaggle image are provider
+observations, not values this repository may invent. The checked-in metadata declares the full
+contract and remains private and `production_ready=false` until the control plane supplies and
+attests those exact values.
 
 ## Activation gate
 

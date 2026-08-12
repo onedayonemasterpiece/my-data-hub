@@ -1,29 +1,209 @@
 name: my-data-hub-control-plane
 
 x-my-data-hub-profile: production-lightweight-control-plane
+x-my-data-hub-opt-in-profile: remote-mcp
+x-bounded-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
+  connector-intake:
+    profiles: ["connectors"]
+    image: my-data-hub-control-plane:${MY_DATA_HUB_IMAGE_TAG:-architecture-reset}
+    build:
+      context: .
+      dockerfile: deploy/control-plane/Dockerfile
+    restart: unless-stopped
+    logging: *bounded-logging
+    user: "${MY_DATA_HUB_CONTROL_UID:-1000}:${MY_DATA_HUB_CONTROL_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    entrypoint: ["python", "-m", "my_data_hub.api.connector_runtime"]
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    extra_hosts:
+      - "master-tunnel.internal:host-gateway"
+    env_file:
+      - path: "${MY_DATA_HUB_CONNECTOR_ENV_FILE:-./.state/control-plane/connectors.env}"
+        required: true
+    environment:
+      MY_DATA_HUB_ENVIRONMENT: production
+      MY_DATA_HUB_API_HOST: 0.0.0.0
+      MY_DATA_HUB_API_PORT: 8081
+      MY_DATA_HUB_CONTROL_LEDGER_PATH: /ledger/control.sqlite3
+      MY_DATA_HUB_MASTER_SESSION_DIRECTORY: /sessions
+      MY_DATA_HUB_SCHEDULER_ENABLED: "false"
+      MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED: "false"
+    ports:
+      - "127.0.0.1:${MY_DATA_HUB_CONNECTOR_PORT:-8081}:8081"
+    volumes:
+      - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:-./.state/control-ledger}:/ledger"
+      - "${MY_DATA_HUB_MASTER_SESSION_DIR:-./.state/master-sessions}:/sessions:ro"
+      - "${MY_DATA_HUB_MASTER_TLS_DIR:-./.state/master-tls}:/state/master-tls:ro"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health/ready', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
   control-plane:
     image: my-data-hub-control-plane:${MY_DATA_HUB_IMAGE_TAG:-architecture-reset}
     build:
       context: .
       dockerfile: deploy/control-plane/Dockerfile
     restart: unless-stopped
+    logging: *bounded-logging
+    user: "${MY_DATA_HUB_CONTROL_UID:-1000}:${MY_DATA_HUB_CONTROL_GID:-1000}"
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
+    env_file:
+      - path: "${MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE:-./.state/control-plane/provider.env}"
+        required: true
+      - path: "${MY_DATA_HUB_MASTER_ASSET_DIR:-./.state/master-assets}/master-assets.env"
+        required: true
     environment:
+      # Compose runs with the owning host UID, not the image's baked-in mdh
+      # UID.  Keep SDK configuration/cache writes on the ephemeral tmpfs so
+      # the read-only root filesystem remains intact.
+      HOME: /tmp/my-data-hub-control
       MY_DATA_HUB_ENVIRONMENT: production
       MY_DATA_HUB_CONTROL_HOST: 0.0.0.0
       MY_DATA_HUB_CONTROL_PORT: 8080
+      MY_DATA_HUB_CONTROL_LEDGER_PATH: /ledger/control.sqlite3
+      MY_DATA_HUB_MASTER_SESSION_DIR: /sessions
+      MY_DATA_HUB_MASTER_TLS_CA_PATH: /state/master-tls/ca.pem
       MY_DATA_HUB_SCHEDULER_ENABLED: "false"
       MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED: "false"
       MY_DATA_HUB_MCP_REMOTE_ENABLED: "false"
       MY_DATA_HUB_MCP_WRITE_ENABLED: "false"
+      MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED: "false"
+      MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED: "false"
+      MY_DATA_HUB_CONNECTOR_RUNTIME_ENABLED: "false"
+      MY_DATA_HUB_TUNNEL_BROKER_SOCKET: /run/mdh-tunnel/control.sock
+      MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE: /run/secrets/checkpoint-upload-broker.key
+      MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED: "${MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED:-false}"
+      MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR: /embedding-credentials
+      MY_DATA_HUB_MASTER_TUNNEL_KNOWN_HOSTS_PATH: /master-assets/dataset/tunnel-known-hosts
     ports:
       - "127.0.0.1:${MY_DATA_HUB_CONTROL_PORT:-8080}:8080"
+    volumes:
+      - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:-./.state/control-ledger}:/ledger"
+      - "${MY_DATA_HUB_MASTER_SESSION_DIR:-./.state/master-sessions}:/sessions"
+      - "${MY_DATA_HUB_MASTER_ASSET_DIR:-./.state/master-assets}:/master-assets:ro"
+      - "${MY_DATA_HUB_MASTER_TLS_DIR:-./.state/master-tls}:/state/master-tls"
+      - "${MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR:-/run/my-data-hub/tunnel-broker}:/run/mdh-tunnel"
+      - "${MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE:-./.state/control-plane/checkpoint-upload-broker.key}:/run/secrets/checkpoint-upload-broker.key:ro"
+      - "${MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR:-./.state/embedding-credentials}:/embedding-credentials"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  remote-mcp:
+    profiles: ["remote-mcp"]
+    image: my-data-hub-control-plane:${MY_DATA_HUB_IMAGE_TAG:-architecture-reset}
+    build:
+      context: .
+      dockerfile: deploy/control-plane/Dockerfile
+    restart: unless-stopped
+    logging: *bounded-logging
+    user: "${MY_DATA_HUB_CONTROL_UID:-1000}:${MY_DATA_HUB_CONTROL_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    entrypoint: ["python", "-m", "my_data_hub.mcp.runtime"]
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      oauth-server:
+        condition: service_healthy
+    env_file:
+      - path: "${MY_DATA_HUB_MCP_ENV_FILE:-./.state/control-plane/mcp-reader.env}"
+        required: true
+    environment:
+      MY_DATA_HUB_ENVIRONMENT: production
+      MY_DATA_HUB_CONTROL_LEDGER_PATH: /ledger/control.sqlite3
+      MY_DATA_HUB_SCHEDULER_ENABLED: "false"
+      MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED: "false"
+      MY_DATA_HUB_MCP_REMOTE_ENABLED: "true"
+      MY_DATA_HUB_MCP_WRITE_ENABLED: "false"
+      MY_DATA_HUB_MCP_AUTH_MODE: oauth
+      MY_DATA_HUB_MCP_HOST: 0.0.0.0
+      MY_DATA_HUB_MCP_PORT: 8765
+      MY_DATA_HUB_DEPLOY_COMMIT: "${MY_DATA_HUB_IMAGE_TAG:-architecture-reset}"
+      MY_DATA_HUB_MASTER_SESSION_DIRECTORY: /sessions
+    ports:
+      - "127.0.0.1:${MY_DATA_HUB_MCP_PORT:-8765}:8765"
+    volumes:
+      - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:-./.state/control-ledger}:/ledger"
+      - "${MY_DATA_HUB_MASTER_SESSION_DIR:-./.state/master-sessions}:/sessions:ro"
+      - "${MY_DATA_HUB_MASTER_TLS_DIR:-./.state/master-tls}:/state/master-tls:ro"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          r=urllib.request.Request('http://127.0.0.1:8765/.well-known/oauth-protected-resource/mcp',
+          headers={'Host':'mcp-datahub.kenigevents.ru'});
+          urllib.request.urlopen(r,timeout=3).read()
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  oauth-server:
+    profiles: ["remote-mcp"]
+    image: my-data-hub-control-plane:${MY_DATA_HUB_IMAGE_TAG:-architecture-reset}
+    build:
+      context: .
+      dockerfile: deploy/control-plane/Dockerfile
+    restart: unless-stopped
+    logging: *bounded-logging
+    # SQLite WAL is intentionally shared only among the three bounded control
+    # processes; signing keys and epoch credentials remain separately mounted.
+    user: "${MY_DATA_HUB_CONTROL_UID:-1000}:${MY_DATA_HUB_CONTROL_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    entrypoint: ["python", "-m", "my_data_hub.oauth_server.runtime"]
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    env_file:
+      - path: "${MY_DATA_HUB_OAUTH_ENV_FILE:-./.state/oauth/oauth.env}"
+        required: true
+    environment:
+      MY_DATA_HUB_CONTROL_LEDGER_PATH: /ledger/control.sqlite3
+      MY_DATA_HUB_OAUTH_HOST: 0.0.0.0
+      MY_DATA_HUB_OAUTH_PORT: 8780
+      MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE: /run/secrets/oauth-signing-key.pem
+      MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE: /run/config/oauth-overlap-jwks.json
+      MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE: /run/secrets/owner-oidc-client-secret
+      MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE: /run/secrets/owner-portal-state.key
+    ports:
+      - "127.0.0.1:${MY_DATA_HUB_OAUTH_PORT:-8780}:8780"
+    volumes:
+      - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:-./.state/control-ledger}:/ledger"
+      - "${MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE:-./.state/oauth/oauth-signing-key.pem}:/run/secrets/oauth-signing-key.pem:ro"
+      - "${MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE:-./.state/oauth/owner-oidc-client-secret}:/run/secrets/owner-oidc-client-secret:ro"
+      - "${MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE:-./.state/oauth/owner-portal-state.key}:/run/secrets/owner-portal-state.key:ro"
+      - "${MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE:-./.state/oauth/oauth-overlap-jwks.json}:/run/config/oauth-overlap-jwks.json:ro"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8780/.well-known/oauth-authorization-server',
+          timeout=3).read()
       interval: 15s
       timeout: 5s
       retries: 10

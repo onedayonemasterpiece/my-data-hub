@@ -1,0 +1,43 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "operation_id": {
+      "format": "uuid",
+      "title": "Operation Id",
+      "type": "string"
+    },
+    "task_run_id": {
+      "format": "uuid",
+      "title": "Task Run Id",
+      "type": "string"
+    },
+    "idempotency_key": {
+      "maxLength": 200,
+      "minLength": 8,
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "source_revision": {
+      "pattern": "^[0-9a-f]{40}$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "my-data-hub-checkpoint-acceptance-fm15.v1",
+      "default": "my-data-hub-checkpoint-acceptance-fm15.v1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "operation_id",
+    "task_run_id",
+    "idempotency_key",
+    "source_revision",
+    "schema_version"
+  ],
+  "title": "ForcedRestoreFailureRequest",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/checkpoint-acceptance-fm15-request.v1.schema.json"
+}

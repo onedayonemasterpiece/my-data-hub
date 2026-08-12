@@ -1,0 +1,378 @@
+{
+  "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "created_at": "2026-08-11T00:00:00+00:00",
+  "matrix_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "minimum_distinct_provider_runs": 15,
+  "scenarios": [
+    {
+      "category": "provider",
+      "integration_dependency": "operational driver must create/read/delete a disposable private Dataset",
+      "lifecycle_gates": [],
+      "name": "private-dataset-create-readback-delete",
+      "ordinal": 1,
+      "planned_task_run_id": "0ef8a6ff-a1a2-5086-87c0-22cb5cd70a21",
+      "required_assertions": [
+        "private_create",
+        "exact_readback",
+        "claim_bound_delete"
+      ],
+      "requirement_id": "FM01"
+    },
+    {
+      "category": "provider",
+      "integration_dependency": "operational driver must run and clean a disposable private Notebook",
+      "lifecycle_gates": [],
+      "name": "private-notebook-source-run-output-delete",
+      "ordinal": 2,
+      "planned_task_run_id": "983233a1-cc84-5ce3-8aea-d7f466d82c9f",
+      "required_assertions": [
+        "exact_source",
+        "terminal_complete",
+        "exact_output",
+        "claim_bound_delete"
+      ],
+      "requirement_id": "FM02"
+    },
+    {
+      "category": "runtime",
+      "integration_dependency": "runtime event observation API with exact run and epoch identity",
+      "lifecycle_gates": [],
+      "name": "runtime-callback-heartbeat-terminal",
+      "ordinal": 3,
+      "planned_task_run_id": "c70a7692-012a-519d-8c07-e8704d324cee",
+      "required_assertions": [
+        "callback_bound",
+        "heartbeat_observed",
+        "terminal_event_bound"
+      ],
+      "requirement_id": "FM03"
+    },
+    {
+      "category": "master",
+      "integration_dependency": "disposable empty-master bootstrap action and status API",
+      "lifecycle_gates": [
+        "master_boot"
+      ],
+      "name": "empty-postgresql-master-bootstrap",
+      "ordinal": 4,
+      "planned_task_run_id": "80df30dc-69cb-5a7f-a9f8-bd34b18bf185",
+      "required_assertions": [
+        "empty_checkpoint_selected",
+        "postgres_bootstrapped",
+        "master_active"
+      ],
+      "requirement_id": "FM04"
+    },
+    {
+      "category": "checkpoint",
+      "integration_dependency": "checkpoint publish/readback/restore action API",
+      "lifecycle_gates": [],
+      "name": "verified-empty-checkpoint-roundtrip",
+      "ordinal": 5,
+      "planned_task_run_id": "6cdf2762-f084-5517-94c4-f0322aa9c2a3",
+      "required_assertions": [
+        "candidate_uploaded",
+        "exact_readback",
+        "restore_verified",
+        "head_advanced"
+      ],
+      "requirement_id": "FM05"
+    },
+    {
+      "category": "master",
+      "integration_dependency": "cold-restore action API with exact checkpoint identity",
+      "lifecycle_gates": [
+        "master_boot"
+      ],
+      "name": "cold-master-restore",
+      "ordinal": 6,
+      "planned_task_run_id": "4ae842f0-b802-5d2e-b624-58052589be9a",
+      "required_assertions": [
+        "verified_checkpoint_selected",
+        "cold_restore_complete",
+        "revision_equal"
+      ],
+      "requirement_id": "FM06"
+    },
+    {
+      "category": "concurrency",
+      "integration_dependency": "20-way concurrent master.ensure client and provider inventory",
+      "lifecycle_gates": [],
+      "name": "concurrent-ensure-master-single-run",
+      "ordinal": 7,
+      "planned_task_run_id": "ba283a13-590a-509f-9e18-6d18a26c4c75",
+      "required_assertions": [
+        "twenty_requests",
+        "one_operation",
+        "one_provider_run",
+        "all_resolved_same_epoch"
+      ],
+      "requirement_id": "FM07"
+    },
+    {
+      "category": "recovery",
+      "integration_dependency": "callback-loss fault injector and restart-safe reconciliation",
+      "lifecycle_gates": [
+        "abrupt_master_termination",
+        "control_plane_restart"
+      ],
+      "name": "callback-loss-status-output-recovery",
+      "ordinal": 8,
+      "planned_task_run_id": "c63b1393-b2cf-5801-9ae4-1638ce4735f4",
+      "required_assertions": [
+        "callback_withheld",
+        "status_reconciled",
+        "output_identity_reconciled"
+      ],
+      "requirement_id": "FM08"
+    },
+    {
+      "category": "fencing",
+      "integration_dependency": "callback and output replay fault injector",
+      "lifecycle_gates": [],
+      "name": "duplicate-stale-callback-output-rejection",
+      "ordinal": 9,
+      "planned_task_run_id": "60c0f8cf-7e1e-5116-add3-bbac7af098c8",
+      "required_assertions": [
+        "duplicate_callback_noop",
+        "stale_callback_rejected",
+        "stale_output_rejected"
+      ],
+      "requirement_id": "FM09"
+    },
+    {
+      "category": "fencing",
+      "integration_dependency": "lease clock/fault control and real write admission probe",
+      "lifecycle_gates": [],
+      "name": "lease-expiry-write-gate-closes",
+      "ordinal": 10,
+      "planned_task_run_id": "d95572e1-bffd-5fdb-9417-0449cc2e8390",
+      "required_assertions": [
+        "lease_expired",
+        "write_denied",
+        "credentials_invalidated"
+      ],
+      "requirement_id": "FM10"
+    },
+    {
+      "category": "fencing",
+      "integration_dependency": "split-brain old-run resume injector and admission probes",
+      "lifecycle_gates": [
+        "clean_rotation"
+      ],
+      "name": "old-epoch-return-fenced",
+      "ordinal": 11,
+      "planned_task_run_id": "b244799f-c71e-5e45-b0e9-d536d4dc2268",
+      "required_assertions": [
+        "epoch_advanced",
+        "old_renew_denied",
+        "old_register_denied",
+        "old_write_denied",
+        "registry_resolves_new"
+      ],
+      "requirement_id": "FM11"
+    },
+    {
+      "category": "master",
+      "integration_dependency": "clean drain/checkpoint/stop action API",
+      "lifecycle_gates": [],
+      "name": "clean-drain-checkpoint-stop",
+      "ordinal": 12,
+      "planned_task_run_id": "3b189df7-9c40-5e92-bb36-6763eb068f78",
+      "required_assertions": [
+        "drain_started",
+        "checkpoint_verified",
+        "terminal_stopped"
+      ],
+      "requirement_id": "FM12"
+    },
+    {
+      "category": "master",
+      "integration_dependency": "forced rotation action API",
+      "lifecycle_gates": [
+        "clean_rotation",
+        "master_boot"
+      ],
+      "name": "forced-rotation-new-run-epoch",
+      "ordinal": 13,
+      "planned_task_run_id": "65c7ea9b-05b8-50db-ac18-355247a42baf",
+      "required_assertions": [
+        "old_run_stopped",
+        "new_run_distinct",
+        "epoch_incremented",
+        "checkpoint_bound"
+      ],
+      "requirement_id": "FM13"
+    },
+    {
+      "category": "checkpoint",
+      "integration_dependency": "checkpoint corruption fault injector",
+      "lifecycle_gates": [],
+      "name": "corrupt-candidate-head-preserved",
+      "ordinal": 14,
+      "planned_task_run_id": "17ee8513-28e7-542d-a609-3f6d82370b53",
+      "required_assertions": [
+        "corrupt_candidate_uploaded",
+        "hash_mismatch_detected",
+        "old_head_unchanged"
+      ],
+      "requirement_id": "FM14"
+    },
+    {
+      "category": "checkpoint",
+      "integration_dependency": "restore-smoke failure injector",
+      "lifecycle_gates": [],
+      "name": "restore-smoke-failure-head-preserved",
+      "ordinal": 15,
+      "planned_task_run_id": "df97e744-17ab-582c-946a-62f4514b7943",
+      "required_assertions": [
+        "restore_smoke_forced_failure",
+        "candidate_rejected",
+        "old_head_unchanged"
+      ],
+      "requirement_id": "FM15"
+    },
+    {
+      "category": "migration",
+      "integration_dependency": "production YDB export plus migration-operator preview/apply",
+      "lifecycle_gates": [],
+      "name": "full-ydb-blogger-import-checkpoint",
+      "ordinal": 16,
+      "planned_task_run_id": "1adc3e60-b812-57a1-85a2-aaeff816b1ec",
+      "required_assertions": [
+        "full_export_accounted",
+        "transactional_import",
+        "quarantine_accounted",
+        "checkpoint_verified"
+      ],
+      "requirement_id": "FM16"
+    },
+    {
+      "category": "migration",
+      "integration_dependency": "post-import checkpoint restore and logical equality query",
+      "lifecycle_gates": [
+        "master_boot"
+      ],
+      "name": "post-import-cold-restore-equality",
+      "ordinal": 17,
+      "planned_task_run_id": "f8dd3dab-6abc-546b-91e8-4692456f2efc",
+      "required_assertions": [
+        "cold_restore_complete",
+        "row_count_equal",
+        "logical_hash_equal"
+      ],
+      "requirement_id": "FM17"
+    },
+    {
+      "category": "embedding",
+      "integration_dependency": "E5 worker submission and embedding import status interface",
+      "lifecycle_gates": [],
+      "name": "e5-corpus-worker-transactional-import",
+      "ordinal": 18,
+      "planned_task_run_id": "1131b4d3-c233-58eb-b7c2-0508401e3a41",
+      "required_assertions": [
+        "exact_e5_model",
+        "corpus_accounted",
+        "transactional_import",
+        "checkpoint_required"
+      ],
+      "requirement_id": "FM18"
+    },
+    {
+      "category": "embedding",
+      "integration_dependency": "BGE-M3 worker submission and embedding import status interface",
+      "lifecycle_gates": [],
+      "name": "bge-m3-corpus-worker-transactional-import",
+      "ordinal": 19,
+      "planned_task_run_id": "26ace1b2-d275-5f4f-809a-d10c0518fef2",
+      "required_assertions": [
+        "exact_bge_m3_model",
+        "corpus_accounted",
+        "transactional_import",
+        "checkpoint_required"
+      ],
+      "requirement_id": "FM19"
+    },
+    {
+      "category": "mcp",
+      "integration_dependency": "remote reader MCP plus host reboot controller",
+      "lifecycle_gates": [
+        "host_reboot"
+      ],
+      "name": "remote-mcp-cold-start-blogger-search",
+      "ordinal": 20,
+      "planned_task_run_id": "a3ab56de-591a-5dec-babd-1c421aa2a8ea",
+      "required_assertions": [
+        "master_initially_absent",
+        "ensure_triggered",
+        "search_completed",
+        "bounded_result"
+      ],
+      "requirement_id": "FM20"
+    },
+    {
+      "category": "mcp",
+      "integration_dependency": "controlled business row and owner/operator MCP credential",
+      "lifecycle_gates": [],
+      "name": "owner-preview-apply-checkpoint-receipt",
+      "ordinal": 21,
+      "planned_task_run_id": "7fc8d0a4-1d82-5fb6-918a-7fa97c76456c",
+      "required_assertions": [
+        "disposable_row",
+        "preview_bound",
+        "apply_bound",
+        "post_checkpoint_verified",
+        "durable_receipt"
+      ],
+      "requirement_id": "FM21"
+    },
+    {
+      "category": "mcp",
+      "integration_dependency": "provider-operator MCP credential and lifecycle tools",
+      "lifecycle_gates": [],
+      "name": "mcp-managed-provider-lifecycle-cleanup",
+      "ordinal": 22,
+      "planned_task_run_id": "0d2f553c-3622-5d7d-a7e1-da5b1eb01656",
+      "required_assertions": [
+        "private_dataset_lifecycle",
+        "private_notebook_lifecycle",
+        "exact_readback",
+        "claim_cleanup"
+      ],
+      "requirement_id": "FM22"
+    },
+    {
+      "category": "security",
+      "integration_dependency": "operator acceptance probe for protected provider resources",
+      "lifecycle_gates": [],
+      "name": "protected-kaggle-mutation-denial",
+      "ordinal": 23,
+      "planned_task_run_id": "4f75a300-ffe8-5a92-b9cf-ee9069381a6d",
+      "required_assertions": [
+        "protected_resource_selected",
+        "mutation_denied",
+        "mutation_not_attempted"
+      ],
+      "requirement_id": "FM23"
+    },
+    {
+      "category": "soak",
+      "integration_dependency": "60-90 minute soak controller with session rotation",
+      "lifecycle_gates": [
+        "soak"
+      ],
+      "name": "accelerated-session-rotation-soak",
+      "ordinal": 24,
+      "planned_task_run_id": "05c69c96-25a7-5be5-9011-701ae7ae921e",
+      "required_assertions": [
+        "duration_in_range",
+        "heartbeats_continuous",
+        "reads_succeeded",
+        "checkpoint_verified",
+        "recovery_succeeded"
+      ],
+      "requirement_id": "FM24"
+    }
+  ],
+  "schema_version": "my-data-hub-operational-kaggle-matrix-plan.v1"
+}

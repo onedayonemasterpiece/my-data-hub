@@ -1,0 +1,47 @@
+{
+  "access_bindings_sha256": "ca266a1c8f8070e9f648d633b732237f9a455ca0458551a88a94214390dbcdda",
+  "database_id": "etnkibjidis0o6stn2cq",
+  "database_restored_state": {
+    "enable_throttling_rcu_limit": true,
+    "status": "STOPPED",
+    "throttling_rcu_limit": 0
+  },
+  "database_roles": [
+    "ydb.viewer"
+  ],
+  "export_batch_id": "86010778-9728-542b-901c-8b29ce1cdcf6",
+  "first_scan": {
+    "batch_count": 14,
+    "confirmation_status_counts": {
+      "confirmed_external": 202,
+      "needs_externality_review": 64
+    },
+    "distinct_record_ids": 266,
+    "logical_sha256": "c79c52c7f0d554b1af5f25afaa402357aed0ec0d0867562d0922e316ddbfcb10",
+    "record_id_set_sha256": "e0d3473a0732fe176f7642450415397c492982447a225ca9a108282b0f268a43",
+    "row_count": 266,
+    "source_file_count": 14
+  },
+  "metadata_only": true,
+  "observed_at": "2026-08-12T08:34:44.464362Z",
+  "query_sha256": "ef94cf114fea0e2f89418c5dacbc289e5c2d21f6935883c2b685ec4f64bd0e50",
+  "reader_service_account_id": "ajeri3qs6jbijih0bs5d",
+  "receipt_file_sha256": "181d33198c30cac08710828d21f7655ac002078642ea0939a4ca159c6f153dd7",
+  "receipt_mode": "0600",
+  "receipt_sha256": "f2dfef44a5596dc3e862cb388e9d202c7f9d3a737b8053c912f9601615787495",
+  "repeat_scan_matches": true,
+  "row_bytes_persisted_on_devstand": false,
+  "schema_version": "my-data-hub.ydb-blogger-metadata-preflight-live-evidence.v1",
+  "source_revision": "416d17e689acf0a4f69f2b4d1db5dad5b46c4bca",
+  "status": "LIVE_METADATA_PREFLIGHT_COMPLETE",
+  "write_denial": {
+    "provider_status": "ABORTED",
+    "server_code": 400040,
+    "structured_issue_codes": [
+      2028,
+      2019
+    ],
+    "verified": true
+  },
+  "ydb_python_version": "3.31.2"
+}

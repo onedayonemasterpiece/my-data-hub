@@ -1,0 +1,243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/region-talk-ydb-bloggers-quarantine-receipt.v1.schema.json",
+  "title": "BloggerQuarantineReceipt",
+  "$defs": {
+    "BloggerDuplicateReviewGroup": {
+      "additionalProperties": false,
+      "description": "Deterministic facts needed by an owner to resolve one duplicate group.",
+      "properties": {
+        "identity_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Identity Sha256",
+          "type": "string"
+        },
+        "members": {
+          "items": {
+            "$ref": "#/$defs/BloggerDuplicateReviewMember"
+          },
+          "maxItems": 100000,
+          "minItems": 2,
+          "title": "Members",
+          "type": "array"
+        },
+        "existing_actor_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Existing Actor Id"
+        }
+      },
+      "required": [
+        "identity_sha256",
+        "members"
+      ],
+      "title": "BloggerDuplicateReviewGroup",
+      "type": "object"
+    },
+    "BloggerDuplicateReviewInputs": {
+      "additionalProperties": false,
+      "description": "Bounded, row-free owner review projection persisted after quarantine.",
+      "properties": {
+        "groups": {
+          "items": {
+            "$ref": "#/$defs/BloggerDuplicateReviewGroup"
+          },
+          "maxItems": 500000,
+          "minItems": 1,
+          "title": "Groups",
+          "type": "array"
+        }
+      },
+      "required": [
+        "groups"
+      ],
+      "title": "BloggerDuplicateReviewInputs",
+      "type": "object"
+    },
+    "BloggerDuplicateReviewMember": {
+      "additionalProperties": false,
+      "description": "One metadata-only member projection; source values never enter control.",
+      "properties": {
+        "record_id": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Record Id",
+          "type": "string"
+        },
+        "projected_actor_id": {
+          "format": "uuid",
+          "title": "Projected Actor Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "projected_actor_id"
+      ],
+      "title": "BloggerDuplicateReviewMember",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Durable metadata proof that a rejected import is awaiting owner review.",
+  "properties": {
+    "schema_version": {
+      "const": "region-talk-ydb-bloggers-quarantine-receipt.v1",
+      "default": "region-talk-ydb-bloggers-quarantine-receipt.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "request_id": {
+      "format": "uuid",
+      "title": "Request Id",
+      "type": "string"
+    },
+    "operation_id": {
+      "format": "uuid",
+      "title": "Operation Id",
+      "type": "string"
+    },
+    "request_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Request Sha256",
+      "type": "string"
+    },
+    "master_instance_id": {
+      "format": "uuid",
+      "title": "Master Instance Id",
+      "type": "string"
+    },
+    "run_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "attempt_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Attempt Id",
+      "type": "string"
+    },
+    "epoch": {
+      "minimum": 1,
+      "title": "Epoch",
+      "type": "integer"
+    },
+    "export_batch_id": {
+      "format": "uuid",
+      "title": "Export Batch Id",
+      "type": "string"
+    },
+    "failure_code": {
+      "const": "BloggerMigrationQuarantined",
+      "default": "BloggerMigrationQuarantined",
+      "title": "Failure Code",
+      "type": "string"
+    },
+    "row_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000,
+      "title": "Row Count",
+      "type": "integer"
+    },
+    "raw_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000,
+      "title": "Raw Count",
+      "type": "integer"
+    },
+    "dispositioned_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000,
+      "title": "Dispositioned Count",
+      "type": "integer"
+    },
+    "undispositioned_count": {
+      "const": 0,
+      "title": "Undispositioned Count",
+      "type": "integer"
+    },
+    "quarantined_count": {
+      "maximum": 100000,
+      "minimum": 1,
+      "title": "Quarantined Count",
+      "type": "integer"
+    },
+    "logical_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Logical Sha256",
+      "type": "string"
+    },
+    "record_id_set_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Record Id Set Sha256",
+      "type": "string"
+    },
+    "canonical_outcome_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Canonical Outcome Sha256",
+      "type": "string"
+    },
+    "duplicate_group_count": {
+      "maximum": 500000,
+      "minimum": 1,
+      "title": "Duplicate Group Count",
+      "type": "integer"
+    },
+    "duplicate_groups_pending": {
+      "maximum": 500000,
+      "minimum": 1,
+      "title": "Duplicate Groups Pending",
+      "type": "integer"
+    },
+    "duplicate_review_inputs": {
+      "$ref": "#/$defs/BloggerDuplicateReviewInputs"
+    },
+    "transaction_committed": {
+      "const": true,
+      "default": true,
+      "title": "Transaction Committed",
+      "type": "boolean"
+    },
+    "durability_state": {
+      "const": "BLOCKED_QUARANTINE",
+      "default": "BLOCKED_QUARANTINE",
+      "title": "Durability State",
+      "type": "string"
+    }
+  },
+  "required": [
+    "request_id",
+    "operation_id",
+    "request_sha256",
+    "master_instance_id",
+    "run_id",
+    "attempt_id",
+    "epoch",
+    "export_batch_id",
+    "row_count",
+    "raw_count",
+    "dispositioned_count",
+    "undispositioned_count",
+    "quarantined_count",
+    "logical_sha256",
+    "record_id_set_sha256",
+    "canonical_outcome_sha256",
+    "duplicate_group_count",
+    "duplicate_groups_pending",
+    "duplicate_review_inputs"
+  ],
+  "type": "object"
+}

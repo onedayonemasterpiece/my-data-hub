@@ -1,0 +1,266 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/deployment-evidence.v2.schema.json",
+  "title": "Signed devstand deployment evidence receipt v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_identity",
+    "deployed_commit",
+    "source_tree_sha256",
+    "installed_release_tree_sha256",
+    "host_id_sha256",
+    "issued_at",
+    "expires_at",
+    "checks",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-deployment-evidence.v2"
+    },
+    "source_identity": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$"
+    },
+    "deployed_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "source_tree_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "installed_release_tree_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "host_id_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 64
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 64
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "services",
+        "service_image_ids",
+        "database_process_present",
+        "pgdata_present",
+        "database_environment_present",
+        "my_data_hub_public_listener_ports",
+        "my_data_hub_loopback_listener_ports",
+        "process_kill",
+        "reboot_autostart"
+      ],
+      "properties": {
+        "services": {
+          "$ref": "#/$defs/services"
+        },
+        "service_image_ids": {
+          "$ref": "#/$defs/service_image_ids"
+        },
+        "database_process_present": {
+          "const": false
+        },
+        "pgdata_present": {
+          "const": false
+        },
+        "database_environment_present": {
+          "const": false
+        },
+        "my_data_hub_public_listener_ports": {
+          "const": []
+        },
+        "my_data_hub_loopback_listener_ports": {
+          "const": [
+            8080,
+            8765,
+            8780
+          ]
+        },
+        "process_kill": {
+          "$ref": "#/$defs/process_kill"
+        },
+        "reboot_autostart": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "rebooted_at",
+            "verified_at",
+            "before_boot_id_sha256",
+            "after_boot_id_sha256",
+            "systemd_unit",
+            "unit_enabled",
+            "linger_enabled",
+            "autostart_services"
+          ],
+          "properties": {
+            "rebooted_at": {
+              "type": "string",
+              "format": "date-time",
+              "maxLength": 64
+            },
+            "verified_at": {
+              "type": "string",
+              "format": "date-time",
+              "maxLength": 64
+            },
+            "systemd_unit": {
+              "const": "my-data-hub-control-plane.service"
+            },
+            "unit_enabled": {
+              "const": true
+            },
+            "linger_enabled": {
+              "const": true
+            },
+            "autostart_services": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "const": "control-plane"
+                },
+                {
+                  "const": "oauth-server"
+                },
+                {
+                  "const": "remote-mcp"
+                }
+              ],
+              "items": false,
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "before_boot_id_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "after_boot_id_sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "key_id",
+        "value"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "Ed25519"
+        },
+        "key_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "image_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "services": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control-plane",
+        "oauth-server",
+        "remote-mcp"
+      ],
+      "properties": {
+        "control-plane": {
+          "const": "running"
+        },
+        "oauth-server": {
+          "const": "running"
+        },
+        "remote-mcp": {
+          "const": "running"
+        }
+      }
+    },
+    "service_image_ids": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control-plane",
+        "oauth-server",
+        "remote-mcp"
+      ],
+      "properties": {
+        "control-plane": {
+          "$ref": "#/$defs/image_id"
+        },
+        "oauth-server": {
+          "$ref": "#/$defs/image_id"
+        },
+        "remote-mcp": {
+          "$ref": "#/$defs/image_id"
+        }
+      }
+    },
+    "process_kill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_service",
+        "killed_at",
+        "recovered_at",
+        "before_process_sha256",
+        "after_process_sha256",
+        "recovered"
+      ],
+      "properties": {
+        "target_service": {
+          "enum": [
+            "control-plane",
+            "oauth-server",
+            "remote-mcp"
+          ]
+        },
+        "killed_at": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        },
+        "recovered_at": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 64
+        },
+        "before_process_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "after_process_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "recovered": {
+          "const": true
+        }
+      }
+    }
+  }
+}

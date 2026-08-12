@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/embeddings/embedding-production-closure.v1.schema.json",
+  "title": "FINAL-EMBED production closure receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "receipt_id", "status", "live_evidence", "started_at", "completed_at", "request_id", "request_sha256", "source_revision", "blogger_prerequisite", "provider_adapter", "workers", "imports", "stage_coverage", "checkpoint", "cold_restore", "mcp_coverage", "hybrid_search", "blockers"],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-embedding-production-closure.v1"},
+    "receipt_id": {"type": "string", "format": "uuid"},
+    "status": {"const": "DURABLE_COMPLETE"},
+    "live_evidence": {"const": true},
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "request_id": {"type": "string", "format": "uuid"},
+    "request_sha256": {"$ref": "#/$defs/sha256"},
+    "source_revision": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "blogger_prerequisite": {
+      "type": "object", "additionalProperties": false,
+      "required": ["receipt_id", "receipt_sha256", "canonical_revision", "checkpoint_id"],
+      "properties": {"receipt_id": {"type": "string", "format": "uuid"}, "receipt_sha256": {"$ref": "#/$defs/sha256"}, "canonical_revision": {"type": "integer", "minimum": 1}, "checkpoint_id": {"type": "string", "format": "uuid"}}
+    },
+    "provider_adapter": {
+      "type": "object", "additionalProperties": false,
+      "required": ["package", "version", "implementation", "single_adapter", "execution_location"],
+      "properties": {"package": {"const": "kaggle"}, "version": {"const": "2.2.4"}, "implementation": {"const": "my_data_hub.providers.kaggle.KaggleProviderAdapter"}, "single_adapter": {"const": true}, "execution_location": {"const": "active_kaggle_master"}}
+    },
+    "workers": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/worker"}},
+    "imports": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/import"}},
+    "stage_coverage": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/coverage"}},
+    "checkpoint": {"$ref": "#/$defs/checkpoint"},
+    "cold_restore": {
+      "type": "object", "additionalProperties": false,
+      "required": ["rotation_operation_id", "master_instance_id", "epoch", "canonical_revision"],
+      "properties": {"rotation_operation_id": {"type": "string", "minLength": 1}, "master_instance_id": {"type": "string", "format": "uuid"}, "epoch": {"type": "integer", "minimum": 2}, "canonical_revision": {"type": "integer", "minimum": 1}}
+    },
+    "mcp_coverage": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/coverage"}},
+    "hybrid_search": {
+      "type": "object", "additionalProperties": false,
+      "required": ["query_sha256", "result_count", "requested_retrievers", "completed_retrievers", "unavailable_retrievers", "complete", "canonical_revision"],
+      "properties": {
+        "query_sha256": {"$ref": "#/$defs/sha256"}, "result_count": {"type": "integer", "minimum": 1, "maximum": 20},
+        "requested_retrievers": {"const": ["bge_m3", "e5", "exact", "fts"]},
+        "completed_retrievers": {"const": ["bge_m3", "e5", "exact", "fts"]},
+        "unavailable_retrievers": {"const": []}, "complete": {"const": true}, "canonical_revision": {"type": "integer", "minimum": 1}
+      }
+    },
+    "blockers": {"type": "array", "maxItems": 0}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "worker": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model_exact_id", "task_run_id", "provider_ref", "provider_run_ref", "provider_kernel_id", "source_version", "source_sha256", "primary_source_sha256", "provider_status", "privacy", "control_class", "output_tree_sha256", "artifact_sha256", "artifact_id", "artifact_run_id", "input_dataset"],
+      "properties": {
+        "model_exact_id": {"type": "string", "minLength": 42}, "task_run_id": {"type": "string", "format": "uuid"},
+        "provider_ref": {"type": "string", "pattern": "^[^/]+/[^/]+$"}, "provider_run_ref": {"type": "string", "pattern": "^[^/]+/[^/]+/[1-9][0-9]*$"},
+        "provider_kernel_id": {"type": "integer", "minimum": 1}, "source_version": {"type": "integer", "minimum": 1}, "source_sha256": {"$ref": "#/$defs/sha256"}, "primary_source_sha256": {"$ref": "#/$defs/sha256"},
+        "provider_status": {"const": "complete"}, "privacy": {"const": "private"}, "control_class": {"const": "orchestrator_protected"},
+        "output_tree_sha256": {"$ref": "#/$defs/sha256"}, "artifact_sha256": {"$ref": "#/$defs/sha256"},
+        "artifact_id": {"type": "string", "format": "uuid"}, "artifact_run_id": {"type": "string", "format": "uuid"},
+        "input_dataset": {
+          "type": "object", "additionalProperties": false,
+          "required": ["provider_ref", "provider_version", "package_sha256", "jobs_sha256"],
+          "properties": {"provider_ref": {"type": "string", "pattern": "^[^/]+/[^/]+$"}, "provider_version": {"type": "integer", "minimum": 1}, "package_sha256": {"$ref": "#/$defs/sha256"}, "jobs_sha256": {"$ref": "#/$defs/sha256"}}
+        }
+      }
+    },
+    "import": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model_exact_id", "artifact_id", "run_id", "artifact_sha256", "outbox_id", "canonical_revision", "inserted_count", "stale_count", "failed_count", "replayed", "durability_state"],
+      "properties": {"model_exact_id": {"type": "string"}, "artifact_id": {"type": "string", "format": "uuid"}, "run_id": {"type": "string", "format": "uuid"}, "artifact_sha256": {"$ref": "#/$defs/sha256"}, "outbox_id": {"type": "string", "format": "uuid"}, "canonical_revision": {"type": "integer", "minimum": 1}, "inserted_count": {"const": 266}, "stale_count": {"const": 0}, "failed_count": {"const": 0}, "replayed": {"type": "boolean"}, "durability_state": {"const": "COMMITTED_PENDING_CHECKPOINT"}}
+    },
+    "coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model_exact_id", "expected_documents", "completed_documents", "coverage"],
+      "properties": {"model_exact_id": {"type": "string"}, "expected_documents": {"const": 266}, "completed_documents": {"const": 266}, "coverage": {"const": 1.0}}
+    },
+    "checkpoint": {
+      "type": "object", "additionalProperties": false,
+      "required": ["checkpoint_id", "status", "canonical_revision", "manifest_sha256", "exact_version_ref"],
+      "properties": {"checkpoint_id": {"type": "string", "format": "uuid"}, "status": {"const": "VERIFIED"}, "canonical_revision": {"type": "integer", "minimum": 1}, "manifest_sha256": {"$ref": "#/$defs/sha256"}, "exact_version_ref": {"type": "string", "pattern": "^[^/]+/[^/]+/[1-9][0-9]*$"}}
+    }
+  }
+}

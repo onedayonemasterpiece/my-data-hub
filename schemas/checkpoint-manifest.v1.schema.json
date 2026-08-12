@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.local/schemas/checkpoint-manifest.v1.schema.json",
+  "title": "My Data Hub verified checkpoint manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "checkpoint_id",
+    "master_instance_id",
+    "epoch",
+    "parent_checkpoint_id",
+    "postgres_version",
+    "pgvector_version",
+    "schema_version",
+    "canonical_revision",
+    "source_run_id",
+    "source_identity",
+    "created_at",
+    "checkpoint_lsn",
+    "files",
+    "restore_probe",
+    "manifest_sha256"
+  ],
+  "properties": {
+    "contract": {"const": "my-data-hub-checkpoint-manifest.v1"},
+    "checkpoint_id": {"type": "string", "format": "uuid"},
+    "master_instance_id": {"type": "string", "format": "uuid"},
+    "epoch": {"type": "integer", "minimum": 1},
+    "parent_checkpoint_id": {"type": ["string", "null"], "format": "uuid"},
+    "postgres_version": {"type": "string", "pattern": "^18\\."},
+    "pgvector_version": {"type": "string", "minLength": 1, "maxLength": 64},
+    "schema_version": {"type": "integer", "minimum": 1},
+    "canonical_revision": {"type": "integer", "minimum": 0},
+    "source_run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "source_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+    "created_at": {"type": "string", "format": "date-time"},
+    "checkpoint_lsn": {"type": "string", "pattern": "^[0-9A-F]+/[0-9A-F]+$"},
+    "files": {
+      "type": "array",
+      "minItems": 5,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "kind", "byte_size", "sha256"],
+        "properties": {
+          "path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"},
+          "kind": {
+            "enum": [
+              "physical",
+              "postgres_backup_manifest",
+              "logical",
+              "verification_receipt",
+              "restore_smoke_receipt"
+            ]
+          },
+          "byte_size": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+        }
+      }
+    },
+    "restore_probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "canonical_revision", "logical_hash_sha256", "row_counts"],
+      "properties": {
+        "schema_version": {"type": "integer", "minimum": 1},
+        "canonical_revision": {"type": "integer", "minimum": 0},
+        "logical_hash_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "row_counts": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0},
+          "propertyNames": {"pattern": "^[a-z_][a-z0-9_.]{0,127}$"}
+        }
+      }
+    },
+    "manifest_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

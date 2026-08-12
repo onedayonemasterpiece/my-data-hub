@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-12T08:38:21Z",
+  "deployment_commit": "fe46224da025c2a895da31f3d3e1713a52291a32",
+  "deployment": {
+    "action": "INSTALL_MY_DATA_HUB_PROVIDER_MCP",
+    "current_release_matches_commit": true,
+    "systemd_active": true,
+    "systemd_enabled": true,
+    "services": {
+      "control-plane": "healthy",
+      "oauth-server": "healthy",
+      "remote-mcp": "healthy"
+    },
+    "provider_only_ready": {
+      "ok": true,
+      "provider_only_mode": true,
+      "provider_gateway_ready": true,
+      "master_state": "ABSENT",
+      "data_plane_ready": false
+    }
+  },
+  "static_client_registration": {
+    "client_id": "opencode-my-data-hub",
+    "existing_client_preserved": "bootstrap-reader",
+    "redirect_uris": [
+      "http://127.0.0.1:19876/mcp/oauth/callback"
+    ],
+    "allowed_scopes": [
+      "openid",
+      "offline_access",
+      "platform:read",
+      "provider:read",
+      "provider:write"
+    ],
+    "oauth_environment_mode": "0600",
+    "client_secret_configured": false
+  },
+  "authorization_server": {
+    "issuer": "https://identity.kenigevents.ru",
+    "grant_types_supported": [
+      "authorization_code",
+      "refresh_token"
+    ],
+    "code_challenge_methods_supported": [
+      "S256"
+    ],
+    "token_endpoint_auth_methods_supported": [
+      "none"
+    ],
+    "registration_endpoint_present": false,
+    "exact_opencode_authorization_request_accepted": true,
+    "owner_login_redirect_status": 303,
+    "owner_login_redirect_path": "/owner/login"
+  },
+  "protected_resource": {
+    "resource": "https://mcp-datahub.kenigevents.ru/mcp",
+    "authorization_servers": [
+      "https://identity.kenigevents.ru"
+    ],
+    "scopes_supported": [
+      "platform:read",
+      "provider:read",
+      "provider:write"
+    ]
+  },
+  "opencode": {
+    "version": "1.18.15",
+    "configuration_mode": "0600",
+    "debug_client_id_available": true,
+    "debug_protected_resource_challenge_observed": true,
+    "authenticated": false,
+    "remaining_owner_command": "opencode mcp auth my-data-hub"
+  },
+  "secrets_or_tokens_recorded": false
+}

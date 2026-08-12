@@ -1,0 +1,12 @@
+{
+  "epoch": 9,
+  "input_jobs_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "job_count": 267,
+  "model_exact_id": "intfloat/multilingual-e5-base@d128750597153bb5987e10b1c3493a34e5a4502a",
+  "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "schema_version": "embedding-central-launch-metadata.v1",
+  "task_run_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "worker_primary_source_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "worker_source_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}

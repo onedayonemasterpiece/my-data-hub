@@ -1,0 +1,108 @@
+{
+  "schema_version": "my-data-hub-checkpoint-acceptance-operational-result.v1",
+  "scenario": "FM14",
+  "outcome": "LIVE_EVIDENCE_READY",
+  "live_evidence": true,
+  "operation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "task_run_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "source_revision": "2222222222222222222222222222222222222222",
+  "config_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "mutations_started": 2,
+  "locator": {
+    "provider_owner": "owner",
+    "dataset_ref": "owner/checkpoint-acceptance-fm14",
+    "evidence_notebook_ref": "owner/checkpoint-acceptance-evidence-fm14",
+    "template_dataset_version_ref": "owner/checkpoint-empty-template/3",
+    "template_claim_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "exact_version_refs": [
+      "owner/checkpoint-acceptance-fm14/1"
+    ]
+  },
+  "candidate_checkpoint_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  "intent_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "verdict": "LIVE_PASS",
+  "evidence_class": "live",
+  "initial_head": {
+    "generation": 0
+  },
+  "final_head": {
+    "generation": 0
+  },
+  "head_unchanged": true,
+  "stages": [
+    {
+      "stage": "corrupted_candidate",
+      "candidate_checkpoint_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "task_owned": true,
+      "disposable_candidate": true,
+      "outcome": "succeeded",
+      "detail_code": "TASK_OWNED_CORRUPTION_CANDIDATE_CREATED",
+      "provider_receipt_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "manifest_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "package_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+      "expected_content_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+      "observed_content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "exact_version_ref": "owner/checkpoint-acceptance-fm14/1"
+    },
+    {
+      "stage": "hash_mismatch_rejection",
+      "candidate_checkpoint_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "task_owned": true,
+      "disposable_candidate": true,
+      "outcome": "rejected_expected",
+      "detail_code": "EXACT_READBACK_HASH_MISMATCH_REJECTED",
+      "provider_receipt_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "expected_content_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+      "observed_content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "exact_version_ref": "owner/checkpoint-acceptance-fm14/1"
+    }
+  ],
+  "receipt": {
+    "schema_version": "my-data-hub-checkpoint-acceptance-receipt.v1",
+    "scenario": "FM14",
+    "verdict": "LIVE_PASS",
+    "evidence_class": "live",
+    "operation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "task_run_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "candidate_checkpoint_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    "intent_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "initial_head": {
+      "generation": 0
+    },
+    "final_head": {
+      "generation": 0
+    },
+    "head_unchanged": true,
+    "stages": [
+      {
+        "stage": "corrupted_candidate",
+        "candidate_checkpoint_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "task_owned": true,
+        "disposable_candidate": true,
+        "outcome": "succeeded",
+        "detail_code": "TASK_OWNED_CORRUPTION_CANDIDATE_CREATED",
+        "provider_receipt_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "manifest_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+        "package_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+        "expected_content_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+        "observed_content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "exact_version_ref": "owner/checkpoint-acceptance-fm14/1"
+      },
+      {
+        "stage": "hash_mismatch_rejection",
+        "candidate_checkpoint_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "task_owned": true,
+        "disposable_candidate": true,
+        "outcome": "rejected_expected",
+        "detail_code": "EXACT_READBACK_HASH_MISMATCH_REJECTED",
+        "provider_receipt_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "expected_content_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+        "observed_content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "exact_version_ref": "owner/checkpoint-acceptance-fm14/1"
+      }
+    ],
+    "completed_at": "2026-08-11T12:05:00Z"
+  },
+  "receipt_sha256": "da293877b1ebfa03d0e049f070a72595a7d0f0924514b1e3ec9ac0f164f0eb7b",
+  "completed_at": "2026-08-11T12:05:00Z"
+}

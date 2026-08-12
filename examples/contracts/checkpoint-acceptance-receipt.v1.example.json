@@ -1,0 +1,56 @@
+{
+  "schema_version": "my-data-hub-checkpoint-acceptance-receipt.v1",
+  "scenario": "FM14",
+  "verdict": "CONTRACT_PASS",
+  "evidence_class": "injected",
+  "operation_id": "33333333-3333-4333-8333-333333333333",
+  "task_run_id": "44444444-4444-4444-8444-444444444444",
+  "candidate_checkpoint_id": "55555555-5555-4555-8555-555555555555",
+  "intent_sha256": "699f5629098b16653fcdcf13557fc02988199d562431046f255f93414508bdc7",
+  "initial_head": {
+    "generation": 7,
+    "current_checkpoint_id": "11111111-1111-4111-8111-111111111111",
+    "previous_checkpoint_id": "22222222-2222-4222-8222-222222222222"
+  },
+  "final_head": {
+    "generation": 7,
+    "current_checkpoint_id": "11111111-1111-4111-8111-111111111111",
+    "previous_checkpoint_id": "22222222-2222-4222-8222-222222222222"
+  },
+  "head_unchanged": true,
+  "stages": [
+    {
+      "stage": "corrupted_candidate",
+      "candidate_checkpoint_id": "55555555-5555-4555-8555-555555555555",
+      "task_owned": true,
+      "disposable_candidate": true,
+      "outcome": "succeeded",
+      "detail_code": "TASK_OWNED_CORRUPTION_CANDIDATE_CREATED",
+      "provider_receipt_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "manifest_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "package_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "expected_content_sha256": null,
+      "observed_content_sha256": null,
+      "exact_version_ref": null,
+      "canonical_revision": null,
+      "canonical_row_count": null
+    },
+    {
+      "stage": "hash_mismatch_rejection",
+      "candidate_checkpoint_id": "55555555-5555-4555-8555-555555555555",
+      "task_owned": true,
+      "disposable_candidate": false,
+      "outcome": "rejected_expected",
+      "detail_code": "EXACT_READBACK_HASH_MISMATCH_REJECTED",
+      "provider_receipt_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "manifest_sha256": null,
+      "package_sha256": null,
+      "expected_content_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "observed_content_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "exact_version_ref": null,
+      "canonical_revision": null,
+      "canonical_row_count": null
+    }
+  ],
+  "completed_at": "2026-08-11T12:00:00Z"
+}

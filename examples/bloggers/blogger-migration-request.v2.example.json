@@ -1,0 +1,90 @@
+{
+  "schema_version": "my-data-hub-blogger-migration-request.v2",
+  "request_id": "66666666-6666-4666-8666-666666666666",
+  "operation_id": "77777777-7777-4777-8777-777777777777",
+  "project_id": "33333333-3333-4333-8333-333333333333",
+  "snapshot_at": "2026-08-09T00:00:00Z",
+  "expected_rows": 266,
+  "source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "source_query_sha256": "ef94cf114fea0e2f89418c5dacbc289e5c2d21f6935883c2b685ec4f64bd0e50",
+  "replay_of_request_id": "11111111-1111-4111-8111-111111111111",
+  "duplicate_resolution": {
+    "schema_version": "region-talk-blogger-duplicate-resolution-envelope.v1",
+    "authorization_id": "44444444-4444-4444-8444-444444444444",
+    "authorized_by": "owner-review:2026-08-11",
+    "authorized_at": "2026-08-11T12:00:00Z",
+    "source_request_id": "11111111-1111-4111-8111-111111111111",
+    "source_operation_id": "22222222-2222-4222-8222-222222222222",
+    "source_request_sha256": "7ae2703abb0e25e946aa2ba6089329ffd3ac01f9b62d4efe17b4c51476c1dac5",
+    "export_batch_id": "1a18f3a8-2399-5cf9-8280-6801f482099d",
+    "project_id": "33333333-3333-4333-8333-333333333333",
+    "snapshot_at": "2026-08-09T00:00:00Z",
+    "expected_rows": 266,
+    "source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "source_query_sha256": "ef94cf114fea0e2f89418c5dacbc289e5c2d21f6935883c2b685ec4f64bd0e50",
+    "decisions": [
+      {
+        "identity_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "canonical_record_id": "blogger-001",
+        "canonical_actor_id": "55555555-5555-4555-8555-555555555555",
+        "member_record_ids": [
+          "blogger-001",
+          "blogger-002"
+        ],
+        "decided_by": "owner-review:2026-08-11",
+        "reason": "Reviewed source evidence confirms both rows represent the same person."
+      }
+    ]
+  },
+  "source_read_receipt": {
+    "schema_version": "my-data-hub.region-talk-ydb-source-read-receipt.v1",
+    "export_batch_id": "1a18f3a8-2399-5cf9-8280-6801f482099d",
+    "snapshot_at": "2026-08-09T00:00:00Z",
+    "source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "database_id": "etnkibjidis0o6stn2cq",
+    "database_path": "/ru-central1/b1ghfk15fpug7mn5439l/etnkibjidis0o6stn2cq",
+    "table": "region_talk_external_blogger_evidence",
+    "schema_sha256": "a44855556115f90c0b6353cac0b8c5d1eaebf91485ca594c621cc73f91b2564f",
+    "query_sha256": "ef94cf114fea0e2f89418c5dacbc289e5c2d21f6935883c2b685ec4f64bd0e50",
+    "reader_service_account_id": "aaaaaaaaaaaaaaaaaaaa",
+    "database_roles": [
+      "ydb.viewer"
+    ],
+    "access_bindings_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "write_denial_verified": true,
+    "first_scan": {
+      "started_at": "2026-08-09T00:00:00Z",
+      "completed_at": "2026-08-09T00:01:00Z",
+      "row_count": 266,
+      "distinct_record_ids": 266,
+      "logical_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "record_id_set_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "batch_count": 14,
+      "batch_id_set_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "source_file_count": 14,
+      "source_file_set_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "confirmation_status_counts": {
+        "confirmed_external": 266
+      },
+      "min_updated_at": "2026-07-01T00:00:00Z",
+      "max_updated_at": "2026-08-08T00:00:00Z"
+    },
+    "repeat_scan": {
+      "started_at": "2026-08-09T00:01:00Z",
+      "completed_at": "2026-08-09T00:02:00Z",
+      "row_count": 266,
+      "distinct_record_ids": 266,
+      "logical_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "record_id_set_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "batch_count": 14,
+      "batch_id_set_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "source_file_count": 14,
+      "source_file_set_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "confirmation_status_counts": {
+        "confirmed_external": 266
+      },
+      "min_updated_at": "2026-07-01T00:00:00Z",
+      "max_updated_at": "2026-08-08T00:00:00Z"
+    }
+  }
+}

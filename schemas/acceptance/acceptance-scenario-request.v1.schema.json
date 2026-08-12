@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/acceptance/acceptance-scenario-request.v1.schema.json",
+  "$defs": {
+    "AcceptanceScenarioId": {
+      "enum": [
+        "FM04",
+        "FM05",
+        "FM07",
+        "FM08",
+        "FM09",
+        "FM10",
+        "FM11",
+        "FM12",
+        "FM14",
+        "FM15",
+        "FM24"
+      ],
+      "title": "AcceptanceScenarioId",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The complete public mutation contract; no action/fault selector.",
+  "properties": {
+    "task_id": {
+      "format": "uuid",
+      "title": "Task Id",
+      "type": "string"
+    },
+    "scenario": {
+      "$ref": "#/$defs/AcceptanceScenarioId"
+    },
+    "idempotency_key": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$",
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "source_revision": {
+      "pattern": "^[a-f0-9]{40}$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "target_operation_id": {
+      "anyOf": [
+        {"type": "string", "format": "uuid"},
+        {"type": "null"}
+      ],
+      "default": null,
+      "title": "Target Operation Id"
+    }
+  },
+  "required": [
+    "task_id",
+    "scenario",
+    "idempotency_key",
+    "source_revision"
+  ],
+  "title": "AcceptanceScenarioRequest",
+  "type": "object"
+}

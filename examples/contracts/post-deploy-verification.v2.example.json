@@ -1,0 +1,85 @@
+{
+  "deployment_evidence": {
+    "after_boot_id_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "before_boot_id_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "deployed_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "evidence_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+    "host_id_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "installed_release_tree_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "local_database_absent": true,
+    "process_kill_recovered": true,
+    "reboot_autostart_verified": true,
+    "schema_version": "my-data-hub-deployment-evidence.v2",
+    "service_image_ids": {
+      "control-plane": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "oauth-server": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "remote-mcp": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+    },
+    "signing_key_id": "example-devstand-evidence-key",
+    "source_identity": "onedayonemasterpiece/my-data-hub",
+    "source_tree_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "verified": true
+  },
+  "dns_tls": {
+    "certificate_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+    "dns_global_address_count": 2,
+    "tls_version": "TLSv1.3"
+  },
+  "endpoint": "https://mcp-datahub.kenigevents.ru/mcp",
+  "expected_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expected_source_identity": "onedayonemasterpiece/my-data-hub",
+  "http_negatives": {
+    "authorization_server": "https://identity.kenigevents.ru",
+    "expired_token_rejected": true,
+    "invalid_token_rejected": true,
+    "missing_auth_rejected": true,
+    "published_jwks_keys": 1,
+    "resource_metadata": true,
+    "revoked_token_rejected": true,
+    "wrong_audience_rejected": true,
+    "wrong_host_rejected": true,
+    "wrong_issuer_rejected": true,
+    "wrong_origin_rejected": true,
+    "wrong_resource_rejected": true,
+    "wrong_scope_rejected": true
+  },
+  "ok": true,
+  "public_port_boundary": {
+    "probe_count": 8,
+    "probed_closed_ports": [
+      5432,
+      8080,
+      8765,
+      8780
+    ],
+    "probed_global_address_count": 2,
+    "public_database_port_open": false
+  },
+  "remote_mcp": {
+    "active_master_epoch": 1,
+    "canonical_revision": 0,
+    "cold_operation_id": "00000000-0000-0000-0000-000000000000",
+    "data_read_rows": 1,
+    "deployed_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "initial_master_state": "ABSENT",
+    "tools": [
+      "bloggers.get",
+      "bloggers.list",
+      "bloggers.migration.accounting",
+      "bloggers.provenance",
+      "bloggers.search",
+      "bloggers.statistics",
+      "checkpoint.status",
+      "data.change.status",
+      "data.query",
+      "embedding.coverage",
+      "embedding.production.capabilities",
+      "master.status",
+      "operation.get",
+      "platform.status",
+      "provider.resources.status"
+    ],
+    "writes_discoverable": false
+  },
+  "schema_version": "my-data-hub-post-deploy-verification.v2"
+}

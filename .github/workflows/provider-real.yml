@@ -1,0 +1,259 @@
+name: provider-real
+
+on:
+  workflow_dispatch:
+    inputs:
+      acceptance_mode:
+        description: Scheduled acceptance scenario
+        required: true
+        default: weekly
+        type: choice
+        options:
+          - weekly
+          - manual
+      continuation_run_id:
+        description: Prior provider-real run ID whose durable controller artifact must be restored
+        required: false
+        type: string
+      continuation_run_attempt:
+        description: Exact prior run attempt containing the controller artifact
+        required: false
+        default: '1'
+        type: string
+      matrix_id:
+        description: Optional fixed matrix UUID for a new run (ignored after continuation restore)
+        required: false
+        type: string
+      fm16_resume_authorized:
+        description: Resume the restored FM16 pause with the owner envelope secret
+        required: true
+        default: false
+        type: boolean
+  schedule:
+    - cron: '17 3 * * 2'
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: my-data-hub-real-kaggle
+  cancel-in-progress: false
+
+jobs:
+  private-notebook-canary:
+    # The multi-hour matrix runs only beside its owner-only rotating OAuth
+    # file. GitHub-hosted runners and copied access/refresh tokens are refused.
+    runs-on: [self-hosted, linux, my-data-hub-devstand]
+    timeout-minutes: 360
+    env:
+      # Provider mutations and reconciliation use only the deployed control-owned
+      # gateway. The runner has no Kaggle client credential and cannot replace
+      # the checked-in operational driver with workflow variable content.
+      MY_DATA_HUB_MCP_CANARY_ENDPOINT: ${{ vars.MY_DATA_HUB_MCP_CANARY_ENDPOINT || 'https://mcp-datahub.kenigevents.ru/mcp' }}
+      MY_DATA_HUB_DATA_CONTROL_TOKEN: ${{ secrets.MY_DATA_HUB_DATA_CONTROL_TOKEN }}
+      # Non-secret exact claims for already-running disposable FM06/FM13/FM20
+      # evidence Notebooks. Every claim is re-read through provider MCP.
+      MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON: ${{ vars.MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e '.[dev,kaggle]'
+
+      - name: Require devstand-local rotating OAuth authority
+        run: python scripts/provider/devstand_acceptance_controller.py preflight
+
+      - name: Restore exact durable controller state for continuation
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.continuation_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.continuation_run_id }}
+          name: provider-real-controller-${{ inputs.continuation_run_id }}-${{ inputs.continuation_run_attempt }}
+          path: artifacts
+
+      - name: Materialize and validate staged controller inputs
+        env:
+          REQUESTED_MATRIX_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.matrix_id || '' }}
+          CONTINUATION_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.continuation_run_id || '' }}
+          FM16_RESUME_AUTHORIZED: ${{ github.event_name == 'workflow_dispatch' && inputs.fm16_resume_authorized || false }}
+          OPERATIONAL_PROVIDER_OWNER: ${{ vars.MY_DATA_HUB_OPERATIONAL_PROVIDER_OWNER }}
+          FM03_RUNTIME_JSON: ${{ vars.MY_DATA_HUB_OPERATIONAL_FM03_RUNTIME_JSON }}
+          DATA_WORKLOAD_PLAN_TEMPLATE_JSON: ${{ vars.MY_DATA_HUB_OPERATIONAL_DATA_WORKLOAD_PLAN_JSON }}
+          DATA_WORKLOAD_PRODUCTION_CONFIG_JSON: ${{ vars.MY_DATA_HUB_DATA_WORKLOAD_PRODUCTION_CONFIG_JSON }}
+          FM16_OWNER_ENVELOPE_JSON: ${{ secrets.MY_DATA_HUB_FM16_OWNER_ENVELOPE_JSON }}
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import stat
+          from pathlib import Path
+          from uuid import UUID, NAMESPACE_URL, uuid5
+
+          from my_data_hub.acceptance.data_production import (
+              AtomicJsonStateStore,
+              ProductionDataWorkloadConfig,
+          )
+          from my_data_hub.acceptance.data_workloads import DataWorkloadPlan
+          from my_data_hub.hashing import canonical_json_bytes
+          from scripts.provider.operational_kaggle_driver import EvidenceDriverConfig
+
+          root = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          controller = root / "artifacts" / "controller"
+          controller.mkdir(parents=True, exist_ok=True)
+          matrix_plan_path = root / "artifacts" / "operational-kaggle-plan.json"
+          commit = os.environ["GITHUB_SHA"]
+
+          if matrix_plan_path.is_file():
+              matrix_plan = json.loads(matrix_plan_path.read_bytes())
+              matrix_id = UUID(str(matrix_plan["matrix_id"]))
+              if matrix_plan.get("commit_sha") != commit:
+                  raise SystemExit("restored matrix plan belongs to a different commit")
+          else:
+              requested = os.environ.get("REQUESTED_MATRIX_ID", "").strip()
+              matrix_id = (
+                  UUID(requested)
+                  if requested
+                  else uuid5(NAMESPACE_URL, f"provider-real:{os.environ['GITHUB_REPOSITORY']}:{os.environ['GITHUB_RUN_ID']}")
+              )
+              if os.environ.get("CONTINUATION_RUN_ID", "").strip():
+                  raise SystemExit("continuation artifact did not contain the durable matrix plan")
+
+          raw_plan = os.environ.get("DATA_WORKLOAD_PLAN_TEMPLATE_JSON", "").strip()
+          raw_production = os.environ.get("DATA_WORKLOAD_PRODUCTION_CONFIG_JSON", "").strip()
+          provider_owner = os.environ.get("OPERATIONAL_PROVIDER_OWNER", "").strip()
+          if not raw_plan or not raw_production or not provider_owner:
+              raise SystemExit("required evidence-driver/data-workload configuration is absent")
+          plan_value = json.loads(raw_plan)
+          plan_value["matrix_id"] = str(matrix_id)
+          plan_value["source_commit"] = commit
+          plan = DataWorkloadPlan.model_validate(plan_value)
+          production = ProductionDataWorkloadConfig.model_validate_json(raw_production)
+
+          def persist_exact(path: Path, payload: object, *, mode: int = 0o600) -> None:
+              encoded = canonical_json_bytes(payload) + b"\n"
+              if path.exists() and path.read_bytes() != encoded:
+                  raise SystemExit(f"restored controller input drifted: {path.name}")
+              if not path.exists():
+                  path.write_bytes(encoded)
+              path.chmod(mode)
+
+          data_plan_path = controller / "operational-data-workload-plan.json"
+          production_path = controller / "data-workload-production-config.json"
+          state_path = controller / "operational-data-workload-state.json"
+          persist_exact(data_plan_path, plan.model_dump(mode="json"))
+          persist_exact(production_path, production.model_dump(mode="json"))
+          if state_path.exists():
+              state_path.chmod(0o600)
+              info = state_path.stat(follow_symlinks=False)
+              if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+                  raise SystemExit("restored data-workload state is not a mode-0600 regular file")
+              AtomicJsonStateStore(state_path).load(plan)
+
+          fm03 = os.environ.get("FM03_RUNTIME_JSON", "").strip()
+          owner_envelope_path = Path(os.environ["RUNNER_TEMP"]) / "fm16-owner-envelope.json"
+          authorized = os.environ.get("FM16_RESUME_AUTHORIZED", "false").lower() == "true"
+          if authorized:
+              envelope = os.environ.get("FM16_OWNER_ENVELOPE_JSON", "").strip()
+              if not state_path.is_file():
+                  raise SystemExit("FM16 authorization requires restored durable workload state")
+              if not envelope:
+                  raise SystemExit("FM16 authorization requires the owner envelope secret")
+              json.loads(envelope)
+              owner_envelope_path.write_text(envelope + "\n", encoding="utf-8")
+              owner_envelope_path.chmod(0o600)
+          elif owner_envelope_path.exists():
+              owner_envelope_path.unlink()
+
+          evidence = EvidenceDriverConfig.model_validate(
+              {
+                  "schema_version": "my-data-hub-operational-kaggle-evidence-driver.v1",
+                  "provider_owner": provider_owner,
+                  "fm03_runtime": json.loads(fm03) if fm03 else None,
+                  "data_workload": {
+                      "plan_path": str(data_plan_path),
+                      "production_config_path": str(production_path),
+                      "state_path": str(state_path),
+                      "owner_envelope_path": str(owner_envelope_path),
+                  },
+              }
+          )
+          evidence_json = json.dumps(evidence.model_dump(mode="json"), separators=(",", ":"), sort_keys=True)
+          github_env = Path(os.environ["GITHUB_ENV"])
+          with github_env.open("a", encoding="utf-8") as handle:
+              handle.write(f"OPERATIONAL_MATRIX_ID={matrix_id}\n")
+              handle.write(f"MY_DATA_HUB_OPERATIONAL_EVIDENCE_DRIVER_JSON={evidence_json}\n")
+          PY
+
+      - name: Preflight exact operational interface and staged configuration
+        run: |
+          python scripts/provider/operational_kaggle_matrix.py preflight
+          python - <<'PY'
+          import os
+          from scripts.provider.operational_kaggle_driver import _evidence_driver_config
+          value = _evidence_driver_config()
+          if value is None or value.data_workload is None:
+              raise SystemExit("staged evidence driver is incomplete")
+          PY
+
+      - name: Run or resume the exact 24-scenario operational matrix
+        id: operational_matrix
+        shell: bash
+        run: |
+          set +e
+          python scripts/provider/operational_kaggle_matrix.py run \
+            --ledger artifacts/operational-provider-effects.sqlite3 \
+            --receipt artifacts/operational-kaggle-matrix.json \
+            --scenario-receipts artifacts/operational-kaggle-scenarios \
+            --plan artifacts/operational-kaggle-plan.json \
+            --matrix-id "$OPERATIONAL_MATRIX_ID"
+          status=$?
+          set -e
+          if [[ "$status" != 0 && "$status" != 1 && "$status" != 78 ]]; then
+            echo "unexpected operational matrix exit: $status" >&2
+            exit "$status"
+          fi
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Run weekly/manual scheduled acceptance
+        if: always()
+        env:
+          MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT: ${{ vars.MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT }}
+          ACCEPTANCE_MODE: ${{ github.event_name == 'schedule' && 'weekly' || inputs.acceptance_mode }}
+        run: >-
+          python scripts/provider/scheduled_acceptance.py run
+          --mode "$ACCEPTANCE_MODE"
+          --ledger artifacts/scheduled-provider-effects.sqlite3
+          --dataset-lifecycle-receipt artifacts/dataset-canary.json
+          --notebook-lifecycle-receipt artifacts/notebook-canary.json
+          --receipt artifacts/scheduled-provider-real.json
+
+      - name: Upload durable staged controller state and non-secret receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-real-controller-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/controller/
+            artifacts/operational-kaggle-matrix.json
+            artifacts/operational-kaggle-plan.json
+            artifacts/operational-kaggle-scenarios/
+            artifacts/scheduled-provider-real.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Preserve matrix terminal status after artifact upload
+        if: always()
+        env:
+          MATRIX_EXIT_CODE: ${{ steps.operational_matrix.outputs.exit_code }}
+        run: |
+          status="${MATRIX_EXIT_CODE:-1}"
+          if [[ "$status" == 78 ]] && find artifacts/operational-kaggle-scenarios -name '*.owner-pause.json' -print -quit | grep -q .; then
+            echo 'FM16 is durably paused; dispatch a continuation with fm16_resume_authorized=true.' >&2
+          fi
+          exit "$status"

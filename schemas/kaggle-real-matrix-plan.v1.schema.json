@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/kaggle-real-matrix-plan.v1.schema.json",
+  "title": "Stable real Kaggle scenario matrix plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "matrix_id", "commit_sha", "created_at", "minimum_real_runs", "scenarios"],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-real-kaggle-matrix-plan.v1"},
+    "matrix_id": {"type": "string", "format": "uuid"},
+    "commit_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "minimum_real_runs": {"const": 15},
+    "scenarios": {
+      "type": "array",
+      "minItems": 15,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ordinal", "name", "category", "variant", "fault_probe", "checkpoint_bound",
+          "task_id", "task_run_id", "work_item_id", "subject_id", "checkpoint_id",
+          "checkpoint_manifest_sha256"
+        ],
+        "properties": {
+          "ordinal": {"type": "integer", "minimum": 1, "maximum": 100},
+          "name": {"type": "string", "pattern": "^[a-z0-9-]+$", "maxLength": 100},
+          "category": {"enum": ["baseline", "identity", "retry", "resume", "idempotency", "fault", "checkpoint", "contract", "soak"]},
+          "variant": {"type": "string", "pattern": "^[a-z0-9-]+$", "maxLength": 100},
+          "fault_probe": {"type": ["string", "null"]},
+          "checkpoint_bound": {"type": "boolean"},
+          "task_id": {"type": "string", "format": "uuid"},
+          "task_run_id": {"type": "string", "format": "uuid"},
+          "work_item_id": {"type": "string", "format": "uuid"},
+          "subject_id": {"type": "string", "format": "uuid"},
+          "checkpoint_id": {"type": ["string", "null"], "format": "uuid"},
+          "checkpoint_manifest_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"checkpoint_bound": {"const": true}}},
+            "then": {
+              "properties": {
+                "checkpoint_id": {"type": "string", "format": "uuid"},
+                "checkpoint_manifest_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+              }
+            },
+            "else": {
+              "properties": {
+                "checkpoint_id": {"type": "null"},
+                "checkpoint_manifest_sha256": {"type": "null"}
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

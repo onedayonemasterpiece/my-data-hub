@@ -16,6 +16,15 @@ MAX_SAFE_JSON_INTEGER = (2**53) - 1
 TraceValue = Annotated[str, Field(max_length=1000)]
 
 
+class DeliveryMode(StrEnum):
+    """The single connector delivery-mode vocabulary used by envelope and registry."""
+
+    PUSH = "push"
+    PULL = "pull"
+    ARTIFACT_HANDOFF = "artifact_handoff"
+    TRUSTED_DATABASE_LANDING = "trusted_database_landing"
+
+
 class ConnectorContractError(ValueError):
     """The submitted bytes do not satisfy the versioned connector contract."""
 
@@ -179,7 +188,7 @@ class ConnectorEnvelope(BaseModel):
     produced_at: datetime
     observed_period: ObservedPeriod
     source_cursor: SourceCursor | None = None
-    delivery_mode: Literal["push", "pull", "artifact_handoff", "trusted_database_landing"]
+    delivery_mode: DeliveryMode
     record_count: int = Field(ge=0, le=10_000_000)
     payload_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     inline_records: list[dict[str, Any]] | None = Field(default=None, max_length=10_000)
@@ -289,3 +298,119 @@ class ConnectorReceipt(BaseModel):
         if self.accepted_at.tzinfo is None:
             raise ValueError("accepted_at must include a timezone offset")
         return self
+
+
+class ConnectorDurabilityState(StrEnum):
+    ACCEPTED = "ACCEPTED"
+    CANONICAL_COMMITTED = "CANONICAL_COMMITTED"
+    CHECKPOINT_REQUESTED = "CHECKPOINT_REQUESTED"
+    CHECKPOINTING = "CHECKPOINTING"
+    DURABLE_COMPLETE = "DURABLE_COMPLETE"
+    FAILED = "FAILED"
+
+
+class ConnectorDurabilityReceipt(BaseModel):
+    """Producer-visible proof from acceptance through verified private checkpoint."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["my-data-hub-connector-durability-receipt.v1"] = (
+        "my-data-hub-connector-durability-receipt.v1"
+    )
+    state: ConnectorDurabilityState
+    acceptance: ConnectorReceipt
+    canonical_revision: int | None = Field(default=None, ge=1)
+    checkpoint_request_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    checkpoint_operation_id: str | None = Field(default=None, min_length=1, max_length=300)
+    checkpoint_receipt_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    checkpoint_id: str | None = Field(default=None, min_length=1, max_length=300)
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def lifecycle_is_complete(self) -> ConnectorDurabilityReceipt:
+        if self.updated_at.tzinfo is None:
+            raise ValueError("updated_at must include a timezone offset")
+        after_acceptance = self.state is not ConnectorDurabilityState.ACCEPTED
+        if after_acceptance != (self.canonical_revision is not None):
+            raise ValueError("post-acceptance durability requires canonical_revision")
+        checkpoint_started = self.state in {
+            ConnectorDurabilityState.CHECKPOINT_REQUESTED,
+            ConnectorDurabilityState.CHECKPOINTING,
+            ConnectorDurabilityState.DURABLE_COMPLETE,
+            ConnectorDurabilityState.FAILED,
+        }
+        if checkpoint_started != (
+            self.checkpoint_request_id is not None and self.checkpoint_operation_id is not None
+        ):
+            raise ValueError("checkpoint lifecycle requires exact request and operation identities")
+        durable = self.state is ConnectorDurabilityState.DURABLE_COMPLETE
+        if durable != (
+            self.checkpoint_receipt_sha256 is not None and self.checkpoint_id is not None
+        ):
+            raise ValueError("DURABLE_COMPLETE requires a verified checkpoint receipt")
+        return self
+
+
+class ConnectorCheckpointState(StrEnum):
+    REQUESTED = "REQUESTED"
+    RUNNING = "RUNNING"
+    DURABLE_COMPLETE = "DURABLE_COMPLETE"
+    FAILED = "FAILED"
+    FENCED = "FENCED"
+    ORPHANED = "ORPHANED"
+
+
+class ConnectorCheckpointRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["my-data-hub-connector-checkpoint-request.v1"] = (
+        "my-data-hub-connector-checkpoint-request.v1"
+    )
+    request_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    connector_id: str
+    batch_id: UUID
+    canonical_revision: int = Field(ge=1)
+    payload_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    envelope_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    def exact_sha256(self) -> str:
+        return sha256_bytes(canonical_json_bytes(self.model_dump(mode="json")))
+
+
+class ConnectorCheckpointStatusReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["my-data-hub-connector-checkpoint-status.v1"] = (
+        "my-data-hub-connector-checkpoint-status.v1"
+    )
+    request_id: str = Field(pattern=r"^[a-f0-9]{64}$")
+    operation_id: str = Field(min_length=1, max_length=300)
+    state: ConnectorCheckpointState
+    canonical_revision: int = Field(ge=1)
+    checkpoint_id: str | None = Field(default=None, min_length=1, max_length=300)
+    manifest_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    verified_at: datetime | None = None
+    failure_code: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def terminal_fields_match_state(self) -> ConnectorCheckpointStatusReceipt:
+        durable = self.state is ConnectorCheckpointState.DURABLE_COMPLETE
+        if durable != (
+            self.checkpoint_id is not None
+            and self.manifest_sha256 is not None
+            and self.verified_at is not None
+        ):
+            raise ValueError("DURABLE_COMPLETE checkpoint status requires verified checkpoint evidence")
+        if self.verified_at is not None and self.verified_at.tzinfo is None:
+            raise ValueError("verified_at must include a timezone offset")
+        failed = self.state in {
+            ConnectorCheckpointState.FAILED,
+            ConnectorCheckpointState.FENCED,
+            ConnectorCheckpointState.ORPHANED,
+        }
+        if failed != (self.failure_code is not None):
+            raise ValueError("terminal checkpoint failure requires failure_code")
+        return self
+
+    def exact_sha256(self) -> str:
+        return sha256_bytes(canonical_json_bytes(self.model_dump(mode="json", exclude_none=True)))

@@ -1,0 +1,130 @@
+mode: phased_fanout_then_serial_integration
+repo: onedayonemasterpiece/my-data-hub
+base_ref: de657d63e4662e69dfb7169bc67aa65e8a9bda71
+base_branch: main
+integration_branch: integration/operational-mvp
+global_constraints:
+  - no local production PostgreSQL/PGDATA/canonical rows
+  - exact source bytes immutable
+  - Region Talk production pipeline paused and publication disabled
+  - no public Kaggle resource or public PostgreSQL endpoint
+  - only read-only YDB access
+  - secrets never enter Git, receipts, logs, or chat
+verification_owner: root
+stop_conditions:
+  - destructive action targets an unregistered or foreign resource
+  - source credential cannot be proven read-only
+  - an operation would enable publication or full Region Talk cutover
+lanes:
+  - id: L01-provider
+    role: worker
+    requirement_ids: [R02, R05, R13]
+    target: donor compatibility, one Kaggle adapter, real provider matrix
+    depends_on: [discovery]
+    execution_mode: serial_after_dependency
+    branch: agent/operational-mvp/l01-provider
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-l01-provider
+    writable_files: [src/my_data_hub/providers/**, scripts/provider/**, tests/provider/**, .codex/lanes/L01-provider/**]
+    forbidden_files: [sql/migrations/**, src/my_data_hub/mcp/**, deploy/**]
+    expected_output: committed provider implementation and real-run receipts
+    verification_scope: targeted_and_real_provider
+    effort: xhigh
+    status: read_only_discovery
+  - id: L02-control-runtime
+    role: worker
+    requirement_ids: [R03, R04]
+    target: SQLite control ledger, FakeKaggle, orchestrator core, runtime SDK and generators
+    depends_on: [discovery]
+    execution_mode: serial_after_dependency
+    branch: agent/operational-mvp/l02-control-runtime
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-l02-control-runtime
+    writable_files: [src/my_data_hub/control/**, src/my_data_hub/runtime/**, src/my_data_hub/orchestrator/**, tests/control/**, tests/runtime/**, notebooks/templates/**, .codex/lanes/L02-control-runtime/**]
+    forbidden_files: [sql/migrations/**, src/my_data_hub/mcp/**, deploy/**]
+    expected_output: committed deterministic state-machine/runtime implementation
+    verification_scope: full_local
+    effort: xhigh
+    status: read_only_discovery
+  - id: L03-master
+    role: worker
+    requirement_ids: [R06]
+    target: master runtime, direct tunnel, fencing, checkpoint and recovery
+    depends_on: [L01-provider, L02-control-runtime]
+    execution_mode: read_only_until_dependency
+    branch: agent/operational-mvp/l03-master
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-l03-master
+    writable_files: [src/my_data_hub/master/**, notebooks/templates/postgres_master/**, scripts/master/**, tests/master/**, .codex/lanes/L03-master/**]
+    forbidden_files: [src/my_data_hub/mcp/**, deploy/**]
+    expected_output: committed master/tunnel/checkpoint implementation and evidence
+    verification_scope: targeted_and_real_provider
+    effort: xhigh
+    status: read_only_discovery
+  - id: L04-mcp-oauth
+    role: worker
+    requirement_ids: [R07]
+    target: master resolver/broker MCP, OAuth and guarded durable writes
+    depends_on: [L02-control-runtime, L03-master]
+    execution_mode: read_only_until_dependency
+    branch: agent/operational-mvp/l04-mcp-oauth
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-l04-mcp-oauth
+    writable_files: [src/my_data_hub/mcp/**, tests/mcp/**, schemas/mcp/**, .codex/lanes/L04-mcp-oauth/**]
+    forbidden_files: [deploy/**, sql/migrations/**]
+    expected_output: committed MCP/OAuth implementation and client tests
+    verification_scope: full_local_and_remote
+    effort: xhigh
+    status: read_only_discovery
+  - id: L05-ydb-bloggers
+    role: worker
+    requirement_ids: [R08]
+    target: read-only YDB inventory, full blogger mapping/accounting and connector
+    depends_on: [L02-control-runtime, L03-master]
+    execution_mode: read_only_until_dependency
+    branch: agent/operational-mvp/l05-ydb-bloggers
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-l05-ydb-bloggers
+    writable_files: [src/my_data_hub/workloads/bloggers/**, scripts/bloggers/**, schemas/bloggers/**, tests/bloggers/**, docs/migrations/bloggers/**, .codex/lanes/L05-ydb-bloggers/**]
+    forbidden_files: [deploy/**, src/my_data_hub/mcp/**]
+    expected_output: committed importer/connector and private accounting receipts
+    verification_scope: targeted_and_read_only_source
+    effort: xhigh
+    status: read_only_discovery
+  - id: L06-embeddings
+    role: worker
+    requirement_ids: [R09]
+    target: E5/BGE-M3 workers, model registry, vector imports and RRF
+    depends_on: [L05-ydb-bloggers]
+    execution_mode: read_only_until_dependency
+    branch: agent/operational-mvp/l06-embeddings
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-l06-embeddings
+    writable_files: [src/my_data_hub/embeddings/**, notebooks/templates/e5/**, notebooks/templates/bge/**, tests/embeddings/**, .codex/lanes/L06-embeddings/**]
+    forbidden_files: [deploy/**, src/my_data_hub/mcp/**]
+    expected_output: committed model/vector/RRF implementation and benchmarks
+    verification_scope: targeted_and_real_provider
+    effort: high
+    status: read_only_discovery
+  - id: ROOT-integration-deploy
+    role: integrator
+    requirement_ids: [R01, R10, R11, R14]
+    target: shared contracts/migrations, integration, CI, deploy and evidence
+    depends_on: [all_workers]
+    execution_mode: serial
+    branch: integration/operational-mvp
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-mvp
+    writable_files: ['**']
+    forbidden_files: [docs/source-material/idea-hub/idea-20260809-content-platform-current-design.md]
+    expected_output: merged implementation PR and deployed merge commit
+    verification_scope: full_local_ci_remote
+    effort: xhigh
+    status: active
+  - id: FINAL-review
+    role: reviewer
+    requirement_ids: [R12]
+    target: exact-head red-team architecture/security/data-integrity audit
+    depends_on: [ROOT-integration-deploy]
+    execution_mode: serial_after_dependency
+    branch: read_only
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-mvp
+    writable_files: []
+    forbidden_files: ['**']
+    expected_output: zero Critical/High and merge verdict
+    verification_scope: full_local_ci_remote
+    effort: xhigh
+    status: planned

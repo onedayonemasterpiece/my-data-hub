@@ -1,0 +1,10 @@
+{
+  "schema_version": "my-data-hub-data-workload-production-config.v1",
+  "control_base_url": "http://127.0.0.1:8080",
+  "mcp_endpoint": "https://mcp-datahub.kenigevents.ru/mcp",
+  "blogger_v1_operation_id": "00000000-0000-4000-8000-000000000016",
+  "blogger_v2_operation_id": "00000000-0000-4000-8000-000000000026",
+  "probe_query": "Калининград",
+  "timeout_seconds": 3600,
+  "poll_seconds": 10.0
+}

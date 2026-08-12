@@ -1,0 +1,74 @@
+name: nightly
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '41 1 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-control-plane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      MY_DATA_HUB_MCP_CANARY_ENDPOINT: ${{ vars.MY_DATA_HUB_MCP_CANARY_ENDPOINT || 'https://mcp-datahub.kenigevents.ru/mcp' }}
+      MY_DATA_HUB_MCP_CANARY_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_CANARY_TOKEN }}
+      MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN }}
+      MY_DATA_HUB_MCP_PROVIDER_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_PROVIDER_OPERATOR_TOKEN }}
+      MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT: ${{ vars.MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e '.[dev,kaggle]'
+      - name: Validate architecture and generated notebooks
+        run: |
+          python scripts/validate_repository.py
+          python scripts/create_notebooks.py --check
+      - name: Run deterministic orchestration, checkpoint and OAuth/MCP faults
+        run: >-
+          pytest -q
+          tests/control
+          tests/master/test_checkpoint.py
+          tests/master/test_fencing.py
+          tests/mcp
+          tests/provider
+      - name: Prove no local master state was created
+        shell: bash
+        run: |
+          test ! -e .state/postgres
+          test ! -e pgdata
+      - name: Write nightly receipt
+        if: always()
+        run: >-
+          python scripts/write_workflow_receipt.py
+          --workflow nightly-control-plane --environment ci
+          --outcome "${{ job.status == 'success' && 'PASS' || 'FAIL' }}"
+          --observed "deterministic control/fencing/checkpoint/MCP/provider suite; no local PGDATA"
+          --output artifacts/nightly.json
+      - name: Upload receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/nightly.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Run live nightly scheduled acceptance
+        run: >-
+          python scripts/provider/scheduled_acceptance.py run
+          --mode nightly
+          --ledger artifacts/scheduled-provider-effects.sqlite3
+          --receipt artifacts/scheduled-nightly.json
+      - name: Upload sanitized scheduled receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduled-nightly-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/scheduled-nightly.json
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/provider/operational-kaggle-driver-request.v1.schema.json",
+  "title": "Operational driver request v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "matrix_id", "commit_sha", "ordinal", "requirement_id", "scenario", "task_run_id", "required_assertions", "lifecycle_gates", "minimum_soak_seconds", "maximum_soak_seconds", "result_file", "resume_only"],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-operational-kaggle-driver-request.v1"},
+    "matrix_id": {"type": "string", "format": "uuid"}, "commit_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "ordinal": {"type": "integer", "minimum": 1, "maximum": 24}, "requirement_id": {"type": "string", "pattern": "^FM(0[1-9]|1[0-9]|2[0-4])$"},
+    "scenario": {"type": "string", "pattern": "^[a-z0-9-]+$"}, "task_run_id": {"type": "string", "format": "uuid"},
+    "required_assertions": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9_]+$"}},
+    "lifecycle_gates": {"type": "array", "uniqueItems": true, "items": {"enum": ["master_boot", "clean_rotation", "abrupt_master_termination", "control_plane_restart", "host_reboot", "soak"]}},
+    "minimum_soak_seconds": {"type": ["integer", "null"], "minimum": 3600, "maximum": 3600}, "maximum_soak_seconds": {"type": ["integer", "null"], "minimum": 5400, "maximum": 5400},
+    "result_file": {"const": "operational-result.json"}, "resume_only": {"type": "boolean"}
+  }
+}

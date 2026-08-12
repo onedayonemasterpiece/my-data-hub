@@ -84,6 +84,8 @@ Region Talk batch scope and scope-complete normalized/deduplicated targets under
 - [`operations/backup-and-recovery.md`](operations/backup-and-recovery.md)
 - [`operations/observability.md`](operations/observability.md)
 - [`operations/secrets.md`](operations/secrets.md)
+- [`operations/2026-08-11-operational-mvp-progress.md`](operations/2026-08-11-operational-mvp-progress.md) —
+  sanitized proof index and exact external blocker; not an acceptance claim.
 
 ## Release, delivery and handoff
 

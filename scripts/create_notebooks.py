@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ import nbformat
 
 ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK_ROOT = ROOT / "notebooks"
+TEMPLATE_ROOT = NOTEBOOK_ROOT / "templates"
+EMBEDDING_ASSET_ROOT = ROOT / "src" / "my_data_hub" / "embeddings" / "assets"
 
 NOTEBOOK_README = """# Notebook workers
 
@@ -28,12 +31,24 @@ A worker receives `MY_DATA_HUB_NOTEBOOK_INPUT_MANIFEST` and writes
 but it may not connect to canonical PostgreSQL, mutate YDB, publish to Telegram/VK or
 advance a queue cursor. The local reconciler validates and commits results.
 
-`00-platform-smoke` and `80-region-talk-migration-reconciliation` have implemented adapters.
+`01` through `06` are the operational MVP notebooks generated from reviewed Python templates.
+They remain marked `production_ready=false` until an exact real-provider receipt proves the
+source, input versions, privacy and terminal output. `00-platform-smoke` and
+`80-region-talk-migration-reconciliation` have implemented legacy typed-worker adapters.
 Other Region Talk notebooks contain complete contract, accounting, error and atomic-output
 plumbing; their `process_item()` adapters intentionally fail with
 `PROCESSOR_ADAPTER_NOT_PORTED` until code is adapted from an exact donor revision and covered
 by golden fixtures. A placeholder notebook therefore cannot be mistaken for a working
 production stage.
+
+Every operational notebook also fails before installing or executing code unless a hashed
+`my-data-hub-notebook-execution-pins/v1` manifest binds the exact CPython patch version,
+immutable Kaggle image digest, numeric private Dataset versions, task wheel and embedded source
+hashes, output contract, model revision (when applicable), resource class, and cleanup/retention
+policy. Launch-time values are used because Dataset versions and the Kaggle image are provider
+observations, not values this repository may invent. The checked-in metadata declares the full
+contract and remains private and `production_ready=false` until the control plane supplies and
+attests those exact values.
 
 ## Activation gate
 
@@ -51,6 +66,101 @@ class NotebookSpec:
     contracts: dict[str, str]
     model: dict[str, str]
     adapter: Literal["smoke", "migration_reconciliation", "pending"] = "pending"
+
+
+@dataclass(frozen=True, slots=True)
+class OperationalNotebookSpec:
+    """One deterministic, private operational notebook built from Python source.
+
+    The Python module is the primary source.  The generated ipynb only installs
+    an exact task wheel from a private Kaggle input and invokes ``main()``.  This
+    keeps reviewable code out of notebook JSON and makes drift mechanically
+    detectable.
+    """
+
+    directory: str
+    title: str
+    purpose: str
+    template: str
+    runtime_contract: str
+    resource_class: Literal["orchestrator_protected"] = "orchestrator_protected"
+    enable_internet: bool = False
+    model_id: str | None = None
+    model_revision: str | None = None
+    timeout_seconds: int = 1_800
+    canonical_write_allowed: bool = False
+    external_side_effects_allowed: bool = True
+
+
+OPERATIONAL_CLEANUP_RETENTION_POLICY = {
+    "cleanup_receipt_required": True,
+    "notebook_resource": "orchestrator_protected_until_owner_supersedes",
+    "run_outputs": "retain_until_terminal_receipt_then_control_policy",
+    "task_owned_inputs": "claim_bound_delete_after_terminal_or_expiry",
+}
+EXECUTION_PINS_SCHEMA = "my-data-hub-notebook-execution-pins/v1"
+SUPPORTED_PYTHON_SERIES = "3.12"
+
+
+OPERATIONAL_SPECS: tuple[OperationalNotebookSpec, ...] = (
+    OperationalNotebookSpec(
+        "01-platform-runtime-smoke",
+        "01 Platform runtime smoke",
+        "Exercise callback retry, heartbeat, local JSONL replay and a bound terminal receipt.",
+        "runtime_smoke/runtime.py",
+        "my-data-hub-platform-runtime-smoke.v1",
+        timeout_seconds=600,
+    ),
+    OperationalNotebookSpec(
+        "02-postgres-master",
+        "02 PostgreSQL 18 master",
+        "Run the single epoch-fenced PostgreSQL primary inside /kaggle/working.",
+        "postgres_master/runtime.py",
+        "my-data-hub-postgres-master.v1",
+        # Leave the provider hard-cutoff reserve declared in runtime_sdk.lifetime.
+        timeout_seconds=42_300,
+        canonical_write_allowed=True,
+    ),
+    OperationalNotebookSpec(
+        "03-checkpoint-verifier-restore-smoke",
+        "03 Checkpoint verifier restore smoke",
+        "Independently verify and restore an exact private checkpoint candidate.",
+        "checkpoint_verifier/runtime.py",
+        "my-data-hub-checkpoint-restore-smoke.v1",
+        timeout_seconds=3_600,
+    ),
+    OperationalNotebookSpec(
+        "04-region-talk-ydb-bloggers-importer",
+        "04 Region Talk YDB bloggers importer",
+        "Stream the exact read-only YDB snapshot directly into the ACTIVE master.",
+        "blogger_importer/runtime.py",
+        "region-talk-ydb-bloggers-import.v1",
+        timeout_seconds=3_600,
+        canonical_write_allowed=True,
+    ),
+    OperationalNotebookSpec(
+        "05-e5-blogger-embedding-worker",
+        "05 E5 blogger embedding worker",
+        "Encode one exact job artifact in the isolated 768-dimensional E5 space.",
+        "embedding_workers/e5_runtime.py",
+        "my-data-hub-blogger-embedding-artifact.v1",
+        enable_internet=True,
+        model_id="intfloat/multilingual-e5-base",
+        model_revision="d128750597153bb5987e10b1c3493a34e5a4502a",
+        timeout_seconds=7_200,
+    ),
+    OperationalNotebookSpec(
+        "06-bge-m3-blogger-embedding-worker",
+        "06 BGE-M3 blogger embedding worker",
+        "Encode one exact job artifact in the isolated 1024-dimensional BGE-M3 space.",
+        "embedding_workers/bge_m3_runtime.py",
+        "my-data-hub-blogger-embedding-artifact.v1",
+        enable_internet=True,
+        model_id="BAAI/bge-m3",
+        model_revision="5617a9f61b028005a4858fdac845db406aefb181",
+        timeout_seconds=10_800,
+    ),
+)
 
 
 SPECS: tuple[NotebookSpec, ...] = (
@@ -382,8 +492,391 @@ def kernel_metadata(spec: NotebookSpec) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
+def _operational_source(spec: OperationalNotebookSpec) -> str:
+    path = TEMPLATE_ROOT / spec.template
+    source = path.read_text(encoding="utf-8")
+    if "def main(" not in source:
+        raise ValueError(f"operational template has no main(): {spec.template}")
+    return source
+
+
+def build_operational_notebook(spec: OperationalNotebookSpec):  # type: ignore[no-untyped-def]
+    source = _operational_source(spec)
+    source_sha256 = hashlib.sha256(source.encode()).hexdigest()
+    embedding_dependency_assets = (
+        ["embedding_dependency_manifest_sha256", "embedding_dependency_smoke_receipt_sha256"]
+        if spec.model_id is not None
+        else []
+    )
+    pin_contract = {
+        "schema": EXECUTION_PINS_SCHEMA,
+        "notebook": spec.directory,
+        "supported_python_series": SUPPORTED_PYTHON_SERIES,
+        "kaggle_runtime_image_identity": "required-immutable-sha256-at-launch",
+        "input_dataset_versions": "required-exact-numeric-private-refs-at-launch",
+        "immutable_assets": [
+            "my_data_hub_wheel_sha256", "primary_source_sha256", *embedding_dependency_assets
+        ],
+        "output_contract": spec.runtime_contract,
+        "model": (
+            {"id": spec.model_id, "revision": spec.model_revision}
+            if spec.model_id is not None
+            else None
+        ),
+        "privacy": "private",
+        "resource_class": spec.resource_class,
+        "cleanup_retention_policy": OPERATIONAL_CLEANUP_RETENTION_POLICY,
+    }
+    dependency_hash_bootstrap = ""
+    dependency_bootstrap = ""
+    dependency_import = ""
+    project_install_index_option = ""
+    if spec.model_id is not None:
+        project_install_index_option = "'--no-index', "
+        dependency_import = "import importlib.metadata\n"
+        dependency_hash_bootstrap = (
+            "expected_dependency_sha = os.environ.get(\n"
+            "    'MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_SHA256', ''\n"
+            ")\n"
+            "expected_smoke_sha = os.environ.get(\n"
+            "    'MY_DATA_HUB_EMBEDDING_DEPENDENCY_SMOKE_RECEIPT_SHA256', ''\n"
+            ")\n"
+            "if (not re.fullmatch(r'[a-f0-9]{64}', expected_dependency_sha) or\n"
+            "        not re.fullmatch(r'[a-f0-9]{64}', expected_smoke_sha)):\n"
+            "    raise RuntimeError('embedding dependency hashes are required')\n"
+            "expected_assets.update({\n"
+            "    'embedding_dependency_manifest_sha256': expected_dependency_sha,\n"
+            "    'embedding_dependency_smoke_receipt_sha256': expected_smoke_sha,\n"
+            "})\n"
+        )
+        dependency_bootstrap = (
+            "dependency_manifest_path = Path(os.environ.get(\n"
+            "    'MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_PATH',\n"
+            "    str(wheel.parent / 'embedding-worker-dependencies.json'),\n"
+            "))\n"
+            "wheelhouse_path = Path(os.environ.get(\n"
+            "    'MY_DATA_HUB_EMBEDDING_WHEELHOUSE_PATH',\n"
+            "    str(wheel.parent / 'embedding-worker-wheelhouse'),\n"
+            "))\n"
+            "smoke_receipt_path = Path(os.environ.get(\n"
+            "    'MY_DATA_HUB_EMBEDDING_DEPENDENCY_SMOKE_RECEIPT_PATH', ''\n"
+            "))\n"
+            "expected_dependency_sha = pins['immutable_asset_sha256s'].get(\n"
+            "    'embedding_dependency_manifest_sha256', ''\n"
+            ")\n"
+            "expected_smoke_sha = pins['immutable_asset_sha256s'].get(\n"
+            "    'embedding_dependency_smoke_receipt_sha256', ''\n"
+            ")\n"
+            "if (not dependency_manifest_path.is_file() or dependency_manifest_path.is_symlink() or\n"
+            "        not wheelhouse_path.is_dir() or wheelhouse_path.is_symlink() or\n"
+            "        not smoke_receipt_path.is_file() or smoke_receipt_path.is_symlink() or\n"
+            "        not re.fullmatch(r'[a-f0-9]{64}', expected_dependency_sha) or\n"
+            "        not re.fullmatch(r'[a-f0-9]{64}', expected_smoke_sha)):\n"
+            "    raise RuntimeError('verified offline embedding dependency inputs are required')\n"
+            "dependency_body = dependency_manifest_path.read_bytes()\n"
+            "smoke_body = smoke_receipt_path.read_bytes()\n"
+            "if hashlib.sha256(dependency_body).hexdigest() != expected_dependency_sha:\n"
+            "    raise RuntimeError('embedding dependency manifest hash mismatch')\n"
+            "if hashlib.sha256(smoke_body).hexdigest() != expected_smoke_sha:\n"
+            "    raise RuntimeError('embedding dependency smoke receipt hash mismatch')\n"
+            "dependencies = json.loads(dependency_body)\n"
+            "smoke = json.loads(smoke_body)\n"
+            "if dependency_body != json.dumps(\n"
+            "        dependencies, sort_keys=True, separators=(',', ':'), ensure_ascii=False\n"
+            "    ).encode():\n"
+            "    raise RuntimeError('embedding dependency manifest is not canonical JSON')\n"
+            "if smoke_body != json.dumps(\n"
+            "        smoke, sort_keys=True, separators=(',', ':'), ensure_ascii=False\n"
+            "    ).encode():\n"
+            "    raise RuntimeError('embedding dependency smoke receipt is not canonical JSON')\n"
+            "dependency_keys = {\n"
+            "    'schema_version', 'source_lock_sha256', 'index_url', 'runtime',\n"
+            "    'install_order', 'required_image_distributions', 'wheels',\n"
+            "    'smoke_requirement',\n"
+            "}\n"
+            "if (not isinstance(dependencies, dict) or set(dependencies) != dependency_keys or\n"
+            "        dependencies['schema_version'] !=\n"
+            "        'my-data-hub-embedding-worker-dependencies.v1' or\n"
+            "        dependencies['runtime'].get('image_identity') != image_identity or\n"
+            "        dependencies['runtime'].get('source_commit') != source_commit or\n"
+            "        dependencies['runtime'].get('python_abi') != 'cp312' or\n"
+            "        dependencies['runtime'].get('platform') != 'manylinux2014_x86_64'):\n"
+            "    raise RuntimeError('embedding dependency manifest runtime differs')\n"
+            "wheels = dependencies['wheels']\n"
+            "required_image_distributions = dependencies['required_image_distributions']\n"
+            "smoke_requirement = dependencies['smoke_requirement']\n"
+            "if (not isinstance(wheels, list) or not wheels or\n"
+            "        not isinstance(required_image_distributions, list) or\n"
+            "        not required_image_distributions or\n"
+            "        len(required_image_distributions) != len(set(required_image_distributions)) or\n"
+            "        not isinstance(smoke_requirement, dict) or\n"
+            "        smoke_requirement.get('schema_version') !=\n"
+            "        'my-data-hub-embedding-dependency-smoke-receipt.v1' or\n"
+            "        smoke_requirement.get('observation_schema_version') !=\n"
+            "        'my-data-hub-embedding-dependency-smoke-observation.v1' or\n"
+            "        smoke_requirement.get('receipt_source') !=\n"
+            "        'central-provider-exact-private-kaggle-run' or\n"
+            "        smoke_requirement.get('worker_admission') !=\n"
+            "        'deny-without-verified-receipt' or\n"
+            "        smoke_requirement.get('required') is not True or\n"
+            "        dependencies['install_order'] != [item.get('filename') for item in wheels]):\n"
+            "    raise RuntimeError('embedding dependency install order is invalid')\n"
+            "expected_wheel_hashes = {item['filename']: item['sha256'] for item in wheels}\n"
+            "if ({path.name for path in wheelhouse_path.iterdir()} != set(expected_wheel_hashes) or\n"
+            "        any(path.is_symlink() or not path.is_file() for path in wheelhouse_path.iterdir())):\n"
+            "    raise RuntimeError('embedding wheelhouse inventory differs from manifest')\n"
+            "smoke_keys = {\n"
+            "    'schema_version', 'status', 'observed_at', 'provider_run_ref',\n"
+            "    'observation_sha256', 'image_identity',\n"
+            "    'image_source_commit', 'python_version', 'dependency_manifest_sha256',\n"
+            "    'project_wheel_sha256', 'wheel_sha256s', 'imports',\n"
+            "    'psycopg_implementation', 'distributions', 'notebook_private',\n"
+            "    'internet_enabled', 'verified_by_central_adapter',\n"
+            "}\n"
+            "if (not isinstance(smoke, dict) or set(smoke) != smoke_keys or\n"
+            "        smoke['schema_version'] !=\n"
+            "        'my-data-hub-embedding-dependency-smoke-receipt.v1' or\n"
+            "        smoke['status'] != 'pass' or smoke['image_identity'] != image_identity or\n"
+            "        smoke['image_source_commit'] != source_commit or\n"
+            "        not str(smoke['python_version']).startswith(pins['python_series'] + '.') or\n"
+            "        smoke['dependency_manifest_sha256'] != expected_dependency_sha or\n"
+            "        smoke['project_wheel_sha256'] != expected_wheel_sha or\n"
+            "        smoke['wheel_sha256s'] != expected_wheel_hashes or\n"
+            "        smoke['imports'] != dependencies['smoke_requirement']['imports'] or\n"
+            "        smoke['psycopg_implementation'] != 'binary' or\n"
+            "        not isinstance(smoke['distributions'], dict) or\n"
+            "        smoke['notebook_private'] is not True or smoke['internet_enabled'] is not False or\n"
+            "        smoke['verified_by_central_adapter'] is not True or\n"
+            "        not re.fullmatch(r'[a-f0-9]{64}', str(smoke['observation_sha256'])) or\n"
+            "        not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*',\n"
+            "                         str(smoke['provider_run_ref']))):\n"
+            "    raise RuntimeError('embedding dependency smoke receipt is not verified')\n"
+            "for item in wheels:\n"
+            "    dependency_wheel = wheelhouse_path / item['filename']\n"
+            "    if hashlib.sha256(dependency_wheel.read_bytes()).hexdigest() != item['sha256']:\n"
+            "        raise RuntimeError('embedding dependency wheel hash mismatch')\n"
+            "    subprocess.run(\n"
+            "        [sys.executable, '-m', 'pip', 'install', '--no-index', '--no-deps',\n"
+            "         '--disable-pip-version-check', str(dependency_wheel)], check=True\n"
+            "    )\n"
+            "for distribution in [\n"
+            "        *required_image_distributions,\n"
+            "        *(item['distribution'] for item in wheels),\n"
+            "    ]:\n"
+            "    if smoke['distributions'].get(distribution) != importlib.metadata.version(distribution):\n"
+            "        raise RuntimeError('embedding dependency smoke version differs from runtime')\n"
+        )
+    nb = nbformat.v4.new_notebook()
+    nb.nbformat = 4
+    nb.nbformat_minor = 5
+    nb.metadata = {
+        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+        "language_info": {"name": "python", "version": "3.12"},
+        "my_data_hub": {
+            "contracts": {},
+            "runtime_contract": spec.runtime_contract,
+            "primary_source": f"notebooks/templates/{spec.template}",
+            "primary_source_sha256": source_sha256,
+            "privacy": "private",
+            "resource_class": spec.resource_class,
+            "canonical_database_location": "kaggle-notebook-only",
+            "embedded_secrets": False,
+            "canonical_write_allowed": spec.canonical_write_allowed,
+            "external_side_effects_allowed": spec.external_side_effects_allowed,
+            "timeout_seconds": spec.timeout_seconds,
+            "model_id": spec.model_id,
+            "model_revision": spec.model_revision,
+            "execution_pin_contract": pin_contract,
+            "activation_prerequisites_satisfied": False,
+        },
+    }
+    nb.cells = [
+        _cell(
+            "markdown",
+            f"# {spec.title}\n\n{spec.purpose}\n\n"
+            "This private `orchestrator_protected` notebook is generated from a reviewed Python "
+            "template. It receives exact input versions and secrets through Kaggle runtime inputs; "
+            "no credential is embedded in this notebook or written to its output.",
+            "intro",
+        ),
+        _cell(
+            "code",
+            "from __future__ import annotations\n\n"
+            "import hashlib\n"
+            f"{dependency_import}"
+            "import json\n"
+            "import os\n"
+            "import platform\n"
+            "import re\n"
+            "import subprocess\n"
+            "import sys\n"
+            "from pathlib import Path\n\n"
+            f"EXPECTED_SOURCE_SHA256 = {source_sha256!r}\n"
+            f"RUNTIME_CONTRACT = {spec.runtime_contract!r}\n"
+            f"PIN_CONTRACT = {pin_contract!r}\n"
+            "pin_path = Path(os.environ.get('MY_DATA_HUB_EXECUTION_PINS_PATH', ''))\n"
+            "expected_pin_sha = os.environ.get('MY_DATA_HUB_EXECUTION_PINS_SHA256', '')\n"
+            "if not pin_path.is_file() or not re.fullmatch(r'[a-f0-9]{64}', expected_pin_sha):\n"
+            "    raise RuntimeError('hashed execution pins manifest is required')\n"
+            "pin_bytes = pin_path.read_bytes()\n"
+            "if hashlib.sha256(pin_bytes).hexdigest() != expected_pin_sha:\n"
+            "    raise RuntimeError('execution pins manifest hash mismatch')\n"
+            "pins = json.loads(pin_bytes)\n"
+            "required_pin_keys = {\n"
+            "    'schema', 'notebook', 'python_series', 'image_source_commit',\n"
+            "    'kaggle_runtime_image_identity',\n"
+            "    'input_dataset_versions', 'immutable_asset_sha256s', 'output_contract',\n"
+            "    'model', 'privacy', 'resource_class', 'cleanup_retention_policy',\n"
+            "}\n"
+            "if not isinstance(pins, dict) or set(pins) != required_pin_keys:\n"
+            "    raise RuntimeError('execution pins manifest keys differ from the exact contract')\n"
+            "if pins['schema'] != PIN_CONTRACT['schema'] or pins['notebook'] != PIN_CONTRACT['notebook']:\n"
+            "    raise RuntimeError('execution pins manifest targets a different notebook contract')\n"
+            "python_version = platform.python_version()\n"
+            "if (pins['python_series'] != PIN_CONTRACT['supported_python_series'] or\n"
+            "        not python_version.startswith(pins['python_series'] + '.')):\n"
+            "    raise RuntimeError('CPython series differs from execution pins')\n"
+            "source_commit = Path('/etc/git_commit').read_text().strip()\n"
+            "if (pins['image_source_commit'] != source_commit or\n"
+            "        os.environ.get('MY_DATA_HUB_KAGGLE_RUNTIME_SOURCE_COMMIT') != source_commit or\n"
+            "        not re.fullmatch(r'[a-f0-9]{40}', source_commit)):\n"
+            "    raise RuntimeError('Kaggle runtime source commit differs from execution pins')\n"
+            "image_identity = os.environ.get('MY_DATA_HUB_KAGGLE_RUNTIME_IMAGE_IDENTITY', '')\n"
+            "if (pins['kaggle_runtime_image_identity'] != image_identity or\n"
+            "        not re.fullmatch(r'[^@\\s]+@sha256:[a-f0-9]{64}', image_identity)):\n"
+            "    raise RuntimeError('immutable Kaggle runtime image identity is required')\n"
+            "dataset_versions = pins['input_dataset_versions']\n"
+            "if (not isinstance(dataset_versions, list) or not dataset_versions or\n"
+            "        any(not isinstance(ref, str) or not re.fullmatch(\n"
+            "            r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*', ref\n"
+            "        ) for ref in dataset_versions) or\n"
+            "        len(dataset_versions) != len(set(dataset_versions))):\n"
+            "    raise RuntimeError('exact numeric input Dataset versions are required')\n"
+            "try:\n"
+            "    observed_dataset_versions = json.loads(\n"
+            "        os.environ.get('MY_DATA_HUB_INPUT_DATASET_VERSIONS_JSON', '')\n"
+            "    )\n"
+            "except json.JSONDecodeError as exc:\n"
+            "    raise RuntimeError('observed input Dataset versions are required') from exc\n"
+            "if observed_dataset_versions != dataset_versions:\n"
+            "    raise RuntimeError('attached input Dataset versions differ from execution pins')\n"
+            "if os.environ.get('MY_DATA_HUB_NOTEBOOK_IS_PRIVATE') != 'true':\n"
+            "    raise RuntimeError('operational notebook must be provider-confirmed private')\n"
+            "for key in ('output_contract', 'model', 'privacy', 'resource_class', 'cleanup_retention_policy'):\n"
+            "    if pins[key] != PIN_CONTRACT[key]:\n"
+            "        raise RuntimeError(f'execution pins {key} differs from the generated contract')\n"
+            "wheel = Path(os.environ.get('MY_DATA_HUB_WHEEL_PATH', ''))\n"
+            "if not wheel.is_file() or wheel.suffix != '.whl':\n"
+            "    raise RuntimeError('exact private my-data-hub wheel input is required')\n"
+            "expected_wheel_sha = os.environ.get('MY_DATA_HUB_WHEEL_SHA256', '')\n"
+            "if (len(expected_wheel_sha) != 64 or \n"
+            "        hashlib.sha256(wheel.read_bytes()).hexdigest() != expected_wheel_sha):\n"
+            "    raise RuntimeError('my-data-hub wheel hash mismatch')\n"
+            "expected_assets = {\n"
+            "    'my_data_hub_wheel_sha256': expected_wheel_sha,\n"
+            "    'primary_source_sha256': EXPECTED_SOURCE_SHA256,\n"
+            "}\n"
+            f"{dependency_hash_bootstrap}"
+            "if pins['immutable_asset_sha256s'] != expected_assets:\n"
+            "    raise RuntimeError('immutable dependency/source asset hashes differ from execution pins')\n"
+            f"{dependency_bootstrap}"
+            "subprocess.run(\n"
+            f"    [sys.executable, '-m', 'pip', 'install', {project_install_index_option}'--no-deps', "
+            "'--disable-pip-version-check', str(wheel)],\n"
+            "    check=True,\n"
+            ")",
+            "install-exact-wheel",
+        ),
+        _cell(
+            "code",
+            f"PRIMARY_SOURCE = {source!r}\n"
+            "if hashlib.sha256(PRIMARY_SOURCE.encode()).hexdigest() != EXPECTED_SOURCE_SHA256:\n"
+            "    raise RuntimeError('embedded primary source hash mismatch')\n"
+            "exec(compile(PRIMARY_SOURCE, '<my-data-hub-primary-source>', 'exec'), globals())",
+            "primary-source",
+        ),
+        _cell("code", "raise SystemExit(globals()['main']())", "run"),
+    ]
+    nbformat.validate(nb)
+    return nb
+
+
+def operational_kernel_metadata(spec: OperationalNotebookSpec) -> str:
+    source = _operational_source(spec)
+    source_sha256 = hashlib.sha256(source.encode()).hexdigest()
+    pin_contract = {
+        "schema": EXECUTION_PINS_SCHEMA,
+        "notebook": spec.directory,
+        "supported_python_series": SUPPORTED_PYTHON_SERIES,
+        "kaggle_runtime_image_identity": "required-immutable-sha256-at-launch",
+        "input_dataset_versions": "required-exact-numeric-private-refs-at-launch",
+        "immutable_assets": [
+            "my_data_hub_wheel_sha256",
+            "primary_source_sha256",
+            *(
+                ["embedding_dependency_manifest_sha256", "embedding_dependency_smoke_receipt_sha256"]
+                if spec.model_id is not None
+                else []
+            ),
+        ],
+        "output_contract": spec.runtime_contract,
+        "model": (
+            {"id": spec.model_id, "revision": spec.model_revision}
+            if spec.model_id is not None
+            else None
+        ),
+        "privacy": "private",
+        "resource_class": spec.resource_class,
+        "cleanup_retention_policy": OPERATIONAL_CLEANUP_RETENTION_POLICY,
+    }
+    payload = {
+        "id": f"OWNER/{spec.directory}",
+        # The real provider adapter replaces OWNER and requires title == slug,
+        # which prevents Kaggle from silently rewriting the exact resource ref.
+        "title": spec.directory,
+        "code_file": "worker.ipynb",
+        "language": "python",
+        "kernel_type": "notebook",
+        "is_private": True,
+        "enable_gpu": False,
+        "enable_tpu": False,
+        "enable_internet": spec.enable_internet,
+        "dataset_sources": [],
+        "competition_sources": [],
+        "kernel_sources": [],
+        "model_sources": [],
+        "my_data_hub": {
+            "contracts": {},
+            "runtime_contract": spec.runtime_contract,
+            "primary_source": spec.template,
+            "primary_source_sha256": source_sha256,
+            "resource_class": spec.resource_class,
+            "privacy": "private",
+            "timeout_seconds": spec.timeout_seconds,
+            "model_id": spec.model_id,
+            "model_revision": spec.model_revision,
+            "production_ready": False,
+            "activation_requires_real_receipt": True,
+            "canonical_write_allowed": spec.canonical_write_allowed,
+            "external_side_effects_allowed": spec.external_side_effects_allowed,
+            "execution_pin_contract": pin_contract,
+            "activation_prerequisites_satisfied": False,
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
 def expected_files() -> dict[Path, str]:
     files = {NOTEBOOK_ROOT / "README.md": NOTEBOOK_README}
+    for spec in OPERATIONAL_SPECS:
+        directory = NOTEBOOK_ROOT / spec.directory
+        serialized = serialize_notebook(build_operational_notebook(spec))
+        files[directory / "worker.ipynb"] = serialized
+        if spec.directory == "05-e5-blogger-embedding-worker":
+            files[EMBEDDING_ASSET_ROOT / "e5-worker.json"] = serialized
+        elif spec.directory == "06-bge-m3-blogger-embedding-worker":
+            files[EMBEDDING_ASSET_ROOT / "bge-worker.json"] = serialized
+        files[directory / "kernel-metadata.example.json"] = operational_kernel_metadata(spec)
     for spec in SPECS:
         directory = NOTEBOOK_ROOT / spec.directory
         files[directory / "worker.ipynb"] = serialize_notebook(build_notebook(spec))

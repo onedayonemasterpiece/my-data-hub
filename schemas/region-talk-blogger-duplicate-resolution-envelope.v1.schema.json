@@ -1,0 +1,160 @@
+{
+  "$defs": {
+    "BloggerDuplicateDecision": {
+      "additionalProperties": false,
+      "description": "One bounded decision record; it contains no source payload fields.",
+      "properties": {
+        "identity_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Identity Sha256",
+          "type": "string"
+        },
+        "canonical_record_id": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Canonical Record Id",
+          "type": "string"
+        },
+        "canonical_actor_id": {
+          "format": "uuid",
+          "title": "Canonical Actor Id",
+          "type": "string"
+        },
+        "member_record_ids": {
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "maxItems": 100000,
+          "minItems": 1,
+          "title": "Member Record Ids",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "decided_by": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Decided By",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity_sha256",
+        "canonical_record_id",
+        "canonical_actor_id",
+        "member_record_ids",
+        "decided_by",
+        "reason"
+      ],
+      "title": "BloggerDuplicateDecision",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Owner-authorized metadata binding decisions to one quarantined source request.",
+  "properties": {
+    "schema_version": {
+      "const": "region-talk-blogger-duplicate-resolution-envelope.v1"
+    },
+    "authorization_id": {
+      "format": "uuid",
+      "title": "Authorization Id",
+      "type": "string"
+    },
+    "authorized_by": {
+      "maxLength": 512,
+      "minLength": 1,
+      "title": "Authorized By",
+      "type": "string"
+    },
+    "authorized_at": {
+      "format": "date-time",
+      "title": "Authorized At",
+      "type": "string"
+    },
+    "source_request_id": {
+      "format": "uuid",
+      "title": "Source Request Id",
+      "type": "string"
+    },
+    "source_operation_id": {
+      "format": "uuid",
+      "title": "Source Operation Id",
+      "type": "string"
+    },
+    "source_request_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Request Sha256",
+      "type": "string"
+    },
+    "export_batch_id": {
+      "format": "uuid",
+      "title": "Export Batch Id",
+      "type": "string"
+    },
+    "project_id": {
+      "format": "uuid",
+      "title": "Project Id",
+      "type": "string"
+    },
+    "snapshot_at": {
+      "format": "date-time",
+      "title": "Snapshot At",
+      "type": "string"
+    },
+    "expected_rows": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000,
+      "title": "Expected Rows"
+    },
+    "source_revision": {
+      "pattern": "^[0-9a-f]{40}$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "source_query_sha256": {
+      "const": "ef94cf114fea0e2f89418c5dacbc289e5c2d21f6935883c2b685ec4f64bd0e50",
+      "default": "ef94cf114fea0e2f89418c5dacbc289e5c2d21f6935883c2b685ec4f64bd0e50",
+      "title": "Source Query Sha256",
+      "type": "string"
+    },
+    "decisions": {
+      "items": {
+        "$ref": "#/$defs/BloggerDuplicateDecision"
+      },
+      "maxItems": 500000,
+      "minItems": 1,
+      "title": "Decisions",
+      "type": "array",
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "schema_version",
+    "authorization_id",
+    "authorized_by",
+    "authorized_at",
+    "source_request_id",
+    "source_operation_id",
+    "source_request_sha256",
+    "export_batch_id",
+    "project_id",
+    "snapshot_at",
+    "expected_rows",
+    "source_revision",
+    "source_query_sha256",
+    "decisions"
+  ],
+  "title": "BloggerDuplicateResolutionEnvelope",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/region-talk-blogger-duplicate-resolution-envelope.v1.schema.json"
+}

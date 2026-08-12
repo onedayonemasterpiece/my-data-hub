@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.local/schemas/checkpoint-restore-verified-receipt.v2.schema.json",
+  "title": "Checkpoint restore verified receipt v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "task_run_id", "checkpoint_id", "manifest_sha256",
+    "manifest_file_sha256", "dataset_ref", "dataset_version", "package_sha256",
+    "restore_mode", "execution_pins_sha256", "runtime_image_identity",
+    "runtime_image_source_commit", "input_dataset_versions", "ok", "observed",
+    "provider_run_ref", "source_sha256", "output_receipt_sha256", "output_tree_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-checkpoint-restore-smoke.v2"},
+    "task_run_id": {"type": "string", "format": "uuid"},
+    "checkpoint_id": {"type": "string", "format": "uuid"},
+    "manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "manifest_file_sha256": {"$ref": "#/$defs/sha256"},
+    "dataset_ref": {"$ref": "#/$defs/providerRef"},
+    "dataset_version": {"type": "integer", "minimum": 1},
+    "package_sha256": {"$ref": "#/$defs/sha256"},
+    "restore_mode": {"const": "isolated_physical_restore"},
+    "execution_pins_sha256": {"$ref": "#/$defs/sha256"},
+    "runtime_image_identity": {"type": "string", "pattern": "^[^@\\s]+@sha256:[a-f0-9]{64}$"},
+    "runtime_image_source_commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "input_dataset_versions": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "items": {"$ref": "#/$defs/exactDatasetRef"}
+    },
+    "ok": {"const": true},
+    "provider_run_ref": {"$ref": "#/$defs/exactDatasetRef"},
+    "source_sha256": {"$ref": "#/$defs/sha256"},
+    "output_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "output_tree_sha256": {"$ref": "#/$defs/sha256"},
+    "observed": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "schema_version", "canonical_revision", "logical_hash_sha256", "row_counts",
+        "postgres_version", "extensions", "migration_boundary", "database_invariants",
+        "vector_query", "bounded_read_smoke"
+      ],
+      "properties": {
+        "schema_version": {"type": "integer", "minimum": 1},
+        "canonical_revision": {"type": "integer", "minimum": 0},
+        "logical_hash_sha256": {"$ref": "#/$defs/sha256"},
+        "row_counts": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "integer", "minimum": 0}},
+        "postgres_version": {"type": "string", "pattern": "^18\\.[0-9]+(?:\\.[0-9]+)?$"},
+        "extensions": {
+          "type": "object", "additionalProperties": false,
+          "required": ["citext", "pg_trgm", "pgcrypto", "vector"],
+          "properties": {
+            "citext": {"type": "string", "minLength": 1},
+            "pg_trgm": {"type": "string", "minLength": 1},
+            "pgcrypto": {"type": "string", "minLength": 1},
+            "vector": {"type": "string", "minLength": 1}
+          }
+        },
+        "migration_boundary": {
+          "type": "object", "additionalProperties": false,
+          "required": ["first_version", "last_version", "applied_count", "contiguous", "history_sha256"],
+          "properties": {
+            "first_version": {"const": 1},
+            "last_version": {"type": "integer", "minimum": 1},
+            "applied_count": {"type": "integer", "minimum": 1},
+            "contiguous": {"const": true},
+            "history_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "database_invariants": {
+          "type": "object", "additionalProperties": false,
+          "required": ["canonical_state_singletons", "epoch_state_singletons", "unvalidated_constraints"],
+          "properties": {
+            "canonical_state_singletons": {"const": 1},
+            "epoch_state_singletons": {"const": 1},
+            "unvalidated_constraints": {"const": 0}
+          }
+        },
+        "vector_query": {
+          "type": "object", "additionalProperties": false,
+          "required": ["operator", "dimensions", "distance"],
+          "properties": {
+            "operator": {"const": "cosine_distance"},
+            "dimensions": {"const": 3},
+            "distance": {"const": 0.0}
+          }
+        },
+        "bounded_read_smoke": {
+          "type": "object", "additionalProperties": false,
+          "required": ["relation_count", "total_rows", "statement_timeout_ms", "lock_timeout_ms"],
+          "properties": {
+            "relation_count": {"type": "integer", "minimum": 1, "maximum": 100},
+            "total_rows": {"type": "integer", "minimum": 0},
+            "statement_timeout_ms": {"const": 30000},
+            "lock_timeout_ms": {"const": 3000}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "providerRef": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "exactDatasetRef": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$"}
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/connector-durability-receipt.v1.schema.json",
+  "title": "Connector durable completion receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "acceptance", "updated_at"],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-connector-durability-receipt.v1"},
+    "state": {"enum": ["ACCEPTED", "CANONICAL_COMMITTED", "CHECKPOINT_REQUESTED", "CHECKPOINTING", "DURABLE_COMPLETE", "FAILED"]},
+    "acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receipt_id", "status", "connector_id", "batch_id", "idempotency_key", "payload_sha256", "envelope_sha256", "accepted_at"],
+      "properties": {
+        "receipt_id": {"type": "string", "format": "uuid"},
+        "status": {"enum": ["accepted", "replayed"]},
+        "connector_id": {"type": "string", "minLength": 3, "maxLength": 200},
+        "batch_id": {"type": "string", "format": "uuid"},
+        "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 300},
+        "payload_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "envelope_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "accepted_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "canonical_revision": {"type": "integer", "minimum": 1},
+    "checkpoint_request_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "checkpoint_operation_id": {"type": "string", "minLength": 1, "maxLength": 300},
+    "checkpoint_receipt_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "checkpoint_id": {"type": "string", "minLength": 1, "maxLength": 300},
+    "updated_at": {"type": "string", "format": "date-time"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"state": {"const": "ACCEPTED"}}},
+      "then": {"not": {"required": ["canonical_revision"]}},
+      "else": {"required": ["canonical_revision"]}
+    },
+    {
+      "if": {"properties": {"state": {"enum": ["CHECKPOINT_REQUESTED", "CHECKPOINTING", "DURABLE_COMPLETE", "FAILED"]}}},
+      "then": {"required": ["checkpoint_request_id", "checkpoint_operation_id"]}
+    },
+    {
+      "if": {"properties": {"state": {"const": "DURABLE_COMPLETE"}}},
+      "then": {"required": ["checkpoint_receipt_sha256", "checkpoint_id"]}
+    }
+  ]
+}

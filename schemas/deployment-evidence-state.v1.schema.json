@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/deployment-evidence-state.v1.schema.json",
+  "title": "Sanitized staged process-kill and pre-reboot evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_identity",
+    "deployed_commit",
+    "source_tree_sha256",
+    "installed_release_tree_sha256",
+    "host_id_sha256",
+    "pre_reboot_boot_id_sha256",
+    "process_kill",
+    "reboot_prepared_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-deployment-evidence-state.v1"},
+    "source_identity": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$"
+    },
+    "deployed_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "source_tree_sha256": {"$ref": "#/$defs/sha256"},
+    "installed_release_tree_sha256": {"$ref": "#/$defs/sha256"},
+    "host_id_sha256": {"$ref": "#/$defs/sha256"},
+    "pre_reboot_boot_id_sha256": {"$ref": "#/$defs/sha256"},
+    "process_kill": {"$ref": "#/$defs/process_kill"},
+    "reboot_prepared_at": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "format": "date-time", "maxLength": 64}
+      ]
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "process_kill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_service",
+        "killed_at",
+        "recovered_at",
+        "before_process_sha256",
+        "after_process_sha256",
+        "recovered"
+      ],
+      "properties": {
+        "target_service": {"enum": ["control-plane", "oauth-server", "remote-mcp"]},
+        "killed_at": {"type": "string", "format": "date-time", "maxLength": 64},
+        "recovered_at": {"type": "string", "format": "date-time", "maxLength": 64},
+        "before_process_sha256": {"$ref": "#/$defs/sha256"},
+        "after_process_sha256": {"$ref": "#/$defs/sha256"},
+        "recovered": {"const": true}
+      }
+    }
+  }
+}

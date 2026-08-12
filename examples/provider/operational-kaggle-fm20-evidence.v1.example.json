@@ -1,0 +1,71 @@
+{
+  "schema_version": "my-data-hub-operational-kaggle-fm20-evidence.v1",
+  "deployment_evidence": {
+    "checks": {
+      "database_environment_present": false,
+      "database_process_present": false,
+      "my_data_hub_loopback_listener_ports": [
+        8080,
+        8765,
+        8780
+      ],
+      "my_data_hub_public_listener_ports": [],
+      "pgdata_present": false,
+      "process_kill": {
+        "after_process_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "before_process_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "killed_at": "2026-08-11T03:50:00Z",
+        "recovered": true,
+        "recovered_at": "2026-08-11T03:51:00Z",
+        "target_service": "remote-mcp"
+      },
+      "reboot_autostart": {
+        "after_boot_id_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "autostart_services": [
+          "control-plane",
+          "oauth-server",
+          "remote-mcp"
+        ],
+        "before_boot_id_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "linger_enabled": true,
+        "rebooted_at": "2026-08-11T03:55:00Z",
+        "systemd_unit": "my-data-hub-control-plane.service",
+        "unit_enabled": true,
+        "verified_at": "2026-08-11T04:00:00Z"
+      },
+      "service_image_ids": {
+        "control-plane": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "oauth-server": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "remote-mcp": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+      },
+      "services": {
+        "control-plane": "running",
+        "oauth-server": "running",
+        "remote-mcp": "running"
+      }
+    },
+    "deployed_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expires_at": "2026-08-11T05:00:00Z",
+    "host_id_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "installed_release_tree_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "issued_at": "2026-08-11T04:00:00Z",
+    "schema_version": "my-data-hub-deployment-evidence.v2",
+    "signature": {
+      "algorithm": "Ed25519",
+      "key_id": "example-devstand-evidence-key",
+      "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    "source_identity": "onedayonemasterpiece/my-data-hub",
+    "source_tree_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA7+jGqI8r0xjBSxV9z5yqRhQ8F5oTz5m8YRyICFWVlV8=\n-----END PUBLIC KEY-----\n",
+  "expected_key_id": "example-devstand-evidence-key",
+  "expected_source_identity": "onedayonemasterpiece/my-data-hub",
+  "expected_service_image_ids": {
+    "control-plane": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+    "oauth-server": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+    "remote-mcp": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+  },
+  "blogger_query": "Калининград",
+  "expected_source_tree_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+}

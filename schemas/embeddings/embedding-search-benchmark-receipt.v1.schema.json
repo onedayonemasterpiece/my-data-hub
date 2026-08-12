@@ -1,0 +1,275 @@
+{
+  "$defs": {
+    "EmbeddingModelContract": {
+      "additionalProperties": false,
+      "description": "Exact, immutable identity and encoder behavior for one vector space.",
+      "properties": {
+        "dimensions": {
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Dimensions",
+          "type": "integer"
+        },
+        "document_prefix": {
+          "title": "Document Prefix",
+          "type": "string"
+        },
+        "encoder_contract_version": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Encoder Contract Version",
+          "type": "string"
+        },
+        "max_tokens": {
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Max Tokens",
+          "type": "integer"
+        },
+        "model_key": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Model Key",
+          "type": "string"
+        },
+        "normalization": {
+          "const": "l2",
+          "title": "Normalization",
+          "type": "string"
+        },
+        "output_modes": {
+          "items": {
+            "const": "dense",
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Output Modes",
+          "type": "array"
+        },
+        "pooling": {
+          "enum": [
+            "attention_mask_mean",
+            "model_native_dense"
+          ],
+          "title": "Pooling",
+          "type": "string"
+        },
+        "query_prefix": {
+          "title": "Query Prefix",
+          "type": "string"
+        },
+        "revision": {
+          "pattern": "^[a-f0-9]{40}$",
+          "title": "Revision",
+          "type": "string"
+        },
+        "vector_space": {
+          "pattern": "^[a-z][a-z0-9_]{0,99}$",
+          "title": "Vector Space",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_key",
+        "revision",
+        "dimensions",
+        "max_tokens",
+        "pooling",
+        "normalization",
+        "query_prefix",
+        "document_prefix",
+        "output_modes",
+        "encoder_contract_version",
+        "vector_space"
+      ],
+      "title": "EmbeddingModelContract",
+      "type": "object"
+    },
+    "RetrievalMetrics": {
+      "additionalProperties": false,
+      "properties": {
+        "exact_relevance_case_count": {
+          "minimum": 1,
+          "title": "Exact Relevance Case Count",
+          "type": "integer"
+        },
+        "k": {
+          "minimum": 1,
+          "title": "K",
+          "type": "integer"
+        },
+        "latency_p50_ms": {
+          "minimum": 0,
+          "title": "Latency P50 Ms",
+          "type": "number"
+        },
+        "latency_p95_ms": {
+          "minimum": 0,
+          "title": "Latency P95 Ms",
+          "type": "number"
+        },
+        "recall_at_k": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Recall At K",
+          "type": "number"
+        }
+      },
+      "required": [
+        "exact_relevance_case_count",
+        "recall_at_k",
+        "k",
+        "latency_p50_ms",
+        "latency_p95_ms"
+      ],
+      "title": "RetrievalMetrics",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.my-data-hub.internal/embeddings/embedding-search-benchmark-receipt.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Observed quality/capacity receipt; zero or estimated values are rejected.",
+  "properties": {
+    "available_memory_bytes": {
+      "minimum": 1,
+      "title": "Available Memory Bytes",
+      "type": "integer"
+    },
+    "capacity_proven": {
+      "title": "Capacity Proven",
+      "type": "boolean"
+    },
+    "checkpoint_bytes_after": {
+      "minimum": 1,
+      "title": "Checkpoint Bytes After",
+      "type": "integer"
+    },
+    "checkpoint_bytes_before": {
+      "minimum": 1,
+      "title": "Checkpoint Bytes Before",
+      "type": "integer"
+    },
+    "checkpoint_seconds_after": {
+      "exclusiveMinimum": 0,
+      "title": "Checkpoint Seconds After",
+      "type": "number"
+    },
+    "code_revision": {
+      "pattern": "^[a-f0-9]{40}$",
+      "title": "Code Revision",
+      "type": "string"
+    },
+    "corpus_document_count": {
+      "minimum": 1,
+      "title": "Corpus Document Count",
+      "type": "integer"
+    },
+    "corpus_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Corpus Sha256",
+      "type": "string"
+    },
+    "evidence_artifact_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Evidence Artifact Sha256",
+      "type": "string"
+    },
+    "exact_search": {
+      "$ref": "#/$defs/RetrievalMetrics"
+    },
+    "hnsw_search": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RetrievalMetrics"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "index_build_seconds": {
+      "anyOf": [
+        {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Index Build Seconds"
+    },
+    "index_bytes": {
+      "minimum": 0,
+      "title": "Index Bytes",
+      "type": "integer"
+    },
+    "model": {
+      "$ref": "#/$defs/EmbeddingModelContract"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "peak_build_memory_bytes": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Peak Build Memory Bytes"
+    },
+    "receipt_id": {
+      "format": "uuid",
+      "title": "Receipt Id",
+      "type": "string"
+    },
+    "run_id": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "embedding-search-benchmark-receipt.v1",
+      "default": "embedding-search-benchmark-receipt.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "vector_heap_bytes": {
+      "minimum": 1,
+      "title": "Vector Heap Bytes",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "receipt_id",
+    "run_id",
+    "observed_at",
+    "code_revision",
+    "corpus_sha256",
+    "corpus_document_count",
+    "model",
+    "exact_search",
+    "vector_heap_bytes",
+    "index_bytes",
+    "available_memory_bytes",
+    "checkpoint_bytes_before",
+    "checkpoint_bytes_after",
+    "checkpoint_seconds_after",
+    "capacity_proven",
+    "evidence_artifact_sha256"
+  ],
+  "title": "EmbeddingBenchmarkReceipt",
+  "type": "object"
+}

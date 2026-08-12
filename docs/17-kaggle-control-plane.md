@@ -1,6 +1,6 @@
 # Kaggle control plane
 
-Status: `CORE ARCHITECTURE / REAL PROVIDER IMPLEMENTATION DEFERRED`
+Status: `CORE IMPLEMENTED / REAL OPERATIONAL MATRIX BLOCKED`
 
 Kaggle has two distinct roles:
 
@@ -16,25 +16,30 @@ Resource control classes remain: `orchestrator_protected`, `mcp_managed`, `mcp_e
 and `external_read_only`. Names never grant authorization. Master and checkpoint resources
 are orchestrator-protected. Public creation is absent.
 
-PR-A makes no provider call. Next are donor compatibility and FakeKaggle; real lifecycle and
-master Notebook are later PRs.
+PR-A made no provider call. The implementation PR now contains the single official
+provider adapter, durable provider-effect journal, FakeKaggle/state-machine contracts,
+protected master launch, callback reconciliation and an in-Notebook checkpoint pipeline.
+A disposable private Dataset canary passed, but the required private Notebook and master
+run matrix remains blocked on modern owner authentication; no permanent protected resource
+or production master is claimed.
 
 ## Preserved detailed contract — bound by ADR-0016
 
 The detailed material below is retained where topology-neutral. Any reference to a database, role, committer, backup or connector application is executed inside/against the latest ACTIVE Kaggle master; devstand execution claims are superseded.
 
-Status: `R1 POLICY/REGISTRY CONTRACT IMPLEMENTED / PROVIDER ADAPTER BLOCKED`
+Status: `POLICY/REGISTRY/ADAPTER IMPLEMENTED / REAL ACCEPTANCE BLOCKED`
 Date: 2026-08-09
 Related decision: ADR-0011
 Exchange contract: [`../schemas/kaggle-exchange-manifest.v1.schema.json`](../schemas/kaggle-exchange-manifest.v1.schema.json)
 
-Implemented in R1: provider-neutral control-class models, bounded pagination,
+Implemented: provider-neutral control-class models, bounded pagination,
 unknown-resource classification, immutable protected-class database enforcement,
 fingerprint/lease mutation policy, private exchange validation, private lifecycle
-receipt contracts, protected-resource negative tests, and a minimal remote status tool.
-No concrete Kaggle create/readback/delete adapter, account inventory, resource ID, or
-cleanup receipt is claimed; the provider workflow fails closed until those primitives
-and dedicated credentials exist.
+receipt contracts, protected-resource negative tests, one concrete `kaggle==2.2.4`
+adapter and a minimal remote status tool. A task-owned disposable private Dataset has an
+exact create/readback/privacy-denial/delete receipt. Existing account resources remain
+`external_read_only`; permanent protected resource identities and real master/checkpoint
+receipts are not yet claimed.
 
 ## 1. Role of Kaggle
 
@@ -384,3 +389,74 @@ a risk until provider-account separation is implemented.
 11. backup resources remain protected even for a principal with normal Kaggle write
     scopes;
 12. orchestrator-created resources cannot be reclassified through rename or rediscovery.
+
+### 8.4 Implemented remote exchange mutation boundary
+
+For `mcp_exchange`, `provider.resources.create` and `provider.resources.version` now
+require an exact `my-data-hub-kaggle-exchange.v1` manifest before the single Kaggle
+adapter is called. The authenticated OAuth subject must equal `created_by`; dataset ref
+and version, current TTL, manifest hash, every file path/size/hash and disposable cleanup
+intent are bound to the operation. Confidential payloads are accepted only as
+non-executable ASCII-armored age ciphertext with an encrypted media type. A canonical
+manifest file is included in the private Dataset version.
+
+The devstand ledger stores only access metadata and provider receipts, never exchange
+payload bytes or instructions. Reads require a non-expired manifest and an exact intended
+recipient. Version requires the original creator and an active TTL. Expiry permanently
+denies reads and versions but deliberately does not strand retention cleanup: only the
+exact creator may replay the claim-bound, idempotent delete after expiry. Its stable
+bounded retention receipt binds the package/manifest expiry, seven-day maximum TTL,
+claim, operation/effect and observed absent resource state without storing payload bytes.
+These are code and mock-provider proofs until a real modern Kaggle token run is recorded.
+
+### 8.5 Bounded ChatGPT JSON batch gateway
+
+The provider-operator profile exposes a directly callable, binary-safe quick-release
+path for exact private `mcp_managed` and `mcp_exchange` Dataset versions. Existing UTF-8
+`files: {path: text}` requests remain valid. A binary value is an exact closed object:
+
+```json
+{
+  "encoding": "base64",
+  "content_base64": "AAECAw==",
+  "byte_size": 4,
+  "sha256": "<64 lowercase hex characters>"
+}
+```
+
+The gateway decodes strict canonical base64 and compares both declared size and SHA-256
+before the single injected Kaggle adapter sees bytes. A request has at most 100 files;
+one declared binary file is at most 256 KiB and mixed binary content has a 320 KiB raw
+validation ceiling. Create/version use a 512 KiB semantic/internal JSON request limit;
+base64 expansion and the surrounding manifest make the practical raw batch maximum
+smaller than 320 KiB, so 320 KiB is not claimed usable for every envelope. Text-only
+requests preserve their existing 256 KiB UTF-8 total bound.
+
+`provider.resources.list` accepts the exact task claim, an integer cursor and a limit up
+to 50. It compares live exact-version Kaggle name/size metadata with the durable
+path/size/hash content manifest before returning a bounded page; it does not download the
+Dataset. `provider.resources.download` accepts one manifest path, an offset and at most
+128 KiB. The sole adapter downloads only that file from the exact numeric Dataset
+version, rejects files over 64 MiB, rechecks size and SHA-256, then returns canonical
+base64 plus chunk SHA-256 and deterministic `next_offset`. A caller repeats exact offsets
+and verifies the final file hash to assemble the file. No signed URL, blob grant, Kaggle
+credential or filesystem path crosses MCP.
+
+Both reads are bound to the durable task claim and registered version. `mcp_managed`
+requires the exact creating principal; `mcp_exchange` retains creator/recipient/expiry
+authorization. Provider-owned manifests are never listed as content or downloadable.
+Traversal, symlinks, reserved metadata, checkpoint/PostgreSQL artifact names, unexpected
+provider files, oversize files and content tamper fail before returning bytes.
+
+The contract was exercised against the real pinned `kaggle==2.2.4` provider on
+2026-08-12: a disposable private Dataset was created with three mixed text/binary files,
+listed, two exact files were downloaded and hash-verified, a second version was created
+and downloaded, and the task-owned Dataset was deleted with exact inventory-absence
+reconciliation. The protected mode-0600 receipt and its SHA-256 are recorded in
+`.codex/lanes/kaggle-mcp-live-canary/RESULTS.md`; the receipt contains no file bytes or
+credentials.
+
+Dataset versions registered before this contract have no durable content manifest and
+therefore fail closed for file-list/download; their existing metadata-only
+`provider.resources.read` contract remains compatible. Creating a new exact version
+under this contract establishes the required manifest.

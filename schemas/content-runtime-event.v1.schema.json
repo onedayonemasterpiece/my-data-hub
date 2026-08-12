@@ -1,0 +1,199 @@
+{
+  "$id": "https://schemas.my-data-hub.local/content-runtime-event.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "service.ready"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "required": [
+              "service_kind",
+              "endpoint",
+              "protocol",
+              "tls_fingerprint",
+              "capabilities",
+              "canonical_revision",
+              "schema_version",
+              "lease_until",
+              "master_instance_id",
+              "epoch"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "artifact_refs": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          },
+          "locator": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "type": "string"
+          },
+          "size_bytes": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "locator",
+          "sha256",
+          "size_bytes"
+        ],
+        "type": "object"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "attempt_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "data": {
+      "additionalProperties": true,
+      "maxProperties": 200,
+      "type": "object"
+    },
+    "emitted_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "epoch": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "event_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "event_type": {
+      "enum": [
+        "runtime.created",
+        "runtime.started",
+        "runtime.heartbeat",
+        "runtime.progress",
+        "runtime.draining",
+        "runtime.terminal",
+        "runtime.failed",
+        "service.announced",
+        "service.ready",
+        "service.unavailable",
+        "service.endpoint_changed",
+        "job.claimed",
+        "job.progress",
+        "job.result_available",
+        "job.completed",
+        "job.failed",
+        "resource.acquire",
+        "resource.renew",
+        "resource.release",
+        "checkpoint.started",
+        "checkpoint.candidate_uploaded",
+        "checkpoint.verified",
+        "checkpoint.failed"
+      ],
+      "type": "string"
+    },
+    "local_sequence": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "metrics": {
+      "additionalProperties": {
+        "type": [
+          "boolean",
+          "number",
+          "string",
+          "null"
+        ]
+      },
+      "maxProperties": 200,
+      "type": "object"
+    },
+    "phase": {
+      "maxLength": 100,
+      "minLength": 1,
+      "type": "string"
+    },
+    "run_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema": {
+      "const": "content-runtime-event/v1",
+      "type": "string"
+    },
+    "service_instance_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "source_identity": {
+      "maxLength": 500,
+      "minLength": 1,
+      "type": "string"
+    },
+    "source_version": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    },
+    "status": {
+      "maxLength": 100,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "propertyNames": {
+    "not": {
+      "enum": [
+        "authorization",
+        "credential",
+        "password",
+        "secret",
+        "token"
+      ]
+    }
+  },
+  "required": [
+    "schema",
+    "event_id",
+    "run_id",
+    "attempt_id",
+    "service_instance_id",
+    "source_identity",
+    "source_version",
+    "event_type",
+    "emitted_at",
+    "local_sequence",
+    "epoch",
+    "data",
+    "artifact_refs",
+    "metrics"
+  ],
+  "title": "content runtime event v1",
+  "type": "object"
+}

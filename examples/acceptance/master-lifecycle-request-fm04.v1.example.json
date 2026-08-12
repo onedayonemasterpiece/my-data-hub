@@ -1,0 +1,8 @@
+{
+  "schema_version": "my-data-hub-master-lifecycle-acceptance.v1",
+  "task_id": "10000000-0000-4000-8000-000000000004",
+  "scenario": "FM04",
+  "idempotency_key": "master-lifecycle-fm04-empty-bootstrap-20260811",
+  "source_revision": "cf1dc3dfd3c5710743a8fa462a5a8c9bd9152433",
+  "target_operation_id": null
+}

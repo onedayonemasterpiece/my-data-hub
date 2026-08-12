@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/checkpoint-acceptance-production-config.v1.schema.json",
+  "$defs": {
+    "CheckpointAcceptanceControlIdentity": {
+      "additionalProperties": false,
+      "description": "Dedicated owner-task authority; it never impersonates a master epoch.",
+      "properties": {
+        "authority_kind": {
+          "const": "acceptance-task",
+          "default": "acceptance-task",
+          "title": "Authority Kind",
+          "type": "string"
+        },
+        "request_id": {
+          "format": "uuid",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "task_run_id": {
+          "format": "uuid",
+          "title": "Task Run Id",
+          "type": "string"
+        },
+        "attempt_id": {
+          "format": "uuid",
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "scope": {
+          "const": "acceptance:operate",
+          "default": "acceptance:operate",
+          "title": "Scope",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "task_run_id",
+        "attempt_id"
+      ],
+      "title": "CheckpointAcceptanceControlIdentity",
+      "type": "object"
+    },
+    "CheckpointAcceptanceVerifierAsset": {
+      "additionalProperties": false,
+      "description": "Owner-reviewed verifier source identity; source bytes remain in Kaggle.",
+      "properties": {
+        "dataset_version_ref": {
+          "maxLength": 320,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Dataset Version Ref",
+          "type": "string"
+        },
+        "claim_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Claim Sha256",
+          "type": "string"
+        },
+        "path": {
+          "format": "path",
+          "title": "Path",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "code_file": {
+          "const": "worker.py",
+          "default": "worker.py",
+          "title": "Code File",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dataset_version_ref",
+        "claim_sha256",
+        "path",
+        "source_sha256"
+      ],
+      "title": "CheckpointAcceptanceVerifierAsset",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Strict metadata-only input for one fixed production checkpoint scenario.",
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-checkpoint-acceptance-production-config.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scenario": {
+      "enum": [
+        "FM05",
+        "FM14",
+        "FM15"
+      ],
+      "title": "Scenario",
+      "type": "string"
+    },
+    "operation_id": {
+      "format": "uuid",
+      "title": "Operation Id",
+      "type": "string"
+    },
+    "task_run_id": {
+      "format": "uuid",
+      "title": "Task Run Id",
+      "type": "string"
+    },
+    "source_revision": {
+      "pattern": "^[a-f0-9]{40}$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "provider_owner": {
+      "pattern": "^[A-Za-z0-9_.-]{1,80}$",
+      "title": "Provider Owner",
+      "type": "string"
+    },
+    "dataset_ref": {
+      "maxLength": 300,
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+      "title": "Dataset Ref",
+      "type": "string"
+    },
+    "evidence_notebook_ref": {
+      "maxLength": 300,
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+      "title": "Evidence Notebook Ref",
+      "type": "string"
+    },
+    "verifier_notebook_ref": {
+      "anyOf": [
+        {
+          "maxLength": 300,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Verifier Notebook Ref"
+    },
+    "template_dataset_version_ref": {
+      "maxLength": 320,
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+      "title": "Template Dataset Version Ref",
+      "type": "string"
+    },
+    "template_claim_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Template Claim Sha256",
+      "type": "string"
+    },
+    "template_directory": {
+      "format": "path",
+      "title": "Template Directory",
+      "type": "string"
+    },
+    "template_manifest_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Template Manifest Sha256",
+      "type": "string"
+    },
+    "template_content_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Template Content Sha256",
+      "type": "string"
+    },
+    "verifier": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CheckpointAcceptanceVerifierAsset"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "status_dataset_version_ref": {
+      "maxLength": 320,
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+      "title": "Status Dataset Version Ref",
+      "type": "string"
+    },
+    "status_config_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Status Config Sha256",
+      "type": "string"
+    },
+    "status_helper_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Status Helper Sha256",
+      "type": "string"
+    },
+    "working_directory": {
+      "format": "path",
+      "title": "Working Directory",
+      "type": "string"
+    },
+    "control_base_url": {
+      "maxLength": 500,
+      "minLength": 12,
+      "title": "Control Base Url",
+      "type": "string"
+    },
+    "control_identity": {
+      "$ref": "#/$defs/CheckpointAcceptanceControlIdentity"
+    },
+    "timeout_seconds": {
+      "const": 900,
+      "title": "Timeout Seconds",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "scenario",
+    "operation_id",
+    "task_run_id",
+    "source_revision",
+    "started_at",
+    "provider_owner",
+    "dataset_ref",
+    "evidence_notebook_ref",
+    "template_dataset_version_ref",
+    "template_claim_sha256",
+    "template_directory",
+    "template_manifest_sha256",
+    "template_content_sha256",
+    "status_dataset_version_ref",
+    "status_config_sha256",
+    "status_helper_sha256",
+    "working_directory",
+    "control_base_url",
+    "control_identity",
+    "timeout_seconds"
+  ],
+  "title": "CheckpointAcceptanceProductionConfig",
+  "type": "object"
+}

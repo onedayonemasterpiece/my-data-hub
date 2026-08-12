@@ -3,24 +3,28 @@ from __future__ import annotations
 import pytest
 
 from my_data_hub.config import Settings
-from my_data_hub.mcp.server import create_server, oauth_resource_metadata_url
+from my_data_hub.mcp.server import MCPDependencies, create_server, oauth_resource_metadata_url
 
 mcp_server_module = pytest.importorskip("mcp.server")
 
 READ_ONLY_TOOLS = {
-    "hub.health",
-    "hub.project.list",
-    "hub.content.search",
-    "hub.content.get",
-    "hub.trace.get",
-    "region_talk.queue.summary",
-    "region_talk.plan.preview",
-    "region_talk.migration.status",
-    "region_talk.migration.accounting",
-    "connector.status.list",
-    "provider.resource.status",
+    "platform.status",
+    "master.status",
+    "operation.get",
+    "checkpoint.status",
+    "embedding.coverage",
+    "embedding.production.capabilities",
+    "provider.resources.status",
+    "bloggers.list",
+    "bloggers.get",
+    "bloggers.search",
+    "bloggers.provenance",
+    "bloggers.statistics",
+    "bloggers.migration.accounting",
+    "data.query",
+    "data.change.status",
 }
-WRITE_TOOLS = {"region_talk.work.enqueue", "hub.command.submit"}
+WRITE_TOOLS = {"master.ensure", "data.change.preview", "data.change.apply"}
 
 
 def read_only_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
@@ -33,7 +37,7 @@ def read_only_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_ENABLED", "false")
     monkeypatch.setenv(
         "MY_DATA_HUB_MCP_SCOPES",
-        "hub:read,orchestrator:read,region-talk:read,migration:read,connector:read,provider:read",
+        "platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,data:read",
     )
     return Settings.from_env()
 
@@ -45,6 +49,44 @@ async def test_mcp_v2_read_only_tool_catalog(monkeypatch: pytest.MonkeyPatch) ->
     names = {tool.name for tool in tools}
     assert names == READ_ONLY_TOOLS
     assert names.isdisjoint(WRITE_TOOLS)
+
+
+@pytest.mark.asyncio
+async def test_acceptance_scenario_tools_require_explicit_executor_opt_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    token = tmp_path / "gateway.token"
+    token.write_text("g" * 32)
+    token.chmod(0o600)
+    monkeypatch.setenv("MY_DATA_HUB_DATABASE_URL", "postgresql://contract:contract@127.0.0.1:5432/contract")
+    monkeypatch.setenv("MY_DATA_HUB_ENVIRONMENT", "test")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_REMOTE_ENABLED", "false")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_SCOPES", "acceptance:operate,data:write")
+    monkeypatch.setenv(
+        "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL",
+        "http://control-plane:8080/internal/mcp-provider/invoke",
+    )
+    monkeypatch.setenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE", str(token))
+    settings = Settings.from_env()
+    disabled = create_server(settings)
+    assert not {
+        "acceptance.scenario.request",
+        "acceptance.scenario.status",
+    } & {tool.name for tool in await disabled.list_tools()}
+    enabled = create_server(
+        settings,
+        dependencies=MCPDependencies(acceptance_scenarios_enabled=True),
+    )
+    enabled_tools = {tool.name: tool for tool in await enabled.list_tools()}
+    assert {
+        "acceptance.scenario.request",
+        "acceptance.scenario.status",
+    } <= set(enabled_tools)
+    request_schema = enabled_tools["acceptance.scenario.request"].input_schema
+    assert "target_operation_id" in request_schema["properties"]
+    assert "target_operation_id" not in request_schema["required"]
 
 
 def test_mcp_v2_streamable_http_builder_accepts_security_limits(

@@ -1,0 +1,120 @@
+{
+  "$defs": {
+    "DataWorkloadDriverConfig": {
+      "additionalProperties": false,
+      "description": "Owner-fixed files for the single matrix-wide FM16--FM21 workflow.",
+      "properties": {
+        "owner_envelope_path": {
+          "anyOf": [
+            {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Owner Envelope Path"
+        },
+        "plan_path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Plan Path",
+          "type": "string"
+        },
+        "production_config_path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Production Config Path",
+          "type": "string"
+        },
+        "state_path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "State Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "plan_path",
+        "production_config_path",
+        "state_path"
+      ],
+      "title": "DataWorkloadDriverConfig",
+      "type": "object"
+    },
+    "RuntimeEventIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "format": "uuid",
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "epoch": {
+          "minimum": 1,
+          "title": "Epoch",
+          "type": "integer"
+        },
+        "run_id": {
+          "format": "uuid",
+          "title": "Run Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "attempt_id",
+        "epoch"
+      ],
+      "title": "RuntimeEventIdentity",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.my-data-hub.local/provider/operational-kaggle-evidence-driver.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "data_workload": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DataWorkloadDriverConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "fm03_runtime": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RuntimeEventIdentity"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "provider_owner": {
+      "maxLength": 80,
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "title": "Provider Owner",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "my-data-hub-operational-kaggle-evidence-driver.v1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "provider_owner"
+  ],
+  "title": "Operational evidence driver configuration v1",
+  "type": "object"
+}

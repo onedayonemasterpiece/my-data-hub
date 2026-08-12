@@ -1,0 +1,114 @@
+name: post-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_commit:
+        description: Exact approved deployed merge commit on the default branch
+        required: true
+      deployment_evidence_receipt:
+        description: Signed sanitized host deployment evidence JSON (never include secrets)
+        required: true
+      deployment_evidence_key_id:
+        description: Expected Ed25519 deployment evidence signing key id
+        required: true
+      cold_start_timeout_seconds:
+        description: Bounded wait for cold master activation
+        required: true
+        default: '900'
+
+permissions:
+  contents: read
+
+jobs:
+  remote-read-only-contract:
+    # workflow_dispatch can name another ref. Never run repository code or expose
+    # credentials unless GitHub says this invocation came from the default branch.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    environment:
+      name: devstand
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      MY_DATA_HUB_MCP_CANARY_ENDPOINT: https://mcp-datahub.kenigevents.ru/mcp
+      MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT: ${{ inputs.expected_commit }}
+      MY_DATA_HUB_EXPECTED_SOURCE_IDENTITY: onedayonemasterpiece/my-data-hub
+      MY_DATA_HUB_SOURCE_COMMIT: ${{ inputs.expected_commit }}
+    steps:
+      - name: Check out trusted default-branch verifier
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          path: trusted
+          persist-credentials: false
+      - name: Require approved default-branch merge commit
+        shell: bash
+        env:
+          MY_DATA_HUB_APPROVED_DEPLOY_COMMIT: ${{ vars.MY_DATA_HUB_APPROVED_DEPLOY_COMMIT }}
+        run: |
+          set -euo pipefail
+          [[ "$MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test -n "$MY_DATA_HUB_APPROVED_DEPLOY_COMMIT"
+          test "$MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT" = "$MY_DATA_HUB_APPROVED_DEPLOY_COMMIT"
+          test "$GITHUB_REPOSITORY" = "onedayonemasterpiece/my-data-hub"
+          test "$GITHUB_REF" = "refs/heads/${{ github.event.repository.default_branch }}"
+          git -C trusted cat-file -e "$MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT^{commit}"
+          git -C trusted merge-base --is-ancestor "$MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT" HEAD
+          test "$(git -C trusted rev-list --parents -n 1 "$MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT" | awk '{print NF}')" -ge 3
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: trusted/pyproject.toml
+      - name: Install trusted verifier dependencies
+        run: python -m pip install -e 'trusted[dev]'
+      - name: Materialize private OAuth negative canaries
+        shell: bash
+        env:
+          MY_DATA_HUB_MCP_NEGATIVE_CREDENTIALS_JSON: ${{ secrets.MY_DATA_HUB_MCP_NEGATIVE_CREDENTIALS_JSON }}
+        run: |
+          set -euo pipefail
+          test -n "$MY_DATA_HUB_MCP_NEGATIVE_CREDENTIALS_JSON"
+          umask 077
+          printf '%s' "$MY_DATA_HUB_MCP_NEGATIVE_CREDENTIALS_JSON" > "$RUNNER_TEMP/mdh-oauth-negative.json"
+          chmod 0600 "$RUNNER_TEMP/mdh-oauth-negative.json"
+      - name: Verify remote and signed host post-deploy contract
+        env:
+          MY_DATA_HUB_MCP_CANARY_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_READER_TOKEN }}
+          MY_DATA_HUB_DEPLOY_EVIDENCE_JSON: ${{ inputs.deployment_evidence_receipt }}
+          MY_DATA_HUB_DEPLOY_EVIDENCE_KEY_ID: ${{ inputs.deployment_evidence_key_id }}
+          MY_DATA_HUB_DEPLOY_EVIDENCE_PUBLIC_KEY_PEM: ${{ vars.MY_DATA_HUB_DEPLOY_EVIDENCE_PUBLIC_KEY_PEM }}
+          MY_DATA_HUB_EXPECTED_DEPLOY_SOURCE_TREE_SHA256: ${{ vars.MY_DATA_HUB_EXPECTED_DEPLOY_SOURCE_TREE_SHA256 }}
+          MY_DATA_HUB_EXPECTED_DEPLOY_SERVICE_IMAGE_IDS_JSON: ${{ vars.MY_DATA_HUB_EXPECTED_DEPLOY_SERVICE_IMAGE_IDS_JSON }}
+        run: >-
+          python trusted/scripts/verify_post_deploy.py
+          --negative-credentials-file "$RUNNER_TEMP/mdh-oauth-negative.json"
+          --cold-start-timeout-seconds "${{ inputs.cold_start_timeout_seconds }}"
+          --output artifacts/post-deploy-verification.json
+      - name: Write post-deploy receipt
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          hash_args=()
+          if test -f artifacts/post-deploy-verification.json; then
+            hash_args+=(--hash-file verification=artifacts/post-deploy-verification.json)
+          fi
+          python trusted/scripts/write_workflow_receipt.py \
+            --workflow post-deploy --environment devstand \
+            --outcome "${{ job.status == 'success' && 'PASS' || 'FAIL' }}" \
+            --observed "remote and signed host acceptance for exact approved deployment" \
+            --resource endpoint="$MY_DATA_HUB_MCP_CANARY_ENDPOINT" \
+            --resource expected_commit="$MY_DATA_HUB_EXPECTED_DEPLOY_COMMIT" \
+            --resource expected_source_identity="$MY_DATA_HUB_EXPECTED_SOURCE_IDENTITY" \
+            "${hash_args[@]}" \
+            --output artifacts/post-deploy.json
+      - name: Upload receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-deploy-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30

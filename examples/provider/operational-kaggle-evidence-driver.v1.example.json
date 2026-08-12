@@ -1,0 +1,15 @@
+{
+  "schema_version": "my-data-hub-operational-kaggle-evidence-driver.v1",
+  "provider_owner": "evidence-owner",
+  "fm03_runtime": {
+    "run_id": "11111111-1111-4111-8111-111111111111",
+    "attempt_id": "22222222-2222-4222-8222-222222222222",
+    "epoch": 7
+  },
+  "data_workload": {
+    "plan_path": "/srv/my-data-hub/owner/operational-data-workload-plan.json",
+    "production_config_path": "/srv/my-data-hub/owner/data-workload-production-config.json",
+    "state_path": "/srv/my-data-hub/state/operational-data-workload-state.json",
+    "owner_envelope_path": "/srv/my-data-hub/owner/fm16-duplicate-resolution-envelope.json"
+  }
+}

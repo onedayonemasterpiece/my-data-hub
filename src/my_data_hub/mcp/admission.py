@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 from uuid import uuid4
 
+from my_data_hub.auth.context import bind_identity, reset_identity
 from my_data_hub.mcp.oauth import AccessIdentity, OAuthBearerValidator, TokenValidationError
 
 ASGIReceive = Callable[[], Awaitable[dict[str, Any]]]
@@ -487,7 +488,11 @@ class HTTPAdmissionSecurity:
                         }
                     )
                     downstream = self._downstream_scope(scope, headers, effective_host, state)
-                    response = await self._run_app(downstream, body)
+                    identity_token = bind_identity(identity)
+                    try:
+                        response = await self._run_app(downstream, body)
+                    finally:
+                        reset_identity(identity_token)
             finally:
                 self._semaphore.release()
             await self._send_buffered(send, response, correlation_id)

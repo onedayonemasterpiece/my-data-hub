@@ -1,0 +1,374 @@
+{
+  "$defs": {
+    "EmbeddingFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/FailureCode"
+        },
+        "job_key": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Job Key",
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "retryable": {
+          "title": "Retryable",
+          "type": "boolean"
+        },
+        "terminal": {
+          "title": "Terminal",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "job_key",
+        "code",
+        "message",
+        "retryable",
+        "terminal"
+      ],
+      "title": "EmbeddingFailure",
+      "type": "object"
+    },
+    "EmbeddingModelContract": {
+      "additionalProperties": false,
+      "description": "Exact, immutable identity and encoder behavior for one vector space.",
+      "properties": {
+        "dimensions": {
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Dimensions",
+          "type": "integer"
+        },
+        "document_prefix": {
+          "title": "Document Prefix",
+          "type": "string"
+        },
+        "encoder_contract_version": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Encoder Contract Version",
+          "type": "string"
+        },
+        "max_tokens": {
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Max Tokens",
+          "type": "integer"
+        },
+        "model_key": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Model Key",
+          "type": "string"
+        },
+        "normalization": {
+          "const": "l2",
+          "title": "Normalization",
+          "type": "string"
+        },
+        "output_modes": {
+          "items": {
+            "const": "dense",
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Output Modes",
+          "type": "array"
+        },
+        "pooling": {
+          "enum": [
+            "attention_mask_mean",
+            "model_native_dense"
+          ],
+          "title": "Pooling",
+          "type": "string"
+        },
+        "query_prefix": {
+          "title": "Query Prefix",
+          "type": "string"
+        },
+        "revision": {
+          "pattern": "^[a-f0-9]{40}$",
+          "title": "Revision",
+          "type": "string"
+        },
+        "vector_space": {
+          "pattern": "^[a-z][a-z0-9_]{0,99}$",
+          "title": "Vector Space",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_key",
+        "revision",
+        "dimensions",
+        "max_tokens",
+        "pooling",
+        "normalization",
+        "query_prefix",
+        "document_prefix",
+        "output_modes",
+        "encoder_contract_version",
+        "vector_space"
+      ],
+      "title": "EmbeddingModelContract",
+      "type": "object"
+    },
+    "EmbeddingVectorResult": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_revision": {
+          "minimum": 0,
+          "title": "Canonical Revision",
+          "type": "integer"
+        },
+        "dimensions": {
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Dimensions",
+          "type": "integer"
+        },
+        "document_id": {
+          "format": "uuid",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "input_hash": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Input Hash",
+          "type": "string"
+        },
+        "job_key": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Job Key",
+          "type": "string"
+        },
+        "model_key": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Model Key",
+          "type": "string"
+        },
+        "model_revision": {
+          "pattern": "^[a-f0-9]{40}$",
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "representation_kind": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Representation Kind",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "embedding-vector-result.v1",
+          "default": "embedding-vector-result.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "vector": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 65536,
+          "minItems": 1,
+          "title": "Vector",
+          "type": "array"
+        },
+        "vector_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Vector Sha256",
+          "type": "string"
+        },
+        "vector_space": {
+          "pattern": "^[a-z][a-z0-9_]{0,99}$",
+          "title": "Vector Space",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_key",
+        "document_id",
+        "representation_kind",
+        "input_hash",
+        "model_key",
+        "model_revision",
+        "vector_space",
+        "canonical_revision",
+        "dimensions",
+        "vector",
+        "vector_sha256"
+      ],
+      "title": "EmbeddingVectorResult",
+      "type": "object"
+    },
+    "EmbeddingWorkerPolicy": {
+      "additionalProperties": false,
+      "description": "Bounded retry/timeout policy carried by every worker receipt.",
+      "properties": {
+        "batch_size": {
+          "default": 64,
+          "maximum": 5000,
+          "minimum": 1,
+          "title": "Batch Size",
+          "type": "integer"
+        },
+        "max_attempts": {
+          "default": 3,
+          "maximum": 20,
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "retry_backoff_seconds": {
+          "default": [
+            30,
+            120
+          ],
+          "items": {
+            "type": "integer"
+          },
+          "title": "Retry Backoff Seconds",
+          "type": "array"
+        },
+        "retryable_failure_codes": {
+          "default": [
+            "encoder_unavailable",
+            "timeout"
+          ],
+          "items": {
+            "$ref": "#/$defs/FailureCode"
+          },
+          "title": "Retryable Failure Codes",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": "embedding-worker-policy.v1",
+          "default": "embedding-worker-policy.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "terminal_failure_codes": {
+          "default": [
+            "invalid_vector",
+            "model_contract_mismatch"
+          ],
+          "items": {
+            "$ref": "#/$defs/FailureCode"
+          },
+          "title": "Terminal Failure Codes",
+          "type": "array"
+        },
+        "timeout_seconds": {
+          "default": 1800,
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "EmbeddingWorkerPolicy",
+      "type": "object"
+    },
+    "FailureCode": {
+      "enum": [
+        "encoder_unavailable",
+        "invalid_vector",
+        "model_contract_mismatch",
+        "timeout"
+      ],
+      "title": "FailureCode",
+      "type": "string"
+    }
+  },
+  "$id": "https://schemas.my-data-hub.internal/embeddings/embedding-artifact-manifest.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Immutable worker artifact descriptor accepted by the master importer.",
+  "properties": {
+    "artifact_id": {
+      "format": "uuid",
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
+      "type": "string"
+    },
+    "execution_policy": {
+      "$ref": "#/$defs/EmbeddingWorkerPolicy"
+    },
+    "failures": {
+      "items": {
+        "$ref": "#/$defs/EmbeddingFailure"
+      },
+      "title": "Failures",
+      "type": "array"
+    },
+    "input_jobs_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Input Jobs Sha256",
+      "type": "string"
+    },
+    "model": {
+      "$ref": "#/$defs/EmbeddingModelContract"
+    },
+    "payload_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Payload Sha256",
+      "type": "string"
+    },
+    "run_id": {
+      "format": "uuid",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "embedding-artifact-manifest.v1",
+      "default": "embedding-artifact-manifest.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "successful_results": {
+      "items": {
+        "$ref": "#/$defs/EmbeddingVectorResult"
+      },
+      "title": "Successful Results",
+      "type": "array"
+    },
+    "total_jobs": {
+      "minimum": 1,
+      "title": "Total Jobs",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "run_id",
+    "model",
+    "execution_policy",
+    "input_jobs_sha256",
+    "payload_sha256",
+    "successful_results",
+    "failures",
+    "total_jobs",
+    "started_at",
+    "completed_at"
+  ],
+  "title": "EmbeddingArtifactManifest",
+  "type": "object"
+}

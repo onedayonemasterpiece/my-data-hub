@@ -68,6 +68,15 @@ projection, target refs, legacy identity, provenance, required Region
 Talk object-scope relation, scoped state/usage when applicable and disposition. A missing
 relation rolls back the row application; it is not repaired later by inference.
 
+For the bounded blogger snapshot, a shared normalized public account first
+creates a durable quarantined duplicate group; it never chooses a winner by row
+order or `ON CONFLICT`. An exact replay is eligible only after a complete
+reviewed resolution set binds every group/member set to an explicit canonical
+source row and actor. The replay adds append-only resolution/effective-
+disposition evidence while leaving raw rows and first dispositions unchanged.
+Unresolved, partial, inconsistent, or ownership-conflicting decisions remain
+quarantined and cannot advance the canonical revision.
+
 ## 5. Reconciliation
 
 Generate a newly registered immutable reconciliation-report version derived from

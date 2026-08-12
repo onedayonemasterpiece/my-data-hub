@@ -7,9 +7,9 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from my_data_hub.mcp.oauth import RevocationCheckError, RevocationKey, TokenValidationError
+from my_data_hub.auth.control import ControlLedgerRevocationStore, OAuthRevocationQuery
+from my_data_hub.mcp.oauth import RevocationKey, TokenValidationError
 from my_data_hub.mcp.oauth_jwt import JwksJwtDecoder
-from my_data_hub.mcp.oauth_postgres import PostgresRevocationStore
 
 RESOURCE = "https://mcp-datahub.kenigevents.ru/mcp"
 
@@ -85,17 +85,25 @@ def test_jwks_decoder_rejects_insecure_authority_and_symmetric_algorithm() -> No
         )
 
 
-def test_postgres_revocation_store_fails_closed_for_unavailable_database() -> None:
-    store = PostgresRevocationStore(
-        "postgresql://invalid:invalid@127.0.0.1:1/invalid?connect_timeout=1"
-    )
-    with pytest.raises(RevocationCheckError, match="unavailable"):
-        store.is_revoked(
-            RevocationKey(
+def test_control_ledger_revocation_adapter_preserves_exact_identity() -> None:
+    class Ledger:
+        def is_revoked(self, query: OAuthRevocationQuery) -> bool:
+            assert query == OAuthRevocationQuery(
                 issuer="https://identity.example",
                 token_id="token-1",
                 client_id="client-1",
                 subject="principal-1",
                 issued_at=1,
             )
+            return True
+
+    store = ControlLedgerRevocationStore(Ledger())  # type: ignore[arg-type]
+    assert store.is_revoked(
+        RevocationKey(
+            issuer="https://identity.example",
+            token_id="token-1",
+            client_id="client-1",
+            subject="principal-1",
+            issued_at=1,
         )
+    ) is True

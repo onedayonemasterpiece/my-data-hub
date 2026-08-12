@@ -1,0 +1,59 @@
+{
+  "$id": "https://schemas.my-data-hub.invalid/provider/operational-data-workload-plan.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "blogger_project_id": {
+      "format": "uuid",
+      "title": "Blogger Project Id",
+      "type": "string"
+    },
+    "blogger_snapshot_at": {
+      "format": "date-time",
+      "title": "Blogger Snapshot At",
+      "type": "string"
+    },
+    "blogger_source_revision": {
+      "pattern": "^[a-f0-9]{40}$",
+      "title": "Blogger Source Revision",
+      "type": "string"
+    },
+    "embedding_probe_query_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Embedding Probe Query Sha256",
+      "type": "string"
+    },
+    "matrix_id": {
+      "format": "uuid",
+      "title": "Matrix Id",
+      "type": "string"
+    },
+    "require_duplicate_replay": {
+      "const": true,
+      "default": true,
+      "title": "Require Duplicate Replay",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": "my-data-hub-operational-data-workload-plan.v1",
+      "default": "my-data-hub-operational-data-workload-plan.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_commit": {
+      "pattern": "^[a-f0-9]{40}$",
+      "title": "Source Commit",
+      "type": "string"
+    }
+  },
+  "required": [
+    "matrix_id",
+    "source_commit",
+    "blogger_project_id",
+    "blogger_snapshot_at",
+    "blogger_source_revision",
+    "embedding_probe_query_sha256"
+  ],
+  "title": "DataWorkloadPlan",
+  "type": "object"
+}

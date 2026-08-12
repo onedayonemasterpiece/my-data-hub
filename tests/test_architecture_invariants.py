@@ -67,12 +67,29 @@ def test_owner_approved_architecture_values_are_constant() -> None:
         "legacy_same_host_install": "forbidden",
         "dns_vpn_443_changes_in_pr_a": "forbidden",
     }
+    assert values["remote_mcp"] == {
+        "default_profile": "read_only",
+        "owner_operator_profile": "enabled_after_all_write_checkpoint_security_gates",
+    }
+    assert values["region_talk"] == {
+        "production_pipeline": "paused",
+        "production_publication": "disabled",
+        "bounded_bloggers_import": "completed_or_exact_blocker",
+    }
+    assert values["operational_state_adr"] == (
+        "docs/adr/0017-operational-mvp-gated-profiles.md"
+    )
 
 
 def test_production_control_profile_has_no_local_database_path() -> None:
     compose = load_yaml("compose.control-plane.yaml")
     assert compose["x-my-data-hub-profile"] == "production-lightweight-control-plane"
-    assert set(compose["services"]) == {"control-plane"}
+    assert set(compose["services"]) == {
+        "connector-intake",
+        "control-plane",
+        "remote-mcp",
+        "oauth-server",
+    }
     assert not compose.get("volumes")
     serialized = json.dumps(compose, sort_keys=True).lower()
     for forbidden in (
@@ -88,6 +105,18 @@ def test_production_control_profile_has_no_local_database_path() -> None:
     environment = compose["services"]["control-plane"]["environment"]
     assert environment["MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED"] == "false"
     assert environment["MY_DATA_HUB_MCP_WRITE_ENABLED"] == "false"
+    remote_mcp = compose["services"]["remote-mcp"]
+    assert remote_mcp["profiles"] == ["remote-mcp"]
+    oauth_server = compose["services"]["oauth-server"]
+    assert oauth_server["profiles"] == ["remote-mcp"]
+    assert oauth_server["entrypoint"] == ["python", "-m", "my_data_hub.oauth_server.runtime"]
+    assert remote_mcp["environment"]["MY_DATA_HUB_MCP_WRITE_ENABLED"] == "false"
+    assert remote_mcp["ports"] == ["127.0.0.1:${MY_DATA_HUB_MCP_PORT:-8765}:8765"]
+    connector_intake = compose["services"]["connector-intake"]
+    assert connector_intake["profiles"] == ["connectors"]
+    assert connector_intake["ports"] == [
+        "127.0.0.1:${MY_DATA_HUB_CONNECTOR_PORT:-8081}:8081"
+    ]
     installer = (ROOT / "deploy/control-plane/install.sh").read_text().lower()
     assert "compose.control-plane.yaml" in installer
     assert "database_url" not in installer
@@ -119,7 +148,7 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
         path.name
         for path in workflow_directory.iterdir()
         if path.is_file() and path.suffix.lower() in {".yml", ".yaml"}
-    } == {"ci.yml"}
+    } == {"ci.yml", "nightly.yml", "post-deploy.yml", "provider-real.yml"}
     for path in repository_files:
         if path.suffix.lower() not in {".yml", ".yaml"}:
             continue
@@ -139,8 +168,18 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
         if path.is_file()
     } == {
         "deploy/control-plane/Dockerfile",
+        "deploy/control-plane/collect_deployment_evidence.py",
         "deploy/control-plane/install.sh",
+        "deploy/control-plane/install_master_tunnel_broker.sh",
         "deploy/same-host/install.sh",
+        "deploy/yandex-edge/autossh.service",
+        "deploy/yandex-edge/cloud-init.yaml.tpl",
+        "deploy/yandex-edge/create_tunnel_identity.sh",
+        "deploy/yandex-edge/edge-nginx.conf",
+        "deploy/yandex-edge/fetch-lockbox-key.py",
+        "deploy/yandex-edge/provision.sh",
+        "deploy/yandex-edge/proxy.conf",
+        "deploy/yandex-edge/render_cloud_init.py",
     }
     patterns = (
         re.compile(r"^.*postgresql\.service.*$", re.I | re.M),
@@ -249,7 +288,9 @@ def test_disposable_postgres_has_no_persistent_volume() -> None:
             assert name == "postgres"
     postgres = compose["services"]["postgres"]
     assert postgres["restart"] == "no"
-    assert postgres["tmpfs"] == ["/var/lib/postgresql:size=1g,mode=0700"]
+    assert postgres["tmpfs"] == [
+        "/var/lib/postgresql:size=1g,mode=0700,uid=999,gid=999"
+    ]
     makefile = (ROOT / "Makefile").read_text()
     assert "docker compose down -v --remove-orphans" in makefile
     ci = load_yaml(".github/workflows/ci.yml")

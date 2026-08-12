@@ -91,8 +91,10 @@ class Settings:
     mcp_trusted_proxies: tuple[str, ...] = ()
     mcp_token_max_lifetime_seconds: int = 3600
     mcp_operator_profile_enabled: bool = False
-    mcp_revocation_database_url: str = ""
-    mcp_reader_database_url: str = ""
+    mcp_provider_profile_enabled: bool = False
+    mcp_acceptance_scenarios_enabled: bool = False
+    mcp_control_gateway_url: str = ""
+    mcp_control_gateway_token_file: Path | None = None
     application_database_url: str = ""
     connector_intake_database_url: str = ""
     orchestrator_database_url: str = ""
@@ -149,7 +151,8 @@ class Settings:
                 _csv(
                     os.getenv(
                         "MY_DATA_HUB_MCP_SCOPES",
-                        "hub:read,orchestrator:read,region-talk:read,migration:read",
+                        "platform:read,master:read,operation:read,checkpoint:read,"
+                        "embedding:read,provider:read,bloggers:read,data:read",
                     )
                 )
             ),
@@ -175,12 +178,20 @@ class Settings:
             mcp_operator_profile_enabled=_bool(
                 "MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED", False
             ),
-            mcp_revocation_database_url=os.getenv(
-                "MY_DATA_HUB_MCP_REVOCATION_DATABASE_URL", ""
+            mcp_provider_profile_enabled=_bool(
+                "MY_DATA_HUB_MCP_PROVIDER_PROFILE_ENABLED", False
+            ),
+            mcp_acceptance_scenarios_enabled=_bool(
+                "MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED", False
+            ),
+            mcp_control_gateway_url=os.getenv(
+                "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL", ""
             ).strip(),
-            mcp_reader_database_url=os.getenv(
-                "MY_DATA_HUB_MCP_READER_DATABASE_URL", ""
-            ).strip(),
+            mcp_control_gateway_token_file=(
+                Path(os.environ["MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE"]).expanduser()
+                if os.getenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE")
+                else None
+            ),
             application_database_url=os.getenv(
                 "MY_DATA_HUB_APPLICATION_DATABASE_URL", ""
             ).strip(),
@@ -236,8 +247,6 @@ class Settings:
                     self.connector_intake_database_url,
                     self.orchestrator_database_url,
                     self.canonical_committer_database_url,
-                    self.mcp_reader_database_url,
-                    self.mcp_revocation_database_url,
                 )
                 if value
             )
@@ -248,7 +257,31 @@ class Settings:
                 )
         if self.mcp_remote_enabled and self.mcp_auth_mode == "stdio-environment":
             raise ConfigurationError("remote MCP cannot use stdio-environment authentication")
+        provider_only_scopes = frozenset(
+            {"platform:read", "provider:read", "provider:write"}
+        )
+        if self.mcp_provider_profile_enabled and (
+            self.mcp_operator_profile_enabled
+            or not self.mcp_write_enabled
+            or self.mcp_scopes != provider_only_scopes
+            or self.mcp_acceptance_scenarios_enabled
+            or not self.mcp_control_gateway_url
+            or self.mcp_control_gateway_token_file is None
+        ):
+            raise ConfigurationError(
+                "provider-only MCP requires its exclusive profile and exactly "
+                "platform:read, provider:read and provider:write through the single control gateway"
+            )
         remote_read_scopes = {
+            "platform:read",
+            "master:read",
+            "operation:read",
+            "checkpoint:read",
+            "embedding:read",
+            "bloggers:read",
+            "data:read",
+            # Retained only for local compatibility with the pre-reset semantic
+            # catalog. Operational MCP tools use the explicit scopes above.
             "hub:read",
             "orchestrator:read",
             "region-talk:read",
@@ -256,11 +289,21 @@ class Settings:
             "connector:read",
             "provider:read",
         }
+        remote_write_scopes = {
+            "master:ensure",
+            "master:rotate",
+            "recovery:request",
+            "acceptance:probe",
+            "data:write",
+            "migration:operate",
+            "provider:write",
+        }
         if self.mcp_remote_enabled and (
-            self.mcp_write_enabled or not self.mcp_scopes <= remote_read_scopes
+            (not self.mcp_write_enabled and not self.mcp_scopes <= remote_read_scopes)
+            or (self.mcp_write_enabled and not self.mcp_scopes <= remote_read_scopes | remote_write_scopes)
         ):
             raise ConfigurationError(
-                "R1 remote MCP is semantic read-only; write/operator/provider mutation scopes are forbidden"
+                "remote MCP scopes exceed the selected reader or guarded owner/operator profile"
             )
         if self.mcp_remote_enabled and self.mcp_auth_mode == "oauth":
             oauth_values = {
@@ -268,8 +311,6 @@ class Settings:
                 "MY_DATA_HUB_MCP_OAUTH_AUDIENCE": self.mcp_oauth_audience,
                 "MY_DATA_HUB_MCP_OAUTH_RESOURCE": self.mcp_oauth_resource,
                 "MY_DATA_HUB_MCP_OAUTH_JWKS_URL": self.mcp_oauth_jwks_url,
-                "MY_DATA_HUB_MCP_REVOCATION_DATABASE_URL": self.mcp_revocation_database_url,
-                "MY_DATA_HUB_MCP_READER_DATABASE_URL": self.mcp_reader_database_url,
             }
             missing = sorted(name for name, value in oauth_values.items() if not value)
             if missing:
@@ -319,6 +360,27 @@ class Settings:
             raise ConfigurationError("OAuth access token maximum lifetime must be 60..86400 seconds")
         if self.mcp_operator_profile_enabled and not self.mcp_write_enabled:
             raise ConfigurationError("database operator profile requires the MCP write gate")
+        if self.mcp_acceptance_scenarios_enabled and (
+            not self.mcp_write_enabled
+            or "acceptance:operate" not in self.mcp_scopes
+            or not self.mcp_control_gateway_url
+            or self.mcp_control_gateway_token_file is None
+        ):
+            raise ConfigurationError(
+                "acceptance scenarios require write opt-in, acceptance:operate and the single control gateway"
+            )
+        if self.mcp_control_gateway_url:
+            gateway = urlsplit(self.mcp_control_gateway_url)
+            if (
+                gateway.scheme not in {"http", "https"}
+                or not gateway.hostname
+                or gateway.username is not None
+                or gateway.password is not None
+                or gateway.query
+                or gateway.fragment
+                or gateway.path != "/internal/mcp-provider/invoke"
+            ):
+                raise ConfigurationError("provider control gateway URL is not the exact internal endpoint")
         if self.mcp_auth_mode == "development-token" and not self.mcp_development_token:
             raise ConfigurationError("development-token auth requires a token")
         if (
@@ -331,8 +393,9 @@ class Settings:
                 "remote network access requires the OAuth/TLS profile"
             )
         if self.mcp_write_enabled and not {
-            "hub:write",
-            "region-talk:write",
+            "data:write",
+            "migration:operate",
+            "provider:write",
         }.intersection(self.mcp_scopes):
             raise ConfigurationError("MCP write mode requires an explicit write scope")
         if self.production_publish_enabled and self.environment not in {"prod", "production"}:

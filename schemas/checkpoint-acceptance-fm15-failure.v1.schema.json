@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/checkpoint-acceptance-fm15-failure.v1.schema.json",
+  "title": "Fixed FM15 failed restore verifier receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_run_id",
+    "candidate_checkpoint_id",
+    "exact_version_ref",
+    "source_revision",
+    "manifest_sha256",
+    "expected_content_sha256",
+    "detail_code",
+    "failure_code",
+    "restore_ok"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-checkpoint-acceptance-fm15-failure.v1"
+    },
+    "task_run_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "candidate_checkpoint_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "exact_version_ref": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+      "maxLength": 512
+    },
+    "source_revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "expected_content_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "detail_code": {
+      "const": "FORCED_DISPOSABLE_RESTORE_FAILURE"
+    },
+    "failure_code": {
+      "const": "MY_DATA_HUB_FIXED_FM15_RESTORE_FAILURE"
+    },
+    "restore_ok": {
+      "const": false
+    }
+  }
+}

@@ -9,7 +9,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 import my_data_hub.api.app as api_module
+from my_data_hub.api.connector_runtime import build_connector_api_runtime
 from my_data_hub.config import ConfigurationError, Settings
+from my_data_hub.control_plane.ledger import ControlLedger
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -95,7 +97,7 @@ def test_unconfigured_intake_is_fail_closed(monkeypatch: pytest.MonkeyPatch, tmp
     assert response.status_code == 503
 
 
-def test_production_api_requires_only_its_two_database_identities_and_worker_token(
+def test_production_api_does_not_require_static_connector_database_identity(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(api_module, "WorkerResultRepository", FakeRepository)
@@ -105,11 +107,91 @@ def test_production_api_requires_only_its_two_database_identities_and_worker_tok
     production = replace(
         production,
         application_database_url="postgresql://application@db/hub",
-        connector_intake_database_url="postgresql://connector@db/hub",
+        connector_intake_database_url="",
         worker_result_token=None,
     )
     with pytest.raises(ConfigurationError, match="worker result token"):
         api_module.create_app(production)
+    configured = replace(production, worker_result_token="worker-secret")
+    app = api_module.create_app(configured)
+    assert app.title == "my-data-hub control API"
+
+
+def test_connector_intake_without_active_master_runtime_is_pre_mutation_blocker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(api_module, "WorkerResultRepository", FakeRepository)
+    configured = replace(
+        settings(tmp_path),
+        connector_credentials=(("synthetic.daily-statistics", "connector-secret"),),
+    )
+    client = TestClient(api_module.create_app(configured))
+    envelope = (ROOT / "examples/contracts/data-connector-envelope.v1.example.json").read_bytes()
+    response = client.post(
+        "/intake/v1/batches",
+        content=envelope,
+        headers={
+            "Authorization": "Bearer connector-secret",
+            "Content-Type": "application/json",
+        },
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "CONNECTOR_ACTIVE_MASTER_RUNTIME_UNAVAILABLE",
+        "retryable": True,
+        "mutation_started": False,
+    }
+
+
+def test_connector_only_production_runtime_has_no_static_database_or_worker_route(
+    tmp_path: Path,
+) -> None:
+    configured = replace(
+        settings(tmp_path),
+        database_url="",
+        environment="production",
+        worker_result_token=None,
+        connector_credentials=(("synthetic.daily-statistics", "connector-secret"),),
+    )
+    ledger = ControlLedger(tmp_path / "control.sqlite3")
+    runtime = build_connector_api_runtime(settings=configured, ledger=ledger)
+    with TestClient(runtime.app) as client:
+        assert client.get("/health/ready").json() == {
+            "ok": True,
+            "component": "my-data-hub-connector-intake",
+        }
+        assert client.post("/v1/worker-results", json={}).status_code == 404
+        response = client.post(
+            "/intake/v1/batches",
+            content=(
+                ROOT / "examples/contracts/data-connector-envelope.v1.example.json"
+            ).read_bytes(),
+            headers={
+                "Authorization": "Bearer connector-secret",
+                "Content-Type": "application/json",
+            },
+        )
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "MASTER_NOT_ACTIVE",
+        "master_state": "REQUESTED",
+        "operation_id": None,
+        "retryable": True,
+        "mutation_started": False,
+    }
+
+
+def test_connector_only_runtime_rejects_injected_static_database_url(tmp_path: Path) -> None:
+    configured = replace(
+        settings(tmp_path),
+        environment="production",
+        connector_credentials=(("synthetic.daily-statistics", "connector-secret"),),
+    )
+    with pytest.raises(ConfigurationError, match="static database URL"):
+        build_connector_api_runtime(
+            settings=configured,
+            ledger=ControlLedger(tmp_path / "control.sqlite3"),
+        )
 
 
 def test_chunked_or_declared_oversize_body_is_rejected(

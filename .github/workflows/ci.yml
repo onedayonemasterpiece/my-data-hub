@@ -13,15 +13,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
       - run: python -m pip install -e '.[dev]'
       - run: python scripts/validate_repository.py
+      - run: python scripts/scan_tracked_secrets.py
       - run: python -m compileall -q src tests scripts
       - run: pytest
       - run: ruff check .
+      - run: mypy
 
   postgres-integration:
     runs-on: ubuntu-latest
@@ -56,8 +60,14 @@ jobs:
       MY_DATA_HUB_MCP_READER_DATABASE_URL: postgresql://ci_mcp_reader:ci-reader-password@127.0.0.1:5432/my_data_hub_test
       MY_DATA_HUB_MONITORING_DATABASE_URL: postgresql://ci_monitoring:ci-monitoring-password@127.0.0.1:5432/my_data_hub_test
       MY_DATA_HUB_OPERATOR_DATABASE_URL: postgresql://ci_editor:ci-editor-password@127.0.0.1:5432/my_data_hub_test
+      # Run the separate tmpfs-only Docker proof which holds an old transaction
+      # across a real fence/epoch rotation.  The container is --rm and has no
+      # named/bind volume, so it cannot become a production/local master.
+      MDH_RUN_DISPOSABLE_POSTGRES: '1'
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -98,6 +108,8 @@ jobs:
           SQL
       - name: Prove PostgreSQL positive and adversarial role probes
         run: python scripts/verify_postgres_roles.py
+      - name: Prove a real old transaction is fenced across an epoch rotation
+        run: python -m pytest -q tests/master/test_live_postgres.py
       - name: Prove verified recovery checkpoint opens only the restricted operator read gate
         run: |
           python -m my_data_hub.recovery_record \
@@ -117,7 +129,10 @@ jobs:
       - name: Verify disposable database reader/editor
         run: python scripts/verify_db_operator.py
       - name: Verify synthetic connector exactly-once flow
-        run: python scripts/verify_connector_flow.py
+        run: >-
+          python scripts/verify_connector_flow.py
+          --bootstrap-disposable-epoch
+          --bootstrap-disposable-checkpoint
       - name: Import MCP v2 server contract
         run: python -c "from my_data_hub.config import Settings; from my_data_hub.mcp.server import create_server; assert create_server(Settings.from_env()) is not None"
       - name: Write PostgreSQL integration receipt

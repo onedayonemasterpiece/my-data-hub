@@ -1,0 +1,131 @@
+{
+  "$defs": {
+    "CheckpointAcceptanceHead": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "minimum": 0,
+          "title": "Generation",
+          "type": "integer"
+        },
+        "current_checkpoint_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Current Checkpoint Id"
+        },
+        "previous_checkpoint_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Previous Checkpoint Id"
+        }
+      },
+      "required": [
+        "generation",
+        "current_checkpoint_id",
+        "previous_checkpoint_id"
+      ],
+      "title": "CheckpointAcceptanceHead",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Durable pre-effect record containing only bounded identities and HEAD.",
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-checkpoint-acceptance-intent.v1",
+      "default": "my-data-hub-checkpoint-acceptance-intent.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scenario": {
+      "enum": [
+        "FM05",
+        "FM14",
+        "FM15"
+      ],
+      "title": "Scenario",
+      "type": "string"
+    },
+    "operation_id": {
+      "format": "uuid",
+      "title": "Operation Id",
+      "type": "string"
+    },
+    "task_run_id": {
+      "format": "uuid",
+      "title": "Task Run Id",
+      "type": "string"
+    },
+    "idempotency_key_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Idempotency Key Sha256",
+      "type": "string"
+    },
+    "source_revision": {
+      "pattern": "^[0-9a-f]{40}$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "candidate_checkpoint_id": {
+      "format": "uuid",
+      "title": "Candidate Checkpoint Id",
+      "type": "string"
+    },
+    "evidence_class": {
+      "enum": [
+        "injected",
+        "live"
+      ],
+      "title": "Evidence Class",
+      "type": "string"
+    },
+    "initial_head": {
+      "$ref": "#/$defs/CheckpointAcceptanceHead"
+    },
+    "timeout_seconds": {
+      "const": 900,
+      "default": 900,
+      "title": "Timeout Seconds",
+      "type": "integer"
+    },
+    "max_attempts": {
+      "const": 3,
+      "default": 3,
+      "title": "Max Attempts",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "scenario",
+    "operation_id",
+    "task_run_id",
+    "idempotency_key_sha256",
+    "source_revision",
+    "candidate_checkpoint_id",
+    "evidence_class",
+    "initial_head",
+    "schema_version",
+    "timeout_seconds",
+    "max_attempts"
+  ],
+  "title": "CheckpointAcceptanceIntent",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/checkpoint-acceptance-intent.v1.schema.json"
+}

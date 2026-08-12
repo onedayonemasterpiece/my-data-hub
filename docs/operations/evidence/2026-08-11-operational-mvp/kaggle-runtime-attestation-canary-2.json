@@ -1,0 +1,28 @@
+{
+  "blockers": [
+    "PUBLIC_CALLBACK_ENDPOINT_UNAVAILABLE",
+    "PRODUCTION_CONTROL_PLANE_NOT_DEPLOYED"
+  ],
+  "callback_delivery": "not_attempted_public_endpoint_unavailable",
+  "cleanup": "task_created_resource_absent",
+  "credential_mode": "automated_legacy_username_key",
+  "event_count": 5,
+  "event_names": [
+    "kernel_started",
+    "preflight_ok",
+    "alive",
+    "report_written",
+    "terminal"
+  ],
+  "event_uid_count": 5,
+  "evidence_class": "live_diagnostic_nonqualifying",
+  "observed_at": "2026-08-11T18:04:21+00:00",
+  "output_sha256": "10d2b7c1789fa6e6d179c76fab19c2196f22afa4138502f7ad3fd39348c23de6",
+  "provider_ref": "zigomaro/mdh-events-runtime-15e3e6b0",
+  "provider_status": "complete",
+  "run_id": "15e3e6b0-5694-445b-b6f5-348c52f587ef",
+  "runtime_source_attested": true,
+  "schema_version": "my-data-hub-runtime-attestation-live-receipt.v1",
+  "source_sha256": "549d832f1659c99173c07280f392d00b167ebb983c352b1a228cf176e8270c46",
+  "token_redacted": true
+}

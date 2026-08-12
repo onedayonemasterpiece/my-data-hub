@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/blogger-closure-receipt.v2.schema.json",
+  "title": "FINAL-BLOGGER durable closure receipt v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "status",
+    "started_at",
+    "completed_at",
+    "closure_idempotency_key_sha256",
+    "request_id",
+    "request_sha256",
+    "ensure_operation_id",
+    "rotation_operation_id",
+    "import_runtime",
+    "import_receipt",
+    "import_receipt_sha256",
+    "checkpoint",
+    "cold_restore",
+    "mcp_accounting",
+    "mcp_statistics",
+    "mcp_projection"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-blogger-closure.v2"
+    },
+    "receipt_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "status": {
+      "const": "DURABLE_COMPLETE"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "closure_idempotency_key_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "request_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "request_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "ensure_operation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "rotation_operation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "import_runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "attempt_id",
+        "master_instance_id",
+        "epoch"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "type": "string"
+        },
+        "master_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "import_receipt": {
+      "$ref": "region-talk-ydb-bloggers-import-receipt.v3.schema.json"
+    },
+    "import_receipt_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generation",
+        "checkpoint_id",
+        "exact_version_ref",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "checkpoint_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "exact_version_ref": {
+          "type": "string",
+          "pattern": "^[^/]+/[^/]+/[1-9][0-9]*$"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "cold_restore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "master_instance_id",
+        "epoch",
+        "canonical_revision"
+      ],
+      "properties": {
+        "master_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "canonical_revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "mcp_accounting": {
+      "type": "object",
+      "maxProperties": 32
+    },
+    "mcp_statistics": {
+      "type": "object",
+      "maxProperties": 16
+    },
+    "mcp_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "listed_bloggers",
+        "get_found",
+        "provenance_events",
+        "search_matches",
+        "completed_retrievers"
+      ],
+      "properties": {
+        "listed_bloggers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "get_found": {
+          "const": true
+        },
+        "provenance_events": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "search_matches": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "completed_retrievers": {
+          "type": "array",
+          "maxItems": 4,
+          "uniqueItems": true,
+          "allOf": [
+            {
+              "contains": {
+                "const": "exact"
+              },
+              "minContains": 1
+            },
+            {
+              "contains": {
+                "const": "fts"
+              },
+              "minContains": 1
+            }
+          ]
+        }
+      }
+    }
+  }
+}

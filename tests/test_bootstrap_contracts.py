@@ -14,6 +14,8 @@ def test_postgres_verifier_uses_current_accounting_contract() -> None:
     assert "quarantined_count" in source
     assert "cutover_ready" in source
     assert 'str(projects[0][1]) != "paused"' in source
+    assert "migrations != expected_migrations" in source
+    assert "expected_schema_revision = expected_migrations[-1][0]" in source
 
 
 def test_sql_accounting_starts_from_manifest_kinds_and_blocks_quarantine() -> None:

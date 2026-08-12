@@ -1,0 +1,26 @@
+{
+  "schema_version": "my-data-hub-real-kaggle-canary.v2",
+  "scenario": "private_dataset_create_exact_readback_unauthenticated_denial_delete",
+  "task_id": "11111111-1111-4111-8111-111111111111",
+  "run_id": "22222222-2222-4222-8222-222222222222",
+  "commit_sha": "0123456789abcdef0123456789abcdef01234567",
+  "provider_ref": "owner/task-created-private-canary",
+  "provider_version": 1,
+  "package_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "claim_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "privacy": "private",
+  "unauthenticated_http_status": 403,
+  "denial_class": "authorization",
+  "cleanup": "task_created_resource_absent",
+  "cleanup_outcome": "complete",
+  "counts": {"created": 1, "exact_readback": 1, "deleted": 1},
+  "gate_results": [
+    {"name": "private_create", "outcome": "PASS"},
+    {"name": "exact_version_readback", "outcome": "PASS"},
+    {"name": "unauthenticated_access_denied", "outcome": "PASS"},
+    {"name": "claim_bound_cleanup", "outcome": "PASS"}
+  ],
+  "blockers": [],
+  "started_at": "2026-08-11T03:30:00Z",
+  "completed_at": "2026-08-11T03:31:00Z"
+}

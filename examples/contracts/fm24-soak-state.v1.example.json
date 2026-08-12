@@ -1,0 +1,19 @@
+{
+  "binding_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "bounded_reads": 0,
+  "checkpoint_recovery": null,
+  "completed_steps": 0,
+  "deadline_monotonic_ns": 5400000000000,
+  "evidence_class": "injected",
+  "finished_monotonic_ns": null,
+  "lease_renewals": 0,
+  "rejected_stale_sessions": 0,
+  "schema_version": "my-data-hub-fm24-soak-state.v1",
+  "session_rotations": 0,
+  "started_monotonic_ns": 0,
+  "status": "RUNNING",
+  "steps": [],
+  "task_id_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "terminal_code": null,
+  "tunnel_renewals": 0
+}

@@ -124,3 +124,26 @@ spool restart/capacity/backup, then run accept/replay/outage/conflict/auth canar
 - Kaggle protected resources are status-only;
 - Region Talk and `publication_dispatch` remain paused/disabled;
 - no production dump, credential, OAuth token, provider key, or private source data is in git.
+
+---
+
+# Operational MVP continuation — 2026-08-11
+
+Integration branch: `integration/operational-mvp`
+
+This continuation preserves the Kaggle-only writable PostgreSQL topology. It is
+merge-safe implementation evidence, not an operational-completion claim.
+
+| Lane / correction | Requirement area | Integration outcome | Integrated evidence |
+|---|---|---|---|
+| FINAL-M1 | scheduled connector/probe/restore/rotation controls | merged and corrected | `b6e633f`, `a8b7fed`, `4f4455f`, `9ce8ce2`, `a7524eb` |
+| FINAL-BLOGGER | bounded YDB import, checkpoint, cold restore, public MCP projection | merged and corrected | `c895b4b`..`e4d78dd`, `502a042`, `9ce8ce2`, `a7524eb` |
+| FINAL-MATRIX | real-provider driver | merged as platform smoke only; mandatory operational matrix remains blocked | `b52e62f`, `09f1e36`, `34085aa` |
+| FINAL-EMBED | production closure boundary | merged fail-closed; worker/prerequisite binding hardened; live control/MCP implementation still missing | `89355c7`, `a7524eb` |
+| Final integration | durable replay, deadlines, terminal polling, callback-outage regression | merged; full local gates pass | `a7524eb` |
+
+No lane is represented as live acceptance. The machine-readable verdict remains
+`MY_DATA_HUB_OPERATIONAL_MVP_BLOCKED` in
+`docs/operations/evidence/2026-08-11-operational-mvp/operational-mvp-acceptance-blocked.json`.
+Exact open implementation and external gates are listed there and in
+`docs/operations/2026-08-11-operational-mvp-progress.md`.

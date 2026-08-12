@@ -1,0 +1,23 @@
+{
+  "commit": "60878bf",
+  "completed_at": "2026-08-11T00:39:24.958446+00:00",
+  "container_health": "healthy",
+  "control_state_persisted": true,
+  "failure_injection": "host-PID SIGKILL to container init; not docker stop/kill",
+  "ready": {
+    "canonical_database_runtime": "kaggle_notebook",
+    "control_plane_ready": true,
+    "data_plane_ready": false,
+    "lifecycle_implementation": "durable_control_ledger_v1",
+    "master_epoch": null,
+    "master_instance_id": null,
+    "master_state": "REQUESTED",
+    "ok": true,
+    "production_publication": false,
+    "remote_mcp_writes": false
+  },
+  "restart_count_after": 1,
+  "restart_policy": "unless-stopped",
+  "schema_version": "my-data-hub-devstand-process-recovery.v1",
+  "verdict": "PASS"
+}

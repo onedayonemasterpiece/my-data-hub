@@ -1,0 +1,24 @@
+{
+  "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "lifecycle_gates": [
+    "clean_rotation",
+    "soak"
+  ],
+  "matrix_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "maximum_soak_seconds": 5400,
+  "minimum_soak_seconds": 3600,
+  "ordinal": 24,
+  "required_assertions": [
+    "duration_in_range",
+    "heartbeats_continuous",
+    "reads_succeeded",
+    "checkpoint_verified",
+    "recovery_succeeded"
+  ],
+  "requirement_id": "FM24",
+  "result_file": "operational-result.json",
+  "resume_only": false,
+  "scenario": "accelerated-session-rotation-soak",
+  "schema_version": "my-data-hub-operational-kaggle-driver-request.v1",
+  "task_run_id": "05c69c96-25a7-5be5-9011-701ae7ae921e"
+}

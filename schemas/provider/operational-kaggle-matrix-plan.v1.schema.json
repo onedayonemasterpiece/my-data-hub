@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/provider/operational-kaggle-matrix-plan.v1.schema.json",
+  "title": "Operational Kaggle 24-scenario plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "matrix_id", "commit_sha", "created_at", "minimum_distinct_provider_runs", "scenarios"],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-operational-kaggle-matrix-plan.v1"},
+    "matrix_id": {"type": "string", "format": "uuid"},
+    "commit_sha": {"$ref": "#/$defs/commit"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "minimum_distinct_provider_runs": {"const": 15},
+    "scenarios": {
+      "type": "array", "minItems": 24, "maxItems": 24,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["ordinal", "requirement_id", "name", "category", "planned_task_run_id", "required_assertions", "lifecycle_gates", "integration_dependency"],
+        "properties": {
+          "ordinal": {"type": "integer", "minimum": 1, "maximum": 24},
+          "requirement_id": {"type": "string", "pattern": "^FM(0[1-9]|1[0-9]|2[0-4])$"},
+          "name": {"type": "string", "pattern": "^[a-z0-9-]+$", "maxLength": 100},
+          "category": {"enum": ["provider", "runtime", "master", "checkpoint", "concurrency", "recovery", "fencing", "migration", "embedding", "mcp", "security", "soak"]},
+          "planned_task_run_id": {"type": "string", "format": "uuid"},
+          "required_assertions": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9_]+$"}},
+          "lifecycle_gates": {"type": "array", "uniqueItems": true, "items": {"enum": ["master_boot", "clean_rotation", "abrupt_master_termination", "control_plane_restart", "host_reboot", "soak"]}},
+          "integration_dependency": {"type": "string", "minLength": 1, "maxLength": 500}
+        }
+      }
+    }
+  },
+  "$defs": {"commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"}}
+}

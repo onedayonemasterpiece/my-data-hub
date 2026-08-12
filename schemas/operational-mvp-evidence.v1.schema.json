@@ -1,0 +1,288 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/operational-mvp-evidence.v1.schema.json",
+  "title": "Operational MVP semantic evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_class",
+    "source_commit",
+    "outcome",
+    "live_evidence",
+    "gate_ids",
+    "requirement_ids",
+    "assertions",
+    "observed_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-operational-mvp-evidence.v1"
+    },
+    "evidence_class": {
+      "enum": [
+        "IMPLEMENTATION_REVIEW",
+        "DEPLOYMENT",
+        "POST_DEPLOY",
+        "SECURITY_AUDIT",
+        "DATA_INTEGRITY_AUDIT",
+        "GATE_EVIDENCE"
+      ]
+    },
+    "source_commit": {
+      "$ref": "#/$defs/commit"
+    },
+    "outcome": {
+      "const": "PASS"
+    },
+    "live_evidence": {
+      "const": true
+    },
+    "gate_ids": {
+      "$ref": "#/$defs/gate_ids"
+    },
+    "requirement_ids": {
+      "$ref": "#/$defs/requirement_ids"
+    },
+    "assertions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/assertion"
+      }
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "reviewed_head_commit": {
+      "$ref": "#/$defs/commit"
+    },
+    "merge_commit": {
+      "$ref": "#/$defs/commit"
+    },
+    "review_relationship": {
+      "enum": ["PARENT", "ANCESTOR"]
+    },
+    "pull_request": {
+      "$ref": "#/$defs/pull_request"
+    },
+    "hosted_checks": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/hosted_check"
+      }
+    },
+    "deployed_commit": {
+      "$ref": "#/$defs/commit"
+    },
+    "post_deploy_verified_commit": {
+      "$ref": "#/$defs/commit"
+    },
+    "deployment_tree_state": {
+      "enum": ["CLEAN", "DIRTY"]
+    }
+  },
+  "$defs": {
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gate_id": {
+      "enum": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"]
+    },
+    "gate_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 14,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/gate_id"
+      }
+    },
+    "requirement_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9_.-]{1,99}$"
+      }
+    },
+    "assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assertion_id",
+        "gate_id",
+        "requirement_ids",
+        "outcome",
+        "evidence_sha256"
+      ],
+      "properties": {
+        "assertion_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]{2,99}$"
+        },
+        "gate_id": {
+          "$ref": "#/$defs/gate_id"
+        },
+        "requirement_ids": {
+          "$ref": "#/$defs/requirement_ids"
+        },
+        "outcome": {
+          "const": "PASS"
+        },
+        "evidence_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "pull_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "number", "url"],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*$"
+        }
+      }
+    },
+    "hosted_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "provider",
+        "runner",
+        "status",
+        "conclusion",
+        "head_commit",
+        "run_url"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]{1,99}$"
+        },
+        "provider": {
+          "const": "GITHUB_ACTIONS"
+        },
+        "runner": {
+          "oneOf": [
+            {
+              "const": "ubuntu-latest"
+            },
+            {
+              "type": "array",
+              "prefixItems": [
+                {"const": "self-hosted"},
+                {"const": "linux"},
+                {"const": "my-data-hub-devstand"}
+              ],
+              "items": false,
+              "minItems": 3,
+              "maxItems": 3
+            }
+          ]
+        },
+        "status": {
+          "const": "COMPLETED"
+        },
+        "conclusion": {
+          "const": "SUCCESS"
+        },
+        "head_commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "run_url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*$"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "evidence_class": {
+            "const": "IMPLEMENTATION_REVIEW"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "reviewed_head_commit",
+          "merge_commit",
+          "review_relationship",
+          "pull_request",
+          "hosted_checks"
+        ],
+        "properties": {
+          "hosted_checks": {
+            "minItems": 2
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "evidence_class": {
+            "const": "DEPLOYMENT"
+          }
+        }
+      },
+      "then": {
+        "required": ["deployed_commit", "deployment_tree_state"],
+        "properties": {
+          "deployment_tree_state": {
+            "const": "CLEAN"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "evidence_class": {
+            "const": "POST_DEPLOY"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "deployed_commit",
+          "post_deploy_verified_commit",
+          "deployment_tree_state",
+          "hosted_checks"
+        ],
+        "properties": {
+          "deployment_tree_state": {
+            "const": "CLEAN"
+          },
+          "hosted_checks": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ]
+}

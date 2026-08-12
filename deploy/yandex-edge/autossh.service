@@ -1,0 +1,39 @@
+[Unit]
+Description=my-data-hub restricted reverse data-less tunnel to DevCoveer
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mdh-edge
+Group=mdh-edge
+Environment=AUTOSSH_GATETIME=0
+Environment=AUTOSSH_POLL=30
+ExecStart=/usr/bin/autossh -M 0 -N \
+  -o BatchMode=yes \
+  -o ConnectTimeout=10 \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile=/etc/my-data-hub/known_hosts \
+  -i /etc/my-data-hub/tunnel_ed25519 \
+  -L 127.0.0.1:18080:127.0.0.1:8080 \
+  -L 127.0.0.1:18765:127.0.0.1:8765 \
+  -L 127.0.0.1:18780:127.0.0.1:8780 \
+  dev@188.227.84.107
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/my-data-hub
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

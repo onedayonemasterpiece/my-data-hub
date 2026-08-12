@@ -1,0 +1,54 @@
+{
+  "archive_sha256": "40bf34fb4a97a248537d0221127e38deb98c9b35208d474dd1b93f773c2558b5",
+  "blockers": [
+    "CENTRAL_CHECKPOINT_UPLOAD_PATH_UNAVAILABLE"
+  ],
+  "cleanup": {
+    "dataset": "task_created_resource_absent",
+    "destructive_calls_each": 1,
+    "notebook": "task_created_resource_absent"
+  },
+  "credential_mode": "automated_legacy_username_key",
+  "dataset_package_sha256": "fe1c7477664fb1129fbe909559ab51a191b44db1b139ef10d4e04170876e260f",
+  "dataset_ref": "zigomaro/mdh-pg18-runtime-2c999942",
+  "dataset_version": 1,
+  "diagnostic_outcome": "PASS",
+  "event_names": [
+    "kernel_started",
+    "preflight_ok",
+    "pg_started",
+    "extensions_verified",
+    "report_written"
+  ],
+  "event_uids": [
+    "6af23254-6574-54e3-9c70-9779e48e8494",
+    "5091ab13-81ca-5d8b-ab03-d346a8cd7a57",
+    "138bd8f5-a81b-5809-8dd0-cde6bf6007e1",
+    "7dc91319-5b72-510d-9afd-ed55351b97b8",
+    "984311c8-1204-50f5-87de-ae264ea2217c"
+  ],
+  "evidence_class": "live_diagnostic_nonqualifying",
+  "extensions": {
+    "citext": "1.8",
+    "pg_trgm": "1.6",
+    "pgcrypto": "1.4",
+    "vector": "0.8.6"
+  },
+  "live_evidence": true,
+  "notebook_effective_uid": 0,
+  "observed_at": "2026-08-11T22:00:55.553417+00:00",
+  "operational_matrix_pass": false,
+  "output_sha256": "63a1de50c6457d5746dc6692e99951ff066e47ee8c02689686e3d4a020281a19",
+  "output_tree_sha256": "3dcea1b50aae75973b176929851459f28f0df76c31b031f468883100da7c4227",
+  "platform": "Linux-6.12.90+-x86_64-with-glibc2.35",
+  "postgres_version": "postgres (PostgreSQL) 18.4",
+  "provider_kernel_id": 130479130,
+  "provider_ref": "zigomaro/mdh-pg18-canary-2c999942",
+  "provider_run_ref": "zigomaro/mdh-pg18-canary-2c999942/1",
+  "schema_version": "my-data-hub-pg18-runtime-live-canary.v1",
+  "source_sha256": "4f645cfc6fd29272c36d5d9b85489f5d203037c4633bba5224e845077c2274f9",
+  "source_version": 1,
+  "started_at": "2026-08-11T21:58:58.993729+00:00",
+  "task_run_id": "2c999942-5a64-408d-a1a6-38e3a53ad8f8",
+  "vector_distance": "1"
+}

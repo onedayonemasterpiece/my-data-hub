@@ -1,0 +1,114 @@
+{
+  "schema_version": "my-data-hub-operational-mvp-acceptance.v1",
+  "receipt_scope": "SYNTHETIC_EXAMPLE",
+  "verdict": "MY_DATA_HUB_OPERATIONAL_MVP_BLOCKED",
+  "completion_criteria_met": false,
+  "evaluated_source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "implementation_identity": {
+    "reviewed_head_commit": null,
+    "merge_commit": null,
+    "deployed_commit": null,
+    "post_deploy_verified_commit": null,
+    "deployment_tree_state": "UNKNOWN"
+  },
+  "architecture_source_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "completed_at": "2026-08-11T05:00:00Z",
+  "summary": "Synthetic example: external real-provider and deployment gates are blocked.",
+  "counts": {
+    "real_kaggle_run_ids": 0,
+    "real_kaggle_kernel_ids": 0,
+    "operational_scenarios_passed": 0,
+    "ydb_bloggers_observed": 266,
+    "bloggers_imported": 0,
+    "undispositioned_rows": 266,
+    "quarantined_rows": 0,
+    "e5_coverage": 0,
+    "bge_m3_coverage": 0
+  },
+  "operational_matrix": {
+    "receipt_evidence_id": null,
+    "planned_scenarios": 24,
+    "passed_scenarios": 0,
+    "failed_scenarios": 0,
+    "blocked_scenarios": 24,
+    "distinct_provider_run_refs": [],
+    "distinct_provider_kernel_ids": [],
+    "lifecycle_gates": {
+      "master_boots": 0,
+      "clean_rotations": 0,
+      "abrupt_master_terminations": 0,
+      "control_plane_restarts": 0,
+      "host_reboots": 0,
+      "soak_runs": 0,
+      "soak_duration_seconds": 0,
+      "soak_heartbeats": 0,
+      "soak_read_queries": 0,
+      "soak_checkpoints": 0,
+      "soak_recoveries": 0
+    }
+  },
+  "gate_results": [
+    {
+      "name": "code_contracts",
+      "outcome": "PASS",
+      "evidence": "synthetic example",
+      "evidence_refs": []
+    },
+    {
+      "name": "real_kaggle_matrix",
+      "outcome": "BLOCKED",
+      "evidence": "modern token absent",
+      "evidence_refs": []
+    }
+  ],
+  "evidence": [],
+  "required_evidence": {
+    "implementation_review": [],
+    "deployment": [],
+    "post_deploy": [],
+    "security_audit": [],
+    "data_integrity_audit": [],
+    "operational_matrix": []
+  },
+  "blockers": [
+    {
+      "code": "KAGGLE_MODERN_API_TOKEN_REQUIRED",
+      "blocker_class": "EXTERNAL",
+      "affected_gates": [
+        "D",
+        "F",
+        "H",
+        "N"
+      ],
+      "affected_scenarios": [
+        "FM01",
+        "FM02",
+        "FM03",
+        "FM04",
+        "FM05",
+        "FM06",
+        "FM07",
+        "FM08",
+        "FM09",
+        "FM10",
+        "FM11",
+        "FM12",
+        "FM13",
+        "FM14",
+        "FM15",
+        "FM16",
+        "FM17",
+        "FM18",
+        "FM19",
+        "FM20",
+        "FM21",
+        "FM22",
+        "FM23",
+        "FM24"
+      ],
+      "missing": "Modern Kaggle OAuth access token",
+      "closure_proof": ".venv/bin/kaggle auth login",
+      "evidence_refs": []
+    }
+  ]
+}

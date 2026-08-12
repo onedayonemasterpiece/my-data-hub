@@ -1,0 +1,293 @@
+{
+  "$defs": {
+    "CheckpointAcceptanceHead": {
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "minimum": 0,
+          "title": "Generation",
+          "type": "integer"
+        },
+        "current_checkpoint_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Current Checkpoint Id"
+        },
+        "previous_checkpoint_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Previous Checkpoint Id"
+        }
+      },
+      "required": [
+        "generation",
+        "current_checkpoint_id",
+        "previous_checkpoint_id"
+      ],
+      "title": "CheckpointAcceptanceHead",
+      "type": "object"
+    },
+    "CheckpointAcceptanceStageReceipt": {
+      "additionalProperties": false,
+      "description": "Bounded metadata returned by one fixed idempotent provider effect.",
+      "properties": {
+        "stage": {
+          "pattern": "^[a-z][a-z0-9_]{2,63}$",
+          "title": "Stage",
+          "type": "string"
+        },
+        "candidate_checkpoint_id": {
+          "format": "uuid",
+          "title": "Candidate Checkpoint Id",
+          "type": "string"
+        },
+        "task_owned": {
+          "const": true,
+          "default": true,
+          "title": "Task Owned",
+          "type": "boolean"
+        },
+        "disposable_candidate": {
+          "default": false,
+          "title": "Disposable Candidate",
+          "type": "boolean"
+        },
+        "outcome": {
+          "enum": [
+            "succeeded",
+            "rejected_expected"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "detail_code": {
+          "pattern": "^[A-Z][A-Z0-9_]{2,99}$",
+          "title": "Detail Code",
+          "type": "string"
+        },
+        "provider_receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Provider Receipt Sha256",
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manifest Sha256"
+        },
+        "package_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Package Sha256"
+        },
+        "expected_content_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Content Sha256"
+        },
+        "observed_content_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observed Content Sha256"
+        },
+        "exact_version_ref": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exact Version Ref"
+        },
+        "canonical_revision": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Canonical Revision"
+        },
+        "canonical_row_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Canonical Row Count"
+        }
+      },
+      "required": [
+        "stage",
+        "candidate_checkpoint_id",
+        "outcome",
+        "detail_code",
+        "provider_receipt_sha256",
+        "task_owned",
+        "disposable_candidate"
+      ],
+      "title": "CheckpointAcceptanceStageReceipt",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Terminal bounded receipt; injected contract evidence is never labelled live.",
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-checkpoint-acceptance-receipt.v1",
+      "default": "my-data-hub-checkpoint-acceptance-receipt.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scenario": {
+      "enum": [
+        "FM05",
+        "FM14",
+        "FM15"
+      ],
+      "title": "Scenario",
+      "type": "string"
+    },
+    "verdict": {
+      "enum": [
+        "CONTRACT_PASS",
+        "LIVE_PASS"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    },
+    "evidence_class": {
+      "enum": [
+        "injected",
+        "live"
+      ],
+      "title": "Evidence Class",
+      "type": "string"
+    },
+    "operation_id": {
+      "format": "uuid",
+      "title": "Operation Id",
+      "type": "string"
+    },
+    "task_run_id": {
+      "format": "uuid",
+      "title": "Task Run Id",
+      "type": "string"
+    },
+    "candidate_checkpoint_id": {
+      "format": "uuid",
+      "title": "Candidate Checkpoint Id",
+      "type": "string"
+    },
+    "intent_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Intent Sha256",
+      "type": "string"
+    },
+    "initial_head": {
+      "$ref": "#/$defs/CheckpointAcceptanceHead"
+    },
+    "final_head": {
+      "$ref": "#/$defs/CheckpointAcceptanceHead"
+    },
+    "head_unchanged": {
+      "title": "Head Unchanged",
+      "type": "boolean"
+    },
+    "stages": {
+      "items": {
+        "$ref": "#/$defs/CheckpointAcceptanceStageReceipt"
+      },
+      "maxItems": 5,
+      "minItems": 2,
+      "title": "Stages",
+      "type": "array"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "scenario",
+    "verdict",
+    "evidence_class",
+    "operation_id",
+    "task_run_id",
+    "candidate_checkpoint_id",
+    "intent_sha256",
+    "initial_head",
+    "final_head",
+    "head_unchanged",
+    "stages",
+    "completed_at",
+    "schema_version"
+  ],
+  "title": "CheckpointAcceptanceReceipt",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/checkpoint-acceptance-receipt.v1.schema.json"
+}

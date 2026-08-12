@@ -1,0 +1,15 @@
+{
+  "schema_version": "my-data-hub-checkpoint-broker-publication.v1",
+  "checkpoint_id": "66666666-6666-4666-8666-666666666666",
+  "operation_id": "44444444-4444-4444-8444-444444444444",
+  "epoch": 7,
+  "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source_head_generation": 3,
+  "state": "FAILED",
+  "exact_version_ref": null,
+  "verifier_run_ref": null,
+  "verifier_receipt_sha256": null,
+  "failure_code": "EXAMPLE_ONLY_NO_LIVE_EVIDENCE",
+  "created_at": "2026-08-11T00:00:00Z",
+  "updated_at": "2026-08-11T00:01:00Z"
+}

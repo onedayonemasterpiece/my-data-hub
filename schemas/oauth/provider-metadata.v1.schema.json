@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/oauth/provider-metadata.v1.schema.json",
+  "title": "my-data-hub OAuth 2.1 provider metadata v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "issuer": { "const": "https://identity.kenigevents.ru" },
+    "authorization_endpoint": { "const": "https://identity.kenigevents.ru/authorize" },
+    "token_endpoint": { "const": "https://identity.kenigevents.ru/token" },
+    "jwks_uri": { "const": "https://identity.kenigevents.ru/.well-known/jwks.json" },
+    "response_types_supported": { "const": ["code"] },
+    "grant_types_supported": { "const": ["authorization_code", "refresh_token"] },
+    "code_challenge_methods_supported": { "const": ["S256"] },
+    "token_endpoint_auth_methods_supported": { "const": ["none"] },
+    "scopes_supported": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+    "client_id_metadata_document_supported": { "const": false },
+    "registration_endpoint": { "type": "string", "format": "uri", "pattern": "^https://" }
+  },
+  "required": [
+    "issuer", "authorization_endpoint", "token_endpoint", "jwks_uri",
+    "response_types_supported", "grant_types_supported", "code_challenge_methods_supported",
+    "token_endpoint_auth_methods_supported", "scopes_supported",
+    "client_id_metadata_document_supported"
+  ]
+}

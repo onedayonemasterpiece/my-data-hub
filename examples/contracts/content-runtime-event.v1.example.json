@@ -1,0 +1,35 @@
+{
+  "schema": "content-runtime-event/v1",
+  "event_id": "a8179dc3-5ad9-48c6-b483-76052f34adcd",
+  "run_id": "master-run-20260810-001",
+  "attempt_id": "master-attempt-20260810-001",
+  "service_instance_id": "postgres-master-20260810-001",
+  "source_identity": "my-data-hub/postgres-master",
+  "source_version": "git:0123456789abcdef",
+  "event_type": "service.ready",
+  "emitted_at": "2026-08-10T18:30:00Z",
+  "local_sequence": 17,
+  "epoch": 42,
+  "phase": "serve",
+  "status": "ready",
+  "data": {
+    "service_kind": "postgres-master",
+    "endpoint": "tunnel://master-42",
+    "protocol": "postgresql+tls",
+    "tls_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "capabilities": [
+      "sql",
+      "fts",
+      "pgvector"
+    ],
+    "canonical_revision": 1842,
+    "schema_version": "17",
+    "lease_until": "2026-08-10T18:35:00Z",
+    "master_instance_id": "master-20260810-001",
+    "epoch": 42
+  },
+  "artifact_refs": [],
+  "metrics": {
+    "queue_depth": 0
+  }
+}

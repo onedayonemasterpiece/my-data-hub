@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/embeddings/embedding-dependency-smoke-receipt.v1.schema.json",
+  "title": "Central provider verified embedding dependency smoke receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "status", "observed_at", "provider_run_ref", "observation_sha256", "image_identity",
+    "image_source_commit", "python_version", "dependency_manifest_sha256",
+    "project_wheel_sha256", "wheel_sha256s", "imports", "psycopg_implementation",
+    "distributions", "notebook_private", "internet_enabled", "verified_by_central_adapter"
+  ],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-embedding-dependency-smoke-receipt.v1"},
+    "status": {"const": "pass"},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "provider_run_ref": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$", "maxLength": 320},
+    "observation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "image_identity": {"const": "gcr.io/kaggle-images/python@sha256:c1fa4de30bc268e601e6dcddb6ceb2519b9adde3527dbbfb05e6bdfbbbdcd1a2"},
+    "image_source_commit": {"const": "fc61d5cda7da39530055bae9bd0e92865f995cd9"},
+    "python_version": {"type": "string", "pattern": "^3\\.12\\.[0-9]+$"},
+    "dependency_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "project_wheel_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "wheel_sha256s": {
+      "type": "object", "minProperties": 4, "maxProperties": 16,
+      "propertyNames": {"pattern": "^[A-Za-z0-9_.+-]+\\.whl$"},
+      "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    },
+    "imports": {"const": ["FlagEmbedding.BGEM3FlagModel", "psycopg", "torch", "transformers.AutoModel", "transformers.AutoTokenizer"]},
+    "psycopg_implementation": {"const": "binary"},
+    "distributions": {
+      "type": "object", "minProperties": 14, "maxProperties": 200,
+      "propertyNames": {"pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+      "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 100}
+    },
+    "notebook_private": {"const": true},
+    "internet_enabled": {"const": false},
+    "verified_by_central_adapter": {"const": true}
+  }
+}

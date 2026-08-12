@@ -1,0 +1,988 @@
+{
+  "$defs": {
+    "CallbackLossEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "callback_suppressed_once": {
+          "const": true,
+          "title": "Callback Suppressed Once",
+          "type": "boolean"
+        },
+        "control_boot_id_after": {
+          "format": "uuid",
+          "title": "Control Boot Id After",
+          "type": "string"
+        },
+        "control_boot_id_before": {
+          "format": "uuid",
+          "title": "Control Boot Id Before",
+          "type": "string"
+        },
+        "exact_body_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Exact Body Sha256",
+          "type": "string"
+        },
+        "exact_event_id": {
+          "format": "uuid",
+          "title": "Exact Event Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "CALLBACK_LOSS_RECOVERY",
+          "title": "Kind",
+          "type": "string"
+        },
+        "new_epoch": {
+          "minimum": 2,
+          "title": "New Epoch",
+          "type": "integer"
+        },
+        "new_operation_id": {
+          "format": "uuid",
+          "title": "New Operation Id",
+          "type": "string"
+        },
+        "new_provider_kernel_id": {
+          "minimum": 1,
+          "title": "New Provider Kernel Id",
+          "type": "integer"
+        },
+        "new_provider_run_ref": {
+          "maxLength": 320,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "New Provider Run Ref",
+          "type": "string"
+        },
+        "old_epoch": {
+          "minimum": 1,
+          "title": "Old Epoch",
+          "type": "integer"
+        },
+        "old_master_abruptly_terminated": {
+          "const": true,
+          "title": "Old Master Abruptly Terminated",
+          "type": "boolean"
+        },
+        "old_operation_id": {
+          "format": "uuid",
+          "title": "Old Operation Id",
+          "type": "string"
+        },
+        "old_provider_kernel_id": {
+          "minimum": 1,
+          "title": "Old Provider Kernel Id",
+          "type": "integer"
+        },
+        "old_provider_run_ref": {
+          "maxLength": 320,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Old Provider Run Ref",
+          "type": "string"
+        },
+        "recovery_receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Recovery Receipt Sha256",
+          "type": "string"
+        },
+        "replay_disposition": {
+          "enum": [
+            "accepted",
+            "duplicate"
+          ],
+          "title": "Replay Disposition",
+          "type": "string"
+        },
+        "service_active_after_recovery": {
+          "const": true,
+          "title": "Service Active After Recovery",
+          "type": "boolean"
+        },
+        "termination_receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Termination Receipt Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "callback_suppressed_once",
+        "exact_event_id",
+        "exact_body_sha256",
+        "control_boot_id_before",
+        "control_boot_id_after",
+        "replay_disposition",
+        "service_active_after_recovery",
+        "old_master_abruptly_terminated",
+        "old_operation_id",
+        "new_operation_id",
+        "old_epoch",
+        "new_epoch",
+        "old_provider_run_ref",
+        "old_provider_kernel_id",
+        "new_provider_run_ref",
+        "new_provider_kernel_id",
+        "termination_receipt_sha256",
+        "recovery_receipt_sha256"
+      ],
+      "title": "CallbackLossEvidence",
+      "type": "object"
+    },
+    "CleanDrainEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {
+          "format": "uuid",
+          "title": "Checkpoint Id",
+          "type": "string"
+        },
+        "exact_readback_verified": {
+          "const": true,
+          "title": "Exact Readback Verified",
+          "type": "boolean"
+        },
+        "exact_version_ref": {
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Exact Version Ref",
+          "type": "string"
+        },
+        "head_promoted": {
+          "const": true,
+          "title": "Head Promoted",
+          "type": "boolean"
+        },
+        "kind": {
+          "const": "CLEAN_DRAIN",
+          "title": "Kind",
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
+        },
+        "restore_smoke_verified": {
+          "const": true,
+          "title": "Restore Smoke Verified",
+          "type": "boolean"
+        },
+        "terminal_state": {
+          "const": "STOPPED",
+          "title": "Terminal State",
+          "type": "string"
+        },
+        "write_gate_closed": {
+          "const": true,
+          "title": "Write Gate Closed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "write_gate_closed",
+        "checkpoint_id",
+        "exact_version_ref",
+        "manifest_sha256",
+        "exact_readback_verified",
+        "restore_smoke_verified",
+        "head_promoted",
+        "terminal_state"
+      ],
+      "title": "CleanDrainEvidence",
+      "type": "object"
+    },
+    "ConcurrentEnsureEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "epochs": {
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 20,
+          "minItems": 20,
+          "title": "Epochs",
+          "type": "array"
+        },
+        "kind": {
+          "const": "CONCURRENT_ENSURE_SINGLE_RUN",
+          "title": "Kind",
+          "type": "string"
+        },
+        "operation_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 20,
+          "title": "Operation Ids",
+          "type": "array"
+        },
+        "provider_kernel_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 20,
+          "minItems": 20,
+          "title": "Provider Kernel Ids",
+          "type": "array"
+        },
+        "provider_run_refs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 20,
+          "title": "Provider Run Refs",
+          "type": "array"
+        },
+        "request_count": {
+          "const": 20,
+          "title": "Request Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "request_count",
+        "operation_ids",
+        "provider_run_refs",
+        "provider_kernel_ids",
+        "epochs"
+      ],
+      "title": "ConcurrentEnsureEvidence",
+      "type": "object"
+    },
+    "EmptyBootstrapEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "boot_source": {
+          "const": "empty_baseline",
+          "title": "Boot Source",
+          "type": "string"
+        },
+        "canonical_revision": {
+          "const": 0,
+          "title": "Canonical Revision",
+          "type": "integer"
+        },
+        "canonical_row_count": {
+          "const": 0,
+          "title": "Canonical Row Count",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "EMPTY_MASTER_BOOTSTRAP",
+          "title": "Kind",
+          "type": "string"
+        },
+        "service_active": {
+          "const": true,
+          "title": "Service Active",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "boot_source",
+        "canonical_revision",
+        "canonical_row_count",
+        "service_active"
+      ],
+      "title": "EmptyBootstrapEvidence",
+      "type": "object"
+    },
+    "LeaseExpiryEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "bounded_operator_dml_denied": {
+          "const": true,
+          "title": "Bounded Operator Dml Denied",
+          "type": "boolean"
+        },
+        "canonical_revision_after": {
+          "minimum": 0,
+          "title": "Canonical Revision After",
+          "type": "integer"
+        },
+        "canonical_revision_before": {
+          "minimum": 0,
+          "title": "Canonical Revision Before",
+          "type": "integer"
+        },
+        "credentials_invalidated": {
+          "const": true,
+          "title": "Credentials Invalidated",
+          "type": "boolean"
+        },
+        "denial_code": {
+          "const": "MDH_EPOCH_LEASE_EXPIRED",
+          "title": "Denial Code",
+          "type": "string"
+        },
+        "kind": {
+          "const": "LEASE_EXPIRY_DENIAL",
+          "title": "Kind",
+          "type": "string"
+        },
+        "lease_expired": {
+          "const": true,
+          "title": "Lease Expired",
+          "type": "boolean"
+        },
+        "observed_wait_seconds": {
+          "maximum": 900,
+          "minimum": 60,
+          "title": "Observed Wait Seconds",
+          "type": "integer"
+        },
+        "operator_operation_id": {
+          "format": "uuid",
+          "title": "Operator Operation Id",
+          "type": "string"
+        },
+        "operator_receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Operator Receipt Sha256",
+          "type": "string"
+        },
+        "transaction_state": {
+          "const": "rollback_only",
+          "title": "Transaction State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "observed_wait_seconds",
+        "lease_expired",
+        "credentials_invalidated",
+        "bounded_operator_dml_denied",
+        "transaction_state",
+        "operator_operation_id",
+        "operator_receipt_sha256",
+        "denial_code",
+        "canonical_revision_before",
+        "canonical_revision_after"
+      ],
+      "title": "LeaseExpiryEvidence",
+      "type": "object"
+    },
+    "MasterAcceptanceBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "format": "uuid",
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "epoch": {
+          "minimum": 1,
+          "title": "Epoch",
+          "type": "integer"
+        },
+        "master_instance_id": {
+          "format": "uuid",
+          "title": "Master Instance Id",
+          "type": "string"
+        },
+        "operation_id": {
+          "format": "uuid",
+          "title": "Operation Id",
+          "type": "string"
+        },
+        "run_id": {
+          "format": "uuid",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "service_instance_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Service Instance Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "run_id",
+        "attempt_id",
+        "service_instance_id",
+        "master_instance_id",
+        "epoch"
+      ],
+      "title": "MasterAcceptanceBinding",
+      "type": "object"
+    },
+    "MasterAcceptanceCommandKind": {
+      "enum": [
+        "EMPTY_MASTER_BOOTSTRAP",
+        "CONCURRENT_ENSURE_SINGLE_RUN",
+        "CALLBACK_LOSS_RECOVERY",
+        "STALE_REPLAY_REJECTION",
+        "LEASE_EXPIRY_DENIAL",
+        "OLD_EPOCH_RETURN_DENIAL",
+        "CLEAN_DRAIN",
+        "SESSION_ROTATION_SOAK"
+      ],
+      "title": "MasterAcceptanceCommandKind",
+      "type": "string"
+    },
+    "MasterAcceptanceScenario": {
+      "enum": [
+        "FM04",
+        "FM07",
+        "FM08",
+        "FM09",
+        "FM10",
+        "FM11",
+        "FM12",
+        "FM24"
+      ],
+      "title": "MasterAcceptanceScenario",
+      "type": "string"
+    },
+    "OldEpochEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "bounded_write_denied": {
+          "const": true,
+          "title": "Bounded Write Denied",
+          "type": "boolean"
+        },
+        "handoff_checkpoint_id": {
+          "format": "uuid",
+          "title": "Handoff Checkpoint Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "OLD_EPOCH_RETURN_DENIAL",
+          "title": "Kind",
+          "type": "string"
+        },
+        "new_epoch": {
+          "minimum": 2,
+          "title": "New Epoch",
+          "type": "integer"
+        },
+        "new_epoch_active": {
+          "const": true,
+          "title": "New Epoch Active",
+          "type": "boolean"
+        },
+        "new_operation_id": {
+          "format": "uuid",
+          "title": "New Operation Id",
+          "type": "string"
+        },
+        "new_provider_kernel_id": {
+          "minimum": 1,
+          "title": "New Provider Kernel Id",
+          "type": "integer"
+        },
+        "new_provider_run_ref": {
+          "maxLength": 320,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "New Provider Run Ref",
+          "type": "string"
+        },
+        "old_epoch": {
+          "minimum": 1,
+          "title": "Old Epoch",
+          "type": "integer"
+        },
+        "old_operation_id": {
+          "format": "uuid",
+          "title": "Old Operation Id",
+          "type": "string"
+        },
+        "old_provider_kernel_id": {
+          "minimum": 1,
+          "title": "Old Provider Kernel Id",
+          "type": "integer"
+        },
+        "old_provider_run_ref": {
+          "maxLength": 320,
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+          "title": "Old Provider Run Ref",
+          "type": "string"
+        },
+        "old_runtime_draining_before_rotation": {
+          "const": true,
+          "title": "Old Runtime Draining Before Rotation",
+          "type": "boolean"
+        },
+        "register_denied": {
+          "const": true,
+          "title": "Register Denied",
+          "type": "boolean"
+        },
+        "registry_resolves_new": {
+          "const": true,
+          "title": "Registry Resolves New",
+          "type": "boolean"
+        },
+        "renew_denied": {
+          "const": true,
+          "title": "Renew Denied",
+          "type": "boolean"
+        },
+        "tunnel_denial_receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Tunnel Denial Receipt Sha256",
+          "type": "string"
+        },
+        "tunnel_denied": {
+          "const": true,
+          "title": "Tunnel Denied",
+          "type": "boolean"
+        },
+        "write_denial_receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Write Denial Receipt Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "old_epoch",
+        "new_epoch",
+        "old_runtime_draining_before_rotation",
+        "renew_denied",
+        "register_denied",
+        "bounded_write_denied",
+        "tunnel_denied",
+        "new_epoch_active",
+        "registry_resolves_new",
+        "old_operation_id",
+        "new_operation_id",
+        "old_provider_run_ref",
+        "old_provider_kernel_id",
+        "new_provider_run_ref",
+        "new_provider_kernel_id",
+        "handoff_checkpoint_id",
+        "write_denial_receipt_sha256",
+        "tunnel_denial_receipt_sha256"
+      ],
+      "title": "OldEpochEvidence",
+      "type": "object"
+    },
+    "RotationSoakEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "bounded_read_receipt_sha256s": {
+          "anyOf": [
+            {
+              "items": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bounded Read Receipt Sha256S"
+        },
+        "checkpoint_id": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint Id"
+        },
+        "checkpoint_receipt_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint Receipt Sha256"
+        },
+        "checkpoint_verified": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checkpoint Verified"
+        },
+        "exact_version_ref": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exact Version Ref"
+        },
+        "heartbeat_count": {
+          "anyOf": [
+            {
+              "const": 12,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Heartbeat Count"
+        },
+        "heartbeat_receipt_sha256s": {
+          "anyOf": [
+            {
+              "items": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Heartbeat Receipt Sha256S"
+        },
+        "heartbeats_continuous": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Heartbeats Continuous"
+        },
+        "kind": {
+          "const": "SESSION_ROTATION_SOAK",
+          "title": "Kind",
+          "type": "string"
+        },
+        "lease_renewals": {
+          "maximum": 400,
+          "minimum": 12,
+          "title": "Lease Renewals",
+          "type": "integer"
+        },
+        "manifest_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manifest Sha256"
+        },
+        "monotonic_finished_ns": {
+          "minimum": 0,
+          "title": "Monotonic Finished Ns",
+          "type": "integer"
+        },
+        "monotonic_started_ns": {
+          "minimum": 0,
+          "title": "Monotonic Started Ns",
+          "type": "integer"
+        },
+        "observed_duration_seconds": {
+          "maximum": 5400,
+          "minimum": 3600,
+          "title": "Observed Duration Seconds",
+          "type": "integer"
+        },
+        "read_query_count": {
+          "anyOf": [
+            {
+              "const": 12,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Read Query Count"
+        },
+        "reads_succeeded": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reads Succeeded"
+        },
+        "recovery_receipt_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recovery Receipt Sha256"
+        },
+        "recovery_succeeded": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recovery Succeeded"
+        },
+        "rejected_stale_sessions": {
+          "maximum": 400,
+          "minimum": 1,
+          "title": "Rejected Stale Sessions",
+          "type": "integer"
+        },
+        "remained_single_epoch": {
+          "const": true,
+          "title": "Remained Single Epoch",
+          "type": "boolean"
+        },
+        "service_active_at_end": {
+          "const": true,
+          "title": "Service Active At End",
+          "type": "boolean"
+        },
+        "session_rotations": {
+          "maximum": 200,
+          "minimum": 12,
+          "title": "Session Rotations",
+          "type": "integer"
+        },
+        "tunnel_renewals": {
+          "maximum": 400,
+          "minimum": 12,
+          "title": "Tunnel Renewals",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "monotonic_started_ns",
+        "monotonic_finished_ns",
+        "observed_duration_seconds",
+        "session_rotations",
+        "lease_renewals",
+        "tunnel_renewals",
+        "rejected_stale_sessions",
+        "remained_single_epoch",
+        "service_active_at_end"
+      ],
+      "title": "RotationSoakEvidence",
+      "type": "object"
+    },
+    "StaleReplayEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "duplicate_disposition": {
+          "const": "duplicate",
+          "title": "Duplicate Disposition",
+          "type": "string"
+        },
+        "exact_body_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Exact Body Sha256",
+          "type": "string"
+        },
+        "exact_event_id": {
+          "format": "uuid",
+          "title": "Exact Event Id",
+          "type": "string"
+        },
+        "kind": {
+          "const": "STALE_REPLAY_REJECTION",
+          "title": "Kind",
+          "type": "string"
+        },
+        "stale_epoch_rejected": {
+          "const": true,
+          "title": "Stale Epoch Rejected",
+          "type": "boolean"
+        },
+        "stale_runtime_auth_rejected": {
+          "const": true,
+          "title": "Stale Runtime Auth Rejected",
+          "type": "boolean"
+        },
+        "state_sha256_after": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "State Sha256 After",
+          "type": "string"
+        },
+        "state_sha256_before": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "State Sha256 Before",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "exact_event_id",
+        "exact_body_sha256",
+        "duplicate_disposition",
+        "stale_runtime_auth_rejected",
+        "stale_epoch_rejected",
+        "state_sha256_before",
+        "state_sha256_after"
+      ],
+      "title": "StaleReplayEvidence",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "binding": {
+      "$ref": "#/$defs/MasterAcceptanceBinding"
+    },
+    "command_id": {
+      "format": "uuid",
+      "title": "Command Id",
+      "type": "string"
+    },
+    "command_kind": {
+      "$ref": "#/$defs/MasterAcceptanceCommandKind"
+    },
+    "command_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Command Sha256",
+      "type": "string"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
+      "type": "string"
+    },
+    "evidence": {
+      "discriminator": {
+        "mapping": {
+          "CALLBACK_LOSS_RECOVERY": "#/$defs/CallbackLossEvidence",
+          "CLEAN_DRAIN": "#/$defs/CleanDrainEvidence",
+          "CONCURRENT_ENSURE_SINGLE_RUN": "#/$defs/ConcurrentEnsureEvidence",
+          "EMPTY_MASTER_BOOTSTRAP": "#/$defs/EmptyBootstrapEvidence",
+          "LEASE_EXPIRY_DENIAL": "#/$defs/LeaseExpiryEvidence",
+          "OLD_EPOCH_RETURN_DENIAL": "#/$defs/OldEpochEvidence",
+          "SESSION_ROTATION_SOAK": "#/$defs/RotationSoakEvidence",
+          "STALE_REPLAY_REJECTION": "#/$defs/StaleReplayEvidence"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/EmptyBootstrapEvidence"
+        },
+        {
+          "$ref": "#/$defs/ConcurrentEnsureEvidence"
+        },
+        {
+          "$ref": "#/$defs/CallbackLossEvidence"
+        },
+        {
+          "$ref": "#/$defs/StaleReplayEvidence"
+        },
+        {
+          "$ref": "#/$defs/LeaseExpiryEvidence"
+        },
+        {
+          "$ref": "#/$defs/OldEpochEvidence"
+        },
+        {
+          "$ref": "#/$defs/CleanDrainEvidence"
+        },
+        {
+          "$ref": "#/$defs/RotationSoakEvidence"
+        }
+      ],
+      "title": "Evidence"
+    },
+    "evidence_class": {
+      "const": "live",
+      "title": "Evidence Class",
+      "type": "string"
+    },
+    "outcome": {
+      "enum": [
+        "succeeded",
+        "failed"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "scenario": {
+      "$ref": "#/$defs/MasterAcceptanceScenario"
+    },
+    "schema_version": {
+      "const": "my-data-hub-master-lifecycle-receipt.v1",
+      "default": "my-data-hub-master-lifecycle-receipt.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "task_id": {
+      "format": "uuid",
+      "title": "Task Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "command_id",
+    "command_sha256",
+    "task_id",
+    "scenario",
+    "command_kind",
+    "binding",
+    "evidence_class",
+    "outcome",
+    "evidence",
+    "completed_at"
+  ],
+  "title": "MasterAcceptanceReceipt",
+  "type": "object"
+}

@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Run the production FINAL-BLOGGER closure; no token means EX_CONFIG/78."""
+
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+from uuid import UUID
+
+from my_data_hub.hashing import canonical_json_bytes
+from my_data_hub.workloads.bloggers.closure import (
+    CANONICAL_MCP_URL,
+    EXTERNAL_BLOCKED,
+    LOCAL_CONTROL_URL,
+    ClosureConfig,
+    LocalClosureControl,
+    StreamableHttpClosureMcp,
+    central_kaggle_credentials_configured,
+    run_blogger_closure,
+)
+from my_data_hub.workloads.bloggers.master_stage import (
+    MAX_REQUEST_BYTES,
+    BloggerDuplicateResolutionEnvelope,
+)
+from my_data_hub.workloads.bloggers.ydb_reader import BloggerYdbSourceReadReceipt
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("run", choices=("run",))
+    parser.add_argument("--control-url", default=os.getenv("MY_DATA_HUB_CONTROL_URL", LOCAL_CONTROL_URL))
+    parser.add_argument("--mcp-url", default=os.getenv("MY_DATA_HUB_MCP_CANARY_ENDPOINT", CANONICAL_MCP_URL))
+    parser.add_argument("--idempotency-key", required=True)
+    parser.add_argument("--project-id", type=UUID, required=True)
+    parser.add_argument(
+        "--source-read-receipt",
+        type=Path,
+        help="mode-0600 metadata-only receipt from the exact provider-side two-scan preflight",
+    )
+    # Parsed only to preserve credential-preflight ordering for older invocations;
+    # neither value is trusted when a detached source receipt is required below.
+    parser.add_argument("--snapshot-at", help=argparse.SUPPRESS)
+    parser.add_argument("--source-revision", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--duplicate-resolution-envelope",
+        type=Path,
+        help="owner-reviewed, mode-0600 metadata envelope for an exact quarantined replay",
+    )
+    parser.add_argument("--receipt", type=Path, required=True)
+    parser.add_argument("--timeout-seconds", type=int, default=43_000)
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    # This is deliberately the first environmental/provider decision.  In
+    # particular, no control request, ledger file, or receipt is created first.
+    if not central_kaggle_credentials_configured():
+        return EXTERNAL_BLOCKED
+    if args.source_read_receipt is None:
+        raise SystemExit("--source-read-receipt is required after central credential preflight")
+    duplicate_resolution = None
+    source_receipt_path = args.source_read_receipt
+    if (
+        source_receipt_path.is_symlink()
+        or not source_receipt_path.is_file()
+        or source_receipt_path.stat().st_mode & 0o077
+    ):
+        raise SystemExit("source read receipt must be a regular mode-0600 file")
+    source_receipt = BloggerYdbSourceReadReceipt.model_validate_json(source_receipt_path.read_bytes())
+    if args.duplicate_resolution_envelope is not None:
+        path = args.duplicate_resolution_envelope
+        if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
+            raise SystemExit("duplicate resolution envelope must be a regular mode-0600 file")
+        raw = path.read_bytes()
+        if len(raw) > MAX_REQUEST_BYTES:
+            raise SystemExit("duplicate resolution envelope exceeds 256 KiB")
+        duplicate_resolution = BloggerDuplicateResolutionEnvelope.model_validate_json(raw)
+    config = ClosureConfig(
+        control_url=args.control_url,
+        idempotency_key=args.idempotency_key,
+        project_id=args.project_id,
+        snapshot_at=source_receipt.snapshot_at,
+        source_revision=source_receipt.source_revision,
+        source_read_receipt=source_receipt,
+        duplicate_resolution=duplicate_resolution,
+        timeout_seconds=args.timeout_seconds,
+    )
+    mcp = StreamableHttpClosureMcp(args.mcp_url, os.getenv("MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN", ""))
+    receipt = run_blogger_closure(config, control=LocalClosureControl(config), mcp=mcp)
+    encoded = canonical_json_bytes(receipt)
+    args.receipt.parent.mkdir(parents=True, exist_ok=True)
+    temporary = args.receipt.with_suffix(args.receipt.suffix + ".tmp")
+    temporary.write_bytes(encoded + b"\n")
+    temporary.chmod(0o600)
+    temporary.replace(args.receipt)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

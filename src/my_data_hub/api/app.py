@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
+from contextlib import asynccontextmanager, suppress
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -13,12 +15,13 @@ from my_data_hub.api.intake import WorkerResultConflict, WorkerResultRepository
 from my_data_hub.artifact_store import LocalArtifactStore
 from my_data_hub.config import ConfigurationError, Settings
 from my_data_hub.connectors.contracts import ConnectorContractError
-from my_data_hub.connectors.postgres import PostgresConnectorAcceptanceRepository
+from my_data_hub.connectors.errors import ConnectorCapabilityBlocked
 from my_data_hub.connectors.repository import AcceptanceDisposition
-from my_data_hub.connectors.service import (
-    ConnectorAuthorizationError,
-    ConnectorIntakeService,
+from my_data_hub.connectors.runtime import (
+    ActiveMasterConnectorRuntime,
+    connector_principal,
 )
+from my_data_hub.connectors.service import ConnectorAuthorizationError
 from my_data_hub.db.health import verify_database
 from my_data_hub.notebooks.contracts import NotebookResult
 
@@ -90,16 +93,21 @@ async def _bounded_json_body(request: Request, max_bytes: int) -> dict[str, Any]
     return value
 
 
-def create_app(settings: Settings) -> FastAPI:
-    if settings.environment in {"prod", "production"}:
+def create_app(
+    settings: Settings,
+    *,
+    connector_runtime: ActiveMasterConnectorRuntime | None = None,
+    connector_durability_runtime: Any | None = None,
+    worker_results_enabled: bool = True,
+    durability_interval_seconds: float = 5.0,
+) -> FastAPI:
+    if durability_interval_seconds <= 0:
+        raise ValueError("connector durability interval must be positive")
+    if settings.environment in {"prod", "production"} and worker_results_enabled:
         missing = [
             name
             for name, value in (
                 ("MY_DATA_HUB_APPLICATION_DATABASE_URL", settings.application_database_url),
-                (
-                    "MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL",
-                    settings.connector_intake_database_url,
-                ),
             )
             if not value
         ]
@@ -110,24 +118,50 @@ def create_app(settings: Settings) -> FastAPI:
             )
         if not settings.worker_result_token:
             raise ConfigurationError("worker result token is required by the production API")
+
+    async def reconcile_durability(stop: asyncio.Event) -> None:
+        assert connector_durability_runtime is not None
+        while not stop.is_set():
+            with suppress(ConnectorCapabilityBlocked, OSError, RuntimeError):
+                await connector_durability_runtime.reconcile_once()
+            # The next bounded interval re-resolves the ACTIVE epoch. No
+            # durability state is kept in this devstand process.
+            with suppress(TimeoutError):
+                await asyncio.wait_for(
+                    stop.wait(), timeout=durability_interval_seconds
+                )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):  # type: ignore[no-untyped-def]
+        durability_stop = asyncio.Event()
+        durability_task: asyncio.Task[None] | None = None
+        if connector_durability_runtime is not None:
+            durability_task = asyncio.create_task(
+                reconcile_durability(durability_stop)
+            )
+        try:
+            yield
+        finally:
+            durability_stop.set()
+            if durability_task is not None:
+                await durability_task
+
     app = FastAPI(
         title="my-data-hub control API",
         version="0.1.0",
         docs_url=None if settings.environment in {"prod", "production"} else "/docs",
         redoc_url=None,
+        lifespan=lifespan,
     )
-    repository = WorkerResultRepository(
-        settings.application_database_url or settings.database_url,
-        LocalArtifactStore(settings.artifact_root),
+    repository = (
+        WorkerResultRepository(
+            settings.application_database_url or settings.database_url,
+            LocalArtifactStore(settings.artifact_root),
+        )
+        if worker_results_enabled
+        else None
     )
     authenticate_worker = _worker_auth(settings)
-    connector_repository = PostgresConnectorAcceptanceRepository(
-        settings.connector_intake_database_url or settings.database_url
-    )
-    connector_service = ConnectorIntakeService(
-        connector_repository,
-        max_envelope_bytes=settings.connector_intake_max_bytes,
-    )
     authenticate_connector = _connector_auth(settings)
 
     @app.middleware("http")
@@ -142,7 +176,9 @@ def create_app(settings: Settings) -> FastAPI:
                     early_response = JSONResponse(
                         status_code=400, content={"detail": "invalid content-length"}
                     )
-                elif declared_size > settings.worker_result_max_bytes:
+                elif declared_size > max(
+                    settings.worker_result_max_bytes, settings.connector_intake_max_bytes
+                ):
                     early_response = JSONResponse(
                         status_code=413, content={"detail": "request too large"}
                     )
@@ -159,10 +195,21 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.get("/health/live")
     def live() -> dict[str, Any]:
-        return {"ok": True, "component": "my-data-hub-control-api"}
+        return {
+            "ok": True,
+            "component": (
+                "my-data-hub-control-api"
+                if worker_results_enabled
+                else "my-data-hub-connector-intake"
+            ),
+        }
 
     @app.get("/health/ready")
     def ready() -> dict[str, Any]:
+        if not worker_results_enabled:
+            # Readiness is deliberately local. An absent/sleeping master is
+            # recovered through ensure-master on the first authenticated call.
+            return {"ok": True, "component": "my-data-hub-connector-intake"}
         health = verify_database(settings.application_database_url or settings.database_url)
         if not health.ok:
             raise HTTPException(status_code=503, detail={"findings": health.findings})
@@ -173,36 +220,59 @@ def create_app(settings: Settings) -> FastAPI:
             "canonical_revision": health.canonical_revision,
         }
 
-    @app.post(
-        "/v1/worker-results",
-        status_code=status.HTTP_202_ACCEPTED,
-        dependencies=[Depends(authenticate_worker)],
-    )
-    async def submit_worker_result(request: Request) -> dict[str, Any]:
-        raw = await _bounded_json_body(request, settings.worker_result_max_bytes)
-        try:
-            envelope = NotebookResult.model_validate(raw)
-            return repository.store(envelope)
-        except ValidationError as exc:
-            raise HTTPException(status_code=422, detail=exc.errors()) from exc
-        except WorkerResultConflict as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if worker_results_enabled:
+
+        @app.post(
+            "/v1/worker-results",
+            status_code=status.HTTP_202_ACCEPTED,
+            dependencies=[Depends(authenticate_worker)],
+        )
+        async def submit_worker_result(request: Request) -> dict[str, Any]:
+            raw = await _bounded_json_body(request, settings.worker_result_max_bytes)
+            try:
+                envelope = NotebookResult.model_validate(raw)
+                assert repository is not None
+                return repository.store(envelope)
+            except ValidationError as exc:
+                raise HTTPException(status_code=422, detail=exc.errors()) from exc
+            except WorkerResultConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/intake/v1/batches", status_code=status.HTTP_202_ACCEPTED)
     async def submit_connector_batch(
         request: Request,
-        connector_auth: Annotated[tuple[str, str], Depends(authenticate_connector)],
+        connector_auth: tuple[str, str] = Depends(authenticate_connector),
     ) -> JSONResponse:
         media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
         if media_type != "application/json":
             raise HTTPException(status_code=415, detail="content-type must be application/json")
         exact_bytes = await _bounded_body_bytes(request, settings.connector_intake_max_bytes)
-        connector_id, principal = connector_auth
+        connector_id, _principal = connector_auth
+        if connector_runtime is None:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "CONNECTOR_ACTIVE_MASTER_RUNTIME_UNAVAILABLE",
+                    "retryable": True,
+                    "mutation_started": False,
+                },
+            )
+        if connector_durability_runtime is None:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "CONNECTOR_DURABILITY_RUNTIME_UNAVAILABLE",
+                    "retryable": True,
+                    "mutation_started": False,
+                },
+            )
         try:
-            decision = connector_service.submit(
+            # Do not accept new producer bytes unless this exact process can
+            # continue canonical commits through a verified checkpoint.
+            await connector_durability_runtime.preflight()
+            decision = await connector_runtime.submit(
                 exact_bytes,
-                authenticated_connector_id=connector_id,
-                authenticated_principal=principal,
+                principal=connector_principal(connector_id),
                 correlation_id=request.state.correlation_id,
             )
         except ConnectorContractError as exc:
@@ -211,6 +281,8 @@ def create_app(settings: Settings) -> FastAPI:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ConnectorCapabilityBlocked as exc:
+            raise HTTPException(status_code=503 if exc.retryable else 409, detail=exc.public()) from exc
         if decision.disposition is AcceptanceDisposition.QUARANTINED:
             assert decision.quarantine is not None
             return JSONResponse(
@@ -229,27 +301,54 @@ def create_app(settings: Settings) -> FastAPI:
         )
 
     @app.get("/intake/v1/batches/{batch_id}/receipt")
-    def connector_batch_receipt(
+    async def connector_batch_receipt(
         batch_id: UUID,
-        connector_auth: Annotated[tuple[str, str], Depends(authenticate_connector)],
+        connector_auth: tuple[str, str] = Depends(authenticate_connector),
     ) -> dict[str, Any]:
-        receipt = connector_repository.get_receipt(batch_id)
+        if connector_runtime is None:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "CONNECTOR_ACTIVE_MASTER_RUNTIME_UNAVAILABLE",
+                    "retryable": True,
+                    "mutation_started": False,
+                },
+            )
+        try:
+            receipt = await connector_runtime.durability_receipt(
+                batch_id, principal=connector_principal(connector_auth[0])
+            )
+        except ConnectorCapabilityBlocked as exc:
+            raise HTTPException(status_code=503 if exc.retryable else 409, detail=exc.public()) from exc
         if receipt is None:
             raise HTTPException(status_code=404, detail="receipt not found")
-        if receipt.connector_id != connector_auth[0]:
+        if receipt.acceptance.connector_id != connector_auth[0]:
             raise HTTPException(status_code=404, detail="receipt not found")
         return receipt.model_dump(mode="json")
 
     @app.get("/intake/v1/connectors/{connector_id}/health")
-    def connector_health(
+    async def connector_health(
         connector_id: str,
-        connector_auth: Annotated[tuple[str, str], Depends(authenticate_connector)],
+        connector_auth: tuple[str, str] = Depends(authenticate_connector),
     ) -> dict[str, Any]:
         if connector_id != connector_auth[0]:
             raise HTTPException(status_code=404, detail="connector not found")
+        if connector_runtime is None:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "CONNECTOR_ACTIVE_MASTER_RUNTIME_UNAVAILABLE",
+                    "retryable": True,
+                    "mutation_started": False,
+                },
+            )
         try:
-            return connector_repository.health(connector_id)
+            return await connector_runtime.health(
+                connector_id, principal=connector_principal(connector_id)
+            )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail="connector not found") from exc
+        except ConnectorCapabilityBlocked as exc:
+            raise HTTPException(status_code=503 if exc.retryable else 409, detail=exc.public()) from exc
 
     return app

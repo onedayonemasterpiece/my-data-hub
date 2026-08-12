@@ -1,0 +1,37 @@
+{
+  "schema_version": "my-data-hub-checkpoint-acceptance-production-config.v1",
+  "scenario": "FM15",
+  "operation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "task_run_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "source_revision": "2222222222222222222222222222222222222222",
+  "started_at": "2026-08-11T12:00:00Z",
+  "provider_owner": "owner",
+  "dataset_ref": "owner/checkpoint-acceptance-fm15",
+  "evidence_notebook_ref": "owner/checkpoint-acceptance-evidence-fm15",
+  "verifier_notebook_ref": "owner/checkpoint-verifier-fm15",
+  "template_dataset_version_ref": "owner/checkpoint-empty-template/3",
+  "template_claim_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "template_directory": "/kaggle/working/checkpoint-acceptance/template",
+  "template_manifest_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "template_content_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+  "verifier": {
+    "dataset_version_ref": "owner/checkpoint-verifier-assets/5",
+    "claim_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "path": "/kaggle/working/checkpoint-acceptance/fixed-verifier.py",
+    "source_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "code_file": "worker.py"
+  },
+  "working_directory": "/kaggle/working/checkpoint-acceptance/state",
+  "control_base_url": "https://control.example.test",
+  "control_identity": {
+    "authority_kind": "acceptance-task",
+    "request_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "task_run_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "attempt_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    "scope": "acceptance:operate"
+  },
+  "timeout_seconds": 900,
+  "status_dataset_version_ref": "owner/mdh-acc-status-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/1",
+  "status_config_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "status_helper_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

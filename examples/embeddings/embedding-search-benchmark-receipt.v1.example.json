@@ -1,0 +1,42 @@
+{
+  "available_memory_bytes": 1000000,
+  "capacity_proven": false,
+  "checkpoint_bytes_after": 1000000,
+  "checkpoint_bytes_before": 1000000,
+  "checkpoint_seconds_after": 3.0,
+  "code_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "corpus_document_count": 100,
+  "corpus_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "evidence_artifact_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "exact_search": {
+    "exact_relevance_case_count": 25,
+    "k": 10,
+    "latency_p50_ms": 2.0,
+    "latency_p95_ms": 4.0,
+    "recall_at_k": 1.0
+  },
+  "hnsw_search": null,
+  "index_build_seconds": null,
+  "index_bytes": 0,
+  "model": {
+    "dimensions": 768,
+    "document_prefix": "passage: ",
+    "encoder_contract_version": "e5-attention-mask-mean-l2-prefixes-max512.v1",
+    "max_tokens": 512,
+    "model_key": "intfloat/multilingual-e5-base",
+    "normalization": "l2",
+    "output_modes": [
+      "dense"
+    ],
+    "pooling": "attention_mask_mean",
+    "query_prefix": "query: ",
+    "revision": "d128750597153bb5987e10b1c3493a34e5a4502a",
+    "vector_space": "e5_multilingual_base_768_v1"
+  },
+  "observed_at": "2026-08-10T00:00:00Z",
+  "peak_build_memory_bytes": null,
+  "receipt_id": "66666666-6666-4666-8666-666666666666",
+  "run_id": "EXAMPLE-NOT-OBSERVED",
+  "schema_version": "embedding-search-benchmark-receipt.v1",
+  "vector_heap_bytes": 154400
+}

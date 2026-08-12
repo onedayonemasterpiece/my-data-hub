@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/kaggle-real-matrix-receipt.v1.schema.json",
+  "title": "Real Kaggle >=15-run platform-smoke summary receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "matrix_id", "commit_sha", "outcome", "matrix_scope", "minimum_real_runs",
+    "planned_runs", "completed_real_runs", "distinct_real_run_ids", "distinct_provider_run_refs", "input_dataset",
+    "scenario_receipts", "coverage", "started_at", "completed_at", "live_evidence", "blockers"
+  ],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-real-kaggle-matrix.v1"},
+    "matrix_id": {"type": "string", "format": "uuid"},
+    "commit_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "outcome": {"const": "SMOKE_PASS"},
+    "matrix_scope": {"const": "platform_smoke_only"},
+    "minimum_real_runs": {"const": 15},
+    "planned_runs": {"type": "integer", "minimum": 15},
+    "completed_real_runs": {"type": "integer", "minimum": 15},
+    "distinct_real_run_ids": {
+      "type": "array", "minItems": 15, "uniqueItems": true,
+      "items": {"type": "string", "format": "uuid"}
+    },
+    "distinct_provider_run_refs": {
+      "type": "array", "minItems": 15, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$"}
+    },
+    "input_dataset": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider_ref", "provider_version", "privacy", "cleanup"],
+      "properties": {
+        "provider_ref": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+        "provider_version": {"type": "integer", "minimum": 1},
+        "privacy": {"const": "private"},
+        "cleanup": {"const": "task_created_resource_absent"}
+      }
+    },
+    "scenario_receipts": {
+      "type": "array", "minItems": 15,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["ordinal", "scenario", "task_run_id", "provider_run_ref", "outcome", "receipt"],
+        "properties": {
+          "ordinal": {"type": "integer", "minimum": 1},
+          "scenario": {"type": "string", "minLength": 1},
+          "task_run_id": {"type": "string", "format": "uuid"},
+          "provider_run_ref": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$"},
+          "outcome": {"const": "PASS"},
+          "receipt": {"type": "string", "pattern": "^[0-9]{2}-[a-z0-9-]+\\.json$"}
+        }
+      }
+    },
+    "coverage": {
+      "type": "array",
+      "allOf": [
+        {"contains": {"const": "retry"}}, {"contains": {"const": "soak"}},
+        {"contains": {"const": "fault"}}, {"contains": {"const": "resume"}},
+        {"contains": {"const": "idempotency"}}, {"contains": {"const": "checkpoint"}}
+      ],
+      "items": {"type": "string"}
+    },
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "live_evidence": {"const": true},
+    "blockers": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "contains": {"const": "MANDATORY_OPERATIONAL_SCENARIOS_NOT_EXECUTED"},
+      "items": {"type": "string"}
+    }
+  }
+}

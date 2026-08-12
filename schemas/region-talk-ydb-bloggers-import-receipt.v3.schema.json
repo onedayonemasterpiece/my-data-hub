@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/region-talk-ydb-bloggers-import-receipt.v3.schema.json",
+  "title": "In-master Region Talk YDB blogger import receipt v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "request_id",
+    "operation_id",
+    "master_instance_id",
+    "run_id",
+    "epoch",
+    "request_sha256",
+    "export_batch_id",
+    "source_query_sha256",
+    "row_count",
+    "distinct_record_ids",
+    "source_file_count",
+    "dispositions",
+    "record_id_set_sha256",
+    "logical_sha256",
+    "canonical_outcome_sha256",
+    "actor_count",
+    "account_count",
+    "duplicate_group_count",
+    "duplicate_groups_pending",
+    "undispositioned",
+    "quarantined",
+    "replayed_count",
+    "canonical_revision",
+    "transaction_committed",
+    "ydb_write_denial_verified",
+    "durability_state"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "region-talk-ydb-bloggers-import-receipt.v3"
+    },
+    "request_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "operation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "master_instance_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "request_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "export_batch_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "source_query_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "row_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "distinct_record_ids": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "source_file_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "dispositions": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 16,
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000
+      }
+    },
+    "record_id_set_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "logical_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "canonical_outcome_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "actor_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "account_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 800000
+    },
+    "duplicate_group_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 500000
+    },
+    "duplicate_groups_pending": {
+      "const": 0
+    },
+    "undispositioned": {
+      "const": 0
+    },
+    "quarantined": {
+      "const": 0
+    },
+    "replayed_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "canonical_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "transaction_committed": {
+      "const": true
+    },
+    "ydb_write_denial_verified": {
+      "const": true
+    },
+    "durability_state": {
+      "const": "COMMITTED_PENDING_CHECKPOINT"
+    }
+  }
+}

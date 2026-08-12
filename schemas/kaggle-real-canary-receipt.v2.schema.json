@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/kaggle-real-canary-receipt.v2.schema.json",
+  "title": "my-data-hub exact-commit real private Kaggle Dataset canary receipt v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "scenario",
+    "task_id",
+    "run_id",
+    "commit_sha",
+    "provider_ref",
+    "provider_version",
+    "package_sha256",
+    "claim_sha256",
+    "privacy",
+    "unauthenticated_http_status",
+    "denial_class",
+    "cleanup",
+    "cleanup_outcome",
+    "counts",
+    "gate_results",
+    "blockers",
+    "started_at",
+    "completed_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-real-kaggle-canary.v2"},
+    "scenario": {
+      "const": "private_dataset_create_exact_readback_unauthenticated_denial_delete"
+    },
+    "task_id": {"type": "string", "format": "uuid"},
+    "run_id": {"type": "string", "format": "uuid"},
+    "commit_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "provider_ref": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+      "maxLength": 300
+    },
+    "provider_version": {"type": "integer", "minimum": 1},
+    "package_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "claim_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "privacy": {"const": "private"},
+    "unauthenticated_http_status": {"enum": [401, 403, 404]},
+    "denial_class": {"enum": ["authentication", "authorization", "not_found"]},
+    "cleanup": {"const": "task_created_resource_absent"},
+    "cleanup_outcome": {"const": "complete"},
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["created", "exact_readback", "deleted"],
+      "properties": {
+        "created": {"const": 1},
+        "exact_readback": {"const": 1},
+        "deleted": {"const": 1}
+      }
+    },
+    "gate_results": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "outcome"],
+        "properties": {
+          "name": {
+            "enum": [
+              "private_create",
+              "exact_version_readback",
+              "unauthenticated_access_denied",
+              "claim_bound_cleanup"
+            ]
+          },
+          "outcome": {"const": "PASS"}
+        }
+      }
+    },
+    "blockers": {"type": "array", "maxItems": 0},
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"}
+  }
+}

@@ -1,0 +1,43 @@
+mode: serial_integrator
+repo: /home/dev/projects/my-data-hub
+base_ref: 46aafc3813b400f70a1bbeb8e040125ff96da5ce
+base_branch: integration/operational-mvp
+integration_branch: agent/operational-mvp/final-blogger
+global_constraints:
+  - devstand handles metadata only; never blogger rows, YDB secrets, PostgreSQL URLs, or checkpoint bytes
+  - use ensure_master and the existing single Kaggle provider/runtime path
+  - fail with exit 78 before mutation when the modern token is absent
+  - do not edit shared control adapters or real_kaggle_matrix
+verification_owner: final-blogger serial lane
+stop_conditions:
+  - no executable existing API can satisfy a required lifecycle gate
+  - implementation would require a static devstand database URL or business-data relay
+lanes:
+  - id: final-blogger
+    role: worker
+    requirement_ids: [FB01, FB02, FB03, FB04, FB05, FB06, FB07, FB08]
+    target: one fail-closed production blogger closure command and receipt
+    depends_on: [FINAL-M1 cb06d07, 94ea9f8]
+    execution_mode: serial_after_dependency
+    branch: agent/operational-mvp/final-blogger
+    worktree: /home/dev/.codex/worktrees/my-data-hub/final-blogger
+    writable_files:
+      - new production orchestration module and CLI/script
+      - focused tests
+      - new receipt schema/example and focused documentation
+      - .codex/lanes/final-blogger/RESULTS.md
+    forbidden_files:
+      - shared control adapters
+      - real_kaggle_matrix
+    expected_output: committed executable workflow with typed durable receipt and fault tests
+    verification_scope: full_local
+    status: completed
+requirements:
+  FB01: modern token absence exits 78 before mutation
+  FB02: resolve ACTIVE PostgreSQL only through control-plane ensure_master, never a static devstand DB URL
+  FB03: launch the exact read-only YDB importer through the single Kaggle provider/runtime path
+  FB04: prove exact 266-row lossless accounting and explicit duplicate decisions
+  FB05: require transactional canonical import completion
+  FB06: require post-import checkpoint promotion and independent cold restore
+  FB07: require bounded MCP accounting before DURABLE_COMPLETE while keeping devstand metadata-only
+  FB08: emit typed operation/run/checkpoint/receipt identities and provide executable CLI, tests, docs, and schema

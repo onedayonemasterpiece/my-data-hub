@@ -1,0 +1,188 @@
+# Operational MVP evidence — 2026-08-11
+
+Status: **implementation in progress; operational acceptance is blocked**.
+
+This page is an evidence index, not a claim that the one-pass completion gate is
+green.  The canonical database topology remains unchanged: a writable PostgreSQL
+primary may run only in the ACTIVE protected Kaggle master notebook.  The devstand
+contains only the lightweight control ledger/process and no canonical rows.
+
+## Proven in this implementation branch
+
+- The PR-A architecture reset was independently reviewed and merged as
+  `de657d63e4662e69dfb7169bc67aa65e8a9bda71`.
+- The SQLite WAL control ledger, lifecycle state machine, epochs, leases,
+  provider-effect journal, callback deduplication, checkpoint pointers, OAuth
+  client/revocation state, and bounded audit projections are implemented.
+- FakeKaggle/state-machine tests include 10,000 generated sequences, concurrent
+  `ensure_master`, crash/reconciliation, callback replay, stale epoch, and
+  checkpoint failure cases.
+- The single concrete provider transport uses exactly `kaggle==2.2.4`; the
+  repository validator forbids another Kaggle transport implementation.
+- A real disposable private Kaggle Dataset was created, read back by exact
+  version/hash, denied to an unauthenticated client, and deleted by an exact
+  task-created claim.  See
+  [the sanitized receipt](evidence/2026-08-11-operational-mvp/kaggle-private-dataset-canary.json).
+- The now-reproducible repository command repeated that real Dataset gate with a
+  second task-owned private resource and exact cleanup. See
+  [the schema-validated second receipt](evidence/2026-08-11-operational-mvp/kaggle-private-dataset-canary-2.json).
+  Dataset canaries are real provider mutations but are not Notebook run IDs and do
+  not reduce the required 15-run minimum.
+- Receipt v2 then repeated the same gate from a clean exact source commit and added
+  explicit gate results, counts, cleanup and blockers. See
+  [the exact-commit third receipt](evidence/2026-08-11-operational-mvp/kaggle-private-dataset-canary-3.json).
+- The target YDB table was inventoried with a dedicated database-scoped
+  `ydb.viewer` identity. A zero-row UPDATE was denied. The live bounded snapshot
+  contained 266 distinct records across 14 batches and 14 source files. No row
+  payload was persisted on the devstand. See
+  [the sanitized inventory](evidence/2026-08-11-operational-mvp/ydb-readonly-inventory.json).
+- The control-only Compose process was killed at its host PID, restarted by
+  Docker, and retained its control state. See
+  [the process-recovery receipt](evidence/2026-08-11-operational-mvp/control-process-recovery.json).
+- The remote MCP reader runtime now uses the same durable control ledger for
+  resolution, client authorization, revocation, and audit. A standard MCP 2.0
+  Streamable HTTP client proves discovery and `platform.status` with
+  `master_state=ABSENT`; revoked JWTs, database environment leakage, and reader
+  write-tool discovery are denied in tests.
+- Nightly and weekly/manual acceptance runners now execute bounded real-provider
+  inventory, MCP authentication negatives, lifecycle-receipt checks, and
+  checkpoint/master/provider/embedding evaluations.  Their current
+  credential-free receipt exits `78` with 14 explicit `BLOCKED` checks; it does
+  not turn absent live interfaces or credentials into a pass.
+- Scheduled acceptance now has schema-validated receipts, exact current/previous
+  checkpoint metadata, bounded control-ledger connector coverage, production
+  policy/fencing denial probes, and a durable restore/rotation consumer heartbeat.
+  It submits and polls each accepted operation to a terminal state sequentially;
+  verifier timeouts are capped by the remaining request budget and a late return
+  is recorded as `FAILED`, not durable success. No live scheduled receipt is
+  claimed because provider credentials and a deployed consumer are absent.
+- The post-deploy workflow runs only trusted default-branch verifier code and
+  evidence-binds an exact approved reachable merge commit without checking out
+  or executing that deployed revision. It also requires
+  DNS and CA-valid TLS, OAuth metadata/JWKS, Host/Origin/authentication negatives,
+  a cold `ABSENT` to fenced `ACTIVE` master read, forbidden-public-port probes,
+  and fresh Ed25519-signed metadata-only host evidence for the three supervised
+  services, absence of local database state, process replacement and reboot
+  recovery. This is tested automation only: the public TLS edge exists, but the
+  MCP/OAuth application routes and signed live host receipt do not.
+- A three-stage host-derived evidence collector and schemas now cover immutable
+  image IDs, equal source/installed release tree hashes, loopback listeners,
+  absence of local database state and process/reboot recovery.  GitHub's
+  `devstand` Environment was observed through the GitHub API at 2026-08-11
+  05:03 UTC with one custom deployment branch policy, `main`, and zero
+  Environment secrets. Required-reviewer protection and live credentials have
+  not been installed, so no workflow success is claimed.
+- Operational notebook sources are deterministic and bind exact wheel/source
+  hashes. PostgreSQL master fencing, typed blogger import, separate E5/BGE spaces,
+  deterministic RRF, and checkpoint verification have executable unit/integration
+  contracts. They have **not** yet passed the required real Kaggle matrix.
+- The checkpoint implementation has exact physical/WAL/logical artifacts,
+  numeric-version readback, an independent restore verifier, and metadata-only
+  current/previous HEAD compare-and-swap. The runtime no longer constructs a
+  second provider client. A central split-upload broker keeps Kaggle credentials
+  and blob tokens on the control host, while the Notebook streams bytes directly
+  to a just-in-time signed Kaggle storage URL. No checkpoint bytes traverse the
+  devstand, and no provider credential is copied through the per-attempt status
+  Dataset. Deterministic local tests pass; disposable live-canary evidence remains
+  to be collected before this progress record may claim operational completion.
+- The FINAL-BLOGGER command now implements the metadata-only external closure and
+  the in-master bounded YDB stage. It requires an acknowledged exact 266-row import
+  receipt before checkpoint publication, then a verified exact-version checkpoint,
+  independent restore, cold rotation, accounting, and bounded MCP projection.
+  Persistent import-receipt callback loss fences/stops the ephemeral master and
+  deliberately preserves the previous HEAD. This path has not been executed live.
+- The FINAL-EMBED path now runs inside the ACTIVE master. It creates deterministic
+  compact documents and jobs, uses the single provider adapter for separate exact
+  private E5/BGE inputs and worker runs, selectively reads only the bounded typed
+  result, transactionally imports both vector spaces, records query vectors only in
+  the canonical master, and exposes exact/FTS/E5/BGE rank-only RRF through the
+  fenced MCP broker. Its stage receipt must be acknowledged before checkpointing.
+  This is implementation and disposable-test evidence only: no real corpus/model
+  run, coverage, checkpoint or restored query has been observed.
+- The provider-real workflow now has an exact 24-scenario operational catalog and
+  a checked-in trusted driver. It counts only reconciled numeric Kaggle run refs and
+  kernel IDs, requires at least three boots, two rotations, abrupt termination,
+  control restart, host reboot and a 60–90 minute soak, and cannot turn task UUIDs
+  or platform smoke into PASS. Missing live scenario evidence produces 24 typed
+  BLOCKED receipts with `mutations_started=0` and exit `78`; no live PASS is claimed.
+- A dedicated Yandex Cloud public TLS edge now exists at the two canonical names.
+  Its private gateway has no public IP, the certificate is hostname-valid, and the
+  restricted tunnel exposes only the three DevCoveer loopback destinations. The
+  public callback route returned bounded `master_absent`; a private gateway restart
+  recovered that path. MCP and OAuth still return `502` because the reviewed
+  three-process application and owner secrets are not installed. This is
+  edge/tunnel evidence, not endpoint acceptance.
+- At implementation/evidence commit `87921d6709eb0fe480db1b79ce1f2b030e48d0fe`,
+  the repository validator reports 3,181 checks with zero errors; 728 tests pass
+  with one explicitly opt-in disposable PostgreSQL test skipped. That PostgreSQL
+  18 tmpfs-only fencing/migration/quarantine test passes when separately enabled.
+  Compileall, notebook drift, reachable-history secret scan, Ruff and the configured
+  strict mypy target pass. These remain code and disposable-integration evidence,
+  not real-provider or deployment acceptance.
+
+## Exact blockers and real provider proof
+
+Kaggle authentication is **not** the current blocker. The installed automated
+legacy username/key profile uses the same non-interactive official SDK path as
+the existing events-bot/CherryFlash launchers. Fresh private runtime diagnostics
+reached `COMPLETE`, attested their executed source, returned bounded output, and
+were deleted with absence observed.  A later real private Kaggle run also unpacked
+the pinned portable runtime, started PostgreSQL 18.4,
+created `pgcrypto`, `citext`, `pg_trgm`, and pgvector 0.8.6, evaluated an actual
+vector distance, returned five deterministic custom-state event UUIDs, and then
+deleted both its Notebook and input Dataset through exact claims.  This is a live
+runtime diagnostic, not an operational-matrix PASS.
+
+The checkpoint upload topology is no longer an internal design blocker.  A live
+disposable canary proved the brokered split upload with one central credentialed
+adapter, a credential-free producer Notebook PUT directly to Kaggle blob storage,
+an exact private Dataset numeric version, an independent verifier Notebook, matching
+4,096-byte SHA-256 evidence, and exact cleanup/inventory absence for all three
+resources.  Neither the signed upload URL nor the opaque blob token is retained in
+the receipt.
+
+On 2026-08-12 the owner Identity Hub Web OIDC client and application were also
+created, restricted to one organization-owner account, and preflighted with code,
+nonce and PKCE.  The provider client secret, authorization-server RSA key and
+restart-safe portal state key exist only in owner-only mode-`0600` devstand files.
+The checked-in observation deliberately contains no secret.  The local authorization
+server remains bootstrap-only until ChatGPT displays its exact connector callback URI;
+that URI must replace the nonfunctional bootstrap redirect before a live reader token
+can be issued.
+
+The remaining deployment blocker is external host privilege: the guarded installer
+requires the root-installed epoch tunnel broker socket, but the current account has no
+noninteractive sudo authority and the service/socket do not exist.  The public edge
+tunnel itself is healthy: the callback path reaches the local control process, while
+MCP and OAuth return 502 because their reviewed loopback processes are not installed.
+The exact source release/image and exact-head master assets have been prepared, but no
+service restart or deployment was attempted past the broker preflight.
+
+Sanitized evidence:
+
+- [first automated runtime-attestation canary](evidence/2026-08-11-operational-mvp/kaggle-runtime-attestation-canary.json)
+- [second automated runtime-attestation canary](evidence/2026-08-11-operational-mvp/kaggle-runtime-attestation-canary-2.json)
+- [real PostgreSQL 18.4 + pgvector Kaggle runtime canary](evidence/2026-08-11-operational-mvp/kaggle-pg18-runtime-canary-live.json)
+- [live brokered checkpoint upload canary](evidence/2026-08-11-operational-mvp/broker-live-canary-observed.json)
+- [observed Identity Hub owner portal](evidence/2026-08-11-operational-mvp/identity-hub-owner-portal-observed.json)
+- [observed devstand deployment blocker](evidence/2026-08-11-operational-mvp/devstand-live-blocker.json)
+
+Closure requires the root-owned tunnel broker installation, then installing the
+reviewed control-plane release with the existing automated Kaggle credential only in
+the control service, replacing the bootstrap OAuth redirect with the callback URI
+displayed by ChatGPT, and running the pinned control-owned operational driver. No
+Kaggle credential is copied into Notebook source, callback bodies, remote MCP, or
+evidence.
+
+## Gates not claimed
+
+Until the blockers are closed, the following remain fail-closed and must not be
+reported as complete: permanent master/checkpoint resources; 15 qualifying real
+Notebook run identities and all 24 scenario receipts; full YDB import into the
+Kaggle primary; E5/BGE 100% coverage; verified current/previous cold restores;
+live brokered reads; owner MCP writes; live OAuth/ChatGPT; signed DevCoveer
+three-process process-kill/reboot evidence; implementation PR merge; and deployment
+of its merge commit. Public DNS/TLS and the private edge tunnel are provisioned,
+but the MCP/OAuth application backends are not.
+
+Region Talk remains paused and production publication remains disabled.

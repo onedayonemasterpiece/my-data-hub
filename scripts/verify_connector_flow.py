@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import atexit
 import json
 import os
 import tempfile
@@ -11,8 +13,19 @@ import time
 from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
+from uuid import NAMESPACE_URL, UUID, uuid5
 
-from my_data_hub.connectors.contracts import canonical_json_bytes, payload_sha256
+from my_data_hub.connectors.contracts import (
+    ConnectorCheckpointRequest,
+    ConnectorCheckpointState,
+    ConnectorCheckpointStatusReceipt,
+    ConnectorDurabilityState,
+    ConnectorReceipt,
+    canonical_json_bytes,
+    payload_sha256,
+)
+from my_data_hub.connectors.durability import ConnectorDurabilityService
 from my_data_hub.connectors.postgres import (
     PostgresConnectorAcceptanceRepository,
     PostgresDailyStatisticsCommitter,
@@ -23,10 +36,104 @@ from my_data_hub.connectors.spool import (
     ConnectorDeliveryService,
     DeliveryDisposition,
     DeliveryResult,
+    DurabilityDeliveryResult,
+    DurabilityDisposition,
     DurableConnectorSpool,
 )
 from my_data_hub.connectors.synthetic import SyntheticConnectorProducer
-from my_data_hub.mcp.service import HubService
+
+
+def _open_disposable_epoch(
+    admin_database_url: str, *, connector_url: str, committer_url: str
+) -> tuple[UUID, int]:
+    """Bind the disposable CI LOGINs to one real leased write epoch."""
+
+    import psycopg
+
+    master_instance_id = uuid5(NAMESPACE_URL, "my-data-hub:disposable-connector-ci")
+    now = datetime.now(UTC)
+    lease_until = now + timedelta(minutes=10)
+    credential_until = now + timedelta(minutes=5)
+    principals = tuple(urlsplit(value).username for value in (connector_url, committer_url))
+    if any(not principal for principal in principals) or len(set(principals)) != 2:
+        raise ValueError("disposable connector epoch requires two distinct LOGIN principals")
+    with psycopg.connect(admin_database_url) as connection, connection.cursor() as cursor:
+        highest_epoch, current_epoch = cursor.execute(
+            "SELECT highest_epoch,current_epoch FROM master_control.epoch_state WHERE singleton=true"
+        ).fetchone()
+        if current_epoch is not None:
+            raise RuntimeError("disposable connector fixture found an already registered master epoch")
+        epoch = int(highest_epoch) + 1
+        cursor.execute(
+            "SELECT master_control.begin_epoch(%s,%s,%s,%s)",
+            (master_instance_id, "disposable-connector-ci", epoch, lease_until),
+        )
+        cursor.execute(
+            "SELECT master_control.open_write_gate(%s,%s)",
+            (master_instance_id, epoch),
+        )
+        for principal in principals:
+            cursor.execute(
+                "SELECT master_control.bind_epoch_credential(%s,%s,%s,%s,%s)",
+                (
+                    uuid5(NAMESPACE_URL, f"my-data-hub:disposable:{principal}:{epoch}"),
+                    principal,
+                    master_instance_id,
+                    epoch,
+                    credential_until,
+                ),
+            )
+        connection.commit()
+    return master_instance_id, epoch
+
+
+def _close_disposable_epoch(admin_database_url: str, master_instance_id: UUID, epoch: int) -> None:
+    import psycopg
+
+    with psycopg.connect(admin_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT master_control.close_write_gate(%s,%s,'closed','disposable_ci_complete')",
+            (master_instance_id, epoch),
+        )
+        connection.commit()
+
+
+def _reader_connector_status(database_url: str) -> list[dict[str, object]]:
+    """Read the bounded connector projection through the restricted reader LOGIN.
+
+    Production MCP never receives a static PostgreSQL URL.  The disposable
+    integration job still proves that the short-lived master reader identity can
+    observe the exact allowlisted connector tables that a brokered MCP session
+    will use.
+    """
+
+    import psycopg
+
+    with psycopg.connect(database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT p.data_product,
+                   count(b.batch_id) FILTER (WHERE b.status = 'accepted'),
+                   count(b.batch_id) FILTER (WHERE b.status = 'canonical_committed'),
+                   max(b.accepted_at),
+                   max(b.committed_at)
+            FROM integration.data_product p
+            LEFT JOIN integration.batch b ON b.data_product = p.data_product
+            GROUP BY p.data_product
+            ORDER BY p.data_product
+            """
+        )
+        rows = cursor.fetchall()
+    return [
+        {
+            "data_product": str(row[0]),
+            "accepted_uncommitted_batches": int(row[1]),
+            "committed_batches": int(row[2]),
+            "last_accepted_at": row[3].isoformat() if row[3] else None,
+            "last_committed_at": row[4].isoformat() if row[4] else None,
+        }
+        for row in rows
+    ]
 
 
 def main() -> int:
@@ -47,7 +154,21 @@ def main() -> int:
         "--verification-database-url",
         default=os.getenv("MY_DATA_HUB_MONITORING_DATABASE_URL", ""),
     )
+    parser.add_argument(
+        "--admin-database-url",
+        default=os.getenv("MY_DATA_HUB_ROLE_ADMIN_DATABASE_URL", ""),
+    )
+    parser.add_argument("--bootstrap-disposable-epoch", action="store_true")
+    parser.add_argument(
+        "--bootstrap-disposable-checkpoint",
+        action="store_true",
+        help=(
+            "complete durability with an explicit synthetic checkpoint fixture; "
+            "CI-only and never live evidence"
+        ),
+    )
     parser.add_argument("--sequence", type=int, default=None)
+    parser.add_argument("--durability-timeout-seconds", type=float, default=0.0)
     args = parser.parse_args()
     urls = {
         "intake": args.intake_database_url,
@@ -58,6 +179,16 @@ def main() -> int:
     missing = [name for name, value in urls.items() if not value]
     if missing:
         raise SystemExit("missing dedicated database URL(s): " + ", ".join(missing))
+    disposable_epoch: tuple[UUID, int] | None = None
+    if args.bootstrap_disposable_epoch:
+        if not args.admin_database_url:
+            raise SystemExit("disposable epoch bootstrap requires the role-admin database URL")
+        disposable_epoch = _open_disposable_epoch(
+            args.admin_database_url,
+            connector_url=args.intake_database_url,
+            committer_url=args.committer_database_url,
+        )
+        atexit.register(_close_disposable_epoch, args.admin_database_url, *disposable_epoch)
 
     import psycopg
 
@@ -71,6 +202,7 @@ def main() -> int:
     reporting_date = date(2000, 1, 1) + timedelta(days=sequence % 1_000_000)
     exact = producer.exact_bytes(reporting_date, sequence=sequence)
     repository = PostgresConnectorAcceptanceRepository(args.intake_database_url)
+    durability_repository = PostgresConnectorAcceptanceRepository(args.committer_database_url)
     intake = ConnectorIntakeService(repository)
     committer = PostgresDailyStatisticsCommitter(args.committer_database_url)
 
@@ -166,6 +298,9 @@ def main() -> int:
         def submit(self, _exact_envelope_bytes: bytes) -> DeliveryResult:
             raise TimeoutError("synthetic transport outage")
 
+        def durability(self, _acceptance: ConnectorReceipt) -> DurabilityDeliveryResult:
+            raise TimeoutError("synthetic transport outage")
+
     class IntakeTransport:
         def submit(self, exact_envelope_bytes: bytes) -> DeliveryResult:
             result = intake.submit(
@@ -183,6 +318,20 @@ def main() -> int:
             )
             return DeliveryResult(disposition, receipt=result.receipt)
 
+        def durability(self, acceptance: ConnectorReceipt) -> DurabilityDeliveryResult:
+            receipt = repository.get_durability_receipt(acceptance.batch_id)
+            if receipt is None:
+                return DurabilityDeliveryResult(
+                    DurabilityDisposition.RETRY,
+                    message="durability receipt is not visible",
+                )
+            disposition = (
+                DurabilityDisposition.COMPLETE
+                if receipt.state is ConnectorDurabilityState.DURABLE_COMPLETE
+                else DurabilityDisposition.PENDING
+            )
+            return DurabilityDeliveryResult(disposition, receipt=receipt)
+
     with tempfile.TemporaryDirectory(prefix="mdh-connector-spool-") as temp:
         spool_root = Path(temp) / "spool"
         first_spool = DurableConnectorSpool(spool_root)
@@ -194,26 +343,86 @@ def main() -> int:
         recovery_summary = ConnectorDeliveryService(
             restarted_spool, IntakeTransport()
         ).deliver_ready(now=outage_at + timedelta(seconds=2))
-        receipt_files = list(restarted_spool.receipts_dir.glob("*.json"))
-        eventual_receipt = json.loads(receipt_files[0].read_bytes())
-        eventual_commit = committer.commit(eventual_receipt["batch_id"])
-        eventual_replay = committer.commit(eventual_receipt["batch_id"])
+        accepted_files = list(restarted_spool.receipts_dir.glob("*.accepted.json"))
+        eventual_acceptance = ConnectorReceipt.model_validate_json(accepted_files[0].read_bytes())
+        eventual_commit = committer.commit(eventual_acceptance.batch_id)
+        eventual_replay = committer.commit(eventual_acceptance.batch_id)
+        if args.bootstrap_disposable_checkpoint:
+            if not args.bootstrap_disposable_epoch:
+                raise SystemExit(
+                    "synthetic checkpoint bootstrap requires the disposable epoch fixture"
+                )
+
+            class DisposableCheckpointGateway:
+                """Exact CI fixture; it is never constructed by the live verifier path."""
+
+                def __init__(self) -> None:
+                    self.request: ConnectorCheckpointRequest | None = None
+
+                def request_checkpoint(
+                    self, request: ConnectorCheckpointRequest
+                ) -> ConnectorCheckpointStatusReceipt:
+                    self.request = request
+                    return ConnectorCheckpointStatusReceipt(
+                        request_id=request.request_id,
+                        operation_id=f"disposable-ci:{request.request_id}",
+                        state=ConnectorCheckpointState.REQUESTED,
+                        canonical_revision=request.canonical_revision,
+                    )
+
+                def checkpoint_status(
+                    self, operation_id: str
+                ) -> ConnectorCheckpointStatusReceipt:
+                    request = self.request
+                    if request is None or operation_id != f"disposable-ci:{request.request_id}":
+                        raise RuntimeError("disposable checkpoint operation identity changed")
+                    return ConnectorCheckpointStatusReceipt(
+                        request_id=request.request_id,
+                        operation_id=operation_id,
+                        state=ConnectorCheckpointState.DURABLE_COMPLETE,
+                        canonical_revision=request.canonical_revision,
+                        checkpoint_id=f"disposable-ci:{request.canonical_revision}",
+                        manifest_sha256=request.exact_sha256(),
+                        verified_at=datetime.now(UTC),
+                    )
+
+            asyncio.run(
+                ConnectorDurabilityService(
+                    durability_repository, DisposableCheckpointGateway()
+                ).advance(eventual_acceptance.batch_id)
+            )
+        deadline = time.monotonic() + max(0.0, args.durability_timeout_seconds)
+        durability_summary = ConnectorDeliveryService(
+            restarted_spool, IntakeTransport()
+        ).deliver_ready(now=outage_at + timedelta(seconds=4))
+        while durability_summary.delivered != 1 and time.monotonic() < deadline:
+            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+            durability_summary = ConnectorDeliveryService(
+                restarted_spool, IntakeTransport()
+            ).deliver_ready(now=datetime.now(UTC) + timedelta(minutes=5))
+        receipt_files = [
+            path
+            for path in restarted_spool.receipts_dir.glob("*.json")
+            if not path.name.endswith(".accepted.json")
+        ]
+        eventual_durability = (
+            json.loads(receipt_files[0].read_bytes()) if len(receipt_files) == 1 else None
+        )
         spool_ok = (
             outage_summary.deferred == 1
-            and recovery_summary.delivered == 1
-            and not restarted_spool.pending(ready_at=outage_at + timedelta(seconds=2))
+            and recovery_summary.deferred == 1
+            and durability_summary.delivered == 1
+            and not restarted_spool.pending(ready_at=datetime.now(UTC) + timedelta(minutes=5))
             and len(receipt_files) == 1
+            and eventual_durability is not None
+            and eventual_durability["state"] == "DURABLE_COMPLETE"
             and not eventual_commit.duplicate
             and eventual_replay.duplicate
         )
 
-    mcp_status = HubService(
-        args.mcp_reader_database_url,
-        scopes=frozenset({"connector:read"}),
-        write_enabled=False,
-    ).connector_status()
-    mcp_row = next(
-        row for row in mcp_status if row["data_product"] == "synthetic.daily-statistics.v1"
+    reader_status = _reader_connector_status(args.mcp_reader_database_url)
+    reader_row = next(
+        row for row in reader_status if row["data_product"] == "synthetic.daily-statistics.v1"
     )
 
     with psycopg.connect(
@@ -245,7 +454,7 @@ def main() -> int:
         and spool_ok
         and not semantic_quarantine.duplicate
         and semantic_quarantine_replay.duplicate
-        and mcp_row["committed_batches"] >= 2
+        and reader_row["committed_batches"] >= 2
     )
     report = {
         "ok": ok,
@@ -266,13 +475,24 @@ def main() -> int:
             "semantic_quarantine": counts[5],
         },
         "outage_restart": {
+            "checkpoint_evidence_class": (
+                "synthetic_disposable_ci"
+                if args.bootstrap_disposable_checkpoint
+                else "live_external_gateway_required"
+            ),
             "first_delivery_deferred": outage_summary.deferred,
-            "eventual_delivery_count": recovery_summary.delivered,
+            "acceptance_deferred": recovery_summary.deferred,
+            "durable_complete_count": durability_summary.delivered,
             "durable_receipts": len(receipt_files),
-            "eventual_batch_id": str(eventual_receipt["batch_id"]),
+            "eventual_batch_id": str(eventual_acceptance.batch_id),
+            "durability_state": (
+                eventual_durability["state"]
+                if eventual_durability is not None
+                else repository.get_durability_receipt(eventual_acceptance.batch_id).state.value
+            ),
             "commit_replayed": eventual_replay.duplicate,
         },
-        "mcp_read": mcp_row,
+        "restricted_master_reader": reader_row,
         "semantic_poison": {
             "batch_id": str(poison_result.receipt.batch_id),
             "quarantine_id": str(semantic_quarantine.quarantine_id),
@@ -285,6 +505,9 @@ def main() -> int:
         },
     }
     print(json.dumps(report, indent=2, sort_keys=True))
+    if disposable_epoch is not None:
+        _close_disposable_epoch(args.admin_database_url, *disposable_epoch)
+        atexit.unregister(_close_disposable_epoch)
     return 0 if ok else 2
 
 

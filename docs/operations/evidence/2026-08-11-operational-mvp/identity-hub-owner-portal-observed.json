@@ -1,0 +1,56 @@
+{
+  "application_assignment_count": 1,
+  "application_status": "ACTIVE",
+  "authorization_endpoint": "https://auth.yandex.cloud/oauth/authorize",
+  "authorized_scopes": [
+    "email",
+    "openid",
+    "profile"
+  ],
+  "client_id": "ajeuq7pc19fg878vq1ik",
+  "client_secret_storage": "owner-only mode-0600 devstand file; value not recorded",
+  "discovery_url": "https://auth.yandex.cloud/.well-known/openid-configuration",
+  "issuer": "https://auth.yandex.cloud",
+  "jwks_uri": "https://auth.yandex.cloud/oauth/jwks/keys",
+  "local_authorization_server": {
+    "bootstrap_client_id": "bootstrap-reader",
+    "bootstrap_redirect_uri": "https://identity.kenigevents.ru/bootstrap/callback",
+    "issuer": "https://identity.kenigevents.ru",
+    "status": "BOOTSTRAP_ONLY_AWAITING_CHATGPT_DISPLAYED_CALLBACK"
+  },
+  "observed_at": "2026-08-12T00:54:08Z",
+  "oidc_application_id": "ek0ogb6pmhuhd28r98fl",
+  "owner_subject": "one explicitly assigned organization-owner account; identifier omitted",
+  "portal_preflight": {
+    "authorization_metadata_http_status": 200,
+    "container_user": "1000:1000",
+    "disposable_sqlite_initialized": true,
+    "exact_image_commit": "e8795cc4b9af8c9d3dbf153203c49c0569593f20",
+    "exact_image_id": "sha256:adae0e8200232af28eda6812def045685c1cf4c3011b361dc27b8a78b6425a07",
+    "grant_types": [
+      "authorization_code",
+      "refresh_token"
+    ],
+    "metadata_bytes": 719,
+    "metadata_http_status": 200,
+    "owner_login_http_status": 303,
+    "pkce_methods": [
+      "S256"
+    ],
+    "secret_in_metadata": false,
+    "secret_in_redirect": false
+  },
+  "prepared_release": {
+    "autostart_changed": false,
+    "commit": "e8795cc4b9af8c9d3dbf153203c49c0569593f20",
+    "image_id": "sha256:adae0e8200232af28eda6812def045685c1cf4c3011b361dc27b8a78b6425a07",
+    "master_asset_count": 6,
+    "master_asset_manifest_sha256": "5b93e0ba4cbdc3616caa943eda9e9b9d49709366c26935338883e106323c98d1",
+    "runtime_changed": false
+  },
+  "redirect_uris": [
+    "https://identity.kenigevents.ru/owner/callback"
+  ],
+  "schema_version": "my-data-hub-identity-hub-live-observation.v1",
+  "token_endpoint": "https://auth.yandex.cloud/oauth/token"
+}

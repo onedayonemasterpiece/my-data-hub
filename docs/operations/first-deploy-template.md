@@ -34,5 +34,4 @@ residue:
 blockers:
 ```
 
-Master Notebook, private checkpoint, provider, DNS/TLS/OAuth and remote MCP receipts are
-separate later-phase artifacts. Never fill them with planned values.
+Master Notebook, private checkpoint, provider, OAuth application and remote MCP receipts are separate later-phase artifacts. DNS/TLS edge provisioning is recorded independently in `yandex-edge-deployment.md` and does not satisfy these application gates. Never fill receipts with planned values.

@@ -1,0 +1,215 @@
+mode: read_only_parallel_then_serial_integration
+repo: /home/dev/.codex/worktrees/my-data-hub/operational-mvp
+base_ref: 6b1cebdd1e81541669b66f63e6369905c58dcc11
+base_branch: main
+integration_branch: integration/operational-mvp
+global_constraints:
+  - PostgreSQL canonical primary exists only in one ACTIVE Kaggle master Notebook.
+  - Exactly one central control-owned Kaggle lifecycle adapter; no Notebook provider credential/session.
+  - No canonical rows, checkpoints, PGDATA, provider secrets, or raw YDB data on devstand.
+  - No synthetic LIVE_PASS; live external observations and exact receipts are mandatory.
+  - Region Talk remains paused and publication disabled.
+verification_owner: /root
+stop_conditions:
+  - Do not merge PR 5 until all internal code gaps are closed and exact-head review is clean.
+  - Do not deploy or restart devstand services without the prompt-authorized reviewed release procedure.
+  - Do not mark the persistent goal complete while any gate lacks exact live evidence.
+lanes:
+  - id: audit-core-a-h
+    role: planner
+    requirement_ids: [G-A, G-B, G-C, G-D, G-E, G-F, G-G, G-H]
+    target: exact-head core architecture and checkpoint/recovery gap audit
+    depends_on: []
+    execution_mode: read_only_parallel
+    branch: null
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-mvp
+    writable_files: []
+    forbidden_files: ['**/*']
+    expected_output: per-gate evidence table and implementation order
+    verification_scope: inspection_only
+    status: completed
+  - id: audit-oauth-deploy
+    role: planner
+    requirement_ids: [G-I, G-M, FINAL-DEPLOY]
+    target: MCP/OAuth, devstand and exact merge/deploy audit
+    depends_on: []
+    execution_mode: read_only_parallel
+    branch: null
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-mvp
+    writable_files: []
+    forbidden_files: ['**/*']
+    expected_output: code/live blocker split
+    verification_scope: inspection_only
+    status: completed
+  - id: audit-data-j-l
+    role: planner
+    requirement_ids: [G-J, G-K, G-L]
+    target: YDB blogger import, embeddings and connectors audit
+    depends_on: [G-F, G-H]
+    execution_mode: read_only_parallel
+    branch: null
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-mvp
+    writable_files: []
+    forbidden_files: ['**/*']
+    expected_output: callable-path and evidence gap table
+    verification_scope: inspection_only
+    status: completed
+  - id: audit-acceptance-n-dod
+    role: reviewer
+    requirement_ids: [G-N, LIVE-MATRIX, SEC-FAULT, DOC-CONTRACTS, DOD]
+    target: acceptance integrity, CI, contracts and final receipt audit
+    depends_on: []
+    execution_mode: read_only_parallel
+    branch: null
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-mvp
+    writable_files: []
+    forbidden_files: ['**/*']
+    expected_output: requirement-by-requirement closure table
+    verification_scope: inspection_only
+    status: completed
+  - id: checkpoint-topology-research
+    role: planner
+    requirement_ids: []
+    target: official provider-side checkpoint copy/upload feasibility
+    depends_on: [G-D, G-H]
+    execution_mode: read_only_parallel
+    branch: null
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-mvp
+    writable_files: []
+    forbidden_files: ['**/*']
+    expected_output: official-contract conclusion and narrow owner decision if unsupported
+    verification_scope: inspection_only
+    status: completed
+  - id: gates-a-b
+    role: implementation
+    requirement_ids: [G-A, G-B]
+    target: single-transport enforcement, property histories, poison isolation
+    depends_on: [audit-core-a-h]
+    execution_mode: isolated_writable
+    branch: agent/operational-mvp/gates-a-b
+    writable_files: [scripts/validate_repository.py, src/my_data_hub/orchestrator/master/coordinator.py, tests]
+    forbidden_files: [src/my_data_hub/runtime_sdk, scripts/provider, src/my_data_hub/connectors]
+    expected_output: clean commits and full gates
+    verification_scope: focused_and_full
+    status: merged
+  - id: gates-c-e
+    role: implementation
+    requirement_ids: [G-C, G-E]
+    target: runtime event contract/redaction and complete Notebook pins
+    depends_on: [audit-core-a-h]
+    execution_mode: isolated_writable
+    branch: agent/operational-mvp/gates-c-e
+    writable_files: [src/my_data_hub/runtime_sdk, scripts/create_notebooks.py, notebooks, tests]
+    forbidden_files: [src/my_data_hub/checkpoints, scripts/provider, src/my_data_hub/connectors]
+    expected_output: clean commits and full gates
+    verification_scope: focused_and_full
+    status: merged
+  - id: acceptance-matrix-runtime
+    role: implementation
+    requirement_ids: [G-N, LIVE-MATRIX]
+    target: executable typed scenario dispatch and staged workflow
+    depends_on: [audit-acceptance-n-dod]
+    execution_mode: isolated_writable
+    branch: agent/operational-mvp/acceptance-matrix-runtime
+    writable_files: [scripts/provider, .github/workflows/provider-real.yml, tests, schemas, docs]
+    forbidden_files: [src/my_data_hub/control_plane, src/my_data_hub/checkpoints]
+    expected_output: clean commits and full gates
+    verification_scope: focused_and_full
+    status: merged
+  - id: gate-l-connectors
+    role: implementation
+    requirement_ids: [G-L]
+    target: dynamic connector ingress and durable checkpoint completion
+    depends_on: [audit-data-j-l]
+    execution_mode: isolated_writable
+    branch: agent/operational-mvp/gate-l-connectors
+    writable_files: [src/my_data_hub/connectors, src/my_data_hub/api/app.py, sql/migrations/0018*, tests, schemas, docs]
+    forbidden_files: [src/my_data_hub/checkpoints, src/my_data_hub/providers/kaggle]
+    expected_output: clean commits and full gates
+    verification_scope: focused_and_full
+    status: merged
+  - id: final-receipt-integrity
+    role: implementation
+    requirement_ids: [DOC-CONTRACTS, DOD]
+    target: conditional COMPLETE schema and evidence-consistent validator
+    depends_on: [audit-acceptance-n-dod]
+    execution_mode: isolated_writable
+    branch: agent/operational-mvp/final-receipt-integrity
+    writable_files: [schemas/operational-mvp-acceptance-receipt.v1.schema.json, examples, scripts/validate_repository.py, tests, docs]
+    forbidden_files: [src]
+    expected_output: clean commits and full gates
+    verification_scope: focused_and_full
+    status: merged
+  - id: gates-i-m-readiness
+    role: implementation
+    requirement_ids: [G-I, G-M]
+    target: OAuth readiness, negative canaries and post-deploy identity contracts
+    depends_on: [audit-oauth-deploy]
+    execution_mode: isolated_writable
+    branch: agent/gates-i-m-readiness
+    writable_files: [src/my_data_hub/mcp/oauth.py, deploy, .github/workflows, tests, docs]
+    forbidden_files: [src/my_data_hub/checkpoints]
+    expected_output: clean commits and full gates
+    verification_scope: focused_and_full
+    status: merged
+  - id: checkpoint-adapter-primitives
+    role: implementation
+    requirement_ids: [G-D, G-H]
+    target: official central-adapter blob start/finalize/reconcile primitives
+    depends_on: [checkpoint-topology-research]
+    execution_mode: isolated_writable
+    branch: agent/operational-mvp/checkpoint-adapter-primitives
+    writable_files: [src/my_data_hub/providers/kaggle, tests/provider]
+    forbidden_files: [src/my_data_hub/control_plane, src/my_data_hub/checkpoints]
+    expected_output: canonical types, SDK smoke and full gates
+    verification_scope: focused_and_full
+    status: merged
+  - id: checkpoint-broker
+    role: implementation
+    requirement_ids: [G-D, G-F, G-G, G-H]
+    target: brokered direct checkpoint upload, restore verification and HEAD CAS
+    depends_on: [checkpoint-adapter-primitives]
+    execution_mode: serial_after_dependency
+    branch: agent/operational-mvp/checkpoint-broker
+    writable_files: [src/my_data_hub/checkpoints, src/my_data_hub/control_plane, control_migrations/025*, deploy, tests, schemas, docs]
+    forbidden_files: [docs/source-material/idea-hub/idea-20260809-content-platform-current-design.md]
+    expected_output: deterministic complete broker implementation and integration gates
+    verification_scope: focused_and_full
+    status: merged
+  - id: broker-live-canary
+    role: implementation
+    requirement_ids: [LIVE-MATRIX]
+    target: disposable private direct-upload canary and exact cleanup receipt
+    depends_on: [checkpoint-broker]
+    execution_mode: isolated_writable
+    branch: agent/operational-mvp/broker-live-canary
+    writable_files: [scripts/provider, schemas, examples, tests, docs, .codex/lanes/broker-live-canary]
+    forbidden_files: [src/my_data_hub/control_plane, src/my_data_hub/checkpoints]
+    expected_output: committed canary runner then live receipt
+    verification_scope: focused_and_live
+    status: running
+  - id: ydb-live-inventory
+    role: implementation
+    requirement_ids: [G-J]
+    target: complete read-only Region Talk YDB inventory and protected ordered export
+    depends_on: [audit-data-j-l]
+    execution_mode: isolated_writable
+    branch: agent/operational-mvp/ydb-live-inventory
+    writable_files: [scripts/provider, schemas, tests, docs/operations/evidence, .codex/lanes/ydb-live-inventory]
+    forbidden_files: [src/my_data_hub/control_plane, sql/migrations]
+    expected_output: sanitized live inventory receipt and protected raw export handoff
+    verification_scope: focused_and_live
+    status: running
+  - id: serial-integration
+    role: merge_reviewer
+    requirement_ids: []
+    target: implement confirmed gaps, reconcile lanes, run gates, merge and deploy
+    depends_on: [audit-core-a-h, audit-oauth-deploy, audit-data-j-l, audit-acceptance-n-dod, checkpoint-topology-research]
+    execution_mode: serial_after_dependency
+    branch: integration/operational-mvp
+    worktree: /home/dev/.codex/worktrees/my-data-hub/operational-mvp
+    writable_files: ['**/*']
+    forbidden_files: [docs/source-material/idea-hub/idea-20260809-content-platform-current-design.md]
+    expected_output: committed fixes, integration report, exact-head gates and live acceptance
+    verification_scope: full_local
+    status: running

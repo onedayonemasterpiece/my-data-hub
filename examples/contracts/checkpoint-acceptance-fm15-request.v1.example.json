@@ -1,0 +1,7 @@
+{
+  "operation_id": "77777777-7777-4777-8777-777777777777",
+  "task_run_id": "44444444-4444-4444-8444-444444444444",
+  "idempotency_key": "checkpoint-acceptance-example",
+  "source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "schema_version": "my-data-hub-checkpoint-acceptance-fm15.v1"
+}

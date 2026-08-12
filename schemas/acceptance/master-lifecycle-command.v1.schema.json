@@ -1,0 +1,123 @@
+{
+  "$defs": {
+    "MasterAcceptanceBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "format": "uuid",
+          "title": "Operation Id",
+          "type": "string"
+        },
+        "run_id": {
+          "format": "uuid",
+          "title": "Run Id",
+          "type": "string"
+        },
+        "attempt_id": {
+          "format": "uuid",
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "service_instance_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Service Instance Id",
+          "type": "string"
+        },
+        "master_instance_id": {
+          "format": "uuid",
+          "title": "Master Instance Id",
+          "type": "string"
+        },
+        "epoch": {
+          "minimum": 1,
+          "title": "Epoch",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "operation_id",
+        "run_id",
+        "attempt_id",
+        "service_instance_id",
+        "master_instance_id",
+        "epoch"
+      ],
+      "title": "MasterAcceptanceBinding",
+      "type": "object"
+    },
+    "MasterAcceptanceCommandKind": {
+      "enum": [
+        "EMPTY_MASTER_BOOTSTRAP",
+        "CONCURRENT_ENSURE_SINGLE_RUN",
+        "CALLBACK_LOSS_RECOVERY",
+        "STALE_REPLAY_REJECTION",
+        "LEASE_EXPIRY_DENIAL",
+        "OLD_EPOCH_RETURN_DENIAL",
+        "CLEAN_DRAIN",
+        "SESSION_ROTATION_SOAK"
+      ],
+      "title": "MasterAcceptanceCommandKind",
+      "type": "string"
+    },
+    "MasterAcceptanceScenario": {
+      "enum": [
+        "FM04",
+        "FM07",
+        "FM08",
+        "FM09",
+        "FM10",
+        "FM11",
+        "FM12",
+        "FM24"
+      ],
+      "title": "MasterAcceptanceScenario",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-master-lifecycle-command.v1",
+      "default": "my-data-hub-master-lifecycle-command.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "command_id": {
+      "format": "uuid",
+      "title": "Command Id",
+      "type": "string"
+    },
+    "task_id": {
+      "format": "uuid",
+      "title": "Task Id",
+      "type": "string"
+    },
+    "scenario": {
+      "$ref": "#/$defs/MasterAcceptanceScenario"
+    },
+    "command_kind": {
+      "$ref": "#/$defs/MasterAcceptanceCommandKind"
+    },
+    "source_revision": {
+      "pattern": "^[0-9a-f]{40}$",
+      "title": "Source Revision",
+      "type": "string"
+    },
+    "binding": {
+      "$ref": "#/$defs/MasterAcceptanceBinding"
+    }
+  },
+  "required": [
+    "command_id",
+    "task_id",
+    "scenario",
+    "command_kind",
+    "source_revision",
+    "binding"
+  ],
+  "title": "MasterAcceptanceCommand",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/acceptance/master-lifecycle-command.v1.schema.json"
+}

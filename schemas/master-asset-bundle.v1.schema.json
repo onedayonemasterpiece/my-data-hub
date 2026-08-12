@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/master-asset-bundle.v1.schema.json",
+  "title": "Master asset bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "provider_ref": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+      "maxLength": 300
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "byte_size"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(?:dataset/)?[A-Za-z0-9_.+-]+$",
+          "maxLength": 240
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 67108864
+        }
+      }
+    },
+    "dependency_wheel_asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "byte_size"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^dataset/embedding-worker-wheelhouse/[A-Za-z0-9_.+-]+\\.whl$",
+          "maxLength": 240
+        },
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "byte_size": {"type": "integer", "minimum": 1, "maximum": 67108864}
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "source_commit",
+    "source_identity",
+    "source_version",
+    "launch_dataset_ref",
+    "master_notebook_ref",
+    "checkpoint_dataset_ref",
+    "checkpoint_verifier_ref",
+    "probe_relations",
+    "worker_runtime",
+    "assets",
+    "embedding_dependency_wheels"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "my-data-hub-master-asset-bundle.v1"
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "source_identity": {
+      "type": "string",
+      "pattern": "^git:[0-9a-f]{40}$"
+    },
+    "source_version": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "launch_dataset_ref": {"$ref": "#/$defs/provider_ref"},
+    "master_notebook_ref": {"$ref": "#/$defs/provider_ref"},
+    "checkpoint_dataset_ref": {"$ref": "#/$defs/provider_ref"},
+    "checkpoint_verifier_ref": {"$ref": "#/$defs/provider_ref"},
+    "worker_runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image_identity", "docker_image_pinning_type", "release_url", "source_commit", "python_series"],
+      "properties": {
+        "image_identity": {"const": "gcr.io/kaggle-images/python@sha256:c1fa4de30bc268e601e6dcddb6ceb2519b9adde3527dbbfb05e6bdfbbbdcd1a2"},
+        "docker_image_pinning_type": {"const": "original"},
+        "release_url": {"const": "https://github.com/Kaggle/docker-python/releases/tag/v170-CPU-c1fa4de30bc268e601e6dcddb6ceb2519b9adde3527dbbfb05e6bdfbbbdcd1a2"},
+        "source_commit": {"const": "fc61d5cda7da39530055bae9bd0e92865f995cd9"},
+        "python_series": {"const": "3.12"}
+      }
+    },
+    "probe_relations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z_][a-z0-9_]*\\.[a-z_][a-z0-9_]*$"
+      }
+    },
+    "assets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "master_notebook",
+        "checkpoint_verifier",
+        "wheel",
+        "postgres_runtime",
+        "postgres_runtime_manifest",
+        "tunnel_known_hosts",
+        "embedding_e5_worker",
+        "embedding_bge_worker",
+        "embedding_dependency_manifest",
+        "embedding_dependency_smoke_runner"
+      ],
+      "properties": {
+        "master_notebook": {"$ref": "#/$defs/asset"},
+        "checkpoint_verifier": {"$ref": "#/$defs/asset"},
+        "wheel": {"$ref": "#/$defs/asset"},
+        "postgres_runtime": {"$ref": "#/$defs/asset"},
+        "postgres_runtime_manifest": {"$ref": "#/$defs/asset"},
+        "tunnel_known_hosts": {"$ref": "#/$defs/asset"},
+        "embedding_e5_worker": {"$ref": "#/$defs/asset"},
+        "embedding_bge_worker": {"$ref": "#/$defs/asset"},
+        "embedding_dependency_manifest": {"$ref": "#/$defs/asset"},
+        "embedding_dependency_smoke_runner": {"$ref": "#/$defs/asset"}
+      }
+    },
+    "embedding_dependency_wheels": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 16,
+      "items": {"$ref": "#/$defs/dependency_wheel_asset"}
+    }
+  }
+}

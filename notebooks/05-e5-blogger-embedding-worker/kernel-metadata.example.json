@@ -1,0 +1,57 @@
+{
+  "code_file": "worker.ipynb",
+  "competition_sources": [],
+  "dataset_sources": [],
+  "enable_gpu": false,
+  "enable_internet": true,
+  "enable_tpu": false,
+  "id": "OWNER/05-e5-blogger-embedding-worker",
+  "is_private": true,
+  "kernel_sources": [],
+  "kernel_type": "notebook",
+  "language": "python",
+  "model_sources": [],
+  "my_data_hub": {
+    "activation_prerequisites_satisfied": false,
+    "activation_requires_real_receipt": true,
+    "canonical_write_allowed": false,
+    "contracts": {},
+    "execution_pin_contract": {
+      "cleanup_retention_policy": {
+        "cleanup_receipt_required": true,
+        "notebook_resource": "orchestrator_protected_until_owner_supersedes",
+        "run_outputs": "retain_until_terminal_receipt_then_control_policy",
+        "task_owned_inputs": "claim_bound_delete_after_terminal_or_expiry"
+      },
+      "immutable_assets": [
+        "my_data_hub_wheel_sha256",
+        "primary_source_sha256",
+        "embedding_dependency_manifest_sha256",
+        "embedding_dependency_smoke_receipt_sha256"
+      ],
+      "input_dataset_versions": "required-exact-numeric-private-refs-at-launch",
+      "kaggle_runtime_image_identity": "required-immutable-sha256-at-launch",
+      "model": {
+        "id": "intfloat/multilingual-e5-base",
+        "revision": "d128750597153bb5987e10b1c3493a34e5a4502a"
+      },
+      "notebook": "05-e5-blogger-embedding-worker",
+      "output_contract": "my-data-hub-blogger-embedding-artifact.v1",
+      "privacy": "private",
+      "resource_class": "orchestrator_protected",
+      "schema": "my-data-hub-notebook-execution-pins/v1",
+      "supported_python_series": "3.12"
+    },
+    "external_side_effects_allowed": true,
+    "model_id": "intfloat/multilingual-e5-base",
+    "model_revision": "d128750597153bb5987e10b1c3493a34e5a4502a",
+    "primary_source": "embedding_workers/e5_runtime.py",
+    "primary_source_sha256": "5eddc79bca897b8ff31c398d447c66275abaaa8092a59f27d5c77037e0dd7b55",
+    "privacy": "private",
+    "production_ready": false,
+    "resource_class": "orchestrator_protected",
+    "runtime_contract": "my-data-hub-blogger-embedding-artifact.v1",
+    "timeout_seconds": 7200
+  },
+  "title": "05-e5-blogger-embedding-worker"
+}

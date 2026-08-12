@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.my-data-hub.local/kaggle-real-canary-receipt.v1.schema.json",
+  "title": "my-data-hub real private Kaggle Dataset canary receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "scenario",
+    "task_id",
+    "run_id",
+    "provider_ref",
+    "provider_version",
+    "package_sha256",
+    "claim_sha256",
+    "privacy",
+    "unauthenticated_http_status",
+    "denial_class",
+    "cleanup",
+    "started_at",
+    "completed_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "my-data-hub-real-kaggle-canary.v1"},
+    "scenario": {
+      "const": "private_dataset_create_exact_readback_unauthenticated_denial_delete"
+    },
+    "task_id": {"type": "string", "format": "uuid"},
+    "run_id": {"type": "string", "format": "uuid"},
+    "provider_ref": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+      "maxLength": 300
+    },
+    "provider_version": {"type": "integer", "minimum": 1},
+    "package_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "claim_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "privacy": {"const": "private"},
+    "unauthenticated_http_status": {"enum": [401, 403, 404]},
+    "denial_class": {"enum": ["authentication", "authorization", "not_found"]},
+    "cleanup": {"const": "task_created_resource_absent"},
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"}
+  }
+}

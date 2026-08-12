@@ -1,0 +1,60 @@
+{
+  "$id": "https://schemas.my-data-hub.invalid/provider/data-workload-production-config.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "blogger_v1_operation_id": {
+      "format": "uuid",
+      "title": "Blogger V1 Operation Id",
+      "type": "string"
+    },
+    "blogger_v2_operation_id": {
+      "format": "uuid",
+      "title": "Blogger V2 Operation Id",
+      "type": "string"
+    },
+    "control_base_url": {
+      "title": "Control Base Url",
+      "type": "string"
+    },
+    "mcp_endpoint": {
+      "title": "Mcp Endpoint",
+      "type": "string"
+    },
+    "poll_seconds": {
+      "default": 10.0,
+      "maximum": 60.0,
+      "minimum": 1.0,
+      "title": "Poll Seconds",
+      "type": "number"
+    },
+    "probe_query": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Probe Query",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "my-data-hub-data-workload-production-config.v1",
+      "default": "my-data-hub-data-workload-production-config.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "timeout_seconds": {
+      "default": 3600,
+      "maximum": 43000,
+      "minimum": 60,
+      "title": "Timeout Seconds",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "control_base_url",
+    "mcp_endpoint",
+    "blogger_v1_operation_id",
+    "blogger_v2_operation_id",
+    "probe_query"
+  ],
+  "title": "ProductionDataWorkloadConfig",
+  "type": "object"
+}
