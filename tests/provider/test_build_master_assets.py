@@ -60,7 +60,7 @@ def _dependency_inputs(tmp_path: Path) -> tuple[Path, Path]:
     wheelhouse.mkdir(parents=True)
     specs = (
         ("flagembedding", "1.4.0", "flagembedding-1.4.0-py3-none-any.whl"),
-        ("ir-datasets", "0.5.11", "ir_datasets-0.5.11-py3-none-any.whl"),
+        ("ir-datasets", "0.6.2", "ir_datasets-0.6.2-py3-none-any.whl"),
         ("psycopg", "3.3.4", "psycopg-3.3.4-py3-none-any.whl"),
         (
             "psycopg-binary",
