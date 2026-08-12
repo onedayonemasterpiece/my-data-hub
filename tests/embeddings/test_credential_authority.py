@@ -67,6 +67,20 @@ def test_wrong_task_token_never_returns_secret(tmp_path) -> None:  # type: ignor
     assert error.value.code == "EMBEDDING_TASK_TOKEN_INVALID"
 
 
+def test_missing_credential_creates_hash_only_master_request(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    authority = DirectoryEmbeddingCredentialAuthority(
+        tmp_path / "credentials", clock=lambda: NOW, credential_wait_seconds=0
+    )
+    authority.root.mkdir(mode=0o700)
+    with pytest.raises(EmbeddingDirectAccessUnavailable) as error:
+        authority.issue(metadata(), TOKEN)
+    assert error.value.code == "EMBEDDING_JIT_CREDENTIAL_PENDING"
+    pending = authority.pending_requests()
+    assert len(pending) == 1 and pending[0]["task_run_id"] == str(TASK)
+    assert pending[0]["task_token_sha256"] == hashlib.sha256(TOKEN.encode()).hexdigest()
+    assert TOKEN not in str(pending)
+
+
 def test_expired_registration_is_rejected_before_storage(tmp_path) -> None:  # type: ignore[no-untyped-def]
     authority = DirectoryEmbeddingCredentialAuthority(tmp_path / "credentials", clock=lambda: NOW)
     value = registration()

@@ -14,6 +14,7 @@ import hmac
 import json
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,9 +57,20 @@ class EmbeddingCredentialRegistration:
 class DirectoryEmbeddingCredentialAuthority:
     """Atomic registrar/source plus durable, idempotent revocation mailbox."""
 
-    def __init__(self, root: Path, *, clock=lambda: datetime.now(UTC)) -> None:  # type: ignore[no-untyped-def]
+    def __init__(
+        self,
+        root: Path,
+        *,
+        clock=lambda: datetime.now(UTC),  # type: ignore[no-untyped-def]
+        credential_wait_seconds: float = 30.0,
+        poll_seconds: float = 0.25,
+    ) -> None:
+        if not 0 <= credential_wait_seconds <= 120 or not 0.01 <= poll_seconds <= 5:
+            raise ValueError("embedding credential wait policy is outside the bounded contract")
         self.root = root
         self.clock = clock
+        self.credential_wait_seconds = credential_wait_seconds
+        self.poll_seconds = poll_seconds
 
     def store(self, registration: EmbeddingCredentialRegistration) -> Path:
         self._validate_registration(registration)
@@ -83,6 +95,13 @@ class DirectoryEmbeddingCredentialAuthority:
     ) -> TaskBoundEmbeddingCredential:
         self._private_root(create=False)
         path = self.root / self._credential_name(metadata.task_run_id)
+        if not path.is_file():
+            self._request(metadata, task_token)
+        deadline = time.monotonic() + self.credential_wait_seconds
+        while not path.is_file() and time.monotonic() < deadline:
+            time.sleep(min(self.poll_seconds, max(0.0, deadline - time.monotonic())))
+        if not path.is_file():
+            raise EmbeddingDirectAccessUnavailable("EMBEDDING_JIT_CREDENTIAL_PENDING")
         payload = self._read(path)
         expected = {
             "schema_version", "master_instance_id", "epoch", "task_run_id", "credential_id",
@@ -108,6 +127,25 @@ class DirectoryEmbeddingCredentialAuthority:
         if registration.task_run_id != metadata.task_run_id or registration.epoch != metadata.epoch:
             raise EmbeddingDirectAccessUnavailable("EMBEDDING_CREDENTIAL_BINDING_INVALID")
         return registration.credential()
+
+    def pending_requests(self, *, limit: int = 100) -> tuple[dict[str, object], ...]:
+        """Master-facing metadata commands; never contains the plaintext token."""
+
+        self._private_root(create=False)
+        directory = self.root / "requests"
+        if not directory.exists():
+            return ()
+        if directory.is_symlink() or not directory.is_dir() or directory.stat().st_mode & 0o077:
+            raise EmbeddingDirectAccessUnavailable("EMBEDDING_CREDENTIAL_REQUEST_MAILBOX_UNSAFE")
+        values: list[dict[str, object]] = []
+        for path in sorted(directory.iterdir()):
+            if len(values) >= limit:
+                break
+            payload = self._read(path)
+            if payload.get("schema_version") != "embedding-worker-credential-request.v1":
+                raise EmbeddingDirectAccessUnavailable("EMBEDDING_CREDENTIAL_REQUEST_INVALID")
+            values.append(payload)
+        return tuple(values)
 
     def revoke(self, credential_id: UUID, *, task_run_id: UUID) -> None:
         self._private_root(create=True)
@@ -160,6 +198,31 @@ class DirectoryEmbeddingCredentialAuthority:
                 or query.get("sslmode", [""])[0] not in {"verify-ca", "verify-full"}
                 or query.get("connect_timeout", [""])[0] != "5"):
             raise EmbeddingDirectAccessUnavailable("EMBEDDING_JIT_DATABASE_URL_INVALID")
+
+    def _request(self, metadata: EmbeddingLaunchMetadata, task_token: str) -> None:
+        token_sha = hashlib.sha256(task_token.encode()).hexdigest()
+        directory = self.root / "requests"
+        directory.mkdir(mode=0o700, exist_ok=True)
+        if directory.is_symlink() or directory.stat().st_mode & 0o077:
+            raise EmbeddingDirectAccessUnavailable("EMBEDDING_CREDENTIAL_REQUEST_MAILBOX_UNSAFE")
+        path = directory / f"{metadata.task_run_id.hex}.json"
+        payload = {
+            "schema_version": "embedding-worker-credential-request.v1",
+            "request_id": str(metadata.request_id),
+            "request_sha256": metadata.request_sha256,
+            "task_run_id": str(metadata.task_run_id),
+            "input_jobs_sha256": metadata.input_jobs_sha256,
+            "epoch": metadata.epoch,
+            "task_token_sha256": token_sha,
+            "requested_at": self.clock().astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        }
+        encoded = canonical_json_bytes(payload) + b"\n"
+        if path.exists():
+            existing = path.read_bytes()
+            if existing != encoded:
+                raise EmbeddingDirectAccessUnavailable("EMBEDDING_CREDENTIAL_REQUEST_CONFLICT")
+            return
+        self._atomic(path, encoded)
 
     def _private_root(self, *, create: bool) -> None:
         if create:
