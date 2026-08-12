@@ -4,7 +4,7 @@
 
 - Requirements: R-C1, R-C2, R-C3.
 - Base SHA: `90ce252b75f385ce46bc3f2ecb5418967afc747c`.
-- Implementation SHA: `4175b037fc28c80da2907b982f77a6551e8c3fea`.
+- Implementation SHA: `4175b037fc594c7ad8cc89904304019aab7102a7`.
 - Branch: `agent/checkpoint-image-attestation`.
 - Worktree: `/home/dev/.codex/worktrees/my-data-hub/checkpoint-image-attestation`.
 - No provider, cloud, deploy, database or credential mutation was performed.
@@ -42,7 +42,7 @@
 - `python -m compileall -q src tests` — PASS.
 - Focused/adjacent pytest covering checkpoint launcher/authority/entrypoint, central Kaggle
   adapter, operational driver and matrix — PASS (148 tests collected/executed).
-- Full `python -m pytest -q` — PASS; three opt-in skips and two pre-existing
+- Full `python -m pytest -q` — PASS; two opt-in skips and two pre-existing
   `jsonschema.RefResolver` deprecation warnings.
 - `python scripts/validate_repository.py` — PASS: 3,990 checks, zero errors/notes.
 - Focused Ruff — PASS.
