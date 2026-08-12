@@ -2287,6 +2287,13 @@ class ControlLedger:
             return None
         return {key: str(value) for key, value in dict(row).items()}
 
+    def provider_effect_idempotency_key(self, effect_id: str) -> str | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT idempotency_key FROM provider_effect_intents WHERE effect_id=?", (effect_id,)
+            ).fetchone()
+        return str(row["idempotency_key"]) if row else None
+
     def latest_provider_resource_claim(
         self,
         *,

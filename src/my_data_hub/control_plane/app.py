@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
 
@@ -364,9 +364,13 @@ def create_app(
             return None
         authority = control_ledger.provider_effect_authority(str(claim["effect_id"]))
         receipt = control_ledger.latest_provider_effect_receipt(str(claim["effect_id"]))
+        expected_key = f"{authority['operation_id']}:ensure_dataset" if authority is not None else ""
+        observed_key = control_ledger.provider_effect_idempotency_key(str(claim["effect_id"]))
         if (
             authority is None or authority.get("action") != "create_dataset"
             or authority.get("provider_ref") != settings.assets.dataset_ref
+            or observed_key != expected_key
+            or str(uuid5(NAMESPACE_URL, expected_key)) != str(claim["effect_id"])
             or receipt is None or receipt.get("provider_version") != claim.get("provider_version")
             or receipt.get("outcome") not in {"applied", "already_applied"}
         ):
