@@ -402,6 +402,7 @@ class BloggerSnapshotImporter:
         rows: Iterable[dict[str, object]],
         source_code_revision: str,
         duplicate_resolutions: Iterable[DuplicateResolution] = (),
+        expected_source_evidence: Mapping[str, object] | None = None,
     ) -> ImportReceipt:
         batch_id = batch_identity(snapshot_at, expected_row_count)
         manifest_sha = _manifest_hash(batch_id, snapshot_at, expected_row_count)
@@ -951,6 +952,18 @@ class BloggerSnapshotImporter:
                 export = accumulator.finish(
                     expected_row_count=expected_row_count, allow_incomplete=not can_commit
                 )
+                if expected_source_evidence is not None:
+                    observed_evidence = {
+                        "row_count": export.row_count,
+                        "distinct_record_ids": export.distinct_record_ids,
+                        "record_id_set_sha256": export.record_id_set_sha256,
+                        "logical_sha256": export.logical_sha256,
+                        "source_file_count": export.source_file_count,
+                    }
+                    if observed_evidence != dict(expected_source_evidence):
+                        raise ValueError(
+                            "streamed ACTIVE-master YDB scan differs before transaction commit"
+                        )
                 accounting = cursor.execute(
                     """
                     SELECT raw_count,undispositioned_count,quarantined_count

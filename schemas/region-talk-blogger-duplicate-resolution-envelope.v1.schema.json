@@ -26,7 +26,7 @@
             "minLength": 1,
             "maxLength": 4096
           },
-          "maxItems": 266,
+          "maxItems": 100000,
           "minItems": 1,
           "title": "Member Record Ids",
           "type": "array",
@@ -110,10 +110,10 @@
       "type": "string"
     },
     "expected_rows": {
-      "const": 266,
-      "default": 266,
-      "title": "Expected Rows",
-      "type": "integer"
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000,
+      "title": "Expected Rows"
     },
     "source_revision": {
       "pattern": "^[0-9a-f]{40}$",
@@ -130,7 +130,7 @@
       "items": {
         "$ref": "#/$defs/BloggerDuplicateDecision"
       },
-      "maxItems": 1330,
+      "maxItems": 500000,
       "minItems": 1,
       "title": "Decisions",
       "type": "array",

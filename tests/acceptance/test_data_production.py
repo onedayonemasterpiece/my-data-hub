@@ -184,6 +184,7 @@ async def test_real_h5_quarantine_status_drives_exact_owner_bound_v2_replay(
         operation_id=config.blogger_v1_operation_id,
         project_id=plan.blogger_project_id,
         snapshot_at=plan.blogger_snapshot_at,
+        expected_rows=266,
         source_revision=plan.blogger_source_revision,
     )
     canonical_actor = uid(40)
@@ -255,6 +256,7 @@ async def test_real_h5_quarantine_status_drives_exact_owner_bound_v2_replay(
         export_batch_id=receipt.export_batch_id,
         project_id=plan.blogger_project_id,
         snapshot_at=plan.blogger_snapshot_at,
+        expected_rows=source.expected_rows,
         source_revision=plan.blogger_source_revision,
         decisions=(
             BloggerDuplicateDecision(

@@ -65,6 +65,7 @@ def test_duplicate_replay_requires_terminal_quarantine_and_exact_source_authoriz
         operation_id=uuid4(),
         project_id=uuid4(),
         snapshot_at=snapshot_at,
+        expected_rows=266,
         source_revision="a" * 40,
     )
     authorized_at = datetime(2026, 8, 11, tzinfo=UTC)
@@ -80,6 +81,7 @@ def test_duplicate_replay_requires_terminal_quarantine_and_exact_source_authoriz
         export_batch_id=batch_identity(snapshot_at, 266),
         project_id=source.project_id,
         snapshot_at=snapshot_at,
+        expected_rows=source.expected_rows,
         source_revision=source.source_revision,
         decisions=(
             BloggerDuplicateDecision(
@@ -98,6 +100,7 @@ def test_duplicate_replay_requires_terminal_quarantine_and_exact_source_authoriz
         operation_id=uuid4(),
         project_id=source.project_id,
         snapshot_at=snapshot_at,
+        expected_rows=266,
         source_revision=source.source_revision,
         replay_of_request_id=source.request_id,
         duplicate_resolution=envelope,
@@ -719,6 +722,7 @@ def test_active_runtime_claims_only_its_exact_blogger_request(tmp_path: Path) ->
         operation_id=operation.operation_id,
         project_id=uuid4(),
         snapshot_at=now,
+        expected_rows=266,
         source_revision="a" * 40,
     )
     created = client.post("/control/v1/blogger-closure/requests", json=request.model_dump(mode="json"))
@@ -868,6 +872,7 @@ def test_quarantine_callback_is_durable_public_and_alteration_denied(tmp_path: P
         operation_id=operation.operation_id,
         project_id=uuid4(),
         snapshot_at=now,
+        expected_rows=266,
         source_revision="a" * 40,
     )
     assert (

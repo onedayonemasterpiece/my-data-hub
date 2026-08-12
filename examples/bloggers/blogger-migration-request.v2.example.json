@@ -35,5 +35,56 @@
         "reason": "Reviewed source evidence confirms both rows represent the same person."
       }
     ]
+  },
+  "source_read_receipt": {
+    "schema_version": "my-data-hub.region-talk-ydb-source-read-receipt.v1",
+    "export_batch_id": "1a18f3a8-2399-5cf9-8280-6801f482099d",
+    "snapshot_at": "2026-08-09T00:00:00Z",
+    "source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "database_id": "etnkibjidis0o6stn2cq",
+    "database_path": "/ru-central1/b1ghfk15fpug7mn5439l/etnkibjidis0o6stn2cq",
+    "table": "region_talk_external_blogger_evidence",
+    "schema_sha256": "a44855556115f90c0b6353cac0b8c5d1eaebf91485ca594c621cc73f91b2564f",
+    "query_sha256": "ef94cf114fea0e2f89418c5dacbc289e5c2d21f6935883c2b685ec4f64bd0e50",
+    "reader_service_account_id": "aaaaaaaaaaaaaaaaaaaa",
+    "database_roles": [
+      "ydb.viewer"
+    ],
+    "access_bindings_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "write_denial_verified": true,
+    "first_scan": {
+      "started_at": "2026-08-09T00:00:00Z",
+      "completed_at": "2026-08-09T00:01:00Z",
+      "row_count": 266,
+      "distinct_record_ids": 266,
+      "logical_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "record_id_set_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "batch_count": 14,
+      "batch_id_set_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "source_file_count": 14,
+      "source_file_set_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "confirmation_status_counts": {
+        "confirmed_external": 266
+      },
+      "min_updated_at": "2026-07-01T00:00:00Z",
+      "max_updated_at": "2026-08-08T00:00:00Z"
+    },
+    "repeat_scan": {
+      "started_at": "2026-08-09T00:01:00Z",
+      "completed_at": "2026-08-09T00:02:00Z",
+      "row_count": 266,
+      "distinct_record_ids": 266,
+      "logical_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "record_id_set_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "batch_count": 14,
+      "batch_id_set_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "source_file_count": 14,
+      "source_file_set_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "confirmation_status_counts": {
+        "confirmed_external": 266
+      },
+      "min_updated_at": "2026-07-01T00:00:00Z",
+      "max_updated_at": "2026-08-08T00:00:00Z"
+    }
   }
 }

@@ -84,28 +84,6 @@ SessionCredentialRole = Literal[
 ]
 
 
-def _blogger_protected_manifest() -> Path | None:
-    """Resolve the process-local private artifact without control-plane transport."""
-
-    value = os.environ.get("MY_DATA_HUB_BLOGGER_PROTECTED_MANIFEST", "").strip()
-    if not value:
-        return None
-    path = Path(value).expanduser().resolve()
-    if not path.is_relative_to(Path("/kaggle/working")):
-        raise RuntimeError("blogger protected artifact must remain inside /kaggle/working")
-    return path
-
-
-def _destroy_blogger_protected_artifact(path: Path | None) -> None:
-    """Remove provider-side source bytes only after terminal receipt delivery."""
-
-    if path is None:
-        return
-    from my_data_hub.workloads.bloggers.protected_artifact import load_protected_artifact
-
-    load_protected_artifact(path).destroy_source_bytes()
-
-
 class MasterTerminalCheckpoint(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -2067,7 +2045,6 @@ def run_master(
             if migration_request is not None:
                 if remaining_active < 300:
                     raise RuntimeError("blogger stage was not admitted without its bounded active-time allocation")
-                protected_manifest = _blogger_protected_manifest()
                 try:
                     blogger_receipt = execute_blogger_migration_stage(
                         BloggerStageContext(
@@ -2078,7 +2055,6 @@ def run_master(
                             attempt_id=config.attempt_id,
                         ),
                         owner_connection=gate_connection,
-                        protected_artifact_manifest=protected_manifest,
                     )
                 except BloggerMigrationQuarantined as exc:
                     with suppress(Exception):
@@ -2115,7 +2091,6 @@ def run_master(
                     suffix="/import-receipt",
                     payload=blogger_receipt.model_dump(mode="json"),
                 )
-                _destroy_blogger_protected_artifact(protected_manifest)
                 break
             embedding_request = _claim_embedding_production(
                 config=config, callback_url=callback_url, run_secret=run_secret

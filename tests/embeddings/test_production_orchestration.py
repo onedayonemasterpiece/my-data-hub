@@ -40,6 +40,7 @@ def _imported() -> BloggerImportStageReceipt:
         operation_id=UUID("22222222-2222-4222-8222-222222222222"),
         project_id=UUID("33333333-3333-4333-8333-333333333333"),
         snapshot_at=datetime(2026, 8, 9, tzinfo=UTC),
+        expected_rows=266,
         source_revision="b" * 40,
     )
     return BloggerImportStageReceipt(

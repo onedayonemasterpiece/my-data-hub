@@ -16,7 +16,7 @@
           "items": {
             "$ref": "#/$defs/BloggerDuplicateReviewMember"
           },
-          "maxItems": 266,
+          "maxItems": 100000,
           "minItems": 2,
           "title": "Members",
           "type": "array"
@@ -50,7 +50,7 @@
           "items": {
             "$ref": "#/$defs/BloggerDuplicateReviewGroup"
           },
-          "maxItems": 1330,
+          "maxItems": 500000,
           "minItems": 1,
           "title": "Groups",
           "type": "array"
@@ -144,17 +144,23 @@
       "type": "string"
     },
     "row_count": {
-      "const": 266,
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000,
       "title": "Row Count",
       "type": "integer"
     },
     "raw_count": {
-      "const": 266,
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000,
       "title": "Raw Count",
       "type": "integer"
     },
     "dispositioned_count": {
-      "const": 266,
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000,
       "title": "Dispositioned Count",
       "type": "integer"
     },
@@ -164,7 +170,7 @@
       "type": "integer"
     },
     "quarantined_count": {
-      "maximum": 266,
+      "maximum": 100000,
       "minimum": 1,
       "title": "Quarantined Count",
       "type": "integer"
@@ -185,13 +191,13 @@
       "type": "string"
     },
     "duplicate_group_count": {
-      "maximum": 1330,
+      "maximum": 500000,
       "minimum": 1,
       "title": "Duplicate Group Count",
       "type": "integer"
     },
     "duplicate_groups_pending": {
-      "maximum": 1330,
+      "maximum": 500000,
       "minimum": 1,
       "title": "Duplicate Groups Pending",
       "type": "integer"

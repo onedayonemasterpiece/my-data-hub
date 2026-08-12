@@ -1,46 +1,66 @@
 # FINAL-BLOGGER production closure
 
-Run `python3 scripts/bloggers/run_final_closure.py run ...` only on the protected
-devstand operator account. The control client is pinned to
-`http://127.0.0.1:8080`; it does not transmit a reusable control credential and
-cannot target a remote host. The MCP client is pinned to the owner-approved
-`https://mcp-datahub.kenigevents.ru/mcp` audience before it attaches the operator
-token. The command is fail closed and returns `78` before any control-plane
-request when a modern Kaggle token is absent.
+The production path has two read-only authorities and never materializes a row
+artifact on the devstand. First, an owner runs the provider preflight with the
+dedicated database-scoped `ydb.viewer` service account. The preflight proves the
+zero-row write probe returns the SDK's exact `UNAUTHORIZED` status and performs
+two non-overlapping ordered `QuerySnapshotReadOnly` scans. Source values remain
+in process only. Its sole output is a mode-0600 detached receipt containing
+bounded counts, set/logical hashes, timestamps, source/query/schema identities,
+source revision, the viewer binding hash, and deterministic snapshot/batch
+identity. It contains no YDB row, token, URL credential, PostgreSQL DSN, or
+business value.
 
-The command first calls `POST /control/v1/master/ensure`. It then stores one
-secret-free, exact request bound to that ensure operation. The request is claimed
-only by the matching ACTIVE run/attempt/master/epoch. The stage is default-off;
-ordinary master runs never access YDB.
+```bash
+chmod 600 /run/my-data-hub/ydb-viewer-token /run/my-data-hub/ydb-access-bindings.json
+python3 scripts/provider/read_only_ydb_blogger_export.py \
+  --endpoint "$MY_DATA_HUB_YDB_ENDPOINT" \
+  --reader-service-account-id "$YDB_READER_SERVICE_ACCOUNT_ID" \
+  --iam-token-file /run/my-data-hub/ydb-viewer-token \
+  --source-revision "$SOURCE_COMMIT_SHA" \
+  --access-bindings-json /run/my-data-hub/ydb-access-bindings.json \
+  --receipt /run/my-data-hub/blogger-ydb-source-read-receipt.json
+```
 
-The importer executes **inside the ACTIVE Kaggle master**. `MY_DATA_HUB_YDB_ENDPOINT`,
-`MY_DATA_HUB_YDB_DATABASE`, and the dedicated viewer-only
-`YDB_ACCESS_TOKEN_CREDENTIALS` are supplied through Kaggle User Secrets. No
-PostgreSQL URL is handed to another notebook. The stage creates a five-minute,
-one-connection `mdh_migration_operator` LOGIN bound to the current epoch, proves
-that a zero-row YDB UPDATE returns the SDK's exact `UNAUTHORIZED` status, streams
-the exact ordered snapshot, requires 266 distinct rows, and commits the importer
-transaction. YDB denial/read requests are capped at 10/30 seconds and PostgreSQL
-enforces a 180-second transaction timeout; admission requires 300 seconds of
-remaining active runtime and at least 270 seconds on the current lease. It drops
-the LOGIN in all outcomes.
+The receipt is metadata-only, but it is not proof of a later import. Transfer it
+through the protected operator workflow, never a row export, and start closure:
 
-An owner may instead attach a sealed private artifact to the ACTIVE master and
-set `MY_DATA_HUB_BLOGGER_PROTECTED_MANIFEST` to its mode-0600 `manifest.json`.
-The artifact must be created under `/kaggle/working`; an input Dataset, control
-Dataset, devstand path, or other filesystem root is rejected.
-This does not change the default live-YDB path. The adapter requires the
-versioned manifest and detached receipt, exact mode-0700 directory and mode-0600
-regular files, no symlinks or undeclared files, viewer-only principal evidence,
-two independent ordered scan hashes, deterministic batch/snapshot/source-revision
-binding, and exact reconciliation with a prior unbounded live inventory count.
-It streams canonical JSONL only inside the master import transaction and verifies
-the opened bytes again before transaction exit, so tampering rolls back. The
-artifact path and bytes must never be attached to the devstand or control ledger.
-After successful metadata-only import-receipt delivery, the master overwrites the
-raw file, deletes manifest/receipt/raw files, and removes the artifact directory.
-Current `STOPPED`/zero-RCU source state remains an external blocker; the presence
-of this adapter is not evidence that a live export or import occurred.
+```bash
+python3 scripts/bloggers/run_final_closure.py run \
+  --idempotency-key final-blogger-20260812-01 \
+  --project-id "$PROJECT_ID" \
+  --source-read-receipt /run/my-data-hub/blogger-ydb-source-read-receipt.json \
+  --receipt /run/my-data-hub/final-blogger-closure.json
+```
+
+The control client is pinned to `http://127.0.0.1:8080`; it does not transmit a
+reusable control credential and cannot target a remote host. The MCP client is
+pinned to the owner-approved `https://mcp-datahub.kenigevents.ru/mcp` audience.
+The command fails before a control mutation when the central Kaggle credential
+preflight fails, and it will not create a request without the exact detached
+source receipt.
+
+The importer executes only inside the matching ACTIVE Kaggle master. The master
+uses the dedicated viewer-only YDB credential from Kaggle User Secrets, repeats
+the denial probe, then performs a fresh hash-only ordered scan and reconciles it
+to the provider receipt. `MY_DATA_HUB_YDB_DATABASE` must equal the pinned source
+database path, and `MY_DATA_HUB_YDB_READER_SERVICE_ACCOUNT_ID` must equal the
+receipt's reviewed viewer principal. It opens a second direct ordered scan and
+streams those
+rows into the one PostgreSQL importer transaction. Before commit, the importer
+compares the dynamic row count, distinct record count, record-id set hash,
+logical hash, and source-file count with the preceding master scan. Any provider
+receipt mismatch, changed scan, incomplete accounting, or lease/credential fault
+rolls back and leaves canonical current/previous state unchanged. Counts are
+bounded by the contract but are never assumed to be a historical fixed value.
+
+No PostgreSQL URL is handed to another Notebook. The stage creates a five-minute,
+one-connection `mdh_migration_operator` LOGIN bound to the current epoch and
+drops it on every outcome. YDB denial/read requests are capped at 10/30 seconds;
+PostgreSQL enforces a 180-second transaction timeout; admission requires 300
+seconds of remaining active runtime and at least 270 seconds on the lease.
+Current `STOPPED`/zero-RCU source state remains an external blocker. Code or a
+metadata receipt alone is not evidence that a live read or import occurred.
 
 `COMMITTED_PENDING_CHECKPOINT` is not success. The master immediately enters its
 normal drain/checkpoint path. A final receipt is emitted only after exact private
@@ -48,9 +68,9 @@ checkpoint publication/readback, independent isolated restore verification and
 HEAD promotion; M1's durable rotation consumer cold-boots that HEAD; and bounded
 MCP `bloggers.migration.accounting` plus `bloggers.statistics` agree on revision,
 hashes, zero pending/quarantined/undispositioned rows, and the exact canonical
-actor count in the import receipt. The source row count remains exactly 266;
-explicit same-person resolutions can correctly make the canonical actor count
-smaller than 266.
+actor count in the import receipt. The source row count is taken from the exact source receipt; explicit same-person
+resolutions can correctly make the canonical actor count smaller than that dynamic
+source count.
 The same closure then walks the complete bounded `bloggers.list` cursor and
 proves representative `bloggers.get`, `bloggers.provenance`, and exact/FTS
 `bloggers.search` results without writing returned rows to its receipt. Only
@@ -107,8 +127,7 @@ chmod 600 /run/my-data-hub/blogger-duplicate-resolution-envelope.json
 python3 scripts/bloggers/run_final_closure.py run \
   --idempotency-key final-blogger-resolve-20260811-01 \
   --project-id "$PROJECT_ID" \
-  --snapshot-at 2026-08-09T00:00:00Z \
-  --source-revision "$SOURCE_COMMIT_SHA" \
+  --source-read-receipt /run/my-data-hub/blogger-ydb-source-read-receipt.json \
   --duplicate-resolution-envelope /run/my-data-hub/blogger-duplicate-resolution-envelope.json \
   --receipt /run/my-data-hub/final-blogger-closure.json
 ```

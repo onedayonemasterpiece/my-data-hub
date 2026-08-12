@@ -408,6 +408,7 @@ class ControlPlaneDataWorkloadGateway(DataWorkloadGateway):
             operation_id=self.config.blogger_v1_operation_id,
             project_id=plan.blogger_project_id,
             snapshot_at=plan.blogger_snapshot_at,
+            expected_rows=266,
             source_revision=plan.blogger_source_revision,
         )
         return await self._create_blogger_request(request)
@@ -487,6 +488,7 @@ class ControlPlaneDataWorkloadGateway(DataWorkloadGateway):
             operation_id=self.config.blogger_v2_operation_id,
             project_id=self.plan.blogger_project_id,
             snapshot_at=self.plan.blogger_snapshot_at,
+            expected_rows=266,
             source_revision=self.plan.blogger_source_revision,
             replay_of_request_id=envelope.source_request_id,
             duplicate_resolution=envelope,

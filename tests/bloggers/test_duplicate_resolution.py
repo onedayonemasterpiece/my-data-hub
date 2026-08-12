@@ -181,6 +181,7 @@ def test_replay_request_hash_binds_authorization_source_and_sorted_decisions() -
         operation_id=envelope.source_operation_id,
         project_id=envelope.project_id,
         snapshot_at=envelope.snapshot_at,
+        expected_rows=266,
         source_revision=envelope.source_revision,
     )
     assert source.request_sha256 == envelope.source_request_sha256
@@ -190,6 +191,7 @@ def test_replay_request_hash_binds_authorization_source_and_sorted_decisions() -
         operation_id=UUID("77777777-7777-4777-8777-777777777777"),
         project_id=envelope.project_id,
         snapshot_at=envelope.snapshot_at,
+        expected_rows=266,
         source_revision=envelope.source_revision,
         replay_of_request_id=envelope.source_request_id,
         duplicate_resolution=envelope,
@@ -213,6 +215,7 @@ def test_replay_request_hash_binds_authorization_source_and_sorted_decisions() -
             operation_id=UUID("99999999-9999-4999-8999-999999999999"),
             project_id=envelope.project_id,
             snapshot_at=envelope.snapshot_at,
+            expected_rows=266,
             source_revision=envelope.source_revision,
         )
 
@@ -223,6 +226,7 @@ def test_v1_request_payload_and_hash_remain_backward_compatible() -> None:
         operation_id=UUID("22222222-2222-4222-8222-222222222222"),
         project_id=UUID("33333333-3333-4333-8333-333333333333"),
         snapshot_at=datetime(2026, 8, 9, tzinfo=UTC),
+        expected_rows=266,
         source_revision="b" * 40,
     )
     assert "replay_of_request_id" not in request.metadata_payload

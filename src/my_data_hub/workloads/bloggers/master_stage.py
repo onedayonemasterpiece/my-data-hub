@@ -9,10 +9,8 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
-from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import quote
 from uuid import UUID
@@ -30,10 +28,17 @@ from .importer import (
     ImportReceipt,
     batch_identity,
 )
-from .protected_artifact import load_protected_artifact
-from .schema import SOURCE_QUERY_SHA256
-from .ydb_reader import YdbBloggerSnapshot
+from .schema import SOURCE_DATABASE_PATH, SOURCE_QUERY_SHA256
+from .ydb_reader import (
+    MAX_BLOGGER_SOURCE_ROWS,
+    BloggerYdbScanEvidence,
+    BloggerYdbSourceReadReceipt,
+    YdbBloggerSnapshot,
+    scan_ydb_rows,
+)
 
+# Compatibility for the separately owned embedding closure. Blogger ingestion
+# never derives or validates source accounting from this historical baseline.
 EXPECTED_BLOGGER_ROWS = 266
 BLOGGER_STAGE_SCHEMA = "my-data-hub-blogger-migration-request.v1"
 BLOGGER_REPLAY_STAGE_SCHEMA = "my-data-hub-blogger-migration-request.v2"
@@ -59,7 +64,9 @@ class BloggerDuplicateReviewGroup(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     identity_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    members: tuple[BloggerDuplicateReviewMember, ...] = Field(min_length=2, max_length=266)
+    members: tuple[BloggerDuplicateReviewMember, ...] = Field(
+        min_length=2, max_length=MAX_BLOGGER_SOURCE_ROWS
+    )
     existing_actor_id: UUID | None = None
 
     @model_validator(mode="after")
@@ -80,7 +87,7 @@ class BloggerDuplicateReviewInputs(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    groups: tuple[BloggerDuplicateReviewGroup, ...] = Field(min_length=1, max_length=1330)
+    groups: tuple[BloggerDuplicateReviewGroup, ...] = Field(min_length=1, max_length=MAX_BLOGGER_SOURCE_ROWS * 5)
 
     @model_validator(mode="after")
     def exact_groups(self) -> BloggerDuplicateReviewInputs:
@@ -117,7 +124,7 @@ class BloggerDuplicateDecision(BaseModel):
     canonical_actor_id: UUID
     member_record_ids: tuple[
         Annotated[str, Field(min_length=1, max_length=4096)], ...
-    ] = Field(min_length=1, max_length=266)
+    ] = Field(min_length=1, max_length=MAX_BLOGGER_SOURCE_ROWS)
     decided_by: str = Field(min_length=1, max_length=512)
     reason: str = Field(min_length=1, max_length=4096)
 
@@ -161,10 +168,10 @@ class BloggerDuplicateResolutionEnvelope(BaseModel):
     export_batch_id: UUID
     project_id: UUID
     snapshot_at: datetime
-    expected_rows: Literal[266] = EXPECTED_BLOGGER_ROWS
+    expected_rows: int = Field(ge=1, le=MAX_BLOGGER_SOURCE_ROWS)
     source_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
     source_query_sha256: Literal[SOURCE_QUERY_SHA256] = SOURCE_QUERY_SHA256
-    decisions: tuple[BloggerDuplicateDecision, ...] = Field(min_length=1, max_length=1330)
+    decisions: tuple[BloggerDuplicateDecision, ...] = Field(min_length=1, max_length=MAX_BLOGGER_SOURCE_ROWS * 5)
 
     @model_validator(mode="after")
     def exact_binding(self) -> BloggerDuplicateResolutionEnvelope:
@@ -203,9 +210,10 @@ class BloggerMigrationRequest(BaseModel):
     operation_id: UUID
     project_id: UUID
     snapshot_at: datetime
-    expected_rows: Literal[266] = EXPECTED_BLOGGER_ROWS
+    expected_rows: int = Field(ge=1, le=MAX_BLOGGER_SOURCE_ROWS)
     source_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
     source_query_sha256: Literal[SOURCE_QUERY_SHA256] = SOURCE_QUERY_SHA256
+    source_read_receipt: BloggerYdbSourceReadReceipt | None = None
     replay_of_request_id: UUID | None = None
     duplicate_resolution: BloggerDuplicateResolutionEnvelope | None = None
 
@@ -213,6 +221,15 @@ class BloggerMigrationRequest(BaseModel):
     def exact_snapshot(self) -> BloggerMigrationRequest:
         if self.snapshot_at.tzinfo is None:
             raise ValueError("blogger snapshot timestamp must be timezone-aware")
+        source_receipt = self.source_read_receipt
+        if source_receipt is not None and (
+            source_receipt.snapshot_at.astimezone(UTC) != self.snapshot_at.astimezone(UTC)
+            or source_receipt.row_count != self.expected_rows
+            or source_receipt.source_revision != self.source_revision
+            or source_receipt.query_sha256 != self.source_query_sha256
+            or source_receipt.export_batch_id != batch_identity(self.snapshot_at, self.expected_rows)
+        ):
+            raise ValueError("detached YDB read receipt differs from the requested source snapshot")
         if self.schema_version == BLOGGER_STAGE_SCHEMA:
             if self.replay_of_request_id is not None or self.duplicate_resolution is not None:
                 raise ValueError("v1 blogger request cannot carry duplicate decisions")
@@ -262,16 +279,16 @@ class BloggerQuarantineReceipt(BaseModel):
     epoch: int = Field(ge=1)
     export_batch_id: UUID
     failure_code: Literal["BloggerMigrationQuarantined"] = "BloggerMigrationQuarantined"
-    row_count: Literal[266]
-    raw_count: Literal[266]
-    dispositioned_count: Literal[266]
+    row_count: int = Field(ge=1, le=MAX_BLOGGER_SOURCE_ROWS)
+    raw_count: int = Field(ge=1, le=MAX_BLOGGER_SOURCE_ROWS)
+    dispositioned_count: int = Field(ge=1, le=MAX_BLOGGER_SOURCE_ROWS)
     undispositioned_count: Literal[0]
-    quarantined_count: int = Field(ge=1, le=266)
+    quarantined_count: int = Field(ge=1, le=MAX_BLOGGER_SOURCE_ROWS)
     logical_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     record_id_set_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     canonical_outcome_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    duplicate_group_count: int = Field(ge=1, le=1330)
-    duplicate_groups_pending: int = Field(ge=1, le=1330)
+    duplicate_group_count: int = Field(ge=1, le=MAX_BLOGGER_SOURCE_ROWS * 5)
+    duplicate_groups_pending: int = Field(ge=1, le=MAX_BLOGGER_SOURCE_ROWS * 5)
     duplicate_review_inputs: BloggerDuplicateReviewInputs
     transaction_committed: Literal[True] = True
     durability_state: Literal["BLOCKED_QUARANTINE"] = "BLOCKED_QUARANTINE"
@@ -282,6 +299,12 @@ class BloggerQuarantineReceipt(BaseModel):
             raise ValueError("all quarantined duplicate groups must remain pending")
         if self.duplicate_group_count != len(self.duplicate_review_inputs.groups):
             raise ValueError("quarantine review group count differs from durable accounting")
+        if (
+            self.raw_count != self.row_count
+            or self.dispositioned_count != self.row_count
+            or self.undispositioned_count != 0
+        ):
+            raise ValueError("quarantine receipt does not account for the dynamic source snapshot")
         return self
 
     @property
@@ -379,20 +402,20 @@ class BloggerImportStageReceipt(BaseModel):
     request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     export_batch_id: UUID
     source_query_sha256: Literal[SOURCE_QUERY_SHA256] = SOURCE_QUERY_SHA256
-    row_count: Literal[266]
-    distinct_record_ids: Literal[266]
-    source_file_count: int = Field(ge=1, le=266)
+    row_count: int = Field(ge=1, le=MAX_BLOGGER_SOURCE_ROWS)
+    distinct_record_ids: int = Field(ge=1, le=MAX_BLOGGER_SOURCE_ROWS)
+    source_file_count: int = Field(ge=1, le=MAX_BLOGGER_SOURCE_ROWS)
     dispositions: dict[str, int]
     record_id_set_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     logical_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     canonical_outcome_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    actor_count: int = Field(ge=1, le=266)
-    account_count: int = Field(ge=0, le=266 * 8)
-    duplicate_group_count: int = Field(default=0, ge=0, le=266 * 5)
+    actor_count: int = Field(ge=1, le=MAX_BLOGGER_SOURCE_ROWS)
+    account_count: int = Field(ge=0, le=MAX_BLOGGER_SOURCE_ROWS * 8)
+    duplicate_group_count: int = Field(default=0, ge=0, le=MAX_BLOGGER_SOURCE_ROWS * 5)
     duplicate_groups_pending: Literal[0] = 0
     undispositioned: Literal[0] = 0
     quarantined: Literal[0] = 0
-    replayed_count: int = Field(ge=0, le=266)
+    replayed_count: int = Field(ge=0, le=MAX_BLOGGER_SOURCE_ROWS)
     canonical_revision: int = Field(ge=1)
     transaction_committed: Literal[True] = True
     ydb_write_denial_verified: Literal[True] = True
@@ -400,11 +423,13 @@ class BloggerImportStageReceipt(BaseModel):
 
     @model_validator(mode="after")
     def lossless_accounting(self) -> BloggerImportStageReceipt:
-        if sum(self.dispositions.values()) != EXPECTED_BLOGGER_ROWS:
-            raise ValueError("blogger dispositions do not account for all 266 rows")
+        if self.distinct_record_ids != self.row_count:
+            raise ValueError("blogger source record identities are not exact")
+        if sum(self.dispositions.values()) != self.row_count:
+            raise ValueError("blogger dispositions do not account for the dynamic source snapshot")
         if any(not isinstance(key, str) or value < 0 for key, value in self.dispositions.items()):
             raise ValueError("blogger dispositions are invalid")
-        if self.replayed_count not in {0, EXPECTED_BLOGGER_ROWS}:
+        if self.replayed_count not in {0, self.row_count}:
             raise ValueError("blogger import is a partial replay")
         deduplicated = self.dispositions.get("deduplicated", 0)
         if self.actor_count > self.row_count:
@@ -412,7 +437,7 @@ class BloggerImportStageReceipt(BaseModel):
         if self.duplicate_group_count == 0 and deduplicated:
             raise ValueError("deduplicated rows require durable duplicate groups")
         if self.schema_version == BLOGGER_IMPORT_RECEIPT_SCHEMA and (
-            self.actor_count != EXPECTED_BLOGGER_ROWS
+            self.actor_count != self.row_count
             or self.duplicate_group_count != 0
             or deduplicated != 0
         ):
@@ -454,7 +479,7 @@ def _to_receipt(
     return BloggerImportStageReceipt(
         schema_version=(
             BLOGGER_IMPORT_RECEIPT_SCHEMA_V3
-            if imported.duplicate_group_count or imported.actor_count != EXPECTED_BLOGGER_ROWS
+            if imported.duplicate_group_count or imported.actor_count != imported.export.row_count
             else BLOGGER_IMPORT_RECEIPT_SCHEMA
         ),
         request_id=context.request.request_id,
@@ -539,17 +564,15 @@ def execute_blogger_migration_stage(
     driver: Any | None = None,
     importer: BloggerSnapshotImporter | None = None,
     duplicate_resolutions: tuple[DuplicateResolution, ...] | None = None,
-    protected_artifact_manifest: Path | None = None,
     now: datetime | None = None,
 ) -> BloggerImportStageReceipt:
-    """Execute an exact 266-row import under one epoch-bound login.
+    """Execute one dynamically accounted source import under an epoch-bound login.
 
     The temporary LOGIN is created and consumed only within the master process.
     It is always dropped; no DSN is returned, persisted, logged, or handed to a
-    second Kaggle notebook.  The default path streams a live read-only YDB
-    snapshot.  The optional protected-artifact adapter validates owner-only
-    files and streams them only inside this ACTIVE-master process; source bytes
-    never enter the control ledger or devstand database.
+    second Kaggle notebook. The production path performs fresh read-only YDB
+    scans and streams rows only inside this ACTIVE-master process. Source bytes
+    never enter the control ledger, a detached receipt, or the devstand.
     """
 
     import psycopg
@@ -558,20 +581,6 @@ def execute_blogger_migration_stage(
     bound_resolutions = request.duplicate_resolutions
     if duplicate_resolutions is not None and duplicate_resolutions != bound_resolutions:
         raise ValueError("blogger duplicate decisions differ from the hashed request")
-    if protected_artifact_manifest is not None and driver is not None:
-        raise ValueError("protected artifact and live YDB driver are mutually exclusive")
-    protected_artifact = None
-    if protected_artifact_manifest is not None:
-        resolved_manifest = protected_artifact_manifest.expanduser().resolve()
-        provider_root = Path("/kaggle/working")
-        if not resolved_manifest.is_relative_to(provider_root):
-            raise ValueError("protected artifact must remain inside ACTIVE master /kaggle/working")
-        protected_artifact = load_protected_artifact(protected_artifact_manifest)
-        protected_artifact.assert_import_binding(
-            snapshot_at=request.snapshot_at,
-            expected_row_count=request.expected_rows,
-            source_revision=request.source_revision,
-        )
     observed = (now or datetime.now(UTC)).astimezone(UTC)
     expiry = min(observed + timedelta(minutes=5), context.lease_until.astimezone(UTC))
     if expiry <= observed + timedelta(seconds=270):
@@ -595,8 +604,8 @@ def execute_blogger_migration_stage(
             connection_limit=1,
         ),
     )
-    owns_driver = driver is None and protected_artifact is None
-    if driver is None and protected_artifact is None:
+    owns_driver = driver is None
+    if driver is None:
         import ydb
 
         endpoint = os.environ.get("MY_DATA_HUB_YDB_ENDPOINT", "").strip()
@@ -604,6 +613,9 @@ def execute_blogger_migration_stage(
         if not endpoint or not database:
             provisioner.drop(principal)
             raise RuntimeError("bounded YDB endpoint/database configuration is absent")
+        if database != SOURCE_DATABASE_PATH:
+            provisioner.drop(principal)
+            raise RuntimeError("ACTIVE-master YDB database differs from the pinned source")
         driver = ydb.Driver(
             endpoint=endpoint,
             database=database,
@@ -611,12 +623,23 @@ def execute_blogger_migration_stage(
         )
         driver.wait(timeout=20, fail_fast=True)
     try:
-        if protected_artifact is None:
-            snapshot = YdbBloggerSnapshot(driver)
-            snapshot.assert_write_denied()
-            rows_context = snapshot.iter_rows()
-        else:
-            rows_context = nullcontext(protected_artifact.iter_rows())
+        snapshot = YdbBloggerSnapshot(driver)
+        snapshot.assert_write_denied()
+        source_receipt = request.source_read_receipt
+        if owns_driver and source_receipt is None:
+            raise RuntimeError("production blogger import requires detached two-scan YDB evidence")
+        first_scan: BloggerYdbScanEvidence | None = None
+        if source_receipt is not None:
+            reader_id = os.environ.get("MY_DATA_HUB_YDB_READER_SERVICE_ACCOUNT_ID", "").strip()
+            if owns_driver and not reader_id:
+                raise RuntimeError("ACTIVE-master YDB reader identity configuration is absent")
+            if reader_id and reader_id != source_receipt.reader_service_account_id:
+                raise RuntimeError("ACTIVE-master YDB reader differs from detached receipt")
+            scan_started = datetime.now(UTC)
+            with snapshot.iter_rows() as observed_rows:
+                first_scan = scan_ydb_rows(observed_rows, started_at=scan_started)
+            if first_scan.consistency_binding != source_receipt.first_scan.consistency_binding:
+                raise RuntimeError("fresh ACTIVE-master YDB scan differs from detached receipt")
         with psycopg.connect(
             _migration_url(context.local_database_url, principal, password), connect_timeout=5
         ) as connection:
@@ -626,18 +649,29 @@ def execute_blogger_migration_stage(
                 cursor.execute("SET lock_timeout='5s'")
                 cursor.execute("SET idle_in_transaction_session_timeout='30s'")
                 cursor.execute("SET transaction_timeout='180s'")
-            with rows_context as rows:
+            with snapshot.iter_rows() as rows:
                 imported = (importer or BloggerSnapshotImporter()).import_rows(
                     connection,
                     project_id=request.project_id,
                     snapshot_at=request.snapshot_at.astimezone(UTC),
-                    expected_row_count=EXPECTED_BLOGGER_ROWS,
+                    expected_row_count=request.expected_rows,
                     rows=rows,
                     source_code_revision=request.source_revision,
                     duplicate_resolutions=bound_resolutions,
+                    expected_source_evidence=(
+                        {
+                            "row_count": first_scan.row_count,
+                            "distinct_record_ids": first_scan.distinct_record_ids,
+                            "record_id_set_sha256": first_scan.record_id_set_sha256,
+                            "logical_sha256": first_scan.logical_sha256,
+                            "source_file_count": first_scan.source_file_count,
+                        }
+                        if first_scan is not None
+                        else None
+                    ),
                 )
-                if not imported.accounting_complete:
-                    raise BloggerMigrationQuarantined(_to_quarantine_receipt(context, imported))
+            if not imported.accounting_complete:
+                raise BloggerMigrationQuarantined(_to_quarantine_receipt(context, imported))
         return _to_receipt(context, imported)
     finally:
         if owns_driver:

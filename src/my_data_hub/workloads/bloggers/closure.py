@@ -1,6 +1,6 @@
 """Production FINAL-BLOGGER closure orchestration.
 
-This module carries only bounded metadata.  The 266 source rows stream from YDB
+This module carries only bounded metadata. Source rows stream from YDB
 inside the ACTIVE Kaggle master directly into its local PostgreSQL process.
 """
 
@@ -23,12 +23,12 @@ from my_data_hub.providers.kaggle.credentials import kaggle_credentials_configur
 
 from .master_stage import (
     BLOGGER_REPLAY_STAGE_SCHEMA,
-    EXPECTED_BLOGGER_ROWS,
     MAX_REQUEST_BYTES,
     BloggerDuplicateResolutionEnvelope,
     BloggerImportStageReceipt,
     BloggerMigrationRequest,
 )
+from .ydb_reader import BloggerYdbSourceReadReceipt
 
 EXTERNAL_BLOCKED = 78
 FINAL_RECEIPT_SCHEMA = "my-data-hub-blogger-closure.v1"
@@ -73,6 +73,7 @@ class ClosureConfig:
     project_id: UUID
     snapshot_at: datetime
     source_revision: str
+    source_read_receipt: BloggerYdbSourceReadReceipt | None = None
     duplicate_resolution: BloggerDuplicateResolutionEnvelope | None = None
     timeout_seconds: int = 43_000
     poll_seconds: float = 10.0
@@ -97,6 +98,12 @@ class ClosureConfig:
             raise ValueError("blogger closure snapshot timestamp must be timezone-aware")
         if len(self.source_revision) != 40 or any(c not in "0123456789abcdef" for c in self.source_revision):
             raise ValueError("source revision must be an exact lowercase commit SHA")
+        receipt = self.source_read_receipt
+        if receipt is not None and (
+            receipt.snapshot_at.astimezone(UTC) != self.snapshot_at.astimezone(UTC)
+            or receipt.source_revision != self.source_revision
+        ):
+            raise ValueError("detached YDB read receipt differs from closure source binding")
         if self.duplicate_resolution is not None:
             envelope = self.duplicate_resolution
             if (
@@ -239,15 +246,15 @@ def _require_accounting(value: dict[str, Any], imported: BloggerImportStageRecei
     row = value["accounting"]
     exact = {
         "export_batch_id": str(imported.export_batch_id),
-        "expected_row_count": EXPECTED_BLOGGER_ROWS,
+        "expected_row_count": imported.row_count,
         "status": "accepted",
         "logical_sha256": imported.logical_sha256,
         "record_id_set_sha256": imported.record_id_set_sha256,
         "canonical_outcome_sha256": imported.canonical_outcome_sha256,
         "duplicate_groups_pending": 0,
         "imported_canonical_revision": imported.canonical_revision,
-        "raw_count": EXPECTED_BLOGGER_ROWS,
-        "dispositioned_count": EXPECTED_BLOGGER_ROWS,
+        "raw_count": imported.row_count,
+        "dispositioned_count": imported.row_count,
         "undispositioned_count": 0,
         "quarantined_count": 0,
         "actor_count": imported.actor_count,
@@ -255,7 +262,7 @@ def _require_accounting(value: dict[str, Any], imported: BloggerImportStageRecei
         "checkpoint_required": True,
     }
     if any(row.get(key) != expected for key, expected in exact.items()):
-        raise BloggerClosureError("MCP accounting differs from the committed 266-row receipt")
+        raise BloggerClosureError("MCP accounting differs from the committed dynamic-row receipt")
     if value.get("canonical_revision") != imported.canonical_revision:
         raise BloggerClosureError("cold-restored master revision differs from the import")
     return row
@@ -325,6 +332,8 @@ def run_blogger_closure(
     """Run the single fail-closed production closure state machine."""
 
     started_at = now()
+    if config.source_read_receipt is None:
+        raise BloggerClosureError("metadata-only provider YDB source receipt is required")
     deadline = time.monotonic() + config.timeout_seconds
     ensure = control.ensure_master(f"{config.idempotency_key}:master")
     operation_id = UUID(str(ensure.get("operation_id")))
@@ -347,7 +356,9 @@ def run_blogger_closure(
         operation_id=operation_id,
         project_id=config.project_id,
         snapshot_at=config.snapshot_at,
+        expected_rows=config.source_read_receipt.row_count,
         source_revision=config.source_revision,
+        source_read_receipt=config.source_read_receipt,
         replay_of_request_id=(
             config.duplicate_resolution.source_request_id if config.duplicate_resolution else None
         ),
@@ -367,7 +378,15 @@ def run_blogger_closure(
     if request_status.get("state") != "CHECKPOINT_VERIFIED":
         raise BloggerClosureError("blogger import did not reach verified checkpoint")
     imported = BloggerImportStageReceipt.model_validate(request_status.get("import_receipt"))
-    if imported.request_sha256 != request.request_sha256 or imported.operation_id != operation_id:
+    if (
+        imported.request_sha256 != request.request_sha256
+        or imported.operation_id != operation_id
+        or imported.export_batch_id != config.source_read_receipt.export_batch_id
+        or imported.row_count != config.source_read_receipt.row_count
+        or imported.logical_sha256 != config.source_read_receipt.first_scan.logical_sha256
+        or imported.record_id_set_sha256
+        != config.source_read_receipt.first_scan.record_id_set_sha256
+    ):
         raise BloggerClosureError("import receipt does not bind the exact request/operation")
     checkpoint_status = mcp.call("checkpoint.status", {})
     checkpoint = _require_checkpoint(checkpoint_status, request_status)

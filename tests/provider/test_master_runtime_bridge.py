@@ -510,6 +510,7 @@ def test_terminal_output_recovers_committed_blogger_receipt_after_all_callback_a
         operation_id=UUID(handle.operation_id),
         project_id=uuid4(),
         snapshot_at=datetime.now(UTC),
+        expected_rows=266,
         source_revision="a" * 40,
     )
     ledger.ensure_blogger_migration_request(

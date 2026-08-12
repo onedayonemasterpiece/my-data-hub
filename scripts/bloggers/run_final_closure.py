@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import os
-from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -24,6 +23,7 @@ from my_data_hub.workloads.bloggers.master_stage import (
     MAX_REQUEST_BYTES,
     BloggerDuplicateResolutionEnvelope,
 )
+from my_data_hub.workloads.bloggers.ydb_reader import BloggerYdbSourceReadReceipt
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,8 +33,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mcp-url", default=os.getenv("MY_DATA_HUB_MCP_CANARY_ENDPOINT", CANONICAL_MCP_URL))
     parser.add_argument("--idempotency-key", required=True)
     parser.add_argument("--project-id", type=UUID, required=True)
-    parser.add_argument("--snapshot-at", required=True)
-    parser.add_argument("--source-revision", required=True)
+    parser.add_argument(
+        "--source-read-receipt",
+        type=Path,
+        help="mode-0600 metadata-only receipt from the exact provider-side two-scan preflight",
+    )
+    # Parsed only to preserve credential-preflight ordering for older invocations;
+    # neither value is trusted when a detached source receipt is required below.
+    parser.add_argument("--snapshot-at", help=argparse.SUPPRESS)
+    parser.add_argument("--source-revision", help=argparse.SUPPRESS)
     parser.add_argument(
         "--duplicate-resolution-envelope",
         type=Path,
@@ -51,7 +58,17 @@ def main() -> int:
     # particular, no control request, ledger file, or receipt is created first.
     if not central_kaggle_credentials_configured():
         return EXTERNAL_BLOCKED
+    if args.source_read_receipt is None:
+        raise SystemExit("--source-read-receipt is required after central credential preflight")
     duplicate_resolution = None
+    source_receipt_path = args.source_read_receipt
+    if (
+        source_receipt_path.is_symlink()
+        or not source_receipt_path.is_file()
+        or source_receipt_path.stat().st_mode & 0o077
+    ):
+        raise SystemExit("source read receipt must be a regular mode-0600 file")
+    source_receipt = BloggerYdbSourceReadReceipt.model_validate_json(source_receipt_path.read_bytes())
     if args.duplicate_resolution_envelope is not None:
         path = args.duplicate_resolution_envelope
         if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
@@ -64,8 +81,9 @@ def main() -> int:
         control_url=args.control_url,
         idempotency_key=args.idempotency_key,
         project_id=args.project_id,
-        snapshot_at=datetime.fromisoformat(args.snapshot_at.replace("Z", "+00:00")),
-        source_revision=args.source_revision,
+        snapshot_at=source_receipt.snapshot_at,
+        source_revision=source_receipt.source_revision,
+        source_read_receipt=source_receipt,
         duplicate_resolution=duplicate_resolution,
         timeout_seconds=args.timeout_seconds,
     )

@@ -26,7 +26,7 @@
             "minLength": 1,
             "maxLength": 4096
           },
-          "maxItems": 266,
+          "maxItems": 100000,
           "minItems": 1,
           "title": "Member Record Ids",
           "type": "array",
@@ -110,10 +110,10 @@
           "type": "string"
         },
         "expected_rows": {
-          "const": 266,
-          "default": 266,
           "title": "Expected Rows",
-          "type": "integer"
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
         },
         "source_revision": {
           "pattern": "^[0-9a-f]{40}$",
@@ -130,7 +130,7 @@
           "items": {
             "$ref": "#/$defs/BloggerDuplicateDecision"
           },
-          "maxItems": 1330,
+          "maxItems": 500000,
           "minItems": 1,
           "title": "Decisions",
           "type": "array",
@@ -155,6 +155,201 @@
       ],
       "title": "BloggerDuplicateResolutionEnvelope",
       "type": "object"
+    },
+    "BloggerYdbScanEvidence": {
+      "additionalProperties": false,
+      "description": "Bounded metadata from one ordered scan; never contains a source value.",
+      "properties": {
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        },
+        "completed_at": {
+          "format": "date-time",
+          "title": "Completed At",
+          "type": "string"
+        },
+        "row_count": {
+          "maximum": 100000,
+          "minimum": 1,
+          "title": "Row Count",
+          "type": "integer"
+        },
+        "distinct_record_ids": {
+          "maximum": 100000,
+          "minimum": 1,
+          "title": "Distinct Record Ids",
+          "type": "integer"
+        },
+        "logical_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Logical Sha256",
+          "type": "string"
+        },
+        "record_id_set_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Record Id Set Sha256",
+          "type": "string"
+        },
+        "batch_count": {
+          "maximum": 100000,
+          "minimum": 1,
+          "title": "Batch Count",
+          "type": "integer"
+        },
+        "batch_id_set_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Batch Id Set Sha256",
+          "type": "string"
+        },
+        "source_file_count": {
+          "maximum": 100000,
+          "minimum": 1,
+          "title": "Source File Count",
+          "type": "integer"
+        },
+        "source_file_set_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source File Set Sha256",
+          "type": "string"
+        },
+        "confirmation_status_counts": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "maxProperties": 32,
+          "minProperties": 1,
+          "title": "Confirmation Status Counts",
+          "type": "object"
+        },
+        "min_updated_at": {
+          "format": "date-time",
+          "title": "Min Updated At",
+          "type": "string"
+        },
+        "max_updated_at": {
+          "format": "date-time",
+          "title": "Max Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "started_at",
+        "completed_at",
+        "row_count",
+        "distinct_record_ids",
+        "logical_sha256",
+        "record_id_set_sha256",
+        "batch_count",
+        "batch_id_set_sha256",
+        "source_file_count",
+        "source_file_set_sha256",
+        "confirmation_status_counts",
+        "min_updated_at",
+        "max_updated_at"
+      ],
+      "title": "BloggerYdbScanEvidence",
+      "type": "object"
+    },
+    "BloggerYdbSourceReadReceipt": {
+      "additionalProperties": false,
+      "description": "Detached, row-free evidence from an exact provider-side YDB preflight.",
+      "properties": {
+        "schema_version": {
+          "const": "my-data-hub.region-talk-ydb-source-read-receipt.v1",
+          "default": "my-data-hub.region-talk-ydb-source-read-receipt.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "export_batch_id": {
+          "format": "uuid",
+          "title": "Export Batch Id",
+          "type": "string"
+        },
+        "snapshot_at": {
+          "format": "date-time",
+          "title": "Snapshot At",
+          "type": "string"
+        },
+        "source_revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Source Revision",
+          "type": "string"
+        },
+        "database_id": {
+          "const": "etnkibjidis0o6stn2cq",
+          "default": "etnkibjidis0o6stn2cq",
+          "title": "Database Id",
+          "type": "string"
+        },
+        "database_path": {
+          "const": "/ru-central1/b1ghfk15fpug7mn5439l/etnkibjidis0o6stn2cq",
+          "default": "/ru-central1/b1ghfk15fpug7mn5439l/etnkibjidis0o6stn2cq",
+          "title": "Database Path",
+          "type": "string"
+        },
+        "table": {
+          "const": "region_talk_external_blogger_evidence",
+          "default": "region_talk_external_blogger_evidence",
+          "title": "Table",
+          "type": "string"
+        },
+        "schema_sha256": {
+          "const": "a44855556115f90c0b6353cac0b8c5d1eaebf91485ca594c621cc73f91b2564f",
+          "default": "a44855556115f90c0b6353cac0b8c5d1eaebf91485ca594c621cc73f91b2564f",
+          "title": "Schema Sha256",
+          "type": "string"
+        },
+        "query_sha256": {
+          "const": "ef94cf114fea0e2f89418c5dacbc289e5c2d21f6935883c2b685ec4f64bd0e50",
+          "default": "ef94cf114fea0e2f89418c5dacbc289e5c2d21f6935883c2b685ec4f64bd0e50",
+          "title": "Query Sha256",
+          "type": "string"
+        },
+        "reader_service_account_id": {
+          "pattern": "^[a-z0-9]{20}$",
+          "title": "Reader Service Account Id",
+          "type": "string"
+        },
+        "database_roles": {
+          "items": {
+            "const": "ydb.viewer",
+            "type": "string"
+          },
+          "title": "Database Roles",
+          "type": "array"
+        },
+        "access_bindings_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Access Bindings Sha256",
+          "type": "string"
+        },
+        "write_denial_verified": {
+          "const": true,
+          "default": true,
+          "title": "Write Denial Verified",
+          "type": "boolean"
+        },
+        "first_scan": {
+          "$ref": "#/$defs/BloggerYdbScanEvidence"
+        },
+        "repeat_scan": {
+          "$ref": "#/$defs/BloggerYdbScanEvidence"
+        }
+      },
+      "required": [
+        "export_batch_id",
+        "snapshot_at",
+        "source_revision",
+        "reader_service_account_id",
+        "database_roles",
+        "access_bindings_sha256",
+        "first_scan",
+        "repeat_scan"
+      ],
+      "type": "object",
+      "title": "BloggerYdbSourceReadReceipt"
     }
   },
   "additionalProperties": false,
@@ -184,10 +379,10 @@
       "type": "string"
     },
     "expected_rows": {
-      "const": 266,
-      "default": 266,
       "title": "Expected Rows",
-      "type": "integer"
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
     },
     "source_revision": {
       "pattern": "^[0-9a-f]{40}$",
@@ -206,6 +401,9 @@
     },
     "duplicate_resolution": {
       "$ref": "#/$defs/BloggerDuplicateResolutionEnvelope"
+    },
+    "source_read_receipt": {
+      "$ref": "#/$defs/BloggerYdbSourceReadReceipt"
     }
   },
   "required": [
@@ -213,8 +411,10 @@
     "operation_id",
     "project_id",
     "snapshot_at",
+    "expected_rows",
     "source_revision",
     "schema_version",
+    "source_read_receipt",
     "replay_of_request_id",
     "duplicate_resolution"
   ],

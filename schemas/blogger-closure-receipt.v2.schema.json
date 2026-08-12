@@ -170,7 +170,7 @@
         "listed_bloggers": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 266
+          "maximum": 100000
         },
         "get_found": {
           "const": true

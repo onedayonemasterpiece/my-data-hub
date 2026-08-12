@@ -20,20 +20,54 @@ from my_data_hub.workloads.bloggers.closure import (
     central_kaggle_credentials_configured,
     run_blogger_closure,
 )
+from my_data_hub.workloads.bloggers.importer import batch_identity
 from my_data_hub.workloads.bloggers.master_stage import (
     BloggerDuplicateResolutionEnvelope,
     BloggerImportStageReceipt,
     BloggerMigrationRequest,
 )
 from my_data_hub.workloads.bloggers.schema import SOURCE_QUERY_SHA256
+from my_data_hub.workloads.bloggers.ydb_reader import (
+    BloggerYdbScanEvidence,
+    BloggerYdbSourceReadReceipt,
+)
 
 OPERATION = UUID("11111111-1111-4111-8111-111111111111")
 REQUEST = UUID("22222222-2222-4222-8222-222222222222")
 MASTER = UUID("33333333-3333-4333-8333-333333333333")
-BATCH = UUID("44444444-4444-4444-8444-444444444444")
+SNAPSHOT = datetime(2026, 8, 9, tzinfo=UTC)
+BATCH = batch_identity(SNAPSHOT, 266)
 CHECKPOINT = UUID("55555555-5555-4555-8555-555555555555")
 PROJECT = UUID("66666666-6666-4666-8666-666666666666")
 SHA = "a" * 64
+
+
+def source_read_receipt(*, snapshot: datetime = SNAPSHOT) -> BloggerYdbSourceReadReceipt:
+    first = BloggerYdbScanEvidence(
+        started_at=snapshot,
+        completed_at=snapshot,
+        row_count=266,
+        distinct_record_ids=266,
+        logical_sha256="b" * 64,
+        record_id_set_sha256=SHA,
+        batch_count=14,
+        batch_id_set_sha256="d" * 64,
+        source_file_count=14,
+        source_file_set_sha256="e" * 64,
+        confirmation_status_counts={"confirmed_external": 266},
+        min_updated_at=snapshot,
+        max_updated_at=snapshot,
+    )
+    return BloggerYdbSourceReadReceipt(
+        export_batch_id=batch_identity(snapshot, 266),
+        snapshot_at=snapshot,
+        source_revision="b" * 40,
+        reader_service_account_id="a" * 20,
+        database_roles=("ydb.viewer",),
+        access_bindings_sha256="f" * 64,
+        first_scan=first,
+        repeat_scan=first,
+    )
 
 
 def request() -> BloggerMigrationRequest:
@@ -41,7 +75,8 @@ def request() -> BloggerMigrationRequest:
         request_id=REQUEST,
         operation_id=OPERATION,
         project_id=PROJECT,
-        snapshot_at=datetime(2026, 8, 9, tzinfo=UTC),
+        snapshot_at=SNAPSHOT,
+        expected_rows=266,
         source_revision="b" * 40,
     )
 
@@ -208,8 +243,9 @@ def config() -> ClosureConfig:
         control_url=LOCAL_CONTROL_URL,
         idempotency_key="final-blogger-test",
         project_id=PROJECT,
-        snapshot_at=datetime(2026, 8, 9, tzinfo=UTC),
+        snapshot_at=SNAPSHOT,
         source_revision="b" * 40,
+        source_read_receipt=source_read_receipt(),
         timeout_seconds=600,
         poll_seconds=1,
     )
@@ -288,6 +324,7 @@ def test_final_closure_transports_exact_duplicate_envelope_in_v2_request() -> No
         control_url=LOCAL_CONTROL_URL, idempotency_key="final-blogger-replay-test",
         project_id=envelope.project_id, snapshot_at=envelope.snapshot_at,
         source_revision=envelope.source_revision, duplicate_resolution=envelope,
+        source_read_receipt=source_read_receipt(snapshot=envelope.snapshot_at),
         timeout_seconds=600, poll_seconds=1,
     )
     control = FakeControl()
@@ -590,7 +627,10 @@ def test_in_master_stage_uses_epoch_bound_migration_login_and_drops_it(monkeypat
     execute_blogger_migration_stage(
         BloggerStageContext(
             identity=MasterIdentity(MASTER, "77777777-7777-4777-8777-777777777777", 7),
-            request=replay_request,
+            # This unit exercises the injected-driver/login seam. Live
+            # requests retain the detached receipt and take the fresh
+            # two-scan path covered separately below.
+            request=replay_request.model_copy(update={"source_read_receipt": None}),
             local_database_url="postgresql://postgres@/postgres?host=%2Fkaggle%2Fworking%2Fsocket&port=5432",
             lease_until=datetime.now(UTC).replace(microsecond=0)
             + __import__("datetime").timedelta(minutes=6),
