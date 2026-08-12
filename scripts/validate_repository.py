@@ -321,6 +321,7 @@ OPERATIONAL_MVP_GATE_EVIDENCE_KINDS = {
     "N": frozenset({"IMPLEMENTATION_REVIEW", "POST_DEPLOY"}),
 }
 OPERATIONAL_MVP_REQUIRED_HOSTED_CHECKS = frozenset({"contracts", "postgres-integration"})
+PROVIDER_REAL_RUNNER = ["self-hosted", "linux", "my-data-hub-devstand"]
 
 
 def repository_head_commit(root: Path) -> str | None:
@@ -381,9 +382,7 @@ def validate_operational_mvp_evidence_content(
     expected_schema = OPERATIONAL_MVP_EVIDENCE_SCHEMAS.get(str(artifact_kind))
     schema_path = item.get("schema_path")
     if expected_schema is None or schema_path != expected_schema:
-        errors.append(
-            f"evidence {evidence_id} schema {schema_path!r} is not authoritative for {artifact_kind!r}"
-        )
+        errors.append(f"evidence {evidence_id} schema {schema_path!r} is not authoritative for {artifact_kind!r}")
         return errors
     relative_schema = Path(str(schema_path))
     if relative_schema.is_absolute() or ".." in relative_schema.parts:
@@ -429,9 +428,7 @@ def validate_operational_mvp_evidence_content(
         if content.get("requirement_ids") != requirement_ids:
             errors.append(f"evidence {evidence_id} content requirement scope differs from its index")
         assertions = content.get("assertions", [])
-        assertion_gates = {
-            assertion.get("gate_id") for assertion in assertions if isinstance(assertion, dict)
-        }
+        assertion_gates = {assertion.get("gate_id") for assertion in assertions if isinstance(assertion, dict)}
         assertion_requirements = {
             requirement
             for assertion in assertions
@@ -442,6 +439,15 @@ def validate_operational_mvp_evidence_content(
             errors.append(f"evidence {evidence_id} assertions do not cover its exact gate scope")
         if assertion_requirements != set(requirement_ids or []):
             errors.append(f"evidence {evidence_id} assertions do not cover its exact requirement scope")
+        for check in content.get("hosted_checks", []):
+            if not isinstance(check, dict):
+                continue
+            check_name = check.get("name")
+            expected_runner: str | list[str] = (
+                PROVIDER_REAL_RUNNER if check_name == "provider-real" else "ubuntu-latest"
+            )
+            if check.get("runner") != expected_runner:
+                errors.append(f"evidence {evidence_id} hosted check {check_name!r} uses an untrusted runner")
     elif artifact_kind == "REAL_KAGGLE_MATRIX":
         if content.get("commit_sha") != source_commit or content.get("outcome") != "PASS":
             errors.append(f"evidence {evidence_id} matrix content is not a source-bound PASS")
@@ -600,9 +606,9 @@ def validate_operational_mvp_receipt_semantics(
                         "COMPLETE reviewed_head_commit is neither a parent nor ancestor of an exact merge commit"
                     )
 
-            review_refs = required_evidence.get("implementation_review", []) if isinstance(
-                required_evidence, dict
-            ) else []
+            review_refs = (
+                required_evidence.get("implementation_review", []) if isinstance(required_evidence, dict) else []
+            )
             review_contents = [
                 evidence_content_by_id[evidence_id]
                 for evidence_id in review_refs
@@ -620,9 +626,7 @@ def validate_operational_mvp_receipt_semantics(
                     if content.get("review_relationship") != exact_relationship:
                         errors.append("implementation review evidence misstates the reviewed-head relationship")
                 checks = content.get("hosted_checks", [])
-                check_names = {
-                    check.get("name") for check in checks if isinstance(check, dict)
-                }
+                check_names = {check.get("name") for check in checks if isinstance(check, dict)}
                 if len(check_names) != len(checks):
                     errors.append("implementation review evidence repeats a hosted check name")
                 missing_checks = OPERATIONAL_MVP_REQUIRED_HOSTED_CHECKS - check_names
@@ -633,9 +637,7 @@ def validate_operational_mvp_receipt_semantics(
                     )
                 for check in checks:
                     if isinstance(check, dict) and check.get("head_commit") != reviewed_head:
-                        errors.append(
-                            f"hosted check {check.get('name')} is not bound to reviewed_head_commit"
-                        )
+                        errors.append(f"hosted check {check.get('name')} is not bound to reviewed_head_commit")
 
             for section, commit_fields in {
                 "deployment": ("deployed_commit",),
@@ -643,9 +645,7 @@ def validate_operational_mvp_receipt_semantics(
             }.items():
                 refs = required_evidence.get(section, []) if isinstance(required_evidence, dict) else []
                 contents = [
-                    evidence_content_by_id[evidence_id]
-                    for evidence_id in refs
-                    if evidence_id in evidence_content_by_id
+                    evidence_content_by_id[evidence_id] for evidence_id in refs if evidence_id in evidence_content_by_id
                 ]
                 if not contents:
                     errors.append(f"COMPLETE receipt lacks readable semantic {section} evidence")
@@ -657,9 +657,7 @@ def validate_operational_mvp_receipt_semantics(
                         errors.append(f"{section} evidence did not observe a clean deployed tree")
                     if section == "post_deploy":
                         for check in content.get("hosted_checks", []):
-                            if isinstance(check, dict) and check.get("head_commit") != identity.get(
-                                "deployed_commit"
-                            ):
+                            if isinstance(check, dict) and check.get("head_commit") != identity.get("deployed_commit"):
                                 errors.append("post-deploy hosted check is not bound to deployed_commit")
 
         gate_results = receipt.get("gate_results", [])
@@ -676,21 +674,15 @@ def validate_operational_mvp_receipt_semantics(
                 continue
             gate_id = str(gate["gate_id"])
             refs = gate.get("evidence_refs", [])
-            scoped_items = [
-                evidence_by_id[evidence_id]
-                for evidence_id in refs
-                if evidence_id in evidence_by_id
-            ]
+            scoped_items = [evidence_by_id[evidence_id] for evidence_id in refs if evidence_id in evidence_by_id]
             for item in scoped_items:
                 if item.get("evidence_id") not in evidence_content_by_id:
                     errors.append(
-                        f"Gate {gate_id} evidence is not locally content-verifiable: "
-                        f"{item.get('evidence_id')}"
+                        f"Gate {gate_id} evidence is not locally content-verifiable: {item.get('evidence_id')}"
                     )
                 if gate_id not in item.get("gate_ids", []):
                     errors.append(
-                        f"Gate {gate_id} references evidence outside its declared gate scope: "
-                        f"{item.get('evidence_id')}"
+                        f"Gate {gate_id} references evidence outside its declared gate scope: {item.get('evidence_id')}"
                     )
                 if not item.get("requirement_ids"):
                     errors.append(
@@ -699,13 +691,11 @@ def validate_operational_mvp_receipt_semantics(
                     )
             required_kinds = OPERATIONAL_MVP_GATE_EVIDENCE_KINDS.get(gate_id, frozenset())
             if not any(
-                item.get("artifact_kind") in required_kinds
-                and item.get("evidence_id") in evidence_content_by_id
+                item.get("artifact_kind") in required_kinds and item.get("evidence_id") in evidence_content_by_id
                 for item in scoped_items
             ):
                 errors.append(
-                    f"Gate {gate_id} lacks requirement-specific evidence kind; "
-                    f"expected one of {sorted(required_kinds)}"
+                    f"Gate {gate_id} lacks requirement-specific evidence kind; expected one of {sorted(required_kinds)}"
                 )
 
         for evidence_id, item in evidence_by_id.items():
@@ -925,6 +915,67 @@ def validate_connector_intake_compose_service(report: Report, service: Any) -> N
             )
         ),
         "connector intake embeds a database/PGDATA/data-plane endpoint",
+    )
+
+
+def validate_provider_real_workflow_auth_boundary(
+    report: Report,
+    workflow: Any,
+    source: str,
+) -> None:
+    """Require provider-real to use the private rotating OAuth runner boundary."""
+
+    jobs = workflow.get("jobs", {}) if isinstance(workflow, dict) else {}
+    job = jobs.get("private-notebook-canary", {}) if isinstance(jobs, dict) else {}
+    report.check(
+        isinstance(job, dict) and job.get("runs-on") == PROVIDER_REAL_RUNNER,
+        "provider-real must use exact owner-controlled self-hosted runner labels",
+    )
+    environment_names: set[str] = set()
+
+    def collect_environment_names(value: Any) -> None:
+        if isinstance(value, dict):
+            environment = value.get("env")
+            if isinstance(environment, dict):
+                environment_names.update(str(name) for name in environment)
+            for child in value.values():
+                collect_environment_names(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_environment_names(child)
+
+    collect_environment_names(job)
+    forbidden_names = {
+        name
+        for name in environment_names
+        if "KAGGLE" in name.upper()
+        or ("MCP" in name.upper() and name.upper().endswith(("TOKEN", "BEARER", "KEY")))
+        or ("DATA" in name.upper() and name.upper().endswith(("TOKEN", "BEARER", "KEY")))
+    }
+    report.check(
+        not forbidden_names,
+        f"provider-real declares static MCP/data/Kaggle credential variables: {sorted(forbidden_names)}",
+    )
+    report.check(
+        "MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE" in environment_names,
+        "provider-real does not declare the private rotating OAuth credential file",
+    )
+    report.check(
+        re.search(
+            r"secrets\.[A-Z0-9_]*(?:KAGGLE|MCP|DATA)[A-Z0-9_]*(?:TOKEN|BEARER|KEY)",
+            source,
+            re.I,
+        )
+        is None,
+        "provider-real references a static MCP/data/Kaggle bearer secret",
+    )
+    report.check(
+        "validate_oauth_credential_file" in source
+        and all(
+            f'"{profile}"' in source or f"'{profile}'" in source
+            for profile in ("reader", "operator", "migration", "provider")
+        ),
+        "provider-real lacks exact private refresh-file preflight for all OAuth profiles",
     )
 
 

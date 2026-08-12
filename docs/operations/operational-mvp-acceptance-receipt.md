@@ -86,6 +86,10 @@ accepted as a merge. Implementation-review evidence repeats both commits and
 the observed relationship, records a GitHub pull request, and includes
 successful hosted `contracts` and `postgres-integration` checks. Every hosted
 check is bound to the exact reviewed head, not merely to the repository or PR.
+Those disposable CI checks use `ubuntu-latest`. A recorded `provider-real`
+check instead uses the exact owner-controlled runner labels
+`[self-hosted, linux, my-data-hub-devstand]`; using a GitHub-hosted runner for
+the private rotating OAuth file is rejected.
 
 Deployment and post-deploy evidence repeat the exact deployed/verified commits
 from the final receipt and record a clean deployment tree. Post-deploy hosted

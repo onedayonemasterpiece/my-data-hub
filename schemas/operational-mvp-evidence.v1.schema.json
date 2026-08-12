@@ -185,7 +185,22 @@
           "const": "GITHUB_ACTIONS"
         },
         "runner": {
-          "const": "ubuntu-latest"
+          "oneOf": [
+            {
+              "const": "ubuntu-latest"
+            },
+            {
+              "type": "array",
+              "prefixItems": [
+                {"const": "self-hosted"},
+                {"const": "linux"},
+                {"const": "my-data-hub-devstand"}
+              ],
+              "items": false,
+              "minItems": 3,
+              "maxItems": 3
+            }
+          ]
         },
         "status": {
           "const": "COMPLETED"

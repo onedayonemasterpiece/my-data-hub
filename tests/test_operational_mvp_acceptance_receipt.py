@@ -15,12 +15,11 @@ from scripts.validate_repository import (
     Report,
     validate_connector_intake_compose_service,
     validate_operational_mvp_receipt_semantics,
+    validate_provider_real_workflow_auth_boundary,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA = json.loads(
-    (ROOT / "schemas/operational-mvp-acceptance-receipt.v1.schema.json").read_text()
-)
+SCHEMA = json.loads((ROOT / "schemas/operational-mvp-acceptance-receipt.v1.schema.json").read_text())
 MATRIX_ID = "11111111-1111-4111-8111-111111111111"
 GATES = {
     "A": "donor_compatibility",
@@ -57,9 +56,7 @@ def write_json(path: Path, value: object) -> str:
 
 
 def git(root: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *args], cwd=root, text=True, capture_output=True, check=True
-    )
+    result = subprocess.run(["git", *args], cwd=root, text=True, capture_output=True, check=True)
     return result.stdout.strip()
 
 
@@ -109,10 +106,7 @@ def semantic_evidence(
         "live_evidence": True,
         "gate_ids": gate_ids,
         "requirement_ids": requirements,
-        "assertions": [
-            assertion(gate_id, requirements, index)
-            for index, gate_id in enumerate(gate_ids, start=1)
-        ],
+        "assertions": [assertion(gate_id, requirements, index) for index, gate_id in enumerate(gate_ids, start=1)],
         "observed_at": "2026-08-11T01:00:00Z",
     }
     if evidence_class == "IMPLEMENTATION_REVIEW":
@@ -158,7 +152,16 @@ def semantic_evidence(
                         "conclusion": "SUCCESS",
                         "head_commit": commit,
                         "run_url": "https://github.com/owner/my-data-hub/actions/runs/4300",
-                    }
+                    },
+                    {
+                        "name": "provider-real",
+                        "provider": "GITHUB_ACTIONS",
+                        "runner": ["self-hosted", "linux", "my-data-hub-devstand"],
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                        "head_commit": commit,
+                        "run_url": "https://github.com/owner/my-data-hub/actions/runs/4301",
+                    },
                 ],
             }
         )
@@ -473,8 +476,7 @@ def test_committed_blocked_receipt_and_synthetic_example_are_honest() -> None:
     for relative, allow_complete in (
         ("examples/contracts/operational-mvp-acceptance-receipt.v1.example.json", False),
         (
-            "docs/operations/evidence/2026-08-11-operational-mvp/"
-            "operational-mvp-acceptance-blocked.json",
+            "docs/operations/evidence/2026-08-11-operational-mvp/operational-mvp-acceptance-blocked.json",
             True,
         ),
     ):
@@ -483,12 +485,15 @@ def test_committed_blocked_receipt_and_synthetic_example_are_honest() -> None:
         assert receipt["verdict"] == "MY_DATA_HUB_OPERATIONAL_MVP_BLOCKED"
         assert receipt["completion_criteria_met"] is False
         assert receipt["blockers"]
-        assert validate_operational_mvp_receipt_semantics(
-            receipt,
-            root=ROOT,
-            expected_source_commit="f" * 40,
-            allow_complete=allow_complete,
-        ) == []
+        assert (
+            validate_operational_mvp_receipt_semantics(
+                receipt,
+                root=ROOT,
+                expected_source_commit="f" * 40,
+                allow_complete=allow_complete,
+            )
+            == []
+        )
 
 
 def test_complete_receipt_requires_exact_live_evidence_bundle(tmp_path: Path) -> None:
@@ -585,10 +590,20 @@ def test_complete_receipt_rejects_stale_deploy_provenance(tmp_path: Path) -> Non
     assert any("deployment evidence deployed_commit differs" in error for error in errors)
 
 
+def test_complete_receipt_rejects_provider_real_on_untrusted_runner(tmp_path: Path) -> None:
+    receipt = build_complete_receipt(tmp_path)
+    post_deploy = json.loads((tmp_path / "artifacts/post-deploy.json").read_text())
+    provider_check = next(check for check in post_deploy["hosted_checks"] if check["name"] == "provider-real")
+    provider_check["runner"] = "ubuntu-latest"
+    rewrite_evidence(tmp_path, receipt, "post-deploy", post_deploy)
+
+    errors = validate_complete(tmp_path, receipt)
+
+    assert any("provider-real' uses an untrusted runner" in error for error in errors)
+
+
 def test_synthetic_or_blocker_free_blocked_receipt_cannot_claim_completion() -> None:
-    example = json.loads(
-        (ROOT / "examples/contracts/operational-mvp-acceptance-receipt.v1.example.json").read_text()
-    )
+    example = json.loads((ROOT / "examples/contracts/operational-mvp-acceptance-receipt.v1.example.json").read_text())
     fake_complete = copy.deepcopy(example)
     fake_complete["verdict"] = "MY_DATA_HUB_OPERATIONAL_MVP_COMPLETE"
     fake_complete["completion_criteria_met"] = True
@@ -630,3 +645,52 @@ def test_connector_intake_compose_service_rejects_data_plane_surfaces() -> None:
     assert any("unbounded Compose port" in error for error in report.errors)
     assert any("reviewed lightweight control boundary" in error for error in report.errors)
     assert any("embeds a database/PGDATA/data-plane endpoint" in error for error in report.errors)
+
+
+def test_provider_real_workflow_uses_private_rotating_oauth_boundary() -> None:
+    source = """
+    MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE: /srv/private/oauth.json
+    validate_oauth_credential_file(path, required_profiles=frozenset(
+        {"reader", "operator", "migration", "provider"}
+    ))
+    """
+    workflow = {
+        "jobs": {
+            "private-notebook-canary": {
+                "runs-on": ["self-hosted", "linux", "my-data-hub-devstand"],
+                "env": {"MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE": "/srv/private/oauth.json"},
+            }
+        }
+    }
+    report = Report()
+
+    validate_provider_real_workflow_auth_boundary(report, workflow, source)
+
+    assert report.errors == []
+
+
+def test_provider_real_workflow_rejects_static_bearers_and_hosted_runner() -> None:
+    source = """
+    MY_DATA_HUB_MCP_CANARY_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_CANARY_TOKEN }}
+    KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+    """
+    workflow = {
+        "jobs": {
+            "private-notebook-canary": {
+                "runs-on": "ubuntu-latest",
+                "env": {
+                    "MY_DATA_HUB_MCP_CANARY_TOKEN": "${{ secrets.MY_DATA_HUB_MCP_CANARY_TOKEN }}",
+                    "KAGGLE_API_TOKEN": "${{ secrets.KAGGLE_API_TOKEN }}",
+                },
+            }
+        }
+    }
+    report = Report()
+
+    validate_provider_real_workflow_auth_boundary(report, workflow, source)
+
+    assert any("owner-controlled self-hosted runner" in error for error in report.errors)
+    assert any("static MCP/data/Kaggle credential variables" in error for error in report.errors)
+    assert any("rotating OAuth credential file" in error for error in report.errors)
+    assert any("static MCP/data/Kaggle bearer secret" in error for error in report.errors)
+    assert any("refresh-file preflight" in error for error in report.errors)
