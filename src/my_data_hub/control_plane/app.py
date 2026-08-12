@@ -435,8 +435,16 @@ def create_app(
                     "and single authenticated control adapter"
                 )
             assets = getattr(master_runtime.settings, "assets", None)
+            if assets is None or (
+                deployment.runtime_input.docker_image != assets.runtime_image_identity
+                or deployment.runtime_input.image_source_commit != assets.runtime_image_source_commit
+                or deployment.runtime_input.python_series != assets.runtime_python_series
+            ):
+                raise ControlPlaneConfigurationError(
+                    "checkpoint acceptance runtime provenance differs from reviewed master assets"
+                )
             if checkpoint_upload_broker is not None and (
-                assets is None or deployment.candidate_dataset_refs["FM05"] != assets.checkpoint_ref
+                deployment.candidate_dataset_refs["FM05"] != assets.checkpoint_ref
             ):
                 raise ControlPlaneConfigurationError("FM05 must advance the configured normal checkpoint Dataset")
             checkpoint_acceptance_launcher = ControlCheckpointAcceptanceLauncher(

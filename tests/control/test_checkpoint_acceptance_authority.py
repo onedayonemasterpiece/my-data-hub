@@ -4,6 +4,7 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+import pytest
 from fastapi.testclient import TestClient
 
 from my_data_hub.acceptance.scenario_operator import (
@@ -298,9 +299,15 @@ def test_enabled_app_assembles_checkpoint_launcher_without_runtime_impersonation
     provider_adapter = SimpleNamespace()
 
     def build(ledger, *_args, **_kwargs):
+        assets = SimpleNamespace(
+            checkpoint_ref="owner/candidate-fm05",
+            runtime_image_identity="gcr.io/kaggle-images/python@sha256:" + "a" * 64,
+            runtime_image_source_commit="c" * 40,
+            runtime_python_series="3.12",
+        )
         runtime = SimpleNamespace(
             ledger=ledger,
-            settings=SimpleNamespace(),
+            settings=SimpleNamespace(assets=assets),
             coordinator=SimpleNamespace(
                 tunnel_authority=SimpleNamespace(
                     acceptance_identity_snapshot=lambda **_values: {},
@@ -337,3 +344,98 @@ def test_enabled_app_assembles_checkpoint_launcher_without_runtime_impersonation
     assert adapter.executor.master.host_effects.old_epoch_denials.__class__.__name__ == (
         "TaskBoundOldEpochDenialFactory"
     )
+
+
+def test_enabled_app_rejects_checkpoint_image_not_bound_to_reviewed_assets(
+    tmp_path, monkeypatch
+) -> None:
+    import json
+    from types import SimpleNamespace
+
+    import my_data_hub.control_plane.app as app_module
+    from my_data_hub.control_plane.runtime import ProductionRuntimeBuild
+
+    deployment = {
+        "schema_version": "my-data-hub-checkpoint-acceptance-deployment.v1",
+        "provider_owner": "owner",
+        "evidence_notebook_ref": "owner/checkpoint-evidence",
+        "candidate_dataset_refs": {
+            "FM05": "owner/candidate-fm05",
+            "FM14": "owner/candidate-fm14",
+            "FM15": "owner/candidate-fm15",
+        },
+        "template_input": {
+            "provider_ref": "owner/template",
+            "exact_version_ref": "owner/template/1",
+            "claim_sha256": "1" * 64,
+            "manifest_sha256": "2" * 64,
+            "content_sha256": "3" * 64,
+        },
+        "verifier_inputs": {
+            scenario: {
+                "provider_ref": f"owner/verifier-{scenario.lower()}",
+                "exact_version_ref": f"owner/verifier-{scenario.lower()}/1",
+                "claim_sha256": "4" * 64,
+                "source_sha256": "5" * 64,
+            }
+            for scenario in ("FM05", "FM15")
+        },
+        "verifier_notebook_refs": {
+            "FM05": "owner/verifier-notebook-fm05",
+            "FM15": "owner/verifier-notebook-fm15",
+        },
+        "runtime_input": {
+            "provider_ref": "owner/checkpoint-runtime",
+            "exact_version_ref": "owner/checkpoint-runtime/1",
+            "claim_sha256": "6" * 64,
+            "wheel_file": "my_data_hub.whl",
+            "wheel_sha256": "7" * 64,
+            "entrypoint_sha256": "8" * 64,
+            "docker_image": "gcr.io/kaggle-images/python@sha256:" + "a" * 64,
+            "docker_image_pinning_type": "original",
+            "image_source_commit": "c" * 40,
+            "python_series": "3.12",
+        },
+        "control_base_url": "https://control.example.test",
+        "brokered_checkpoint_upload": True,
+    }
+    deployment_path = tmp_path / "checkpoint-deployment.json"
+    deployment_path.write_text(json.dumps(deployment))
+    deployment_path.chmod(0o600)
+    monkeypatch.setenv("MY_DATA_HUB_CHECKPOINT_ACCEPTANCE_DEPLOYMENT_FILE", str(deployment_path))
+
+    def build(ledger, *_args, **_kwargs):
+        runtime = SimpleNamespace(
+            ledger=ledger,
+            settings=SimpleNamespace(
+                assets=SimpleNamespace(
+                    checkpoint_ref="owner/candidate-fm05",
+                    runtime_image_identity="gcr.io/kaggle-images/python@sha256:" + "b" * 64,
+                    runtime_image_source_commit="c" * 40,
+                    runtime_python_series="3.12",
+                )
+            ),
+            coordinator=SimpleNamespace(tunnel_authority=None),
+            reconcile_requested_once=lambda: None,
+        )
+        return ProductionRuntimeBuild(
+            master=runtime,
+            provider_status="available",
+            provider_adapter=SimpleNamespace(),  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(app_module, "build_production_runtime", build)
+    with pytest.raises(
+        app_module.ControlPlaneConfigurationError,
+        match="runtime provenance differs from reviewed master assets",
+    ):
+        create_app(
+            ControlPlaneSettings(
+                ledger_path=tmp_path / "mismatch.sqlite3",
+                master_runtime=SimpleNamespace(),  # type: ignore[arg-type]
+                operator_credentials_enabled=True,
+                provider_gateway_enabled=True,
+                acceptance_scenarios_enabled=True,
+            ),
+            provider_gateway_token=b"x" * 32,
+        )

@@ -22,6 +22,7 @@ from my_data_hub.acceptance.scenario_operator import (
 )
 from my_data_hub.control_plane.clock import DeterministicClock
 from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.hashing import sha256_value
 from my_data_hub.providers.kaggle import (
     KaggleContractError,
     KaggleProviderAdapter,
@@ -185,10 +186,17 @@ class FakeAdapter:
         self.source = source
         self.dataset_sources = tuple(dataset_sources)
         self.push_kwargs = dict(kwargs)
-        assert intent.arguments["docker_image"] == kwargs["docker_image"]
-        assert intent.arguments["docker_image_pinning_type"] == kwargs[
-            "docker_image_pinning_type"
-        ]
+        assert intent.arguments_sha256 == sha256_value(
+            {
+                "task_run_id": str(task_run_id),
+                "source_sha256": hashlib.sha256(source).hexdigest(),
+                "dataset_sources": tuple(dataset_sources),
+                "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
+                "disposable": False,
+                "docker_image": kwargs["docker_image"],
+                "docker_image_pinning_type": kwargs["docker_image_pinning_type"],
+            }
+        )
         if self.push_entered is not None:
             self.push_entered.set()
         if self.push_release is not None:
