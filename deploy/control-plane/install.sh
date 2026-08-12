@@ -483,6 +483,7 @@ services:
       MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "false"
       MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL: http://control-plane:8080/internal/mcp-provider/invoke
       MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE: /run/secrets/mcp-control-gateway.token
+      MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE: /run/secrets/mcp-write-gate.key
       MY_DATA_HUB_MCP_SCOPES: platform:read,provider:read,provider:write
     volumes: !override
       - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:?control ledger directory is required}:/ledger"

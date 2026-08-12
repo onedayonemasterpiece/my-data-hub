@@ -203,6 +203,7 @@ def test_provider_only_mcp_action_is_explicit_and_skips_master_only_prerequisite
     assert 'provider_only_mode="provider-only-mcp"' in source
     assert 'provider gateway token"' in source
     assert 'operator write-gate signing key"' in source
+    assert source.count("MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE: /run/secrets/mcp-write-gate.key") >= 2
     assert "provider-only control plane requires one central Kaggle credential mode" in source
     assert "provider-only readiness did not prove the central adapter gateway" in source
     assert 'MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED: "true"' in source
