@@ -49,6 +49,8 @@ from my_data_hub.control_plane.runtime import (
     TunnelCertificateBroker,
     build_production_runtime,
 )
+from my_data_hub.embeddings.central_launcher import CentralEmbeddingWorkerLauncher
+from my_data_hub.embeddings.direct_plane import EmbeddingLaunchMetadata
 from my_data_hub.embeddings.master_stage import execute_embedding_production_stage
 from my_data_hub.embeddings.production import (
     WORKER_ASSETS,
@@ -302,6 +304,7 @@ def create_app(
     checkpoint_acceptance_catalog: object | None = None,
     old_epoch_denials: object | None = None,
     checkpoint_upload_broker: BrokeredCheckpointUploadService | None = None,
+    embedding_direct_plane_launcher: CentralEmbeddingWorkerLauncher | None = None,
 ) -> FastAPI:
     runtime = settings or ControlPlaneSettings.from_env()
     if operator_credential_enabled is None:
@@ -487,7 +490,13 @@ def create_app(
     # This must be a real central launcher that can deliver an epoch-bound
     # direct-master credential/tunnel to both workers.  Mere adapter presence
     # must never advertise Gate K readiness.
-    app.state.embedding_direct_plane_launcher = None
+    # Production capability is advertised only when the concrete launcher and
+    # its ACTIVE-master credential factory were explicitly assembled.
+    app.state.embedding_direct_plane_launcher = (
+        embedding_direct_plane_launcher
+        if embedding_direct_plane_launcher is not None and embedding_direct_plane_launcher.ready
+        else None
+    )
     app.state.provider_gateway = provider_gateway if runtime.provider_gateway_enabled else None
     app.state.acceptance_scenario_adapter = acceptance_scenario_adapter
     # Process invocation identity, not the host/kernel boot ID. A real control
@@ -1529,6 +1538,19 @@ def create_app(
                 )
                 raise HTTPException(status_code=503, detail={"code": "acceptance_callback_ack_suppressed"})
             receipt = coordinator.accept_runtime_event(raw, header_token=token)
+            if event.event_type is RuntimeEventType.JOB_CLAIMED:
+                progress = event.data.get("progress")
+                if not isinstance(progress, dict):
+                    raise ValueError("embedding launch callback lacks metadata")
+                metadata = EmbeddingLaunchMetadata.model_validate(progress)
+                launcher = app.state.embedding_direct_plane_launcher
+                if launcher is None:
+                    raise HTTPException(
+                        status_code=503, detail={"code": "embedding_direct_plane_unavailable"}
+                    )
+                # Adapter mutation is deterministic/idempotent by task_run_id;
+                # the callback ACK follows launch reconciliation.
+                await asyncio.to_thread(launcher.launch, metadata)
             if event.event_type in {RuntimeEventType.RUNTIME_TERMINAL, RuntimeEventType.RUNTIME_FAILED}:
                 reconcile_status_cleanup = getattr(master_runtime, "reconcile_status_cleanup_once", None)
                 if reconcile_status_cleanup is not None:
