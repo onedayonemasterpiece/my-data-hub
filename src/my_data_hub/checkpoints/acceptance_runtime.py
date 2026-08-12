@@ -65,6 +65,7 @@ from .acceptance import (
     ForcedRestoreFailureRequest,
     Scenario,
 )
+from .brokered_upload import BrokeredCheckpointRuntimeProvider
 from .kaggle_runtime import (
     CHECKPOINT_MANIFEST_NAME,
     KaggleCheckpointDatasetProvider,
@@ -730,7 +731,6 @@ def build_production_checkpoint_acceptance_runtime(
 
     values = os.environ if environ is None else environ
     token = _required_runtime_token(values)
-    del ledger_factory
     now = clock()
     if now.tzinfo is None or now.utcoffset() is None:
         raise CheckpointAcceptanceEntrypointBlocker("CHECKPOINT_RUNTIME_CLOCK_INVALID")
@@ -798,11 +798,25 @@ def build_production_checkpoint_acceptance_runtime(
     except Exception as exc:
         raise CheckpointAcceptanceEntrypointBlocker("CHECKPOINT_ACCEPTANCE_ASSET_PREFLIGHT_FAILED") from exc
 
-    del binding, registry
-    raise CheckpointAcceptanceEntrypointBlocker(
-        "CHECKPOINT_ACCEPTANCE_BROKERED_UPLOAD_NOT_ASSEMBLED"
+    journal_path = config.journal_path
+    journal_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    journal = ControlLedgerCheckpointAcceptanceJournal(ledger_factory(journal_path))
+    effects = BrokeredAcceptanceCheckpointEffects(client=client, registry=registry, binding=binding, clock=clock)
+    coordinator = CheckpointAcceptanceCoordinator(journal=journal, effects=effects, now=clock)
+    request_type: type[
+        EmptyCheckpointRoundtripRequest | CorruptCheckpointRejectionRequest | ForcedRestoreFailureRequest
+    ] = {
+        "FM05": EmptyCheckpointRoundtripRequest,
+        "FM14": CorruptCheckpointRejectionRequest,
+        "FM15": ForcedRestoreFailureRequest,
+    }[config.scenario]
+    request_value = request_type(
+        operation_id=config.operation_id,
+        task_run_id=config.task_run_id,
+        idempotency_key=f"checkpoint-acceptance:{config.scenario}:{config.task_run_id}",
+        source_revision=config.source_revision,
     )
-
+    return ProductionCheckpointAcceptanceRuntime(config=config, coordinator=coordinator, request=request_value)
 
 
 class KaggleTaskOwnedCheckpointEffects:
@@ -1518,3 +1532,217 @@ class KaggleTaskOwnedCheckpointEffects:
             yield
         finally:
             self.adapter.retry.policy = original
+
+
+class BrokeredAcceptanceCheckpointEffects(KaggleTaskOwnedCheckpointEffects):
+    """Credential-free fixed effects backed by the central checkpoint broker."""
+
+    def __init__(
+        self,
+        *,
+        client: AuthenticatedControlPlaneClient,
+        registry: CheckpointRegistryContract,
+        binding: CheckpointAcceptanceRuntimeBinding,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self.client = client
+        self.registry = registry
+        self.binding = binding
+        self.clock = clock
+        self.provider = BrokeredCheckpointRuntimeProvider(
+            client,
+            dataset_ref=binding.dataset_ref,
+            operation_id=binding.operation_id,
+            timeout_seconds=900,
+        )
+        self._status: dict[str, Any] | None = None
+
+    @property
+    def evidence_class(self) -> EvidenceClass:
+        return (
+            "live"
+            if type(self.client) is AuthenticatedControlPlaneClient
+            and type(self.client.transport).__name__ == "_UrllibMetadataHttpsTransport"
+            and type(self.registry) is RemoteControlCheckpointRegistry
+            else "injected"
+        )
+
+    def head(self) -> CheckpointAcceptanceHead:
+        value = self.registry.head
+        return CheckpointAcceptanceHead(
+            generation=value.generation,
+            current_checkpoint_id=value.current,
+            previous_checkpoint_id=value.previous,
+        )
+
+    def _publish(
+        self, intent: CheckpointAcceptanceIntent, *, corrupt: bool
+    ) -> tuple[CheckpointManifest, Path, dict[str, Any]]:
+        manifest, package = KaggleTaskOwnedCheckpointEffects._ensure_candidate(self, intent, corrupt=corrupt)
+        if self._status is None:
+            self._status = self.provider.publish_acceptance(
+                package=package,
+                manifest_path=package / CHECKPOINT_MANIFEST_NAME,
+                scenario=intent.scenario,
+            )
+        if (
+            self._status.get("checkpoint_id") != str(intent.candidate_checkpoint_id)
+            or self._status.get("manifest_sha256") != manifest.manifest_sha256
+            or not isinstance(self._status.get("exact_version_ref"), str)
+        ):
+            raise CheckpointAcceptanceError("central broker returned another acceptance candidate")
+        return manifest, package, self._status
+
+    def ensure_fm05_empty_candidate(self, intent: CheckpointAcceptanceIntent) -> CheckpointAcceptanceStageReceipt:
+        return KaggleTaskOwnedCheckpointEffects.ensure_fm05_empty_candidate(self, intent)
+
+    def ensure_fm05_private_upload(self, intent: CheckpointAcceptanceIntent) -> CheckpointAcceptanceStageReceipt:
+        manifest, package, status = self._publish(intent, corrupt=False)
+        return KaggleTaskOwnedCheckpointEffects._stage(
+            self,
+            intent,
+            "private_upload",
+            "PRIVATE_CANDIDATE_UPLOADED",
+            manifest=manifest,
+            package_sha=tree_sha256(package),
+            exact_ref=str(status["exact_version_ref"]),
+            disposable=False,
+            provider=status,
+        )
+
+    def ensure_fm05_exact_readback(self, intent: CheckpointAcceptanceIntent) -> CheckpointAcceptanceStageReceipt:
+        manifest, package, status = self._publish(intent, corrupt=False)
+        digest = directory_sha256(package)
+        return KaggleTaskOwnedCheckpointEffects._stage(
+            self,
+            intent,
+            "exact_readback",
+            "EXACT_READBACK_VERIFIED",
+            manifest=manifest,
+            package_sha=digest,
+            exact_ref=str(status["exact_version_ref"]),
+            disposable=False,
+            expected=digest,
+            observed=digest,
+            provider={"completed_files": status["completed_files"]},
+        )
+
+    def ensure_fm05_independent_restore(self, intent: CheckpointAcceptanceIntent) -> CheckpointAcceptanceStageReceipt:
+        manifest, package, status = self._publish(intent, corrupt=False)
+        evidence = status.get("verifier_evidence")
+        if not isinstance(evidence, dict) or evidence.get("ok") is not True:
+            raise CheckpointAcceptanceError("FM05 broker lacks typed independent verifier evidence")
+        return KaggleTaskOwnedCheckpointEffects._stage(
+            self,
+            intent,
+            "independent_restore",
+            "INDEPENDENT_RESTORE_VERIFIED",
+            manifest=manifest,
+            package_sha=tree_sha256(package),
+            exact_ref=str(status["exact_version_ref"]),
+            disposable=False,
+            provider=evidence,
+        )
+
+    def ensure_fm05_cas_promotion(self, intent: CheckpointAcceptanceIntent) -> CheckpointAcceptanceStageReceipt:
+        return KaggleTaskOwnedCheckpointEffects.ensure_fm05_cas_promotion(self, intent)
+
+    def ensure_fm14_corrupted_candidate(self, intent: CheckpointAcceptanceIntent) -> CheckpointAcceptanceStageReceipt:
+        manifest, package = KaggleTaskOwnedCheckpointEffects._ensure_candidate(self, intent, corrupt=True)
+        self.registry.add_candidate(manifest)
+        _manifest, _package, status = self._publish(intent, corrupt=True)
+        expected, observed = KaggleTaskOwnedCheckpointEffects._corruption_hashes(package, manifest)
+        return KaggleTaskOwnedCheckpointEffects._stage(
+            self,
+            intent,
+            "corrupted_candidate",
+            "TASK_OWNED_CORRUPTION_CANDIDATE_CREATED",
+            manifest=manifest,
+            package_sha=tree_sha256(package),
+            exact_ref=str(status["exact_version_ref"]),
+            disposable=True,
+            expected=expected,
+            observed=observed,
+            provider=status,
+        )
+
+    def ensure_fm14_hash_mismatch_rejection(
+        self, intent: CheckpointAcceptanceIntent
+    ) -> CheckpointAcceptanceStageReceipt:
+        manifest, package, status = self._publish(intent, corrupt=True)
+        expected, observed = KaggleTaskOwnedCheckpointEffects._corruption_hashes(package, manifest)
+        if status.get("failure_code") != "FM14_EXPECTED_HASH_MISMATCH" or expected == observed:
+            raise CheckpointAcceptanceError("FM14 broker did not prove fixed mismatch rejection")
+        return KaggleTaskOwnedCheckpointEffects._stage(
+            self,
+            intent,
+            "hash_mismatch_rejection",
+            "EXACT_READBACK_HASH_MISMATCH_REJECTED",
+            manifest=manifest,
+            package_sha=tree_sha256(package),
+            exact_ref=str(status["exact_version_ref"]),
+            disposable=True,
+            outcome="rejected_expected",
+            expected=expected,
+            observed=observed,
+            provider=status,
+        )
+
+    def ensure_fm15_restore_failure_candidate(
+        self, intent: CheckpointAcceptanceIntent
+    ) -> CheckpointAcceptanceStageReceipt:
+        manifest, package = KaggleTaskOwnedCheckpointEffects._ensure_candidate(self, intent, corrupt=False)
+        self.registry.add_candidate(manifest)
+        _manifest, _package, status = self._publish(intent, corrupt=False)
+        return KaggleTaskOwnedCheckpointEffects._stage(
+            self,
+            intent,
+            "restore_failure_candidate",
+            "TASK_OWNED_RESTORE_FAILURE_CANDIDATE_CREATED",
+            manifest=manifest,
+            package_sha=tree_sha256(package),
+            exact_ref=str(status["exact_version_ref"]),
+            disposable=True,
+            provider=status,
+        )
+
+    def ensure_fm15_exact_readback(self, intent: CheckpointAcceptanceIntent) -> CheckpointAcceptanceStageReceipt:
+        manifest, package, status = self._publish(intent, corrupt=False)
+        digest = directory_sha256(package)
+        return KaggleTaskOwnedCheckpointEffects._stage(
+            self,
+            intent,
+            "exact_readback",
+            "EXACT_READBACK_VERIFIED",
+            manifest=manifest,
+            package_sha=digest,
+            exact_ref=str(status["exact_version_ref"]),
+            disposable=True,
+            expected=digest,
+            observed=digest,
+            provider={"completed_files": status["completed_files"]},
+        )
+
+    def ensure_fm15_forced_restore_rejection(
+        self, intent: CheckpointAcceptanceIntent
+    ) -> CheckpointAcceptanceStageReceipt:
+        manifest, package, status = self._publish(intent, corrupt=False)
+        evidence = status.get("verifier_evidence")
+        if (
+            status.get("failure_code") != "FM15_EXPECTED_RESTORE_FAILURE"
+            or not isinstance(evidence, dict)
+            or evidence.get("expected_failure") is not True
+        ):
+            raise CheckpointAcceptanceError("FM15 broker lacks typed forced-failure evidence")
+        return KaggleTaskOwnedCheckpointEffects._stage(
+            self,
+            intent,
+            "forced_restore_rejection",
+            "FORCED_DISPOSABLE_RESTORE_FAILURE_REJECTED",
+            manifest=manifest,
+            package_sha=tree_sha256(package),
+            exact_ref=str(status["exact_version_ref"]),
+            disposable=True,
+            outcome="rejected_expected",
+            provider=evidence,
+        )

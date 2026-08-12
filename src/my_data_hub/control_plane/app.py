@@ -368,10 +368,16 @@ def create_app(
                     "acceptance scenario opt-in requires the exact checkpoint deployment "
                     "and single authenticated control adapter"
                 )
+            assets = getattr(master_runtime.settings, "assets", None)
+            if checkpoint_upload_broker is not None and (
+                assets is None or deployment.candidate_dataset_refs["FM05"] != assets.checkpoint_ref
+            ):
+                raise ControlPlaneConfigurationError("FM05 must advance the configured normal checkpoint Dataset")
             checkpoint_acceptance_launcher = ControlCheckpointAcceptanceLauncher(
                 ledger=control_ledger,
                 adapter=provider_adapter,
                 deployment=deployment,
+                brokered_upload_ready=checkpoint_upload_broker is not None,
             )
             checkpoint_acceptance_catalog = deployment.catalog
         if master_runtime is None or checkpoint_acceptance_launcher is None or checkpoint_acceptance_catalog is None:
@@ -2364,9 +2370,44 @@ def create_app(
         )
         return {"claim": claim}
 
-    def _broker_runtime_authority(operation: _ProviderOperationAuthority) -> RuntimeUploadAuthority:
-        if checkpoint_upload_broker is None or operation.acceptance is not None:
+    def _broker_runtime_authority(
+        operation: _ProviderOperationAuthority, *, checkpoint_id: str | None = None
+    ) -> RuntimeUploadAuthority:
+        if checkpoint_upload_broker is None:
             raise HTTPException(status_code=503, detail={"code": "checkpoint_upload_broker_unavailable"})
+        if operation.acceptance is not None:
+            launch = operation.acceptance
+            config = launch.get("config")
+            request_value = launch.get("request")
+            if checkpoint_id is None or not isinstance(config, dict) or not isinstance(request_value, dict):
+                raise HTTPException(status_code=409, detail={"code": "acceptance_checkpoint_unresolved"})
+            candidate = control_ledger.checkpoint_candidate(checkpoint_id)
+            try:
+                manifest = CheckpointManifest.from_payload(candidate["manifest"] if candidate else None)
+                run = KaggleKernelRunIdentity.model_validate(launch.get("provider_run"))
+                expiry = datetime.fromisoformat(str(launch["expires_at"]).replace("Z", "+00:00"))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise HTTPException(status_code=409, detail={"code": "acceptance_checkpoint_unresolved"}) from exc
+            verifier = config.get("verifier")
+            return RuntimeUploadAuthority(
+                operation_id=operation.operation_id,
+                run_id=str(launch["task_run_id"]),
+                attempt_id=str(launch["attempt_id"]),
+                master_instance_id=str(manifest.master_instance_id),
+                service_instance_id=str(launch["request_id"]),
+                epoch=manifest.epoch,
+                master_run_ref=run.provider_run_ref,
+                lease_until=expiry,
+                authority_kind="acceptance",
+                acceptance_scenario=str(launch["scenario_id"]),  # type: ignore[arg-type]
+                source_revision=str(request_value["source_revision"]),
+                verifier_dataset_version_ref=(
+                    str(verifier["dataset_version_ref"]) if isinstance(verifier, dict) else None
+                ),
+                verifier_notebook_ref=(
+                    str(config["verifier_notebook_ref"]) if config.get("verifier_notebook_ref") is not None else None
+                ),
+            )
         identity = operation.identity
         trigger = control_ledger.get_effect_by_idempotency_key(f"{operation.operation_id}:trigger_run")
         try:
@@ -2397,8 +2438,9 @@ def create_app(
             lease_until=datetime.fromisoformat(str(snapshot["lease_until"]).replace("Z", "+00:00")),
         )
 
-    @app.get("/internal/checkpoints/runtime-upload-authority")
+    @app.get("/internal/checkpoints/{checkpoint_id}/runtime-upload-authority")
     def checkpoint_runtime_upload_authority(
+        checkpoint_id: str,
         request: Request,
         authorization: str | None = Header(default=None),
         run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
@@ -2414,6 +2456,33 @@ def create_app(
             master_instance_id=master_instance_id,
             epoch=epoch,
         )
+        authority = _broker_runtime_authority(operation, checkpoint_id=checkpoint_id)
+        return {
+            "master_run_ref": authority.master_run_ref,
+            "epoch": authority.epoch,
+            "acceptance_scenario": authority.acceptance_scenario,
+        }
+
+    @app.get("/internal/checkpoints/runtime-upload-authority")
+    def checkpoint_runtime_upload_authority_legacy(
+        request: Request,
+        authorization: str | None = Header(default=None),
+        run_id: str | None = Header(default=None, alias="X-MDH-Run-ID"),
+        attempt_id: str | None = Header(default=None, alias="X-MDH-Attempt-ID"),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, str]:
+        """Compatibility route for normal masters; acceptance is checkpoint-bound."""
+        operation = _provider_authority(
+            request=request,
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+        )
+        if operation.acceptance is not None:
+            raise HTTPException(status_code=409, detail={"code": "acceptance_checkpoint_required"})
         authority = _broker_runtime_authority(operation)
         return {"master_run_ref": authority.master_run_ref}
 
@@ -2435,7 +2504,7 @@ def create_app(
             master_instance_id=master_instance_id,
             epoch=epoch,
         )
-        authority = _broker_runtime_authority(operation)
+        authority = _broker_runtime_authority(operation, checkpoint_id=checkpoint_id)
         body = await _bounded_json(request)
         if body.get("checkpoint_id") != checkpoint_id:
             raise HTTPException(status_code=422, detail={"code": "checkpoint_upload_identity_invalid"})
@@ -2463,7 +2532,7 @@ def create_app(
             master_instance_id=master_instance_id,
             epoch=epoch,
         )
-        authority = _broker_runtime_authority(operation)
+        authority = _broker_runtime_authority(operation, checkpoint_id=checkpoint_id)
         body = await _bounded_json(request)
         if body.get("checkpoint_id") != checkpoint_id:
             raise HTTPException(status_code=422, detail={"code": "checkpoint_upload_identity_invalid"})
@@ -2492,7 +2561,7 @@ def create_app(
             master_instance_id=master_instance_id,
             epoch=epoch,
         )
-        _broker_runtime_authority(operation)
+        authority = _broker_runtime_authority(operation, checkpoint_id=checkpoint_id)
         body = await _bounded_json(request)
         publication = checkpoint_upload_broker.status(UUID(checkpoint_id))  # type: ignore[union-attr]
         if body != {
@@ -2507,6 +2576,12 @@ def create_app(
             "PROMOTED",
         }:
             raise HTTPException(status_code=409, detail={"code": "checkpoint_finalize_rejected"})
+        if authority.authority_kind == "acceptance":
+            return await asyncio.to_thread(
+                checkpoint_upload_broker.finalize,
+                UUID(checkpoint_id),
+                authority,  # type: ignore[union-attr]
+            )
         return publication
 
     @app.get("/internal/checkpoints/{checkpoint_id}/publication")
@@ -2527,7 +2602,7 @@ def create_app(
             master_instance_id=master_instance_id,
             epoch=epoch,
         )
-        _broker_runtime_authority(operation)
+        _broker_runtime_authority(operation, checkpoint_id=checkpoint_id)
         publication = checkpoint_upload_broker.status(UUID(checkpoint_id))  # type: ignore[union-attr]
         if publication["operation_id"] != operation.operation_id:
             raise HTTPException(status_code=403, detail={"code": "checkpoint_publication_forbidden"})

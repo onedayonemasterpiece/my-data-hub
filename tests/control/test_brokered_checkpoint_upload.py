@@ -11,6 +11,7 @@ import pytest
 from my_data_hub.checkpoints.brokered_upload import (
     BrokeredCheckpointError,
     BrokeredCheckpointQuarantined,
+    BrokeredCheckpointRuntimeCoordinator,
     BrokeredCheckpointRuntimeProvider,
     BrokeredCheckpointUploadService,
     CheckpointBlobCompletion,
@@ -547,6 +548,71 @@ def test_runtime_provider_sends_only_metadata_and_direct_puts_each_file(
         encoded = str(payload)
         assert "blob_token" not in encoded and "storage.test" not in encoded and "sig=secret" not in encoded
     assert not hasattr(provider, "adapter")
+
+
+def test_runtime_provider_restart_skips_exact_completed_blob(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _ledger, package, manifest, _adapter, _verifier, _service, _authority = _fixture(tmp_path)
+    manifest_path = tmp_path / "checkpoint-manifest.json"
+    write_manifest(manifest_path, manifest)
+    first = sorted(manifest.files, key=lambda item: item.path)[0]
+
+    class ReplayClient(_RuntimeMetadataClient):
+        def get(self, path: str) -> dict[str, object]:
+            if path.endswith("/publication"):
+                return {
+                    "state": "PROMOTED",
+                    "exact_version_ref": "owner/checkpoints/1",
+                    "verifier_run_ref": "owner/verifier/7",
+                    "verifier_receipt_sha256": "e" * 64,
+                    "completed_files": [
+                        {
+                            "file_name": first.path,
+                            "content_length": first.byte_size,
+                            "content_sha256": first.sha256,
+                        }
+                    ],
+                }
+            return super().get(path)
+
+    client = ReplayClient(manifest)
+    provider = BrokeredCheckpointRuntimeProvider(
+        client, dataset_ref="owner/checkpoints", operation_id=OPERATION, timeout_seconds=60
+    )
+    puts: list[str] = []
+    monkeypatch.setattr(
+        provider,
+        "_put_exact",
+        lambda _url, path, **_kwargs: puts.append(
+            path.relative_to(package).as_posix() if path.is_relative_to(package) else path.name
+        ),
+    )
+    provider.publish(package=package, manifest_path=manifest_path)
+    assert first.path not in puts
+    assert len(puts) == len(manifest.files)
+
+
+def test_runtime_coordinator_registers_candidate_before_first_blob_prepare(
+    tmp_path: Path,
+) -> None:
+    _ledger, package, manifest, _adapter, _verifier, _service, _authority = _fixture(tmp_path)
+    manifest_path = tmp_path / "checkpoint-manifest.json"
+    write_manifest(manifest_path, manifest)
+    calls: list[str] = []
+
+    class Registry:
+        def add_candidate(self, value: object) -> None:
+            assert value == manifest
+            calls.append("candidate")
+
+    class Provider:
+        def publish(self, **_kwargs: object) -> object:
+            assert calls == ["candidate"]
+            calls.append("publish")
+            return object()
+
+    coordinator = BrokeredCheckpointRuntimeCoordinator(Registry(), Provider())  # type: ignore[arg-type]
+    coordinator.publish(package=package, manifest_path=manifest_path, readback_directory=tmp_path / "unused")
+    assert calls == ["candidate", "publish"]
 
 
 def test_stale_epoch_and_wrong_completion_identity_fail_before_mutation(tmp_path: Path) -> None:

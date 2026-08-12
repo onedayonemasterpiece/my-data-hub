@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import json
 import os
 import re
 import stat
@@ -13,7 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -186,10 +187,25 @@ class BrokeredRestoreVerifier(Protocol):
     ) -> dict[str, object]: ...
 
 
+class BrokeredForcedFailureVerifier(Protocol):
+    def verify_forced_failure(
+        self,
+        *,
+        exact_version_ref: str,
+        dataset_identity: KaggleDatasetIdentity,
+        manifest: CheckpointManifest,
+        authority: RuntimeUploadAuthority,
+    ) -> dict[str, object]: ...
+
+
 class BrokeredMetadataClient(Protocol):
     def get(self, path: str) -> dict[str, Any]: ...
 
     def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]: ...
+
+
+class BrokeredCheckpointRegistry(Protocol):
+    def add_candidate(self, manifest: CheckpointManifest) -> None: ...
 
 
 class BrokeredCheckpointRuntimeProvider:
@@ -224,12 +240,91 @@ class BrokeredCheckpointRuntimeProvider:
         )
 
     def publish(self, *, package: Path, manifest_path: Path) -> PublishReceipt:
+        status, started = self._direct_upload(package=package, manifest_path=manifest_path, scenario=None)
         manifest = load_and_verify(manifest_path, package)
-        authority = self.client.get("/internal/checkpoints/runtime-upload-authority")
-        if set(authority) != {"master_run_ref"} or not isinstance(authority["master_run_ref"], str):
+        head = self.client.get("/internal/checkpoints/postgres-master/head")
+        current = head.get("current")
+        previous = head.get("previous")
+        if not isinstance(current, dict) or current.get("checkpoint_id") != str(manifest.checkpoint_id):
+            raise BrokeredCheckpointError("promoted checkpoint is not exact current HEAD")
+        return PublishReceipt(
+            checkpoint_id=str(manifest.checkpoint_id),
+            exact_version_ref=str(status["exact_version_ref"]),
+            manifest_sha256=manifest.manifest_sha256,
+            current_checkpoint_id=str(current["checkpoint_id"]),
+            previous_checkpoint_id=(str(previous["checkpoint_id"]) if isinstance(previous, dict) else None),
+            upload_seconds=time.monotonic() - started,
+            readback_seconds=0.0,
+            restore_seconds=0.0,
+            package_bytes=sum(item.byte_size for item in manifest.files),
+            restore_receipt={
+                "brokered_direct_upload": True,
+                "verifier_run_ref": status["verifier_run_ref"],
+                "verifier_receipt_sha256": status["verifier_receipt_sha256"],
+            },
+        )
+
+    def publish_acceptance(
+        self, *, package: Path, manifest_path: Path, scenario: Literal["FM05", "FM14", "FM15"]
+    ) -> dict[str, Any]:
+        """Direct-upload one fixed task-owned acceptance candidate.
+
+        The return is metadata-only.  Negative scenarios succeed only when the
+        central broker reports their fixed expected rejection code.
+        """
+
+        status, _started = self._direct_upload(package=package, manifest_path=manifest_path, scenario=scenario)
+        if status.get("acceptance_scenario") != scenario:
+            raise BrokeredCheckpointError("acceptance publication scenario changed")
+        expected = {
+            "FM05": ("PROMOTED", None),
+            "FM14": ("FAILED", "FM14_EXPECTED_HASH_MISMATCH"),
+            "FM15": ("FAILED", "FM15_EXPECTED_RESTORE_FAILURE"),
+        }[scenario]
+        if (status.get("state"), status.get("failure_code")) != expected:
+            raise BrokeredCheckpointError("acceptance publication did not reach its fixed terminal state")
+        return status
+
+    def _direct_upload(
+        self,
+        *,
+        package: Path,
+        manifest_path: Path,
+        scenario: Literal["FM05", "FM14", "FM15"] | None,
+    ) -> tuple[dict[str, Any], float]:
+        if scenario == "FM14":
+            try:
+                manifest = CheckpointManifest.from_payload(json.loads(manifest_path.read_bytes()))
+            except Exception as exc:
+                raise BrokeredCheckpointError("FM14 manifest is invalid") from exc
+        else:
+            manifest = load_and_verify(manifest_path, package)
+        authority = self.client.get(
+            f"/internal/checkpoints/{manifest.checkpoint_id}/runtime-upload-authority"
+            if scenario is not None
+            else "/internal/checkpoints/runtime-upload-authority"
+        )
+        expected_authority_keys = (
+            {"master_run_ref", "epoch", "acceptance_scenario"} if scenario is not None else {"master_run_ref"}
+        )
+        if set(authority) != expected_authority_keys or not isinstance(authority["master_run_ref"], str):
             raise BrokeredCheckpointError("central checkpoint upload authority is invalid")
+        if scenario is not None and (
+            int(authority["epoch"]) != manifest.epoch or authority["acceptance_scenario"] != scenario
+        ):
+            raise BrokeredCheckpointError("central checkpoint upload authority differs from the candidate")
         master_run_ref = str(authority["master_run_ref"])
-        files = [(item.path, package / item.path, item.byte_size, item.sha256) for item in manifest.files]
+        files = []
+        for item in manifest.files:
+            path = package / item.path
+            size = path.stat().st_size if path.is_file() and not path.is_symlink() else item.byte_size
+            digest = self._sha256(path) if path.is_file() and not path.is_symlink() else item.sha256
+            if scenario != "FM14" or item.path != "physical/base.tar.gz":
+                if (size, digest) != (item.byte_size, item.sha256):
+                    raise BrokeredCheckpointError("checkpoint artifact changed before direct upload")
+            elif size != item.byte_size or digest == item.sha256:
+                raise BrokeredCheckpointError("FM14 fixed corruption identity is invalid")
+            files.append((item.path, path, size, digest))
         manifest_bytes = canonical_json(manifest.payload()) + b"\n"
         files.append(
             (
@@ -243,6 +338,19 @@ class BrokeredCheckpointRuntimeProvider:
         for name, path, size, digest in files:
             if not path.is_file() or path.is_symlink() or path.stat().st_size != size or self._sha256(path) != digest:
                 raise BrokeredCheckpointError("checkpoint artifact changed before direct upload")
+            try:
+                replay = self.client.get(f"/internal/checkpoints/{manifest.checkpoint_id}/publication")
+            except Exception:
+                replay = {}
+            completed = {
+                (item.get("file_name"), item.get("content_length"), item.get("content_sha256"))
+                for item in replay.get("completed_files", ())
+                if isinstance(item, dict)
+            }
+            if (name, size, digest) in completed:
+                continue
+            if any(item[0] == name for item in completed):
+                raise BrokeredCheckpointError("completed checkpoint blob replay changed identity")
             prepare = self.client.post(
                 f"/internal/checkpoints/{manifest.checkpoint_id}/blob-uploads/prepare",
                 {
@@ -296,28 +404,13 @@ class BrokeredCheckpointRuntimeProvider:
         deadline = time.monotonic() + self.timeout_seconds
         while time.monotonic() < deadline:
             status = self.client.get(f"/internal/checkpoints/{manifest.checkpoint_id}/publication")
-            if status.get("state") == "PROMOTED":
-                head = self.client.get("/internal/checkpoints/postgres-master/head")
-                current = head.get("current")
-                previous = head.get("previous")
-                if not isinstance(current, dict) or current.get("checkpoint_id") != str(manifest.checkpoint_id):
-                    raise BrokeredCheckpointError("promoted checkpoint is not exact current HEAD")
-                return PublishReceipt(
-                    checkpoint_id=str(manifest.checkpoint_id),
-                    exact_version_ref=str(status["exact_version_ref"]),
-                    manifest_sha256=manifest.manifest_sha256,
-                    current_checkpoint_id=str(current["checkpoint_id"]),
-                    previous_checkpoint_id=(str(previous["checkpoint_id"]) if isinstance(previous, dict) else None),
-                    upload_seconds=time.monotonic() - started,
-                    readback_seconds=0.0,
-                    restore_seconds=0.0,
-                    package_bytes=sum(item.byte_size for item in manifest.files),
-                    restore_receipt={
-                        "brokered_direct_upload": True,
-                        "verifier_run_ref": status["verifier_run_ref"],
-                        "verifier_receipt_sha256": status["verifier_receipt_sha256"],
-                    },
-                )
+            if status.get("state") == "PROMOTED" or (
+                scenario in {"FM14", "FM15"}
+                and status.get("state") == "FAILED"
+                and status.get("failure_code")
+                == {"FM14": "FM14_EXPECTED_HASH_MISMATCH", "FM15": "FM15_EXPECTED_RESTORE_FAILURE"}[scenario]
+            ):
+                return status, started
             if status.get("state") in {"FAILED", "QUARANTINED"}:
                 raise BrokeredCheckpointError("brokered checkpoint publication failed closed")
             time.sleep(5.0)
@@ -392,12 +485,14 @@ class BrokeredCheckpointRuntimeProvider:
 class BrokeredCheckpointRuntimeCoordinator:
     """Publisher facade matching KaggleCheckpointCoordinator without a local adapter."""
 
-    def __init__(self, registry: object, provider: BrokeredCheckpointRuntimeProvider) -> None:
+    def __init__(self, registry: BrokeredCheckpointRegistry, provider: BrokeredCheckpointRuntimeProvider) -> None:
         self.registry = registry
         self.provider = provider
 
     def publish(self, *, package: Path, manifest_path: Path, readback_directory: Path) -> PublishReceipt:
         del readback_directory
+        manifest = load_and_verify(manifest_path, package)
+        self.registry.add_candidate(manifest)
         return self.provider.publish(package=package, manifest_path=manifest_path)
 
     def reconcile_promoted(self, *, package: Path, manifest_path: Path) -> PublishReceipt | None:
@@ -459,6 +554,11 @@ class RuntimeUploadAuthority:
     epoch: int
     master_run_ref: str
     lease_until: datetime
+    authority_kind: Literal["master", "acceptance"] = "master"
+    acceptance_scenario: Literal["FM05", "FM14", "FM15"] | None = None
+    source_revision: str | None = None
+    verifier_dataset_version_ref: str | None = None
+    verifier_notebook_ref: str | None = None
 
 
 class BrokeredCheckpointUploadService:
@@ -471,6 +571,9 @@ class BrokeredCheckpointUploadService:
         secret_box: CheckpointUploadSecretBox,
         restore_verifier: BrokeredRestoreVerifier | None = None,
         restore_verifier_factory: Callable[[UUID, UUID], BrokeredRestoreVerifier] | None = None,
+        forced_failure_verifier_factory: (
+            Callable[[RuntimeUploadAuthority], BrokeredForcedFailureVerifier] | None
+        ) = None,
     ) -> None:
         self.control = ledger
         self.ledger = CheckpointUploadLedger(ledger)
@@ -478,6 +581,7 @@ class BrokeredCheckpointUploadService:
         self.secret_box = secret_box
         self.restore_verifier = restore_verifier
         self.restore_verifier_factory = restore_verifier_factory
+        self.forced_failure_verifier_factory = forced_failure_verifier_factory
 
     def prepare(self, spec: CheckpointBlobSpec, authority: RuntimeUploadAuthority) -> CheckpointBlobGrant:
         try:
@@ -504,6 +608,8 @@ class BrokeredCheckpointUploadService:
             source_head_generation=generation,
             expected_file_count=len(manifest.files) + 1,
             expected_total_bytes=expected_total_bytes,
+            authority_kind=authority.authority_kind,
+            acceptance_scenario=authority.acceptance_scenario,
         )
         expires_at = min(authority.lease_until, self.control.clock.now() + UPLOAD_GRANT_TTL)
         if expires_at <= self.control.clock.now() + timedelta(seconds=30):
@@ -583,6 +689,8 @@ class BrokeredCheckpointUploadService:
         if publication is None:
             raise BrokeredCheckpointError("checkpoint publication is absent")
         _candidate, manifest = self._validate_publication(publication, authority)
+        if authority.authority_kind == "acceptance":
+            return self._finalize_acceptance(checkpoint_id, publication, manifest, authority)
         if publication["state"] == "PROMOTED":
             return self._public_status(publication)
         claims = self.ledger.claims(str(checkpoint_id))
@@ -667,7 +775,6 @@ class BrokeredCheckpointUploadService:
         try:
             registry.uploaded(checkpoint_id, exact_ref)
             registry.package_uploaded(checkpoint_id, package_sha256)
-            registry.readback_verified(checkpoint_id)
             if publication["state"] == "DATASET_RESOLVED":
                 publication = self.ledger.transition(
                     str(checkpoint_id),
@@ -710,6 +817,7 @@ class BrokeredCheckpointUploadService:
                 if receipt.get("ok") is not True or not isinstance(receipt.get("provider_run_ref"), str):
                     raise BrokeredCheckpointError("independent restore verifier did not pass")
                 receipt_sha256 = hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
+                registry.readback_verified(checkpoint_id)
                 registry.restore_verified(checkpoint_id)
                 publication = self.ledger.transition(
                     str(checkpoint_id),
@@ -750,6 +858,201 @@ class BrokeredCheckpointUploadService:
             if publication["state"] not in {"PROMOTED", "FAILED", "QUARANTINED"}:
                 self._fail(checkpoint_id, type(exc).__name__, quarantine=False)
             raise
+        return self._public_status(publication)
+
+    def _finalize_acceptance(
+        self,
+        checkpoint_id: UUID,
+        publication: dict[str, Any],
+        manifest: CheckpointManifest,
+        authority: RuntimeUploadAuthority,
+    ) -> dict[str, Any]:
+        """Finalize one task-bound disposable Dataset without master impersonation."""
+
+        scenario = authority.acceptance_scenario
+        if scenario not in {"FM05", "FM14", "FM15"}:
+            raise BrokeredCheckpointError("checkpoint acceptance scenario is unavailable")
+        if publication["state"] in {"PROMOTED", "FAILED"}:
+            return self._public_status(publication)
+        claims = self.ledger.claims(str(checkpoint_id))
+        expected_files, provider_files, package_sha256 = self._provider_files(
+            publication=publication, manifest=manifest, claims=claims
+        )
+        persisted = publication.get("expected_provider_version")
+        expected_previous_version: int | None = None
+        if persisted is None and scenario == "FM05":
+            head = self.control.checkpoint_head("postgres-master")
+            current_version = self.adapter.current_private_dataset_version(provider_ref=str(publication["dataset_ref"]))
+            if head is None or head.current_checkpoint_id is None:
+                if current_version is not None:
+                    raise BrokeredCheckpointQuarantined("FM05 checkpoint Dataset exists without a current HEAD")
+                expected_version = 1
+            else:
+                current = self.control.checkpoint_candidate(head.current_checkpoint_id)
+                if current is None or not current.get("version_ref"):
+                    raise BrokeredCheckpointError("FM05 current HEAD lacks an exact Dataset version")
+                current_ref, version_text = str(current["version_ref"]).rsplit("/", 1)
+                if current_ref != publication["dataset_ref"] or not version_text.isdigit():
+                    raise BrokeredCheckpointError("FM05 must use the normal checkpoint Dataset")
+                expected_previous_version = int(version_text)
+                if current_version != expected_previous_version:
+                    raise BrokeredCheckpointQuarantined("FM05 Dataset advanced beyond current HEAD")
+                expected_version = expected_previous_version + 1
+        elif persisted is None:
+            current_version = self.adapter.current_private_dataset_version(provider_ref=str(publication["dataset_ref"]))
+            if current_version is not None:
+                raise BrokeredCheckpointQuarantined("task-owned acceptance Dataset existed before its fixed mutation")
+            expected_version = 1
+        else:
+            expected_version = int(persisted)
+            expected_previous_version = expected_version - 1 if scenario == "FM05" and expected_version > 1 else None
+        original_state = str(publication["state"])
+        publication = self.ledger.begin_finalize(str(checkpoint_id), expected_provider_version=expected_version)
+        exact_ref = f"{publication['dataset_ref']}/{expected_version}"
+        if publication["state"] == "FINALIZING":
+            if original_state == "READY_TO_FINALIZE":
+                notes = (
+                    f"mdh-checkpoint-acceptance scenario={scenario} operation={publication['operation_id']} "
+                    f"manifest={publication['manifest_sha256']}"
+                )
+                try:
+                    observed = self.adapter.finalize_brokered_checkpoint_dataset(
+                        provider_ref=str(publication["dataset_ref"]),
+                        title=str(publication["dataset_ref"]).split("/", 1)[1],
+                        files=provider_files,
+                        version_notes=notes,
+                        expected_previous_version=expected_previous_version,
+                    )
+                except Exception as exc:
+                    if not self.adapter.reconcile_brokered_checkpoint_dataset(
+                        provider_ref=str(publication["dataset_ref"]),
+                        version=expected_version,
+                        expected_files=expected_files,
+                    ):
+                        raise BrokeredCheckpointError("acceptance Dataset finalization remains unresolved") from exc
+                else:
+                    if observed != expected_version:
+                        self._fail(checkpoint_id, "DATASET_VERSION_UNEXPECTED", quarantine=True)
+                        raise BrokeredCheckpointQuarantined("acceptance Dataset returned an unexpected version")
+            elif not self.adapter.reconcile_brokered_checkpoint_dataset(
+                provider_ref=str(publication["dataset_ref"]),
+                version=expected_version,
+                expected_files=expected_files,
+            ):
+                raise BrokeredCheckpointError("acceptance Dataset finalization is not reconciled")
+            publication = self.ledger.resolve_dataset(str(checkpoint_id), exact_version_ref=exact_ref)
+
+        registry = ControlLedgerCheckpointRegistry(
+            self.control,
+            operation_id=str(publication["operation_id"]),
+            dataset_ref=str(publication["dataset_ref"]),
+        )
+        registry.uploaded(checkpoint_id, exact_ref)
+        registry.package_uploaded(checkpoint_id, package_sha256)
+        dataset_identity = KaggleDatasetIdentity(
+            provider_ref=str(publication["dataset_ref"]),
+            version=expected_version,
+            privacy="private",
+            package_sha256=package_sha256,
+            fingerprint=ProviderFingerprint(
+                value=sha256_value(
+                    {
+                        "provider_ref": publication["dataset_ref"],
+                        "version": expected_version,
+                        "privacy": "private",
+                        "package_sha256": package_sha256,
+                    }
+                )
+            ),
+            observed_at=self.control.clock.now(),
+        )
+        if scenario == "FM14":
+            expected_digest = next(item.sha256 for item in manifest.files if item.path == "physical/base.tar.gz")
+            observed_digest = next(
+                str(row["content_sha256"]) for row in claims if row["file_name"] == "physical/base.tar.gz"
+            )
+            if expected_digest == observed_digest:
+                raise BrokeredCheckpointError("FM14 fixed corruption was not observed")
+            registry.reject(checkpoint_id, "FM14_EXACT_READBACK_HASH_MISMATCH")
+            publication = self.ledger.transition(
+                str(checkpoint_id),
+                expected_states=frozenset({"DATASET_RESOLVED"}),
+                state="FAILED",
+                event_type="publication.failed",
+                evidence={"failure_code": "FM14_EXPECTED_HASH_MISMATCH"},
+                failure_code="FM14_EXPECTED_HASH_MISMATCH",
+            )
+            return self._public_status(publication)
+
+        if publication["state"] == "DATASET_RESOLVED":
+            publication = self.ledger.transition(
+                str(checkpoint_id),
+                expected_states=frozenset({"DATASET_RESOLVED"}),
+                state="VERIFYING",
+                event_type="verifier.started",
+                evidence={"exact_version_ref": exact_ref, "scenario": scenario},
+            )
+        if scenario == "FM15":
+            registry.readback_verified(checkpoint_id)
+            factory = self.forced_failure_verifier_factory
+            if factory is None:
+                raise BrokeredCheckpointError("FM15 central forced-failure verifier is unavailable")
+            receipt = factory(authority).verify_forced_failure(
+                exact_version_ref=exact_ref,
+                dataset_identity=dataset_identity,
+                manifest=manifest,
+                authority=authority,
+            )
+            if receipt.get("expected_failure") is not True or not isinstance(receipt.get("provider_run_ref"), str):
+                raise BrokeredCheckpointError("FM15 verifier did not prove the fixed provider failure")
+            receipt_sha256 = hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
+            registry.reject(checkpoint_id, "FM15_FORCED_RESTORE_SMOKE_FAILURE")
+            publication = self.ledger.transition(
+                str(checkpoint_id),
+                expected_states=frozenset({"VERIFYING"}),
+                state="FAILED",
+                event_type="publication.failed",
+                evidence={"failure_code": "FM15_EXPECTED_RESTORE_FAILURE"},
+                verifier_run_ref=str(receipt["provider_run_ref"]),
+                verifier_receipt_sha256=receipt_sha256,
+                verifier_evidence=receipt,
+                failure_code="FM15_EXPECTED_RESTORE_FAILURE",
+            )
+            return self._public_status(publication)
+
+        verifier = self.restore_verifier
+        if verifier is None and self.restore_verifier_factory is not None:
+            verifier = self.restore_verifier_factory(
+                UUID(str(publication["operation_id"])), UUID(str(publication["run_id"]))
+            )
+        if verifier is None:
+            raise BrokeredCheckpointError("FM05 independent restore verifier is unavailable")
+        receipt = verifier.verify_restore(
+            exact_version_ref=exact_ref, dataset_identity=dataset_identity, manifest=manifest
+        )
+        if receipt.get("ok") is not True or not isinstance(receipt.get("provider_run_ref"), str):
+            raise BrokeredCheckpointError("FM05 independent restore verifier did not pass")
+        receipt_sha256 = hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
+        registry.readback_verified(checkpoint_id)
+        registry.restore_verified(checkpoint_id)
+        publication = self.ledger.transition(
+            str(checkpoint_id),
+            expected_states=frozenset({"VERIFYING"}),
+            state="VERIFIED",
+            event_type="verifier.passed",
+            evidence={"receipt_sha256": receipt_sha256},
+            verifier_run_ref=str(receipt["provider_run_ref"]),
+            verifier_receipt_sha256=receipt_sha256,
+            verifier_evidence=receipt,
+        )
+        promoted = registry.promote(checkpoint_id, expected_generation=int(publication["source_head_generation"]))
+        publication = self.ledger.transition(
+            str(checkpoint_id),
+            expected_states=frozenset({"VERIFIED"}),
+            state="PROMOTED",
+            event_type="publication.promoted",
+            evidence={"generation": promoted.generation, "checkpoint_id": str(checkpoint_id)},
+        )
         return self._public_status(publication)
 
     def status(self, checkpoint_id: UUID) -> dict[str, Any]:
@@ -868,11 +1171,14 @@ class BrokeredCheckpointUploadService:
         state = "QUARANTINED" if quarantine else "FAILED"
         event = "publication.quarantined" if quarantine else "publication.failed"
         with_error = re.sub(r"[^A-Za-z0-9_.-]", "_", code)[:120] or "BROKER_FAILURE"
+        publication = self.ledger.publication(str(checkpoint_id))
         with suppress(Exception):
+            if publication is None:
+                raise KeyError(str(checkpoint_id))
             ControlLedgerCheckpointRegistry(
                 self.control,
-                operation_id=str(self.ledger.publication(str(checkpoint_id))["operation_id"]),
-                dataset_ref=str(self.ledger.publication(str(checkpoint_id))["dataset_ref"]),
+                operation_id=str(publication["operation_id"]),
+                dataset_ref=str(publication["dataset_ref"]),
             ).reject(checkpoint_id, with_error)
         with suppress(Exception):
             self.ledger.transition(
@@ -894,10 +1200,21 @@ class BrokeredCheckpointUploadService:
                 failure_code=with_error,
             )
 
-    @staticmethod
-    def _public_status(publication: dict[str, Any]) -> dict[str, Any]:
+    def _public_status(self, publication: dict[str, Any]) -> dict[str, Any]:
+        completed = tuple(
+            {
+                "file_name": str(row["file_name"]),
+                "content_length": int(row["content_length"]),
+                "content_sha256": str(row["content_sha256"]),
+            }
+            for row in self.ledger.claims(str(publication["checkpoint_id"]))
+            if row["state"] in {"UPLOADED", "CONSUMED"}
+        )
+        evidence = publication.get("verifier_evidence_json")
         return {
             "schema_version": "my-data-hub-checkpoint-broker-publication.v1",
+            "completed_files": completed,
+            "verifier_evidence": json.loads(evidence) if isinstance(evidence, str) else None,
             **{
                 key: publication.get(key)
                 for key in (
@@ -911,6 +1228,8 @@ class BrokeredCheckpointUploadService:
                     "verifier_run_ref",
                     "verifier_receipt_sha256",
                     "failure_code",
+                    "authority_kind",
+                    "acceptance_scenario",
                     "created_at",
                     "updated_at",
                 )
@@ -920,7 +1239,9 @@ class BrokeredCheckpointUploadService:
     def _validate(
         self, spec: CheckpointBlobSpec, authority: RuntimeUploadAuthority
     ) -> tuple[dict[str, Any], CheckpointManifest]:
-        if (
+        if authority.authority_kind == "acceptance":
+            self._validate_acceptance_authority(spec, authority)
+        elif (
             str(spec.operation_id) != authority.operation_id
             or spec.master_run_ref != authority.master_run_ref
             or spec.epoch != authority.epoch
@@ -936,7 +1257,12 @@ class BrokeredCheckpointUploadService:
         ):
             raise LeaseRejected("checkpoint upload authority is fenced or expired")
         operation = self.control.get_operation(authority.operation_id)
-        if operation is None or operation.state not in {"DRAINING", "CHECKPOINTING", "ACTIVE"}:
+        allowed_operation_states = (
+            {"INTENT_COMMITTED", "RUNNING"}
+            if authority.authority_kind == "acceptance"
+            else {"DRAINING", "CHECKPOINTING", "ACTIVE"}
+        )
+        if operation is None or operation.state not in allowed_operation_states:
             raise BrokeredCheckpointError("checkpoint operation is not in an upload-capable phase")
         candidate = self.control.checkpoint_candidate(str(spec.checkpoint_id))
         if candidate is None or candidate["operation_id"] != authority.operation_id:
@@ -955,9 +1281,54 @@ class BrokeredCheckpointUploadService:
         expected = {item.path: (item.byte_size, item.sha256) for item in manifest.files}
         manifest_bytes = canonical_json(manifest.payload()) + b"\n"
         expected[CHECKPOINT_MANIFEST_NAME] = (len(manifest_bytes), hashlib.sha256(manifest_bytes).hexdigest())
-        if expected.get(spec.file_name) != (spec.content_length, spec.content_sha256):
+        observed = (spec.content_length, spec.content_sha256)
+        fixed_fm14_corruption = (
+            authority.authority_kind == "acceptance"
+            and authority.acceptance_scenario == "FM14"
+            and spec.file_name == "physical/base.tar.gz"
+            and expected.get(spec.file_name) is not None
+            and expected[spec.file_name][0] == spec.content_length
+            and expected[spec.file_name][1] != spec.content_sha256
+        )
+        if expected.get(spec.file_name) != observed and not fixed_fm14_corruption:
             raise BrokeredCheckpointError("checkpoint blob metadata differs from its manifest")
         return candidate, manifest
+
+    def _validate_acceptance_authority(self, spec: CheckpointBlobSpec, authority: RuntimeUploadAuthority) -> None:
+        if (
+            authority.acceptance_scenario not in {"FM05", "FM14", "FM15"}
+            or not authority.source_revision
+            or str(spec.operation_id) != authority.operation_id
+            or spec.master_run_ref != authority.master_run_ref
+            or spec.epoch != authority.epoch
+            or self.control.clock.now() >= authority.lease_until
+        ):
+            raise LeaseRejected("checkpoint acceptance upload authority is stale")
+        launch = self.control.checkpoint_acceptance_launch(authority.run_id)
+        if launch is None or launch.get("result") is not None:
+            raise LeaseRejected("checkpoint acceptance launch is not active")
+        config = launch.get("config")
+        request = launch.get("request")
+        provider_run = launch.get("provider_run")
+        if (
+            not isinstance(config, dict)
+            or not isinstance(request, dict)
+            or not isinstance(provider_run, dict)
+        ):
+            raise LeaseRejected("checkpoint acceptance launch binding is unavailable")
+        expected_verifier = config.get("verifier")
+        if (
+            str(launch.get("operation_id")) != authority.operation_id
+            or str(launch.get("task_run_id")) != authority.run_id
+            or str(launch.get("attempt_id")) != authority.attempt_id
+            or str(provider_run.get("provider_run_ref")) != authority.master_run_ref
+            or str(request.get("scenario")) != authority.acceptance_scenario
+            or str(request.get("source_revision")) != authority.source_revision
+            or str(request.get("candidate_dataset_ref")) != str(config.get("dataset_ref"))
+            or (expected_verifier or {}).get("dataset_version_ref") != authority.verifier_dataset_version_ref
+            or config.get("verifier_notebook_ref") != authority.verifier_notebook_ref
+        ):
+            raise LeaseRejected("checkpoint acceptance launch binding changed")
 
     @staticmethod
     def _public_grant(

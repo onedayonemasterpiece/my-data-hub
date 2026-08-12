@@ -1061,11 +1061,21 @@ def build_production_runtime(
                 metadata_only_output=True,
             )
 
+        from my_data_hub.checkpoints.acceptance_broker import CentralBrokeredFM15Verifier
+
+        fm15_root = receipt_root / "fm15"
+        fm15_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fm15_root.chmod(0o700)
+
+        def forced_failure_factory(_authority: object) -> CentralBrokeredFM15Verifier:
+            return CentralBrokeredFM15Verifier(adapter, fm15_root)
+
         checkpoint_broker = BrokeredCheckpointUploadService(
             ledger,
             adapter,
             secret_box,
             restore_verifier_factory=verifier_factory,
+            forced_failure_verifier_factory=forced_failure_factory,
         )
     except Exception:
         return ProductionRuntimeBuild(

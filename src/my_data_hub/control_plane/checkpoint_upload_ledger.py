@@ -63,6 +63,8 @@ class CheckpointUploadLedger:
         source_head_generation: int,
         expected_file_count: int,
         expected_total_bytes: int,
+        authority_kind: str = "master",
+        acceptance_scenario: str | None = None,
     ) -> dict[str, Any]:
         if (
             not all(
@@ -82,6 +84,9 @@ class CheckpointUploadLedger:
             or expected_file_count < 1
             or expected_total_bytes < 1
             or not _SHA256.fullmatch(manifest_sha256)
+            or authority_kind not in {"master", "acceptance"}
+            or acceptance_scenario not in {None, "FM05", "FM14", "FM15"}
+            or (authority_kind == "master") != (acceptance_scenario is None)
         ):
             raise ValueError("checkpoint upload publication identity is invalid")
         now = _time(self.ledger.clock.now())
@@ -98,6 +103,8 @@ class CheckpointUploadLedger:
             source_head_generation,
             expected_file_count,
             expected_total_bytes,
+            authority_kind,
+            acceptance_scenario,
         )
         with self.ledger._transaction() as connection:
             connection.execute(
@@ -105,8 +112,8 @@ class CheckpointUploadLedger:
                 "checkpoint_id,operation_id,run_id,attempt_id,master_instance_id,service_instance_id,master_run_ref,"
                 "epoch,dataset_ref,"
                 "manifest_sha256,source_head_generation,expected_file_count,expected_total_bytes,"
-                "state,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'PREPARING',?,?) ON CONFLICT(checkpoint_id) DO NOTHING",
+                "authority_kind,acceptance_scenario,state,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PREPARING',?,?) ON CONFLICT(checkpoint_id) DO NOTHING",
                 (checkpoint_id, *expected, now, now),
             )
             row = connection.execute(
@@ -125,6 +132,8 @@ class CheckpointUploadLedger:
                 "source_head_generation",
                 "expected_file_count",
                 "expected_total_bytes",
+                "authority_kind",
+                "acceptance_scenario",
             )
             if row is None or tuple(row[key] for key in keys) != expected:
                 raise IdempotencyConflict("checkpoint upload publication identity collision")
@@ -216,7 +225,7 @@ class CheckpointUploadLedger:
             raise ValueError("checkpoint publication scan limit is invalid")
         with self.ledger._reader() as connection:
             rows = connection.execute(
-                "SELECT checkpoint_id FROM checkpoint_blob_publications WHERE state IN ("
+                "SELECT checkpoint_id FROM checkpoint_blob_publications WHERE authority_kind='master' AND state IN ("
                 "'READY_TO_FINALIZE','FINALIZING','DATASET_RESOLVED','VERIFYING','VERIFIED') "
                 "ORDER BY updated_at,checkpoint_id LIMIT ?",
                 (limit,),
@@ -607,9 +616,16 @@ class CheckpointUploadLedger:
         exact_version_ref: str | None = None,
         verifier_run_ref: str | None = None,
         verifier_receipt_sha256: str | None = None,
+        verifier_evidence: Mapping[str, Any] | None = None,
         failure_code: str | None = None,
     ) -> dict[str, Any]:
         now = _time(self.ledger.clock.now())
+        verifier_json = None
+        if verifier_evidence is not None:
+            # Validate the same bounded, secret-free shape used for event evidence,
+            # but retain the typed body for acceptance reconstruction.
+            _evidence(verifier_evidence)
+            verifier_json = json.dumps(verifier_evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         with self.ledger._transaction() as connection:
             row = connection.execute(
                 "SELECT * FROM checkpoint_blob_publications WHERE checkpoint_id=?", (checkpoint_id,)
@@ -623,12 +639,14 @@ class CheckpointUploadLedger:
             connection.execute(
                 "UPDATE checkpoint_blob_publications SET state=?,exact_version_ref=COALESCE(?,exact_version_ref),"
                 "verifier_run_ref=COALESCE(?,verifier_run_ref),verifier_receipt_sha256=COALESCE(?,verifier_receipt_sha256),"
+                "verifier_evidence_json=COALESCE(?,verifier_evidence_json),"
                 "failure_code=COALESCE(?,failure_code),updated_at=? WHERE checkpoint_id=? AND state=?",
                 (
                     state,
                     exact_version_ref,
                     verifier_run_ref,
                     verifier_receipt_sha256,
+                    verifier_json,
                     failure_code,
                     now,
                     checkpoint_id,
