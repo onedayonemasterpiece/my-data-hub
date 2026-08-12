@@ -1,0 +1,47 @@
+{
+  "schema_version": "my-data-hub-operational-mvp-evidence.v1",
+  "evidence_class": "IMPLEMENTATION_REVIEW",
+  "source_commit": "cccccccccccccccccccccccccccccccccccccccc",
+  "outcome": "PASS",
+  "live_evidence": true,
+  "gate_ids": ["N"],
+  "requirement_ids": ["GATE-N-HOSTED-CHECKS"],
+  "assertions": [
+    {
+      "assertion_id": "hosted-checks-reviewed-head",
+      "gate_id": "N",
+      "requirement_ids": ["GATE-N-HOSTED-CHECKS"],
+      "outcome": "PASS",
+      "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "observed_at": "2026-08-12T12:00:00Z",
+  "reviewed_head_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "merge_commit": "cccccccccccccccccccccccccccccccccccccccc",
+  "review_relationship": "PARENT",
+  "pull_request": {
+    "repository": "owner/my-data-hub",
+    "number": 42,
+    "url": "https://github.com/owner/my-data-hub/pull/42"
+  },
+  "hosted_checks": [
+    {
+      "name": "contracts",
+      "provider": "GITHUB_ACTIONS",
+      "runner": "ubuntu-latest",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "head_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "run_url": "https://github.com/owner/my-data-hub/actions/runs/4201"
+    },
+    {
+      "name": "postgres-integration",
+      "provider": "GITHUB_ACTIONS",
+      "runner": "ubuntu-latest",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "head_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "run_url": "https://github.com/owner/my-data-hub/actions/runs/4202"
+    }
+  ]
+}

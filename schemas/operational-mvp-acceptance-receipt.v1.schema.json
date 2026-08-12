@@ -190,7 +190,10 @@
         "sha256",
         "source_commit",
         "observed_at",
-        "live_evidence"
+        "live_evidence",
+        "schema_path",
+        "gate_ids",
+        "requirement_ids"
       ],
       "properties": {
         "evidence_id": {
@@ -204,7 +207,8 @@
             "SECURITY_AUDIT",
             "DATA_INTEGRITY_AUDIT",
             "REAL_KAGGLE_MATRIX",
-            "GATE_EVIDENCE"
+            "GATE_EVIDENCE",
+            "CONNECTOR_DURABILITY"
           ]
         },
         "storage": {
@@ -230,6 +234,43 @@
         },
         "live_evidence": {
           "type": "boolean"
+        },
+        "schema_path": {
+          "type": "string",
+          "pattern": "^schemas/(?:provider/)?[A-Za-z0-9_.-]+\\.schema\\.json$",
+          "maxLength": 300
+        },
+        "gate_ids": {
+          "type": "array",
+          "maxItems": 14,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "A",
+              "B",
+              "C",
+              "D",
+              "E",
+              "F",
+              "G",
+              "H",
+              "I",
+              "J",
+              "K",
+              "L",
+              "M",
+              "N"
+            ]
+          }
+        },
+        "requirement_ids": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,99}$"
+          }
         }
       },
       "allOf": [
@@ -1025,6 +1066,12 @@
                   "properties": {
                     "live_evidence": {
                       "const": true
+                    },
+                    "gate_ids": {
+                      "minItems": 1
+                    },
+                    "requirement_ids": {
+                      "minItems": 1
                     }
                   }
                 }

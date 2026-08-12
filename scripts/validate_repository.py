@@ -294,6 +294,33 @@ OPERATIONAL_MVP_REQUIRED_EVIDENCE_KINDS = {
     "data_integrity_audit": "DATA_INTEGRITY_AUDIT",
     "operational_matrix": "REAL_KAGGLE_MATRIX",
 }
+OPERATIONAL_MVP_EVIDENCE_SCHEMAS = {
+    "IMPLEMENTATION_REVIEW": "schemas/operational-mvp-evidence.v1.schema.json",
+    "DEPLOYMENT": "schemas/operational-mvp-evidence.v1.schema.json",
+    "POST_DEPLOY": "schemas/operational-mvp-evidence.v1.schema.json",
+    "SECURITY_AUDIT": "schemas/operational-mvp-evidence.v1.schema.json",
+    "DATA_INTEGRITY_AUDIT": "schemas/operational-mvp-evidence.v1.schema.json",
+    "GATE_EVIDENCE": "schemas/operational-mvp-evidence.v1.schema.json",
+    "REAL_KAGGLE_MATRIX": "schemas/provider/operational-kaggle-matrix-receipt.v1.schema.json",
+    "CONNECTOR_DURABILITY": "schemas/connector-durability-receipt.v1.schema.json",
+}
+OPERATIONAL_MVP_GATE_EVIDENCE_KINDS = {
+    "A": frozenset({"REAL_KAGGLE_MATRIX", "GATE_EVIDENCE"}),
+    "B": frozenset({"REAL_KAGGLE_MATRIX", "GATE_EVIDENCE"}),
+    "C": frozenset({"REAL_KAGGLE_MATRIX", "GATE_EVIDENCE"}),
+    "D": frozenset({"REAL_KAGGLE_MATRIX", "GATE_EVIDENCE"}),
+    "E": frozenset({"REAL_KAGGLE_MATRIX", "GATE_EVIDENCE"}),
+    "F": frozenset({"REAL_KAGGLE_MATRIX", "GATE_EVIDENCE"}),
+    "G": frozenset({"REAL_KAGGLE_MATRIX", "GATE_EVIDENCE"}),
+    "H": frozenset({"REAL_KAGGLE_MATRIX", "GATE_EVIDENCE"}),
+    "I": frozenset({"SECURITY_AUDIT"}),
+    "J": frozenset({"DATA_INTEGRITY_AUDIT"}),
+    "K": frozenset({"DATA_INTEGRITY_AUDIT"}),
+    "L": frozenset({"CONNECTOR_DURABILITY"}),
+    "M": frozenset({"DEPLOYMENT", "POST_DEPLOY"}),
+    "N": frozenset({"IMPLEMENTATION_REVIEW", "POST_DEPLOY"}),
+}
+OPERATIONAL_MVP_REQUIRED_HOSTED_CHECKS = frozenset({"contracts", "postgres-integration"})
 
 
 def repository_head_commit(root: Path) -> str | None:
@@ -310,6 +337,123 @@ def repository_head_commit(root: Path) -> str | None:
     if result.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         return None
     return commit
+
+
+def repository_commit_relationship(root: Path, ancestor: str, descendant: str) -> str | None:
+    """Return the exact git relationship without trusting receipt labels."""
+
+    if ancestor == descendant:
+        return None
+    parents = subprocess.run(
+        ["git", "show", "-s", "--format=%P", descendant],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if parents.returncode != 0:
+        return None
+    exact_parents = parents.stdout.strip().split()
+    if len(exact_parents) < 2:
+        return None
+    if ancestor in exact_parents:
+        return "PARENT"
+    relationship = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=root,
+        capture_output=True,
+        check=False,
+    )
+    return "ANCESTOR" if relationship.returncode == 0 else None
+
+
+def validate_operational_mvp_evidence_content(
+    item: dict[str, Any],
+    content: dict[str, Any],
+    *,
+    root: Path,
+) -> list[str]:
+    """Bind an evidence index entry to schema-valid, semantically typed JSON."""
+
+    errors: list[str] = []
+    evidence_id = str(item.get("evidence_id", "<unknown>"))
+    artifact_kind = item.get("artifact_kind")
+    expected_schema = OPERATIONAL_MVP_EVIDENCE_SCHEMAS.get(str(artifact_kind))
+    schema_path = item.get("schema_path")
+    if expected_schema is None or schema_path != expected_schema:
+        errors.append(
+            f"evidence {evidence_id} schema {schema_path!r} is not authoritative for {artifact_kind!r}"
+        )
+        return errors
+    relative_schema = Path(str(schema_path))
+    if relative_schema.is_absolute() or ".." in relative_schema.parts:
+        errors.append(f"evidence {evidence_id} schema path is unsafe")
+        return errors
+    schema_file = root / relative_schema
+    if not schema_file.is_file():
+        errors.append(f"evidence {evidence_id} schema is absent: {schema_path}")
+        return errors
+    try:
+        schema = load_json(schema_file)
+        schema_errors = sorted(
+            Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(content),
+            key=lambda error: list(error.path),
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        errors.append(f"evidence {evidence_id} schema cannot be read: {exc}")
+        return errors
+    if schema_errors:
+        errors.append(
+            f"evidence {evidence_id} violates its semantic schema: "
+            + "; ".join(error.message for error in schema_errors[:5])
+        )
+        return errors
+
+    source_commit = item.get("source_commit")
+    gate_ids = item.get("gate_ids")
+    requirement_ids = item.get("requirement_ids")
+    if artifact_kind in {
+        "IMPLEMENTATION_REVIEW",
+        "DEPLOYMENT",
+        "POST_DEPLOY",
+        "SECURITY_AUDIT",
+        "DATA_INTEGRITY_AUDIT",
+        "GATE_EVIDENCE",
+    }:
+        if content.get("evidence_class") != artifact_kind:
+            errors.append(f"evidence {evidence_id} content class differs from its index")
+        if content.get("source_commit") != source_commit:
+            errors.append(f"evidence {evidence_id} content source commit differs from its index")
+        if content.get("gate_ids") != gate_ids:
+            errors.append(f"evidence {evidence_id} content gate scope differs from its index")
+        if content.get("requirement_ids") != requirement_ids:
+            errors.append(f"evidence {evidence_id} content requirement scope differs from its index")
+        assertions = content.get("assertions", [])
+        assertion_gates = {
+            assertion.get("gate_id") for assertion in assertions if isinstance(assertion, dict)
+        }
+        assertion_requirements = {
+            requirement
+            for assertion in assertions
+            if isinstance(assertion, dict)
+            for requirement in assertion.get("requirement_ids", [])
+        }
+        if assertion_gates != set(gate_ids or []):
+            errors.append(f"evidence {evidence_id} assertions do not cover its exact gate scope")
+        if assertion_requirements != set(requirement_ids or []):
+            errors.append(f"evidence {evidence_id} assertions do not cover its exact requirement scope")
+    elif artifact_kind == "REAL_KAGGLE_MATRIX":
+        if content.get("commit_sha") != source_commit or content.get("outcome") != "PASS":
+            errors.append(f"evidence {evidence_id} matrix content is not a source-bound PASS")
+        expected_requirements = {f"FM{ordinal:02d}" for ordinal in range(1, 25)}
+        if set(requirement_ids or []) != expected_requirements:
+            errors.append(f"evidence {evidence_id} matrix does not declare exact FM01-FM24 coverage")
+    elif artifact_kind == "CONNECTOR_DURABILITY":
+        if content.get("state") != "DURABLE_COMPLETE":
+            errors.append(f"evidence {evidence_id} connector receipt is not DURABLE_COMPLETE")
+        if gate_ids != ["L"]:
+            errors.append(f"evidence {evidence_id} connector receipt must be scoped only to Gate L")
+    return errors
 
 
 def validate_operational_mvp_receipt_semantics(
@@ -333,6 +477,7 @@ def validate_operational_mvp_receipt_semantics(
 
     evidence_items = receipt.get("evidence", [])
     evidence_by_id: dict[str, dict[str, Any]] = {}
+    evidence_content_by_id: dict[str, dict[str, Any]] = {}
     for item in evidence_items if isinstance(evidence_items, list) else []:
         if not isinstance(item, dict):
             continue
@@ -360,6 +505,17 @@ def validate_operational_mvp_receipt_semantics(
                     f"repository evidence hash mismatch for {evidence_id}: "
                     f"declared {item.get('sha256')}, observed {observed_hash}"
                 )
+                continue
+            try:
+                content = load_json(evidence_path)
+            except (OSError, json.JSONDecodeError) as exc:
+                errors.append(f"repository evidence is not readable JSON for {evidence_id}: {exc}")
+                continue
+            if not isinstance(content, dict):
+                errors.append(f"repository evidence must be a JSON object for {evidence_id}")
+                continue
+            evidence_content_by_id[evidence_id] = content
+            errors.extend(validate_operational_mvp_evidence_content(item, content, root=root))
 
     referenced_ids: set[str] = set()
     for gate in receipt.get("gate_results", []):
@@ -433,6 +589,79 @@ def validate_operational_mvp_receipt_semantics(
                 if identity.get(field) != evaluated_commit:
                     errors.append(f"COMPLETE receipt {field} must equal evaluated_source_commit")
 
+            reviewed_head = identity.get("reviewed_head_commit")
+            merge_commit = identity.get("merge_commit")
+            if not isinstance(reviewed_head, str) or not isinstance(merge_commit, str):
+                errors.append("COMPLETE receipt lacks exact reviewed-head/merge provenance")
+            else:
+                relationship = repository_commit_relationship(root, reviewed_head, merge_commit)
+                if relationship is None:
+                    errors.append(
+                        "COMPLETE reviewed_head_commit is neither a parent nor ancestor of an exact merge commit"
+                    )
+
+            review_refs = required_evidence.get("implementation_review", []) if isinstance(
+                required_evidence, dict
+            ) else []
+            review_contents = [
+                evidence_content_by_id[evidence_id]
+                for evidence_id in review_refs
+                if evidence_id in evidence_content_by_id
+            ]
+            if not review_contents:
+                errors.append("COMPLETE receipt lacks readable semantic implementation review evidence")
+            for content in review_contents:
+                if content.get("reviewed_head_commit") != reviewed_head:
+                    errors.append("implementation review evidence has another reviewed head commit")
+                if content.get("merge_commit") != merge_commit:
+                    errors.append("implementation review evidence has another merge commit")
+                if isinstance(reviewed_head, str) and isinstance(merge_commit, str):
+                    exact_relationship = repository_commit_relationship(root, reviewed_head, merge_commit)
+                    if content.get("review_relationship") != exact_relationship:
+                        errors.append("implementation review evidence misstates the reviewed-head relationship")
+                checks = content.get("hosted_checks", [])
+                check_names = {
+                    check.get("name") for check in checks if isinstance(check, dict)
+                }
+                if len(check_names) != len(checks):
+                    errors.append("implementation review evidence repeats a hosted check name")
+                missing_checks = OPERATIONAL_MVP_REQUIRED_HOSTED_CHECKS - check_names
+                if missing_checks:
+                    errors.append(
+                        "implementation review evidence lacks required hosted checks: "
+                        + ", ".join(sorted(missing_checks))
+                    )
+                for check in checks:
+                    if isinstance(check, dict) and check.get("head_commit") != reviewed_head:
+                        errors.append(
+                            f"hosted check {check.get('name')} is not bound to reviewed_head_commit"
+                        )
+
+            for section, commit_fields in {
+                "deployment": ("deployed_commit",),
+                "post_deploy": ("deployed_commit", "post_deploy_verified_commit"),
+            }.items():
+                refs = required_evidence.get(section, []) if isinstance(required_evidence, dict) else []
+                contents = [
+                    evidence_content_by_id[evidence_id]
+                    for evidence_id in refs
+                    if evidence_id in evidence_content_by_id
+                ]
+                if not contents:
+                    errors.append(f"COMPLETE receipt lacks readable semantic {section} evidence")
+                for content in contents:
+                    for field in commit_fields:
+                        if content.get(field) != identity.get(field):
+                            errors.append(f"{section} evidence {field} differs from implementation identity")
+                    if content.get("deployment_tree_state") != "CLEAN":
+                        errors.append(f"{section} evidence did not observe a clean deployed tree")
+                    if section == "post_deploy":
+                        for check in content.get("hosted_checks", []):
+                            if isinstance(check, dict) and check.get("head_commit") != identity.get(
+                                "deployed_commit"
+                            ):
+                                errors.append("post-deploy hosted check is not bound to deployed_commit")
+
         gate_results = receipt.get("gate_results", [])
         gate_ids = [
             gate.get("gate_id")
@@ -441,6 +670,43 @@ def validate_operational_mvp_receipt_semantics(
         ]
         if sorted(gate_ids) != list(OPERATIONAL_MVP_GATE_IDS):
             errors.append("COMPLETE receipt must contain each Gate A-N exactly once")
+
+        for gate in gate_results if isinstance(gate_results, list) else []:
+            if not isinstance(gate, dict) or not isinstance(gate.get("gate_id"), str):
+                continue
+            gate_id = str(gate["gate_id"])
+            refs = gate.get("evidence_refs", [])
+            scoped_items = [
+                evidence_by_id[evidence_id]
+                for evidence_id in refs
+                if evidence_id in evidence_by_id
+            ]
+            for item in scoped_items:
+                if item.get("evidence_id") not in evidence_content_by_id:
+                    errors.append(
+                        f"Gate {gate_id} evidence is not locally content-verifiable: "
+                        f"{item.get('evidence_id')}"
+                    )
+                if gate_id not in item.get("gate_ids", []):
+                    errors.append(
+                        f"Gate {gate_id} references evidence outside its declared gate scope: "
+                        f"{item.get('evidence_id')}"
+                    )
+                if not item.get("requirement_ids"):
+                    errors.append(
+                        f"Gate {gate_id} references evidence without requirement-specific scope: "
+                        f"{item.get('evidence_id')}"
+                    )
+            required_kinds = OPERATIONAL_MVP_GATE_EVIDENCE_KINDS.get(gate_id, frozenset())
+            if not any(
+                item.get("artifact_kind") in required_kinds
+                and item.get("evidence_id") in evidence_content_by_id
+                for item in scoped_items
+            ):
+                errors.append(
+                    f"Gate {gate_id} lacks requirement-specific evidence kind; "
+                    f"expected one of {sorted(required_kinds)}"
+                )
 
         for evidence_id, item in evidence_by_id.items():
             if item.get("live_evidence") is not True:
@@ -615,6 +881,53 @@ def validate_operational_mvp_receipt_semantics(
     return errors
 
 
+def validate_connector_intake_compose_service(report: Report, service: Any) -> None:
+    """Validate the sole reviewed, default-off connector control service."""
+
+    report.check(isinstance(service, dict), "connector intake service must be a Compose mapping")
+    if not isinstance(service, dict):
+        return
+    report.check(
+        service.get("profiles") == ["connectors"],
+        "connector intake must remain an explicit default-off connectors profile",
+    )
+    report.check(service.get("read_only") is True, "connector intake filesystem must be read-only")
+    report.check(
+        service.get("ports") == ["127.0.0.1:${MY_DATA_HUB_CONNECTOR_PORT:-8081}:8081"],
+        "connector intake must publish only the reviewed loopback port",
+    )
+    report.check(not service.get("expose"), "connector intake must not expose an unbounded Compose port")
+    connector_environment = service.get("environment", {})
+    expected_environment = {
+        "MY_DATA_HUB_ENVIRONMENT",
+        "MY_DATA_HUB_API_HOST",
+        "MY_DATA_HUB_API_PORT",
+        "MY_DATA_HUB_CONTROL_LEDGER_PATH",
+        "MY_DATA_HUB_MASTER_SESSION_DIRECTORY",
+        "MY_DATA_HUB_SCHEDULER_ENABLED",
+        "MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED",
+    }
+    report.check(
+        isinstance(connector_environment, dict) and set(connector_environment) == expected_environment,
+        "connector intake environment crossed its reviewed lightweight control boundary",
+    )
+    connector_serialized = json.dumps(service, sort_keys=True).casefold()
+    report.check(
+        not any(
+            marker in connector_serialized
+            for marker in (
+                "postgresql://",
+                "postgres://",
+                "pgdata",
+                "database_url",
+                "data_plane",
+                "25432",
+            )
+        ),
+        "connector intake embeds a database/PGDATA/data-plane endpoint",
+    )
+
+
 def validate_json_and_schemas(report: Report) -> None:
     schemas: dict[str, dict[str, Any]] = {}
     for path in sorted(SCHEMA_DIR.glob("*.json")):
@@ -642,6 +955,7 @@ def validate_json_and_schemas(report: Report) -> None:
         "deployment-evidence-state.v1.example.json": ("deployment-evidence-state.v1.schema.json"),
         "post-deploy-verification.v1.example.json": ("post-deploy-verification.v1.schema.json"),
         "post-deploy-verification.v2.example.json": ("post-deploy-verification.v2.schema.json"),
+        "operational-mvp-evidence.v1.example.json": ("operational-mvp-evidence.v1.schema.json"),
         "operational-mvp-acceptance-receipt.v1.example.json": ("operational-mvp-acceptance-receipt.v1.schema.json"),
         "master-asset-bundle.v1.example.json": "master-asset-bundle.v1.schema.json",
     }
@@ -1237,35 +1551,10 @@ def validate_deployment(report: Report) -> None:
     report.check(
         control.get("x-my-data-hub-profile") == "production-lightweight-control-plane", "control profile marker drifted"
     )
+    service_names = set(control.get("services", {}))
     report.check(
-        set(control.get("services", {}))
-        == {"control-plane", "connector-intake", "remote-mcp", "oauth-server"},
+        service_names == {"control-plane", "connector-intake", "remote-mcp", "oauth-server"},
         "production profile must contain only control API, connector intake, OAuth and opt-in remote MCP services",
-    )
-    connector_service = control.get("services", {}).get("connector-intake", {})
-    report.check(
-        connector_service.get("profiles") == ["connectors"],
-        "connector intake must remain an explicit opt-in profile",
-    )
-    report.check(connector_service.get("read_only") is True, "connector intake filesystem is not read-only")
-    connector_ports = connector_service.get("ports", [])
-    report.check(
-        connector_ports == ["127.0.0.1:${MY_DATA_HUB_CONNECTOR_PORT:-8081}:8081"],
-        "connector intake must bind only the reviewed loopback port",
-    )
-    connector_environment = connector_service.get("environment", {})
-    report.check(
-        set(connector_environment)
-        == {
-            "MY_DATA_HUB_ENVIRONMENT",
-            "MY_DATA_HUB_API_HOST",
-            "MY_DATA_HUB_API_PORT",
-            "MY_DATA_HUB_CONTROL_LEDGER_PATH",
-            "MY_DATA_HUB_MASTER_SESSION_DIRECTORY",
-            "MY_DATA_HUB_SCHEDULER_ENABLED",
-            "MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED",
-        },
-        "connector intake environment crossed its lightweight control boundary",
     )
     report.check(not control.get("volumes"), "production control plane must not declare volumes")
     control_serialized = json.dumps(control, sort_keys=True).lower()
@@ -1305,6 +1594,9 @@ def validate_deployment(report: Report) -> None:
         remote_mcp.get("ports") == ["127.0.0.1:${MY_DATA_HUB_MCP_PORT:-8765}:8765"],
         "remote MCP upstream must bind loopback only",
     )
+    connector_intake = control.get("services", {}).get("connector-intake")
+    if connector_intake is not None:
+        validate_connector_intake_compose_service(report, connector_intake)
 
     legacy = (ROOT / "deploy/same-host/install.sh").read_text(encoding="utf-8")
     report.check(
