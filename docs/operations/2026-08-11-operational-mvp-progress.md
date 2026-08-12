@@ -133,28 +133,46 @@ vector distance, returned five deterministic custom-state event UUIDs, and then
 deleted both its Notebook and input Dataset through exact claims.  This is a live
 runtime diagnostic, not an operational-matrix PASS.
 
-The internal blocker is the absence of an approved provider-side checkpoint
-upload/copy mechanism that preserves both the one-central-adapter rule and the
-ban on canonical checkpoint bytes crossing the devstand.  The external blocker
-is the undeployed devstand application/control path:
-`mcp-datahub.kenigevents.ru`, the MCP endpoint, and the identity discovery
-endpoint currently return 502, while the GitHub repository and `devstand`
-Environment contain no deployment/Kaggle/OAuth secrets. Therefore a Kaggle
-Notebook can run, but it cannot yet deliver authenticated callbacks to this
-orchestrator or participate in the qualifying lifecycle matrix.
+The checkpoint upload topology is no longer an internal design blocker.  A live
+disposable canary proved the brokered split upload with one central credentialed
+adapter, a credential-free producer Notebook PUT directly to Kaggle blob storage,
+an exact private Dataset numeric version, an independent verifier Notebook, matching
+4,096-byte SHA-256 evidence, and exact cleanup/inventory absence for all three
+resources.  Neither the signed upload URL nor the opaque blob token is retained in
+the receipt.
+
+On 2026-08-12 the owner Identity Hub Web OIDC client and application were also
+created, restricted to one organization-owner account, and preflighted with code,
+nonce and PKCE.  The provider client secret, authorization-server RSA key and
+restart-safe portal state key exist only in owner-only mode-`0600` devstand files.
+The checked-in observation deliberately contains no secret.  The local authorization
+server remains bootstrap-only until ChatGPT displays its exact connector callback URI;
+that URI must replace the nonfunctional bootstrap redirect before a live reader token
+can be issued.
+
+The remaining deployment blocker is external host privilege: the guarded installer
+requires the root-installed epoch tunnel broker socket, but the current account has no
+noninteractive sudo authority and the service/socket do not exist.  The public edge
+tunnel itself is healthy: the callback path reaches the local control process, while
+MCP and OAuth return 502 because their reviewed loopback processes are not installed.
+The exact source release/image and exact-head master assets have been prepared, but no
+service restart or deployment was attempted past the broker preflight.
 
 Sanitized evidence:
 
 - [first automated runtime-attestation canary](evidence/2026-08-11-operational-mvp/kaggle-runtime-attestation-canary.json)
 - [second automated runtime-attestation canary](evidence/2026-08-11-operational-mvp/kaggle-runtime-attestation-canary-2.json)
 - [real PostgreSQL 18.4 + pgvector Kaggle runtime canary](evidence/2026-08-11-operational-mvp/kaggle-pg18-runtime-canary-live.json)
+- [live brokered checkpoint upload canary](evidence/2026-08-11-operational-mvp/broker-live-canary-observed.json)
+- [observed Identity Hub owner portal](evidence/2026-08-11-operational-mvp/identity-hub-owner-portal-observed.json)
 - [observed devstand deployment blocker](evidence/2026-08-11-operational-mvp/devstand-live-blocker.json)
 
-Closure requires installing the reviewed control-plane release with the existing
-automated Kaggle credential only in the control service, restoring the public
-callback/MCP/OAuth backends, and then running the pinned control-owned operational
-driver. No interactive OAuth login and no Kaggle credential copied into Notebook
-source, callback bodies, remote MCP, or evidence is part of this design.
+Closure requires the root-owned tunnel broker installation, then installing the
+reviewed control-plane release with the existing automated Kaggle credential only in
+the control service, replacing the bootstrap OAuth redirect with the callback URI
+displayed by ChatGPT, and running the pinned control-owned operational driver. No
+Kaggle credential is copied into Notebook source, callback bodies, remote MCP, or
+evidence.
 
 ## Gates not claimed
 

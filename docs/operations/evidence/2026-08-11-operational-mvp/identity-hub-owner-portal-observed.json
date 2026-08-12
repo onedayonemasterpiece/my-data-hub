@@ -1,0 +1,34 @@
+{
+  "application_assignment_count": 1,
+  "application_status": "ACTIVE",
+  "authorization_endpoint": "https://auth.yandex.cloud/oauth/authorize",
+  "authorized_scopes": [
+    "email",
+    "openid",
+    "profile"
+  ],
+  "client_id": "ajeuq7pc19fg878vq1ik",
+  "client_secret_storage": "owner-only mode-0600 devstand file; value not recorded",
+  "discovery_url": "https://auth.yandex.cloud/.well-known/openid-configuration",
+  "issuer": "https://auth.yandex.cloud",
+  "jwks_uri": "https://auth.yandex.cloud/oauth/jwks/keys",
+  "local_authorization_server": {
+    "bootstrap_client_id": "bootstrap-reader",
+    "bootstrap_redirect_uri": "https://identity.kenigevents.ru/bootstrap/callback",
+    "issuer": "https://identity.kenigevents.ru",
+    "status": "BOOTSTRAP_ONLY_AWAITING_CHATGPT_DISPLAYED_CALLBACK"
+  },
+  "observed_at": "2026-08-12T00:29:00Z",
+  "oidc_application_id": "ek0ogb6pmhuhd28r98fl",
+  "owner_subject": "one explicitly assigned organization-owner account; identifier omitted",
+  "portal_preflight": {
+    "authorization_metadata_http_status": 200,
+    "owner_login_http_status": 303,
+    "secret_in_redirect": false
+  },
+  "redirect_uris": [
+    "https://identity.kenigevents.ru/owner/callback"
+  ],
+  "schema_version": "my-data-hub-identity-hub-live-observation.v1",
+  "token_endpoint": "https://auth.yandex.cloud/oauth/token"
+}
