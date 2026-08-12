@@ -15,6 +15,13 @@ from my_data_hub.connectors.contracts import (
     payload_sha256,
     validate_envelope_bytes,
 )
+from my_data_hub.connectors.durability import (
+    ConnectorDurabilitySupervisor,
+    CoordinatedConnectorCheckpointGateway,
+    VerifiedCheckpointCoordinator,
+    build_connector_checkpoint_gateway,
+)
+from my_data_hub.connectors.errors import ConnectorCapabilityBlocked
 from my_data_hub.connectors.postgres import (
     CommitReceipt,
     PostgresConnectorAcceptanceRepository,
@@ -29,10 +36,11 @@ from my_data_hub.connectors.repository import (
     classify_replay,
 )
 from my_data_hub.connectors.runtime import (
+    ActiveMasterConnectorDurabilityRuntime,
     ActiveMasterConnectorRuntime,
-    ConnectorCapabilityBlocked,
     ConnectorPrincipal,
     ConnectorSessionBroker,
+    DirectoryConnectorDurabilitySessionBroker,
     DirectoryConnectorSessionBroker,
 )
 from my_data_hub.connectors.service import ConnectorAuthorizationError, ConnectorIntakeService
@@ -47,6 +55,7 @@ __all__ = [
     "CONTRACT_VERSION",
     "AcceptanceDisposition",
     "AcceptanceSubmission",
+    "ActiveMasterConnectorDurabilityRuntime",
     "ActiveMasterConnectorRuntime",
     "CommitReceipt",
     "ConnectorAcceptanceRepository",
@@ -58,13 +67,16 @@ __all__ = [
     "ConnectorDeliveryService",
     "ConnectorDurabilityReceipt",
     "ConnectorDurabilityState",
+    "ConnectorDurabilitySupervisor",
     "ConnectorEnvelope",
     "ConnectorIntakeService",
     "ConnectorPrincipal",
     "ConnectorReceipt",
     "ConnectorSessionBroker",
     "ConnectorTransport",
+    "CoordinatedConnectorCheckpointGateway",
     "DeliveryMode",
+    "DirectoryConnectorDurabilitySessionBroker",
     "DirectoryConnectorSessionBroker",
     "DurableConnectorSpool",
     "PostgresConnectorAcceptanceRepository",
@@ -73,6 +85,8 @@ __all__ = [
     "RepositoryDecision",
     "SyntheticConnectorProducer",
     "ValidatedEnvelope",
+    "VerifiedCheckpointCoordinator",
+    "build_connector_checkpoint_gateway",
     "canonical_json_bytes",
     "classify_replay",
     "payload_sha256",

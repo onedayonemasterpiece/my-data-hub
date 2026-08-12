@@ -24,6 +24,8 @@ from my_data_hub.connectors.contracts import (
 from my_data_hub.connectors.durability import (
     ConnectorDurabilityConflict,
     ConnectorDurabilityService,
+    ConnectorDurabilitySupervisor,
+    build_connector_checkpoint_gateway,
     checkpoint_request_for,
 )
 from my_data_hub.connectors.interfaces import ConnectorRegistration, OrchestratorPullInterface
@@ -38,8 +40,10 @@ from my_data_hub.connectors.repository import (
     classify_replay,
 )
 from my_data_hub.connectors.runtime import (
+    ActiveMasterConnectorDurabilityRuntime,
     ActiveMasterConnectorRuntime,
     ConnectorCapabilityBlocked,
+    ConnectorDurabilitySessionRequest,
     ConnectorSessionRequest,
     connector_principal,
 )
@@ -400,6 +404,15 @@ class MemoryDurabilityRepository:
         assert batch_id == self.receipt.acceptance.batch_id
         return self.receipt
 
+    def pending_durability_batch_ids(self, *, limit: int = 25):  # type: ignore[no-untyped-def]
+        if self.receipt.state in {
+            ConnectorDurabilityState.CANONICAL_COMMITTED,
+            ConnectorDurabilityState.CHECKPOINT_REQUESTED,
+            ConnectorDurabilityState.CHECKPOINTING,
+        }:
+            return [self.receipt.acceptance.batch_id][:limit]
+        return []
+
     def record_checkpoint_request(
         self,
         batch_id,
@@ -432,11 +445,19 @@ class MemoryDurabilityRepository:
         exact = status.exact_sha256()
         if self.terminal_sha256 is not None and self.terminal_sha256 != exact:
             raise ConnectorDurabilityConflict("terminal checkpoint receipt changed")
-        self.terminal_sha256 = exact
+        if status.state is ConnectorCheckpointState.DURABLE_COMPLETE:
+            self.terminal_sha256 = exact
+            state = ConnectorDurabilityState.DURABLE_COMPLETE
+        elif status.state is ConnectorCheckpointState.RUNNING:
+            state = ConnectorDurabilityState.CHECKPOINTING
+        else:
+            state = ConnectorDurabilityState.CHECKPOINT_REQUESTED
         self.receipt = self.receipt.model_copy(
             update={
-                "state": ConnectorDurabilityState.DURABLE_COMPLETE,
-                "checkpoint_receipt_sha256": exact,
+                "state": state,
+                "checkpoint_receipt_sha256": (
+                    exact if state is ConnectorDurabilityState.DURABLE_COMPLETE else None
+                ),
                 "checkpoint_id": status.checkpoint_id,
             }
         )
@@ -514,6 +535,165 @@ async def test_missing_checkpoint_gateway_blocks_before_repository_mutation() ->
 
 
 @pytest.mark.asyncio
+async def test_injected_checkpoint_coordinator_recovers_after_restart_to_verified_durable() -> None:
+    acceptance = RecordingTransport(fail=False).submit(synthetic_bytes()).receipt
+    assert acceptance is not None
+    repository = MemoryDurabilityRepository(
+        ConnectorDurabilityReceipt(
+            state=ConnectorDurabilityState.CANONICAL_COMMITTED,
+            acceptance=acceptance,
+            canonical_revision=18,
+            updated_at=ACCEPTED_AT,
+        )
+    )
+
+    class Coordinator:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+            self.complete = False
+
+        def request_verified_checkpoint(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls.append(kwargs)
+            return {**kwargs, "state": "REQUESTED"}
+
+        def checkpoint_status(self, operation_id: str):  # type: ignore[no-untyped-def]
+            request = self.calls[0]
+            common = {
+                **request,
+                "operation_id": operation_id,
+                "state": "DURABLE_COMPLETE" if self.complete else "RUNNING",
+            }
+            if self.complete:
+                common.update(
+                    {
+                        "checkpoint_status": "VERIFIED",
+                        "checkpoint_id": "checkpoint-18",
+                        "current_checkpoint_id": "checkpoint-18",
+                        "manifest_sha256": "d" * 64,
+                        "verified_at": ACCEPTED_AT.isoformat(),
+                    }
+                )
+            return common
+
+    coordinator = Coordinator()
+    gateway = build_connector_checkpoint_gateway(coordinator)
+    assert gateway is not None
+    first_process = ConnectorDurabilitySupervisor(repository, gateway)
+    assert await first_process.reconcile_once() == 0
+    assert repository.receipt.state is ConnectorDurabilityState.CHECKPOINTING
+    assert len(coordinator.calls) == 1
+
+    coordinator.complete = True
+    restarted_process = ConnectorDurabilitySupervisor(repository, gateway)
+    assert await restarted_process.reconcile_once() == 1
+    assert repository.receipt.state is ConnectorDurabilityState.DURABLE_COMPLETE
+    assert repository.receipt.checkpoint_id == "checkpoint-18"
+    assert len(coordinator.calls) == 1
+    assert coordinator.calls[0] == {
+        "operation_id": f"connector-checkpoint:{repository.receipt.checkpoint_request_id}",
+        "canonical_revision": 18,
+        "idempotency_key": repository.receipt.checkpoint_request_id,
+    }
+
+
+def test_checkpoint_coordinator_adapter_is_fail_closed_and_requires_verified_head() -> None:
+    assert build_connector_checkpoint_gateway(None) is None
+    with pytest.raises(ConnectorCapabilityBlocked) as invalid:
+        build_connector_checkpoint_gateway(object())  # type: ignore[arg-type]
+    assert invalid.value.code == "CONNECTOR_VERIFIED_CHECKPOINT_COORDINATOR_INVALID"
+
+    class IncompleteCoordinator:
+        def request_verified_checkpoint(self, **kwargs):  # type: ignore[no-untyped-def]
+            return {
+                **kwargs,
+                "state": "DURABLE_COMPLETE",
+                "checkpoint_status": "VERIFIED",
+                "checkpoint_id": "checkpoint-18",
+                "current_checkpoint_id": "different-head",
+                "manifest_sha256": "d" * 64,
+                "verified_at": ACCEPTED_AT.isoformat(),
+            }
+
+        def checkpoint_status(self, operation_id: str):  # type: ignore[no-untyped-def]
+            raise AssertionError(operation_id)
+
+    acceptance = RecordingTransport(fail=False).submit(synthetic_bytes()).receipt
+    assert acceptance is not None
+    request = checkpoint_request_for(
+        ConnectorDurabilityReceipt(
+            state=ConnectorDurabilityState.CANONICAL_COMMITTED,
+            acceptance=acceptance,
+            canonical_revision=18,
+            updated_at=ACCEPTED_AT,
+        )
+    )
+    gateway = build_connector_checkpoint_gateway(IncompleteCoordinator())
+    assert gateway is not None
+    with pytest.raises(ConnectorCapabilityBlocked) as incomplete:
+        gateway.request_checkpoint(request)
+    assert incomplete.value.code == "CONNECTOR_CHECKPOINT_VERIFIED_RECEIPT_INCOMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_durability_runtime_binds_committer_session_to_exact_active_epoch() -> None:
+    class Resolver:
+        def resolve_master(self, principal) -> MasterSnapshot:  # type: ignore[no-untyped-def]
+            return MasterSnapshot(
+                MasterState.ACTIVE,
+                instance_id="master-instance",
+                epoch=9,
+                capabilities=frozenset({"sql", "fts", "pgvector"}),
+            )
+
+        def ensure_master(self, principal, *, intent: str):  # type: ignore[no-untyped-def]
+            raise AssertionError((principal, intent))
+
+    class Gateway:
+        def request_checkpoint(self, request):  # type: ignore[no-untyped-def]
+            raise AssertionError(request)
+
+        def checkpoint_status(self, operation_id: str):  # type: ignore[no-untyped-def]
+            raise AssertionError(operation_id)
+
+    class Session:
+        probed = False
+        closed = False
+
+        async def probe(self) -> None:
+            self.probed = True
+
+        async def reconcile_once(self, *, limit: int) -> int:
+            assert limit == 7
+            return 2
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class Broker:
+        def __init__(self) -> None:
+            self.request: ConnectorDurabilitySessionRequest | None = None
+            self.sessions: list[Session] = []
+
+        def issue_durability_session(
+            self, request: ConnectorDurabilitySessionRequest
+        ) -> Session:
+            self.request = request
+            session = Session()
+            self.sessions.append(session)
+            return session
+
+    broker = Broker()
+    gateway = Gateway()
+    runtime = ActiveMasterConnectorDurabilityRuntime(Resolver(), broker, gateway)  # type: ignore[arg-type]
+    await runtime.preflight()
+    assert await runtime.reconcile_once(limit=7) == 2
+    assert broker.request == ConnectorDurabilitySessionRequest("master-instance", 9)
+    assert broker.request.role == "canonical_committer"
+    assert broker.sessions[0].probed is True
+    assert all(session.closed for session in broker.sessions)
+
+
+@pytest.mark.asyncio
 async def test_active_master_runtime_ensures_absent_master_before_any_mutation() -> None:
     class Resolver:
         ensured = 0
@@ -558,7 +738,7 @@ async def test_active_master_runtime_binds_connector_session_to_exact_epoch() ->
                 operation_id="master-operation",
                 instance_id="master-instance",
                 epoch=7,
-                capabilities=frozenset({"connector-intake"}),
+                capabilities=frozenset({"sql"}),
             )
 
         def ensure_master(self, principal, *, intent: str) -> EnsureMasterReceipt:  # type: ignore[no-untyped-def]

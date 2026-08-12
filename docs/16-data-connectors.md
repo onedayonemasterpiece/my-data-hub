@@ -1,6 +1,6 @@
 # Data connector contract
 
-Status: `INTERNAL CONNECTOR PLANE CLOSED / EXTERNAL CREDENTIAL HANDOFF BLOCKED`
+Status: `PRODUCTION INTAKE WIRED / CHECKPOINT COORDINATOR AND ROLE HANDOFF BLOCKED`
 
 Producer durable spool -> register batch/ensure master -> resolve ACTIVE latest epoch ->
 short-lived connector role -> connector-specific landing in Kaggle PostgreSQL -> validate,
@@ -14,6 +14,30 @@ tables. Canonical application and semantic outbox share one master transaction.
 
 Multi-consumer scope/application design from ADR-0015 remains accepted design and pending.
 PR-A performs no live connector deployment or producer change.
+
+The production connector-only API is now constructible without a database URL and is
+defined as the opt-in `connector-intake` Compose service. It shares only the lightweight
+control ledger and read-only epoch credential directory, resolves or ensures the ACTIVE
+master, and opens a bounded role-specific PostgreSQL session for each request. Before
+accepting producer bytes it also proves that the durability path is callable. A background
+reconciler re-resolves the exact epoch and scans persisted PostgreSQL durability rows, so a
+process restart does not lose `CANONICAL_COMMITTED`, `CHECKPOINT_REQUESTED`, or
+`CHECKPOINTING` work.
+
+The checkpoint adapter accepts only an explicitly injected coordinator exposing the exact
+`request_verified_checkpoint(operation_id, canonical_revision, idempotency_key)` and
+`checkpoint_status(operation_id)` boundary. It records `DURABLE_COMPLETE` only when the
+returned checkpoint is `VERIFIED`, is the current checkpoint head, and includes the exact
+checkpoint/manifest/timestamp evidence. There is intentionally no environment-selected or
+inferred fallback. The current general master checkpoint coordinator has not yet injected
+that boundary into the production entry point, so production submissions fail before
+mutation with `CONNECTOR_VERIFIED_CHECKPOINT_COORDINATOR_UNAVAILABLE`.
+
+Two further internal handoffs remain outside this connector lane: the master Notebook must
+publish short-lived `connector` and `canonical_committer` epoch credentials (today it
+publishes reader/operator credentials), and the control-plane installer must explicitly
+opt the new Compose profile into deployment. Therefore this change is runtime wiring and
+restart-safe machinery, not evidence of a live deployment or full Gate L closure.
 
 ## Preserved detailed contract — bound by ADR-0016
 

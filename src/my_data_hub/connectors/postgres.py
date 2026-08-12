@@ -365,6 +365,23 @@ class PostgresConnectorAcceptanceRepository:
             acceptance=ConnectorReceipt.model_validate(row[7]),
         )
 
+    def pending_durability_batch_ids(self, *, limit: int = 25) -> list[UUID]:
+        if not 1 <= limit <= 100:
+            raise ValueError("connector durability scan limit must be between 1 and 100")
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT batch_id
+                FROM integration.connector_durability
+                WHERE state IN ('CANONICAL_COMMITTED', 'CHECKPOINT_REQUESTED', 'CHECKPOINTING')
+                ORDER BY updated_at, batch_id
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+        return [UUID(str(row[0])) for row in rows]
+
     def record_checkpoint_request(
         self,
         batch_id: UUID,

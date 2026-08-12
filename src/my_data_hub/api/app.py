@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
+from contextlib import asynccontextmanager, suppress
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -13,10 +15,10 @@ from my_data_hub.api.intake import WorkerResultConflict, WorkerResultRepository
 from my_data_hub.artifact_store import LocalArtifactStore
 from my_data_hub.config import ConfigurationError, Settings
 from my_data_hub.connectors.contracts import ConnectorContractError
+from my_data_hub.connectors.errors import ConnectorCapabilityBlocked
 from my_data_hub.connectors.repository import AcceptanceDisposition
 from my_data_hub.connectors.runtime import (
     ActiveMasterConnectorRuntime,
-    ConnectorCapabilityBlocked,
     connector_principal,
 )
 from my_data_hub.connectors.service import ConnectorAuthorizationError
@@ -95,8 +97,13 @@ def create_app(
     settings: Settings,
     *,
     connector_runtime: ActiveMasterConnectorRuntime | None = None,
+    connector_durability_runtime: Any | None = None,
+    worker_results_enabled: bool = True,
+    durability_interval_seconds: float = 5.0,
 ) -> FastAPI:
-    if settings.environment in {"prod", "production"}:
+    if durability_interval_seconds <= 0:
+        raise ValueError("connector durability interval must be positive")
+    if settings.environment in {"prod", "production"} and worker_results_enabled:
         missing = [
             name
             for name, value in (
@@ -111,15 +118,48 @@ def create_app(
             )
         if not settings.worker_result_token:
             raise ConfigurationError("worker result token is required by the production API")
+
+    async def reconcile_durability(stop: asyncio.Event) -> None:
+        assert connector_durability_runtime is not None
+        while not stop.is_set():
+            with suppress(ConnectorCapabilityBlocked, OSError, RuntimeError):
+                await connector_durability_runtime.reconcile_once()
+            # The next bounded interval re-resolves the ACTIVE epoch. No
+            # durability state is kept in this devstand process.
+            with suppress(TimeoutError):
+                await asyncio.wait_for(
+                    stop.wait(), timeout=durability_interval_seconds
+                )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):  # type: ignore[no-untyped-def]
+        durability_stop = asyncio.Event()
+        durability_task: asyncio.Task[None] | None = None
+        if connector_durability_runtime is not None:
+            durability_task = asyncio.create_task(
+                reconcile_durability(durability_stop)
+            )
+        try:
+            yield
+        finally:
+            durability_stop.set()
+            if durability_task is not None:
+                await durability_task
+
     app = FastAPI(
         title="my-data-hub control API",
         version="0.1.0",
         docs_url=None if settings.environment in {"prod", "production"} else "/docs",
         redoc_url=None,
+        lifespan=lifespan,
     )
-    repository = WorkerResultRepository(
-        settings.application_database_url or settings.database_url,
-        LocalArtifactStore(settings.artifact_root),
+    repository = (
+        WorkerResultRepository(
+            settings.application_database_url or settings.database_url,
+            LocalArtifactStore(settings.artifact_root),
+        )
+        if worker_results_enabled
+        else None
     )
     authenticate_worker = _worker_auth(settings)
     authenticate_connector = _connector_auth(settings)
@@ -136,7 +176,9 @@ def create_app(
                     early_response = JSONResponse(
                         status_code=400, content={"detail": "invalid content-length"}
                     )
-                elif declared_size > settings.worker_result_max_bytes:
+                elif declared_size > max(
+                    settings.worker_result_max_bytes, settings.connector_intake_max_bytes
+                ):
                     early_response = JSONResponse(
                         status_code=413, content={"detail": "request too large"}
                     )
@@ -153,10 +195,21 @@ def create_app(
 
     @app.get("/health/live")
     def live() -> dict[str, Any]:
-        return {"ok": True, "component": "my-data-hub-control-api"}
+        return {
+            "ok": True,
+            "component": (
+                "my-data-hub-control-api"
+                if worker_results_enabled
+                else "my-data-hub-connector-intake"
+            ),
+        }
 
     @app.get("/health/ready")
     def ready() -> dict[str, Any]:
+        if not worker_results_enabled:
+            # Readiness is deliberately local. An absent/sleeping master is
+            # recovered through ensure-master on the first authenticated call.
+            return {"ok": True, "component": "my-data-hub-connector-intake"}
         health = verify_database(settings.application_database_url or settings.database_url)
         if not health.ok:
             raise HTTPException(status_code=503, detail={"findings": health.findings})
@@ -167,20 +220,23 @@ def create_app(
             "canonical_revision": health.canonical_revision,
         }
 
-    @app.post(
-        "/v1/worker-results",
-        status_code=status.HTTP_202_ACCEPTED,
-        dependencies=[Depends(authenticate_worker)],
-    )
-    async def submit_worker_result(request: Request) -> dict[str, Any]:
-        raw = await _bounded_json_body(request, settings.worker_result_max_bytes)
-        try:
-            envelope = NotebookResult.model_validate(raw)
-            return repository.store(envelope)
-        except ValidationError as exc:
-            raise HTTPException(status_code=422, detail=exc.errors()) from exc
-        except WorkerResultConflict as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if worker_results_enabled:
+
+        @app.post(
+            "/v1/worker-results",
+            status_code=status.HTTP_202_ACCEPTED,
+            dependencies=[Depends(authenticate_worker)],
+        )
+        async def submit_worker_result(request: Request) -> dict[str, Any]:
+            raw = await _bounded_json_body(request, settings.worker_result_max_bytes)
+            try:
+                envelope = NotebookResult.model_validate(raw)
+                assert repository is not None
+                return repository.store(envelope)
+            except ValidationError as exc:
+                raise HTTPException(status_code=422, detail=exc.errors()) from exc
+            except WorkerResultConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/intake/v1/batches", status_code=status.HTTP_202_ACCEPTED)
     async def submit_connector_batch(
@@ -201,7 +257,19 @@ def create_app(
                     "mutation_started": False,
                 },
             )
+        if connector_durability_runtime is None:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "CONNECTOR_DURABILITY_RUNTIME_UNAVAILABLE",
+                    "retryable": True,
+                    "mutation_started": False,
+                },
+            )
         try:
+            # Do not accept new producer bytes unless this exact process can
+            # continue canonical commits through a verified checkpoint.
+            await connector_durability_runtime.preflight()
             decision = await connector_runtime.submit(
                 exact_bytes,
                 principal=connector_principal(connector_id),

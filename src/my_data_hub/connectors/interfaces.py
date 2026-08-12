@@ -12,7 +12,7 @@ from my_data_hub.connectors.contracts import (
     sha256_bytes,
     validate_envelope_bytes,
 )
-from my_data_hub.connectors.runtime import ConnectorCapabilityBlocked
+from my_data_hub.connectors.errors import ConnectorCapabilityBlocked
 from my_data_hub.connectors.spool import DurableConnectorSpool, SpoolItem
 
 

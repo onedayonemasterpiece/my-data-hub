@@ -76,7 +76,22 @@ def test_compose_has_exact_opt_in_profile_split_secret_boundaries_and_loopback_p
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
     assert compose["x-my-data-hub-opt-in-profile"] == "remote-mcp"
     services = compose["services"]
-    assert set(services) == {"control-plane", "remote-mcp", "oauth-server"}
+    assert set(services) == {
+        "connector-intake",
+        "control-plane",
+        "remote-mcp",
+        "oauth-server",
+    }
+    connector = services["connector-intake"]
+    assert connector["profiles"] == ["connectors"]
+    assert connector["entrypoint"] == [
+        "python",
+        "-m",
+        "my_data_hub.api.connector_runtime",
+    ]
+    assert connector["depends_on"] == {
+        "control-plane": {"condition": "service_healthy"}
+    }
     assert services["remote-mcp"]["profiles"] == ["remote-mcp"]
     assert services["oauth-server"]["profiles"] == ["remote-mcp"]
     assert services["remote-mcp"]["depends_on"] == {
@@ -86,11 +101,20 @@ def test_compose_has_exact_opt_in_profile_split_secret_boundaries_and_loopback_p
     assert services["oauth-server"]["depends_on"] == {"control-plane": {"condition": "service_healthy"}}
 
     env_files = {name: service["env_file"][0]["path"] for name, service in services.items()}
-    assert len(set(env_files.values())) == 3
+    assert len(set(env_files.values())) == 4
     assert all(service["env_file"][0]["required"] is True for service in services.values())
     assert "provider.env" in env_files["control-plane"]
     assert "mcp-reader.env" in env_files["remote-mcp"]
     assert "oauth.env" in env_files["oauth-server"]
+    assert "connectors.env" in env_files["connector-intake"]
+    assert set(connector["volumes"]) == {
+        "${MY_DATA_HUB_CONTROL_LEDGER_DIR:-./.state/control-ledger}:/ledger",
+        "${MY_DATA_HUB_MASTER_SESSION_DIR:-./.state/master-sessions}:/sessions:ro",
+    }
+    assert not any(
+        "DATABASE_URL" in name or name.startswith("PG")
+        for name in connector["environment"]
+    )
     oauth = services["oauth-server"]
     assert oauth["environment"]["MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE"] == (
         "/run/secrets/owner-oidc-client-secret"
