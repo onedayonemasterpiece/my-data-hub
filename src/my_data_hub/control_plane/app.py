@@ -893,6 +893,8 @@ def create_app(
                 "provider.resources.version",
                 "provider.resources.run",
                 "provider.resources.read",
+                "provider.resources.list",
+                "provider.resources.download",
                 "provider.inventory.live",
                 "provider.resources.delete",
                 "provider.acceptance.dataset.lifecycle",

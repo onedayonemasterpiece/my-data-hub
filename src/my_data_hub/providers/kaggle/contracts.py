@@ -304,6 +304,24 @@ class KaggleDatasetIdentity(BaseModel):
     observed_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class ExactDatasetBatchFile:
+    """One verified regular file; content is intentionally absent from repr."""
+
+    path: str
+    byte_size: int
+    sha256: str
+    content: bytes = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ExactDatasetBatch:
+    """Bounded readback of an exact private MCP Dataset version."""
+
+    identity: KaggleDatasetIdentity
+    files: tuple[ExactDatasetBatchFile, ...]
+
+
 class KaggleKernelSourceIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -486,6 +504,16 @@ class KaggleApiProtocol(Protocol):
         unzip: bool = False,
         licenses: list[str] | None = None,
     ) -> None: ...
+
+    def dataset_download_file(
+        self,
+        dataset: str,
+        file_name: str,
+        path: str | None = None,
+        force: bool = False,
+        quiet: bool = True,
+        licenses: list[str] | None = None,
+    ) -> bool: ...
 
     def dataset_delete(self, owner_slug: str | None, dataset_slug: str, no_confirm: bool = False) -> bool: ...
 

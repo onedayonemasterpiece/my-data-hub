@@ -20,6 +20,8 @@ from my_data_hub.mcp.oauth import AccessIdentity, OAuthBearerValidator
 from my_data_hub.mcp.provider_schemas import (
     ProviderCreatePayload,
     ProviderDeletePayload,
+    ProviderDownloadPayload,
+    ProviderListPayload,
     ProviderReadPayload,
     ProviderRunPayload,
     ProviderVersionPayload,
@@ -381,6 +383,8 @@ def create_server(
         | ProviderVersionPayload
         | ProviderRunPayload
         | ProviderReadPayload
+        | ProviderListPayload
+        | ProviderDownloadPayload
         | ProviderDeletePayload,
     ) -> dict[str, Any]:
         return {
@@ -434,6 +438,28 @@ def create_server(
             provider_arguments(resource_ref, control_class, private, payload),
         )
 
+    async def provider_resources_list(
+        resource_ref: str,
+        control_class: Literal["mcp_managed", "mcp_exchange"],
+        private: Literal[True],
+        payload: ProviderListPayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.resources.list",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
+    async def provider_resources_download(
+        resource_ref: str,
+        control_class: Literal["mcp_managed", "mcp_exchange"],
+        private: Literal[True],
+        payload: ProviderDownloadPayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.resources.download",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
     async def provider_inventory_live(limit: int = 100) -> dict[str, Any]:
         return await service.invoke("provider.inventory.live", {"limit": limit})
 
@@ -473,6 +499,8 @@ def create_server(
         "provider.resources.version": provider_resources_version,
         "provider.resources.run": provider_resources_run,
         "provider.resources.read": provider_resources_read,
+        "provider.resources.list": provider_resources_list,
+        "provider.resources.download": provider_resources_download,
         "provider.inventory.live": provider_inventory_live,
         "provider.resources.delete": provider_resources_delete,
         "bloggers.list": bloggers_list,

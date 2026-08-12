@@ -283,6 +283,8 @@ async def test_provider_tools_advertise_closed_action_specific_input_schemas() -
         "provider.resources.version": "ProviderVersionPayload",
         "provider.resources.run": "ProviderRunPayload",
         "provider.resources.read": "ProviderReadPayload",
+        "provider.resources.list": "ProviderListPayload",
+        "provider.resources.download": "ProviderDownloadPayload",
         "provider.resources.delete": "ProviderDeletePayload",
     }
     for name, definition in expected_payloads.items():
@@ -331,6 +333,15 @@ async def test_provider_tools_advertise_closed_action_specific_input_schemas() -
     ]["anyOf"][0]["$ref"]
     assert exchange_ref.endswith("/ExchangeManifest")
     assert create_schema["$defs"]["ExchangeManifest"]["additionalProperties"] is False
+    binary = create_schema["$defs"]["ProviderBinaryFile"]
+    assert binary["additionalProperties"] is False
+    assert binary["properties"]["encoding"]["const"] == "base64"
+    assert binary["properties"]["byte_size"]["maximum"] == 262_144
+    download = tools["provider.resources.download"]
+    assert download.annotations.read_only_hint is True
+    assert download.input_schema["$defs"]["ProviderDownloadPayload"]["properties"][
+        "max_bytes"
+    ]["maximum"] == 131_072
 
 
 @pytest.mark.asyncio

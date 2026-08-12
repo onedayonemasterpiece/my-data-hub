@@ -408,3 +408,47 @@ exact creator may replay the claim-bound, idempotent delete after expiry. Its st
 bounded retention receipt binds the package/manifest expiry, seven-day maximum TTL,
 claim, operation/effect and observed absent resource state without storing payload bytes.
 These are code and mock-provider proofs until a real modern Kaggle token run is recorded.
+
+### 8.5 Bounded ChatGPT JSON batch gateway
+
+The provider-operator profile exposes a directly callable, binary-safe quick-release
+path for exact private `mcp_managed` and `mcp_exchange` Dataset versions. Existing UTF-8
+`files: {path: text}` requests remain valid. A binary value is an exact closed object:
+
+```json
+{
+  "encoding": "base64",
+  "content_base64": "AAECAw==",
+  "byte_size": 4,
+  "sha256": "<64 lowercase hex characters>"
+}
+```
+
+The gateway decodes strict canonical base64 and compares both declared size and SHA-256
+before the single injected Kaggle adapter sees bytes. A request has at most 100 files;
+one binary file is at most 256 KiB and mixed binary content is at most 320 KiB raw. The
+512 KiB semantic/internal JSON request limits still apply, so base64 expansion and the
+surrounding manifest make the practical raw batch maximum smaller than 320 KiB. Text-only
+requests preserve their existing 256 KiB UTF-8 total bound.
+
+`provider.resources.list` accepts the exact task claim, an integer cursor and a limit up
+to 50. It compares live exact-version Kaggle name/size metadata with the durable
+path/size/hash content manifest before returning a bounded page; it does not download the
+Dataset. `provider.resources.download` accepts one manifest path, an offset and at most
+128 KiB. The sole adapter downloads only that file from the exact numeric Dataset
+version, rejects files over 64 MiB, rechecks size and SHA-256, then returns canonical
+base64 plus chunk SHA-256 and deterministic `next_offset`. A caller repeats exact offsets
+and verifies the final file hash to assemble the file. No signed URL, blob grant, Kaggle
+credential or filesystem path crosses MCP.
+
+Both reads are bound to the durable task claim and registered version. `mcp_managed`
+requires the exact creating principal; `mcp_exchange` retains creator/recipient/expiry
+authorization. Provider-owned manifests are never listed as content or downloadable.
+Traversal, symlinks, reserved metadata, checkpoint/PostgreSQL artifact names, unexpected
+provider files, oversize files and content tamper fail before returning bytes. These are
+code/mock-provider proofs, not a live Kaggle round-trip receipt.
+
+Dataset versions registered before this contract have no durable content manifest and
+therefore fail closed for file-list/download; their existing metadata-only
+`provider.resources.read` contract remains compatible. Creating a new exact version
+under this contract establishes the required manifest.

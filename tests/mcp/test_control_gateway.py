@@ -91,6 +91,12 @@ async def test_split_reader_routes_only_exact_provider_actions_to_control_author
     assert (await split.invoke_control("provider.resources.delete", {}, identity()))["target"] == (
         "single-provider-authority"
     )
+    assert (await split.invoke_control("provider.resources.list", {}, identity()))["target"] == (
+        "single-provider-authority"
+    )
+    assert (await split.invoke_control("provider.resources.download", {}, identity()))["target"] == (
+        "single-provider-authority"
+    )
     assert (await split.invoke_control("data.change.status", {}, identity()))["target"] == "local-ledger"
     acceptance_identity = replace(identity(), scopes=frozenset({"acceptance:operate"}))
     assert (
@@ -98,7 +104,7 @@ async def test_split_reader_routes_only_exact_provider_actions_to_control_author
             "acceptance.scenario.status", {"task_id": "00000000-0000-0000-0000-000000000001"}, acceptance_identity
         )
     )["target"] == "single-provider-authority"
-    assert len(provider.calls) == 2 and len(local.calls) == 1
+    assert len(provider.calls) == 4 and len(local.calls) == 1
 
 
 def test_control_gateway_token_file_must_be_private(tmp_path: Path) -> None:

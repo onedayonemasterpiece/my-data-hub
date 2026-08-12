@@ -227,6 +227,7 @@ def test_installed_official_kaggle_224_surface_matches_protocol() -> None:
             "dir_mode",
         },
         "dataset_download_files": {"dataset", "path", "force", "quiet", "unzip"},
+        "dataset_download_file": {"dataset", "file_name", "path", "force", "quiet"},
         "dataset_delete": {"owner_slug", "dataset_slug", "no_confirm"},
         "kernels_push": {"folder", "timeout", "acc"},
         "kernels_pull": {"kernel", "path", "metadata", "quiet"},

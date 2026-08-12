@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import importlib.metadata
 import json
 import re
@@ -32,6 +33,8 @@ from .contracts import (
     BrokeredDatasetFile,
     DatasetMutationResult,
     EffectOutcome,
+    ExactDatasetBatch,
+    ExactDatasetBatchFile,
     KaggleAmbiguousMutation,
     KaggleApiProtocol,
     KaggleContractError,
@@ -1004,6 +1007,273 @@ class KaggleProviderAdapter:
                 version=version,
                 destination=Path(temporary),
             )
+
+    def list_private_dataset_files_exact(
+        self,
+        *,
+        claim: TaskResourceClaim,
+        max_files: int = 102,
+        max_total_bytes: int = 64 * 1024 * 1024,
+    ) -> tuple[tuple[str, int], ...]:
+        """List exact-version private Dataset metadata for a durable MCP claim."""
+
+        self.journal.assert_resource_claim(claim)
+        if claim.kind is not ProviderKind.DATASET or claim.control_class not in {
+            ControlClass.MCP_MANAGED,
+            ControlClass.MCP_EXCHANGE,
+        }:
+            raise KagglePolicyError("file listing requires an exact MCP Dataset claim")
+        ref = _normalized_ref(claim.provider_ref)
+        if ref.split("/", 1)[0] != self.identity.username:
+            raise KagglePolicyError("MCP Dataset target is not owned by the authenticated identity")
+        observed, observed_version, _provider_id = self._find_resource(ref, ProviderKind.DATASET)
+        if observed.private is not True:
+            raise KagglePolicyError("dataset privacy was not explicitly proven private")
+        if observed_version is not None and claim.provider_version > observed_version:
+            raise KaggleNotFound("requested dataset version is newer than the provider current version")
+        return self._list_private_dataset_files_exact(
+            provider_ref=ref,
+            version=claim.provider_version,
+            max_files=max_files,
+            max_total_bytes=max_total_bytes,
+        )
+
+    def download_mcp_dataset_file_exact(
+        self,
+        *,
+        claim: TaskResourceClaim,
+        path: str,
+        expected_size: int,
+        expected_sha256: str,
+        max_file_bytes: int = 64 * 1024 * 1024,
+    ) -> ExactDatasetBatchFile:
+        """Download and verify one exact-version file via the pinned SDK."""
+
+        _validate_relative_path(path)
+        if claim.provider_ref.split("/", 1)[0] != self.identity.username:
+            raise KagglePolicyError("MCP Dataset target is not owned by the authenticated identity")
+        if (
+            isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size < 0
+            or expected_size > max_file_bytes
+            or not _SHA256_PATTERN.fullmatch(expected_sha256)
+        ):
+            raise KaggleContractError("exact MCP Dataset file declaration is invalid")
+        listed = self.list_private_dataset_files_exact(
+            claim=claim,
+            max_files=102,
+            max_total_bytes=64 * 1024 * 1024,
+        )
+        if (path, expected_size) not in listed:
+            raise KagglePolicyError("Kaggle Dataset file metadata differs from the durable manifest")
+        with tempfile.TemporaryDirectory(prefix="my-data-hub-mcp-file-") as temporary:
+            destination = Path(temporary) / "download"
+            _prepare_destination(destination)
+            self.retry.call(
+                "mcp_dataset_download_file",
+                lambda: self.api.dataset_download_file(
+                    f"{claim.provider_ref}/{claim.provider_version}",
+                    path,
+                    path=str(destination),
+                    force=True,
+                    quiet=True,
+                    licenses=[],
+                ),
+            )
+            entries = _tree_entries(destination)
+            if len(entries) != 1:
+                raise KaggleContractError("Kaggle single-file download returned an inexact artifact tree")
+            local_path = destination.joinpath(*str(entries[0]["path"]).split("/"))
+            if int(entries[0]["byte_size"]) != expected_size:
+                raise KagglePolicyError("Kaggle Dataset file size differs from the durable manifest")
+            content = local_path.read_bytes()
+            digest = hashlib.sha256(content).hexdigest()
+            if len(content) != expected_size or not hmac.compare_digest(digest, expected_sha256):
+                raise KagglePolicyError("Kaggle Dataset file hash differs from the durable manifest")
+            return ExactDatasetBatchFile(
+                path=path,
+                byte_size=expected_size,
+                sha256=expected_sha256,
+                content=content,
+            )
+
+    def download_mcp_dataset_batch_exact(
+        self,
+        *,
+        claim: TaskResourceClaim,
+        max_files: int,
+        max_total_bytes: int,
+    ) -> ExactDatasetBatch:
+        """Read a small exact MCP Dataset version without exposing SDK capabilities.
+
+        Kaggle's bulk downloader is invoked only after its exact-version file
+        metadata proves the package is within the caller's hard bounds.  The
+        extracted tree, provider control manifest, package fingerprint, paths,
+        sizes and hashes are all checked again before any bytes are returned.
+        """
+
+        self.journal.assert_resource_claim(claim)
+        if claim.kind is not ProviderKind.DATASET or claim.control_class not in {
+            ControlClass.MCP_MANAGED,
+            ControlClass.MCP_EXCHANGE,
+        }:
+            raise KagglePolicyError("batch read requires an exact MCP Dataset claim")
+        if not 1 <= max_files <= 102 or not 1 <= max_total_bytes <= 512 * 1024:
+            raise KaggleContractError("MCP Dataset batch read bounds are invalid")
+        ref = _normalized_ref(claim.provider_ref)
+        observed, observed_version, _provider_id = self._find_resource(ref, ProviderKind.DATASET)
+        if observed.private is not True:
+            raise KagglePolicyError("dataset privacy was not explicitly proven private")
+        if observed_version is not None and claim.provider_version > observed_version:
+            raise KaggleNotFound("requested dataset version is newer than the provider current version")
+
+        expected = self._list_private_dataset_files_exact(
+            provider_ref=ref,
+            version=claim.provider_version,
+            max_files=max_files,
+            max_total_bytes=max_total_bytes,
+        )
+        with tempfile.TemporaryDirectory(prefix="my-data-hub-mcp-batch-") as temporary:
+            parent = Path(temporary)
+            destination = parent / "dataset"
+            _prepare_destination(destination)
+            self.retry.call(
+                "mcp_dataset_download_files",
+                lambda: self.api.dataset_download_files(
+                    f"{ref}/{claim.provider_version}",
+                    path=str(destination),
+                    force=True,
+                    quiet=True,
+                    unzip=True,
+                    licenses=[],
+                ),
+            )
+            if destination.is_symlink() or any(path != destination for path in parent.iterdir()):
+                raise KaggleContractError("Kaggle Dataset extraction escaped its isolated destination")
+            entries = _tree_entries(destination)
+            observed_files = tuple(
+                sorted((str(item["path"]), int(item["byte_size"])) for item in entries)
+            )
+            if observed_files != expected:
+                raise KagglePolicyError("Kaggle Dataset extracted tree differs from exact file metadata")
+            package_sha = tree_sha256(destination)
+            fingerprint = ProviderFingerprint(
+                value=sha256_value(
+                    {
+                        "provider_ref": ref,
+                        "version": claim.provider_version,
+                        "privacy": "private",
+                        "package_sha256": package_sha,
+                    }
+                )
+            )
+            if fingerprint != claim.fingerprint:
+                raise KagglePolicyError("Kaggle Dataset content differs from the durable task claim")
+            manifest_path = destination / CONTROL_MANIFEST_NAME
+            try:
+                manifest = json.loads(manifest_path.read_bytes())
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise KagglePolicyError("Kaggle Dataset control manifest is unavailable") from exc
+            expected_manifest = {
+                "task_id": str(claim.task_id),
+                "effect_id": str(claim.effect_id),
+                "provider_ref": claim.provider_ref,
+                "kind": claim.kind.value,
+                "control_class": claim.control_class.value,
+                "disposable": claim.disposable,
+                "private": True,
+            }
+            if (
+                not isinstance(manifest, Mapping)
+                or manifest.get("contract_version") != "my-data-hub-kaggle-resource.v1"
+                or any(manifest.get(key) != value for key, value in expected_manifest.items())
+            ):
+                raise KagglePolicyError("Kaggle Dataset control manifest differs from the durable task claim")
+
+            files: list[ExactDatasetBatchFile] = []
+            for item in entries:
+                path = str(item["path"])
+                if path == CONTROL_MANIFEST_NAME:
+                    continue
+                content = destination.joinpath(*path.split("/")).read_bytes()
+                digest = hashlib.sha256(content).hexdigest()
+                if len(content) != int(item["byte_size"]) or digest != str(item["sha256"]):
+                    raise KagglePolicyError("Kaggle Dataset file changed during bounded readback")
+                files.append(
+                    ExactDatasetBatchFile(
+                        path=path,
+                        byte_size=len(content),
+                        sha256=digest,
+                        content=content,
+                    )
+                )
+            identity = KaggleDatasetIdentity(
+                provider_ref=ref,
+                version=claim.provider_version,
+                privacy="private",
+                package_sha256=package_sha,
+                fingerprint=fingerprint,
+                observed_at=self.clock(),
+            )
+            return ExactDatasetBatch(identity=identity, files=tuple(files))
+
+    def _list_private_dataset_files_exact(
+        self,
+        *,
+        provider_ref: str,
+        version: int,
+        max_files: int,
+        max_total_bytes: int,
+    ) -> tuple[tuple[str, int], ...]:
+        rows: list[tuple[str, int]] = []
+        seen_paths: set[str] = set()
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        total = 0
+        for _ in range(4):
+            response, _attempts = self.retry.call(
+                "mcp_dataset_list_files",
+                lambda cursor=cursor: self.api.dataset_list_files(
+                    f"{provider_ref}/{version}", page_token=cursor, page_size=100
+                ),
+            )
+            if str(_field(response, "error_message", "errorMessage") or "").strip():
+                raise KaggleContractError("Kaggle exact Dataset file metadata was unavailable")
+            page = _field(response, "files", "dataset_files", "datasetFiles") or []
+            if not isinstance(page, Sequence) or isinstance(page, (str, bytes)) or len(page) > 100:
+                raise KaggleContractError("Kaggle exact Dataset file metadata page is invalid")
+            for row in page:
+                path = str(_field(row, "name") or "")
+                _validate_relative_path(path)
+                if path in seen_paths:
+                    raise KaggleContractError("Kaggle exact Dataset file metadata repeated a path")
+                raw_size = _field(row, "total_bytes", "totalBytes", "size")
+                if isinstance(raw_size, bool):
+                    raise KaggleIdentityError("Kaggle Dataset file size metadata is invalid")
+                try:
+                    size = int(raw_size)
+                except (TypeError, ValueError):
+                    raise KaggleIdentityError("Kaggle Dataset file size metadata is invalid") from None
+                if size < 0:
+                    raise KaggleIdentityError("Kaggle Dataset file size metadata is invalid")
+                seen_paths.add(path)
+                rows.append((path, size))
+                total += size
+                if len(rows) > max_files or total > max_total_bytes:
+                    raise KaggleContractError("Kaggle Dataset exceeds the bounded MCP batch read contract")
+            next_cursor = str(_field(response, "next_page_token", "nextPageToken") or "").strip() or None
+            if next_cursor is None:
+                break
+            if next_cursor in seen_cursors:
+                raise KaggleContractError("Kaggle Dataset file listing repeated a cursor")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        else:
+            raise KaggleContractError("Kaggle Dataset file metadata exceeded its page bound")
+        if not rows or CONTROL_MANIFEST_NAME not in seen_paths:
+            raise KagglePolicyError("Kaggle Dataset lacks its provider control manifest")
+        return tuple(sorted(rows))
 
     def download_private_dataset_exact(
         self,

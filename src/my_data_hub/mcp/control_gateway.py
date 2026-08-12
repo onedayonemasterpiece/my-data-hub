@@ -23,6 +23,8 @@ _REMOTE_PROVIDER_TOOLS = frozenset(
         "provider.resources.version",
         "provider.resources.run",
         "provider.resources.read",
+        "provider.resources.list",
+        "provider.resources.download",
         "provider.resources.delete",
         "provider.acceptance.dataset.lifecycle",
         "provider.acceptance.notebook.lifecycle",
@@ -35,7 +37,7 @@ _REMOTE_PROVIDER_TOOLS = frozenset(
 
 
 class AuthenticatedProviderControlClient(ControlPlaneReader):
-    """Metadata response gateway; it owns no Kaggle adapter or credential."""
+    """Bounded semantic gateway; it owns no Kaggle adapter or credential."""
 
     def __init__(self, endpoint: str, service_token: bytes) -> None:
         parsed = urlsplit(endpoint)

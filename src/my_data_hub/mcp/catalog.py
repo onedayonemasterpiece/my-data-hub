@@ -80,6 +80,8 @@ _WRITES = (
     ToolContract("provider.resources.version", "provider:write", False, open_world=True, role="provider_operator"),
     ToolContract("provider.resources.run", "provider:write", False, open_world=True, role="provider_operator"),
     ToolContract("provider.resources.read", "provider:write", True, open_world=True, role="provider_operator"),
+    ToolContract("provider.resources.list", "provider:write", True, open_world=True, role="provider_operator"),
+    ToolContract("provider.resources.download", "provider:write", True, open_world=True, role="provider_operator"),
     ToolContract(
         "provider.inventory.live",
         "provider:write",

@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import json
 import time
-from base64 import urlsafe_b64decode, urlsafe_b64encode
+from base64 import b64decode, b64encode, urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -459,6 +459,10 @@ class KaggleMCPProviderGateway:
             return self._run(provider_ref, control_class, payload, principal)
         if tool == "provider.resources.read":
             return self._read(provider_ref, control_class, payload, principal)
+        if tool == "provider.resources.list":
+            return self._list(provider_ref, control_class, payload, principal)
+        if tool == "provider.resources.download":
+            return self._download(provider_ref, control_class, payload, principal)
         if tool == "provider.resources.delete":
             return self._delete(provider_ref, control_class, payload, principal)
         raise ValueError("unsupported provider gateway tool")
@@ -569,7 +573,12 @@ class KaggleMCPProviderGateway:
             control_class=control_class,
             disposable=bool(payload["disposable"]),
         )
-        self._register_dataset(result, created_by=principal.subject, exchange_manifest=exchange_manifest)
+        self._register_dataset(
+            result,
+            created_by=principal.subject,
+            files=files,
+            exchange_manifest=exchange_manifest,
+        )
         return self._dataset_response(result)
 
     def _version(
@@ -606,6 +615,8 @@ class KaggleMCPProviderGateway:
             files[EXCHANGE_MANIFEST_PATH] = canonical_json_bytes(
                 exchange_manifest.model_dump(mode="json")
             )
+        else:
+            self._authorize_mcp_access(claim, principal, task_id=str(payload["task_id"]))
         notes = str(payload["version_notes"])
         arguments = {
             "content_tree_sha256": mapping_sha256(files),
@@ -626,7 +637,12 @@ class KaggleMCPProviderGateway:
             )
         finally:
             self.ledger.release_resource_lease(str(lease.lease_id), principal.subject, lease.fencing_token)
-        self._register_dataset(result, created_by=principal.subject, exchange_manifest=exchange_manifest)
+        self._register_dataset(
+            result,
+            created_by=principal.subject,
+            files=files,
+            exchange_manifest=exchange_manifest,
+        )
         return self._dataset_response(result)
 
     def _run(
@@ -683,6 +699,7 @@ class KaggleMCPProviderGateway:
             "claim": result.claim.model_dump(mode="json"),
             "source": result.source.model_dump(mode="json"),
             "run": result.run.model_dump(mode="json"),
+            "mcp_access": {"created_by": principal.subject},
         }
         self.ledger.register_provider_resource(
             provider="kaggle",
@@ -724,6 +741,8 @@ class KaggleMCPProviderGateway:
         resource = self._resource(claim, state="recorded")
         if control_class is ControlClass.MCP_EXCHANGE:
             self._authorize_exchange_access(claim, principal, action="read")
+        else:
+            self._authorize_mcp_access(claim, principal)
         self.policy.authorize(
             resource,
             ProviderAction.DOWNLOAD if kind is ProviderKind.DATASET else ProviderAction.READ_SOURCE,
@@ -765,6 +784,191 @@ class KaggleMCPProviderGateway:
             "private": True,
         }
 
+    def _list(
+        self,
+        provider_ref: str,
+        control_class: ControlClass,
+        payload: Mapping[str, Any],
+        principal: AccessIdentity,
+    ) -> dict[str, Any]:
+        self._exact_keys(payload, {"kind", "claim_sha256", "cursor", "limit"})
+        if payload["kind"] != "dataset":
+            raise ValueError("provider file listing supports exact private datasets")
+        cursor = payload["cursor"]
+        limit = payload["limit"]
+        if (
+            not isinstance(cursor, int)
+            or isinstance(cursor, bool)
+            or cursor < 0
+            or not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 50
+        ):
+            raise ValueError("provider file listing cursor or limit is invalid")
+        claim = self._claim(
+            provider_ref, control_class, str(payload["claim_sha256"]), ProviderKind.DATASET
+        )
+        self._authorize_dataset_read(claim, control_class, principal)
+        files = self._registered_content_manifest(claim)
+        observed = self.adapter.list_private_dataset_files_exact(claim=claim)
+        self._verify_provider_file_listing(files, observed, control_class)
+        page = files[cursor : cursor + limit]
+        next_cursor = cursor + len(page) if cursor + len(page) < len(files) else None
+        return {
+            "contract_version": "my-data-hub-mcp-dataset-batch.v1",
+            "claim_sha256": claim.claim_sha256,
+            "task_id": str(claim.task_id),
+            "provider_ref": provider_ref,
+            "provider_version": claim.provider_version,
+            "package_sha256": self._registered_package_sha256(claim),
+            "files": [
+                {"path": item["path"], "byte_size": item["byte_size"], "sha256": item["sha256"]}
+                for item in page
+            ],
+            "file_count": len(files),
+            "cursor": cursor,
+            "next_cursor": next_cursor,
+            "complete": next_cursor is None,
+            "bounded": True,
+        }
+
+    def _download(
+        self,
+        provider_ref: str,
+        control_class: ControlClass,
+        payload: Mapping[str, Any],
+        principal: AccessIdentity,
+    ) -> dict[str, Any]:
+        self._exact_keys(
+            payload, {"kind", "claim_sha256", "path", "offset", "max_bytes"}
+        )
+        if payload["kind"] != "dataset":
+            raise ValueError("provider file download supports exact private datasets")
+        path = payload["path"]
+        offset = payload["offset"]
+        max_bytes = payload["max_bytes"]
+        if not isinstance(path, str):
+            raise ValueError("provider file path is invalid")
+        # Use the provider adapter's public path validator before any provider
+        # call. mapping_sha256 also rejects its reserved metadata paths.
+        mapping_sha256({path: b"x"})
+        if path == EXCHANGE_MANIFEST_PATH:
+            raise PermissionError("provider-owned manifest files are not downloadable")
+        if (
+            not isinstance(offset, int)
+            or isinstance(offset, bool)
+            or offset < 0
+            or not isinstance(max_bytes, int)
+            or isinstance(max_bytes, bool)
+            or not 1 <= max_bytes <= 131_072
+        ):
+            raise ValueError("provider file download offset or size is invalid")
+        claim = self._claim(
+            provider_ref, control_class, str(payload["claim_sha256"]), ProviderKind.DATASET
+        )
+        self._authorize_dataset_read(claim, control_class, principal)
+        files = self._registered_content_manifest(claim)
+        observed = self.adapter.list_private_dataset_files_exact(claim=claim)
+        self._verify_provider_file_listing(files, observed, control_class)
+        item = next((candidate for candidate in files if candidate["path"] == path), None)
+        if item is None:
+            raise FileNotFoundError("exact provider Dataset file was not found")
+        if offset > item["byte_size"]:
+            raise ValueError("provider file download offset exceeds exact file size")
+        downloaded = self.adapter.download_mcp_dataset_file_exact(
+            claim=claim,
+            path=path,
+            expected_size=item["byte_size"],
+            expected_sha256=item["sha256"],
+        )
+        content = downloaded.content[offset : offset + max_bytes]
+        next_offset = offset + len(content)
+        complete = next_offset == downloaded.byte_size
+        return {
+            "contract_version": "my-data-hub-mcp-dataset-file-chunk.v1",
+            "claim_sha256": claim.claim_sha256,
+            "task_id": str(claim.task_id),
+            "provider_ref": provider_ref,
+            "provider_version": claim.provider_version,
+            "package_sha256": self._registered_package_sha256(claim),
+            "path": downloaded.path,
+            "file_byte_size": downloaded.byte_size,
+            "file_sha256": downloaded.sha256,
+            "encoding": "base64",
+            "offset": offset,
+            "content_base64": b64encode(content).decode("ascii"),
+            "content_byte_size": len(content),
+            "content_sha256": hashlib.sha256(content).hexdigest(),
+            "next_offset": None if complete else next_offset,
+            "complete": complete,
+            "bounded": True,
+        }
+
+    def _authorize_dataset_read(
+        self,
+        claim: TaskResourceClaim,
+        control_class: ControlClass,
+        principal: AccessIdentity,
+    ) -> None:
+        if control_class is ControlClass.MCP_EXCHANGE:
+            self._authorize_exchange_access(claim, principal, action="read")
+        else:
+            self._authorize_mcp_access(claim, principal)
+        self.policy.authorize(
+            self._resource(claim, state="recorded"),
+            ProviderAction.DOWNLOAD,
+            principal=principal.subject,
+            now=self.ledger.clock.now(),
+        )
+
+    def _registered_content_manifest(self, claim: TaskResourceClaim) -> tuple[dict[str, Any], ...]:
+        projection = self.ledger.provider_resource(claim.provider_ref, str(claim.provider_version))
+        value = projection.get("metadata", {}).get("content_manifest") if projection else None
+        if not isinstance(value, list) or not value or len(value) > 100:
+            raise PermissionError("provider resource lacks a durable bounded content manifest")
+        result: list[dict[str, Any]] = []
+        for item in value:
+            if (
+                not isinstance(item, Mapping)
+                or set(item) != {"path", "byte_size", "sha256"}
+                or not isinstance(item["path"], str)
+                or not isinstance(item["byte_size"], int)
+                or isinstance(item["byte_size"], bool)
+                or item["byte_size"] < 0
+                or not isinstance(item["sha256"], str)
+                or len(item["sha256"]) != 64
+            ):
+                raise PermissionError("provider resource content manifest is invalid")
+            result.append(dict(item))
+        if result != sorted(result, key=lambda row: row["path"]):
+            raise PermissionError("provider resource content manifest is not canonical")
+        return tuple(result)
+
+    @staticmethod
+    def _verify_provider_file_listing(
+        manifest: tuple[dict[str, Any], ...],
+        observed: tuple[tuple[str, int], ...],
+        control_class: ControlClass,
+    ) -> None:
+        expected = {(str(item["path"]), int(item["byte_size"])) for item in manifest}
+        allowed_reserved = {"my-data-hub-resource.json"}
+        if control_class is ControlClass.MCP_EXCHANGE:
+            allowed_reserved.add(EXCHANGE_MANIFEST_PATH)
+        actual = set(observed)
+        unexpected = any(
+            path not in allowed_reserved and (path, size) not in expected
+            for path, size in actual
+        )
+        if not expected <= actual or unexpected:
+            raise PermissionError("provider Dataset file metadata differs from its durable content manifest")
+
+    def _registered_package_sha256(self, claim: TaskResourceClaim) -> str:
+        projection = self.ledger.provider_resource(claim.provider_ref, str(claim.provider_version))
+        value = projection.get("metadata", {}).get("identity", {}).get("package_sha256") if projection else None
+        if not isinstance(value, str) or len(value) != 64:
+            raise PermissionError("provider resource lacks an exact package hash")
+        return value
+
     def _delete(
         self,
         provider_ref: str,
@@ -786,6 +990,8 @@ class KaggleMCPProviderGateway:
         exchange_access: Mapping[str, Any] | None = None
         if control_class is ControlClass.MCP_EXCHANGE:
             exchange_access = self._authorize_exchange_access(claim, principal, action="delete")
+        else:
+            self._authorize_mcp_access(claim, principal, task_id=str(payload["task_id"]))
         arguments = {"claim_sha256": claim.claim_sha256, "provider_version": claim.provider_version}
         action = MutationAction.DELETE_DATASET if kind is ProviderKind.DATASET else MutationAction.DELETE_NOTEBOOK
         intent = self._intent(
@@ -953,12 +1159,22 @@ class KaggleMCPProviderGateway:
         result: Any,
         *,
         created_by: str,
+        files: Mapping[str, bytes],
         exchange_manifest: ExchangeManifest | None = None,
     ) -> None:
         metadata = {
             "claim": result.claim.model_dump(mode="json"),
             "identity": result.identity.model_dump(mode="json"),
             "mcp_access": {"created_by": created_by},
+            "content_manifest": [
+                {
+                    "path": path,
+                    "byte_size": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+                for path, content in sorted(files.items())
+                if path != EXCHANGE_MANIFEST_PATH
+            ],
         }
         if exchange_manifest is not None:
             metadata["exchange_access"] = {
@@ -1123,6 +1339,24 @@ class KaggleMCPProviderGateway:
             raise ValueError("unsupported exchange access action")
         return access
 
+    def _authorize_mcp_access(
+        self,
+        claim: TaskResourceClaim,
+        principal: AccessIdentity,
+        *,
+        task_id: str | None = None,
+    ) -> None:
+        projection = self.ledger.provider_resource(claim.provider_ref, str(claim.provider_version))
+        access = projection.get("metadata", {}).get("mcp_access") if projection else None
+        if (
+            projection is None
+            or projection.get("source_identity") != str(claim.task_id)
+            or not isinstance(access, Mapping)
+            or access.get("created_by") != principal.subject
+            or (task_id is not None and task_id != str(claim.task_id))
+        ):
+            raise PermissionError("mcp_managed resource requires its exact creating task and principal")
+
     @staticmethod
     def _dataset_response(result: Any) -> dict[str, Any]:
         return {
@@ -1144,14 +1378,67 @@ class KaggleMCPProviderGateway:
             raise ValueError("provider files must be a bounded path/string object")
         result: dict[str, bytes] = {}
         total = 0
+        contains_binary = False
         for path, content in value.items():
-            if not isinstance(path, str) or not isinstance(content, str):
-                raise ValueError("provider file paths and contents must be UTF-8 strings")
-            encoded = content.encode("utf-8")
+            if not isinstance(path, str):
+                raise ValueError("provider file paths must be UTF-8 strings")
+            normalized = path.casefold()
+            forbidden_parts = {
+                "pg_version",
+                "pgdata",
+                "backup_manifest",
+                "backup_label",
+                "tablespace_map",
+                "postmaster.pid",
+                "postmaster.opts",
+            }
+            parts = normalized.split("/")
+            if (
+                "checkpoint" in normalized
+                or "postgres" in normalized
+                or any(part in forbidden_parts or part.startswith("pg_wal") for part in parts)
+                or normalized.endswith((".dump", ".sql", ".backup"))
+            ):
+                raise PermissionError("canonical database and checkpoint artifacts are forbidden")
+            if isinstance(content, str):
+                encoded = content.encode("utf-8")
+            elif isinstance(content, Mapping) and set(content) == {
+                "encoding", "content_base64", "byte_size", "sha256"
+            }:
+                if content["encoding"] != "base64":
+                    raise ValueError("provider binary file encoding must be exact base64")
+                raw_size = content["byte_size"]
+                digest = content["sha256"]
+                armored = content["content_base64"]
+                if (
+                    not isinstance(raw_size, int)
+                    or isinstance(raw_size, bool)
+                    or not 1 <= raw_size <= 262_144
+                    or not isinstance(digest, str)
+                    or len(digest) != 64
+                    or not isinstance(armored, str)
+                ):
+                    raise ValueError("provider binary file declaration is invalid")
+                try:
+                    encoded = b64decode(armored, validate=True)
+                except (ValueError, TypeError) as exc:
+                    raise ValueError("provider binary file is not canonical base64") from exc
+                if b64encode(encoded).decode("ascii") != armored:
+                    raise ValueError("provider binary file is not canonical base64")
+                if len(encoded) != raw_size or not hmac.compare_digest(
+                    hashlib.sha256(encoded).hexdigest(), digest
+                ):
+                    raise ValueError("provider binary file size or sha256 differs from its bytes")
+                contains_binary = True
+            else:
+                raise ValueError("provider files require UTF-8 strings or exact binary objects")
             total += len(encoded)
-            if total > 256 * 1024:
+            if total > 256 * 1024 and not contains_binary:
+                raise ValueError("provider files exceed the bounded request contract")
+            if contains_binary and total > 320 * 1024:
                 raise ValueError("provider files exceed the bounded request contract")
             result[path] = encoded
+        mapping_sha256(result)
         return result
 
     @staticmethod
@@ -1343,6 +1630,8 @@ class LedgerControlReader(ControlPlaneReader):
             "provider.resources.version",
             "provider.resources.run",
             "provider.resources.read",
+            "provider.resources.list",
+            "provider.resources.download",
             "provider.inventory.live",
             "provider.resources.delete",
         }:

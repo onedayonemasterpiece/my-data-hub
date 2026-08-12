@@ -198,6 +198,37 @@ class FakeKaggleApi:
         self.calls.append(("dataset_download_files", dataset, path))
         write_tree(Path(path or "."), self.datasets[f"{owner}/{slug}"][int(version)])
 
+    def dataset_list_files(
+        self,
+        dataset: str,
+        page_token: str | None = None,
+        page_size: int = 20,
+    ):
+        owner, slug, version = dataset.split("/")
+        assert page_token is None
+        rows = [
+            SimpleNamespace(name=path, total_bytes=len(content))
+            for path, content in sorted(self.datasets[f"{owner}/{slug}"][int(version)].items())
+        ]
+        self.calls.append(("dataset_list_files", dataset, page_size))
+        return SimpleNamespace(files=rows[:page_size], next_page_token=None)
+
+    def dataset_download_file(
+        self,
+        dataset: str,
+        file_name: str,
+        path: str | None = None,
+        force: bool = False,
+        quiet: bool = True,
+        licenses: list[str] | None = None,
+    ) -> bool:
+        owner, slug, version = dataset.split("/")
+        content = self.datasets[f"{owner}/{slug}"][int(version)][file_name]
+        destination = Path(path or ".") / Path(file_name).name
+        destination.write_bytes(content)
+        self.calls.append(("dataset_download_file", dataset, file_name, force))
+        return True
+
     def dataset_delete(self, owner_slug: str | None, dataset_slug: str, no_confirm: bool = False) -> bool:
         assert self.journal.intents
         ref = f"{owner_slug}/{dataset_slug}"
@@ -392,6 +423,24 @@ def test_official_224_calls_are_private_and_exact(tmp_path: Path) -> None:
     assert downloaded.version == 1
     assert (destination / "payload/value.txt").read_bytes() == b"exact bytes"
     assert any(call[:2] == ("dataset_download_files", "owner/private-canary/1") for call in api.calls)
+    batch = client.download_mcp_dataset_batch_exact(
+        claim=created.claim,
+        max_files=102,
+        max_total_bytes=512 * 1024,
+    )
+    assert [(item.path, item.content) for item in batch.files] == [
+        ("payload/value.txt", b"exact bytes")
+    ]
+    assert batch.identity == downloaded
+    assert any(call[:2] == ("dataset_list_files", "owner/private-canary/1") for call in api.calls)
+    exact_file = client.download_mcp_dataset_file_exact(
+        claim=created.claim,
+        path="payload/value.txt",
+        expected_size=len(files["payload/value.txt"]),
+        expected_sha256=hashlib.sha256(files["payload/value.txt"]).hexdigest(),
+    )
+    assert exact_file.content == b"exact bytes"
+    assert any(call[:2] == ("dataset_download_file", "owner/private-canary/1") for call in api.calls)
 
     replacement = {"payload/value.txt": b"version two"}
     version_intent = effect(

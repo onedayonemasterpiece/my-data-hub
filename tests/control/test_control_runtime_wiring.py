@@ -360,6 +360,19 @@ def test_control_provider_gateway_requires_service_auth_and_uses_injected_single
     assert accepted.json() == {"provider_ref": "owner/disposable", "outcome": "applied"}
     assert gateway.calls == [("provider.resources.delete", body["arguments"], "owner", "internal-provider-gateway")]
 
+    for tool in ("provider.resources.list", "provider.resources.download"):
+        routed = client.post(
+            "/internal/mcp-provider/invoke",
+            json={**body, "tool": tool},
+            headers={"Authorization": "Bearer " + "g" * 32},
+        )
+        assert routed.status_code == 200
+    assert [call[0] for call in gateway.calls] == [
+        "provider.resources.delete",
+        "provider.resources.list",
+        "provider.resources.download",
+    ]
+
     secret = {**body, "arguments": {**body["arguments"], "password": "forbidden"}}
     rejected = client.post(
         "/internal/mcp-provider/invoke",
@@ -367,7 +380,7 @@ def test_control_provider_gateway_requires_service_auth_and_uses_injected_single
         headers={"Authorization": "Bearer " + "g" * 32},
     )
     assert rejected.status_code == 422
-    assert len(gateway.calls) == 1
+    assert len(gateway.calls) == 3
 
 
 def test_control_ensure_runs_one_physical_launch_under_concurrency_and_restart(tmp_path: Path) -> None:

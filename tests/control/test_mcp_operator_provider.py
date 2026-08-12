@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from base64 import b64decode, b64encode
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,6 +23,9 @@ from my_data_hub.providers.kaggle import ControlLedgerKaggleJournal
 from my_data_hub.providers.kaggle.contracts import (
     DatasetMutationResult,
     EffectOutcome,
+    ExactDatasetBatch,
+    ExactDatasetBatchFile,
+    KaggleContractError,
     KaggleDatasetIdentity,
     KaggleKernelRunIdentity,
     KaggleKernelSourceIdentity,
@@ -290,6 +294,7 @@ class FakeAdapter:
         self.journal = ControlLedgerKaggleJournal(ledger)
         self.now = ledger.clock.now
         self.datasets: dict[tuple[str, int], KaggleDatasetIdentity] = {}
+        self.dataset_files: dict[tuple[str, int], dict[str, bytes]] = {}
         self.sources: dict[tuple[str, int], KaggleKernelSourceIdentity] = {}
         self.output_bytes = b'{"accepted":true}'
         self.create_calls = 0
@@ -341,15 +346,58 @@ class FakeAdapter:
     def create_private_dataset(self, *, intent, files, title, control_class, disposable):  # type: ignore[no-untyped-def]
         assert files and title
         self.create_calls += 1
-        return self._dataset_result(intent, control_class, disposable, 1)
+        result = self._dataset_result(intent, control_class, disposable, 1)
+        self.dataset_files[(intent.provider_ref, 1)] = dict(files)
+        return result
 
     def create_private_dataset_version(self, *, intent, claim, files, version_notes):  # type: ignore[no-untyped-def]
         assert files and version_notes
         self.version_calls += 1
-        return self._dataset_result(intent, claim.control_class, claim.disposable, claim.provider_version + 1)
+        version = claim.provider_version + 1
+        result = self._dataset_result(intent, claim.control_class, claim.disposable, version)
+        self.dataset_files[(intent.provider_ref, version)] = dict(files)
+        return result
 
     def read_private_dataset(self, *, provider_ref, version):  # type: ignore[no-untyped-def]
         return self.datasets[(provider_ref, version)]
+
+    def download_mcp_dataset_batch_exact(self, *, claim, max_files, max_total_bytes):  # type: ignore[no-untyped-def]
+        files = self.dataset_files[(claim.provider_ref, claim.provider_version)]
+        assert len(files) <= max_files
+        assert sum(map(len, files.values())) <= max_total_bytes
+        return ExactDatasetBatch(
+            identity=self.datasets[(claim.provider_ref, claim.provider_version)],
+            files=tuple(
+                ExactDatasetBatchFile(
+                    path=path,
+                    byte_size=len(content),
+                    sha256=hashlib.sha256(content).hexdigest(),
+                    content=content,
+                )
+                for path, content in sorted(files.items())
+            ),
+        )
+
+    def list_private_dataset_files_exact(self, *, claim, **_kwargs):  # type: ignore[no-untyped-def]
+        return tuple(
+            (path, len(content))
+            for path, content in sorted(
+                self.dataset_files[(claim.provider_ref, claim.provider_version)].items()
+            )
+        )
+
+    def download_mcp_dataset_file_exact(  # type: ignore[no-untyped-def]
+        self, *, claim, path, expected_size, expected_sha256
+    ):
+        content = self.dataset_files[(claim.provider_ref, claim.provider_version)][path]
+        assert len(content) == expected_size
+        assert hashlib.sha256(content).hexdigest() == expected_sha256
+        return ExactDatasetBatchFile(
+            path=path,
+            byte_size=expected_size,
+            sha256=expected_sha256,
+            content=content,
+        )
 
     def push_private_notebook(self, *, intent, task_run_id, source, control_class, disposable, **kwargs):  # type: ignore[no-untyped-def]
         self.run_calls += 1
@@ -571,7 +619,7 @@ def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_
             **common,
             "payload": {
                 "kind": "dataset",
-                "task_id": str(uuid4()),
+                "task_id": str(task_id),
                 "effect_id": str(uuid4()),
                 "idempotency_key": "provider-version-1",
                 "claim_sha256": created["claim_sha256"],
@@ -627,6 +675,198 @@ def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_
         principal(),
     )
     assert deleted["outcome"] == "applied"
+
+
+def test_binary_batch_round_trip_is_claim_bound_chunked_and_json_safe(tmp_path: Path) -> None:
+    ledger = ControlLedger(tmp_path / "batch.sqlite3")
+    adapter = FakeAdapter(ledger)
+    gateway = KaggleMCPProviderGateway(ledger, adapter)  # type: ignore[arg-type]
+    task_id = uuid4()
+    content = b"\x00\xffbinary\n" * 20_000
+    # Stay within the explicit 128 KiB per-file request contract.
+    content = content[:131_072]
+    digest = hashlib.sha256(content).hexdigest()
+    common = {
+        "resource_ref": "owner/mcp-binary",
+        "control_class": "mcp_managed",
+        "private": True,
+    }
+    created = gateway.invoke(
+        "provider.resources.create",
+        {
+            **common,
+            "payload": {
+                "kind": "dataset",
+                "task_id": str(task_id),
+                "effect_id": str(uuid4()),
+                "idempotency_key": "provider-binary-create-1",
+                "title": "MCP binary batch",
+                "disposable": True,
+                "files": {
+                    "nested/payload.bin": {
+                        "encoding": "base64",
+                        "content_base64": b64encode(content).decode("ascii"),
+                        "byte_size": len(content),
+                        "sha256": digest,
+                    },
+                    "readme.txt": "compatible UTF-8",
+                },
+            },
+        },
+        principal(),
+    )
+    listing = gateway.invoke(
+        "provider.resources.list",
+        {
+            **common,
+            "payload": {
+                "kind": "dataset",
+                "claim_sha256": created["claim_sha256"],
+                "cursor": 0,
+                "limit": 1,
+            },
+        },
+        principal(),
+    )
+    assert listing["contract_version"] == "my-data-hub-mcp-dataset-batch.v1"
+    assert listing["file_count"] == 2
+    assert listing["next_cursor"] == 1
+    assert "content" not in listing["files"][0]
+
+    assembled = bytearray()
+    offset = 0
+    while True:
+        chunk = gateway.invoke(
+            "provider.resources.download",
+            {
+                **common,
+                "payload": {
+                    "kind": "dataset",
+                    "claim_sha256": created["claim_sha256"],
+                    "path": "nested/payload.bin",
+                    "offset": offset,
+                    "max_bytes": 32_768,
+                },
+            },
+            principal(),
+        )
+        decoded = b64decode(chunk["content_base64"], validate=True)
+        assert hashlib.sha256(decoded).hexdigest() == chunk["content_sha256"]
+        assembled.extend(decoded)
+        if chunk["complete"]:
+            assert chunk["next_offset"] is None
+            break
+        offset = chunk["next_offset"]
+    assert bytes(assembled) == content
+    assert chunk["file_sha256"] == digest
+    assert content not in ledger.path.read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("path", "message"),
+    [
+        ("../escape.bin", "traversal"),
+        ("PG_VERSION", "canonical database"),
+        ("checkpoints/base.tar", "checkpoint"),
+        ("snapshot.dump", "canonical database"),
+        ("my-data-hub-resource.json", "metadata paths"),
+    ],
+)
+def test_batch_upload_denies_traversal_reserved_and_canonical_artifacts(
+    tmp_path: Path, path: str, message: str
+) -> None:
+    ledger = ControlLedger(tmp_path / "denied.sqlite3")
+    adapter = FakeAdapter(ledger)
+    gateway = KaggleMCPProviderGateway(ledger, adapter)  # type: ignore[arg-type]
+    with pytest.raises((ValueError, PermissionError, KaggleContractError), match=message):
+        gateway.invoke(
+            "provider.resources.create",
+            {
+                "resource_ref": "owner/mcp-denied",
+                "control_class": "mcp_managed",
+                "private": True,
+                "payload": {
+                    "kind": "dataset",
+                    "task_id": str(uuid4()),
+                    "effect_id": str(uuid4()),
+                    "idempotency_key": "provider-denied-create-1",
+                    "title": "MCP denied batch",
+                    "disposable": True,
+                    "files": {path: "forbidden"},
+                },
+            },
+            principal(),
+        )
+    assert adapter.create_calls == 0
+
+
+def test_batch_rejects_hash_tamper_and_wrong_principal_before_adapter(tmp_path: Path) -> None:
+    ledger = ControlLedger(tmp_path / "tamper.sqlite3")
+    adapter = FakeAdapter(ledger)
+    gateway = KaggleMCPProviderGateway(ledger, adapter)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="size or sha256"):
+        gateway.invoke(
+            "provider.resources.create",
+            {
+                "resource_ref": "owner/mcp-tamper",
+                "control_class": "mcp_managed",
+                "private": True,
+                "payload": {
+                    "kind": "dataset",
+                    "task_id": str(uuid4()),
+                    "effect_id": str(uuid4()),
+                    "idempotency_key": "provider-tamper-create-1",
+                    "title": "MCP tamper batch",
+                    "disposable": True,
+                    "files": {
+                        "payload.bin": {
+                            "encoding": "base64",
+                            "content_base64": "AA==",
+                            "byte_size": 1,
+                            "sha256": "0" * 64,
+                        }
+                    },
+                },
+            },
+            principal(),
+        )
+    assert adapter.create_calls == 0
+
+    created = gateway.invoke(
+        "provider.resources.create",
+        {
+            "resource_ref": "owner/mcp-owned",
+            "control_class": "mcp_managed",
+            "private": True,
+            "payload": {
+                "kind": "dataset",
+                "task_id": str(uuid4()),
+                "effect_id": str(uuid4()),
+                "idempotency_key": "provider-owned-create-1",
+                "title": "MCP owned batch",
+                "disposable": True,
+                "files": {"payload.txt": "owned"},
+            },
+        },
+        principal(),
+    )
+    with pytest.raises(PermissionError, match="creating task and principal"):
+        gateway.invoke(
+            "provider.resources.download",
+            {
+                "resource_ref": "owner/mcp-owned",
+                "control_class": "mcp_managed",
+                "private": True,
+                "payload": {
+                    "kind": "dataset",
+                    "claim_sha256": created["claim_sha256"],
+                    "path": "payload.txt",
+                    "offset": 0,
+                    "max_bytes": 10,
+                },
+            },
+            principal("other"),
+        )
 
 
 def test_provider_run_rejects_legacy_raw_dataset_source_before_adapter(

@@ -54,6 +54,8 @@ _CONTROL_TOOLS = frozenset(
         "embedding.production.capabilities",
         "provider.resources.status",
         "provider.resources.read",
+        "provider.resources.list",
+        "provider.resources.download",
         "provider.inventory.live",
         "provider.acceptance.claim.get",
         "runtime.events.history",
@@ -153,7 +155,14 @@ class HubService:
         identity = self.identity()
         if contract.scope not in identity.scopes:
             raise HubPermissionError(f"MCP scope required: {contract.scope}")
-        bounded_arguments = self._bounded_arguments(arguments)
+        bounded_arguments = self._bounded_arguments(
+            arguments,
+            max_bytes=(
+                512 * 1024
+                if tool in {"provider.resources.create", "provider.resources.version"}
+                else 256 * 1024
+            ),
+        )
         try:
             if tool == "platform.status":
                 result = await self._platform_status(identity)
@@ -563,11 +572,13 @@ class HubService:
         )
 
     @staticmethod
-    def _bounded_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    def _bounded_arguments(
+        arguments: Mapping[str, Any], *, max_bytes: int = 262_144
+    ) -> dict[str, Any]:
         if not isinstance(arguments, Mapping):
             raise ValueError("tool arguments must be an object")
         encoded = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"), default=str).encode()
-        if len(encoded) > 262_144:
+        if len(encoded) > max_bytes:
             raise ValueError("tool arguments exceed the semantic body limit")
         return dict(arguments)
 

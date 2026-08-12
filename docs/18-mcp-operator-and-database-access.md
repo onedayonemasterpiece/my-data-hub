@@ -445,11 +445,15 @@ token and never returns provider bytes or credentials. A normal control-plane in
 removes that override from the systemd command and returns to the reader-only default.
 
 Provider mutation discovery is closed per action rather than advertising an open
-`payload` object. Create, version, run, read and delete each expose a distinct
+`payload` object. Create, version, run, read, file-list, file-download and delete each expose a distinct
 `extra=forbid` model. Exchange create/version include the bounded manifest schema, and
 run inputs require an exact registered Dataset `resource_ref`, numeric
 `provider_version`, `claim_sha256` and allowed `control_class`; a slug using `latest` or
 an unregistered/protected source is not representable in the advertised contract.
+File-list and file-download are read-only-hint tools under the separately enabled
+provider-operator scope; they return bounded JSON metadata or verified base64 chunks,
+never transient provider URLs or credentials. Exact limits and continuation semantics
+are documented in `docs/17-kaggle-control-plane.md`.
 
 Migration `0016_mcp_operator_transaction_boundary.sql` makes the data-plane write path
 operational without granting generic SQL authority. `mdh_mcp_editor` has column-level
