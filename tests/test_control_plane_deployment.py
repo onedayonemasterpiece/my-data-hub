@@ -215,6 +215,13 @@ def test_provider_only_mcp_action_is_explicit_and_skips_master_only_prerequisite
     assert '"openid", "offline_access", "platform:read", "provider:read", "provider:write"' in source
     assert "!override" in source
 
+    # Compose deliberately runs as the owning host UID rather than the image's
+    # baked-in uid.  The official Kaggle SDK needs a writable HOME even when
+    # legacy credentials arrive only through the environment; keep that home
+    # on the existing ephemeral /tmp tmpfs instead of the read-only image.
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    assert compose["services"]["control-plane"]["environment"]["HOME"] == "/tmp/my-data-hub-control"
+
     provider_branch = source[source.index('if [[ "$provider_only" == true ]]') :]
     assert "verify_master_assets.py" not in provider_branch.split("else", 1)[0]
     assert "root-installed epoch tunnel broker socket is required" not in provider_branch.split("else", 1)[0]
