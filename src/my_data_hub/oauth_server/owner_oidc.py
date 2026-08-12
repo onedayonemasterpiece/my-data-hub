@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -78,6 +79,14 @@ class OIDCSessionOwnerAuthenticator:
         return OwnerIdentity(subject=subject, authenticated_at=authenticated_at)
 
     def _verified_identity(self, token: str) -> tuple[str, int]:
+        claims = self.verified_claims(token)
+        return self.owner_subject, int(claims["auth_time"])
+
+    def verified_claims(
+        self, token: str, *, expected_nonce: str | None = None
+    ) -> dict[str, Any]:
+        """Return one fully verified provider claim set for portal/session use."""
+
         import jwt
 
         signing_key = self._client.get_signing_key_from_jwt(token)
@@ -98,10 +107,20 @@ class OIDCSessionOwnerAuthenticator:
             or authenticated_at < 0
         ):
             raise ValueError("owner session identity differs from policy")
+        if expected_nonce is not None and (
+            not isinstance(claims.get("nonce"), str)
+            or not secrets.compare_digest(claims["nonce"], expected_nonce)
+        ):
+            raise ValueError("owner session nonce differs from its login ceremony")
         # The external opaque provider subject is pinned above, then mapped to
         # the one local authorization principal. It is never exposed as an MCP
         # principal or allowed to choose that local identity.
-        return self.owner_subject, authenticated_at
+        return dict(claims)
+
+    def validate_return_to(self, return_to: str) -> None:
+        """Reject open redirects before handing state to an upstream portal."""
+
+        self._challenge(return_to)
 
     def _challenge(self, return_to: str) -> str:
         target = urlsplit(return_to)

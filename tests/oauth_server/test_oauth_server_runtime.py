@@ -120,6 +120,69 @@ def test_runtime_accepts_empty_overlap_jwks_for_initial_deployment(
     assert runtime_module._overlap_public_jwks() == ()
 
 
+def test_production_runtime_mounts_restart_safe_integrated_owner_portal(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    key_path = tmp_path / "signing.pem"
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    key_path.chmod(0o600)
+    client_secret = tmp_path / "owner-client.secret"
+    client_secret.write_text("provider-client-secret\n", encoding="utf-8")
+    client_secret.chmod(0o600)
+    state_key = tmp_path / "owner-state.key"
+    state_key.write_bytes(b"p" * 32)
+    state_key.chmod(0o600)
+    issuer = "https://identity.example.test"
+    for name, value in {
+        "MY_DATA_HUB_CONTROL_LEDGER_PATH": str(tmp_path / "ledger.sqlite3"),
+        "MY_DATA_HUB_OAUTH_ISSUER": issuer,
+        "MY_DATA_HUB_OAUTH_OWNER_SUBJECT": "datahub-owner",
+        "MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE": str(key_path),
+        "MY_DATA_HUB_OAUTH_SIGNING_KEY_ID": "key-1",
+        "MY_DATA_HUB_MCP_OAUTH_RESOURCE": "https://mcp.example.test/mcp",
+        "MY_DATA_HUB_MCP_OAUTH_AUDIENCE": "https://mcp.example.test/mcp",
+        "MY_DATA_HUB_OAUTH_CLIENTS_JSON": json.dumps(
+            [
+                {
+                    "client_id": "chatgpt-reader",
+                    "redirect_uris": ["https://chatgpt.example.test/callback"],
+                    "allowed_scopes": ["bloggers:read"],
+                }
+            ]
+        ),
+        "MY_DATA_HUB_OWNER_OIDC_ISSUER": "https://idp.example.test",
+        "MY_DATA_HUB_OWNER_OIDC_AUDIENCE": "owner-client",
+        "MY_DATA_HUB_OWNER_OIDC_JWKS_URL": "https://idp.example.test/jwks",
+        "MY_DATA_HUB_OWNER_OIDC_SUBJECT": "provider-owner",
+        "MY_DATA_HUB_OWNER_LOGIN_URL": f"{issuer}/owner/login",
+        "MY_DATA_HUB_OWNER_OIDC_AUTHORIZATION_ENDPOINT": "https://idp.example.test/authorize",
+        "MY_DATA_HUB_OWNER_OIDC_TOKEN_ENDPOINT": "https://idp.example.test/token",
+        "MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE": str(client_secret),
+        "MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE": str(state_key),
+    }.items():
+        monkeypatch.setenv(name, value)
+    runtime = build_authorization_runtime()
+    client = TestClient(runtime.app, base_url=issuer)
+    return_to = (
+        f"{issuer}/authorize?response_type=code&client_id=chatgpt-reader"
+        "&redirect_uri=https%3A%2F%2Fchatgpt.example.test%2Fcallback"
+    )
+    response = client.get(
+        "/owner/login", params={"return_to": return_to}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("https://idp.example.test/authorize?")
+    assert "provider-client-secret" not in response.headers["location"]
+    assert "mdh_owner_login_state=" in response.headers["set-cookie"]
+
+
 def test_external_provider_subject_maps_only_to_fixed_datahub_owner(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     authenticator = OIDCSessionOwnerAuthenticator(
         issuer="https://login.example.test",

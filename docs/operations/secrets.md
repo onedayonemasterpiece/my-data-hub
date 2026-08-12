@@ -49,7 +49,11 @@ installed DNS/OAuth edge secrets and has not enabled remote MCP writes.
 - Owner authentication: `datahub-owner` is a fixed local principal mapped from one exact
   Yandex Identity Hub OIDC `sub`. Identity Hub, not this repository, owns the one-time
   bootstrap password and mandatory first-login change. Any OIDC application secret lives
-  only in a task-owned Lockbox entry or a service-owned mode-`0600` file. See
+  only in a task-owned Lockbox entry or a service-owned mode-`0600` file. The integrated
+  code+PKCE callback portal has a separate persistent random 32-byte mode-`0600` state
+  key: it encrypts only a five-minute HttpOnly login cookie so an issuer restart does not
+  lose an in-flight ceremony. It is not an owner session key; completed sessions remain
+  provider-signed Identity Hub ID tokens. See
   [`../20-remote-mcp-endpoint.md`](../20-remote-mcp-endpoint.md) for non-emitting retrieval,
   rotation and verification commands.
 

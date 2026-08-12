@@ -52,14 +52,25 @@ PyJWT's asymmetric issuer/JWKS verification. The local principal is always
 `MY_DATA_HUB_OWNER_OIDC_SUBJECT` and is mapped to that fixed local principal only after
 signature, issuer, audience, expiry and `auth_time` validation.
 
+The issuer now includes only the narrow OIDC authorization-code callback portal needed
+to complete that upstream ceremony. It stores no password, access token or server-side
+browser session. An encrypted five-minute PKCE/state cookie uses a persistent owner-only
+32-byte key, so a process restart does not lose an in-flight login; the completed browser
+session is the provider-signed ID token and remains independently verifiable after a
+restart. This is unrelated to Kaggle provider authorization and does not add a Kaggle
+client or move `KAGGLE_USERNAME`/`KAGGLE_KEY` out of the central lifecycle adapter.
+
 One-time bootstrap sequence:
 
-1. Create or identify the Identity Hub local user and OIDC application, assign only that
-   user to the app, and register the accepted owner-login portal. The portal must set a
+1. Create or identify the Identity Hub local user and Web OIDC application, assign only that
+   user to the app, and register
+   `https://identity.kenigevents.ru/owner/callback`. The integrated portal sets a
    `Secure; HttpOnly; SameSite=Lax` provider-signed JWT cookie on
    `identity.kenigevents.ru`; the repository does not accept a plaintext/basic-auth
-   substitute. Store the OIDC application secret in a task-owned Lockbox entry or a
-   service-owned `0600` file.
+   substitute. Store the OIDC application secret in a task-owned Lockbox entry or the
+   service-owned `0600` file named by `MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE`.
+   Store the separate random 32-byte restart-safe state key in the `0600` file named by
+   `MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE`.
 2. Generate/reset the one-time provider credential with
    `yc organization-manager idp user reset-password <USER_ID>`. The command emits the
    value once, so run it only in an owner-private terminal; never paste it into Git,

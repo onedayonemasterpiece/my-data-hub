@@ -27,6 +27,15 @@ class OwnerAuthenticator(Protocol):
     ) -> OwnerIdentity | OwnerAuthenticationChallenge | Awaitable[OwnerIdentity | OwnerAuthenticationChallenge]: ...
 
 
+@runtime_checkable
+class OwnerLoginPortal(Protocol):
+    """Bounded upstream-code ceremony mounted on the issuer origin."""
+
+    def begin(self, request: Request, *, return_to: str) -> Response | Awaitable[Response]: ...
+
+    def callback(self, request: Request) -> Response | Awaitable[Response]: ...
+
+
 def _oauth_admission_limits() -> AdmissionLimits:
     return AdmissionLimits(
         max_header_bytes=16_384,
@@ -119,6 +128,7 @@ def create_authorization_app(
     *,
     service: AuthorizationService,
     owner_authenticator: OwnerAuthenticator,
+    owner_login_portal: OwnerLoginPortal | None = None,
     http_policy: OAuthHTTPPolicy | None = None,
 ) -> ASGIApp:
     """Build the explicit authorization-server ASGI surface.
@@ -173,6 +183,24 @@ def create_authorization_app(
             status_code=303,
             headers=_no_store(),
         )
+
+    if owner_login_portal is not None:
+
+        @app.get("/owner/login")
+        async def owner_login(request: Request) -> Response:
+            pairs = list(request.query_params.multi_items())
+            if len(pairs) != 1 or pairs[0][0] != "return_to":
+                return JSONResponse({"error": "invalid_request"}, status_code=400, headers=_no_store())
+            try:
+                result = owner_login_portal.begin(request, return_to=pairs[0][1])
+                return await result if inspect.isawaitable(result) else result
+            except Exception:
+                return JSONResponse({"error": "access_denied"}, status_code=401, headers=_no_store())
+
+        @app.get("/owner/callback")
+        async def owner_callback(request: Request) -> Response:
+            result = owner_login_portal.callback(request)
+            return await result if inspect.isawaitable(result) else result
 
     @app.post("/token")
     async def token(request: Request) -> JSONResponse:

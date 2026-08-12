@@ -108,6 +108,8 @@ provider_env="${MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE:-$env_root/provider.env}"
 mcp_env="${MY_DATA_HUB_MCP_ENV_FILE:-$env_root/mcp-reader.env}"
 oauth_env="${MY_DATA_HUB_OAUTH_ENV_FILE:-$env_root/oauth.env}"
 oauth_key="${MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE:-$secret_root/oauth-signing-key.pem}"
+owner_oidc_client_secret="${MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE:-$secret_root/owner-oidc-client-secret}"
+owner_portal_state_key="${MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE:-$secret_root/owner-portal-state.key}"
 oauth_overlap_jwks="${MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE:-$runtime_root/oauth-public/overlap-jwks.json}"
 operator_gate_receipt="${MY_DATA_HUB_OPERATOR_SECURITY_GATE_RECEIPT_FILE:-$runtime_root/operator-security-gate.json}"
 operator_gate_key="${MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE:-$secret_root/mcp-write-gate.key}"
@@ -139,6 +141,7 @@ if [[ -n "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SUPERVISOR:-}" ]]; then
 fi
 for path_value in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$asset_dir" \
   "$tls_dir" "$tls_ca_file" "$provider_env" "$mcp_env" "$oauth_env" "$oauth_key" "$oauth_overlap_jwks" \
+  "$owner_oidc_client_secret" "$owner_portal_state_key" \
   "$operator_gate_receipt" "$operator_gate_key" "$control_gateway_token" "$tunnel_broker_socket_dir" \
   "$checkpoint_upload_broker_key" \
   "$acceptance_socket_dir" "$acceptance_key" "$checkpoint_acceptance_deployment"; do
@@ -202,6 +205,25 @@ require_private_file "$provider_env" "provider environment"
 require_private_file "$mcp_env" "remote MCP environment"
 require_private_file "$oauth_env" "OAuth environment"
 require_private_file "$oauth_key" "OAuth signing key"
+require_private_file "$owner_oidc_client_secret" "owner OIDC client secret"
+if [[ ! -e "$owner_portal_state_key" ]]; then
+  python3 - "$owner_portal_state_key" <<'PY'
+import os
+import sys
+
+descriptor = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    os.write(descriptor, os.urandom(32))
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+fi
+require_private_file "$owner_portal_state_key" "owner portal state key"
+if [[ "$(stat -c '%s' "$owner_portal_state_key")" != "32" ]]; then
+  echo "owner portal state key must be exactly 32 bytes" >&2
+  exit 2
+fi
 if [[ ! -e "$checkpoint_upload_broker_key" ]]; then
   python3 - "$checkpoint_upload_broker_key" <<'PY'
 import os
@@ -244,7 +266,7 @@ reject_environment_keys "$provider_env" "provider environment" \
 reject_environment_keys "$mcp_env" "remote MCP environment" \
   'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_OAUTH_SIGNING_KEY|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)'
 reject_environment_keys "$oauth_env" "OAuth environment" \
-  'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)'
+  'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)|MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET|MY_DATA_HUB_OWNER_PORTAL_STATE_KEY'
 python3 - "$provider_env" <<'PY'
 import json
 import re
@@ -427,6 +449,8 @@ MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE=$provider_env
 MY_DATA_HUB_MCP_ENV_FILE=$mcp_env
 MY_DATA_HUB_OAUTH_ENV_FILE=$oauth_env
 MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE=$oauth_key
+MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE=$owner_oidc_client_secret
+MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE=$owner_portal_state_key
 MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE=$oauth_overlap_jwks
 MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR=$tunnel_broker_socket_dir
 MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE=$operator_gate_key

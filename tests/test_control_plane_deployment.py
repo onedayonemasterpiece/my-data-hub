@@ -91,6 +91,14 @@ def test_compose_has_exact_opt_in_profile_split_secret_boundaries_and_loopback_p
     assert "provider.env" in env_files["control-plane"]
     assert "mcp-reader.env" in env_files["remote-mcp"]
     assert "oauth.env" in env_files["oauth-server"]
+    oauth = services["oauth-server"]
+    assert oauth["environment"]["MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE"] == (
+        "/run/secrets/owner-oidc-client-secret"
+    )
+    assert oauth["environment"]["MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE"] == (
+        "/run/secrets/owner-portal-state.key"
+    )
+    assert all(":ro" in binding for binding in oauth["volumes"] if "/run/secrets/" in binding)
 
     for service in services.values():
         assert service["restart"] == "unless-stopped"
@@ -112,6 +120,8 @@ def test_install_requires_private_split_inputs_without_static_master_credentials
         "MY_DATA_HUB_OAUTH_ENV_FILE",
         "MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE",
         "MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE",
+        "MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE",
+        "MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE",
         "MY_DATA_HUB_MASTER_TLS_DIR",
     ):
         assert variable in source
@@ -119,6 +129,9 @@ def test_install_requires_private_split_inputs_without_static_master_credentials
     assert 'require_private_file "$mcp_env"' in source
     assert 'require_private_file "$oauth_env"' in source
     assert 'require_private_file "$oauth_key"' in source
+    assert 'require_private_file "$owner_oidc_client_secret"' in source
+    assert 'require_private_file "$owner_portal_state_key"' in source
+    assert "owner portal state key must be exactly 32 bytes" in source
     assert 'require_regular_file "$oauth_overlap_jwks"' in source
     assert 'verify_master_assets.py"' in source
     assert '--bundle "$asset_dir" --expected-commit "$commit"' in source

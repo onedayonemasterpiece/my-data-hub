@@ -16,6 +16,7 @@ from .app import OAuthHTTPPolicy, create_authorization_app
 from .control_store import ControlLedgerOAuthGrantStore
 from .models import AuthorizationServerSettings, StaticClient
 from .owner_oidc import OIDCSessionOwnerAuthenticator
+from .owner_portal import OIDCLoginPortal
 from .service import AuthorizationService
 
 
@@ -30,6 +31,18 @@ def _required(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
         raise RuntimeError(f"required OAuth authorization setting is absent: {name}")
+    return value
+
+
+def _private_file(name: str, *, exact_bytes: int | None = None, maximum_bytes: int = 8192) -> bytes:
+    path = Path(_required(name))
+    if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
+        raise RuntimeError(f"{name} must name a private regular file")
+    value = path.read_bytes()
+    if exact_bytes is not None and len(value) != exact_bytes:
+        raise RuntimeError(f"{name} must contain exactly {exact_bytes} bytes")
+    if not value or len(value) > maximum_bytes:
+        raise RuntimeError(f"{name} is outside its size bound")
     return value
 
 
@@ -130,16 +143,38 @@ def build_authorization_runtime() -> AuthorizationRuntime:
         control_ledger=authority,
         grant_store=ControlLedgerOAuthGrantStore(ledger),
     )
+    owner_login_url = _required("MY_DATA_HUB_OWNER_LOGIN_URL")
     owner = OIDCSessionOwnerAuthenticator(
         issuer=_required("MY_DATA_HUB_OWNER_OIDC_ISSUER"),
         audience=_required("MY_DATA_HUB_OWNER_OIDC_AUDIENCE"),
         jwks_url=_required("MY_DATA_HUB_OWNER_OIDC_JWKS_URL"),
-        login_url=_required("MY_DATA_HUB_OWNER_LOGIN_URL"),
+        login_url=owner_login_url,
         authorization_url=f"{issuer}/authorize",
         owner_subject=owner_subject,
         cookie_name=os.getenv("MY_DATA_HUB_OWNER_SESSION_COOKIE", "mdh_owner_session"),
         provider_subject=os.getenv("MY_DATA_HUB_OWNER_OIDC_SUBJECT", "").strip() or owner_subject,
     )
+    owner_portal = None
+    portal_secret_path = os.getenv("MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE", "").strip()
+    if portal_secret_path:
+        if owner_login_url != f"{issuer}/owner/login":
+            raise RuntimeError("integrated owner portal requires the exact issuer login URL")
+        client_secret = _private_file("MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE").decode(
+            "utf-8"
+        ).strip()
+        if not client_secret:
+            raise RuntimeError("owner OIDC client secret file is empty")
+        owner_portal = OIDCLoginPortal(
+            authorization_endpoint=_required("MY_DATA_HUB_OWNER_OIDC_AUTHORIZATION_ENDPOINT"),
+            token_endpoint=_required("MY_DATA_HUB_OWNER_OIDC_TOKEN_ENDPOINT"),
+            client_id=_required("MY_DATA_HUB_OWNER_OIDC_AUDIENCE"),
+            client_secret=client_secret,
+            redirect_uri=f"{issuer}/owner/callback",
+            state_key=_private_file(
+                "MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE", exact_bytes=32, maximum_bytes=32
+            ),
+            authenticator=owner,
+        )
     issuer_authority = urlsplit(issuer).netloc
     policy = OAuthHTTPPolicy(
         allowed_hosts=_csv(
@@ -153,6 +188,7 @@ def build_authorization_runtime() -> AuthorizationRuntime:
         app=create_authorization_app(
             service=service,
             owner_authenticator=owner,
+            owner_login_portal=owner_portal,
             http_policy=policy,
         ),
         host=os.getenv("MY_DATA_HUB_OAUTH_HOST", "127.0.0.1"),

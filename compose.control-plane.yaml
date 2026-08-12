@@ -135,11 +135,15 @@ services:
       MY_DATA_HUB_OAUTH_PORT: 8780
       MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE: /run/secrets/oauth-signing-key.pem
       MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE: /run/config/oauth-overlap-jwks.json
+      MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE: /run/secrets/owner-oidc-client-secret
+      MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE: /run/secrets/owner-portal-state.key
     ports:
       - "127.0.0.1:${MY_DATA_HUB_OAUTH_PORT:-8780}:8780"
     volumes:
       - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:-./.state/control-ledger}:/ledger"
       - "${MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE:-./.state/oauth/oauth-signing-key.pem}:/run/secrets/oauth-signing-key.pem:ro"
+      - "${MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE:-./.state/oauth/owner-oidc-client-secret}:/run/secrets/owner-oidc-client-secret:ro"
+      - "${MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE:-./.state/oauth/owner-portal-state.key}:/run/secrets/owner-portal-state.key:ro"
       - "${MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE:-./.state/oauth/oauth-overlap-jwks.json}:/run/config/oauth-overlap-jwks.json:ro"
     healthcheck:
       test:

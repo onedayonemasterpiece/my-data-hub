@@ -13,6 +13,7 @@ from my_data_hub.oauth_server.models import (
     StaticClient,
 )
 from my_data_hub.oauth_server.owner_oidc import OIDCSessionOwnerAuthenticator
+from my_data_hub.oauth_server.owner_portal import OIDCLoginPortal
 from my_data_hub.oauth_server.service import AuthorizationService
 from my_data_hub.oauth_server.stores import MemoryOAuthGrantStore, OAuthGrantStore
 
@@ -23,6 +24,7 @@ __all__ = [
     "MemoryOAuthGrantStore",
     "OAuthGrantStore",
     "OAuthHTTPPolicy",
+    "OIDCLoginPortal",
     "OIDCSessionOwnerAuthenticator",
     "OwnerAuthenticationChallenge",
     "OwnerAuthenticator",
