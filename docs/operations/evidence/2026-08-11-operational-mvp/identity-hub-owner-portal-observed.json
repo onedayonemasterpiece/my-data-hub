@@ -18,15 +18,15 @@
     "issuer": "https://identity.kenigevents.ru",
     "status": "BOOTSTRAP_ONLY_AWAITING_CHATGPT_DISPLAYED_CALLBACK"
   },
-  "observed_at": "2026-08-12T00:41:00Z",
+  "observed_at": "2026-08-12T00:54:08Z",
   "oidc_application_id": "ek0ogb6pmhuhd28r98fl",
   "owner_subject": "one explicitly assigned organization-owner account; identifier omitted",
   "portal_preflight": {
     "authorization_metadata_http_status": 200,
     "container_user": "1000:1000",
     "disposable_sqlite_initialized": true,
-    "exact_image_commit": "feba2abc4e80142fbe89f4438f3471245bd4f74b",
-    "exact_image_id": "sha256:97379bb45ffcbc5025a0028d5f3d05a69acf3a791206d84509239096a391ba2b",
+    "exact_image_commit": "e8795cc4b9af8c9d3dbf153203c49c0569593f20",
+    "exact_image_id": "sha256:adae0e8200232af28eda6812def045685c1cf4c3011b361dc27b8a78b6425a07",
     "grant_types": [
       "authorization_code",
       "refresh_token"
@@ -39,6 +39,14 @@
     ],
     "secret_in_metadata": false,
     "secret_in_redirect": false
+  },
+  "prepared_release": {
+    "autostart_changed": false,
+    "commit": "e8795cc4b9af8c9d3dbf153203c49c0569593f20",
+    "image_id": "sha256:adae0e8200232af28eda6812def045685c1cf4c3011b361dc27b8a78b6425a07",
+    "master_asset_count": 6,
+    "master_asset_manifest_sha256": "5b93e0ba4cbdc3616caa943eda9e9b9d49709366c26935338883e106323c98d1",
+    "runtime_changed": false
   },
   "redirect_uris": [
     "https://identity.kenigevents.ru/owner/callback"
