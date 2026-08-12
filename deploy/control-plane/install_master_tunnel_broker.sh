@@ -29,6 +29,7 @@ broker_ipc_source="$source_root/src/my_data_hub/tunnel_broker_ipc.py"
 }
 
 account="${MY_DATA_HUB_TUNNEL_ACCOUNT:-mdh-master-tunnel}"
+worker_account="${MY_DATA_HUB_EMBEDDING_TUNNEL_ACCOUNT:-mdh-embedding-worker}"
 listen_port="${MY_DATA_HUB_TUNNEL_LISTEN_PORT:-25432}"
 state_root="${MY_DATA_HUB_TUNNEL_STATE_ROOT:-/var/lib/my-data-hub/tunnel-broker}"
 account_home="${MY_DATA_HUB_TUNNEL_ACCOUNT_HOME:-/var/lib/my-data-hub/tunnel-account}"
@@ -41,7 +42,8 @@ control_uid="${MY_DATA_HUB_CONTROL_UID:-1000}"
 control_gid="${MY_DATA_HUB_CONTROL_GID:-1000}"
 unit_root="${MY_DATA_HUB_TUNNEL_SYSTEMD_DIR:-/etc/systemd/system}"
 
-[[ "$account" =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] || { echo "invalid tunnel account" >&2; exit 2; }
+[[ "$account" =~ ^[a-z_][a-z0-9_-]{0,30}$ && "$worker_account" =~ ^[a-z_][a-z0-9_-]{0,30}$ \
+  && "$account" != "$worker_account" ]] || { echo "invalid tunnel account" >&2; exit 2; }
 [[ "$listen_port" =~ ^[0-9]+$ ]] && (( listen_port >= 1024 && listen_port <= 65535 )) || {
   echo "tunnel listen port must be within 1024..65535" >&2
   exit 2
@@ -74,20 +76,24 @@ grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf([[:sp
   exit 2
 }
 
-# The account has no usable password, shell, home content, groups, or other job.
-if getent passwd "$account" >/dev/null; then
-  IFS=: read -r _ _ _ _ _ observed_home observed_shell < <(getent passwd "$account")
-  [[ "$observed_home" == "$account_home" && "$observed_shell" == "/usr/sbin/nologin" ]] || {
-    echo "existing tunnel account differs from the dedicated contract" >&2
-    exit 2
-  }
-else
-  useradd --system --user-group --create-home --home-dir "$account_home" \
-    --shell /usr/sbin/nologin --password '*' "$account"
-fi
-usermod --shell /usr/sbin/nologin --password '*' "$account"
+# Both accounts have no usable password, shell, home content, groups, or other job.
+for tunnel_account in "$account" "$worker_account"; do
+  tunnel_home="$account_home/$tunnel_account"
+  if getent passwd "$tunnel_account" >/dev/null; then
+    IFS=: read -r _ _ _ _ _ observed_home observed_shell < <(getent passwd "$tunnel_account")
+    [[ "$observed_home" == "$tunnel_home" && "$observed_shell" == "/usr/sbin/nologin" ]] || {
+      echo "existing tunnel account differs from the dedicated contract" >&2
+      exit 2
+    }
+  else
+    useradd --system --user-group --create-home --home-dir "$tunnel_home" \
+      --shell /usr/sbin/nologin --password '*' "$tunnel_account"
+  fi
+  usermod --shell /usr/sbin/nologin --password '*' "$tunnel_account"
+  install -d -o "$tunnel_account" -g "$tunnel_account" -m 0700 "$tunnel_home"
+done
 install -d -o root -g root -m 0700 "$state_root" "$(dirname "$ca_private")"
-install -d -o "$account" -g "$account" -m 0700 "$account_home"
+install -d -o root -g root -m 0755 "$account_home"
 install -d -o root -g root -m 0755 "$(dirname "$broker_program")" "$(dirname "$sshd_fragment")" "$unit_root"
 install -o root -g root -m 0755 "$broker_source" "$broker_program"
 install -o root -g root -m 0644 "$broker_source" "$(dirname "$broker_ipc_program")/tunnel_broker.py"
@@ -103,9 +109,10 @@ chmod 0600 "$ca_private"
 chmod 0644 "$ca_private.pub"
 
 if [[ ! -e "$state_root/state.json" && ! -e "$state_root/authorized_principals" && ! -e "$state_root/revoked.krl" ]]; then
-  "$broker_program" --state-root "$state_root" --ca-private-key "$ca_private" --account "$account" initialize
+  "$broker_program" --state-root "$state_root" --ca-private-key "$ca_private" --account "$account" \
+    --worker-account "$worker_account" initialize
 fi
-for required_state in state.json authorized_principals revoked.krl; do
+for required_state in state.json authorized_principals authorized_worker_principals revoked.krl; do
   [[ -f "$state_root/$required_state" && ! -L "$state_root/$required_state" ]] || {
     echo "tunnel broker state is incomplete: $required_state" >&2
     exit 2
@@ -124,6 +131,7 @@ PY
 }
 trap cleanup EXIT
 "$broker_program" --state-root "$state_root" --ca-private-key "$ca_private" --account "$account" \
+  --worker-account "$worker_account" \
   render-sshd-config --listen-port "$listen_port" --output "$candidate"
 chmod 0600 "$candidate"
 # Validate the standalone Match block before it can affect the host include.
@@ -163,7 +171,7 @@ After=network.target ssh.service sshd.service
 
 [Service]
 Type=oneshot
-ExecStart=$broker_program --state-root $state_root --ca-private-key $ca_private --account $account reconcile
+ExecStart=$broker_program --state-root $state_root --ca-private-key $ca_private --account $account --worker-account $worker_account reconcile
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
@@ -204,7 +212,7 @@ Before=my-data-hub-master-tunnel-reconcile.timer
 Type=simple
 ExecStartPre=/usr/bin/install -d -o root -g $control_gid -m 0750 $(dirname "$broker_socket")
 ExecStartPre=/usr/bin/rm -f $broker_socket
-ExecStart=$broker_ipc_program --state-root $state_root --ca-private-key $ca_private --account $account --socket $broker_socket --allowed-uid $control_uid --socket-gid $control_gid
+ExecStart=$broker_ipc_program --state-root $state_root --ca-private-key $ca_private --account $account --worker-account $worker_account --socket $broker_socket --allowed-uid $control_uid --socket-gid $control_gid
 Restart=on-failure
 RestartSec=2s
 UMask=0077

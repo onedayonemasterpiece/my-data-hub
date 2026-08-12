@@ -24,8 +24,10 @@ from pathlib import Path
 from typing import Any, NoReturn, cast
 from uuid import UUID
 
-SCHEMA_VERSION = "my-data-hub-master-tunnel-broker.v1"
+SCHEMA_VERSION = "my-data-hub-master-tunnel-broker.v2"
+LEGACY_SCHEMA_VERSION = "my-data-hub-master-tunnel-broker.v1"
 DEFAULT_ACCOUNT = "mdh-master-tunnel"
+DEFAULT_WORKER_ACCOUNT = "mdh-embedding-worker"
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 25432
 MAX_LEASE = timedelta(minutes=10)
@@ -86,6 +88,17 @@ def _runtime_digest(run_id: str, attempt_id: str) -> str:
 def _principal(instance_id: str, epoch: int, run_id: str, attempt_id: str) -> str:
     compact = UUID(instance_id).hex
     return f"mdh-master-e{epoch}-{compact}-{_runtime_digest(run_id, attempt_id)}"
+
+
+def _worker_principal(instance_id: str, epoch: int, task_run_id: str, credential_id: str) -> str:
+    return f"mdh-worker-e{epoch}-{UUID(instance_id).hex}-{UUID(task_run_id).hex}-{UUID(credential_id).hex}"
+
+
+def _uuid(value: str, label: str) -> str:
+    try:
+        return str(UUID(value))
+    except ValueError as exc:
+        raise TunnelBrokerError(f"{label} must be a UUID") from exc
 
 
 def _regular_file(path: Path, label: str, *, private: bool = False) -> None:
@@ -226,21 +239,55 @@ class TunnelCertificate:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class WorkerTunnelCertificate:
+    certificate: str
+    serial: int
+    principal: str
+    valid_before: datetime
+    task_run_id: str
+    credential_id: str
+    connect_host: str = DEFAULT_LISTEN_HOST
+    connect_port: int = DEFAULT_LISTEN_PORT
+    account: str = DEFAULT_WORKER_ACCOUNT
+
+    def public_response(self) -> dict[str, object]:
+        return {
+            "certificate": self.certificate,
+            "serial": self.serial,
+            "principal": self.principal,
+            "valid_before": _format_time(self.valid_before),
+            "task_run_id": self.task_run_id,
+            "credential_id": self.credential_id,
+            "connect_host": self.connect_host,
+            "connect_port": self.connect_port,
+            "account": self.account,
+        }
+
+
 @dataclass(slots=True)
 class BrokerState:
     highest_epoch: int
     next_serial: int
     active: ActiveTunnelLease | None
     issued: list[dict[str, object]]
+    worker_issued: list[dict[str, object]]
     revoked_serials: list[int]
 
     @classmethod
     def empty(cls) -> BrokerState:
-        return cls(highest_epoch=0, next_serial=1, active=None, issued=[], revoked_serials=[])
+        return cls(
+            highest_epoch=0,
+            next_serial=1,
+            active=None,
+            issued=[],
+            worker_issued=[],
+            revoked_serials=[],
+        )
 
     @classmethod
     def from_json(cls, value: object) -> BrokerState:
-        required = {
+        common = {
             "schema_version",
             "highest_epoch",
             "next_serial",
@@ -248,11 +295,19 @@ class BrokerState:
             "issued",
             "revoked_serials",
         }
-        if not isinstance(value, dict) or set(value) != required or value.get("schema_version") != SCHEMA_VERSION:
+        if not isinstance(value, dict) or value.get("schema_version") not in {
+            SCHEMA_VERSION,
+            LEGACY_SCHEMA_VERSION,
+        }:
+            raise TunnelBrokerError("tunnel broker state fields differ from the contract")
+        legacy = value.get("schema_version") == LEGACY_SCHEMA_VERSION
+        required = common if legacy else common | {"worker_issued"}
+        if set(value) != required:
             raise TunnelBrokerError("tunnel broker state fields differ from the contract")
         highest_epoch = value["highest_epoch"]
         next_serial = value["next_serial"]
         issued = value["issued"]
+        worker_issued = [] if legacy else value["worker_issued"]
         revoked = value["revoked_serials"]
         if (
             not isinstance(highest_epoch, int)
@@ -263,6 +318,8 @@ class BrokerState:
             or not 1 <= next_serial < 2**63
             or not isinstance(issued, list)
             or len(issued) > MAX_ISSUED_CERTIFICATES
+            or not isinstance(worker_issued, list)
+            or len(worker_issued) > MAX_ISSUED_CERTIFICATES
             or not isinstance(revoked, list)
             or any(not isinstance(item, int) or isinstance(item, bool) or item < 1 for item in revoked)
             or revoked != sorted(set(revoked))
@@ -306,13 +363,60 @@ class BrokerState:
             run_id, attempt_id = _validate_runtime_ids(item["run_id"], item["attempt_id"])
             if (
                 item["principal"] != _principal(instance, epoch, run_id, attempt_id)
-                or item["key_id"]
-                != f"mdh:{instance}:{epoch}:{_runtime_digest(run_id, attempt_id)}:{serial}"
+                or item["key_id"] != f"mdh:{instance}:{epoch}:{_runtime_digest(run_id, attempt_id)}:{serial}"
             ):
                 raise TunnelBrokerError("issued certificate identity is invalid")
             _parse_time(item["valid_before"], "valid_before")
             seen_serials.add(serial)
             parsed_issued.append(dict(item))
+        parsed_workers: list[dict[str, object]] = []
+        worker_required = {
+            "serial",
+            "master_instance_id",
+            "epoch",
+            "task_run_id",
+            "credential_id",
+            "key_id",
+            "principal",
+            "valid_before",
+            "public_key_sha256",
+            "certificate",
+        }
+        for item in worker_issued:
+            if not isinstance(item, dict) or set(item) != worker_required:
+                raise TunnelBrokerError("worker certificate metadata differs from the contract")
+            serial = item["serial"]
+            if (
+                not isinstance(serial, int)
+                or isinstance(serial, bool)
+                or serial < 1
+                or serial in seen_serials
+                or not isinstance(item["master_instance_id"], str)
+                or not isinstance(item["epoch"], int)
+                or isinstance(item["epoch"], bool)
+                or not isinstance(item["task_run_id"], str)
+                or not isinstance(item["credential_id"], str)
+                or not isinstance(item["key_id"], str)
+                or not isinstance(item["principal"], str)
+                or not isinstance(item["valid_before"], str)
+                or not isinstance(item["public_key_sha256"], str)
+                or not re.fullmatch(r"[a-f0-9]{64}", str(item["public_key_sha256"]))
+                or not isinstance(item["certificate"], str)
+                or (item["certificate"] and not item["certificate"].startswith("ssh-ed25519-cert-v01@openssh.com "))
+            ):
+                raise TunnelBrokerError("worker certificate metadata is invalid")
+            instance, epoch = _validate_identity(item["master_instance_id"], item["epoch"])
+            task_run_id = _uuid(item["task_run_id"], "task_run_id")
+            credential_id = _uuid(item["credential_id"], "credential_id")
+            principal = _worker_principal(instance, epoch, task_run_id, credential_id)
+            if (
+                item["principal"] != principal
+                or item["key_id"] != f"mdh-worker:{instance}:{epoch}:{task_run_id}:{credential_id}:{serial}"
+            ):
+                raise TunnelBrokerError("worker certificate identity is invalid")
+            _parse_time(item["valid_before"], "valid_before")
+            seen_serials.add(serial)
+            parsed_workers.append(dict(item))
         # Revoked serials are intentionally also present in issued metadata.
         if seen_serials and max(seen_serials) >= next_serial:
             raise TunnelBrokerError("issued certificate serial exceeds the durable counter")
@@ -321,7 +425,7 @@ class BrokerState:
         active = ActiveTunnelLease.from_json(value["active"]) if value["active"] is not None else None
         if active is not None and (active.epoch != highest_epoch or active.epoch < 1):
             raise TunnelBrokerError("active tunnel epoch is not the highest durable epoch")
-        return cls(highest_epoch, next_serial, active, parsed_issued, list(revoked))
+        return cls(highest_epoch, next_serial, active, parsed_issued, parsed_workers, list(revoked))
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -330,6 +434,7 @@ class BrokerState:
             "next_serial": self.next_serial,
             "active": self.active.to_json() if self.active else None,
             "issued": self.issued,
+            "worker_issued": self.worker_issued,
             "revoked_serials": self.revoked_serials,
         }
 
@@ -343,21 +448,24 @@ class TunnelBroker:
         *,
         ca_private_key: Path,
         account: str = DEFAULT_ACCOUNT,
+        worker_account: str = DEFAULT_WORKER_ACCOUNT,
         command_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         session_terminator: Callable[[str], None] | None = None,
     ) -> None:
         if not root.is_absolute() or root.is_symlink():
             raise TunnelBrokerError("broker root must be an absolute non-symlink path")
-        if not _ACCOUNT.fullmatch(account):
+        if not _ACCOUNT.fullmatch(account) or not _ACCOUNT.fullmatch(worker_account) or account == worker_account:
             raise TunnelBrokerError("tunnel account name is invalid")
         self.root = root
         self.ca_private_key = ca_private_key
         self.ca_public_key = Path(f"{ca_private_key}.pub")
         self.account = account
+        self.worker_account = worker_account
         self.command_runner = command_runner
         self.session_terminator = session_terminator or terminate_account_sessions
         self.state_path = root / "state.json"
         self.principals_path = root / "authorized_principals"
+        self.worker_principals_path = root / "authorized_worker_principals"
         self.krl_path = root / "revoked.krl"
         self.lock_path = root / "broker.lock"
 
@@ -397,6 +505,30 @@ class TunnelBroker:
         content = b"" if active is None else f"{active.principal}\n".encode()
         _atomic_write(self.principals_path, content, 0o644)
 
+    def _write_worker_principals(self, state: BrokerState, *, now: datetime | None = None) -> None:
+        observed = _utc(now or datetime.now(UTC), "now")
+        active = state.active
+        principals = []
+        if active is not None and active.lease_until > observed:
+            principals = [
+                str(item["principal"])
+                for item in state.worker_issued
+                if item["master_instance_id"] == active.master_instance_id
+                and item["epoch"] == active.epoch
+                and cast(int, item["serial"]) not in state.revoked_serials
+                and bool(item["certificate"])
+                and _parse_time(str(item["valid_before"]), "valid_before") > observed
+            ]
+        content = (
+            "".join(
+                f'restrict,port-forwarding,permitopen="{DEFAULT_LISTEN_HOST}:{active.listen_port}" {principal}\n'
+                for principal in sorted(principals)
+            )
+            if active is not None
+            else ""
+        )
+        _atomic_write(self.worker_principals_path, content.encode("ascii"), 0o644)
+
     def _write_krl(self, revoked_serials: Sequence[int], *, revoke_ca: bool = False) -> None:
         _regular_file(self.ca_public_key, "tunnel CA public key")
         with tempfile.TemporaryDirectory(prefix=".krl.", dir=self.root) as raw_tmp:
@@ -421,17 +553,37 @@ class TunnelBroker:
                 )
             _atomic_write(self.krl_path, output.read_bytes(), 0o644)
 
+    @staticmethod
+    def _worker_serials(state: BrokerState, *, master_instance_id: str, epoch: int) -> list[int]:
+        return [
+            cast(int, item["serial"])
+            for item in state.worker_issued
+            if item["master_instance_id"] == master_instance_id and item["epoch"] == epoch
+        ]
+
+    def _terminate_workers_if_issued(self, state: BrokerState) -> None:
+        if state.worker_issued:
+            self.session_terminator(self.worker_account)
+
     def _fail_closed(self, state: BrokerState | None = None) -> None:
         first_failure: Exception | None = None
         try:
             self._write_principal(None)
         except Exception as exc:  # continue to independent KRL/session denial
             first_failure = exc
+        try:
+            _atomic_write(self.worker_principals_path, b"", 0o644)
+        except Exception as exc:
+            first_failure = first_failure or exc
         if state is not None:
             try:
                 state.active = None
                 state.revoked_serials = sorted(
-                    {*state.revoked_serials, *(cast(int, item["serial"]) for item in state.issued)}
+                    {
+                        *state.revoked_serials,
+                        *(cast(int, item["serial"]) for item in state.issued),
+                        *(cast(int, item["serial"]) for item in state.worker_issued),
+                    }
                 )
                 self._save(state)
             except Exception as exc:
@@ -463,6 +615,7 @@ class TunnelBroker:
             state = BrokerState.empty()
             self._save(state)
             self._write_principal(None)
+            self._write_worker_principals(state)
             self._write_krl([])
 
     def activate(
@@ -514,12 +667,18 @@ class TunnelBroker:
                                     and item["attempt_id"] == current.attempt_id
                                     and item["epoch"] == current.epoch
                                 ),
+                                *self._worker_serials(
+                                    state,
+                                    master_instance_id=current.master_instance_id,
+                                    epoch=current.epoch,
+                                ),
                             }
                         )
                         self._write_krl(state.revoked_serials)
                         state.active = None
                         self._save(state)
                         self.session_terminator(self.account)
+                        self._terminate_workers_if_issued(state)
                     except Exception:
                         self._fail_closed(state)
                         raise
@@ -533,6 +692,7 @@ class TunnelBroker:
                         self._save(state)
                     self._write_krl(state.revoked_serials)
                     self._write_principal(replay)
+                    self._write_worker_principals(state, now=observed)
                     return replay
                 except Exception:
                     self._fail_closed(state)
@@ -543,18 +703,26 @@ class TunnelBroker:
                 raise TunnelBrokerError("activation epoch must advance the durable high-water mark")
             try:
                 self._write_principal(None)
+                self._write_worker_principals(state, now=observed)
                 self.session_terminator(self.account)
+                self._terminate_workers_if_issued(state)
                 superseded = [
                     cast(int, item["serial"])
                     for item in state.issued
                     if cast(int, item["serial"]) not in state.revoked_serials
                 ]
+                superseded.extend(
+                    cast(int, item["serial"])
+                    for item in state.worker_issued
+                    if cast(int, item["serial"]) not in state.revoked_serials
+                )
                 state.revoked_serials = sorted({*state.revoked_serials, *superseded})
                 self._write_krl(state.revoked_serials)
                 state.highest_epoch = active.epoch
                 state.active = active
                 self._save(state)
                 self._write_principal(active)
+                self._write_worker_principals(state, now=observed)
                 return active
             except Exception:
                 self._fail_closed(state)
@@ -590,6 +758,7 @@ class TunnelBroker:
                 try:
                     self._write_krl(state.revoked_serials)
                     self._write_principal(active)
+                    self._write_worker_principals(state, now=observed)
                     return active
                 except Exception:
                     self._fail_closed(state)
@@ -609,6 +778,7 @@ class TunnelBroker:
                 state.active = renewed
                 self._save(state)
                 self._write_principal(renewed)
+                self._write_worker_principals(state, now=observed)
                 return renewed
             except Exception:
                 self._fail_closed(state)
@@ -654,9 +824,7 @@ class TunnelBroker:
             certificate = max(issued, key=lambda item: cast(int, item["serial"]))
             return {
                 "serial": int(cast(int, certificate["serial"])),
-                "principal_sha256": hashlib.sha256(
-                    str(certificate["principal"]).encode("utf-8")
-                ).hexdigest(),
+                "principal_sha256": hashlib.sha256(str(certificate["principal"]).encode("utf-8")).hexdigest(),
                 "public_key_sha256": str(certificate["public_key_sha256"]),
             }
 
@@ -678,9 +846,7 @@ class TunnelBroker:
 
         instance, epoch = _validate_identity(master_instance_id, epoch)
         run_id, attempt_id = _validate_runtime_ids(run_id, attempt_id)
-        replacement, replacement_epoch = _validate_identity(
-            replacement_master_instance_id, replacement_epoch
-        )
+        replacement, replacement_epoch = _validate_identity(replacement_master_instance_id, replacement_epoch)
         _utc(now, "now")
         if (
             certificate_serial < 1
@@ -710,8 +876,7 @@ class TunnelBroker:
                 or active.epoch != replacement_epoch
                 or certificate is None
                 or certificate_serial not in state.revoked_serials
-                or hashlib.sha256(str(certificate["principal"]).encode("utf-8")).hexdigest()
-                != principal_sha256
+                or hashlib.sha256(str(certificate["principal"]).encode("utf-8")).hexdigest() != principal_sha256
                 or certificate["public_key_sha256"] != public_key_sha256
             ):
                 raise TunnelBrokerError("FM11 retired tunnel denial is not durably proven")
@@ -880,6 +1045,190 @@ class TunnelBroker:
                 self._fail_closed(state)
                 raise
 
+    def issue_worker_public_key(
+        self,
+        *,
+        master_instance_id: str,
+        epoch: int,
+        task_run_id: str,
+        credential_id: str,
+        public_key: str,
+        valid_before: datetime,
+        now: datetime,
+    ) -> WorkerTunnelCertificate:
+        """Sign one task credential for local forwarding to the ACTIVE tunnel only."""
+
+        instance, epoch = _validate_identity(master_instance_id, epoch)
+        task_run_id = _uuid(task_run_id, "task_run_id")
+        credential_id = _uuid(credential_id, "credential_id")
+        observed = _utc(now, "now")
+        expiry = _utc(valid_before, "valid_before")
+        _regular_file(self.ca_private_key, "tunnel CA private key", private=True)
+        _regular_file(self.ca_public_key, "tunnel CA public key")
+        if len(public_key.encode("utf-8")) > 16 * 1024:
+            raise TunnelBrokerError("ephemeral worker public key is oversized")
+        try:
+            public_key.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise TunnelBrokerError("ephemeral worker public key must be ASCII") from exc
+        key_text = public_key.strip()
+        fields = key_text.split()
+        if len(fields) < 2 or fields[0] not in _PUBLIC_KEY_TYPES or "\n" in key_text:
+            raise TunnelBrokerError("only one Ed25519 worker public key may be certified")
+        digest = hashlib.sha256(key_text.encode("ascii")).hexdigest()
+        with self._lock():
+            state = self._load_or_fail_closed()
+            active = state.active
+            if (
+                active is None
+                or active.master_instance_id != instance
+                or active.epoch != epoch
+                or active.lease_until <= observed
+            ):
+                raise TunnelBrokerError("worker certificate requires the current unexpired tunnel epoch")
+            if (
+                expiry - observed < MIN_CERTIFICATE_LIFETIME
+                or expiry > active.lease_until
+                or expiry - observed > MAX_LEASE
+            ):
+                raise TunnelBrokerError("worker certificate validity must be within the active lease")
+            replays = [
+                item
+                for item in state.worker_issued
+                if item["task_run_id"] == task_run_id and item["credential_id"] == credential_id
+            ]
+            if replays:
+                item = replays[0]
+                if (
+                    item["master_instance_id"] != instance
+                    or item["epoch"] != epoch
+                    or item["valid_before"] != _format_time(expiry)
+                    or item["public_key_sha256"] != digest
+                    or cast(int, item["serial"]) in state.revoked_serials
+                    or not item["certificate"]
+                ):
+                    raise TunnelBrokerError("worker certificate identity conflicts with its exact replay")
+                self._write_worker_principals(state, now=observed)
+                return WorkerTunnelCertificate(
+                    certificate=str(item["certificate"]),
+                    serial=cast(int, item["serial"]),
+                    principal=str(item["principal"]),
+                    valid_before=expiry,
+                    task_run_id=task_run_id,
+                    credential_id=credential_id,
+                    connect_port=active.listen_port,
+                    account=self.worker_account,
+                )
+            if len(state.issued) + len(state.worker_issued) >= MAX_ISSUED_CERTIFICATES:
+                raise TunnelBrokerError("tunnel certificate metadata limit reached")
+            serial = state.next_serial
+            state.next_serial += 1
+            principal = _worker_principal(instance, epoch, task_run_id, credential_id)
+            key_id = f"mdh-worker:{instance}:{epoch}:{task_run_id}:{credential_id}:{serial}"
+            metadata: dict[str, object] = {
+                "serial": serial,
+                "master_instance_id": instance,
+                "epoch": epoch,
+                "task_run_id": task_run_id,
+                "credential_id": credential_id,
+                "key_id": key_id,
+                "principal": principal,
+                "valid_before": _format_time(expiry),
+                "public_key_sha256": digest,
+                "certificate": "",
+            }
+            state.worker_issued.append(metadata)
+            try:
+                self._save(state)
+                with tempfile.TemporaryDirectory(prefix=".worker-certificate.", dir=self.root) as raw_tmp:
+                    temporary_root = Path(raw_tmp)
+                    signing_key = temporary_root / "ephemeral.pub"
+                    signing_key.write_text(key_text + "\n", encoding="ascii")
+                    os.chmod(signing_key, 0o600)
+                    self._run(["ssh-keygen", "-l", "-f", str(signing_key)])
+                    self._run(
+                        [
+                            "ssh-keygen",
+                            "-q",
+                            "-s",
+                            str(self.ca_private_key),
+                            "-I",
+                            key_id,
+                            "-z",
+                            str(serial),
+                            "-n",
+                            principal,
+                            "-V",
+                            f"{_certificate_time(observed - timedelta(seconds=5))}:{_certificate_time(expiry)}",
+                            "-O",
+                            "clear",
+                            "-O",
+                            "permit-port-forwarding",
+                            str(signing_key),
+                        ]
+                    )
+                    generated = temporary_root / "ephemeral-cert.pub"
+                    _regular_file(generated, "issued worker tunnel certificate")
+                    certificate = generated.read_text(encoding="ascii").strip()
+                metadata["certificate"] = certificate
+                self._save(state)
+                self._write_krl(state.revoked_serials)
+                self._write_worker_principals(state, now=observed)
+                return WorkerTunnelCertificate(
+                    certificate=certificate,
+                    serial=serial,
+                    principal=principal,
+                    valid_before=expiry,
+                    task_run_id=task_run_id,
+                    credential_id=credential_id,
+                    connect_port=active.listen_port,
+                    account=self.worker_account,
+                )
+            except Exception:
+                self._fail_closed(state)
+                raise
+
+    def revoke_worker_certificate(
+        self,
+        *,
+        master_instance_id: str,
+        epoch: int,
+        task_run_id: str,
+        credential_id: str,
+        serial: int,
+        reason: str,
+    ) -> None:
+        instance, epoch = _validate_identity(master_instance_id, epoch)
+        task_run_id = _uuid(task_run_id, "task_run_id")
+        credential_id = _uuid(credential_id, "credential_id")
+        if isinstance(serial, bool) or serial < 1 or not _REASON.fullmatch(reason):
+            raise TunnelBrokerError("worker revocation identity is invalid")
+        with self._lock():
+            state = self._load_or_fail_closed()
+            match = next(
+                (
+                    item
+                    for item in state.worker_issued
+                    if item["serial"] == serial
+                    and item["master_instance_id"] == instance
+                    and item["epoch"] == epoch
+                    and item["task_run_id"] == task_run_id
+                    and item["credential_id"] == credential_id
+                ),
+                None,
+            )
+            if match is None:
+                raise TunnelBrokerError("worker certificate is not bound to the requested task")
+            try:
+                state.revoked_serials = sorted({*state.revoked_serials, serial})
+                self._write_krl(state.revoked_serials)
+                self._save(state)
+                self._write_worker_principals(state)
+                self._terminate_workers_if_issued(state)
+            except Exception:
+                self._fail_closed(state)
+                raise
+
     def revoke(
         self,
         *,
@@ -945,6 +1294,7 @@ class TunnelBroker:
                 raise TunnelBrokerError("deactivation does not match the current tunnel epoch")
             try:
                 self._write_principal(None)
+                self._write_worker_principals(state)
                 state.revoked_serials = sorted(
                     {
                         *state.revoked_serials,
@@ -956,12 +1306,14 @@ class TunnelBroker:
                             and item["attempt_id"] == attempt_id
                             and item["epoch"] == epoch
                         ),
+                        *self._worker_serials(state, master_instance_id=instance, epoch=epoch),
                     }
                 )
                 self._write_krl(state.revoked_serials)
                 state.active = None
                 self._save(state)
                 self.session_terminator(self.account)
+                self._terminate_workers_if_issued(state)
             except Exception:
                 self._fail_closed(state)
                 raise
@@ -974,6 +1326,7 @@ class TunnelBroker:
                 active = state.active
                 if active is None or active.lease_until <= observed:
                     self._write_principal(None)
+                    self._write_worker_principals(state, now=observed)
                     if active is not None:
                         state.revoked_serials = sorted(
                             {
@@ -986,15 +1339,22 @@ class TunnelBroker:
                                     and item["attempt_id"] == active.attempt_id
                                     and item["epoch"] == active.epoch
                                 ),
+                                *self._worker_serials(
+                                    state,
+                                    master_instance_id=active.master_instance_id,
+                                    epoch=active.epoch,
+                                ),
                             }
                         )
                         state.active = None
                         self._save(state)
                     self._write_krl(state.revoked_serials)
                     self.session_terminator(self.account)
+                    self._terminate_workers_if_issued(state)
                     return False
                 self._write_krl(state.revoked_serials)
                 self._write_principal(active)
+                self._write_worker_principals(state, now=observed)
                 return True
             except Exception:
                 self._fail_closed(state)
@@ -1018,12 +1378,13 @@ def terminate_account_sessions(account: str) -> None:
 def render_sshd_config(
     *,
     account: str,
+    worker_account: str = DEFAULT_WORKER_ACCOUNT,
     ca_public_key: Path,
     principals_file: Path,
     revoked_keys_file: Path,
     listen_port: int,
 ) -> str:
-    if not _ACCOUNT.fullmatch(account):
+    if not _ACCOUNT.fullmatch(account) or not _ACCOUNT.fullmatch(worker_account) or account == worker_account:
         raise TunnelBrokerError("tunnel account name is invalid")
     if isinstance(listen_port, bool) or not 1024 <= listen_port <= 65535:
         raise TunnelBrokerError("master tunnel listen port must be within 1024..65535")
@@ -1053,6 +1414,29 @@ Match User {account}
     PermitUserRC no
     MaxSessions 0
 Match all
+
+Match User {worker_account}
+    AuthenticationMethods publickey
+    PubkeyAuthentication yes
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    GSSAPIAuthentication no
+    HostbasedAuthentication no
+    AuthorizedKeysFile none
+    TrustedUserCAKeys {ca_public_key}
+    AuthorizedPrincipalsFile {principals_file.parent / "authorized_worker_principals"}
+    RevokedKeys {revoked_keys_file}
+    AllowTcpForwarding local
+    PermitListen none
+    PermitOpen {DEFAULT_LISTEN_HOST}:{listen_port}
+    GatewayPorts no
+    PermitTTY no
+    X11Forwarding no
+    AllowAgentForwarding no
+    PermitTunnel no
+    PermitUserRC no
+    MaxSessions 0
+Match all
 """
 
 
@@ -1061,6 +1445,7 @@ def _broker(arguments: argparse.Namespace) -> TunnelBroker:
         Path(arguments.state_root),
         ca_private_key=Path(arguments.ca_private_key),
         account=arguments.account,
+        worker_account=arguments.worker_account,
     )
 
 
@@ -1073,6 +1458,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-root", required=True)
     parser.add_argument("--ca-private-key", required=True)
     parser.add_argument("--account", default=DEFAULT_ACCOUNT)
+    parser.add_argument("--worker-account", default=DEFAULT_WORKER_ACCOUNT)
     subparsers = parser.add_subparsers(dest="action", required=True)
     subparsers.add_parser("initialize")
 
@@ -1168,6 +1554,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.action == "render-sshd-config":
             rendered = render_sshd_config(
                 account=arguments.account,
+                worker_account=arguments.worker_account,
                 ca_public_key=broker.ca_public_key,
                 principals_file=broker.principals_path,
                 revoked_keys_file=broker.krl_path,

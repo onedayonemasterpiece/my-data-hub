@@ -133,6 +133,7 @@ def test_issue_is_epoch_and_lease_bound_and_returns_only_public_certificate(tmp_
         "active",
         "issued",
         "revoked_serials",
+        "worker_issued",
     }
     assert terminated == [DEFAULT_ACCOUNT]
 
@@ -604,3 +605,186 @@ def test_fm11_ipc_snapshot_and_retired_denial_are_structured_and_task_bound(
         "certificate_serial": certificate.serial,
         "principal_sha256": snapshot["principal_sha256"],
     }
+
+
+def test_worker_certificate_is_task_bound_local_forward_only_and_exactly_replayable(
+    tmp_path: Path,
+) -> None:
+    broker, terminated, _ca = _broker(tmp_path)
+    broker.activate(
+        master_instance_id=INSTANCE,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        epoch=8,
+        lease_until=NOW + timedelta(minutes=5),
+        listen_port=25432,
+        now=NOW,
+    )
+    task = "11111111-1111-4111-8111-111111111111"
+    credential = "22222222-2222-4222-8222-222222222222"
+    public_key = _key(tmp_path / "worker", "embedding worker").read_text(encoding="ascii")
+    issued = broker.issue_worker_public_key(
+        master_instance_id=INSTANCE,
+        epoch=8,
+        task_run_id=task,
+        credential_id=credential,
+        public_key=public_key,
+        valid_before=NOW + timedelta(minutes=4),
+        now=NOW,
+    )
+    replay = broker.issue_worker_public_key(
+        master_instance_id=INSTANCE,
+        epoch=8,
+        task_run_id=task,
+        credential_id=credential,
+        public_key=public_key,
+        valid_before=NOW + timedelta(minutes=4),
+        now=NOW,
+    )
+    assert replay == issued
+    assert issued.account == "mdh-embedding-worker"
+    assert (issued.connect_host, issued.connect_port) == ("127.0.0.1", 25432)
+    assert broker.worker_principals_path.read_text() == (
+        f'restrict,port-forwarding,permitopen="127.0.0.1:25432" {issued.principal}\n'
+    )
+    state = json.loads(broker.state_path.read_text())
+    assert state["worker_issued"][0]["task_run_id"] == task
+    assert state["worker_issued"][0]["credential_id"] == credential
+    assert public_key not in broker.state_path.read_text()
+    with pytest.raises(TunnelBrokerError, match="exact replay"):
+        broker.issue_worker_public_key(
+            master_instance_id=INSTANCE,
+            epoch=8,
+            task_run_id=task,
+            credential_id=credential,
+            public_key=_key(tmp_path / "other", "other").read_text(),
+            valid_before=NOW + timedelta(minutes=4),
+            now=NOW,
+        )
+    assert terminated == [DEFAULT_ACCOUNT]
+
+
+def test_worker_revoke_and_epoch_fence_remove_local_forward_authority(tmp_path: Path) -> None:
+    broker, terminated, _ca = _broker(tmp_path)
+    broker.activate(
+        master_instance_id=INSTANCE,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        epoch=3,
+        lease_until=NOW + timedelta(minutes=5),
+        listen_port=25432,
+        now=NOW,
+    )
+    task = "11111111-1111-4111-8111-111111111111"
+    credential = "22222222-2222-4222-8222-222222222222"
+    public_key = _key(tmp_path / "worker", "embedding worker").read_text()
+    issued = broker.issue_worker_public_key(
+        master_instance_id=INSTANCE,
+        epoch=3,
+        task_run_id=task,
+        credential_id=credential,
+        public_key=public_key,
+        valid_before=NOW + timedelta(minutes=4),
+        now=NOW,
+    )
+    with pytest.raises(TunnelBrokerError, match="not bound"):
+        broker.revoke_worker_certificate(
+            master_instance_id=INSTANCE,
+            epoch=3,
+            task_run_id=task,
+            credential_id="33333333-3333-4333-8333-333333333333",
+            serial=issued.serial,
+            reason="task_terminal",
+        )
+    broker.revoke_worker_certificate(
+        master_instance_id=INSTANCE,
+        epoch=3,
+        task_run_id=task,
+        credential_id=credential,
+        serial=issued.serial,
+        reason="task_terminal",
+    )
+    assert broker.worker_principals_path.read_bytes() == b""
+    assert json.loads(broker.state_path.read_text())["revoked_serials"] == [issued.serial]
+    with pytest.raises(TunnelBrokerError, match="exact replay"):
+        broker.issue_worker_public_key(
+            master_instance_id=INSTANCE,
+            epoch=3,
+            task_run_id=task,
+            credential_id=credential,
+            public_key=public_key,
+            valid_before=NOW + timedelta(minutes=4),
+            now=NOW,
+        )
+    assert terminated[-1] == "mdh-embedding-worker"
+
+
+def test_sshd_config_separates_master_remote_and_worker_local_forward_policy() -> None:
+    config = render_sshd_config(
+        account=DEFAULT_ACCOUNT,
+        worker_account="mdh-embedding-worker",
+        ca_public_key=Path("/etc/my-data-hub/tunnel-user-ca.pub"),
+        principals_file=Path("/var/lib/my-data-hub/tunnel-broker/authorized_principals"),
+        revoked_keys_file=Path("/var/lib/my-data-hub/tunnel-broker/revoked.krl"),
+        listen_port=25432,
+    )
+    master, worker = config.split("Match User mdh-embedding-worker")
+    assert "AllowTcpForwarding remote" in master and "PermitListen 127.0.0.1:25432" in master
+    assert "PermitOpen none" in master
+    assert "AllowTcpForwarding local" in worker and "PermitOpen 127.0.0.1:25432" in worker
+    assert "PermitListen none" in worker and "0.0.0.0" not in config
+
+
+def test_worker_ipc_dispatch_is_exact_public_metadata_only(tmp_path: Path) -> None:
+    broker, _terminated, _ca = _broker(tmp_path)
+    now = datetime.now(UTC)
+    broker.activate(
+        master_instance_id=INSTANCE,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        epoch=6,
+        lease_until=now + timedelta(minutes=5),
+        listen_port=25432,
+        now=now,
+    )
+    public_key = _key(tmp_path / "ipc-worker", "ipc worker").read_text()
+    payload = {
+        "master_instance_id": INSTANCE,
+        "epoch": 6,
+        "task_run_id": "11111111-1111-4111-8111-111111111111",
+        "credential_id": "22222222-2222-4222-8222-222222222222",
+        "public_key": public_key,
+        "valid_before": (now + timedelta(minutes=4)).isoformat(),
+    }
+    issued = _dispatch(broker, {"action": "issue_worker", "payload": payload})
+    assert set(issued) == {
+        "certificate",
+        "serial",
+        "principal",
+        "valid_before",
+        "task_run_id",
+        "credential_id",
+        "connect_host",
+        "connect_port",
+        "account",
+    }
+    assert "private" not in json.dumps(issued).casefold()
+    replay = _dispatch(broker, {"action": "issue_worker", "payload": payload})
+    assert replay == issued
+    revoked = _dispatch(
+        broker,
+        {
+            "action": "revoke_worker",
+            "payload": {
+                "master_instance_id": INSTANCE,
+                "epoch": 6,
+                "task_run_id": payload["task_run_id"],
+                "credential_id": payload["credential_id"],
+                "serial": issued["serial"],
+                "reason": "task_terminal",
+            },
+        },
+    )
+    assert revoked == {"revoked": True}
+    with pytest.raises(TunnelBrokerError, match="fields"):
+        _dispatch(broker, {"action": "issue_worker", "payload": {**payload, "private_key": "forbidden"}})

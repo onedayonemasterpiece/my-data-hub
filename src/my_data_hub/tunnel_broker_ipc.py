@@ -19,6 +19,7 @@ try:  # Installed package / repository execution.
         TunnelBroker,
         TunnelBrokerError,
         TunnelCertificate,
+        WorkerTunnelCertificate,
     )
 except ModuleNotFoundError:  # Root installer copies both scripts beside each other.
     from tunnel_broker import (  # type: ignore[no-redef]
@@ -26,6 +27,7 @@ except ModuleNotFoundError:  # Root installer copies both scripts beside each ot
         TunnelBroker,
         TunnelBrokerError,
         TunnelCertificate,
+        WorkerTunnelCertificate,
     )
 
 MAX_MESSAGE_BYTES = 32 * 1024
@@ -57,9 +59,10 @@ class TunnelBrokerClient:
         self.timeout_seconds = timeout_seconds
 
     def _call(self, action: str, payload: dict[str, object]) -> dict[str, object]:
-        encoded = json.dumps(
-            {"action": action, "payload": payload}, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8") + b"\n"
+        encoded = (
+            json.dumps({"action": action, "payload": payload}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            + b"\n"
+        )
         if len(encoded) > MAX_MESSAGE_BYTES:
             raise TunnelBrokerError("broker request is oversized")
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
@@ -78,8 +81,10 @@ class TunnelBrokerClient:
             response = json.loads(bytes(raw))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise TunnelBrokerError("broker response is malformed") from exc
-        if not isinstance(response, dict) or response.get("ok") is not True or not isinstance(
-            response.get("result"), dict
+        if (
+            not isinstance(response, dict)
+            or response.get("ok") is not True
+            or not isinstance(response.get("result"), dict)
         ):
             raise TunnelBrokerError("broker denied the operation")
         return cast(dict[str, object], response["result"])
@@ -93,22 +98,41 @@ class TunnelBrokerClient:
             "epoch": epoch,
         }
 
-    def activate(self, *, master_instance_id: str, run_id: str, attempt_id: str, epoch: int,
-                 lease_until: datetime, listen_port: int, now: datetime) -> ActiveTunnelLease:
+    def activate(
+        self,
+        *,
+        master_instance_id: str,
+        run_id: str,
+        attempt_id: str,
+        epoch: int,
+        lease_until: datetime,
+        listen_port: int,
+        now: datetime,
+    ) -> ActiveTunnelLease:
         _format(now)
         payload = self._identity(master_instance_id, run_id, attempt_id, epoch)
         payload.update({"lease_until": _format(lease_until), "listen_port": listen_port})
         return ActiveTunnelLease.from_json(self._call("activate", payload))
 
-    def renew(self, *, master_instance_id: str, run_id: str, attempt_id: str, epoch: int,
-              lease_until: datetime, now: datetime) -> ActiveTunnelLease:
+    def renew(
+        self, *, master_instance_id: str, run_id: str, attempt_id: str, epoch: int, lease_until: datetime, now: datetime
+    ) -> ActiveTunnelLease:
         _format(now)
         payload = self._identity(master_instance_id, run_id, attempt_id, epoch)
         payload["lease_until"] = _format(lease_until)
         return ActiveTunnelLease.from_json(self._call("renew", payload))
 
-    def issue_public_key(self, *, master_instance_id: str, run_id: str, attempt_id: str, epoch: int,
-                         public_key: str, valid_before: datetime, now: datetime) -> TunnelCertificate:
+    def issue_public_key(
+        self,
+        *,
+        master_instance_id: str,
+        run_id: str,
+        attempt_id: str,
+        epoch: int,
+        public_key: str,
+        valid_before: datetime,
+        now: datetime,
+    ) -> TunnelCertificate:
         _format(now)
         payload = self._identity(master_instance_id, run_id, attempt_id, epoch)
         payload.update({"public_key": public_key, "valid_before": _format(valid_before)})
@@ -117,13 +141,87 @@ class TunnelBrokerClient:
         if set(result) != expected:
             raise TunnelBrokerError("broker certificate response differs from the contract")
         return TunnelCertificate(
-            certificate=str(result["certificate"]), serial=int(cast(int, result["serial"])),
-            principal=str(result["principal"]), valid_before=_parse(result["valid_before"]),
-            listen_host=str(result["listen_host"]), listen_port=int(cast(int, result["listen_port"])),
+            certificate=str(result["certificate"]),
+            serial=int(cast(int, result["serial"])),
+            principal=str(result["principal"]),
+            valid_before=_parse(result["valid_before"]),
+            listen_host=str(result["listen_host"]),
+            listen_port=int(cast(int, result["listen_port"])),
         )
 
-    def deactivate(self, *, master_instance_id: str, run_id: str, attempt_id: str, epoch: int,
-                   reason: str) -> None:
+    def issue_worker_public_key(
+        self,
+        *,
+        master_instance_id: str,
+        epoch: int,
+        task_run_id: str,
+        credential_id: str,
+        public_key: str,
+        valid_before: datetime,
+        now: datetime,
+    ) -> WorkerTunnelCertificate:
+        _format(now)
+        result = self._call(
+            "issue_worker",
+            {
+                "master_instance_id": master_instance_id,
+                "epoch": epoch,
+                "task_run_id": task_run_id,
+                "credential_id": credential_id,
+                "public_key": public_key,
+                "valid_before": _format(valid_before),
+            },
+        )
+        expected = {
+            "certificate",
+            "serial",
+            "principal",
+            "valid_before",
+            "task_run_id",
+            "credential_id",
+            "connect_host",
+            "connect_port",
+            "account",
+        }
+        if set(result) != expected:
+            raise TunnelBrokerError("worker certificate response differs from the contract")
+        return WorkerTunnelCertificate(
+            certificate=str(result["certificate"]),
+            serial=int(cast(int, result["serial"])),
+            principal=str(result["principal"]),
+            valid_before=_parse(result["valid_before"]),
+            task_run_id=str(result["task_run_id"]),
+            credential_id=str(result["credential_id"]),
+            connect_host=str(result["connect_host"]),
+            connect_port=int(cast(int, result["connect_port"])),
+            account=str(result["account"]),
+        )
+
+    def revoke_worker_certificate(
+        self,
+        *,
+        master_instance_id: str,
+        epoch: int,
+        task_run_id: str,
+        credential_id: str,
+        serial: int,
+        reason: str,
+    ) -> None:
+        result = self._call(
+            "revoke_worker",
+            {
+                "master_instance_id": master_instance_id,
+                "epoch": epoch,
+                "task_run_id": task_run_id,
+                "credential_id": credential_id,
+                "serial": serial,
+                "reason": reason,
+            },
+        )
+        if result != {"revoked": True}:
+            raise TunnelBrokerError("worker revocation response differs from the contract")
+
+    def deactivate(self, *, master_instance_id: str, run_id: str, attempt_id: str, epoch: int, reason: str) -> None:
         payload = self._identity(master_instance_id, run_id, attempt_id, epoch)
         payload["reason"] = reason
         if self._call("deactivate", payload) != {"deactivated": True}:
@@ -190,31 +288,84 @@ def _dispatch(broker: TunnelBroker, request: object) -> dict[str, object]:
     if action == "activate":
         payload = _exact(envelope["payload"], base | {"lease_until", "listen_port"})
         return broker.activate(
-            master_instance_id=str(payload["master_instance_id"]), run_id=str(payload["run_id"]),
-            attempt_id=str(payload["attempt_id"]), epoch=int(cast(int, payload["epoch"])),
-            lease_until=_parse(payload["lease_until"]), listen_port=int(cast(int, payload["listen_port"])),
+            master_instance_id=str(payload["master_instance_id"]),
+            run_id=str(payload["run_id"]),
+            attempt_id=str(payload["attempt_id"]),
+            epoch=int(cast(int, payload["epoch"])),
+            lease_until=_parse(payload["lease_until"]),
+            listen_port=int(cast(int, payload["listen_port"])),
             now=datetime.now(UTC),
         ).to_json()
     if action == "renew":
         payload = _exact(envelope["payload"], base | {"lease_until"})
         return broker.renew(
-            master_instance_id=str(payload["master_instance_id"]), run_id=str(payload["run_id"]),
-            attempt_id=str(payload["attempt_id"]), epoch=int(cast(int, payload["epoch"])),
-            lease_until=_parse(payload["lease_until"]), now=datetime.now(UTC),
+            master_instance_id=str(payload["master_instance_id"]),
+            run_id=str(payload["run_id"]),
+            attempt_id=str(payload["attempt_id"]),
+            epoch=int(cast(int, payload["epoch"])),
+            lease_until=_parse(payload["lease_until"]),
+            now=datetime.now(UTC),
         ).to_json()
     if action == "issue":
         payload = _exact(envelope["payload"], base | {"public_key", "valid_before"})
         return broker.issue_public_key(
-            master_instance_id=str(payload["master_instance_id"]), run_id=str(payload["run_id"]),
-            attempt_id=str(payload["attempt_id"]), epoch=int(cast(int, payload["epoch"])),
-            public_key=str(payload["public_key"]), valid_before=_parse(payload["valid_before"]),
+            master_instance_id=str(payload["master_instance_id"]),
+            run_id=str(payload["run_id"]),
+            attempt_id=str(payload["attempt_id"]),
+            epoch=int(cast(int, payload["epoch"])),
+            public_key=str(payload["public_key"]),
+            valid_before=_parse(payload["valid_before"]),
             now=datetime.now(UTC),
         ).public_response()
+    if action == "issue_worker":
+        payload = _exact(
+            envelope["payload"],
+            {
+                "master_instance_id",
+                "epoch",
+                "task_run_id",
+                "credential_id",
+                "public_key",
+                "valid_before",
+            },
+        )
+        return broker.issue_worker_public_key(
+            master_instance_id=str(payload["master_instance_id"]),
+            epoch=int(cast(int, payload["epoch"])),
+            task_run_id=str(payload["task_run_id"]),
+            credential_id=str(payload["credential_id"]),
+            public_key=str(payload["public_key"]),
+            valid_before=_parse(payload["valid_before"]),
+            now=datetime.now(UTC),
+        ).public_response()
+    if action == "revoke_worker":
+        payload = _exact(
+            envelope["payload"],
+            {
+                "master_instance_id",
+                "epoch",
+                "task_run_id",
+                "credential_id",
+                "serial",
+                "reason",
+            },
+        )
+        broker.revoke_worker_certificate(
+            master_instance_id=str(payload["master_instance_id"]),
+            epoch=int(cast(int, payload["epoch"])),
+            task_run_id=str(payload["task_run_id"]),
+            credential_id=str(payload["credential_id"]),
+            serial=int(cast(int, payload["serial"])),
+            reason=str(payload["reason"]),
+        )
+        return {"revoked": True}
     if action == "deactivate":
         payload = _exact(envelope["payload"], base | {"reason"})
         broker.deactivate(
-            master_instance_id=str(payload["master_instance_id"]), run_id=str(payload["run_id"]),
-            attempt_id=str(payload["attempt_id"]), epoch=int(cast(int, payload["epoch"])),
+            master_instance_id=str(payload["master_instance_id"]),
+            run_id=str(payload["run_id"]),
+            attempt_id=str(payload["attempt_id"]),
+            epoch=int(cast(int, payload["epoch"])),
             reason=str(payload["reason"]),
         )
         return {"deactivated": True}
@@ -302,13 +453,19 @@ def main() -> int:
     parser.add_argument("--state-root", required=True)
     parser.add_argument("--ca-private-key", required=True)
     parser.add_argument("--account", required=True)
+    parser.add_argument("--worker-account", required=True)
     parser.add_argument("--socket", required=True)
     parser.add_argument("--allowed-uid", required=True, type=int)
     parser.add_argument("--socket-gid", required=True, type=int)
     args = parser.parse_args()
     if not 1 <= args.allowed_uid <= 2_147_483_647 or not 1 <= args.socket_gid <= 2_147_483_647:
         raise SystemExit("broker allowed UID/GID must be non-root")
-    broker = TunnelBroker(Path(args.state_root), ca_private_key=Path(args.ca_private_key), account=args.account)
+    broker = TunnelBroker(
+        Path(args.state_root),
+        ca_private_key=Path(args.ca_private_key),
+        account=args.account,
+        worker_account=args.worker_account,
+    )
     serve(
         broker,
         socket_path=Path(args.socket),
