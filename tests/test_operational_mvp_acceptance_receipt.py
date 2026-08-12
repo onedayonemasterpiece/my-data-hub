@@ -649,22 +649,27 @@ def test_connector_intake_compose_service_rejects_data_plane_surfaces() -> None:
 
 def test_provider_real_workflow_uses_private_rotating_oauth_boundary() -> None:
     source = """
-    MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE: /srv/private/oauth.json
+    MY_DATA_HUB_DATA_CONTROL_TOKEN: ${{ secrets.MY_DATA_HUB_DATA_CONTROL_TOKEN }}
+    run: python scripts/provider/devstand_acceptance_controller.py preflight
+    """
+    preflight_source = """
+    raw_path = os.getenv("MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE", "")
+    runner = os.getenv("RUNNER_ENVIRONMENT", "")
     validate_oauth_credential_file(path, required_profiles=frozenset(
-        {"reader", "operator", "migration", "provider"}
+        {"reader", "operator", "provider"}
     ))
     """
     workflow = {
         "jobs": {
             "private-notebook-canary": {
                 "runs-on": ["self-hosted", "linux", "my-data-hub-devstand"],
-                "env": {"MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE": "/srv/private/oauth.json"},
+                "env": {"MY_DATA_HUB_DATA_CONTROL_TOKEN": "${{ secrets.MY_DATA_HUB_DATA_CONTROL_TOKEN }}"},
             }
         }
     }
     report = Report()
 
-    validate_provider_real_workflow_auth_boundary(report, workflow, source)
+    validate_provider_real_workflow_auth_boundary(report, workflow, source, preflight_source)
 
     assert report.errors == []
 
@@ -673,6 +678,7 @@ def test_provider_real_workflow_rejects_static_bearers_and_hosted_runner() -> No
     source = """
     MY_DATA_HUB_MCP_CANARY_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_CANARY_TOKEN }}
     KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+    MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE: /tmp/materialized.json
     """
     workflow = {
         "jobs": {
@@ -681,16 +687,18 @@ def test_provider_real_workflow_rejects_static_bearers_and_hosted_runner() -> No
                 "env": {
                     "MY_DATA_HUB_MCP_CANARY_TOKEN": "${{ secrets.MY_DATA_HUB_MCP_CANARY_TOKEN }}",
                     "KAGGLE_API_TOKEN": "${{ secrets.KAGGLE_API_TOKEN }}",
+                    "MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE": "/tmp/materialized.json",
                 },
             }
         }
     }
     report = Report()
 
-    validate_provider_real_workflow_auth_boundary(report, workflow, source)
+    validate_provider_real_workflow_auth_boundary(report, workflow, source, "")
 
     assert any("owner-controlled self-hosted runner" in error for error in report.errors)
-    assert any("static MCP/data/Kaggle credential variables" in error for error in report.errors)
-    assert any("rotating OAuth credential file" in error for error in report.errors)
-    assert any("static MCP/data/Kaggle bearer secret" in error for error in report.errors)
-    assert any("refresh-file preflight" in error for error in report.errors)
+    assert any("static MCP/Kaggle credential variables" in error for error in report.errors)
+    assert any("materialize the devstand-local OAuth" in error for error in report.errors)
+    assert any("static MCP/Kaggle bearer secret" in error for error in report.errors)
+    assert any("does not run the devstand-local" in error for error in report.errors)
+    assert any("preflight lacks exact private refresh-file" in error for error in report.errors)

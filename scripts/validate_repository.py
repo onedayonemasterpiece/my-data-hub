@@ -922,6 +922,7 @@ def validate_provider_real_workflow_auth_boundary(
     report: Report,
     workflow: Any,
     source: str,
+    preflight_source: str,
 ) -> None:
     """Require provider-real to use the private rotating OAuth runner boundary."""
 
@@ -945,37 +946,45 @@ def validate_provider_real_workflow_auth_boundary(
                 collect_environment_names(child)
 
     collect_environment_names(job)
-    forbidden_names = {
-        name
-        for name in environment_names
-        if "KAGGLE" in name.upper()
-        or ("MCP" in name.upper() and name.upper().endswith(("TOKEN", "BEARER", "KEY")))
-        or ("DATA" in name.upper() and name.upper().endswith(("TOKEN", "BEARER", "KEY")))
+    static_mcp_names = {
+        "MY_DATA_HUB_MCP_CANARY_TOKEN",
+        "MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN",
+        "MY_DATA_HUB_MCP_MIGRATION_OPERATOR_TOKEN",
+        "MY_DATA_HUB_MCP_PROVIDER_OPERATOR_TOKEN",
+        "MY_DATA_HUB_DATA_MCP_READER_TOKEN",
+        "MY_DATA_HUB_DATA_MCP_OPERATOR_TOKEN",
     }
+    forbidden_names = {name for name in environment_names if name in static_mcp_names or "KAGGLE" in name.upper()}
     report.check(
         not forbidden_names,
-        f"provider-real declares static MCP/data/Kaggle credential variables: {sorted(forbidden_names)}",
+        f"provider-real declares static MCP/Kaggle credential variables: {sorted(forbidden_names)}",
     )
     report.check(
-        "MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE" in environment_names,
-        "provider-real does not declare the private rotating OAuth credential file",
+        "MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE" not in environment_names,
+        "provider-real must not materialize the devstand-local OAuth credential path",
     )
     report.check(
         re.search(
-            r"secrets\.[A-Z0-9_]*(?:KAGGLE|MCP|DATA)[A-Z0-9_]*(?:TOKEN|BEARER|KEY)",
+            r"secrets\.[A-Z0-9_]*(?:KAGGLE|MCP)[A-Z0-9_]*(?:TOKEN|BEARER|KEY)",
             source,
             re.I,
         )
         is None,
-        "provider-real references a static MCP/data/Kaggle bearer secret",
+        "provider-real references a static MCP/Kaggle bearer secret",
     )
     report.check(
-        "validate_oauth_credential_file" in source
+        "devstand_acceptance_controller.py preflight" in source,
+        "provider-real does not run the devstand-local rotating OAuth preflight",
+    )
+    report.check(
+        "validate_oauth_credential_file" in preflight_source
+        and "MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE" in preflight_source
+        and "RUNNER_ENVIRONMENT" in preflight_source
         and all(
-            f'"{profile}"' in source or f"'{profile}'" in source
-            for profile in ("reader", "operator", "migration", "provider")
+            f'"{profile}"' in preflight_source or f"'{profile}'" in preflight_source
+            for profile in ("reader", "operator", "provider")
         ),
-        "provider-real lacks exact private refresh-file preflight for all OAuth profiles",
+        "devstand preflight lacks exact private refresh-file validation for required OAuth profiles",
     )
 
 
@@ -1758,19 +1767,34 @@ def validate_deployment(report: Report) -> None:
         "provider-real.yml": {"private-notebook-canary"},
     }
     for workflow_name, expected_jobs in expected_scheduled_jobs.items():
-        workflow = yaml.safe_load((workflow_directory / workflow_name).read_text(encoding="utf-8"))
+        workflow_path = workflow_directory / workflow_name
+        workflow_source = workflow_path.read_text(encoding="utf-8")
+        workflow = yaml.safe_load(workflow_source)
         report.check(
             set(workflow.get("jobs", {})) == expected_jobs,
             f"{workflow_name} job inventory drifted",
         )
         for job_name, job in workflow.get("jobs", {}).items():
+            expected_runner: str | list[str] = (
+                PROVIDER_REAL_RUNNER if workflow_name == "provider-real.yml" else "ubuntu-latest"
+            )
             report.check(
-                job.get("runs-on") == "ubuntu-latest",
-                f"{workflow_name}:{job_name} is not GitHub-hosted and bounded",
+                job.get("runs-on") == expected_runner,
+                f"{workflow_name}:{job_name} does not use its exact bounded runner",
             )
             report.check(
                 not job.get("services") and "container" not in job,
                 f"{workflow_name}:{job_name} declares an unclassified persistent runtime",
+            )
+        if workflow_name == "provider-real.yml":
+            preflight_path = ROOT / "scripts/provider/devstand_acceptance_controller.py"
+            report.check(preflight_path.is_file(), "provider-real devstand OAuth preflight is missing")
+            preflight_source = preflight_path.read_text(encoding="utf-8") if preflight_path.is_file() else ""
+            validate_provider_real_workflow_auth_boundary(
+                report,
+                workflow,
+                workflow_source,
+                preflight_source,
             )
     ci_path = workflow_directory / "ci.yml"
     ci = ci_path.read_text(encoding="utf-8")

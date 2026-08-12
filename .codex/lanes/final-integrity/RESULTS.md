@@ -28,9 +28,10 @@
   commits.
 - Added semantic support for `provider-real` receipts only on exact runner labels
   `[self-hosted, linux, my-data-hub-devstand]`, plus a pure workflow boundary
-  validator that rejects static MCP/data/Kaggle credential variables or secrets
-  and requires the private rotating OAuth credential-file preflight for all four
-  profiles. Wiring that helper into repository validation awaits the separately
+  validator that rejects static MCP/Kaggle credential variables or secrets
+  and requires the devstand-local private rotating OAuth credential-file
+  preflight for reader/operator/provider without materializing its path in the
+  workflow. Wiring that helper into repository validation awaits the separately
   owned OAuth workflow change because the mandated lane base still has the legacy
   GitHub-hosted/static-token job.
 - Allowed only the exact optional `connector-intake` Compose service and tested a
@@ -49,6 +50,12 @@
   - PASS.
 - `.venv/bin/python scripts/validate_repository.py`
   - PASS: `ok: true`, 4,043 checks, no errors or notes.
+- staged OAuth-topology repository validation (archive of this lane with
+  `provider-real.yml` and `devstand_acceptance_controller.py` from exact
+  `b836360caa2f9e4062739693ca4a9db571bd9a7c`)
+  - PASS: `ok: true`, 3,843 checks, no errors or notes. This verifies the helper
+    is wired from `validate_deployment`; the pre-OAuth lane base is expected to
+    fail the newly exact self-hosted-runner/preflight checks.
 - `.venv/bin/pytest -q`
   - PASS: exit 0 across the full 1,167-test collection; three pre-existing skips
     were displayed and only existing `jsonschema.RefResolver` deprecation
@@ -75,8 +82,9 @@
   over semantic evidence/provenance validation and the pure boundary tests.
 - The provider-real OAuth workflow is separately owned. Root must call
   `validate_provider_real_workflow_auth_boundary` from workflow validation when
-  reconciling that workflow SHA; doing so on this exact base would intentionally
-  fail its legacy job.
+  reconciling that workflow SHA; the helper was directly checked against
+  `b836360caa2f9e4062739693ca4a9db571bd9a7c` with six checks and zero errors.
+  Calling it on this exact base would intentionally fail its legacy job.
 - Hosted-check records are schema- and commit-bound repository evidence; the
   offline validator does not contact GitHub. Receipt production remains
   responsible for obtaining genuine hosted run observations.
