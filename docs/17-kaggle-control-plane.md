@@ -446,8 +446,15 @@ Both reads are bound to the durable task claim and registered version. `mcp_mana
 requires the exact creating principal; `mcp_exchange` retains creator/recipient/expiry
 authorization. Provider-owned manifests are never listed as content or downloadable.
 Traversal, symlinks, reserved metadata, checkpoint/PostgreSQL artifact names, unexpected
-provider files, oversize files and content tamper fail before returning bytes. These are
-code/mock-provider proofs, not a live Kaggle round-trip receipt.
+provider files, oversize files and content tamper fail before returning bytes.
+
+The contract was exercised against the real pinned `kaggle==2.2.4` provider on
+2026-08-12: a disposable private Dataset was created with three mixed text/binary files,
+listed, two exact files were downloaded and hash-verified, a second version was created
+and downloaded, and the task-owned Dataset was deleted with exact inventory-absence
+reconciliation. The protected mode-0600 receipt and its SHA-256 are recorded in
+`.codex/lanes/kaggle-mcp-live-canary/RESULTS.md`; the receipt contains no file bytes or
+credentials.
 
 Dataset versions registered before this contract have no durable content manifest and
 therefore fail closed for file-list/download; their existing metadata-only
