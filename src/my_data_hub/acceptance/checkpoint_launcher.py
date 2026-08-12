@@ -96,6 +96,133 @@ def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _kaggle_input_discovery_source(exact_version_refs: tuple[str, ...]) -> list[str]:
+    """Render the shared, bounded provider-mount discovery preflight.
+
+    Kaggle does not promise that an attached Dataset's directory name equals its
+    slug.  The generated code therefore maps each normalized mount through the
+    adapter-owned resource manifest, then hashes a bounded exact file tree.  It
+    deliberately exposes only roots and metadata helpers; each caller still has
+    to prove the scenario-specific content identity before starting an action.
+    """
+
+    provider_refs = tuple(ref.rsplit("/", 1)[0] for ref in exact_version_refs)
+    if len(provider_refs) != len(set(provider_refs)):
+        raise ValueError("Kaggle input discovery requires distinct provider refs")
+    return [
+        f"EXPECTED_DATASET_REFS = {exact_version_refs!r}",
+        f"EXPECTED_PROVIDER_REFS = {provider_refs!r}",
+        "input_root = pathlib.Path('/kaggle/input')",
+        (
+            "if not input_root.is_dir() or input_root.is_symlink(): "
+            "raise RuntimeError('Kaggle input root is unavailable or unsafe')"
+        ),
+        "def _mdh_file_sha256(path):",
+        "    digest = hashlib.sha256()",
+        "    with path.open('rb') as stream:",
+        "        while chunk := stream.read(1048576): digest.update(chunk)",
+        "    return digest.hexdigest()",
+        "def _mdh_dataset_entries(root):",
+        "    entries = []; total = 0; visited = 0",
+        "    for path in sorted(root.rglob('*')):",
+        "        visited += 1",
+        (
+            "        if visited > 4096: "
+            "raise RuntimeError('Kaggle input discovery exceeds entry bound')"
+        ),
+        (
+            "        if path.is_symlink(): "
+            "raise RuntimeError('Kaggle input Dataset contains a symbolic link')"
+        ),
+        "        if path.is_dir(): continue",
+        (
+            "        if not path.is_file(): "
+            "raise RuntimeError('Kaggle input Dataset contains a non-regular entry')"
+        ),
+        "        relative = path.relative_to(root).as_posix()",
+        (
+            "        if len(relative) > 1000 or relative.startswith('/') or '\\\\' in relative "
+            "or any(part in {'', '.', '..'} for part in relative.split('/')): "
+            "raise RuntimeError('Kaggle input path is unsafe')"
+        ),
+        "        size = path.stat().st_size",
+        (
+            "        if size > 10737418240: "
+            "raise RuntimeError('Kaggle input file exceeds 10 GiB bound')"
+        ),
+        "        total += size",
+        (
+            "        if total > 21474836480 or len(entries) >= 102: "
+            "raise RuntimeError('Kaggle input Dataset exceeds file-set bound')"
+        ),
+        (
+            "        entries.append({'path': relative, 'byte_size': size, "
+            "'sha256': _mdh_file_sha256(path), '_path': path})"
+        ),
+        (
+            "    if not entries: "
+            "raise RuntimeError('Kaggle input Dataset file set is empty')"
+        ),
+        "    return entries",
+        "def _mdh_tree_sha256(entries, *, content_only=False):",
+        "    excluded = {'my-data-hub-resource.json', 'dataset-metadata.json'} if content_only else set()",
+        (
+            "    public = [{key: item[key] for key in ('path','byte_size','sha256')} "
+            "for item in entries if item['path'] not in excluded]"
+        ),
+        (
+            "    if not public: "
+            "raise RuntimeError('Kaggle input Dataset content file set is empty')"
+        ),
+        (
+            "    return hashlib.sha256(json.dumps({'files': public}, ensure_ascii=False, "
+            "sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()"
+        ),
+        "def _mdh_content_entries(provider_ref):",
+        (
+            "    return [item for item in dataset_entries[provider_ref] "
+            "if item['path'] not in {'my-data-hub-resource.json','dataset-metadata.json'}]"
+        ),
+        "roots = {}; dataset_entries = {}",
+        "top_level = sorted(input_root.iterdir())",
+        (
+            "if len(top_level) != len(EXPECTED_DATASET_REFS): "
+            "raise RuntimeError('attached private Dataset set differs from execution pins')"
+        ),
+        "for root in top_level:",
+        (
+            "    if root.is_symlink() or not root.is_dir(): "
+            "raise RuntimeError('attached Kaggle input root is unsafe')"
+        ),
+        "    entries = _mdh_dataset_entries(root)",
+        (
+            "    controls = [item for item in entries "
+            "if item['path'] == 'my-data-hub-resource.json']"
+        ),
+        (
+            "    if len(controls) != 1 or controls[0]['byte_size'] > 16384: "
+            "raise RuntimeError('Kaggle input resource manifest is absent or unsafe')"
+        ),
+        "    try: resource = json.loads(controls[0]['_path'].read_bytes())",
+        (
+            "    except (OSError, ValueError): "
+            "raise RuntimeError('Kaggle input resource manifest is invalid')"
+        ),
+        "    provider_ref = resource.get('provider_ref')",
+        (
+            "    if resource.get('contract_version') != 'my-data-hub-kaggle-resource.v1' "
+            "or resource.get('kind') != 'dataset' or resource.get('private') is not True "
+            "or provider_ref not in EXPECTED_PROVIDER_REFS or provider_ref in roots: "
+            "raise RuntimeError('Kaggle input resource claim differs')"
+        ),
+        "    roots[provider_ref] = root; dataset_entries[provider_ref] = entries",
+        (
+            "if set(roots) != set(EXPECTED_PROVIDER_REFS): "
+            "raise RuntimeError('attached private Dataset claims differ from execution pins')"
+        ),
+    ]
+
+
 class CheckpointRuntimeInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -629,10 +756,22 @@ class ControlCheckpointAcceptanceLauncher:
                 "docker_image": runtime.docker_image,
                 "docker_image_pinning_type": runtime.docker_image_pinning_type,
                 "input_dataset_versions": list(self._dataset_sources(request)),
+                "owner_asset_claim_sha256s": self._owner_asset_claim_sha256s(request),
                 "privacy": "private",
                 "source_attestation": "control_expected_source_sha256",
             }
         )
+
+    def _owner_asset_claim_sha256s(
+        self, request: CheckpointAcceptanceLaunchRequest
+    ) -> dict[str, str]:
+        claims = {
+            self.deployment.runtime_input.exact_version_ref: self.deployment.runtime_input.claim_sha256,
+            request.template_input.exact_version_ref: request.template_input.claim_sha256,
+        }
+        if request.verifier_input is not None:
+            claims[request.verifier_input.exact_version_ref] = request.verifier_input.claim_sha256
+        return claims
 
     def _status_create_intent(
         self, request: CheckpointAcceptanceLaunchRequest, files: Mapping[str, bytes]
@@ -738,14 +877,7 @@ class ControlCheckpointAcceptanceLauncher:
         self, request: CheckpointAcceptanceLaunchRequest, config: CheckpointAcceptanceProductionConfig
     ) -> bytes:
         runtime = self.deployment.runtime_input
-        runtime_mount = f"/kaggle/input/{runtime.provider_ref.split('/', 1)[1]}"
-        template_mount = f"/kaggle/input/{request.template_input.provider_ref.split('/', 1)[1]}"
-        status_mount = f"/kaggle/input/{self._status_dataset_ref(request).split('/', 1)[1]}"
-        verifier_mount = (
-            f"/kaggle/input/{request.verifier_input.provider_ref.split('/', 1)[1]}"
-            if request.verifier_input is not None
-            else None
-        )
+        status_provider_ref = self._status_dataset_ref(request)
         expected_pins = {
             "schema": "my-data-hub-checkpoint-acceptance-execution-pins/v1",
             "task_run_id": str(request.task_run_id),
@@ -755,6 +887,7 @@ class ControlCheckpointAcceptanceLauncher:
             "docker_image": runtime.docker_image,
             "docker_image_pinning_type": runtime.docker_image_pinning_type,
             "input_dataset_versions": list(self._dataset_sources(request)),
+            "owner_asset_claim_sha256s": self._owner_asset_claim_sha256s(request),
             "privacy": "private",
             "source_attestation": "control_expected_source_sha256",
         }
@@ -768,7 +901,8 @@ class ControlCheckpointAcceptanceLauncher:
             f"ATTEMPT_ID = {str(request.control_identity.attempt_id)!r}",
             f"NOTEBOOK_REF = {request.evidence_notebook_ref!r}",
             "EXECUTED_SOURCE_SHA256 = hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest()",
-            f"status_root = pathlib.Path({status_mount!r})",
+            *_kaggle_input_discovery_source(self._dataset_sources(request)),
+            f"status_root = roots[{status_provider_ref!r}]",
             "status_config = status_root / 'kaggle_run.json'",
             "status_helper = status_root / 'kaggle_status_client.py'",
             f"execution_pins_path = status_root / {_EXECUTION_PINS_NAME!r}",
@@ -799,6 +933,63 @@ class ControlCheckpointAcceptanceLauncher:
                 "if execution_pins != expected_execution_pins: "
                 "raise RuntimeError('execution pins contract mismatch')"
             ),
+            (
+                "status_expected = {"
+                f"'kaggle_run.json': {config.status_config_sha256!r}, "
+                f"'kaggle_status_client.py': {config.status_helper_sha256!r}, "
+                "'execution-pins.json': execution_pins_sha256}"
+            ),
+            (
+                f"runtime_expected = {{{runtime.wheel_file!r}: {runtime.wheel_sha256!r}, "
+                f"{runtime.entrypoint_file!r}: {runtime.entrypoint_sha256!r}}}"
+            ),
+            "def _mdh_require_exact_content(provider_ref, expected, *, max_total):",
+            "    entries = _mdh_content_entries(provider_ref)",
+            (
+                "    observed = {item['path']: item['sha256'] for item in entries "
+                "if item['byte_size'] <= max_total}"
+            ),
+            (
+                "    if observed != expected or sum(item['byte_size'] for item in entries) > max_total: "
+                "raise RuntimeError('Kaggle input Dataset file set or hash differs')"
+            ),
+            f"_mdh_require_exact_content({status_provider_ref!r}, status_expected, max_total=1048576)",
+            f"_mdh_require_exact_content({runtime.provider_ref!r}, runtime_expected, max_total=138412032)",
+            f"template_root = roots[{request.template_input.provider_ref!r}]",
+            (
+                f"if _mdh_tree_sha256(dataset_entries[{request.template_input.provider_ref!r}], "
+                f"content_only=True) != {request.template_input.content_sha256!r}: "
+                "raise RuntimeError('checkpoint template content identity differs')"
+            ),
+            "template_manifest = template_root / 'checkpoint-manifest.json'",
+            (
+                "if not template_manifest.is_file() or template_manifest.is_symlink() "
+                "or template_manifest.stat().st_size > 1048576: "
+                "raise RuntimeError('checkpoint template manifest is unsafe')"
+            ),
+            "try: template_manifest_value = json.loads(template_manifest.read_bytes())",
+            (
+                "except (OSError, ValueError): "
+                "raise RuntimeError('checkpoint template manifest is invalid')"
+            ),
+            (
+                f"if template_manifest_value.get('manifest_sha256') != "
+                f"{request.template_input.manifest_sha256!r}: "
+                "raise RuntimeError('checkpoint template manifest identity differs')"
+            ),
+            *(
+                [
+                    f"verifier_root = roots[{request.verifier_input.provider_ref!r}]",
+                    (
+                        f"_mdh_require_exact_content({request.verifier_input.provider_ref!r}, "
+                        f"{{'worker.py': {request.verifier_input.source_sha256!r}}}, "
+                        "max_total=1048576)"
+                    ),
+                    "verifier_source = verifier_root / 'worker.py'",
+                ]
+                if request.verifier_input is not None
+                else []
+            ),
             "observed_image_commit = pathlib.Path('/etc/git_commit').read_text().strip()",
             (
                 "if observed_image_commit != execution_pins['image_source_commit']: "
@@ -814,17 +1005,11 @@ class ControlCheckpointAcceptanceLauncher:
                 "r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*', ref) "
                 "for ref in dataset_versions): raise RuntimeError('input Dataset version is not exact')"
             ),
-            "expected_mounts = {ref.split('/')[1] for ref in dataset_versions}",
-            "input_root = pathlib.Path('/kaggle/input')",
             (
-                "observed_mounts = {path.name for path in input_root.iterdir() "
-                "if path.is_dir() and not path.is_symlink()}"
+                "if tuple(dataset_versions) != EXPECTED_DATASET_REFS: "
+                "raise RuntimeError('attached private Dataset versions differ from execution pins')"
             ),
-            (
-                "if observed_mounts != expected_mounts: "
-                "raise RuntimeError('attached private Dataset set differs from execution pins')"
-            ),
-            f"runtime_root = pathlib.Path({runtime_mount!r})",
+            f"runtime_root = roots[{runtime.provider_ref!r}]",
             f"wheel = runtime_root / {runtime.wheel_file!r}",
             f"entrypoint = runtime_root / {runtime.entrypoint_file!r}",
             (
@@ -862,17 +1047,15 @@ class ControlCheckpointAcceptanceLauncher:
             "     'python_series': execution_pins['python_series'],",
             "     'input_dataset_versions': dataset_versions})",
             "template = pathlib.Path('/kaggle/working/checkpoint-template')",
-            f"shutil.copytree(pathlib.Path({template_mount!r}), template, dirs_exist_ok=False)",
+            "shutil.copytree(template_root, template, dirs_exist_ok=False,",
+            "                ignore=shutil.ignore_patterns('my-data-hub-resource.json','dataset-metadata.json'))",
         ]
-        if verifier_mount is not None:
+        if request.verifier_input is not None:
             lines.extend(
                 [
                     "verifier_dir = pathlib.Path('/kaggle/working/checkpoint-verifier')",
                     "verifier_dir.mkdir(mode=0o700)",
-                    (
-                        f"shutil.copyfile(pathlib.Path({verifier_mount!r}) / 'worker.py', "
-                        "verifier_dir / 'worker.py')"
-                    ),
+                    "shutil.copyfile(verifier_source, verifier_dir / 'worker.py')",
                 ]
             )
         lines.extend(

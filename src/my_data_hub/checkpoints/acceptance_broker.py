@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 from uuid import UUID, uuid5
 
+from my_data_hub.acceptance.checkpoint_launcher import _kaggle_input_discovery_source
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.providers.kaggle.adapter import KaggleProviderAdapter, _canonical_notebook_source
 from my_data_hub.providers.kaggle.contracts import (
@@ -52,22 +53,55 @@ class CentralBrokeredFM15Verifier:
             _EFFECT_NAMESPACE,
             f"fm15:{authority.operation_id}:{authority.run_id}:{manifest.checkpoint_id}",
         )
-        verifier_slug = authority.verifier_dataset_version_ref.split("/")[1]
-        source = (
-            "# fixed central FM15 verifier; no Kaggle credential is available to the producer\n"
-            "import os, runpy\n"
-            "os.environ.update({\n"
-            f" 'MY_DATA_HUB_FM15_TASK_RUN_ID': {str(run_id)!r},\n"
-            f" 'MY_DATA_HUB_FM15_CANDIDATE_ID': {str(manifest.checkpoint_id)!r},\n"
-            f" 'MY_DATA_HUB_FM15_EXACT_DATASET': {exact_version_ref!r},\n"
-            f" 'MY_DATA_HUB_FM15_SOURCE_REVISION': {authority.source_revision!r},\n"
-            f" 'MY_DATA_HUB_FM15_MANIFEST_SHA256': {manifest.manifest_sha256!r},\n"
-            f" 'MY_DATA_HUB_FM15_EXPECTED_CONTENT_SHA256': {dataset_identity.package_sha256!r},\n"
-            f" 'MY_DATA_HUB_FM15_RECEIPT_NAME': {_RECEIPT_NAME!r},\n"
-            "})\n"
-            f"runpy.run_path('/kaggle/input/{verifier_slug}/worker.py', run_name='__main__')\n"
-            "raise RuntimeError('MY_DATA_HUB_FIXED_FM15_RESTORE_FAILURE')\n"
-        ).encode()
+        verifier_ref = authority.verifier_dataset_version_ref
+        verifier_parts = verifier_ref.split("/")
+        if len(verifier_parts) != 3 or not verifier_parts[2].isdigit():
+            raise ValueError("FM15 verifier Dataset ref is not exact numeric")
+        verifier_identity = self.adapter.read_private_dataset(
+            provider_ref="/".join(verifier_parts[:2]), version=int(verifier_parts[2])
+        )
+        if (
+            verifier_identity.provider_ref != "/".join(verifier_parts[:2])
+            or verifier_identity.version != int(verifier_parts[2])
+            or verifier_identity.privacy != "private"
+        ):
+            raise RuntimeError("FM15 verifier Dataset identity differs")
+        candidate_provider_ref = exact_version_ref.rsplit("/", 1)[0]
+        verifier_provider_ref = verifier_ref.rsplit("/", 1)[0]
+        lines = [
+            "# fixed central FM15 verifier; no Kaggle credential is available to the producer",
+            "import hashlib, json, os, pathlib, runpy",
+            *_kaggle_input_discovery_source((exact_version_ref, verifier_ref)),
+            (
+                f"if _mdh_tree_sha256(dataset_entries[{candidate_provider_ref!r}]) != "
+                f"{dataset_identity.package_sha256!r}: "
+                "raise RuntimeError('FM15 candidate Dataset package identity differs')"
+            ),
+            (
+                f"if _mdh_tree_sha256(dataset_entries[{verifier_provider_ref!r}]) != "
+                f"{verifier_identity.package_sha256!r}: "
+                "raise RuntimeError('FM15 verifier Dataset package identity differs')"
+            ),
+            f"verifier_entries = _mdh_content_entries({verifier_provider_ref!r})",
+            (
+                "if len(verifier_entries) != 1 or verifier_entries[0]['path'] != 'worker.py' "
+                "or verifier_entries[0]['byte_size'] > 1048576: "
+                "raise RuntimeError('FM15 verifier file set is unsafe')"
+            ),
+            f"verifier_worker = roots[{verifier_provider_ref!r}] / 'worker.py'",
+            "os.environ.update({",
+            f" 'MY_DATA_HUB_FM15_TASK_RUN_ID': {str(run_id)!r},",
+            f" 'MY_DATA_HUB_FM15_CANDIDATE_ID': {str(manifest.checkpoint_id)!r},",
+            f" 'MY_DATA_HUB_FM15_EXACT_DATASET': {exact_version_ref!r},",
+            f" 'MY_DATA_HUB_FM15_SOURCE_REVISION': {authority.source_revision!r},",
+            f" 'MY_DATA_HUB_FM15_MANIFEST_SHA256': {manifest.manifest_sha256!r},",
+            f" 'MY_DATA_HUB_FM15_EXPECTED_CONTENT_SHA256': {dataset_identity.package_sha256!r},",
+            f" 'MY_DATA_HUB_FM15_RECEIPT_NAME': {_RECEIPT_NAME!r},",
+            "})",
+            "runpy.run_path(str(verifier_worker), run_name='__main__')",
+            "raise RuntimeError('MY_DATA_HUB_FIXED_FM15_RESTORE_FAILURE')",
+        ]
+        source = ("\n".join(lines) + "\n").encode()
         source_sha = hashlib.sha256(_canonical_notebook_source(source, kernel_type="script")).hexdigest()
         intent = ProviderEffectIntent.create(
             operation_id=UUID(authority.operation_id),

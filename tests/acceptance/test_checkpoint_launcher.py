@@ -28,6 +28,7 @@ from my_data_hub.providers.kaggle import (
     KaggleProviderAdapter,
     KaggleProviderIdentity,
 )
+from my_data_hub.providers.kaggle.adapter import directory_sha256
 from my_data_hub.providers.kaggle.contracts import (
     DatasetMutationResult,
     EffectOutcome,
@@ -120,6 +121,115 @@ def _request(scenario: str = "FM14"):
             "control_identity": launch.control_identity.model_copy(update={"attempt_id": ATTEMPT})
         }
     )
+
+
+def _resource_manifest(provider_ref: str) -> bytes:
+    return json.dumps(
+        {
+            "contract_version": "my-data-hub-kaggle-resource.v1",
+            "task_id": str(TASK),
+            "effect_id": str(ATTEMPT),
+            "provider_ref": provider_ref,
+            "kind": "dataset",
+            "control_class": "orchestrator_protected",
+            "disposable": False,
+            "request_sha256": "d" * 64,
+            "private": True,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
+def _write_mount(root: Path, provider_ref: str, files: dict[str, bytes]) -> None:
+    root.mkdir()
+    for name, body in files.items():
+        destination = root / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(body)
+    (root / "my-data-hub-resource.json").write_bytes(_resource_manifest(provider_ref))
+
+
+def _normalized_mount_preflight(
+    tmp_path: Path, scenario: str
+) -> tuple[str, dict[str, Path]]:
+    wheel = b"bounded-runtime-wheel"
+    entrypoint = b"# bounded checkpoint acceptance entrypoint\n"
+    verifier = b"# fixed reviewed verifier\n"
+    template_files = {
+        "checkpoint-manifest.json": json.dumps(
+            {"manifest_sha256": "a" * 64}, sort_keys=True, separators=(",", ":")
+        ).encode(),
+        "physical/base.tar.gz": b"empty-template-archive",
+    }
+    template_hash_root = tmp_path / "template-hash"
+    template_hash_root.mkdir()
+    for name, body in template_files.items():
+        destination = template_hash_root / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(body)
+    template_content_sha = directory_sha256(template_hash_root)
+
+    deployment = _deployment()
+    runtime = deployment.runtime_input.model_copy(
+        update={
+            "wheel_sha256": hashlib.sha256(wheel).hexdigest(),
+            "entrypoint_sha256": hashlib.sha256(entrypoint).hexdigest(),
+        }
+    )
+    deployment = deployment.model_copy(update={"runtime_input": runtime})
+    request = _request(scenario)
+    request = request.model_copy(
+        update={
+            "template_input": request.template_input.model_copy(
+                update={
+                    "manifest_sha256": "a" * 64,
+                    "content_sha256": template_content_sha,
+                }
+            ),
+            "verifier_input": (
+                request.verifier_input.model_copy(
+                    update={"source_sha256": hashlib.sha256(verifier).hexdigest()}
+                )
+                if request.verifier_input is not None
+                else None
+            ),
+        }
+    )
+    launcher = ControlCheckpointAcceptanceLauncher(
+        ledger=ControlLedger(tmp_path / "mount-ledger.sqlite3", clock=DeterministicClock(NOW)),
+        adapter=object(),  # type: ignore[arg-type]
+        deployment=deployment,
+        brokered_upload_ready=True,
+    )
+    pins = launcher._execution_pins(request)
+    status_files = launcher._status_files(request, "f" * 64, execution_pins=pins)
+    mounts_root = tmp_path / "normalized-kaggle-input"
+    mounts_root.mkdir()
+    mounts = {
+        "runtime": mounts_root / "checkpoint-runtime-v9-4f3a",
+        "template": mounts_root / "template-v3-b7c2",
+        "status": mounts_root / "status-v1-a819",
+    }
+    _write_mount(
+        mounts["runtime"],
+        runtime.provider_ref,
+        {runtime.wheel_file: wheel, runtime.entrypoint_file: entrypoint},
+    )
+    _write_mount(mounts["template"], request.template_input.provider_ref, template_files)
+    _write_mount(mounts["status"], launcher._status_dataset_ref(request), dict(status_files))
+    if request.verifier_input is not None:
+        mounts["verifier"] = mounts_root / f"reviewed-verifier-{scenario.lower()}-v4-c930"
+        _write_mount(
+            mounts["verifier"], request.verifier_input.provider_ref, {"worker.py": verifier}
+        )
+    source = launcher._render_source(request, launcher._config(request, status_files)).decode()
+    prefix = source.split("observed_image_commit =", 1)[0].replace(
+        "/kaggle/input", str(mounts_root)
+    )
+    script_path = tmp_path / "rendered-worker.py"
+    script_path.write_text(source)
+    return prefix, mounts
 
 
 class FakeAdapter:
@@ -360,6 +470,51 @@ def test_checkpoint_launch_contract_passes_real_adapter_image_preflight(
     assert api.metadata["docker_image_pinning_type"] == "original"
     assert journal.intents == [intent]
     assert len(journal.receipts) == 1 and len(journal.claims) == 1
+    assert "/kaggle/input/checkpoint-runtime" not in source.decode()
+    assert "_mdh_dataset_entries" in source.decode()
+    assert "Kaggle input resource claim differs" in source.decode()
+
+
+@pytest.mark.parametrize("scenario", ["FM05", "FM14", "FM15"])
+def test_checkpoint_launcher_executes_with_provider_normalized_mount_names(
+    tmp_path: Path, scenario: str
+) -> None:
+    prefix, _mounts = _normalized_mount_preflight(tmp_path, scenario)
+
+    exec(
+        compile(prefix, str(tmp_path / "rendered-worker.py"), "exec"),
+        {"__file__": str(tmp_path / "rendered-worker.py")},
+    )
+
+
+@pytest.mark.parametrize("scenario", ["FM05", "FM14", "FM15"])
+@pytest.mark.parametrize("failure", ["ambiguous", "wrong_set", "symlink", "oversize"])
+def test_checkpoint_launcher_rejects_unsafe_or_inexact_mounts_before_action(
+    tmp_path: Path, scenario: str, failure: str
+) -> None:
+    prefix, mounts = _normalized_mount_preflight(tmp_path, scenario)
+    if failure == "ambiguous":
+        duplicate = mounts["runtime"].parent / "runtime-duplicate-normalized"
+        duplicate.mkdir()
+        for path in mounts["runtime"].iterdir():
+            (duplicate / path.name).write_bytes(path.read_bytes())
+    elif failure == "wrong_set":
+        manifest = json.loads((mounts["template"] / "my-data-hub-resource.json").read_bytes())
+        manifest["provider_ref"] = "owner/unexpected-template"
+        (mounts["template"] / "my-data-hub-resource.json").write_text(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        )
+    elif failure == "symlink":
+        (mounts["runtime"] / "unsafe-link").symlink_to(mounts["runtime"] / "my_data_hub.whl")
+    else:
+        with (mounts["runtime"] / "oversize.bin").open("wb") as stream:
+            stream.truncate(10 * 1024**3 + 1)
+
+    with pytest.raises(RuntimeError, match=r"Kaggle input|attached private Dataset"):
+        exec(
+            compile(prefix, str(tmp_path / "rendered-worker.py"), "exec"),
+            {"__file__": str(tmp_path / "rendered-worker.py")},
+        )
 
 
 def test_launcher_persists_then_attaches_exact_private_status_dataset(tmp_path: Path) -> None:
@@ -395,6 +550,10 @@ def test_launcher_persists_then_attaches_exact_private_status_dataset(tmp_path: 
         "docker_image": RUNTIME_IMAGE,
         "docker_image_pinning_type": "original",
         "input_dataset_versions": list(adapter.dataset_sources),
+        "owner_asset_claim_sha256s": {
+            "owner/checkpoint-runtime/9": "6" * 64,
+            "owner/template/3": "1" * 64,
+        },
         "privacy": "private",
         "source_attestation": "control_expected_source_sha256",
     }

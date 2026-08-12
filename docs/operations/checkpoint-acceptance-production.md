@@ -150,8 +150,15 @@ CPython series. The central adapter binds those fields and the exact numeric
 private Dataset inputs to the push intent and generated Kaggle metadata. Before
 copying a template or starting the checkpoint entrypoint, the rendered script
 verifies the hashed execution-pins document, the observed `/etc/git_commit`, the
-running Python series, and that `/kaggle/input` exposes exactly the pinned
-Dataset slugs as regular directories. Its synchronous `kernel_started` event
+running Python series, and a bounded recursive discovery of exactly the pinned
+private Dataset claims. It does not derive mount paths from provider slugs:
+normalized Kaggle mount names are accepted only when the adapter-owned resource
+manifest, exact content hashes and expected file sets agree. Ambiguous roots,
+extra/missing inputs, symbolic links, non-regular entries, oversized files or
+trees, and wrong runtime/status/template/verifier identities fail before an
+action. The separate central FM15 failure verifier uses the same discovery and
+also binds both candidate and verifier package hashes before executing
+`worker.py`. Its synchronous `kernel_started` event
 carries only the executed source hash and sanitized pin/image/Dataset metadata;
 the control ledger must accept the expected source hash before the checkpoint
 broker authorizes any mutation.
