@@ -488,6 +488,10 @@ services:
       - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:?control ledger directory is required}:/ledger"
       - "${MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE:?write gate key is required}:/run/secrets/mcp-write-gate.key:ro"
       - "${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:?provider gateway token is required}:/run/secrets/mcp-control-gateway.token:ro"
+  oauth-server:
+    environment:
+      MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED: "true"
+      MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access,platform:read,provider:read,provider:write
 YAML
   chmod 600 "$provider_only_override"
   provider_only_compose_arg=" -f $provider_only_override"
@@ -864,9 +868,8 @@ if [[ "$provider_only" == true ]]; then
 fi
 printf 'installed_control_plane_commit=%s\nservices=control-plane,remote-mcp,oauth-server%s\noperator_profile=%s\nprovider_only_mode=%s\nconnector_runtime=%s\nacceptance_scenarios=%s\nacceptance_supervisor=%s\nmaster_state=ABSENT_or_durable_runtime_state\n' "$commit" "$connector_output_service" "$operator_profile" "$provider_only_mode" "$connector_runtime" "$acceptance_scenarios" "$acceptance_supervisor"
 if [[ "$provider_only" == true ]]; then
+  printf 'chatgpt_oauth_client_mode=cimd-public\n'
   if [[ -n "$provider_oauth_client_id" ]]; then
     printf 'provider_oauth_client_id=%s\n' "$provider_oauth_client_id"
-  else
-    printf '%s\n' 'CHATGPT_OAUTH_CLIENT_CONFIGURATION_REQUIRED: configure an exact HTTPS ChatGPT callback with openid, offline_access, platform:read, provider:read and provider:write'
   fi
 fi

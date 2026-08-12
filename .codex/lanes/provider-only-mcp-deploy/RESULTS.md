@@ -23,9 +23,9 @@
   tools/scopes, with exact `provider:write` and an authenticated central gateway.
 - Added static-bearer rejection and bounded mode-0600 write-gate/gateway token checks.
   Secrets are neither logged nor copied to receipts/artifacts.
-- Added nonblocking static OAuth client inspection. A usable bounded client ID is reported;
-  otherwise the receipt reports `CHATGPT_OAUTH_CLIENT_CONFIGURATION_REQUIRED` for the
-  exact callback configuration step.
+- Added bounded ChatGPT CIMD public-client support while preserving static clients. The
+  runtime reports `chatgpt_oauth_client_mode=cimd-public`; no client secret, DCR endpoint,
+  wildcard redirect, or static bearer fallback is used.
 
 ## Deployment prerequisites and exact command
 

@@ -14,6 +14,20 @@ from my_data_hub.oauth_server.owner_oidc import OIDCSessionOwnerAuthenticator
 from my_data_hub.oauth_server.runtime import build_authorization_runtime
 
 
+def test_cimd_toggle_and_scope_configuration_are_fail_closed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED", "yes")
+    try:
+        runtime_module._boolean("MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED")
+    except RuntimeError as exc:
+        assert "exactly true or false" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("non-exact CIMD toggle was accepted")
+
+    monkeypatch.setenv("MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED", "true")
+    monkeypatch.delenv("MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES", raising=False)
+    assert runtime_module._csv("MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES", ()) == ()
+
+
 def test_production_oauth_runtime_uses_durable_ledger_and_external_owner_login(
     monkeypatch, tmp_path: Path
 ) -> None:  # type: ignore[no-untyped-def]
@@ -51,6 +65,10 @@ def test_production_oauth_runtime_uses_durable_ledger_and_external_owner_login(
                 }
             ]
         ),
+        "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED": "true",
+        "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES": (
+            "openid,offline_access,platform:read,provider:read,provider:write"
+        ),
         "MY_DATA_HUB_OWNER_OIDC_ISSUER": "https://login.example.test",
         "MY_DATA_HUB_OWNER_OIDC_AUDIENCE": "my-data-hub-owner",
         "MY_DATA_HUB_OWNER_OIDC_JWKS_URL": "https://login.example.test/.well-known/jwks.json",
@@ -67,6 +85,8 @@ def test_production_oauth_runtime_uses_durable_ledger_and_external_owner_login(
     client = TestClient(runtime.app, base_url="https://auth.example.test")
     metadata = client.get("/.well-known/oauth-authorization-server")
     assert metadata.status_code == 200
+    assert metadata.json()["client_id_metadata_document_supported"] is True
+    assert "registration_endpoint" not in metadata.json()
     loopback_health = TestClient(runtime.app, base_url="http://127.0.0.1:8780").get(
         "/.well-known/oauth-authorization-server"
     )

@@ -205,7 +205,12 @@ def test_provider_only_mcp_action_is_explicit_and_skips_master_only_prerequisite
     assert 'operator write-gate signing key"' in source
     assert "provider-only control plane requires one central Kaggle credential mode" in source
     assert "provider-only readiness did not prove the central adapter gateway" in source
-    assert "CHATGPT_OAUTH_CLIENT_CONFIGURATION_REQUIRED" in source
+    assert 'MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED: "true"' in source
+    assert "chatgpt_oauth_client_mode=cimd-public" in source
+    assert (
+        "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: "
+        "openid,offline_access,platform:read,provider:read,provider:write"
+    ) in source
     assert "provider_oauth_client_id=%s" in source
     assert '"openid", "offline_access", "platform:read", "provider:read", "provider:write"' in source
     assert "!override" in source

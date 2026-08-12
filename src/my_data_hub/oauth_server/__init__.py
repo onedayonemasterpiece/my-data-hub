@@ -5,6 +5,11 @@ from my_data_hub.oauth_server.app import (
     OwnerAuthenticator,
     create_authorization_app,
 )
+from my_data_hub.oauth_server.client_metadata import (
+    ChatGPTClientMetadataResolver,
+    ClientMetadataError,
+    ClientMetadataResponse,
+)
 from my_data_hub.oauth_server.control_store import ControlLedgerOAuthGrantStore
 from my_data_hub.oauth_server.models import (
     AuthorizationServerSettings,
@@ -20,6 +25,9 @@ from my_data_hub.oauth_server.stores import MemoryOAuthGrantStore, OAuthGrantSto
 __all__ = [
     "AuthorizationServerSettings",
     "AuthorizationService",
+    "ChatGPTClientMetadataResolver",
+    "ClientMetadataError",
+    "ClientMetadataResponse",
     "ControlLedgerOAuthGrantStore",
     "MemoryOAuthGrantStore",
     "OAuthGrantStore",

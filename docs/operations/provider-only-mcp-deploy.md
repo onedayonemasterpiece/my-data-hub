@@ -59,13 +59,12 @@ control receipt proves `provider_only_mode=true`, `provider_gateway_ready=true`,
 `master_state=ABSENT`, and `data_plane_ready=false`. The unit is enabled for autostart;
 any failure invokes the existing rollback of the unit and release pointer.
 
-The MCP protected-resource metadata advertises only the provider-only scopes. If
-`oauth.env` already contains a bounded static client with the required provider scopes,
-`openid`, `offline_access`, and exact HTTPS redirects, the installer reports its nonsecret
-client ID. Otherwise it reports `CHATGPT_OAUTH_CLIENT_CONFIGURATION_REQUIRED` without
-misclassifying the healthy local services as failed. Configure the exact callback shown on
-the ChatGPT app management page (`https://chatgpt.com/connector/oauth/{callback_id}` for
-new apps); no wildcard redirect or static bearer fallback is allowed. A legacy callback is
-appropriate only for an already-published legacy app.
+The MCP protected-resource metadata advertises only the provider-only scopes. Provider-only
+deployment enables bounded ChatGPT Client ID Metadata Document (CIMD) discovery and reports
+`chatgpt_oauth_client_mode=cimd-public`. ChatGPT supplies its stable HTTPS client metadata
+URL and exact MCP-specific `https://chatgpt.com/connector/oauth/{callback_id}` redirect;
+the authorization server validates both on every cache miss. There is no wildcard redirect,
+client secret, DCR endpoint, or static bearer fallback. Existing exact static clients remain
+compatible and their nonsecret client ID is also reported when configured.
 
 No live install or restart was performed while implementing this profile.

@@ -13,6 +13,7 @@ from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.mcp.catalog import ALL_SCOPES, READER_PROFILE_SCOPES
 
 from .app import OAuthHTTPPolicy, create_authorization_app
+from .client_metadata import ChatGPTClientMetadataResolver
 from .control_store import ControlLedgerOAuthGrantStore
 from .models import AuthorizationServerSettings, StaticClient
 from .owner_oidc import OIDCSessionOwnerAuthenticator
@@ -32,6 +33,16 @@ def _required(name: str) -> str:
     if not value:
         raise RuntimeError(f"required OAuth authorization setting is absent: {name}")
     return value
+
+
+def _boolean(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value not in {"true", "false"}:
+        raise RuntimeError(f"{name} must be exactly true or false")
+    return value == "true"
 
 
 def _private_file(name: str, *, exact_bytes: int | None = None, maximum_bytes: int = 8192) -> bytes:
@@ -138,10 +149,23 @@ def build_authorization_runtime() -> AuthorizationRuntime:
                 else "owner_operator"
             ),
         )
+    client_metadata_resolver = None
+    if _boolean("MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED"):
+        cimd_scopes = frozenset(
+            _csv("MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES", ())
+        )
+        if not cimd_scopes or not cimd_scopes.issubset(
+            ALL_SCOPES | {"openid", "offline_access"}
+        ):
+            raise RuntimeError("ChatGPT CIMD scopes must be an explicit bounded OAuth subset")
+        client_metadata_resolver = ChatGPTClientMetadataResolver(
+            allowed_scopes=cimd_scopes
+        )
     service = AuthorizationService(
         settings=settings,
         control_ledger=authority,
         grant_store=ControlLedgerOAuthGrantStore(ledger),
+        client_metadata_resolver=client_metadata_resolver,
     )
     owner_login_url = _required("MY_DATA_HUB_OWNER_LOGIN_URL")
     owner = OIDCSessionOwnerAuthenticator(

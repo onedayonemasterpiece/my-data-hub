@@ -11,6 +11,10 @@ from typing import Any
 from urllib.parse import urlencode
 
 from my_data_hub.auth.control import OAuthClientRecord, OAuthControlLedger
+from my_data_hub.oauth_server.client_metadata import (
+    ChatGPTClientMetadataResolver,
+    ClientMetadataError,
+)
 from my_data_hub.oauth_server.models import (
     AuthorizationServerSettings,
     OwnerIdentity,
@@ -83,11 +87,13 @@ class AuthorizationService:
         settings: AuthorizationServerSettings,
         control_ledger: OAuthControlLedger,
         grant_store: OAuthGrantStore,
+        client_metadata_resolver: ChatGPTClientMetadataResolver | None = None,
         clock: Callable[[], int] = unix_time,
     ) -> None:
         self.settings = settings
         self.control_ledger = control_ledger
         self.grant_store = grant_store
+        self.client_metadata_resolver = client_metadata_resolver
         self.clock = clock
         self.jwt = JwtIssuer(
             issuer=settings.issuer,
@@ -101,7 +107,7 @@ class AuthorizationService:
 
     def authorization_server_metadata(self) -> dict[str, object]:
         issuer = self.settings.issuer
-        return {
+        result = {
             "issuer": issuer,
             "authorization_endpoint": f"{issuer}/authorize",
             "token_endpoint": f"{issuer}/token",
@@ -112,8 +118,18 @@ class AuthorizationService:
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
             "revocation_endpoint_auth_methods_supported": ["none"],
-            "scopes_supported": sorted(self.settings.scopes_supported),
+            "scopes_supported": sorted(
+                self.settings.scopes_supported
+                | (
+                    self.client_metadata_resolver.allowed_scopes
+                    if self.client_metadata_resolver is not None
+                    else frozenset()
+                )
+            ),
         }
+        if self.client_metadata_resolver is not None:
+            result["client_id_metadata_document_supported"] = True
+        return result
 
     def openid_configuration(self) -> dict[str, object]:
         return {
@@ -126,7 +142,18 @@ class AuthorizationService:
     async def _enabled_client(self, client_id: str) -> tuple[StaticClient, OAuthClientRecord]:
         configured = self.settings.client(client_id)
         if configured is None:
-            raise OAuthProtocolError("invalid_client", status_code=401)
+            if self.client_metadata_resolver is None:
+                raise OAuthProtocolError("invalid_client", status_code=401)
+            try:
+                configured = await _invoke(self.client_metadata_resolver.resolve, client_id)
+            except ClientMetadataError as exc:
+                raise OAuthProtocolError("invalid_client", status_code=401) from exc
+            return configured, OAuthClientRecord(
+                issuer=self.settings.issuer,
+                client_id=client_id,
+                enabled=True,
+                allowed_scopes=configured.allowed_scopes,
+            )
         try:
             record = await _invoke(self.control_ledger.get_client, self.settings.issuer, client_id)
         except Exception as exc:

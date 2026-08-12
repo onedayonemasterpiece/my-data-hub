@@ -1646,6 +1646,35 @@ def validate_deployment(report: Report) -> None:
         oauth_server.get("entrypoint") == ["python", "-m", "my_data_hub.oauth_server.runtime"],
         "OAuth authorization service does not use the fail-closed production runtime",
     )
+    cimd = (ROOT / "src/my_data_hub/oauth_server/client_metadata.py").read_text(
+        encoding="utf-8"
+    )
+    for required in (
+        'parsed.hostname != "chatgpt.com"',
+        "or port is not none",
+        "max_metadata_bytes = 32 * 1_024",
+        "fetch_timeout_seconds = 3.0",
+        'response.final_url != client_id',
+        '"client_secret"',
+        '"none" not in methods',
+        'prefix = "/connector/oauth/"',
+    ):
+        report.check(
+            required in cimd.lower(),
+            f"ChatGPT CIMD bounded public-client invariant is missing: {required}",
+        )
+    oauth_service = (ROOT / "src/my_data_hub/oauth_server/service.py").read_text(
+        encoding="utf-8"
+    )
+    report.check(
+        'result["client_id_metadata_document_supported"] = true'
+        in oauth_service.lower(),
+        "OAuth discovery does not advertise enabled CIMD support",
+    )
+    report.check(
+        '"registration_endpoint"' not in oauth_service,
+        "OAuth service unexpectedly advertises dynamic client registration",
+    )
     report.check(
         remote_mcp.get("environment", {}).get("MY_DATA_HUB_MCP_WRITE_ENABLED") == "false",
         "remote MCP owner/operator writes are not fail-closed",
@@ -1706,8 +1735,9 @@ def validate_deployment(report: Report) -> None:
                 f"provider-only Compose crosses a forbidden authority boundary: {token}",
             )
     report.check(
-        "chatgpt_oauth_client_configuration_required" in control_installer,
-        "provider-only install does not disclose the bounded ChatGPT OAuth client follow-up",
+        "my_data_hub_oauth_chatgpt_cimd_enabled" in control_installer
+        and "chatgpt_oauth_client_mode=cimd-public" in control_installer,
+        "provider-only install does not enable and disclose bounded ChatGPT CIMD",
     )
     report.check(
         "provider-only readiness did not prove the central adapter gateway" in control_installer,
