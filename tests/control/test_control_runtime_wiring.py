@@ -3,10 +3,11 @@ from __future__ import annotations
 import base64
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import pytest
 from fastapi.testclient import TestClient
@@ -29,10 +30,17 @@ from my_data_hub.control_plane.runtime import (
 from my_data_hub.embeddings.production import EmbeddingProductionRequest
 from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator
 from my_data_hub.providers.kaggle import (
+    ControlLedgerKaggleJournal,
+    EffectOutcome,
     KaggleMasterLaunchAssets,
     KaggleMasterRuntimeProvider,
     KaggleProviderAdapter,
+    MutationAction,
+    ProviderEffectIntent,
+    ProviderEffectReceipt,
+    TaskResourceClaim,
 )
+from my_data_hub.providers.models import ControlClass, ProviderFingerprint, ProviderKind
 from my_data_hub.runtime_sdk import RuntimeEvent, RuntimeEventType
 from my_data_hub.workloads.bloggers.importer import batch_identity
 from my_data_hub.workloads.bloggers.master_stage import (
@@ -235,6 +243,81 @@ def test_production_builder_constructs_single_adapter_journal_and_bridge(monkeyp
     assert built.checkpoint_broker is not None
     assert built.provider_adapter is adapter
     assert len(seen) == 1
+
+
+def test_checkpoint_verifier_factory_uses_exact_verified_master_asset_claim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("KAGGLE_API_TOKEN", "modern-token-present")
+    key = tmp_path / "checkpoint-broker.key"
+    key.write_bytes(b"k" * 32)
+    key.chmod(0o600)
+    monkeypatch.setenv("MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE", str(key))
+    base = assets()
+    wheel_name = "my_data_hub-0.1.0-py3-none-any.whl"
+    launch = replace(base, dataset_files={**base.dataset_files, wheel_name: b"exact-wheel"})
+    ledger = ControlLedger(tmp_path / "verified-assets.sqlite3")
+    journal = ControlLedgerKaggleJournal(ledger)
+    operation_id = uuid4()
+    task_id = uuid4()
+    effect_key = f"{operation_id}:ensure_dataset"
+    effect_id = uuid5(NAMESPACE_URL, effect_key)
+    fingerprint = ProviderFingerprint(value="a" * 64)
+    intent = ProviderEffectIntent.create(
+        operation_id=operation_id,
+        effect_id=effect_id,
+        idempotency_key=effect_key,
+        task_id=task_id,
+        action=MutationAction.CREATE_DATASET,
+        provider_ref=launch.dataset_ref,
+        arguments={
+            "content_tree_sha256": KaggleMasterRuntimeProvider._mapping_sha(launch.dataset_files),
+            "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
+            "disposable": False,
+        },
+        requested_at=datetime(2026, 8, 12, tzinfo=UTC),
+    )
+    journal.persist_intent(intent)
+    journal.persist_receipt(
+        ProviderEffectReceipt(
+            operation_id=operation_id,
+            effect_id=effect_id,
+            action=MutationAction.CREATE_DATASET,
+            provider_ref=launch.dataset_ref,
+            outcome=EffectOutcome.APPLIED,
+            attempts=1,
+            observed_fingerprint=fingerprint,
+            provider_version=7,
+            observed_at=datetime(2026, 8, 12, tzinfo=UTC),
+            detail_code="dataset_created_private",
+        )
+    )
+    journal.persist_resource_claim(
+        TaskResourceClaim.create(
+            task_id=task_id,
+            effect_id=effect_id,
+            provider_ref=launch.dataset_ref,
+            kind=ProviderKind.DATASET,
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+            disposable=False,
+            fingerprint=fingerprint,
+            provider_version=7,
+            registered_at=datetime(2026, 8, 12, tzinfo=UTC),
+        )
+    )
+    adapter = object()
+    built = build_production_runtime(
+        ledger,
+        MasterRuntimeSettings(launch),
+        adapter_factory=lambda _journal: adapter,  # type: ignore[arg-type,return-value]
+    )
+    assert built.checkpoint_broker is not None
+    verifier = built.checkpoint_broker.restore_verifier_factory(uuid4(), uuid4())  # type: ignore[misc]
+    contract = verifier.assets.execution_contract()
+    assert contract["runtime_dataset_exact_ref"] == "owner/master-launch/7"
+    assert contract["runtime_image_identity"] == launch.runtime_image_identity
+    assert contract["wheel_relative_path"] == wheel_name
+    assert contract["wheel_sha256"] == hashlib.sha256(b"exact-wheel").hexdigest()
 
 
 def test_production_builder_accepts_central_legacy_kaggle_credentials(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]

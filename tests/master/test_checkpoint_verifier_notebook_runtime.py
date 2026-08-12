@@ -57,7 +57,7 @@ def _package(root: Path):  # type: ignore[no-untyped-def]
 def test_generated_verifier_actually_starts_an_isolated_restore_and_emits_bound_receipt(
     tmp_path: Path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
-    source_path = ROOT / "notebooks/templates/checkpoint_verifier/runtime.py"
+    source_path = ROOT / "src/my_data_hub/checkpoints/verifier_runtime.py"
     source = source_path.read_text(encoding="utf-8")
     assert "IsolatedPostgresRestoreVerifier" in source
     assert "MY_DATA_HUB_RESTORE_DATABASE_URL" not in source
@@ -87,9 +87,27 @@ def test_generated_verifier_actually_starts_an_isolated_restore_and_emits_bound_
                 "canonical_revision": 4,
                 "logical_hash_sha256": "a" * 64,
                 "row_counts": {"hub.canonical_state": 1},
+                "postgres_version": "18.4",
+                "extensions": {
+                    "citext": "1.6", "pg_trgm": "1.6", "pgcrypto": "1.3", "vector": "0.8.1"
+                },
+                "migration_boundary": {
+                    "first_version": 1, "last_version": 13, "applied_count": 13,
+                    "contiguous": True, "history_sha256": "b" * 64,
+                },
+                "database_invariants": {
+                    "canonical_state_singletons": 1, "epoch_state_singletons": 1,
+                    "unvalidated_constraints": 0,
+                },
+                "vector_query": {"operator": "cosine_distance", "dimensions": 3, "distance": 0.0},
+                "bounded_read_smoke": {
+                    "relation_count": 1, "total_rows": 1,
+                    "statement_timeout_ms": 30000, "lock_timeout_ms": 3000,
+                },
             }
 
     monkeypatch.setattr(module, "IsolatedPostgresRestoreVerifier", FakeIsolatedVerifier)
+    monkeypatch.setattr(module, "_install_postgres_runtime", lambda: Path("/bin/true"))
     environment = {
         "MY_DATA_HUB_CHECKPOINT_DIRECTORY": str(package),
         "MY_DATA_HUB_CHECKPOINT_MANIFEST": str(manifest_path),
@@ -99,7 +117,14 @@ def test_generated_verifier_actually_starts_an_isolated_restore_and_emits_bound_
         "MY_DATA_HUB_CHECKPOINT_DATASET_REF": "owner/private-checkpoints",
         "MY_DATA_HUB_CHECKPOINT_DATASET_VERSION": "7",
         "MY_DATA_HUB_VERIFIER_TASK_RUN_ID": str(RUN_ID),
-        "MY_DATA_HUB_PG_CTL": "/bin/true",
+        "MY_DATA_HUB_EXECUTION_PINS_SHA256": "c" * 64,
+        "MY_DATA_HUB_KAGGLE_RUNTIME_IMAGE_IDENTITY": (
+            "gcr.io/kaggle-images/python@sha256:" + "d" * 64
+        ),
+        "MY_DATA_HUB_KAGGLE_RUNTIME_SOURCE_COMMIT": "e" * 40,
+        "MY_DATA_HUB_INPUT_DATASET_VERSIONS_JSON": json.dumps(
+            ["owner/master-assets/3", "owner/private-checkpoints/7"]
+        ),
     }
     for key, value in environment.items():
         monkeypatch.setenv(key, value)
@@ -130,3 +155,5 @@ def test_generated_verifier_actually_starts_an_isolated_restore_and_emits_bound_
     assert receipt["dataset_version"] == 7
     assert receipt["package_sha256"] == environment["MY_DATA_HUB_CHECKPOINT_PACKAGE_SHA256"]
     assert receipt["restore_mode"] == "isolated_physical_restore"
+    assert receipt["schema_version"] == "my-data-hub-checkpoint-restore-smoke.v2"
+    assert receipt["observed"]["extensions"]["vector"] == "0.8.1"

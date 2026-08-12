@@ -111,6 +111,14 @@ class IsolatedPostgresRestoreVerifier:
                     connection,
                     tuple(sorted(manifest.restore_probe.row_counts)),
                 )
+            extensions = observed.get("extensions")
+            if (
+                not str(observed.get("postgres_version", "")).startswith("18.")
+                or not isinstance(extensions, dict)
+                or extensions.get("vector") != manifest.pgvector_version
+                or any(not extensions.get(name) for name in ("pgcrypto", "citext", "pg_trgm"))
+            ):
+                raise RestoreVerifierError("isolated restore runtime/extension identity differs")
             assert_restore_equality(manifest, observed)
             return {
                 "ok": True,

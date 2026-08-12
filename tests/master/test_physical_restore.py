@@ -107,6 +107,10 @@ def test_production_verifier_starts_only_the_restored_isolated_pgdata(tmp_path: 
         "canonical_revision": 7,
         "logical_hash_sha256": "e" * 64,
         "row_counts": {"hub.canonical_state": 1},
+        "postgres_version": "18.4",
+        "extensions": {
+            "citext": "1.6", "pg_trgm": "1.6", "pgcrypto": "1.3", "vector": "0.8.1"
+        },
     }
     monkeypatch.setattr(
         "my_data_hub.checkpoints.verifier.collect_restore_probe",

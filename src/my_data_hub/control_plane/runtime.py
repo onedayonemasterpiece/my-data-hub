@@ -54,6 +54,10 @@ from my_data_hub.providers.kaggle.contracts import (
     TaskResourceClaim,
 )
 from my_data_hub.providers.kaggle.credentials import kaggle_credentials_configured
+from my_data_hub.providers.kaggle.master_runtime import (
+    POSTGRES_RUNTIME_ARCHIVE_NAME,
+    POSTGRES_RUNTIME_MANIFEST_NAME,
+)
 from my_data_hub.providers.models import ControlClass, ProviderFingerprint, ProviderKind
 from my_data_hub.runtime_sdk import CANONICAL_RUNTIME_CALLBACK_URL
 from my_data_hub.tunnel_broker_ipc import TunnelBrokerClient
@@ -68,7 +72,7 @@ class KaggleAcceptanceOperationExecutor:
     """Run isolated restore verification while retaining receipt metadata only."""
 
     adapter: KaggleProviderAdapter
-    assets: KaggleMasterLaunchAssets
+    verifier_assets_factory: Callable[[int], KaggleCheckpointVerifierAssets]
     output_root: Path
 
     def restore(
@@ -112,15 +116,10 @@ class KaggleAcceptanceOperationExecutor:
             fingerprint=fingerprint,
             observed_at=manifest.created_at,
         )
-        source = self.assets.dataset_files[self.assets.checkpoint_verifier_source_file]
         self.output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         verifier = KaggleCheckpointRestoreVerifier(
             self.adapter,
-            KaggleCheckpointVerifierAssets(
-                notebook_ref=self.assets.checkpoint_verifier_ref,
-                notebook_source=source,
-                timeout_seconds=timeout_seconds,
-            ),
+            self.verifier_assets_factory(timeout_seconds),
             output_directory=self.output_root,
             operation_id=uuid5(NAMESPACE_URL, f"acceptance:{operation_id}"),
             authorization_task_id=UUID(manifest.source_run_id),
@@ -1017,6 +1016,79 @@ class ProductionRuntimeBuild:
     checkpoint_broker: BrokeredCheckpointUploadService | None = None
 
 
+def _checkpoint_verifier_assets_from_verified_master_claim(
+    ledger: ControlLedger,
+    assets: KaggleMasterLaunchAssets,
+    *,
+    timeout_seconds: int,
+) -> KaggleCheckpointVerifierAssets:
+    """Project a verifier runtime only from the exact durable master asset effect."""
+
+    claim = ledger.latest_provider_resource_claim(
+        provider_ref=assets.dataset_ref,
+        resource_kind=ProviderKind.DATASET.value,
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
+    )
+    if claim is None:
+        raise MasterProviderUnavailable("exact master asset Dataset claim is unavailable")
+    effect_id = str(claim.get("effect_id", ""))
+    authority = ledger.provider_effect_authority(effect_id)
+    receipt = ledger.latest_provider_effect_receipt(effect_id)
+    expected_key = f"{authority['operation_id']}:ensure_dataset" if authority is not None else ""
+    expected_arguments_sha256 = sha256_value(
+        {
+            "content_tree_sha256": KaggleMasterRuntimeProvider._mapping_sha(assets.dataset_files),
+            "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
+            "disposable": False,
+        }
+    )
+    if (
+        authority is None
+        or authority.get("action") != "create_dataset"
+        or authority.get("provider_ref") != assets.dataset_ref
+        or ledger.provider_effect_idempotency_key(effect_id) != expected_key
+        or str(uuid5(NAMESPACE_URL, expected_key)) != effect_id
+        or ledger.provider_effect_arguments_sha256(effect_id) != expected_arguments_sha256
+        or claim.get("kind") != ProviderKind.DATASET.value
+        or claim.get("control_class") != ControlClass.ORCHESTRATOR_PROTECTED.value
+        or claim.get("disposable") is not False
+        or receipt is None
+        or receipt.get("provider_version") != claim.get("provider_version")
+        or receipt.get("observed_fingerprint") != claim.get("fingerprint")
+        or receipt.get("outcome") not in {"applied", "already_applied"}
+    ):
+        raise MasterProviderUnavailable("master asset Dataset claim does not bind the exact build effect")
+    try:
+        version = int(claim["provider_version"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MasterProviderUnavailable("master asset Dataset claim has no exact numeric version") from exc
+    wheels = tuple(sorted(name for name in assets.dataset_files if name.endswith(".whl")))
+    if version < 1 or len(wheels) != 1:
+        raise MasterProviderUnavailable("verified master assets lack one exact verifier wheel")
+    wheel = wheels[0]
+    try:
+        verifier_source = assets.dataset_files[assets.checkpoint_verifier_source_file]
+        archive = assets.dataset_files[POSTGRES_RUNTIME_ARCHIVE_NAME]
+        runtime_manifest = assets.dataset_files[POSTGRES_RUNTIME_MANIFEST_NAME]
+    except KeyError as exc:
+        raise MasterProviderUnavailable("verified master assets lack checkpoint verifier runtime files") from exc
+    return KaggleCheckpointVerifierAssets(
+        notebook_ref=assets.checkpoint_verifier_ref,
+        notebook_source=verifier_source,
+        timeout_seconds=timeout_seconds,
+        runtime_dataset_exact_ref=f"{assets.dataset_ref}/{version}",
+        runtime_image_identity=assets.runtime_image_identity,
+        runtime_image_source_commit=assets.runtime_image_source_commit,
+        runtime_python_series=assets.runtime_python_series,
+        wheel_relative_path=wheel,
+        wheel_sha256=hashlib.sha256(assets.dataset_files[wheel]).hexdigest(),
+        postgres_runtime_archive_relative_path=POSTGRES_RUNTIME_ARCHIVE_NAME,
+        postgres_runtime_archive_sha256=hashlib.sha256(archive).hexdigest(),
+        postgres_runtime_manifest_relative_path=POSTGRES_RUNTIME_MANIFEST_NAME,
+        postgres_runtime_manifest_sha256=hashlib.sha256(runtime_manifest).hexdigest(),
+    )
+
+
 def build_production_runtime(
     ledger: ControlLedger,
     settings: MasterRuntimeSettings | None,
@@ -1064,12 +1136,6 @@ def build_production_runtime(
         )
     try:
         secret_box = CheckpointUploadSecretBox.from_file(Path(key_value))
-        verifier_source = settings.assets.dataset_files[settings.assets.checkpoint_verifier_source_file]
-        verifier_assets = KaggleCheckpointVerifierAssets(
-            notebook_ref=settings.assets.checkpoint_verifier_ref,
-            notebook_source=verifier_source,
-            timeout_seconds=1800,
-        )
         receipt_root = (session_credentials_path or Path(tempfile.gettempdir())) / "checkpoint-verifier-receipts"
         receipt_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         receipt_root.chmod(0o700)
@@ -1077,7 +1143,9 @@ def build_production_runtime(
         def verifier_factory(operation_id: UUID, task_id: UUID) -> KaggleCheckpointRestoreVerifier:
             return KaggleCheckpointRestoreVerifier(
                 adapter,
-                verifier_assets,
+                _checkpoint_verifier_assets_from_verified_master_claim(
+                    ledger, settings.assets, timeout_seconds=1800
+                ),
                 output_directory=receipt_root,
                 operation_id=operation_id,
                 authorization_task_id=task_id,
@@ -1120,7 +1188,13 @@ def build_production_runtime(
         ledger,
         coordinator,
         settings,
-        KaggleAcceptanceOperationExecutor(adapter, settings.assets, acceptance_root),
+        KaggleAcceptanceOperationExecutor(
+            adapter,
+            lambda timeout: _checkpoint_verifier_assets_from_verified_master_claim(
+                ledger, settings.assets, timeout_seconds=timeout
+            ),
+            acceptance_root,
+        ),
         master_tls_ca_path,
     )
     with suppress(Exception):

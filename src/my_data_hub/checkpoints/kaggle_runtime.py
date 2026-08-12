@@ -16,11 +16,15 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from time import monotonic
+from time import monotonic, sleep
 from typing import Any, Protocol
 from urllib.parse import quote
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from pydantic import BaseModel, ConfigDict, Field
+
+from my_data_hub.db.migrations import discover_migrations
+from my_data_hub.hashing import canonical_json_bytes, sha256_value
 from my_data_hub.providers.kaggle.adapter import (
     KaggleProviderAdapter,
     _canonical_notebook_source,
@@ -32,6 +36,7 @@ from my_data_hub.providers.kaggle.contracts import (
     KaggleAmbiguousMutation,
     KaggleDatasetIdentity,
     KaggleKernelRunIdentity,
+    KernelState,
     MutationAction,
     PollPolicy,
     ProviderEffectIntent,
@@ -61,7 +66,7 @@ from .restore_probe import collect_restore_probe
 
 CHECKPOINT_MANIFEST_NAME = "checkpoint-manifest.json"
 CHECKPOINT_RESTORE_RECEIPT_NAME = "checkpoint-restore-receipt.json"
-RESTORE_RECEIPT_CONTRACT = "my-data-hub-checkpoint-restore-smoke.v1"
+RESTORE_RECEIPT_CONTRACT = "my-data-hub-checkpoint-restore-smoke.v2"
 _KAGGLE_WORKING_ROOT = Path("/kaggle/working")
 
 
@@ -71,6 +76,56 @@ class CheckpointRuntimeError(RuntimeError):
 
 class CheckpointRetryableError(PublishError):
     """Publication is incomplete but safe to retry with the same candidate."""
+
+
+class CheckpointRestoreObservedReceipt(BaseModel):
+    """Bounded metadata observed from the isolated restored PostgreSQL."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = Field(ge=1)
+    canonical_revision: int = Field(ge=0)
+    logical_hash_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    row_counts: dict[str, int]
+    postgres_version: str = Field(pattern=r"^18\.[0-9]+(?:\.[0-9]+)?$")
+    extensions: dict[str, str]
+    migration_boundary: dict[str, object]
+    database_invariants: dict[str, int]
+    vector_query: dict[str, object]
+    bounded_read_smoke: dict[str, int]
+
+
+class CheckpointRestoreReceipt(BaseModel):
+    """Secret-free verifier output; business/checkpoint bytes remain in Kaggle."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: str = Field(pattern=r"^my-data-hub-checkpoint-restore-smoke\.v2$")
+    task_run_id: UUID
+    checkpoint_id: UUID
+    manifest_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    manifest_file_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    dataset_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+    dataset_version: int = Field(ge=1)
+    package_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    restore_mode: str = Field(pattern=r"^isolated_physical_restore$")
+    execution_pins_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    runtime_image_identity: str = Field(pattern=r"^[^@\s]+@sha256:[a-f0-9]{64}$")
+    runtime_image_source_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+    input_dataset_versions: list[str] = Field(min_length=2, max_length=2)
+    ok: bool
+    observed: CheckpointRestoreObservedReceipt
+
+
+class CheckpointRestoreVerifiedReceipt(CheckpointRestoreReceipt):
+    """Central metadata receipt binding runtime evidence to exact provider output."""
+
+    provider_run_ref: str = Field(
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*$"
+    )
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    output_receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    output_tree_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class RemoteCheckpointRegistryPort(CheckpointRegistryContract, Protocol):
@@ -615,6 +670,16 @@ class KaggleCheckpointVerifierAssets:
     kernel_type: str = "notebook"
     language: str = "python"
     timeout_seconds: int = CHECKPOINT_VERIFIER_TIMEOUT_SECONDS
+    runtime_dataset_exact_ref: str | None = None
+    runtime_image_identity: str | None = None
+    runtime_image_source_commit: str | None = None
+    runtime_python_series: str | None = None
+    wheel_relative_path: str | None = None
+    wheel_sha256: str | None = None
+    postgres_runtime_archive_relative_path: str | None = None
+    postgres_runtime_archive_sha256: str | None = None
+    postgres_runtime_manifest_relative_path: str | None = None
+    postgres_runtime_manifest_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if len(self.notebook_ref.split("/")) != 2 or not self.notebook_source:
@@ -623,6 +688,47 @@ class KaggleCheckpointVerifierAssets:
             raise ValueError("checkpoint verifier kernel type is invalid")
         if not 60 <= self.timeout_seconds <= CHECKPOINT_VERIFIER_TIMEOUT_SECONDS:
             raise ValueError("checkpoint verifier timeout exceeds its attempt allocation")
+
+    def execution_contract(self) -> dict[str, str]:
+        values = {
+            "runtime_dataset_exact_ref": self.runtime_dataset_exact_ref,
+            "runtime_image_identity": self.runtime_image_identity,
+            "runtime_image_source_commit": self.runtime_image_source_commit,
+            "runtime_python_series": self.runtime_python_series,
+            "wheel_relative_path": self.wheel_relative_path,
+            "wheel_sha256": self.wheel_sha256,
+            "postgres_runtime_archive_relative_path": self.postgres_runtime_archive_relative_path,
+            "postgres_runtime_archive_sha256": self.postgres_runtime_archive_sha256,
+            "postgres_runtime_manifest_relative_path": self.postgres_runtime_manifest_relative_path,
+            "postgres_runtime_manifest_sha256": self.postgres_runtime_manifest_sha256,
+        }
+        if any(not isinstance(value, str) or not value for value in values.values()):
+            raise CheckpointRuntimeError("checkpoint verifier exact runtime assets are incomplete")
+        contract = {key: str(value) for key, value in values.items()}
+        _parse_exact_dataset_version(contract["runtime_dataset_exact_ref"])
+        if (
+            not re.fullmatch(r"[^@\s]+@sha256:[a-f0-9]{64}", contract["runtime_image_identity"])
+            or not re.fullmatch(r"[a-f0-9]{40}", contract["runtime_image_source_commit"])
+            or not re.fullmatch(r"[0-9]+\.[0-9]+", contract["runtime_python_series"])
+            or any(
+                not re.fullmatch(r"[a-f0-9]{64}", contract[name])
+                for name in (
+                    "wheel_sha256",
+                    "postgres_runtime_archive_sha256",
+                    "postgres_runtime_manifest_sha256",
+                )
+            )
+        ):
+            raise CheckpointRuntimeError("checkpoint verifier runtime provenance is invalid")
+        for name in (
+            "wheel_relative_path",
+            "postgres_runtime_archive_relative_path",
+            "postgres_runtime_manifest_relative_path",
+        ):
+            path = Path(contract[name])
+            if path.is_absolute() or ".." in path.parts or not 1 <= len(path.parts) <= 8:
+                raise CheckpointRuntimeError("checkpoint verifier runtime asset path is unsafe")
+        return contract
 
 
 class KaggleCheckpointRestoreVerifier:
@@ -639,10 +745,10 @@ class KaggleCheckpointRestoreVerifier:
         clock: Any = lambda: datetime.now(UTC),
         run_id_factory: Any | None = None,
         poll_policy: PollPolicy | None = None,
-        metadata_only_output: bool = False,
+        metadata_only_output: bool = True,
     ) -> None:
         if not metadata_only_output:
-            _assert_kaggle_working_path(output_directory)
+            raise ValueError("checkpoint verifier output must be metadata-only")
         if not output_directory.is_dir() or output_directory.is_symlink():
             raise ValueError("verifier output root must be a real provider-side directory")
         self.adapter = adapter
@@ -670,6 +776,7 @@ class KaggleCheckpointRestoreVerifier:
         provider_ref, version = _parse_exact_dataset_version(exact_version_ref)
         if provider_ref != dataset_identity.provider_ref or version != dataset_identity.version:
             raise CheckpointRuntimeError("verifier dataset identity differs from exact readback")
+        execution = self.assets.execution_contract()
         run_id = (
             UUID(str(self.run_id_factory()))
             if self.run_id_factory is not None
@@ -678,15 +785,46 @@ class KaggleCheckpointRestoreVerifier:
                 f"my-data-hub:checkpoint-verifier-run:{manifest.checkpoint_id}:{version}",
             )
         )
-        source = _render_verifier_source(
+        source, execution_pins_sha256 = _render_verifier_source(
             self.assets,
             run_id=run_id,
             dataset_identity=dataset_identity,
             manifest=manifest,
+            execution=execution,
         )
         canonical_source = _canonical_notebook_source(source, kernel_type=self.assets.kernel_type)
         source_sha = hashlib.sha256(canonical_source).hexdigest()
         dataset_source = f"{provider_ref}/{version}"
+        dataset_sources = (execution["runtime_dataset_exact_ref"], dataset_source)
+        if len(dataset_sources) != len(set(dataset_sources)):
+            raise CheckpointRuntimeError("verifier runtime/checkpoint Dataset inputs must be distinct")
+        destination = self.output_directory / str(run_id)
+        launch_cache = destination / "control-launch.json"
+        if destination.exists() and launch_cache.is_file() and not launch_cache.is_symlink():
+            try:
+                cached_run = KaggleKernelRunIdentity.model_validate_json(launch_cache.read_bytes())
+                if (
+                    cached_run.task_run_id != run_id
+                    or cached_run.provider_ref != self.assets.notebook_ref
+                    or cached_run.source_sha256 != source_sha
+                ):
+                    raise CheckpointRuntimeError("cached verifier launch identity differs")
+                receipt = _load_restore_receipt(destination / CHECKPOINT_RESTORE_RECEIPT_NAME)
+                _assert_restore_receipt(
+                    receipt,
+                    run=cached_run,
+                    manifest=manifest,
+                    dataset_identity=dataset_identity,
+                    execution=execution,
+                    execution_pins_sha256=execution_pins_sha256,
+                )
+                return _verified_restore_receipt(
+                    receipt,
+                    run=cached_run,
+                    receipt_path=destination / CHECKPOINT_RESTORE_RECEIPT_NAME,
+                )
+            except (CheckpointRuntimeError, ValueError):
+                shutil.rmtree(destination, ignore_errors=True)
         intent = ProviderEffectIntent.create(
             operation_id=self.operation_id,
             effect_id=uuid5(NAMESPACE_URL, f"my-data-hub:checkpoint-verifier:{run_id}"),
@@ -697,26 +835,19 @@ class KaggleCheckpointRestoreVerifier:
             arguments={
                 "task_run_id": str(run_id),
                 "source_sha256": source_sha,
-                "dataset_sources": (dataset_source,),
+                "dataset_sources": dataset_sources,
                 "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
                 "disposable": False,
+                "docker_image": execution["runtime_image_identity"],
+                "docker_image_pinning_type": "original",
             },
             # The intent is append-only and may be re-submitted after a lost
             # control-plane response.  Bind its timestamp to the immutable
             # checkpoint rather than to the retry attempt.
             requested_at=manifest.created_at,
         )
-        launched = self.adapter.reconcile_private_notebook_mutation(
-            intent=intent,
-            task_run_id=run_id,
-            expected_source_sha256=source_sha,
-            dataset_sources=(dataset_source,),
-            control_class=ControlClass.ORCHESTRATOR_PROTECTED,
-            disposable=False,
-        )
-        if launched is None:
-            try:
-                launched = self.adapter.push_private_notebook(
+        try:
+            launched = self.adapter.push_private_notebook_pending_runtime_attestation(
                     intent=intent,
                     task_run_id=run_id,
                     source=source,
@@ -726,25 +857,30 @@ class KaggleCheckpointRestoreVerifier:
                     language=self.assets.language,
                     control_class=ControlClass.ORCHESTRATOR_PROTECTED,
                     disposable=False,
-                    dataset_sources=(dataset_source,),
+                    dataset_sources=dataset_sources,
                     enable_internet=False,
                     timeout_seconds=self.assets.timeout_seconds,
+                    docker_image=execution["runtime_image_identity"],
+                    docker_image_pinning_type="original",
                 )
-            except Exception as push_error:
-                launched = self.adapter.reconcile_private_notebook_mutation(
-                    intent=intent,
-                    task_run_id=run_id,
-                    expected_source_sha256=source_sha,
-                    dataset_sources=(dataset_source,),
-                    control_class=ControlClass.ORCHESTRATOR_PROTECTED,
-                    disposable=False,
-                )
-                if launched is None:
-                    raise CheckpointRuntimeError(
-                        "checkpoint verifier provider effect remains ambiguous and was not repeated"
-                    ) from push_error
-        self.adapter.poll_run(launched.run, self.poll_policy)
-        destination = self.output_directory / str(run_id)
+        except Exception as push_error:
+            raise CheckpointRuntimeError(
+                "checkpoint verifier pending-attested provider effect was not repeated"
+            ) from push_error
+        started = monotonic()
+        for poll in range(self.poll_policy.max_polls):
+            status = self.adapter.read_attested_master_run_status(launched.run)
+            if status.state is KernelState.COMPLETE:
+                break
+            if status.state is KernelState.FAILED:
+                raise CheckpointRuntimeError("checkpoint verifier run failed")
+            if (
+                poll + 1 >= self.poll_policy.max_polls
+                or monotonic() - started + self.poll_policy.interval_seconds
+                > self.poll_policy.timeout_seconds
+            ):
+                raise CheckpointRuntimeError("checkpoint verifier exceeded bounded polling")
+            sleep(self.poll_policy.interval_seconds)
         receipt: dict[str, object] | None = None
         if destination.exists():
             try:
@@ -754,6 +890,8 @@ class KaggleCheckpointRestoreVerifier:
                     run=launched.run,
                     manifest=manifest,
                     dataset_identity=dataset_identity,
+                    execution=execution,
+                    execution_pins_sha256=execution_pins_sha256,
                 )
             except CheckpointRuntimeError:
                 # A crash can leave a partial local output tree.  It is only a
@@ -761,27 +899,38 @@ class KaggleCheckpointRestoreVerifier:
                 shutil.rmtree(destination, ignore_errors=True)
                 receipt = None
         if receipt is None:
-            if self.metadata_only_output:
-                self.adapter.download_exact_run_output_file(
-                    launched.run,
-                    destination=destination,
-                    file_name=CHECKPOINT_RESTORE_RECEIPT_NAME,
-                    max_bytes=64 * 1024,
-                )
-            else:
-                self.adapter.download_exact_run_output_tree(launched.run, destination=destination)
+            output_identity = self.adapter.download_attested_master_output_file(
+                launched.run,
+                destination=destination,
+                file_name=CHECKPOINT_RESTORE_RECEIPT_NAME,
+                max_bytes=64 * 1024,
+            )
             receipt = _load_restore_receipt(destination / CHECKPOINT_RESTORE_RECEIPT_NAME)
             _assert_restore_receipt(
                 receipt,
                 run=launched.run,
                 manifest=manifest,
                 dataset_identity=dataset_identity,
+                execution=execution,
+                execution_pins_sha256=execution_pins_sha256,
             )
-        return {
-            **receipt,
-            "provider_run_ref": launched.run.provider_run_ref,
-            "source_sha256": launched.run.source_sha256,
-        }
+            output_tree_sha256 = _receipt_output_tree_sha256(
+                destination / CHECKPOINT_RESTORE_RECEIPT_NAME
+            )
+            if output_identity.output_tree_sha256 != output_tree_sha256:
+                raise CheckpointRuntimeError("verifier provider output tree differs from exact receipt")
+        else:
+            output_tree_sha256 = _receipt_output_tree_sha256(
+                destination / CHECKPOINT_RESTORE_RECEIPT_NAME
+            )
+        launch_cache.write_text(launched.run.model_dump_json(), encoding="utf-8")
+        launch_cache.chmod(0o600)
+        return _verified_restore_receipt(
+            receipt,
+            run=launched.run,
+            receipt_path=destination / CHECKPOINT_RESTORE_RECEIPT_NAME,
+            output_tree_sha256=output_tree_sha256,
+        )
 
 
 class KaggleCheckpointCoordinator:
@@ -1322,23 +1471,171 @@ def _render_verifier_source(
     run_id: UUID,
     dataset_identity: KaggleDatasetIdentity,
     manifest: CheckpointManifest,
-) -> bytes:
-    dataset_slug = dataset_identity.provider_ref.split("/", 1)[1]
+    execution: dict[str, str],
+) -> tuple[bytes, str]:
+    checkpoint_ref = f"{dataset_identity.provider_ref}/{dataset_identity.version}"
+    if assets.kernel_type == "script":
+        primary_source_sha256 = hashlib.sha256(assets.notebook_source).hexdigest()
+        pin_contract = {
+            "schema": "my-data-hub-notebook-execution-pins/v1",
+            "notebook": "03-checkpoint-verifier-restore-smoke",
+            "output_contract": RESTORE_RECEIPT_CONTRACT,
+            "model": None,
+            "privacy": "private",
+            "resource_class": "orchestrator_protected",
+            "cleanup_retention_policy": {
+                "cleanup_receipt_required": True,
+                "notebook_resource": "orchestrator_protected_until_owner_supersedes",
+                "run_outputs": "retain_until_terminal_receipt_then_control_policy",
+                "task_owned_inputs": "claim_bound_delete_after_terminal_or_expiry",
+            },
+        }
+    else:
+        try:
+            notebook_document = json.loads(assets.notebook_source)
+            primary_body = Path(__file__).with_name("verifier_runtime.py").read_bytes()
+            primary_sha256 = hashlib.sha256(primary_body).hexdigest()
+            primary_text = primary_body.decode("utf-8")
+            cells = notebook_document["cells"]
+            primary_cells = [cell for cell in cells if cell.get("id") == "primary-source"]
+            install_cells = [cell for cell in cells if cell.get("id") == "install-exact-wheel"]
+            if len(primary_cells) != 1 or len(install_cells) != 1:
+                raise CheckpointRuntimeError("verifier notebook operational cells differ")
+            old_primary = str(notebook_document["metadata"]["my_data_hub"]["primary_source_sha256"])
+            primary_cells[0]["source"] = (
+                f"PRIMARY_SOURCE = {primary_text!r}\n"
+                "if hashlib.sha256(PRIMARY_SOURCE.encode()).hexdigest() != EXPECTED_SOURCE_SHA256:\n"
+                "    raise RuntimeError('embedded primary source hash mismatch')\n"
+                "exec(compile(PRIMARY_SOURCE, '<my-data-hub-primary-source>', 'exec'), globals())"
+            )
+            install_cells[0]["source"] = str(install_cells[0]["source"]).replace(
+                old_primary, primary_sha256
+            ).replace(
+                "my-data-hub-checkpoint-restore-smoke.v1", RESTORE_RECEIPT_CONTRACT
+            )
+            notebook_metadata = notebook_document["metadata"]["my_data_hub"]
+            notebook_metadata["primary_source_sha256"] = primary_sha256
+            notebook_metadata["runtime_contract"] = RESTORE_RECEIPT_CONTRACT
+            notebook_metadata["execution_pin_contract"]["output_contract"] = RESTORE_RECEIPT_CONTRACT
+            pin_contract = notebook_metadata["execution_pin_contract"]
+            primary_source_sha256 = primary_sha256
+        except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CheckpointRuntimeError("verifier notebook execution pin contract is absent") from exc
+    pins = {
+        "schema": pin_contract["schema"],
+        "notebook": pin_contract["notebook"],
+        "python_series": execution["runtime_python_series"],
+        "image_source_commit": execution["runtime_image_source_commit"],
+        "kaggle_runtime_image_identity": execution["runtime_image_identity"],
+        "input_dataset_versions": [execution["runtime_dataset_exact_ref"], checkpoint_ref],
+        "immutable_asset_sha256s": {
+            "my_data_hub_wheel_sha256": execution["wheel_sha256"],
+            "primary_source_sha256": primary_source_sha256,
+        },
+        "output_contract": pin_contract["output_contract"],
+        "model": pin_contract["model"],
+        "privacy": pin_contract["privacy"],
+        "resource_class": pin_contract["resource_class"],
+        "cleanup_retention_policy": pin_contract["cleanup_retention_policy"],
+    }
     values = {
         "MY_DATA_HUB_VERIFIER_TASK_RUN_ID": str(run_id),
-        "MY_DATA_HUB_CHECKPOINT_DIRECTORY": f"/kaggle/input/{dataset_slug}",
-        "MY_DATA_HUB_CHECKPOINT_MANIFEST": f"/kaggle/input/{dataset_slug}/{CHECKPOINT_MANIFEST_NAME}",
         "MY_DATA_HUB_CHECKPOINT_DATASET_REF": dataset_identity.provider_ref,
         "MY_DATA_HUB_CHECKPOINT_DATASET_VERSION": str(dataset_identity.version),
         "MY_DATA_HUB_CHECKPOINT_PACKAGE_SHA256": dataset_identity.package_sha256,
         "MY_DATA_HUB_CHECKPOINT_ID": str(manifest.checkpoint_id),
         "MY_DATA_HUB_CHECKPOINT_MANIFEST_SHA256": manifest.manifest_sha256,
+        "MY_DATA_HUB_KAGGLE_RUNTIME_IMAGE_IDENTITY": execution["runtime_image_identity"],
+        "MY_DATA_HUB_KAGGLE_RUNTIME_SOURCE_COMMIT": execution["runtime_image_source_commit"],
+        "MY_DATA_HUB_INPUT_DATASET_VERSIONS_JSON": json.dumps(
+            pins["input_dataset_versions"], separators=(",", ":")
+        ),
     }
-    bootstrap = f"import os as _mdh_os\n_mdh_os.environ.update({json.dumps(values, sort_keys=True)})\n"
+    pins_body = json.dumps(pins, sort_keys=True, separators=(",", ":")).encode()
+    runtime_names = {
+        "wheel": execution["wheel_relative_path"],
+        "archive": execution["postgres_runtime_archive_relative_path"],
+        "manifest": execution["postgres_runtime_manifest_relative_path"],
+    }
+    runtime_hashes = {
+        "wheel": execution["wheel_sha256"],
+        "archive": execution["postgres_runtime_archive_sha256"],
+        "manifest": execution["postgres_runtime_manifest_sha256"],
+    }
+    bootstrap = (
+        "import hashlib as _mdh_hashlib, json as _mdh_json, os as _mdh_os, "
+        "pathlib as _mdh_pathlib, platform as _mdh_platform\n"
+        f"_mdh_values = {json.dumps(values, sort_keys=True)}\n"
+        f"_mdh_pins_body = {pins_body!r}\n"
+        f"_mdh_runtime_names = {runtime_names!r}\n"
+        f"_mdh_runtime_hashes = {runtime_hashes!r}\n"
+        "_mdh_input = _mdh_pathlib.Path('/kaggle/input')\n"
+        "if not _mdh_input.is_dir() or _mdh_input.is_symlink(): "
+        "raise RuntimeError('Kaggle input root is unavailable')\n"
+        "_mdh_files=[]; _mdh_total=0\n"
+        "for _mdh_index,_mdh_path in enumerate(_mdh_input.rglob('*')):\n"
+        "    if _mdh_index >= 4096: raise RuntimeError('Kaggle input inventory exceeds bound')\n"
+        "    _mdh_relative=_mdh_path.relative_to(_mdh_input)\n"
+        "    if _mdh_path.is_symlink() or any((_mdh_input.joinpath(*_mdh_relative.parts[:i])).is_symlink() "
+        "for i in range(1,len(_mdh_relative.parts))): raise RuntimeError('Kaggle input contains a symlink')\n"
+        "    if _mdh_path.is_file():\n"
+        "        _mdh_size=_mdh_path.stat().st_size\n"
+        "        if _mdh_size > 536870912: raise RuntimeError('Kaggle input file exceeds bound')\n"
+        "        _mdh_total += _mdh_size; _mdh_files.append(_mdh_path)\n"
+        "if _mdh_total > 1073741824: raise RuntimeError('Kaggle input bytes exceed bound')\n"
+        "def _mdh_file_sha(path):\n"
+        "    digest = _mdh_hashlib.sha256()\n"
+        "    with path.open('rb') as stream:\n"
+        "        while block := stream.read(1048576): digest.update(block)\n"
+        "    return digest.hexdigest()\n"
+        "_mdh_runtime_files={}\n"
+        "for _mdh_key,_mdh_name in _mdh_runtime_names.items():\n"
+        "    _mdh_matches=[path for path in _mdh_files if path.name == _mdh_pathlib.Path(_mdh_name).name "
+        "and _mdh_file_sha(path) == _mdh_runtime_hashes[_mdh_key]]\n"
+        "    if len(_mdh_matches) != 1: raise RuntimeError('exact runtime Dataset file is absent or ambiguous')\n"
+        "    _mdh_runtime_files[_mdh_key]=_mdh_matches[0]\n"
+        "_mdh_runtime_mounts={_mdh_input/path.relative_to(_mdh_input).parts[0] "
+        "for path in _mdh_runtime_files.values()}\n"
+        "if len(_mdh_runtime_mounts) != 1: raise RuntimeError('runtime Dataset file set differs')\n"
+        "_mdh_runtime_root=next(iter(_mdh_runtime_mounts))\n"
+        f"_mdh_checkpoint_manifests=[path for path in _mdh_files if path.name == {CHECKPOINT_MANIFEST_NAME!r}]\n"
+        "_mdh_checkpoint_matches=[]\n"
+        "for _mdh_checkpoint_manifest in _mdh_checkpoint_manifests:\n"
+        "    try: _mdh_checkpoint_payload=_mdh_json.loads(_mdh_checkpoint_manifest.read_bytes())\n"
+        "    except (OSError,ValueError): continue\n"
+        "    if _mdh_checkpoint_payload.get('manifest_sha256') == "
+        "_mdh_values['MY_DATA_HUB_CHECKPOINT_MANIFEST_SHA256']:\n"
+        "        _mdh_checkpoint_matches.append(_mdh_checkpoint_manifest.parent)\n"
+        "if len(_mdh_checkpoint_matches) != 1: raise RuntimeError('exact checkpoint Dataset mount is ambiguous')\n"
+        "_mdh_checkpoint_root=_mdh_checkpoint_matches[0]\n"
+        "if _mdh_input/_mdh_checkpoint_root.relative_to(_mdh_input).parts[0] == _mdh_runtime_root:\n"
+        "    raise RuntimeError('runtime and checkpoint claims resolve to one mount')\n"
+        f"_mdh_values['MY_DATA_HUB_CHECKPOINT_DIRECTORY'] = str(_mdh_checkpoint_root)\n"
+        f"_mdh_values['MY_DATA_HUB_CHECKPOINT_MANIFEST'] = str(_mdh_checkpoint_root / {CHECKPOINT_MANIFEST_NAME!r})\n"
+        "_mdh_values['MY_DATA_HUB_WHEEL_PATH'] = str(_mdh_runtime_files['wheel'])\n"
+        "_mdh_values['MY_DATA_HUB_WHEEL_SHA256'] = _mdh_runtime_hashes['wheel']\n"
+        "_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE'] = str(_mdh_runtime_files['archive'])\n"
+        "_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE_SHA256'] = _mdh_runtime_hashes['archive']\n"
+        "_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST'] = str(_mdh_runtime_files['manifest'])\n"
+        "_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST_SHA256'] = _mdh_runtime_hashes['manifest']\n"
+        "if _mdh_platform.python_version().split('.')[:2] != "
+        "_mdh_json.loads(_mdh_pins_body)['python_series'].split('.'):\n"
+        "    raise RuntimeError('checkpoint verifier Python series differs')\n"
+        "if _mdh_pathlib.Path('/etc/git_commit').read_text().strip() != "
+        "_mdh_json.loads(_mdh_pins_body)['image_source_commit']:\n"
+        "    raise RuntimeError('checkpoint verifier image source commit differs')\n"
+        "_mdh_pins_path = _mdh_pathlib.Path('/kaggle/working/checkpoint-verifier-execution-pins.json')\n"
+        "_mdh_pins_path.write_bytes(_mdh_pins_body); _mdh_pins_path.chmod(0o600)\n"
+        "_mdh_values['MY_DATA_HUB_EXECUTION_PINS_PATH'] = str(_mdh_pins_path)\n"
+        "_mdh_values['MY_DATA_HUB_EXECUTION_PINS_SHA256'] = _mdh_hashlib.sha256(_mdh_pins_body).hexdigest()\n"
+        "_mdh_values['MY_DATA_HUB_NOTEBOOK_IS_PRIVATE'] = 'true'\n"
+        "_mdh_os.environ.update(_mdh_values)\n"
+    )
+    pins_sha256 = hashlib.sha256(pins_body).hexdigest()
     if assets.kernel_type == "script":
-        return bootstrap.encode() + assets.notebook_source
+        return bootstrap.encode() + assets.notebook_source, pins_sha256
     try:
-        body = json.loads(assets.notebook_source)
+        body = notebook_document
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CheckpointRuntimeError("verifier notebook source is invalid JSON") from exc
     if not isinstance(body, dict) or not isinstance(body.get("cells"), list):
@@ -1354,7 +1651,7 @@ def _render_verifier_source(
             "source": bootstrap,
         },
     )
-    return json.dumps(body).encode()
+    return json.dumps(body).encode(), pins_sha256
 
 
 def _load_restore_receipt(path: Path) -> dict[str, object]:
@@ -1364,9 +1661,49 @@ def _load_restore_receipt(path: Path) -> dict[str, object]:
         value = json.loads(path.read_bytes())
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CheckpointRuntimeError("verifier restore receipt is invalid JSON") from exc
-    if not isinstance(value, dict):
-        raise CheckpointRuntimeError("verifier restore receipt must be an object")
-    return value
+    try:
+        receipt = CheckpointRestoreReceipt.model_validate(value)
+    except ValueError as exc:
+        raise CheckpointRuntimeError("verifier restore receipt differs from the typed contract") from exc
+    rendered = receipt.model_dump(mode="json")
+    if path.read_bytes() != canonical_json_bytes(rendered):
+        raise CheckpointRuntimeError("verifier restore receipt is not canonical JSON")
+    return rendered
+
+
+def _receipt_output_tree_sha256(path: Path) -> str:
+    body = path.read_bytes()
+    return sha256_value(
+        {
+            "files": [
+                {
+                    "path": CHECKPOINT_RESTORE_RECEIPT_NAME,
+                    "byte_size": len(body),
+                    "sha256": hashlib.sha256(body).hexdigest(),
+                }
+            ]
+        }
+    )
+
+
+def _verified_restore_receipt(
+    receipt: dict[str, object],
+    *,
+    run: KaggleKernelRunIdentity,
+    receipt_path: Path,
+    output_tree_sha256: str | None = None,
+) -> dict[str, object]:
+    body = receipt_path.read_bytes()
+    verified = CheckpointRestoreVerifiedReceipt.model_validate(
+        {
+            **receipt,
+            "provider_run_ref": run.provider_run_ref,
+            "source_sha256": run.source_sha256,
+            "output_receipt_sha256": hashlib.sha256(body).hexdigest(),
+            "output_tree_sha256": output_tree_sha256 or _receipt_output_tree_sha256(receipt_path),
+        }
+    )
+    return verified.model_dump(mode="json")
 
 
 def _assert_restore_receipt(
@@ -1375,15 +1712,28 @@ def _assert_restore_receipt(
     run: KaggleKernelRunIdentity,
     manifest: CheckpointManifest,
     dataset_identity: KaggleDatasetIdentity,
+    execution: dict[str, str],
+    execution_pins_sha256: str,
 ) -> None:
     expected = {
         "schema_version": RESTORE_RECEIPT_CONTRACT,
         "task_run_id": str(run.task_run_id),
         "checkpoint_id": str(manifest.checkpoint_id),
         "manifest_sha256": manifest.manifest_sha256,
+        "manifest_file_sha256": hashlib.sha256(
+            canonical_json_bytes(manifest.payload()) + b"\n"
+        ).hexdigest(),
         "dataset_ref": dataset_identity.provider_ref,
         "dataset_version": dataset_identity.version,
         "package_sha256": dataset_identity.package_sha256,
+        "restore_mode": "isolated_physical_restore",
+        "execution_pins_sha256": execution_pins_sha256,
+        "runtime_image_identity": execution["runtime_image_identity"],
+        "runtime_image_source_commit": execution["runtime_image_source_commit"],
+        "input_dataset_versions": [
+            execution["runtime_dataset_exact_ref"],
+            f"{dataset_identity.provider_ref}/{dataset_identity.version}",
+        ],
         "ok": True,
     }
     if any(receipt.get(key) != value for key, value in expected.items()):
@@ -1391,6 +1741,16 @@ def _assert_restore_receipt(
     observed = receipt.get("observed")
     if not isinstance(observed, dict):
         raise CheckpointRuntimeError("verifier restore receipt lacks observed probe metadata")
+    required_receipt_keys = {
+        "schema_version", "task_run_id", "checkpoint_id", "manifest_sha256",
+        "manifest_file_sha256", "dataset_ref", "dataset_version", "package_sha256",
+        "restore_mode", "execution_pins_sha256", "runtime_image_identity",
+        "runtime_image_source_commit", "input_dataset_versions", "ok", "observed",
+    }
+    if set(receipt) != required_receipt_keys or not re.fullmatch(
+        r"[a-f0-9]{64}", str(receipt.get("execution_pins_sha256", ""))
+    ):
+        raise CheckpointRuntimeError("verifier restore receipt shape/pins differ")
     expected_probe = manifest.restore_probe
     if observed.get("schema_version") != expected_probe.schema_version:
         raise CheckpointRuntimeError("verifier restore schema version differs")
@@ -1400,3 +1760,63 @@ def _assert_restore_receipt(
         raise CheckpointRuntimeError("verifier restore logical hash differs")
     if observed.get("row_counts") != expected_probe.row_counts:
         raise CheckpointRuntimeError("verifier restore row counts differ")
+    expected_observed_keys = {
+        "schema_version", "canonical_revision", "logical_hash_sha256", "row_counts",
+        "postgres_version", "extensions", "migration_boundary", "database_invariants",
+        "vector_query", "bounded_read_smoke",
+    }
+    if set(observed) != expected_observed_keys:
+        raise CheckpointRuntimeError("verifier restore probe receipt shape differs")
+    extensions = observed.get("extensions")
+    migration = observed.get("migration_boundary")
+    invariants = observed.get("database_invariants")
+    vector = observed.get("vector_query")
+    smoke = observed.get("bounded_read_smoke")
+    if (
+        not str(observed.get("postgres_version", "")).startswith("18.")
+        or not isinstance(extensions, dict)
+        or set(extensions) != {"citext", "pg_trgm", "pgcrypto", "vector"}
+        or extensions.get("vector") != manifest.pgvector_version
+        or any(not isinstance(value, str) or not value for value in extensions.values())
+        or not isinstance(migration, dict)
+        or migration.get("first_version") != 1
+        or migration.get("last_version") != expected_probe.schema_version
+        or migration.get("applied_count") != expected_probe.schema_version
+        or migration.get("contiguous") is not True
+        or migration.get("history_sha256")
+        != _expected_migration_history_sha256(expected_probe.schema_version)
+        or invariants != {
+            "canonical_state_singletons": 1,
+            "epoch_state_singletons": 1,
+            "unvalidated_constraints": 0,
+        }
+        or vector != {"operator": "cosine_distance", "dimensions": 3, "distance": 0.0}
+        or not isinstance(smoke, dict)
+        or smoke.get("relation_count") != len(expected_probe.row_counts)
+        or smoke.get("total_rows") != sum(expected_probe.row_counts.values())
+        or smoke.get("statement_timeout_ms") != 30_000
+        or smoke.get("lock_timeout_ms") != 3_000
+    ):
+        raise CheckpointRuntimeError("verifier live restore evidence differs")
+
+
+def _expected_migration_history_sha256(schema_version: int) -> str:
+    candidates = (
+        Path(__file__).parents[3] / "sql/migrations",
+        Path(__file__).parents[1] / "master_runtime/sql/migrations",
+    )
+    roots = tuple(path for path in candidates if path.is_dir() and not path.is_symlink())
+    if len(roots) != 1:
+        raise CheckpointRuntimeError("exact checkpoint migration source is absent or ambiguous")
+    migrations = discover_migrations(roots[0])
+    prefix = tuple(item for item in migrations if item.version <= schema_version)
+    if [item.version for item in prefix] != list(range(1, schema_version + 1)):
+        raise CheckpointRuntimeError("checkpoint schema boundary differs from repository migrations")
+    return sha256_value(
+        {
+            "migrations": [
+                {"version": item.version, "filename": item.filename, "sha256": item.sha256}
+                for item in prefix
+            ]
+        }
+    )
