@@ -57,13 +57,13 @@ WORKER_ASSETS: tuple[WorkerAsset, ...] = (
     WorkerAsset(
         notebook_slug="05-e5-blogger-embedding-worker",
         notebook_path="notebooks/05-e5-blogger-embedding-worker/worker.ipynb",
-        primary_source_sha256="6fc1b2c7227c812e3eb1b7dec34a705aca27c77459642da102e0a6c3d0f7dff9",
+        primary_source_sha256="5eddc79bca897b8ff31c398d447c66275abaaa8092a59f27d5c77037e0dd7b55",
         model=E5_MULTILINGUAL_BASE,
     ),
     WorkerAsset(
         notebook_slug="06-bge-m3-blogger-embedding-worker",
         notebook_path="notebooks/06-bge-m3-blogger-embedding-worker/worker.ipynb",
-        primary_source_sha256="dafba3b1969f3234365872fa27fcdc5f6e32c863dc655f21c04fe295ec705dc8",
+        primary_source_sha256="0f6cc421287d14658c30cf5c0ec499d095d0ad8acf32a88ff503b65f1424be34",
         model=BGE_M3,
     ),
 )
