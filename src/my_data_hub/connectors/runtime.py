@@ -319,10 +319,14 @@ class ConnectorDurabilitySessionBroker(Protocol):
 
 class PostgresConnectorDurabilityMasterSession:
     def __init__(
-        self, repository: Any, checkpoint_gateway: ConnectorCheckpointGateway | None
+        self,
+        repository: Any,
+        checkpoint_gateway: ConnectorCheckpointGateway | None,
+        committer: Any | None = None,
     ) -> None:
         self.repository = repository
         self.supervisor = ConnectorDurabilitySupervisor(repository, checkpoint_gateway)
+        self.committer = committer
         self._closed = False
 
     def _require_open(self) -> None:
@@ -331,10 +335,29 @@ class PostgresConnectorDurabilityMasterSession:
 
     async def probe(self) -> None:
         self._require_open()
+        if self.committer is None:
+            raise ConnectorCapabilityBlocked(
+                "CONNECTOR_CANONICAL_COMMITTER_UNAVAILABLE", retryable=True
+            )
+        await asyncio.to_thread(self.repository.pending_commit_batch_ids, limit=1)
         await asyncio.to_thread(self.repository.pending_durability_batch_ids, limit=1)
 
     async def reconcile_once(self, *, limit: int) -> int:
         self._require_open()
+        if self.committer is None:
+            raise ConnectorCapabilityBlocked(
+                "CONNECTOR_CANONICAL_COMMITTER_UNAVAILABLE", retryable=True
+            )
+        pending = await asyncio.to_thread(
+            self.repository.pending_commit_batch_ids, limit=limit
+        )
+        for batch_id in pending:
+            try:
+                await asyncio.to_thread(self.committer.commit, batch_id)
+            except ValueError:
+                await asyncio.to_thread(
+                    self.committer.quarantine_semantic_failure, batch_id
+                )
         return await self.supervisor.reconcile_once(limit=limit)
 
     async def close(self) -> None:
@@ -349,7 +372,10 @@ class DirectoryConnectorDurabilitySessionBroker:
     def issue_durability_session(
         self, request: ConnectorDurabilitySessionRequest
     ) -> ConnectorDurabilityMasterSession:
-        from my_data_hub.connectors.postgres import PostgresConnectorAcceptanceRepository
+        from my_data_hub.connectors.postgres import (
+            PostgresConnectorAcceptanceRepository,
+            PostgresDailyStatisticsCommitter,
+        )
         from my_data_hub.mcp.contracts import ExecutionLimits, SessionRequest
 
         credential_request = SessionRequest(
@@ -371,6 +397,7 @@ class DirectoryConnectorDurabilitySessionBroker:
         return PostgresConnectorDurabilityMasterSession(
             PostgresConnectorAcceptanceRepository(credential.database_url),
             self.checkpoint_gateway,
+            PostgresDailyStatisticsCommitter(credential.database_url),
         )
 
 

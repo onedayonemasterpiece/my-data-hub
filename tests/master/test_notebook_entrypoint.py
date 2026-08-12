@@ -329,7 +329,7 @@ def test_reader_credential_handoff_is_epoch_bound_tls_and_not_returned(
     assert "runtime-secret-long-enough" not in json.dumps(body)
 
 
-def test_activation_authorized_operator_is_issued_with_reader_in_one_bounded_envelope(
+def test_activation_authorized_roles_are_issued_in_one_bounded_epoch_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {"creates": []}
@@ -354,7 +354,17 @@ def test_activation_authorized_operator_is_issued_with_reader_in_one_bounded_env
 
         @staticmethod
         def read(_limit: int) -> bytes:
-            return b'{"registered":2,"credential_refs":["reader.json","operator.json"]}'
+            return json.dumps(
+                {
+                    "registered": 4,
+                    "credential_refs": [
+                        "reader.json",
+                        "operator.json",
+                        "connector.json",
+                        "canonical_committer.json",
+                    ],
+                }
+            ).encode()
 
     def open_request(request, timeout):  # type: ignore[no-untyped-def]
         assert timeout == 10
@@ -394,18 +404,32 @@ def test_activation_authorized_operator_is_issued_with_reader_in_one_bounded_env
         config=config,
         callback_url="https://mcp-datahub.kenigevents.ru/internal/runtime/events",
         run_secret="runtime-secret-long-enough",
-        roles=("reader", "operator"),
+        roles=("reader", "operator", "connector", "canonical_committer"),
         expires_at=now + timedelta(minutes=3),
         now=now,
     )
     creates = captured["creates"]
     assert isinstance(creates, list)
-    assert [item["group"] for item in creates] == ["mdh_mcp_reader", "mdh_mcp_editor"]
+    assert [item["group"] for item in creates] == [
+        "mdh_mcp_reader",
+        "mdh_mcp_editor",
+        "mdh_connector_intake",
+        "mdh_canonical_committer",
+    ]
     assert principals[0].startswith("mdh_e1_reader_")
     assert principals[1].startswith("mdh_e1_operator_")
+    assert principals[2].startswith("mdh_e1_connector_")
+    assert principals[3].startswith("mdh_e1_canonical_committer_")
     body = captured["body"]
     assert isinstance(body, dict)
-    assert [item["role"] for item in body["credentials"]] == ["reader", "operator"]
+    assert [item["role"] for item in body["credentials"]] == [
+        "reader",
+        "operator",
+        "connector",
+        "canonical_committer",
+    ]
+    assert "@master-tunnel.internal:" in body["credentials"][2]["database_url"]
+    assert "@master-tunnel.internal:" in body["credentials"][3]["database_url"]
     assert all(set(item) == {"role", "database_url", "expires_at"} for item in body["credentials"])
 
 
@@ -439,6 +463,18 @@ def test_activation_rejects_unrequested_or_reordered_credential_roles(
     assert _wait_for_activation("https://example.test", "secret", IDENTITY) == (
         "reader",
         "operator",
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint.urllib.request.urlopen",
+        lambda *_args, **_kwargs: Response(
+            ["reader", "operator", "connector", "canonical_committer"]
+        ),
+    )
+    assert _wait_for_activation("https://example.test", "secret", IDENTITY) == (
+        "reader",
+        "operator",
+        "connector",
+        "canonical_committer",
     )
     monkeypatch.setattr(
         "my_data_hub.master_runtime.notebook_entrypoint.urllib.request.urlopen",

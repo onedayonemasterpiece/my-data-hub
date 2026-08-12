@@ -1,6 +1,6 @@
 # Data connector contract
 
-Status: `PRODUCTION INTAKE WIRED / CHECKPOINT COORDINATOR AND ROLE HANDOFF BLOCKED`
+Status: `INTERNAL PRODUCTION PATH WIRED / LIVE DEPLOYMENT EVIDENCE PENDING`
 
 Producer durable spool -> register batch/ensure master -> resolve ACTIVE latest epoch ->
 short-lived connector role -> connector-specific landing in Kaggle PostgreSQL -> validate,
@@ -24,20 +24,24 @@ reconciler re-resolves the exact epoch and scans persisted PostgreSQL durability
 process restart does not lose `CANONICAL_COMMITTED`, `CHECKPOINT_REQUESTED`, or
 `CHECKPOINTING` work.
 
-The checkpoint adapter accepts only an explicitly injected coordinator exposing the exact
+The checkpoint adapter accepts only a coordinator exposing the exact
 `request_verified_checkpoint(operation_id, canonical_revision, idempotency_key)` and
 `checkpoint_status(operation_id)` boundary. It records `DURABLE_COMPLETE` only when the
 returned checkpoint is `VERIFIED`, is the current checkpoint head, and includes the exact
 checkpoint/manifest/timestamp evidence. There is intentionally no environment-selected or
-inferred fallback. The current general master checkpoint coordinator has not yet injected
-that boundary into the production entry point, so production submissions fail before
-mutation with `CONNECTOR_VERIFIED_CHECKPOINT_COORDINATOR_UNAVAILABLE`.
+inferred fallback. Production now injects the lightweight control-ledger coordinator. It
+binds the request to the exact ACTIVE operation/epoch; the master claims that metadata-only
+request, drains through its ordinary terminal checkpoint path, uploads only through the
+existing central broker, and publishes success only after the exact current VERIFIED head
+protects at least the requested canonical revision. This request and completion state is
+durable across control/API restarts.
 
-Two further internal handoffs remain outside this connector lane: the master Notebook must
-publish short-lived `connector` and `canonical_committer` epoch credentials (today it
-publishes reader/operator credentials), and the control-plane installer must explicitly
-opt the new Compose profile into deployment. Therefore this change is runtime wiring and
-restart-safe machinery, not evidence of a live deployment or full Gate L closure.
+The master credential registrar now issues opt-in short-lived `connector` and
+`canonical_committer` logins bound to the same task, ACTIVE epoch, lease, TLS tunnel, and
+bounded PostgreSQL group roles. The production installer keeps this profile default-off;
+an exact acknowledgement plus a private connector-bearer environment is required before it
+starts and supervises `connector-intake`. Therefore this is internal runtime closure, not
+evidence of a live deployment, credential handoff, canonical row, or external producer run.
 
 ## Preserved detailed contract — bound by ADR-0016
 

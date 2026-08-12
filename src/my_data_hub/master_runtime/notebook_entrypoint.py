@@ -79,6 +79,9 @@ _MASTER_TERMINAL_EVENT_TYPES = (
     RuntimeEventType.CHECKPOINT_VERIFIED,
     RuntimeEventType.RUNTIME_TERMINAL,
 )
+SessionCredentialRole = Literal[
+    "reader", "operator", "connector", "canonical_committer"
+]
 
 
 def _blogger_protected_manifest() -> Path | None:
@@ -951,6 +954,13 @@ def _master_acceptance_url(callback_url: str, run_id: str, attempt_id: str, suff
     return f"{base}/internal/runtime/master-acceptance/{run_id}/{attempt_id}{suffix}"
 
 
+def _connector_checkpoint_url(callback_url: str, run_id: str, attempt_id: str) -> str:
+    if callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
+        raise ValueError("callback URL does not match the owner-pinned HTTPS runtime endpoint")
+    base = callback_url.removesuffix("/internal/runtime/events")
+    return f"{base}/internal/runtime/connector-checkpoint/{run_id}/{attempt_id}"
+
+
 def _runtime_metadata_headers(config: NotebookMasterConfig, run_secret: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {run_secret}",
@@ -1010,6 +1020,40 @@ def _claim_embedding_production(
     if body.get("request_sha256") != production.request_sha256:
         raise RuntimeError("embedding work request hash differs from its exact body")
     return production
+
+
+def _claim_connector_checkpoint(
+    *, config: NotebookMasterConfig, callback_url: str, run_secret: str
+) -> tuple[str, int] | None:
+    request = urllib.request.Request(
+        _connector_checkpoint_url(callback_url, config.run_id, config.attempt_id),
+        headers=_runtime_metadata_headers(config, run_secret),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read(16 * 1024 + 1)
+    except urllib.error.HTTPError as exc:
+        if exc.code in {404, 502, 503, 504}:
+            return None
+        raise
+    except OSError:
+        return None
+    if len(raw) > 16 * 1024:
+        raise RuntimeError("connector checkpoint claim response is oversized")
+    body = json.loads(raw)
+    if not isinstance(body, dict) or body.get("available") is not True:
+        return None
+    operation_id = body.get("operation_id")
+    revision = body.get("canonical_revision")
+    if (
+        not isinstance(operation_id, str)
+        or not operation_id.startswith("connector-checkpoint:")
+        or not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 1
+    ):
+        raise RuntimeError("connector checkpoint claim identity is invalid")
+    return operation_id, revision
 
 
 def _claim_master_acceptance(
@@ -1273,7 +1317,7 @@ def _register_session_credentials(
     config: NotebookMasterConfig,
     callback_url: str,
     run_secret: str,
-    roles: tuple[Literal["reader", "operator"], ...],
+    roles: tuple[SessionCredentialRole, ...],
     expires_at: datetime,
     now: datetime,
     registration_observer: Callable[[tuple[str, ...], tuple[dict[str, str], ...]], None] | None = None,
@@ -1284,7 +1328,12 @@ def _register_session_credentials(
 
     if expires_at <= now or expires_at - now > timedelta(minutes=5):
         raise ValueError("session credential expiry is outside the broker bound")
-    if roles not in {("reader",), ("reader", "operator")}:
+    if roles not in {
+        ("reader",),
+        ("reader", "operator"),
+        ("reader", "connector", "canonical_committer"),
+        ("reader", "operator", "connector", "canonical_committer"),
+    }:
         raise ValueError("activation credential roles differ from the bounded contract")
     identity = MasterIdentity(config.master_instance_id, config.run_id, config.epoch)
     provisioner = CredentialProvisioner(connection, gate)
@@ -1303,19 +1352,30 @@ def _register_session_credentials(
             credential_id = UUID(bytes=secrets.token_bytes(16), version=4)
             principal = f"mdh_e{config.epoch}_{role}_{credential_id.hex[:8]}"
             password = secrets.token_urlsafe(36)
+            group = {
+                "reader": "mdh_mcp_reader",
+                "operator": "mdh_mcp_editor",
+                "connector": "mdh_connector_intake",
+                "canonical_committer": "mdh_canonical_committer",
+            }[role]
             provisioner.create(
                 principal=principal,
                 password=password,
-                group="mdh_mcp_reader" if role == "reader" else "mdh_mcp_editor",
+                group=group,
                 identity=identity,
                 credential_id=credential_id,
                 expires_at=expires_at,
                 now=now,
             )
             principals.append(principal)
+            session_host = (
+                "master-tunnel.internal"
+                if role in {"connector", "canonical_committer"}
+                else "127.0.0.1"
+            )
             database_url = (
                 f"postgresql://{quote(principal, safe='')}:{quote(password, safe='')}@"
-                f"127.0.0.1:{config.tunnel_remote_port}/postgres?{query}"
+                f"{session_host}:{config.tunnel_remote_port}/postgres?{query}"
             )
             credentials.append(
                 {
@@ -1466,7 +1526,7 @@ def _wait_for_activation(
     token: str,
     identity: MasterIdentity,
     timeout_seconds: int = 90,
-) -> tuple[Literal["reader", "operator"], ...]:
+) -> tuple[SessionCredentialRole, ...]:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
@@ -1485,7 +1545,12 @@ def _wait_for_activation(
             if not isinstance(raw_roles, list) or any(not isinstance(role, str) for role in raw_roles):
                 raise RuntimeError("activation credential roles are malformed")
             roles = tuple(raw_roles)
-            if roles not in {("reader",), ("reader", "operator")}:
+            if roles not in {
+                ("reader",),
+                ("reader", "operator"),
+                ("reader", "connector", "canonical_committer"),
+                ("reader", "operator", "connector", "canonical_committer"),
+            }:
                 raise RuntimeError("activation credential roles exceed the bounded contract")
             return roles  # type: ignore[return-value]
         time.sleep(2)
@@ -1900,6 +1965,24 @@ def run_master(
                         receipt=acceptance_receipt,
                     )
                     break
+            connector_checkpoint = _claim_connector_checkpoint(
+                config=config, callback_url=callback_url, run_secret=run_secret
+            )
+            if connector_checkpoint is not None:
+                _checkpoint_operation_id, requested_revision = connector_checkpoint
+                with gate_connection.cursor() as cursor:
+                    observed_revision = int(
+                        cursor.execute(
+                            "SELECT canonical_revision FROM hub.canonical_state WHERE singleton=true"
+                        ).fetchone()[0]
+                    )
+                if observed_revision < requested_revision:
+                    raise RuntimeError(
+                        "connector checkpoint request exceeds the master canonical revision"
+                    )
+                # The ordinary terminal path now drains, packages, uploads via
+                # the central broker, verifies, promotes, and stops this epoch.
+                break
             migration_request = _claim_blogger_migration(
                 config=config, callback_url=callback_url, run_secret=run_secret
             )

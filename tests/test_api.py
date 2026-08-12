@@ -173,8 +173,8 @@ def test_connector_only_production_runtime_has_no_static_database_or_worker_rout
         )
     assert response.status_code == 503
     assert response.json()["detail"] == {
-        "code": "CONNECTOR_VERIFIED_CHECKPOINT_COORDINATOR_UNAVAILABLE",
-        "master_state": None,
+        "code": "MASTER_NOT_ACTIVE",
+        "master_state": "REQUESTED",
         "operation_id": None,
         "retryable": True,
         "mutation_started": False,

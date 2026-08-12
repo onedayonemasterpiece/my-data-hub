@@ -6,6 +6,7 @@ action="${1:-}"
 operator_profile=false
 acceptance_supervisor=false
 acceptance_scenarios=false
+connector_runtime=false
 if [[ "$action" == "INSTALL_MY_DATA_HUB_SAME_HOST" ]]; then
   echo "FORBIDDEN: local PostgreSQL topology is superseded; no local database will be installed" >&2
   exit 78
@@ -107,6 +108,7 @@ tls_ca_file="$tls_dir/ca.pem"
 provider_env="${MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE:-$env_root/provider.env}"
 mcp_env="${MY_DATA_HUB_MCP_ENV_FILE:-$env_root/mcp-reader.env}"
 oauth_env="${MY_DATA_HUB_OAUTH_ENV_FILE:-$env_root/oauth.env}"
+connector_env="${MY_DATA_HUB_CONNECTOR_ENV_FILE:-$env_root/connectors.env}"
 oauth_key="${MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE:-$secret_root/oauth-signing-key.pem}"
 owner_oidc_client_secret="${MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE:-$secret_root/owner-oidc-client-secret}"
 owner_portal_state_key="${MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE:-$secret_root/owner-portal-state.key}"
@@ -119,6 +121,13 @@ tunnel_broker_socket_dir="${MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR:-/run/my-data-h
 acceptance_socket_dir="${MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_SOCKET_DIR:-$runtime_root/acceptance-supervisor}"
 acceptance_key="${MY_DATA_HUB_ACCEPTANCE_SUPERVISOR_KEY_FILE:-$acceptance_socket_dir/supervisor.key}"
 checkpoint_acceptance_deployment="${MY_DATA_HUB_CHECKPOINT_ACCEPTANCE_DEPLOYMENT_FILE:-$runtime_root/checkpoint-acceptance-deployment.json}"
+if [[ -n "${MY_DATA_HUB_ENABLE_CONNECTOR_RUNTIME:-}" ]]; then
+  if [[ "${MY_DATA_HUB_ENABLE_CONNECTOR_RUNTIME}" != "I_ACKNOWLEDGE_CONNECTOR_CANONICAL_WRITES" ]]; then
+    echo "connector runtime requires the exact canonical-write acknowledgement" >&2
+    exit 2
+  fi
+  connector_runtime=true
+fi
 if [[ -n "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SCENARIOS:-}" ]]; then
   if [[ "$operator_profile" != true \
     || "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SCENARIOS}" != "I_ACKNOWLEDGE_PROTECTED_ACCEPTANCE_EFFECTS" ]]; then
@@ -141,6 +150,7 @@ if [[ -n "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SUPERVISOR:-}" ]]; then
 fi
 for path_value in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$asset_dir" \
   "$tls_dir" "$tls_ca_file" "$provider_env" "$mcp_env" "$oauth_env" "$oauth_key" "$oauth_overlap_jwks" \
+  "$connector_env" \
   "$owner_oidc_client_secret" "$owner_portal_state_key" \
   "$operator_gate_receipt" "$operator_gate_key" "$control_gateway_token" "$tunnel_broker_socket_dir" \
   "$checkpoint_upload_broker_key" \
@@ -204,6 +214,9 @@ reject_environment_keys() {
 require_private_file "$provider_env" "provider environment"
 require_private_file "$mcp_env" "remote MCP environment"
 require_private_file "$oauth_env" "OAuth environment"
+if [[ "$connector_runtime" == true ]]; then
+  require_private_file "$connector_env" "connector environment"
+fi
 require_private_file "$oauth_key" "OAuth signing key"
 require_private_file "$owner_oidc_client_secret" "owner OIDC client secret"
 if [[ ! -e "$owner_portal_state_key" ]]; then
@@ -261,6 +274,15 @@ python3 "$release/scripts/provider/verify_master_assets.py" \
 for env_file in "$provider_env" "$mcp_env" "$oauth_env"; do
   reject_data_plane_environment "$env_file" "$(basename "$env_file")"
 done
+if [[ "$connector_runtime" == true ]]; then
+  reject_data_plane_environment "$connector_env" "connector environment"
+  reject_environment_keys "$connector_env" "connector environment" \
+    'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_OAUTH_[A-Z0-9_]+|MY_DATA_HUB_MCP_[A-Z0-9_]+'
+  if ! grep -Eq '^[[:space:]]*MY_DATA_HUB_CONNECTOR_CREDENTIALS_JSON[[:space:]]*=[^[:space:]].*$' "$connector_env"; then
+    echo "connector environment lacks bearer credential bindings" >&2
+    exit 2
+  fi
+fi
 reject_environment_keys "$provider_env" "provider environment" \
   'MY_DATA_HUB_OAUTH_SIGNING_KEY|MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)|MY_DATA_HUB_KAGGLE_MASTER_(SOURCE_IDENTITY|SOURCE_VERSION|CHECKPOINT_REF|DATASET_REF|NOTEBOOK_REF|DATASET_DIR|NOTEBOOK_SOURCE)'
 reject_environment_keys "$mcp_env" "remote MCP environment" \
@@ -319,6 +341,25 @@ operator_override=""
 operator_compose_arg=""
 acceptance_override=""
 acceptance_compose_arg=""
+connector_override=""
+connector_compose_arg=""
+connector_profile_arg=""
+connector_service=""
+connector_output_service=""
+if [[ "$connector_runtime" == true ]]; then
+  connector_override="$runtime_root/connector-runtime.$commit.yaml"
+  cat > "$connector_override" <<'YAML'
+services:
+  control-plane:
+    environment:
+      MY_DATA_HUB_CONNECTOR_RUNTIME_ENABLED: "true"
+YAML
+  chmod 600 "$connector_override"
+  connector_compose_arg=" -f $connector_override"
+  connector_profile_arg=" --profile connectors"
+  connector_service=" connector-intake"
+  connector_output_service=",connector-intake"
+fi
 if [[ "$operator_profile" == true ]]; then
   if [[ "${MY_DATA_HUB_ENABLE_OPERATOR_PROFILE:-}" != "I_ACKNOWLEDGE_REMOTE_CANONICAL_WRITES" ]]; then
     echo "operator install requires the exact MY_DATA_HUB_ENABLE_OPERATOR_PROFILE acknowledgement" >&2
@@ -445,6 +486,7 @@ MY_DATA_HUB_MASTER_TLS_DIR=$tls_dir
 MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE=$provider_env
 MY_DATA_HUB_MCP_ENV_FILE=$mcp_env
 MY_DATA_HUB_OAUTH_ENV_FILE=$oauth_env
+MY_DATA_HUB_CONNECTOR_ENV_FILE=$connector_env
 MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE=$oauth_key
 MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE=$owner_oidc_client_secret
 MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE=$owner_portal_state_key
@@ -466,7 +508,11 @@ fi
 if [[ -n "$acceptance_scenarios_override" ]]; then
   compose_files+=(-f "$acceptance_scenarios_override")
 fi
+if [[ -n "$connector_override" ]]; then
+  compose_files+=(-f "$connector_override")
+fi
 compose=("$docker_path" compose --env-file "$compose_env" --profile remote-mcp \
+  ${connector_profile_arg:+--profile connectors} \
   --project-directory "$release" "${compose_files[@]}")
 "${compose[@]}" config --quiet
 
@@ -509,7 +555,7 @@ fi
 
 cat > "$unit_candidate" <<UNIT
 [Unit]
-Description=my-data-hub lightweight control, OAuth, and remote MCP processes
+Description=my-data-hub lightweight control, OAuth, remote MCP, and opt-in connectors
 After=network-online.target
 Wants=network-online.target
 
@@ -517,9 +563,9 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=$compose_env
 ExecStartPre=$docker_path info
-ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg up --remove-orphans control-plane remote-mcp oauth-server
-ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg up -d --wait --remove-orphans control-plane remote-mcp oauth-server
-ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg down --remove-orphans
+ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up --remove-orphans control-plane remote-mcp oauth-server$connector_service
+ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up -d --wait --remove-orphans control-plane remote-mcp oauth-server$connector_service
+ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg down --remove-orphans
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=300
@@ -638,6 +684,9 @@ wait_http() {
 wait_http control-plane http://127.0.0.1:8080/health/ready
 wait_http remote-mcp http://127.0.0.1:8765/.well-known/oauth-protected-resource/mcp mcp-datahub.kenigevents.ru
 wait_http oauth-server http://127.0.0.1:8780/.well-known/oauth-authorization-server
+if [[ "$connector_runtime" == true ]]; then
+  wait_http connector-intake http://127.0.0.1:8081/health/ready
+fi
 
 curl --fail --silent --show-error --connect-timeout 2 --max-time 5 \
   http://127.0.0.1:8080/health/ready > "$runtime_root/ready.$commit.json"
@@ -647,4 +696,4 @@ mv -Tf "$next_link" "$current"
 trap - ERR
 rm -f "$unit_backup"
 rm -f "$supervisor_unit_backup"
-printf 'installed_control_plane_commit=%s\nservices=control-plane,remote-mcp,oauth-server\noperator_profile=%s\nacceptance_scenarios=%s\nacceptance_supervisor=%s\nmaster_state=ABSENT_or_durable_runtime_state\n' "$commit" "$operator_profile" "$acceptance_scenarios" "$acceptance_supervisor"
+printf 'installed_control_plane_commit=%s\nservices=control-plane,remote-mcp,oauth-server%s\noperator_profile=%s\nconnector_runtime=%s\nacceptance_scenarios=%s\nacceptance_supervisor=%s\nmaster_state=ABSENT_or_durable_runtime_state\n' "$commit" "$connector_output_service" "$operator_profile" "$connector_runtime" "$acceptance_scenarios" "$acceptance_supervisor"

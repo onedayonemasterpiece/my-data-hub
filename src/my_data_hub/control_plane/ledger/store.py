@@ -5406,6 +5406,162 @@ class ControlLedger:
             ).fetchone()
         return dict(row) if row else None
 
+    def ensure_connector_checkpoint_request(
+        self,
+        *,
+        operation_id: str,
+        idempotency_key: str,
+        canonical_revision: int,
+    ) -> dict[str, Any]:
+        """Bind one connector durability request to the exact current ACTIVE master."""
+
+        if (
+            not operation_id.startswith("connector-checkpoint:")
+            or len(idempotency_key) != 64
+            or any(character not in "0123456789abcdef" for character in idempotency_key)
+            or operation_id != f"connector-checkpoint:{idempotency_key}"
+            or canonical_revision < 1
+        ):
+            raise ValueError("connector checkpoint request identity is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            service = connection.execute(
+                "SELECT a.operation_id,s.master_instance_id,s.epoch FROM services s "
+                "JOIN service_epochs e USING(service_kind) "
+                "JOIN run_attempts a ON a.run_id=s.run_id AND a.attempt_id=s.attempt_id "
+                "WHERE s.service_kind='postgres-master' AND s.state='ACTIVE' "
+                "AND s.epoch=e.current_epoch AND s.lease_until>?",
+                (now,),
+            ).fetchone()
+            if service is None:
+                raise LeaseRejected("connector checkpoint request requires the exact ACTIVE master")
+            expected = (
+                idempotency_key,
+                canonical_revision,
+                str(service["operation_id"]),
+                str(service["master_instance_id"]),
+                int(service["epoch"]),
+            )
+            connection.execute(
+                "INSERT INTO connector_checkpoint_requests(operation_id,idempotency_key,canonical_revision,"
+                "master_operation_id,master_instance_id,epoch,state,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,'REQUESTED',?,?) ON CONFLICT DO NOTHING",
+                (operation_id, *expected, now, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM connector_checkpoint_requests WHERE operation_id=? OR idempotency_key=?",
+                (operation_id, idempotency_key),
+            ).fetchone()
+            keys = (
+                "idempotency_key",
+                "canonical_revision",
+                "master_operation_id",
+                "master_instance_id",
+                "epoch",
+            )
+            if row is None or tuple(row[key] for key in keys) != expected:
+                raise IdempotencyConflict("connector checkpoint request identity changed")
+            return dict(row)
+
+    def claim_connector_checkpoint_request(
+        self,
+        *,
+        run_id: str,
+        attempt_id: str,
+        master_instance_id: str,
+        epoch: int,
+    ) -> dict[str, Any] | None:
+        """Return one exact drain request only to its task/epoch-bound runtime."""
+
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            operation = connection.execute(
+                "SELECT o.operation_id,o.state FROM operations o JOIN run_attempts a "
+                "ON a.operation_id=o.operation_id WHERE a.run_id=? AND a.attempt_id=? "
+                "AND json_extract(o.identity_json,'$.master_instance_id')=? "
+                "AND CAST(json_extract(o.identity_json,'$.epoch') AS INTEGER)=?",
+                (run_id, attempt_id, master_instance_id, epoch),
+            ).fetchone()
+            if operation is None or operation["state"] != "ACTIVE":
+                raise LeaseRejected("connector checkpoint claim runtime is not ACTIVE")
+            row = connection.execute(
+                "SELECT * FROM connector_checkpoint_requests WHERE master_operation_id=? "
+                "AND master_instance_id=? AND epoch=? AND state IN ('REQUESTED','CLAIMED') "
+                "ORDER BY canonical_revision DESC,created_at LIMIT 1",
+                (operation["operation_id"], master_instance_id, epoch),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["state"] == "REQUESTED":
+                connection.execute(
+                    "UPDATE connector_checkpoint_requests SET state='CLAIMED',updated_at=? "
+                    "WHERE operation_id=? AND state='REQUESTED'",
+                    (now, row["operation_id"]),
+                )
+                row = connection.execute(
+                    "SELECT * FROM connector_checkpoint_requests WHERE operation_id=?",
+                    (row["operation_id"],),
+                ).fetchone()
+            return dict(row) if row is not None else None
+
+    def connector_checkpoint_request(self, operation_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM connector_checkpoint_requests WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def complete_connector_checkpoint_request(
+        self,
+        operation_id: str,
+        *,
+        checkpoint_id: str,
+        manifest_sha256: str,
+        verified_at: str,
+    ) -> dict[str, Any]:
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            connection.execute(
+                "UPDATE connector_checkpoint_requests SET state='DURABLE_COMPLETE',checkpoint_id=?,"
+                "manifest_sha256=?,verified_at=?,updated_at=? WHERE operation_id=? "
+                "AND state IN ('REQUESTED','CLAIMED')",
+                (checkpoint_id, manifest_sha256, verified_at, now, operation_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM connector_checkpoint_requests WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if row is None or (
+                row["state"] != "DURABLE_COMPLETE"
+                or row["checkpoint_id"] != checkpoint_id
+                or row["manifest_sha256"] != manifest_sha256
+                or row["verified_at"] != verified_at
+            ):
+                raise IdempotencyConflict("connector checkpoint completion changed")
+            return dict(row)
+
+    def fail_connector_checkpoint_request(
+        self, operation_id: str, *, failure_code: str
+    ) -> dict[str, Any]:
+        code = re.sub(r"[^A-Za-z0-9_.-]", "_", failure_code)[:120]
+        if not code:
+            raise ValueError("connector checkpoint failure code is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            connection.execute(
+                "UPDATE connector_checkpoint_requests SET state='FAILED',failure_code=?,updated_at=? "
+                "WHERE operation_id=? AND state IN ('REQUESTED','CLAIMED')",
+                (code, now, operation_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM connector_checkpoint_requests WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if row is None or row["state"] != "FAILED" or row["failure_code"] != code:
+                raise IdempotencyConflict("connector checkpoint failure changed")
+            return dict(row)
+
     def blogger_migration_request(self, request_id: str) -> dict[str, Any] | None:
         with self._reader() as connection:
             row = connection.execute(

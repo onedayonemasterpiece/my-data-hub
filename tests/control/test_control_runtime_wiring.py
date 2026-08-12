@@ -822,7 +822,7 @@ def test_runtime_can_register_bounded_reader_credential_without_echoing_secret(t
     wired = runtime(ledger, FakeKaggleRuntime())
     registrar = RecordingRegistrar(tmp_path)
     app = create_app(
-        ControlPlaneSettings(ledger_path=path),
+        ControlPlaneSettings(ledger_path=path, connector_runtime_enabled=True),
         ledger=ledger,
         master_runtime=wired,
         session_registrar=registrar,
@@ -876,6 +876,75 @@ def test_runtime_can_register_bounded_reader_credential_without_echoing_secret(t
     )
     assert unauthorized_operator.status_code == 422
     assert unauthorized_operator.json()["detail"]["code"] == "credential_roles_not_authorized"
+
+    now = datetime.now(UTC)
+    ready = RuntimeEvent(
+        event_id=str(uuid4()),
+        run_id=str(identity["run_id"]),
+        attempt_id=str(identity["attempt_id"]),
+        service_instance_id=str(identity["service_instance_id"]),
+        source_identity=assets().source_identity,
+        source_version=assets().source_version,
+        event_type=RuntimeEventType.SERVICE_READY,
+        emitted_at=now,
+        local_sequence=1,
+        epoch=int(identity["epoch"]),
+        data={
+            "service_kind": "postgres-master",
+            "endpoint": "tunnel://127.0.0.1:55432",
+            "protocol": "postgresql+tls",
+            "tls_fingerprint": "sha256:" + "a" * 64,
+            "capabilities": ["sql", "fts", "pgvector"],
+            "canonical_revision": 1,
+            "schema_version": "18",
+            "lease_until": (now + timedelta(minutes=4)).isoformat(),
+            "master_instance_id": str(identity["master_instance_id"]),
+            "epoch": int(identity["epoch"]),
+        },
+    )
+    assert (
+        TestClient(app).post(
+            "/internal/runtime/events",
+            content=ready.model_dump_json(by_alias=True, exclude_none=True).encode(),
+            headers={"Authorization": f"Bearer {token}"},
+        ).status_code
+        == 200
+    )
+    connector_url = secret_url.replace(
+        "reader:opaque-password@127.0.0.1", "connector:opaque-password@master-tunnel.internal"
+    )
+    committer_url = connector_url.replace("connector:", "committer:")
+    active_roles = TestClient(app).post(
+        f"/internal/runtime/session-credentials/{identity['run_id']}/{identity['attempt_id']}",
+        json={
+            "master_instance_id": identity["master_instance_id"],
+            "epoch": identity["epoch"],
+            "credentials": [
+                {
+                    "role": "reader",
+                    "database_url": secret_url,
+                    "expires_at": (now + timedelta(minutes=2)).isoformat(),
+                },
+                {
+                    "role": "connector",
+                    "database_url": connector_url,
+                    "expires_at": (now + timedelta(minutes=2)).isoformat(),
+                },
+                {
+                    "role": "canonical_committer",
+                    "database_url": committer_url,
+                    "expires_at": (now + timedelta(minutes=2)).isoformat(),
+                },
+            ],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert active_roles.status_code == 200
+    assert [credential.role for credential in registrar.credentials[-3:]] == [
+        "reader",
+        "connector",
+        "canonical_committer",
+    ]
 
 
 def test_embedding_capability_does_not_claim_ready_without_active_observed_evidence(tmp_path: Path) -> None:

@@ -382,6 +382,24 @@ class PostgresConnectorAcceptanceRepository:
             rows = cursor.fetchall()
         return [UUID(str(row[0])) for row in rows]
 
+    def pending_commit_batch_ids(self, *, limit: int = 25) -> list[UUID]:
+        if not 1 <= limit <= 100:
+            raise ValueError("connector canonical commit scan limit must be between 1 and 100")
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT d.batch_id
+                FROM integration.connector_durability d
+                JOIN integration.batch b USING (batch_id)
+                WHERE d.state = 'ACCEPTED' AND b.status = 'accepted'
+                ORDER BY d.updated_at, d.batch_id
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+        return [UUID(str(row[0])) for row in rows]
+
     def record_checkpoint_request(
         self,
         batch_id: UUID,

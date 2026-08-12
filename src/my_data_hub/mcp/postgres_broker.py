@@ -88,7 +88,13 @@ class EpochDatabaseCredential:
         parsed = urlsplit(self.database_url)
         if parsed.scheme not in {"postgres", "postgresql"} or not parsed.username or not parsed.password:
             raise SessionBrokerError("master credential is not a password-bound PostgreSQL URL")
-        if parsed.hostname not in {"127.0.0.1", "::1", "localhost", "postgres-master.internal"}:
+        if parsed.hostname not in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+            "postgres-master.internal",
+            "master-tunnel.internal",
+        }:
             raise SessionBrokerError("master credential must target the loopback tunnel")
         query = parse_qs(parsed.query)
         if query.get("sslmode", [""])[0] not in {"verify-ca", "verify-full"}:

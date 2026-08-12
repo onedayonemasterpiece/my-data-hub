@@ -184,7 +184,7 @@ def _session_credential(
     if not isinstance(item, dict) or set(item) != {"role", "database_url", "expires_at"}:
         raise HTTPException(status_code=422, detail={"code": "invalid_credential"})
     role = str(item.get("role", ""))
-    if role not in {"reader", "operator"}:
+    if role not in {"reader", "operator", "connector", "canonical_committer"}:
         raise HTTPException(status_code=422, detail={"code": "credential_role_not_allowed"})
     try:
         expires_at = datetime.fromisoformat(str(item["expires_at"]).replace("Z", "+00:00")).astimezone(UTC)
@@ -197,7 +197,7 @@ def _session_credential(
     query = parse_qs(parsed.query)
     if (
         parsed.scheme not in {"postgresql", "postgres"}
-        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1", "master-tunnel.internal"}
         or not parsed.username
         or not parsed.password
         or query.get("sslmode", [""])[0] not in {"verify-ca", "verify-full"}
@@ -245,6 +245,7 @@ class ControlPlaneSettings:
     operator_credentials_enabled: bool = False
     provider_gateway_enabled: bool = False
     acceptance_scenarios_enabled: bool = False
+    connector_runtime_enabled: bool = False
 
     def __post_init__(self) -> None:
         if not self.host or not 1 <= self.port <= 65535:
@@ -285,6 +286,7 @@ class ControlPlaneSettings:
             operator_credentials_enabled=_boolean("MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED"),
             provider_gateway_enabled=_boolean("MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED"),
             acceptance_scenarios_enabled=_boolean("MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED"),
+            connector_runtime_enabled=_boolean("MY_DATA_HUB_CONNECTOR_RUNTIME_ENABLED"),
         )
 
 
@@ -1802,7 +1804,19 @@ def create_app(
             "state": operation.state,
             "master_instance_id": identity.get("master_instance_id"),
             "epoch": int(identity.get("epoch", 0)),
-            "credential_roles": ["reader", "operator"] if active and operator_credential_enabled else ["reader"],
+            "credential_roles": (
+                [
+                    "reader",
+                    *(["operator"] if operator_credential_enabled else []),
+                    *(
+                        ["connector", "canonical_committer"]
+                        if runtime.connector_runtime_enabled
+                        else []
+                    ),
+                ]
+                if active
+                else ["reader"]
+            ),
         }
 
     @app.post("/internal/runtime/session-credentials/{run_id}/{attempt_id}")
@@ -1856,9 +1870,15 @@ def create_app(
         credentials = [
             _session_credential(item, identity, now=now, latest_expiry=latest_expiry) for item in body["credentials"]
         ]
-        expected_roles = (
-            ["reader", "operator"] if operation.state == "ACTIVE" and operator_credential_enabled else ["reader"]
-        )
+        expected_roles = [
+            "reader",
+            *(["operator"] if operation.state == "ACTIVE" and operator_credential_enabled else []),
+            *(
+                ["connector", "canonical_committer"]
+                if operation.state == "ACTIVE" and runtime.connector_runtime_enabled
+                else []
+            ),
+        ]
         if [credential.role for credential in credentials] != expected_roles:
             raise HTTPException(status_code=422, detail={"code": "credential_roles_not_authorized"})
         references: list[str] = []
@@ -1866,6 +1886,41 @@ def create_app(
             reference = registrar.store(credential)
             references.append(Path(reference).name)
         return {"registered": len(references), "credential_refs": references}
+
+    @app.get("/internal/runtime/connector-checkpoint/{run_id}/{attempt_id}")
+    def runtime_connector_checkpoint(
+        run_id: str,
+        attempt_id: str,
+        authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        if not runtime.connector_runtime_enabled:
+            raise HTTPException(status_code=404, detail={"code": "connector_runtime_disabled"})
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail={"code": "runtime_token_required"})
+        token = authorization.removeprefix("Bearer ").strip()
+        if not control_ledger.runtime_token_valid(run_id, attempt_id, token):
+            raise HTTPException(status_code=401, detail={"code": "runtime_token_invalid"})
+        try:
+            exact_epoch = int(epoch or "0")
+            claim = control_ledger.claim_connector_checkpoint_request(
+                run_id=run_id,
+                attempt_id=attempt_id,
+                master_instance_id=master_instance_id or "",
+                epoch=exact_epoch,
+            )
+        except (ValueError, ControlLedgerError) as exc:
+            raise HTTPException(
+                status_code=409, detail={"code": "connector_checkpoint_claim_rejected"}
+            ) from exc
+        if claim is None:
+            return {"available": False}
+        return {
+            "available": True,
+            "operation_id": claim["operation_id"],
+            "canonical_revision": int(claim["canonical_revision"]),
+        }
 
     @app.post("/internal/runtime/tunnel-certificates/{run_id}/{attempt_id}")
     async def runtime_tunnel_certificate(

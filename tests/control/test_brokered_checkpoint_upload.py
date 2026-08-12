@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+from fastapi.testclient import TestClient
 
 from my_data_hub.checkpoints.brokered_upload import (
     BrokeredCheckpointError,
@@ -21,9 +22,13 @@ from my_data_hub.checkpoints.brokered_upload import (
 )
 from my_data_hub.checkpoints.manifest import RestoreProbe, build_manifest, canonical_json, write_manifest
 from my_data_hub.checkpoints.registry import ControlLedgerCheckpointRegistry
+from my_data_hub.connectors.checkpoint_control import (
+    ControlLedgerVerifiedCheckpointCoordinator,
+)
+from my_data_hub.control_plane.app import ControlPlaneSettings, create_app
 from my_data_hub.control_plane.clock import DeterministicClock
 from my_data_hub.control_plane.ledger import ControlLedger
-from my_data_hub.control_plane.ledger.errors import LeaseRejected
+from my_data_hub.control_plane.ledger.errors import IdempotencyConflict, LeaseRejected
 from my_data_hub.providers.kaggle.contracts import BrokeredBlobGrant, BrokeredDatasetFile
 
 NOW = datetime(2026, 8, 11, 12, tzinfo=UTC)
@@ -282,6 +287,75 @@ def test_broker_uploads_direct_metadata_and_promotes_once(tmp_path: Path) -> Non
     )
     assert service.finalize(CHECKPOINT, authority)["state"] == "PROMOTED"
     assert adapter.finalized == 1
+
+
+def test_connector_request_restarts_through_real_broker_verified_head(tmp_path: Path) -> None:
+    ledger, package, manifest, _adapter, _verifier, service, authority = _fixture(tmp_path)
+    coordinator = ControlLedgerVerifiedCheckpointCoordinator(ledger)
+    idempotency_key = "a" * 64
+    operation_id = f"connector-checkpoint:{idempotency_key}"
+
+    requested = coordinator.request_verified_checkpoint(
+        operation_id=operation_id,
+        canonical_revision=7,
+        idempotency_key=idempotency_key,
+    )
+    assert requested["state"] == "REQUESTED"
+    assert coordinator.request_verified_checkpoint(
+        operation_id=operation_id,
+        canonical_revision=7,
+        idempotency_key=idempotency_key,
+    ) == requested
+    with pytest.raises(IdempotencyConflict):
+        coordinator.request_verified_checkpoint(
+            operation_id=operation_id,
+            canonical_revision=8,
+            idempotency_key=idempotency_key,
+        )
+    token = "r" * 64
+    ledger.store_runtime_token_hash(str(RUN), str(ATTEMPT), token)
+    client = TestClient(
+        create_app(
+            ControlPlaneSettings(
+                ledger_path=ledger.path, connector_runtime_enabled=True
+            ),
+            ledger=ledger,
+        )
+    )
+    claim_response = client.get(
+        f"/internal/runtime/connector-checkpoint/{RUN}/{ATTEMPT}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-MDH-Master-Instance-ID": str(MASTER),
+            "X-MDH-Epoch": "1",
+        },
+    )
+    assert claim_response.status_code == 200
+    assert claim_response.json() == {
+        "available": True,
+        "operation_id": operation_id,
+        "canonical_revision": 7,
+    }
+    assert coordinator.checkpoint_status(operation_id)["state"] == "CHECKPOINTING"
+
+    _upload_all(package, manifest, service, authority)
+    assert service.finalize(CHECKPOINT, authority)["state"] == "PROMOTED"
+
+    # A new process reconstructs only from the shared durable ledger and the
+    # actual broker-promoted current head.
+    restarted = ControlLedgerVerifiedCheckpointCoordinator(ledger)
+    completed = restarted.checkpoint_status(operation_id)
+    assert completed == {
+        "operation_id": operation_id,
+        "idempotency_key": idempotency_key,
+        "canonical_revision": 7,
+        "state": "DURABLE_COMPLETE",
+        "checkpoint_status": "VERIFIED",
+        "checkpoint_id": str(CHECKPOINT),
+        "current_checkpoint_id": str(CHECKPOINT),
+        "manifest_sha256": manifest.manifest_sha256,
+        "verified_at": NOW.isoformat().replace("+00:00", "Z"),
+    }
 
 
 def test_second_verified_candidate_preserves_current_as_previous(tmp_path: Path) -> None:

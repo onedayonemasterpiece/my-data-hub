@@ -16,6 +16,9 @@ from fastapi import FastAPI
 
 from my_data_hub.api.app import create_app
 from my_data_hub.config import ConfigurationError, Settings
+from my_data_hub.connectors.checkpoint_control import (
+    ControlLedgerVerifiedCheckpointCoordinator,
+)
 from my_data_hub.connectors.durability import (
     VerifiedCheckpointCoordinator,
     build_connector_checkpoint_gateway,
@@ -84,6 +87,9 @@ def build_connector_api_runtime(
                 "MY_DATA_HUB_MASTER_SESSION_DIRECTORY", "/sessions"
             )
         ).expanduser()
+    )
+    checkpoint_coordinator = checkpoint_coordinator or ControlLedgerVerifiedCheckpointCoordinator(
+        control_ledger
     )
     gateway = build_connector_checkpoint_gateway(checkpoint_coordinator)
     intake_runtime = ActiveMasterConnectorRuntime(

@@ -72,6 +72,23 @@ def test_install_unit_reconciles_all_opted_in_processes_across_failure_and_reboo
         assert f"http://127.0.0.1:{port}" in source
 
 
+def test_connector_runtime_install_is_explicit_default_off_and_restart_managed() -> None:
+    source = installer_source()
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    assert (
+        compose["services"]["control-plane"]["environment"]
+        ["MY_DATA_HUB_CONNECTOR_RUNTIME_ENABLED"]
+        == "false"
+    )
+    assert "I_ACKNOWLEDGE_CONNECTOR_CANONICAL_WRITES" in source
+    assert 'require_private_file "$connector_env" "connector environment"' in source
+    assert 'reject_data_plane_environment "$connector_env"' in source
+    assert 'MY_DATA_HUB_CONNECTOR_RUNTIME_ENABLED: "true"' in source
+    assert 'connector_profile_arg=" --profile connectors"' in source
+    assert 'connector_service=" connector-intake"' in source
+    assert "wait_http connector-intake http://127.0.0.1:8081/health/ready" in source
+
+
 def test_compose_has_exact_opt_in_profile_split_secret_boundaries_and_loopback_ports() -> None:
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
     assert compose["x-my-data-hub-opt-in-profile"] == "remote-mcp"
@@ -110,7 +127,9 @@ def test_compose_has_exact_opt_in_profile_split_secret_boundaries_and_loopback_p
     assert set(connector["volumes"]) == {
         "${MY_DATA_HUB_CONTROL_LEDGER_DIR:-./.state/control-ledger}:/ledger",
         "${MY_DATA_HUB_MASTER_SESSION_DIR:-./.state/master-sessions}:/sessions:ro",
+        "${MY_DATA_HUB_MASTER_TLS_DIR:-./.state/master-tls}:/state/master-tls:ro",
     }
+    assert connector["extra_hosts"] == ["master-tunnel.internal:host-gateway"]
     assert not any(
         "DATABASE_URL" in name or name.startswith("PG")
         for name in connector["environment"]
