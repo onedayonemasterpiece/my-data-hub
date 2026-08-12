@@ -5,7 +5,7 @@
 - Evidence class: live provider mutation with cleanup; this is not an operational-MVP completion claim.
 - Central authority: one repository `KaggleProviderAdapter` authenticated from the owner-mode-0600 control-plane provider environment; no Kaggle credential was passed to an MCP/runtime client.
 - Disposable private Dataset: `zigomaro/mdh-mcp-batch-20260812062650`
-- Protected receipt: `/home/dev/.local/state/my-data-hub-control-plane/canaries/mcp-batch-live-20260812062650/receipt.json`, mode `0600`, SHA-256 `54151618902fa8b55567f65bb4271d4bf70dd5168a33ba862a4f0d189202f5e6`.
+- Protected receipt: `/home/dev/.local/state/my-data-hub-control-plane/canaries/mcp-batch-live-20260812062650/receipt.json`, mode `0600`, SHA-256 `4d2671faf9cefbf411319222ed11f186085c5656df9b8e18b4c596466b00d27d`.
 
 Observed exact lifecycle:
 
