@@ -62,7 +62,7 @@ from my_data_hub.workloads.bloggers.master_stage import (
 
 from .bootstrap import BootstrapRequest, MasterBootstrap
 from .contracts import BootSource, MasterIdentity, MasterPaths
-from .credentials import CredentialProvisioner
+from .credentials import CredentialProvisioner, LoginPolicy
 from .database_gate import DatabaseGate
 from .postgres import PostgresBinaries, PostgresConfig, PostgresSupervisor
 from .tunnel import ReverseTunnelSpec, TunnelSupervisor
@@ -1285,6 +1285,83 @@ def _credential_registration_url(callback_url: str, run_id: str, attempt_id: str
     return f"{callback_url.removesuffix(suffix)}/internal/runtime/session-credentials/{run_id}/{attempt_id}"
 
 
+def _embedding_credential_url(callback_url: str, run_id: str, attempt_id: str) -> str:
+    suffix = "/internal/runtime/events"
+    if callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
+        raise ValueError("callback URL does not match the owner-pinned HTTPS runtime endpoint")
+    return f"{callback_url.removesuffix(suffix)}/internal/runtime/embedding-worker-credentials/{run_id}/{attempt_id}"
+
+
+def _reconcile_embedding_worker_credentials(
+    *, connection: Any, gate: DatabaseGate, config: NotebookMasterConfig,
+    callback_url: str, run_secret: str, lease_until: datetime,
+    issued: dict[UUID, str],
+) -> None:
+    """Consume metadata-only commands; issue/revoke exact epoch-bound LOGINs."""
+
+    from urllib.parse import quote, urlencode
+
+    base = _embedding_credential_url(callback_url, config.run_id, config.attempt_id)
+    request = urllib.request.Request(
+        base + "/commands", headers={"Authorization": f"Bearer {run_secret}"}
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        command_body = json.loads(response.read(64 * 1024))
+    provisioner = CredentialProvisioner(connection, gate)
+    for revoke in command_body.get("revocations", ()):
+        credential_id = UUID(str(revoke["credential_id"]))
+        principal = issued.pop(credential_id, None)
+        if principal is not None:
+            gate.revoke_credential(credential_id, "embedding_worker_task_revoked")
+            provisioner.drop(principal)
+    for command in command_body.get("commands", ()):
+        task_run_id = UUID(str(command["task_run_id"]))
+        if int(command["epoch"]) != config.epoch or any(
+            principal.endswith(task_run_id.hex[:8]) for principal in issued.values()
+        ):
+            continue
+        now = datetime.now(UTC)
+        expiry = min(now + timedelta(minutes=4), lease_until)
+        if expiry <= now + timedelta(seconds=45):
+            continue
+        credential_id = UUID(bytes=secrets.token_bytes(16), version=4)
+        principal = f"mdh_e{config.epoch}_embed_{credential_id.hex[:8]}"
+        password = secrets.token_urlsafe(36)
+        provisioner.create(
+            principal=principal, password=password, group="mdh_embedding_worker",
+            identity=MasterIdentity(config.master_instance_id, config.run_id, config.epoch),
+            credential_id=credential_id, expires_at=expiry, now=now,
+            policy=LoginPolicy(statement_timeout_ms=300_000, connection_limit=2),
+        )
+        query = urlencode({"sslmode": "verify-ca", "sslrootcert": "/state/master-tls/ca.pem",
+                           "connect_timeout": "5"})
+        body = canonical_json_bytes({
+            "master_instance_id": str(config.master_instance_id), "epoch": config.epoch,
+            "task_run_id": str(task_run_id), "credential_id": str(credential_id),
+            "role": "embedding_worker",
+            "database_url": (
+                f"postgresql://{quote(principal, safe='')}:{quote(password, safe='')}@"
+                f"127.0.0.1:{config.tunnel_remote_port}/postgres?{query}"
+            ),
+            "expires_at": expiry.isoformat().replace("+00:00", "Z"),
+            "task_token_sha256": str(command["task_token_sha256"]),
+        })
+        registration = urllib.request.Request(
+            base, data=body,
+            headers={"Authorization": f"Bearer {run_secret}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(registration, timeout=10) as response:
+                receipt = json.loads(response.read(16 * 1024))
+            if receipt.get("registered") is not True:
+                raise RuntimeError("embedding credential registrar rejected the handoff")
+            issued[credential_id] = principal
+        except Exception:
+            provisioner.drop(principal)
+            raise
+
+
 def _register_reader_credential(
     *,
     connection: Any,
@@ -1852,6 +1929,7 @@ def run_master(
         gate_connection.close()
         raise
     issued_principals = set(session_principals)
+    embedding_worker_principals: dict[UUID, str] = {}
 
     def rotate_soak_credentials(expires_at: datetime) -> tuple[str, ...]:
         principals, _expiry = _register_session_credentials(
@@ -2075,6 +2153,13 @@ def run_master(
                             runtime_client=runtime,
                             canonical_connection_factory=canonical_connection_factory,
                             lease_guard=maintainer.check,
+                            credential_command_poll=partial(
+                                _reconcile_embedding_worker_credentials,
+                                connection=gate_connection, gate=gate, config=config,
+                                callback_url=callback_url, run_secret=run_secret,
+                                lease_until=maintainer.current_lease_until,
+                                issued=embedding_worker_principals,
+                            ),
                         )
                     except Exception as exc:
                         raise EmbeddingStageExecutionError("embedding stage did not complete") from exc
@@ -2087,6 +2172,7 @@ def run_master(
                 finally:
                     maintainer.stop()
                     current_lease = maintainer.lease_until
+                    issued_principals.update(embedding_worker_principals.values())
                 break
             time.sleep(min(30.0, remaining_active))
             if time.monotonic() >= active_deadline:

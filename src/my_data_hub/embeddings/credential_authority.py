@@ -88,6 +88,9 @@ class DirectoryEmbeddingCredentialAuthority:
             "task_token_sha256": registration.task_token_sha256,
         }
         self._atomic(path, canonical_json_bytes(payload) + b"\n")
+        request_path = self.root / "requests" / f"{registration.task_run_id.hex}.json"
+        if request_path.is_file() and not request_path.is_symlink():
+            request_path.unlink()
         return path
 
     def issue(

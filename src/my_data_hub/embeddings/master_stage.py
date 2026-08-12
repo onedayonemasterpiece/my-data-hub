@@ -136,6 +136,7 @@ def execute_embedding_production_stage(
     canonical_connection_factory: Callable[[], AbstractContextManager[Any]],
     lease_guard: Callable[[], None],
     importer: PostgresEmbeddingImporter | None = None,
+    credential_command_poll: Callable[[], None] | None = None,
 ) -> EmbeddingProductionStageReceipt:
     """Stage business bytes on the master and exchange only launch metadata with control."""
 
@@ -169,6 +170,7 @@ def execute_embedding_production_stage(
         manifest = exchange.wait_result(
             connection, request_id=context.request.request_id, task_run_id=prepared.task_id,
             expected_sha256=metadata.input_jobs_sha256, deadline=deadline, lease_guard=lease_guard,
+            poll_hook=credential_command_poll,
         )
         query_results = [item for item in manifest.successful_results if item.job_key == prepared.query_job_key]
         if len(query_results) != 1:

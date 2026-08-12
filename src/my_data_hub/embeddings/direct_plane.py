@@ -84,9 +84,12 @@ class PostgresEmbeddingWorkerExchange:
         deadline: float,
         lease_guard: Any,
         poll_seconds: float = 5.0,
+        poll_hook: Any | None = None,
     ) -> EmbeddingArtifactManifest:
         while time.monotonic() < deadline:
             lease_guard()
+            if poll_hook is not None:
+                poll_hook()
             with connection.cursor() as cursor:
                 row = cursor.execute(
                     "SELECT manifest_sha256,manifest FROM search.embedding_result_landing "

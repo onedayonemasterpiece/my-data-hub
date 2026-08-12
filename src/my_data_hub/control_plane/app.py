@@ -50,6 +50,10 @@ from my_data_hub.control_plane.runtime import (
     build_production_runtime,
 )
 from my_data_hub.embeddings.central_launcher import CentralEmbeddingWorkerLauncher
+from my_data_hub.embeddings.credential_authority import (
+    DirectoryEmbeddingCredentialAuthority,
+    EmbeddingCredentialRegistration,
+)
 from my_data_hub.embeddings.direct_plane import EmbeddingLaunchMetadata
 from my_data_hub.embeddings.master_stage import execute_embedding_production_stage
 from my_data_hub.embeddings.production import (
@@ -60,6 +64,7 @@ from my_data_hub.embeddings.production import (
     EmbeddingProductionStageReceipt,
     embedding_provider_authority,
 )
+from my_data_hub.embeddings.production_assembly import build_embedding_production_assembly
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.catalog import TOOL_CONTRACTS
 from my_data_hub.mcp.oauth import AccessIdentity
@@ -307,6 +312,7 @@ def create_app(
     old_epoch_denials: object | None = None,
     checkpoint_upload_broker: BrokeredCheckpointUploadService | None = None,
     embedding_direct_plane_launcher: CentralEmbeddingWorkerLauncher | None = None,
+    embedding_credential_authority: DirectoryEmbeddingCredentialAuthority | None = None,
 ) -> FastAPI:
     runtime = settings or ControlPlaneSettings.from_env()
     if operator_credential_enabled is None:
@@ -346,6 +352,10 @@ def create_app(
         provider_status = "available"
     if provider_gateway is None and provider_adapter is not None:
         provider_gateway = KaggleMCPProviderGateway(control_ledger, provider_adapter)
+    if embedding_direct_plane_launcher is None and embedding_credential_authority is None and provider_adapter:
+        embedding_assembly = build_embedding_production_assembly(provider_adapter)
+        if embedding_assembly is not None:
+            embedding_direct_plane_launcher, embedding_credential_authority = embedding_assembly
     if runtime.provider_gateway_enabled:
         if not operator_credential_enabled or provider_gateway is None:
             raise ControlPlaneConfigurationError("provider gateway requires the single authenticated control adapter")
@@ -499,6 +509,8 @@ def create_app(
         if embedding_direct_plane_launcher is not None and embedding_direct_plane_launcher.ready
         else None
     )
+    app.state.embedding_credential_authority = embedding_credential_authority
+    app.state.embedding_launch_tasks = set()
     app.state.provider_gateway = provider_gateway if runtime.provider_gateway_enabled else None
     app.state.acceptance_scenario_adapter = acceptance_scenario_adapter
     # Process invocation identity, not the host/kernel boot ID. A real control
@@ -1550,9 +1562,11 @@ def create_app(
                     raise HTTPException(
                         status_code=503, detail={"code": "embedding_direct_plane_unavailable"}
                     )
-                # Adapter mutation is deterministic/idempotent by task_run_id;
-                # the callback ACK follows launch reconciliation.
-                await asyncio.to_thread(launcher.launch, metadata)
+                # ACK first so the master can poll the hash-only JIT command.
+                # The retained task reconciles deterministic provider intents.
+                task = asyncio.create_task(asyncio.to_thread(launcher.launch, metadata))
+                app.state.embedding_launch_tasks.add(task)
+                task.add_done_callback(app.state.embedding_launch_tasks.discard)
             if event.event_type in {RuntimeEventType.RUNTIME_TERMINAL, RuntimeEventType.RUNTIME_FAILED}:
                 reconcile_status_cleanup = getattr(master_runtime, "reconcile_status_cleanup_once", None)
                 if reconcile_status_cleanup is not None:
@@ -1886,6 +1900,57 @@ def create_app(
             reference = registrar.store(credential)
             references.append(Path(reference).name)
         return {"registered": len(references), "credential_refs": references}
+
+    @app.get("/internal/runtime/embedding-worker-credentials/{run_id}/{attempt_id}/commands")
+    def embedding_worker_credential_commands(
+        run_id: str, attempt_id: str, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        authority = app.state.embedding_credential_authority
+        if authority is None:
+            raise HTTPException(status_code=503, detail={"code": "embedding_credential_authority_unavailable"})
+        if not authorization or not authorization.startswith("Bearer ") or not control_ledger.runtime_token_valid(
+            run_id, attempt_id, authorization.removeprefix("Bearer ").strip()
+        ):
+            raise HTTPException(status_code=401, detail={"code": "runtime_token_invalid"})
+        operation = control_ledger.operation_for_attempt(run_id, attempt_id)
+        if operation is None or operation.state != "ACTIVE":
+            raise HTTPException(status_code=409, detail={"code": "active_epoch_mismatch"})
+        return {"commands": authority.pending_requests(), "revocations": [
+            {"task_run_id": str(task), "credential_id": str(credential)}
+            for task, credential, _path in authority.pending_revocations()
+        ]}
+
+    @app.post("/internal/runtime/embedding-worker-credentials/{run_id}/{attempt_id}")
+    async def register_embedding_worker_credential(
+        run_id: str, attempt_id: str, request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        authority = app.state.embedding_credential_authority
+        if authority is None:
+            raise HTTPException(status_code=503, detail={"code": "embedding_credential_authority_unavailable"})
+        if not authorization or not authorization.startswith("Bearer ") or not control_ledger.runtime_token_valid(
+            run_id, attempt_id, authorization.removeprefix("Bearer ").strip()
+        ):
+            raise HTTPException(status_code=401, detail={"code": "runtime_token_invalid"})
+        operation = control_ledger.operation_for_attempt(run_id, attempt_id)
+        body = await _bounded_json(request)
+        identity = operation.identity if operation is not None else {}
+        try:
+            registration = EmbeddingCredentialRegistration(
+                master_instance_id=UUID(str(body["master_instance_id"])), epoch=int(body["epoch"]),
+                task_run_id=UUID(str(body["task_run_id"])), credential_id=UUID(str(body["credential_id"])),
+                role=str(body["role"]), database_url=str(body["database_url"]),
+                expires_at=datetime.fromisoformat(str(body["expires_at"]).replace("Z", "+00:00")),
+                task_token_sha256=str(body["task_token_sha256"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail={"code": "embedding_credential_invalid"}) from exc
+        if (operation is None or operation.state != "ACTIVE"
+                or str(registration.master_instance_id) != str(identity.get("master_instance_id"))
+                or registration.epoch != int(identity.get("epoch", 0))):
+            raise HTTPException(status_code=409, detail={"code": "active_epoch_mismatch"})
+        reference = authority.store(registration)
+        return {"registered": True, "credential_ref": reference.name}
 
     @app.get("/internal/runtime/connector-checkpoint/{run_id}/{attempt_id}")
     def runtime_connector_checkpoint(
