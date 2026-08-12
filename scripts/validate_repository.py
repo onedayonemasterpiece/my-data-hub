@@ -758,6 +758,10 @@ def validate_json_and_schemas(report: Report) -> None:
     sys.path.insert(0, str(ROOT / "src"))
     from my_data_hub.domain.commands import Changeset, SemanticCommand
     from my_data_hub.notebooks.contracts import NotebookInputManifest, NotebookResult
+    from my_data_hub.workloads.bloggers.protected_artifact import (
+        ProtectedExportManifest,
+        ProtectedExportReceipt,
+    )
     from my_data_hub.workloads.region_talk.contracts import (
         MigrationReconciliationReport,
         YdbExportManifest,
@@ -772,6 +776,8 @@ def validate_json_and_schemas(report: Report) -> None:
         "region-talk-ydb-export-manifest.v1.schema.json": YdbExportManifest,
         "region-talk-ydb-export-row.v1.schema.json": YdbExportRow,
         "migration-reconciliation-report.v1.schema.json": (MigrationReconciliationReport),
+        "region-talk-ydb-protected-export-manifest.v1.schema.json": ProtectedExportManifest,
+        "region-talk-ydb-protected-export-receipt.v1.schema.json": ProtectedExportReceipt,
     }
 
     def normalized(schema: dict[str, Any]) -> dict[str, Any]:

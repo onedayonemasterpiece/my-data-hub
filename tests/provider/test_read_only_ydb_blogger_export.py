@@ -6,8 +6,8 @@ from io import BytesIO
 
 import pytest
 
+from my_data_hub.workloads.bloggers.protected_artifact import _set_sha256, scan_rows
 from my_data_hub.workloads.bloggers.schema import SOURCE_COLUMNS
-from scripts.provider.read_only_ydb_blogger_export import _set_sha256, scan_rows
 
 
 def _row(record_id: str, *, batch_id: str = "batch-a") -> dict[str, object]:

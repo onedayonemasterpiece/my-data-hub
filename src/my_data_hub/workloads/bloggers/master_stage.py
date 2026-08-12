@@ -9,8 +9,10 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import quote
 from uuid import UUID
@@ -28,6 +30,7 @@ from .importer import (
     ImportReceipt,
     batch_identity,
 )
+from .protected_artifact import load_protected_artifact
 from .schema import SOURCE_QUERY_SHA256
 from .ydb_reader import YdbBloggerSnapshot
 
@@ -536,22 +539,39 @@ def execute_blogger_migration_stage(
     driver: Any | None = None,
     importer: BloggerSnapshotImporter | None = None,
     duplicate_resolutions: tuple[DuplicateResolution, ...] | None = None,
+    protected_artifact_manifest: Path | None = None,
     now: datetime | None = None,
 ) -> BloggerImportStageReceipt:
-    """Execute denial probe + exact 266-row import under one epoch-bound login.
+    """Execute an exact 266-row import under one epoch-bound login.
 
     The temporary LOGIN is created and consumed only within the master process.
     It is always dropped; no DSN is returned, persisted, logged, or handed to a
-    second Kaggle notebook.
+    second Kaggle notebook.  The default path streams a live read-only YDB
+    snapshot.  The optional protected-artifact adapter validates owner-only
+    files and streams them only inside this ACTIVE-master process; source bytes
+    never enter the control ledger or devstand database.
     """
 
     import psycopg
-    import ydb
 
     request = context.request
     bound_resolutions = request.duplicate_resolutions
     if duplicate_resolutions is not None and duplicate_resolutions != bound_resolutions:
         raise ValueError("blogger duplicate decisions differ from the hashed request")
+    if protected_artifact_manifest is not None and driver is not None:
+        raise ValueError("protected artifact and live YDB driver are mutually exclusive")
+    protected_artifact = None
+    if protected_artifact_manifest is not None:
+        resolved_manifest = protected_artifact_manifest.expanduser().resolve()
+        provider_root = Path("/kaggle/working")
+        if not resolved_manifest.is_relative_to(provider_root):
+            raise ValueError("protected artifact must remain inside ACTIVE master /kaggle/working")
+        protected_artifact = load_protected_artifact(protected_artifact_manifest)
+        protected_artifact.assert_import_binding(
+            snapshot_at=request.snapshot_at,
+            expected_row_count=request.expected_rows,
+            source_revision=request.source_revision,
+        )
     observed = (now or datetime.now(UTC)).astimezone(UTC)
     expiry = min(observed + timedelta(minutes=5), context.lease_until.astimezone(UTC))
     if expiry <= observed + timedelta(seconds=270):
@@ -575,8 +595,10 @@ def execute_blogger_migration_stage(
             connection_limit=1,
         ),
     )
-    owns_driver = driver is None
-    if driver is None:
+    owns_driver = driver is None and protected_artifact is None
+    if driver is None and protected_artifact is None:
+        import ydb
+
         endpoint = os.environ.get("MY_DATA_HUB_YDB_ENDPOINT", "").strip()
         database = os.environ.get("MY_DATA_HUB_YDB_DATABASE", "").strip()
         if not endpoint or not database:
@@ -589,8 +611,12 @@ def execute_blogger_migration_stage(
         )
         driver.wait(timeout=20, fail_fast=True)
     try:
-        snapshot = YdbBloggerSnapshot(driver)
-        snapshot.assert_write_denied()
+        if protected_artifact is None:
+            snapshot = YdbBloggerSnapshot(driver)
+            snapshot.assert_write_denied()
+            rows_context = snapshot.iter_rows()
+        else:
+            rows_context = nullcontext(protected_artifact.iter_rows())
         with psycopg.connect(
             _migration_url(context.local_database_url, principal, password), connect_timeout=5
         ) as connection:
@@ -600,7 +626,7 @@ def execute_blogger_migration_stage(
                 cursor.execute("SET lock_timeout='5s'")
                 cursor.execute("SET idle_in_transaction_session_timeout='30s'")
                 cursor.execute("SET transaction_timeout='180s'")
-            with snapshot.iter_rows() as rows:
+            with rows_context as rows:
                 imported = (importer or BloggerSnapshotImporter()).import_rows(
                     connection,
                     project_id=request.project_id,

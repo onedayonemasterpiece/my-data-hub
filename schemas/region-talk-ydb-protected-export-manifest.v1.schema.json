@@ -1,0 +1,420 @@
+{
+  "$defs": {
+    "DataFileBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_size": {
+          "exclusiveMinimum": 0,
+          "title": "Byte Size",
+          "type": "integer"
+        },
+        "mode": {
+          "const": "0600",
+          "default": "0600",
+          "title": "Mode",
+          "type": "string"
+        },
+        "path": {
+          "const": "rows-000001.jsonl",
+          "default": "rows-000001.jsonl",
+          "title": "Path",
+          "type": "string"
+        },
+        "row_count": {
+          "exclusiveMinimum": 0,
+          "title": "Row Count",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "row_count",
+        "byte_size",
+        "sha256"
+      ],
+      "title": "DataFileBinding",
+      "type": "object"
+    },
+    "ObservedInventoryBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "batch_count": {
+          "exclusiveMinimum": 0,
+          "title": "Batch Count",
+          "type": "integer"
+        },
+        "confirmation_status_counts": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "maxProperties": 32,
+          "minProperties": 1,
+          "title": "Confirmation Status Counts",
+          "type": "object"
+        },
+        "distinct_record_ids": {
+          "exclusiveMinimum": 0,
+          "title": "Distinct Record Ids",
+          "type": "integer"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "receipt_schema_version": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Receipt Schema Version",
+          "type": "string"
+        },
+        "receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Receipt Sha256",
+          "type": "string"
+        },
+        "row_count": {
+          "exclusiveMinimum": 0,
+          "title": "Row Count",
+          "type": "integer"
+        },
+        "source_file_count": {
+          "exclusiveMinimum": 0,
+          "title": "Source File Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "receipt_schema_version",
+        "receipt_sha256",
+        "observed_at",
+        "row_count",
+        "distinct_record_ids",
+        "batch_count",
+        "source_file_count",
+        "confirmation_status_counts"
+      ],
+      "title": "ObservedInventoryBinding",
+      "type": "object"
+    },
+    "ReaderPrincipalBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "access_bindings_observed_at": {
+          "format": "date-time",
+          "title": "Access Bindings Observed At",
+          "type": "string"
+        },
+        "access_bindings_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Access Bindings Sha256",
+          "type": "string"
+        },
+        "credential_mode": {
+          "const": "ephemeral_iam_token_impersonation",
+          "default": "ephemeral_iam_token_impersonation",
+          "title": "Credential Mode",
+          "type": "string"
+        },
+        "database_roles": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Database Roles",
+          "type": "array"
+        },
+        "service_account_id": {
+          "pattern": "^[a-z0-9]{20}$",
+          "title": "Service Account Id",
+          "type": "string"
+        },
+        "service_account_name": {
+          "const": "my-data-hub-ydb-reader",
+          "default": "my-data-hub-ydb-reader",
+          "title": "Service Account Name",
+          "type": "string"
+        },
+        "write_denial_verified": {
+          "const": true,
+          "default": true,
+          "title": "Write Denial Verified",
+          "type": "boolean"
+        },
+        "write_denial_verified_at": {
+          "format": "date-time",
+          "title": "Write Denial Verified At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "service_account_id",
+        "access_bindings_observed_at",
+        "access_bindings_sha256",
+        "database_roles",
+        "write_denial_verified_at"
+      ],
+      "title": "ReaderPrincipalBinding",
+      "type": "object"
+    },
+    "ScanEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "batch_count": {
+          "exclusiveMinimum": 0,
+          "title": "Batch Count",
+          "type": "integer"
+        },
+        "batch_id_set_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Batch Id Set Sha256",
+          "type": "string"
+        },
+        "byte_size": {
+          "exclusiveMinimum": 0,
+          "title": "Byte Size",
+          "type": "integer"
+        },
+        "completed_at": {
+          "format": "date-time",
+          "title": "Completed At",
+          "type": "string"
+        },
+        "confirmation_status_counts": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "maxProperties": 32,
+          "minProperties": 1,
+          "title": "Confirmation Status Counts",
+          "type": "object"
+        },
+        "distinct_record_ids": {
+          "exclusiveMinimum": 0,
+          "title": "Distinct Record Ids",
+          "type": "integer"
+        },
+        "file_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "File Sha256",
+          "type": "string"
+        },
+        "logical_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Logical Sha256",
+          "type": "string"
+        },
+        "max_updated_at": {
+          "format": "date-time",
+          "title": "Max Updated At",
+          "type": "string"
+        },
+        "min_updated_at": {
+          "format": "date-time",
+          "title": "Min Updated At",
+          "type": "string"
+        },
+        "record_id_set_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Record Id Set Sha256",
+          "type": "string"
+        },
+        "row_count": {
+          "exclusiveMinimum": 0,
+          "title": "Row Count",
+          "type": "integer"
+        },
+        "source_file_count": {
+          "exclusiveMinimum": 0,
+          "title": "Source File Count",
+          "type": "integer"
+        },
+        "source_file_set_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source File Set Sha256",
+          "type": "string"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "started_at",
+        "completed_at",
+        "row_count",
+        "distinct_record_ids",
+        "file_sha256",
+        "byte_size",
+        "logical_sha256",
+        "record_id_set_sha256",
+        "batch_count",
+        "batch_id_set_sha256",
+        "source_file_count",
+        "source_file_set_sha256",
+        "confirmation_status_counts",
+        "min_updated_at",
+        "max_updated_at"
+      ],
+      "title": "ScanEvidence",
+      "type": "object"
+    },
+    "SourceBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "columns": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Columns",
+          "type": "array"
+        },
+        "database_id": {
+          "const": "etnkibjidis0o6stn2cq",
+          "default": "etnkibjidis0o6stn2cq",
+          "title": "Database Id",
+          "type": "string"
+        },
+        "database_path": {
+          "const": "/ru-central1/b1ghfk15fpug7mn5439l/etnkibjidis0o6stn2cq",
+          "default": "/ru-central1/b1ghfk15fpug7mn5439l/etnkibjidis0o6stn2cq",
+          "title": "Database Path",
+          "type": "string"
+        },
+        "query": {
+          "const": "SELECT `record_id`, `batch_id`, `list_order`, `level`, `blogger_name`, `segment`, `region_relation_status`, `visit_period_text`, `locations_text`, `confirmation_basis`, `evidence_url`, `telegram_url`, `vk_public_url`, `vk_video_url`, `rutube_url`, `source_kind`, `confirmation_status`, `pipeline_status`, `source_file_sha256`, `ingested_at`, `updated_at`, `external_region_basis`, `external_region_evidence_url`, `submission_batch_ids_json`, `other_primary_url`, `social_links_type`, `evidence_type` FROM `region_talk_external_blogger_evidence` ORDER BY `record_id`;",
+          "default": "SELECT `record_id`, `batch_id`, `list_order`, `level`, `blogger_name`, `segment`, `region_relation_status`, `visit_period_text`, `locations_text`, `confirmation_basis`, `evidence_url`, `telegram_url`, `vk_public_url`, `vk_video_url`, `rutube_url`, `source_kind`, `confirmation_status`, `pipeline_status`, `source_file_sha256`, `ingested_at`, `updated_at`, `external_region_basis`, `external_region_evidence_url`, `submission_batch_ids_json`, `other_primary_url`, `social_links_type`, `evidence_type` FROM `region_talk_external_blogger_evidence` ORDER BY `record_id`;",
+          "title": "Query",
+          "type": "string"
+        },
+        "query_sha256": {
+          "const": "ef94cf114fea0e2f89418c5dacbc289e5c2d21f6935883c2b685ec4f64bd0e50",
+          "default": "ef94cf114fea0e2f89418c5dacbc289e5c2d21f6935883c2b685ec4f64bd0e50",
+          "title": "Query Sha256",
+          "type": "string"
+        },
+        "schema_sha256": {
+          "const": "a44855556115f90c0b6353cac0b8c5d1eaebf91485ca594c621cc73f91b2564f",
+          "default": "a44855556115f90c0b6353cac0b8c5d1eaebf91485ca594c621cc73f91b2564f",
+          "title": "Schema Sha256",
+          "type": "string"
+        },
+        "source_revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "title": "Source Revision",
+          "type": "string"
+        },
+        "system": {
+          "const": "ydb",
+          "default": "ydb",
+          "title": "System",
+          "type": "string"
+        },
+        "table": {
+          "const": "region_talk_external_blogger_evidence",
+          "default": "region_talk_external_blogger_evidence",
+          "title": "Table",
+          "type": "string"
+        }
+      },
+      "required": [
+        "columns",
+        "source_revision"
+      ],
+      "title": "SourceBinding",
+      "type": "object"
+    }
+  },
+  "$id": "https://my-data-hub.invalid/schemas/region-talk-ydb-protected-export-manifest.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "consistency_mode": {
+      "const": "two_independent_QuerySnapshotReadOnly",
+      "default": "two_independent_QuerySnapshotReadOnly",
+      "title": "Consistency Mode",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "data_file": {
+      "$ref": "#/$defs/DataFileBinding"
+    },
+    "export_batch_id": {
+      "format": "uuid",
+      "title": "Export Batch Id",
+      "type": "string"
+    },
+    "inventory": {
+      "$ref": "#/$defs/ObservedInventoryBinding"
+    },
+    "ordering": {
+      "default": [
+        "record_id"
+      ],
+      "items": {
+        "const": "record_id",
+        "type": "string"
+      },
+      "title": "Ordering",
+      "type": "array"
+    },
+    "primary_scan": {
+      "$ref": "#/$defs/ScanEvidence"
+    },
+    "principal": {
+      "$ref": "#/$defs/ReaderPrincipalBinding"
+    },
+    "raw_data_committed_to_git": {
+      "const": false,
+      "default": false,
+      "title": "Raw Data Committed To Git",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": "my-data-hub.region-talk-ydb-protected-export-manifest.v1",
+      "default": "my-data-hub.region-talk-ydb-protected-export-manifest.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "snapshot_at": {
+      "format": "date-time",
+      "title": "Snapshot At",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/SourceBinding"
+    },
+    "status": {
+      "const": "COMPLETE_PROTECTED_EXPORT",
+      "default": "COMPLETE_PROTECTED_EXPORT",
+      "title": "Status",
+      "type": "string"
+    },
+    "verification_scan": {
+      "$ref": "#/$defs/ScanEvidence"
+    }
+  },
+  "required": [
+    "export_batch_id",
+    "snapshot_at",
+    "created_at",
+    "source",
+    "inventory",
+    "principal",
+    "primary_scan",
+    "verification_scan",
+    "data_file"
+  ],
+  "title": "ProtectedExportManifest",
+  "type": "object"
+}

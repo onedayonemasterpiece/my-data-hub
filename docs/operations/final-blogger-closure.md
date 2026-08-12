@@ -25,6 +25,23 @@ enforces a 180-second transaction timeout; admission requires 300 seconds of
 remaining active runtime and at least 270 seconds on the current lease. It drops
 the LOGIN in all outcomes.
 
+An owner may instead attach a sealed private artifact to the ACTIVE master and
+set `MY_DATA_HUB_BLOGGER_PROTECTED_MANIFEST` to its mode-0600 `manifest.json`.
+The artifact must be created under `/kaggle/working`; an input Dataset, control
+Dataset, devstand path, or other filesystem root is rejected.
+This does not change the default live-YDB path. The adapter requires the
+versioned manifest and detached receipt, exact mode-0700 directory and mode-0600
+regular files, no symlinks or undeclared files, viewer-only principal evidence,
+two independent ordered scan hashes, deterministic batch/snapshot/source-revision
+binding, and exact reconciliation with a prior unbounded live inventory count.
+It streams canonical JSONL only inside the master import transaction and verifies
+the opened bytes again before transaction exit, so tampering rolls back. The
+artifact path and bytes must never be attached to the devstand or control ledger.
+After successful metadata-only import-receipt delivery, the master overwrites the
+raw file, deletes manifest/receipt/raw files, and removes the artifact directory.
+Current `STOPPED`/zero-RCU source state remains an external blocker; the presence
+of this adapter is not evidence that a live export or import occurred.
+
 `COMMITTED_PENDING_CHECKPOINT` is not success. The master immediately enters its
 normal drain/checkpoint path. A final receipt is emitted only after exact private
 checkpoint publication/readback, independent isolated restore verification and

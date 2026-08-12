@@ -23,10 +23,12 @@ from my_data_hub.master_runtime.notebook_entrypoint import (
     CheckpointShutdownError,
     NotebookMasterConfig,
     _activation_url,
+    _blogger_protected_manifest,
     _checkpoint_before_stop,
     _checkpoint_until_deadline,
     _cleanup_epoch_principals,
     _credential_registration_url,
+    _destroy_blogger_protected_artifact,
     _EmbeddingLeaseMaintainer,
     _emit_service_ready,
     _fresh_canonical_committer_connection,
@@ -1364,6 +1366,20 @@ def test_run_master_never_checkpoints_unacknowledged_blogger_import_receipt(
     assert "gate.fence:blogger_import_receipt_unacknowledged" in events
     assert events[-2:] == ["tunnel.stop", "postgres.stop"]
     assert connection.closed is True
+
+
+def test_run_master_passes_protected_manifest_only_inside_stage(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Environment path is process-local; it never enters the control request."""
+
+    monkeypatch.delenv("MY_DATA_HUB_BLOGGER_PROTECTED_MANIFEST", raising=False)
+    assert _blogger_protected_manifest() is None
+    manifest = Path("/kaggle/working/private/manifest.json")
+    monkeypatch.setenv("MY_DATA_HUB_BLOGGER_PROTECTED_MANIFEST", str(manifest))
+    assert _blogger_protected_manifest() == manifest
+    monkeypatch.setenv("MY_DATA_HUB_BLOGGER_PROTECTED_MANIFEST", str(tmp_path / "manifest.json"))
+    with pytest.raises(RuntimeError, match="/kaggle/working"):
+        _blogger_protected_manifest()
+    assert _destroy_blogger_protected_artifact(None) is None
 
 
 def test_first_checkpoint_attempt_requires_its_conservative_admission_without_overrun_claim(
