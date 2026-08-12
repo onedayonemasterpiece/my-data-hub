@@ -489,7 +489,7 @@ class TunnelBroker:
 
     def _load(self) -> BrokerState:
         _regular_file(self.state_path, "broker state", private=True)
-        if self.state_path.stat().st_size > 2 * 1024 * 1024:
+        if self.state_path.stat().st_size > 8 * 1024 * 1024:
             raise TunnelBrokerError("tunnel broker state is oversized")
         try:
             raw = json.loads(self.state_path.read_text(encoding="utf-8"))
@@ -596,6 +596,10 @@ class TunnelBroker:
             self.session_terminator(self.account)
         except Exception as exc:
             first_failure = first_failure or exc
+        try:
+            self.session_terminator(self.worker_account)
+        except Exception as exc:
+            first_failure = first_failure or exc
         if first_failure is not None:
             raise TunnelBrokerError("one or more fail-closed tunnel denial actions failed") from first_failure
 
@@ -610,7 +614,12 @@ class TunnelBroker:
         _regular_file(self.ca_private_key, "tunnel CA private key", private=True)
         _regular_file(self.ca_public_key, "tunnel CA public key")
         with self._lock():
-            if self.state_path.exists() or self.principals_path.exists() or self.krl_path.exists():
+            if (
+                self.state_path.exists()
+                or self.principals_path.exists()
+                or self.worker_principals_path.exists()
+                or self.krl_path.exists()
+            ):
                 raise TunnelBrokerError("refusing to replace existing tunnel broker state")
             state = BrokerState.empty()
             self._save(state)

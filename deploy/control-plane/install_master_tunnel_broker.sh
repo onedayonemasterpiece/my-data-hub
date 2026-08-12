@@ -77,6 +77,7 @@ grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf([[:sp
 }
 
 # Both accounts have no usable password, shell, home content, groups, or other job.
+install -d -o root -g root -m 0755 "$account_home"
 for tunnel_account in "$account" "$worker_account"; do
   tunnel_home="$account_home/$tunnel_account"
   if getent passwd "$tunnel_account" >/dev/null; then
@@ -93,7 +94,6 @@ for tunnel_account in "$account" "$worker_account"; do
   install -d -o "$tunnel_account" -g "$tunnel_account" -m 0700 "$tunnel_home"
 done
 install -d -o root -g root -m 0700 "$state_root" "$(dirname "$ca_private")"
-install -d -o root -g root -m 0755 "$account_home"
 install -d -o root -g root -m 0755 "$(dirname "$broker_program")" "$(dirname "$sshd_fragment")" "$unit_root"
 install -o root -g root -m 0755 "$broker_source" "$broker_program"
 install -o root -g root -m 0644 "$broker_source" "$(dirname "$broker_ipc_program")/tunnel_broker.py"
@@ -111,6 +111,9 @@ chmod 0644 "$ca_private.pub"
 if [[ ! -e "$state_root/state.json" && ! -e "$state_root/authorized_principals" && ! -e "$state_root/revoked.krl" ]]; then
   "$broker_program" --state-root "$state_root" --ca-private-key "$ca_private" --account "$account" \
     --worker-account "$worker_account" initialize
+fi
+if [[ -f "$state_root/state.json" && ! -e "$state_root/authorized_worker_principals" ]]; then
+  install -o root -g root -m 0644 /dev/null "$state_root/authorized_worker_principals"
 fi
 for required_state in state.json authorized_principals authorized_worker_principals revoked.krl; do
   [[ -f "$state_root/$required_state" && ! -L "$state_root/$required_state" ]] || {

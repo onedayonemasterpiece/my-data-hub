@@ -277,7 +277,7 @@ def test_expiry_reconcile_and_corrupt_authority_fail_closed(tmp_path: Path) -> N
     assert ca_query.returncode != 0
     assert "REVOKED" in f"{ca_query.stdout}\n{ca_query.stderr}"
     assert broker.principals_path.read_bytes() == b""
-    assert terminated[-1] == DEFAULT_ACCOUNT
+    assert terminated[-2:] == [DEFAULT_ACCOUNT, "mdh-embedding-worker"]
 
 
 def test_stale_epoch_wrong_identity_and_overlong_certificate_are_denied(tmp_path: Path) -> None:
@@ -756,7 +756,7 @@ def test_worker_ipc_dispatch_is_exact_public_metadata_only(tmp_path: Path) -> No
         "public_key": public_key,
         "valid_before": (now + timedelta(minutes=4)).isoformat(),
     }
-    issued = _dispatch(broker, {"action": "issue_worker", "payload": payload})
+    issued = _dispatch(broker, {"action": "issue_worker_public_key", "payload": payload})
     assert set(issued) == {
         "certificate",
         "serial",
@@ -769,12 +769,12 @@ def test_worker_ipc_dispatch_is_exact_public_metadata_only(tmp_path: Path) -> No
         "account",
     }
     assert "private" not in json.dumps(issued).casefold()
-    replay = _dispatch(broker, {"action": "issue_worker", "payload": payload})
+    replay = _dispatch(broker, {"action": "issue_worker_public_key", "payload": payload})
     assert replay == issued
     revoked = _dispatch(
         broker,
         {
-            "action": "revoke_worker",
+            "action": "revoke_worker_certificate",
             "payload": {
                 "master_instance_id": INSTANCE,
                 "epoch": 6,
@@ -787,4 +787,4 @@ def test_worker_ipc_dispatch_is_exact_public_metadata_only(tmp_path: Path) -> No
     )
     assert revoked == {"revoked": True}
     with pytest.raises(TunnelBrokerError, match="fields"):
-        _dispatch(broker, {"action": "issue_worker", "payload": {**payload, "private_key": "forbidden"}})
+        _dispatch(broker, {"action": "issue_worker_public_key", "payload": {**payload, "private_key": "forbidden"}})

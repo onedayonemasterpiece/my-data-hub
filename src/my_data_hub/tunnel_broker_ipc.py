@@ -162,7 +162,7 @@ class TunnelBrokerClient:
     ) -> WorkerTunnelCertificate:
         _format(now)
         result = self._call(
-            "issue_worker",
+            "issue_worker_public_key",
             {
                 "master_instance_id": master_instance_id,
                 "epoch": epoch,
@@ -208,7 +208,7 @@ class TunnelBrokerClient:
         reason: str,
     ) -> None:
         result = self._call(
-            "revoke_worker",
+            "revoke_worker_certificate",
             {
                 "master_instance_id": master_instance_id,
                 "epoch": epoch,
@@ -317,7 +317,7 @@ def _dispatch(broker: TunnelBroker, request: object) -> dict[str, object]:
             valid_before=_parse(payload["valid_before"]),
             now=datetime.now(UTC),
         ).public_response()
-    if action == "issue_worker":
+    if action == "issue_worker_public_key":
         payload = _exact(
             envelope["payload"],
             {
@@ -338,7 +338,7 @@ def _dispatch(broker: TunnelBroker, request: object) -> dict[str, object]:
             valid_before=_parse(payload["valid_before"]),
             now=datetime.now(UTC),
         ).public_response()
-    if action == "revoke_worker":
+    if action == "revoke_worker_certificate":
         payload = _exact(
             envelope["payload"],
             {
