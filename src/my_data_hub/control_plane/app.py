@@ -65,7 +65,7 @@ from my_data_hub.embeddings.production import (
     embedding_provider_authority,
 )
 from my_data_hub.embeddings.production_assembly import build_embedding_production_assembly
-from my_data_hub.hashing import canonical_json_bytes
+from my_data_hub.hashing import canonical_json_bytes, sha256_value
 from my_data_hub.mcp.catalog import TOOL_CONTRACTS
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.providers.kaggle import (
@@ -364,6 +364,15 @@ def create_app(
             return None
         authority = control_ledger.provider_effect_authority(str(claim["effect_id"]))
         receipt = control_ledger.latest_provider_effect_receipt(str(claim["effect_id"]))
+        expected_content_tree_sha256 = KaggleMasterRuntimeProvider._mapping_sha(settings.assets.dataset_files)
+        expected_arguments_sha256 = sha256_value(
+            {
+                "content_tree_sha256": expected_content_tree_sha256,
+                "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
+                "disposable": False,
+            }
+        )
+        observed_arguments_sha256 = control_ledger.provider_effect_arguments_sha256(str(claim["effect_id"]))
         expected_key = f"{authority['operation_id']}:ensure_dataset" if authority is not None else ""
         observed_key = control_ledger.provider_effect_idempotency_key(str(claim["effect_id"]))
         if (
@@ -371,10 +380,16 @@ def create_app(
             or authority.get("provider_ref") != settings.assets.dataset_ref
             or observed_key != expected_key
             or str(uuid5(NAMESPACE_URL, expected_key)) != str(claim["effect_id"])
+            or observed_arguments_sha256 != expected_arguments_sha256
             or receipt is None or receipt.get("provider_version") != claim.get("provider_version")
+            or receipt.get("observed_fingerprint") != claim.get("fingerprint")
             or receipt.get("outcome") not in {"applied", "already_applied"}
         ):
-            raise ControlPlaneConfigurationError("master asset claim is not bound to its exact provider effect")
+            # A historical version may be the latest claim while the exact
+            # release assets are still being created.  Keep admission closed
+            # and let the durable reconciliation loop observe a later exact
+            # claim; never assemble a mixed-release worker runtime.
+            return None
         return claim
     if embedding_direct_plane_launcher is None and embedding_credential_authority is None and provider_adapter:
         asset_settings = runtime.master_runtime

@@ -2294,6 +2294,18 @@ class ControlLedger:
             ).fetchone()
         return str(row["idempotency_key"]) if row else None
 
+    def provider_effect_arguments_sha256(self, effect_id: str) -> str | None:
+        """Return the immutable argument digest without projecting provider payloads."""
+
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT intent_json FROM provider_effect_intents WHERE effect_id=?", (effect_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        value = json.loads(str(row["intent_json"])).get("arguments_sha256")
+        return str(value) if isinstance(value, str) and len(value) == 64 else None
+
     def latest_provider_resource_claim(
         self,
         *,
