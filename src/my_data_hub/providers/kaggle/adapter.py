@@ -68,6 +68,7 @@ MAX_BROKERED_BLOB_BYTES = 10 * 1024**3
 MAX_BROKERED_FILES = 100
 _SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 _BROKERED_FILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.\-/]+$")
+_IMMUTABLE_IMAGE = re.compile(r"^[^@\s]+@sha256:[a-f0-9]{64}$")
 
 _CONTROLLED_CLASSES = {
     ControlClass.ORCHESTRATOR_PROTECTED,
@@ -1099,6 +1100,8 @@ class KaggleProviderAdapter:
         dataset_sources: Sequence[str] = (),
         enable_internet: bool = False,
         timeout_seconds: int | None = None,
+        docker_image: str | None = None,
+        docker_image_pinning_type: str | None = None,
     ) -> NotebookMutationResult:
         """Persist an exact protected push pending authenticated runtime source proof.
 
@@ -1123,6 +1126,8 @@ class KaggleProviderAdapter:
             dataset_sources=dataset_sources,
             enable_internet=enable_internet,
             timeout_seconds=timeout_seconds,
+            docker_image=docker_image,
+            docker_image_pinning_type=docker_image_pinning_type,
             pending_runtime_attestation=True,
         )
 
@@ -1141,6 +1146,8 @@ class KaggleProviderAdapter:
         dataset_sources: Sequence[str] = (),
         enable_internet: bool = False,
         timeout_seconds: int | None = None,
+        docker_image: str | None = None,
+        docker_image_pinning_type: str | None = None,
     ) -> NotebookMutationResult:
         return self.push_private_notebook_pending_runtime_attestation(
             intent=intent,
@@ -1155,7 +1162,18 @@ class KaggleProviderAdapter:
             dataset_sources=dataset_sources,
             enable_internet=enable_internet,
             timeout_seconds=timeout_seconds,
+            docker_image=docker_image,
+            docker_image_pinning_type=docker_image_pinning_type,
         )
+
+    def push_private_worker_notebook_pending_attestation(self, **kwargs: Any) -> NotebookMutationResult:
+        """Push one disposable protected worker pending its task-token source callback."""
+        if (
+            kwargs.get("control_class") is not ControlClass.ORCHESTRATOR_PROTECTED
+            or kwargs.get("disposable") is not True
+        ):
+            raise KagglePolicyError("pending worker attestation requires a disposable protected notebook")
+        return self._push_private_notebook(pending_runtime_attestation=True, **kwargs)
 
     def _push_private_notebook(
         self,
@@ -1173,6 +1191,8 @@ class KaggleProviderAdapter:
         enable_internet: bool = False,
         timeout_seconds: int | None = None,
         pending_runtime_attestation: bool,
+        docker_image: str | None = None,
+        docker_image_pinning_type: str | None = None,
     ) -> NotebookMutationResult:
         if intent.action != MutationAction.PUSH_NOTEBOOK:
             raise KaggleContractError("effect intent action does not authorize notebook push/run")
@@ -1193,16 +1213,23 @@ class KaggleProviderAdapter:
             raise KaggleContractError("notebook source must embed the exact task_run_id")
         source_sha = hashlib.sha256(canonical_source).hexdigest()
         normalized_sources = tuple(_normalized_dataset_source(item) for item in dataset_sources)
-        self._validate_intent(
-            intent,
-            arguments={
+        if pending_runtime_attestation and (
+            not isinstance(docker_image, str)
+            or not _IMMUTABLE_IMAGE.fullmatch(docker_image)
+            or docker_image_pinning_type != "original"
+        ):
+            raise KaggleContractError("runtime-attested notebook requires an exact original image digest")
+        intent_arguments = {
                 "task_run_id": str(task_run_id),
                 "source_sha256": source_sha,
                 "dataset_sources": normalized_sources,
                 "control_class": control_class.value,
                 "disposable": disposable,
-            },
-        )
+        }
+        if pending_runtime_attestation:
+            intent_arguments.update({"docker_image": docker_image,
+                                     "docker_image_pinning_type": docker_image_pinning_type})
+        self._validate_intent(intent, arguments=intent_arguments)
         with tempfile.TemporaryDirectory(prefix="my-data-hub-kaggle-kernel-") as temporary:
             folder = Path(temporary)
             code_path = folder.joinpath(*code_file.split("/"))
@@ -1223,9 +1250,11 @@ class KaggleProviderAdapter:
                 "competition_sources": [],
                 "model_sources": [],
             }
+            if pending_runtime_attestation:
+                metadata.update({"docker_image": docker_image,
+                                 "docker_image_pinning_type": docker_image_pinning_type})
             (folder / "kernel-metadata.json").write_bytes(canonical_json_bytes(metadata))
             self.journal.persist_intent(intent)
-            push_response_received = False
             try:
                 # A Notebook push is a non-idempotent provider mutation.  The
                 # official API does not accept our effect idempotency key, so a
@@ -1237,7 +1266,6 @@ class KaggleProviderAdapter:
                     acc=None,
                 )
                 attempts = 1
-                push_response_received = True
                 response_ref = str(_field(response, "ref") or "").strip()
                 ref = _normalized_ref(response_ref or intent.provider_ref)
                 version = _version(_field(response, "version_number", "versionNumber"))
@@ -1245,7 +1273,26 @@ class KaggleProviderAdapter:
                 error = str(_field(response, "error") or "").strip()
                 if error:
                     raise KaggleTerminalFailure(f"Kaggle rejected notebook push: {error[:500]}")
-                if pending_runtime_attestation or not response_ref or version is None or provider_kernel_id is None:
+                if (
+                    pending_runtime_attestation
+                    and response_ref
+                    and version is not None
+                    and provider_kernel_id is not None
+                ):
+                    if ref != intent.provider_ref:
+                        raise KaggleIdentityError("Kaggle push response ref differs")
+                    fingerprint = ProviderFingerprint(value=sha256_value({
+                        "provider_ref": ref, "source_version": version,
+                        "privacy": "private", "source_sha256": source_sha,
+                    }))
+                    source_identity = KaggleKernelSourceIdentity(
+                        provider_ref=ref, source_version=version, privacy="private",
+                        source_sha256=source_sha, fingerprint=fingerprint, observed_at=self.clock(),
+                    )
+                elif pending_runtime_attestation:
+                    self._persist_uncertain(intent, detail="pending_attestation_push_response_incomplete")
+                    raise KaggleAmbiguousMutation("runtime-attested push lacks an exact SaveKernel response")
+                elif not response_ref or version is None or provider_kernel_id is None:
                     # The pinned official SDK's legacy username/key transport can
                     # successfully commit a private Notebook while projecting an
                     # empty ApiSaveKernelResponse (ref="", version=0, id=0).  The
@@ -1256,7 +1303,8 @@ class KaggleProviderAdapter:
                     # disposable workers instead of adding a second auth flow or
                     # blindly pushing again.
                     readback, readback_kernel_id = self._read_latest_private_notebook_identity(
-                        intent.provider_ref, expected_source_sha256=source_sha
+                        intent.provider_ref, expected_source_sha256=source_sha,
+                        expected_docker_image=docker_image,
                     )
                     if response_ref and ref != readback.provider_ref:
                         raise KaggleIdentityError("Kaggle push/readback refs differ")
@@ -1277,22 +1325,10 @@ class KaggleProviderAdapter:
                 outcome = EffectOutcome.APPLIED
             except Exception as exc:
                 if pending_runtime_attestation:
-                    if push_response_received:
-                        self._persist_uncertain(intent, detail="master_push_response_ambiguous")
-                        raise KaggleAmbiguousMutation(
-                            "master push response could not be exactly reconciled"
-                        ) from exc
-                    try:
-                        source_identity, provider_kernel_id = self._read_latest_private_notebook_identity(
-                            intent.provider_ref, expected_source_sha256=source_sha
-                        )
-                    except Exception:
-                        self._persist_uncertain(intent, detail="master_push_response_ambiguous")
-                        raise KaggleAmbiguousMutation(
-                            "master push outcome lacks an exact persisted response"
-                        ) from exc
-                    attempts = 1
-                    outcome = EffectOutcome.ALREADY_APPLIED
+                    self._persist_uncertain(intent, detail="runtime_attested_push_response_ambiguous")
+                    raise KaggleAmbiguousMutation(
+                        "runtime-attested push outcome lacks an exact SaveKernel response"
+                    ) from exc
                 else:
                     recovered = self._recover_notebook(intent.provider_ref, source_sha)
                     if recovered is None:
@@ -1417,7 +1453,8 @@ class KaggleProviderAdapter:
         return source_sha, provider_id
 
     def _read_latest_private_notebook_identity(
-        self, provider_ref: str, *, expected_source_sha256: str | None
+        self, provider_ref: str, *, expected_source_sha256: str | None,
+        expected_docker_image: str | None = None,
     ) -> tuple[KaggleKernelSourceIdentity, int]:
         """Read exact latest identity through the pinned official GetKernel API.
 
@@ -1450,6 +1487,12 @@ class KaggleProviderAdapter:
                     return client.kernels.kernels_api_client.get_kernel(request)
 
             response, _attempts = self.retry.call("kernel_latest_identity", read)
+        metadata = _field(response, "metadata") or response
+        if expected_docker_image is not None:
+            observed_image = str(_field(metadata, "docker_image", "dockerImage") or "").strip()
+            if observed_image != expected_docker_image:
+                raise KaggleIdentityError("Kaggle runtime image readback differs from the exact digest")
+
         metadata = _field(response, "metadata")
         blob = _field(response, "blob")
         observed_ref = _normalized_ref(_field(metadata, "ref"))

@@ -352,10 +352,39 @@ def create_app(
         provider_status = "available"
     if provider_gateway is None and provider_adapter is not None:
         provider_gateway = KaggleMCPProviderGateway(control_ledger, provider_adapter)
+    def _exact_master_asset_claim(settings: MasterRuntimeSettings | None) -> dict[str, Any] | None:
+        if settings is None or not hasattr(settings, "assets"):
+            return None
+        claim = control_ledger.latest_provider_resource_claim(
+            provider_ref=settings.assets.dataset_ref,
+            resource_kind=ProviderKind.DATASET.value,
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
+        )
+        if claim is None:
+            return None
+        authority = control_ledger.provider_effect_authority(str(claim["effect_id"]))
+        receipt = control_ledger.latest_provider_effect_receipt(str(claim["effect_id"]))
+        if (
+            authority is None or authority.get("action") != "create_dataset"
+            or authority.get("provider_ref") != settings.assets.dataset_ref
+            or receipt is None or receipt.get("provider_version") != claim.get("provider_version")
+            or receipt.get("outcome") not in {"applied", "already_applied"}
+        ):
+            raise ControlPlaneConfigurationError("master asset claim is not bound to its exact provider effect")
+        return claim
     if embedding_direct_plane_launcher is None and embedding_credential_authority is None and provider_adapter:
-        embedding_assembly = build_embedding_production_assembly(
-            provider_adapter, broker=tunnel_certificate_broker,
-            master_instance=lambda: str(control_ledger.resolve_service("postgres-master").master_instance_id),
+        asset_settings = runtime.master_runtime
+        asset_claim = _exact_master_asset_claim(asset_settings)
+        exact_asset_ref = (
+            f"{asset_claim['provider_ref']}/{asset_claim['provider_version']}"
+            if asset_claim is not None else None
+        )
+        embedding_assembly = (
+            build_embedding_production_assembly(
+                provider_adapter, broker=tunnel_certificate_broker,
+                master_instance=lambda: str(control_ledger.resolve_service("postgres-master").master_instance_id),
+                runtime_dataset_exact_ref=exact_asset_ref,
+            ) if exact_asset_ref is not None else None
         )
         if embedding_assembly is not None:
             embedding_direct_plane_launcher, embedding_credential_authority = embedding_assembly
@@ -475,6 +504,23 @@ def create_app(
                         await asyncio.to_thread(checkpoint_upload_broker.reconcile_pending_once)
                         # The durable request remains PENDING; provider details
                         # never enter logs/responses and bounded retry resumes.
+                if app.state.embedding_direct_plane_launcher is None and provider_adapter is not None:
+                    settings = runtime.master_runtime
+                    claim = _exact_master_asset_claim(settings)
+                    if claim is not None:
+                        with suppress(Exception):
+                            assembled = build_embedding_production_assembly(
+                                provider_adapter, broker=tunnel_certificate_broker,
+                                master_instance=lambda: str(
+                                    control_ledger.resolve_service("postgres-master").master_instance_id
+                                ),
+                                runtime_dataset_exact_ref=f"{claim['provider_ref']}/{claim['provider_version']}",
+                            )
+                            if assembled is not None:
+                                (
+                                    app.state.embedding_direct_plane_launcher,
+                                    app.state.embedding_credential_authority,
+                                ) = assembled
                 launcher = app.state.embedding_direct_plane_launcher
                 if launcher is not None:
                     with suppress(Exception):
@@ -1614,6 +1660,28 @@ def create_app(
             "disposition": receipt.disposition.value,
             "body_sha256": receipt.body_sha256,
         }
+
+    @app.post("/internal/runtime/events/embedding-worker-attestation")
+    async def embedding_worker_attestation(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, bool]:
+        launcher = app.state.embedding_direct_plane_launcher
+        if launcher is None or not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail={"code": "embedding_attestation_unauthorized"})
+        body = await _bounded_json(request)
+        if set(body) != {"task_run_id", "source_sha256", "image_identity", "image_source_commit", "epoch"}:
+            raise HTTPException(status_code=422, detail={"code": "embedding_attestation_invalid"})
+        try:
+            launcher.attest_runtime_source(
+                task_run_id=UUID(str(body["task_run_id"])),
+                task_token=authorization.removeprefix("Bearer ").strip(),
+                source_sha256=str(body["source_sha256"]), image_identity=str(body["image_identity"]),
+                image_source_commit=str(body["image_source_commit"]),
+                epoch=int(body["epoch"]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=403, detail={"code": "embedding_attestation_rejected"}) from exc
+        return {"accepted": True}
 
     @app.get("/internal/runtime/master-acceptance/{run_id}/{attempt_id}")
     def runtime_master_acceptance_command(

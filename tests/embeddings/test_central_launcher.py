@@ -26,7 +26,7 @@ class Adapter:
         self.datasets.append(kwargs)
         return SimpleNamespace(claim=self._claim("owner/status", ProviderKind.DATASET))
 
-    def push_private_notebook_pending_runtime_attestation(self, **kwargs):  # type: ignore[no-untyped-def]
+    def push_private_worker_notebook_pending_attestation(self, **kwargs):  # type: ignore[no-untyped-def]
         self.runs.append(kwargs)
         return SimpleNamespace(
             run=SimpleNamespace(provider_run_ref="owner/kernel/runs/1"),
@@ -52,7 +52,9 @@ def _metadata() -> EmbeddingLaunchMetadata:
         schema_version="embedding-central-launch-metadata.v1",
         request_id=UUID("11111111-1111-4111-8111-111111111111"), request_sha256="a" * 64,
         task_run_id=UUID("22222222-2222-4222-8222-222222222222"),
-        model_exact_id="intfloat/multilingual-e5-base@revision", input_jobs_sha256="b" * 64,
+        model_exact_id=(
+            "intfloat/multilingual-e5-base@d128750597153bb5987e10b1c3493a34e5a4502a"
+        ), input_jobs_sha256="b" * 64,
         job_count=267, worker_source_sha256="c" * 64,
         worker_primary_source_sha256="c" * 64, epoch=7,
     )
@@ -224,7 +226,7 @@ def test_restart_reuses_exact_capability_after_status_response_loss(tmp_path) ->
 
 def test_restart_replays_push_response_loss_without_new_access(tmp_path) -> None:  # type: ignore[no-untyped-def]
     adapter = Adapter()
-    original = adapter.push_private_notebook_pending_runtime_attestation
+    original = adapter.push_private_worker_notebook_pending_attestation
     calls = 0
     def ambiguous(**kwargs):  # type: ignore[no-untyped-def]
         nonlocal calls
@@ -233,7 +235,7 @@ def test_restart_replays_push_response_loss_without_new_access(tmp_path) -> None
         if calls == 1:
             raise RuntimeError("lost push response")
         return result
-    adapter.push_private_notebook_pending_runtime_attestation = ambiguous  # type: ignore[method-assign]
+    adapter.push_private_worker_notebook_pending_attestation = ambiguous  # type: ignore[method-assign]
     now = datetime(2026, 8, 12, tzinfo=UTC)
     class Access:
         calls = 0
@@ -253,3 +255,40 @@ def test_restart_replays_push_response_loss_without_new_access(tmp_path) -> None
         adapter, access, config, clock=lambda: now, journal_path=journal
     ).launch(_metadata())
     assert access.calls == 1 and calls == 2
+
+
+def test_runtime_attestation_is_task_token_source_image_commit_and_epoch_bound(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    adapter = Adapter()
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+
+    def access(_metadata, _token):  # type: ignore[no-untyped-def]
+        return EmbeddingWorkerDirectAccess(
+            database_url="postgresql://w:s@d/h", tls_ca_pem="ca",
+            expires_at=now + timedelta(minutes=5), epoch=7, tunnel_endpoint="d:1",
+            credential_id=UUID("33333333-3333-4333-8333-333333333333"),
+        )
+
+    commit = "f" * 40
+    launcher = CentralEmbeddingWorkerLauncher(
+        adapter, access, EmbeddingWorkerLaunchConfig(
+            "owner", "owner/runtime/12", "runtime@sha256:" + "d" * 64,
+            "wheel", "e" * 64, "https://control.example/internal/runtime/events",
+            runtime_image_source_commit=commit,
+        ), clock=lambda: now, journal_path=tmp_path / "journal.json",
+    )
+    receipt = launcher.launch(_metadata())
+    capability = json.loads((tmp_path / f"{receipt.task_run_id}.capability").read_text())
+    launcher.attest_runtime_source(
+        task_run_id=receipt.task_run_id,
+        task_token=capability["callback"]["task_token"],
+        source_sha256=receipt.source_sha256,
+        image_identity="runtime@sha256:" + "d" * 64,
+        image_source_commit=commit,
+        epoch=7,
+    )
+    assert launcher._states[receipt.task_run_id]["runtime_attested"] is True
+    with pytest.raises(ValueError, match="binding differs"):
+        launcher.attest_runtime_source(
+            task_run_id=receipt.task_run_id, task_token="wrong", source_sha256=receipt.source_sha256,
+            image_identity="runtime@sha256:" + "d" * 64, image_source_commit=commit, epoch=7,
+        )

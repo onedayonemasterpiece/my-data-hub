@@ -8,6 +8,7 @@ accepted by this component.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -60,7 +61,7 @@ class WorkerAccessFactory(Protocol):
 
 class CentralAdapter(Protocol):
     def create_private_dataset(self, **kwargs: Any) -> Any: ...
-    def push_private_notebook_pending_runtime_attestation(self, **kwargs: Any) -> Any: ...
+    def push_private_worker_notebook_pending_attestation(self, **kwargs: Any) -> Any: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +72,8 @@ class EmbeddingWorkerLaunchConfig:
     wheel_relative_path: str
     wheel_sha256: str
     callback_url: str
+    runtime_python_series: str = "3.12"
+    runtime_image_source_commit: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,9 +168,35 @@ class CentralEmbeddingWorkerLauncher:
                 "image_identity": self.config.runtime_image_identity,
                 "wheel_relative_path": self.config.wheel_relative_path,
                 "wheel_sha256": self.config.wheel_sha256,
+                "input_dataset_versions": [self.config.runtime_dataset_exact_ref, f"{status_ref}/1"],
             },
         }
         files = {"embedding-worker.json": canonical_json_bytes(status)}
+        worker_assets = __import__(
+            "my_data_hub.embeddings.production", fromlist=["WORKER_ASSETS"]
+        ).WORKER_ASSETS
+        asset = next(item for item in worker_assets if item.model.exact_id == metadata.model_exact_id)
+        pins = {
+            "schema": "my-data-hub-notebook-execution-pins/v1", "notebook": asset.notebook_slug,
+            "python_series": self.config.runtime_python_series,
+            "image_source_commit": self.config.runtime_image_source_commit,
+            "kaggle_runtime_image_identity": self.config.runtime_image_identity,
+            "input_dataset_versions": [self.config.runtime_dataset_exact_ref, f"{status_ref}/1"],
+            "immutable_asset_sha256s": {
+                "my_data_hub_wheel_sha256": self.config.wheel_sha256,
+                "primary_source_sha256": metadata.worker_primary_source_sha256,
+            },
+            "output_contract": "my-data-hub-blogger-embedding-artifact.v1",
+            "model": {"id": asset.model.model_key, "revision": asset.model.revision},
+            "privacy": "private", "resource_class": "orchestrator_protected",
+            "cleanup_retention_policy": {
+                "cleanup_receipt_required": True,
+                "notebook_resource": "orchestrator_protected_until_owner_supersedes",
+                "run_outputs": "retain_until_terminal_receipt_then_control_policy",
+                "task_owned_inputs": "claim_bound_delete_after_terminal_or_expiry",
+            },
+        }
+        files["execution-pins.json"] = canonical_json_bytes(pins)
         if secret_path is not None and (saved is None or saved.get("direct_access") is None):
             self._write_secret(secret_path, files["embedding-worker.json"])
             self._states[metadata.task_run_id].update({
@@ -198,6 +227,8 @@ class CentralEmbeddingWorkerLauncher:
         exact_status = f"{status_ref}/{dataset.claim.provider_version}"
         source = self._render_source(status_ref)
         source_sha = hashlib.sha256(source).hexdigest()
+        self._states[metadata.task_run_id]["expected_source_sha256"] = source_sha
+        self._save_journal()
         sources = (self.config.runtime_dataset_exact_ref, exact_status)
         push_intent = ProviderEffectIntent.create(
             operation_id=operation_id,
@@ -208,14 +239,16 @@ class CentralEmbeddingWorkerLauncher:
             arguments={"task_run_id": str(metadata.task_run_id), "source_sha256": source_sha,
                        "dataset_sources": sources,
                        "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
-                       "disposable": True}, requested_at=now,
+                       "disposable": True, "docker_image": self.config.runtime_image_identity,
+                       "docker_image_pinning_type": "original"}, requested_at=now,
         )
-        run = self.adapter.push_private_notebook_pending_runtime_attestation(
+        run = self.adapter.push_private_worker_notebook_pending_attestation(
             intent=push_intent, task_run_id=metadata.task_run_id, source=source,
             title=notebook_ref.split("/", 1)[1], code_file="worker.py", kernel_type="script",
             language="python", control_class=ControlClass.ORCHESTRATOR_PROTECTED,
             disposable=True, dataset_sources=sources, enable_internet=True,
-            timeout_seconds=10_800,
+            timeout_seconds=10_800, docker_image=self.config.runtime_image_identity,
+            docker_image_pinning_type="original",
         )
         receipt = EmbeddingWorkerLaunchReceipt(
             task_run_id=metadata.task_run_id, status_dataset_exact_ref=exact_status,
@@ -229,6 +262,30 @@ class CentralEmbeddingWorkerLauncher:
         self._states[metadata.task_run_id]["state"] = "LAUNCHED"
         self._save_journal()
         return receipt
+
+    def attest_runtime_source(
+        self, *, task_run_id: UUID, task_token: str, source_sha256: str,
+        image_identity: str, epoch: int,
+        image_source_commit: str,
+    ) -> None:
+        self._load_journal()
+        state = self._states.get(task_run_id)
+        secret_path = self._secret_path(task_run_id)
+        if state is None or secret_path is None:
+            raise ValueError("embedding launch attestation is unknown")
+        metadata = EmbeddingLaunchMetadata.model_validate(state["metadata"])
+        secret = self._read_secret(secret_path, metadata)
+        expected_token = str(secret["callback"]["task_token"])
+        if (
+            not hmac.compare_digest(task_token, expected_token)
+            or source_sha256 != state.get("expected_source_sha256")
+            or image_identity != self.config.runtime_image_identity
+            or image_source_commit != self.config.runtime_image_source_commit
+            or epoch != metadata.epoch
+        ):
+            raise ValueError("embedding runtime attestation binding differs")
+        state["runtime_attested"] = True
+        self._save_journal()
 
     def cleanup(self, task_run_id: UUID) -> tuple[object, object]:
         """Idempotently revoke access then delete exact disposable resources."""
@@ -371,6 +428,7 @@ class CentralEmbeddingWorkerLauncher:
             task_id = UUID(task)
             allowed_keys = {
                 "state", "metadata", "updated_at", "credential_id", "credential_expires_at", "status_claim",
+                "expected_source_sha256", "runtime_attested",
             }
             if (not isinstance(value, dict) or not {"state", "metadata", "updated_at"} <= set(value)
                     or set(value) - allowed_keys or value.get("state") not in allowed_states
@@ -397,8 +455,17 @@ class CentralEmbeddingWorkerLauncher:
             "import json, os, pathlib, subprocess, time",
             f's=json.loads(pathlib.Path({status_mount!r}, "embedding-worker.json").read_text())',
             'assert s["schema_version"] == "embedding-worker-status.v1"',
+            f'pins=pathlib.Path({status_mount!r},"execution-pins.json")',
+            'os.environ["MY_DATA_HUB_EXECUTION_PINS_PATH"]=str(pins)',
+            'os.environ["MY_DATA_HUB_EXECUTION_PINS_SHA256"]=__import__("hashlib").sha256(pins.read_bytes()).hexdigest()',
             'a=s["direct_access"]; m=s["launch"]; r=s["runtime"]',
             'if int(a["epoch"]) != int(m["epoch"]): raise RuntimeError("epoch mismatch")',
+            'observed_commit=pathlib.Path("/etc/git_commit").read_text().strip()',
+            'body=json.dumps({"task_run_id":m["task_run_id"],"source_sha256":__import__("hashlib").sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),"image_identity":r["image_identity"],"image_source_commit":observed_commit,"epoch":m["epoch"]}).encode()',
+            'attest_url=s["callback"]["url"].rstrip("/")+"/embedding-worker-attestation"',
+            'headers={"Authorization":"Bearer "+s["callback"]["task_token"],"Content-Type":"application/json"}',
+            'req=__import__("urllib.request",fromlist=["Request"]).Request(attest_url,data=body,headers=headers,method="POST")',
+            '__import__("urllib.request",fromlist=["urlopen"]).urlopen(req,timeout=30).read()',
             'ca=pathlib.Path("/kaggle/working/mdh-worker-ca.pem")',
             'ca.write_text(a["tls_ca_pem"]); ca.chmod(0o600)',
             'if a.get("ssh_private_key"):',
@@ -424,9 +491,11 @@ class CentralEmbeddingWorkerLauncher:
             f'os.environ["MY_DATA_HUB_WHEEL_PATH"]=str(pathlib.Path({runtime_mount!r},r["wheel_relative_path"]))',
             'os.environ["MY_DATA_HUB_WHEEL_SHA256"]=r["wheel_sha256"]',
             'os.environ["MY_DATA_HUB_KAGGLE_RUNTIME_IMAGE_IDENTITY"]=r["image_identity"]',
+            f'os.environ["MY_DATA_HUB_KAGGLE_RUNTIME_SOURCE_COMMIT"]={self.config.runtime_image_source_commit!r}',
             'os.environ["MY_DATA_HUB_NOTEBOOK_IS_PRIVATE"]="true"',
+            'os.environ["MY_DATA_HUB_INPUT_DATASET_VERSIONS_JSON"]=json.dumps(r["input_dataset_versions"])',
             'asset="e5-worker.json" if "multilingual-e5" in m["model_exact_id"] else "bge-worker.json"',
-            f'n=json.loads(pathlib.Path({runtime_mount!r},"embeddings",asset).read_text())',
+            f'n=json.loads(pathlib.Path({runtime_mount!r},asset).read_text())',
             'for c in n["cells"]:',
             '    if c["cell_type"]=="code": exec(compile(c["source"],asset,"exec"),globals())',
         ]

@@ -10,6 +10,13 @@
   "probe_relations": [
     "hub.canonical_state"
   ],
+  "worker_runtime": {
+    "image_identity": "gcr.io/kaggle-images/python@sha256:c1fa4de30bc268e601e6dcddb6ceb2519b9adde3527dbbfb05e6bdfbbbdcd1a2",
+    "docker_image_pinning_type": "original",
+    "release_url": "https://github.com/Kaggle/docker-python/releases/tag/v170-CPU-c1fa4de30bc268e601e6dcddb6ceb2519b9adde3527dbbfb05e6bdfbbbdcd1a2",
+    "source_commit": "fc61d5cda7da39530055bae9bd0e92865f995cd9",
+    "python_series": "3.12"
+  },
   "assets": {
     "master_notebook": {
       "path": "postgres-master.ipynb",
@@ -40,6 +47,16 @@
       "path": "dataset/tunnel-known-hosts",
       "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
       "byte_size": 128
+    },
+    "embedding_e5_worker": {
+      "path": "dataset/e5-worker.json",
+      "sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+      "byte_size": 4096
+    },
+    "embedding_bge_worker": {
+      "path": "dataset/bge-worker.json",
+      "sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+      "byte_size": 4096
     }
   }
 }

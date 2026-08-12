@@ -32,6 +32,16 @@ REJECTED_POSTGRES_RUNTIME_SHA256 = {
 POSTGRES_RECIPE_PATH = "scripts/provider/assets/postgresql-18.4-pgvector-0.8.6.Dockerfile"
 POSTGRES_BUILDER_IMAGE = "ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f"
 APPROVED_POSTGRES_RUNTIME_SHA256 = "40bf34fb4a97a248537d0221127e38deb98c9b35208d474dd1b93f773c2558b5"
+KAGGLE_CPU_IMAGE_IDENTITY = (
+    "gcr.io/kaggle-images/python@sha256:"
+    "c1fa4de30bc268e601e6dcddb6ceb2519b9adde3527dbbfb05e6bdfbbbdcd1a2"
+)
+KAGGLE_CPU_IMAGE_RELEASE = (
+    "https://github.com/Kaggle/docker-python/releases/tag/"
+    "v170-CPU-c1fa4de30bc268e601e6dcddb6ceb2519b9adde3527dbbfb05e6bdfbbbdcd1a2"
+)
+KAGGLE_CPU_IMAGE_SOURCE_COMMIT = "fc61d5cda7da39530055bae9bd0e92865f995cd9"
+KAGGLE_CPU_IMAGE_PYTHON_SERIES = "3.12"
 
 
 class AssetBundleError(RuntimeError):
@@ -135,6 +145,8 @@ def build_bundle(
     verifier_path = root / "notebooks/03-checkpoint-verifier-restore-smoke/worker.ipynb"
     master = _read_bounded(master_path, maximum=8 * 1024 * 1024)
     verifier = _read_bounded(verifier_path, maximum=8 * 1024 * 1024)
+    e5_worker = _read_bounded(root / "src/my_data_hub/embeddings/assets/e5-worker.json", maximum=1024 * 1024)
+    bge_worker = _read_bounded(root / "src/my_data_hub/embeddings/assets/bge-worker.json", maximum=1024 * 1024)
     with tempfile.TemporaryDirectory(prefix="mdh-master-wheel-") as temporary:
         wheel_path = wheel_builder(root, Path(temporary))
         wheel = _read_bounded(wheel_path, maximum=MAX_ASSET_BYTES)
@@ -181,6 +193,8 @@ def build_bundle(
         dataset_dir / POSTGRES_RUNTIME_NAME: postgres_runtime,
         dataset_dir / POSTGRES_RUNTIME_MANIFEST_NAME: runtime_manifest,
         dataset_dir / TUNNEL_KNOWN_HOSTS_NAME: known_hosts,
+        dataset_dir / "e5-worker.json": e5_worker,
+        dataset_dir / "bge-worker.json": bge_worker,
     }
     for path, body in files.items():
         path.write_bytes(body)
@@ -193,6 +207,13 @@ def build_bundle(
         "source_version": source_commit,
         **refs,
         "probe_relations": list(relations),
+        "worker_runtime": {
+            "image_identity": KAGGLE_CPU_IMAGE_IDENTITY,
+            "docker_image_pinning_type": "original",
+            "release_url": KAGGLE_CPU_IMAGE_RELEASE,
+            "source_commit": KAGGLE_CPU_IMAGE_SOURCE_COMMIT,
+            "python_series": KAGGLE_CPU_IMAGE_PYTHON_SERIES,
+        },
         "assets": {
             "master_notebook": {
                 "path": "postgres-master.ipynb",
@@ -224,6 +245,12 @@ def build_bundle(
                 "sha256": _sha256(known_hosts),
                 "byte_size": len(known_hosts),
             },
+            "embedding_e5_worker": {
+                "path": "dataset/e5-worker.json", "sha256": _sha256(e5_worker), "byte_size": len(e5_worker),
+            },
+            "embedding_bge_worker": {
+                "path": "dataset/bge-worker.json", "sha256": _sha256(bge_worker), "byte_size": len(bge_worker),
+            },
         },
     }
     manifest_body = canonical_json_bytes(manifest)
@@ -242,6 +269,13 @@ def build_bundle(
         "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_REF": checkpoint_verifier_ref,
         "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_SOURCE_FILE": "checkpoint-verifier.ipynb",
         "MY_DATA_HUB_KAGGLE_CHECKPOINT_PROBE_RELATIONS_JSON": json.dumps(relations, separators=(",", ":")),
+        "MY_DATA_HUB_EMBEDDING_RUNTIME_IMAGE_IDENTITY": KAGGLE_CPU_IMAGE_IDENTITY,
+        "MY_DATA_HUB_EMBEDDING_RUNTIME_IMAGE_PINNING_TYPE": "original",
+        "MY_DATA_HUB_EMBEDDING_RUNTIME_SOURCE_COMMIT": KAGGLE_CPU_IMAGE_SOURCE_COMMIT,
+        "MY_DATA_HUB_EMBEDDING_WHEEL_RELATIVE_PATH": wheel_name,
+        "MY_DATA_HUB_EMBEDDING_WHEEL_SHA256": _sha256(wheel),
+        "MY_DATA_HUB_MASTER_TUNNEL_KNOWN_HOSTS_PATH": "/master-assets/dataset/tunnel-known-hosts",
+        "MY_DATA_HUB_EMBEDDING_RUNTIME_PYTHON_SERIES": KAGGLE_CPU_IMAGE_PYTHON_SERIES,
     }
     env_path = output / "master-assets.env"
     env_path.write_text(

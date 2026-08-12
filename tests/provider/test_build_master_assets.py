@@ -31,6 +31,10 @@ def _root(tmp_path: Path) -> Path:
     verifier.parent.mkdir(parents=True)
     master.write_bytes(b'{"master":true}')
     verifier.write_bytes(b'{"verifier":true}')
+    embedding_assets = root / "src/my_data_hub/embeddings/assets"
+    embedding_assets.mkdir(parents=True)
+    (embedding_assets / "e5-worker.json").write_text('{"worker":"e5"}')
+    (embedding_assets / "bge-worker.json").write_text('{"worker":"bge"}')
     recipe = root / "scripts/provider/assets/postgresql-18.4-pgvector-0.8.6.Dockerfile"
     recipe.parent.mkdir(parents=True)
     recipe.write_bytes(
@@ -97,7 +101,7 @@ def test_build_bundle_is_exact_secret_free_and_schema_valid(tmp_path: Path) -> N
         "schema_version": "my-data-hub-master-asset-bundle.v1",
         "source_commit": COMMIT,
         "manifest_sha256": hashlib.sha256((output / "master-asset-bundle.json").read_bytes()).hexdigest(),
-        "asset_count": 6,
+        "asset_count": 8,
         "verified": True,
     }
 

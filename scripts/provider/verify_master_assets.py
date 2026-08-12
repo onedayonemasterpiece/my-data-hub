@@ -25,6 +25,13 @@ POSTGRESQL_SOURCE_SHA256 = "81a81ec695fb0c7901407defaa1d2f7973617154cf27ba74e3a7
 PGVECTOR_SOURCE_URL = "https://github.com/pgvector/pgvector/archive/refs/tags/v0.8.6.tar.gz"
 PGVECTOR_SOURCE_SHA256 = "10bf9938906e5d643bbc4a7eea104b6f57ba4898e5b76b20e60484ea1d5a7f8f"
 APPROVED_POSTGRES_RUNTIME_SHA256 = "40bf34fb4a97a248537d0221127e38deb98c9b35208d474dd1b93f773c2558b5"
+KAGGLE_CPU_IMAGE_IDENTITY = (
+    "gcr.io/kaggle-images/python@sha256:"
+    "c1fa4de30bc268e601e6dcddb6ceb2519b9adde3527dbbfb05e6bdfbbbdcd1a2"
+)
+KAGGLE_CPU_IMAGE_RELEASE = "https://github.com/Kaggle/docker-python/releases/tag/v170-CPU-c1fa4de30bc268e601e6dcddb6ceb2519b9adde3527dbbfb05e6bdfbbbdcd1a2"
+KAGGLE_CPU_IMAGE_SOURCE_COMMIT = "fc61d5cda7da39530055bae9bd0e92865f995cd9"
+KAGGLE_CPU_IMAGE_PYTHON_SERIES = "3.12"
 
 
 class AssetVerificationError(RuntimeError):
@@ -80,6 +87,13 @@ def _expected_environment(manifest: dict[str, Any]) -> dict[str, str]:
         "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_REF": manifest["checkpoint_verifier_ref"],
         "MY_DATA_HUB_KAGGLE_CHECKPOINT_VERIFIER_SOURCE_FILE": "checkpoint-verifier.ipynb",
         "MY_DATA_HUB_KAGGLE_CHECKPOINT_PROBE_RELATIONS_JSON": json.dumps(relations, separators=(",", ":")),
+        "MY_DATA_HUB_EMBEDDING_RUNTIME_IMAGE_IDENTITY": manifest["worker_runtime"]["image_identity"],
+        "MY_DATA_HUB_EMBEDDING_RUNTIME_IMAGE_PINNING_TYPE": "original",
+        "MY_DATA_HUB_EMBEDDING_RUNTIME_SOURCE_COMMIT": manifest["worker_runtime"]["source_commit"],
+        "MY_DATA_HUB_EMBEDDING_WHEEL_RELATIVE_PATH": Path(manifest["assets"]["wheel"]["path"]).name,
+        "MY_DATA_HUB_EMBEDDING_WHEEL_SHA256": manifest["assets"]["wheel"]["sha256"],
+        "MY_DATA_HUB_MASTER_TUNNEL_KNOWN_HOSTS_PATH": "/master-assets/dataset/tunnel-known-hosts",
+        "MY_DATA_HUB_EMBEDDING_RUNTIME_PYTHON_SERIES": manifest["worker_runtime"]["python_series"],
     }
 
 
@@ -124,10 +138,19 @@ def verify_bundle(*, bundle: Path, expected_commit: str) -> dict[str, object]:
         "checkpoint_dataset_ref",
         "checkpoint_verifier_ref",
         "probe_relations",
+        "worker_runtime",
         "assets",
     }
     if set(manifest) != expected_keys or manifest.get("schema_version") != SCHEMA_VERSION:
         raise AssetVerificationError("master asset manifest shape is not exact")
+    if manifest["worker_runtime"] != {
+        "image_identity": KAGGLE_CPU_IMAGE_IDENTITY,
+        "docker_image_pinning_type": "original",
+        "release_url": KAGGLE_CPU_IMAGE_RELEASE,
+        "source_commit": KAGGLE_CPU_IMAGE_SOURCE_COMMIT,
+        "python_series": KAGGLE_CPU_IMAGE_PYTHON_SERIES,
+    }:
+        raise AssetVerificationError("worker runtime provenance differs from the reviewed official release")
     source_commit = _require_string(manifest, "source_commit", SHA40)
     if source_commit != expected_commit:
         raise AssetVerificationError("master asset commit does not match the approved release")
@@ -159,6 +182,8 @@ def verify_bundle(*, bundle: Path, expected_commit: str) -> dict[str, object]:
         "postgres_runtime",
         "postgres_runtime_manifest",
         "tunnel_known_hosts",
+        "embedding_e5_worker",
+        "embedding_bge_worker",
     }:
         raise AssetVerificationError("master asset inventory is invalid")
     expected_paths = {
@@ -167,6 +192,8 @@ def verify_bundle(*, bundle: Path, expected_commit: str) -> dict[str, object]:
         "postgres_runtime": "dataset/postgresql-18-runtime.bundle",
         "postgres_runtime_manifest": "dataset/postgresql-18-runtime.json",
         "tunnel_known_hosts": "dataset/tunnel-known-hosts",
+        "embedding_e5_worker": "dataset/e5-worker.json",
+        "embedding_bge_worker": "dataset/bge-worker.json",
     }
     verified_assets: dict[str, dict[str, object]] = {}
     for name, raw in assets.items():

@@ -228,6 +228,16 @@ class MasterRuntimeSettings:
         if not all(raw.values()):
             # Partial launch configuration never causes a best-effort provider call.
             return None
+        raw.update({
+            "runtime_image_identity": os.getenv(
+                "MY_DATA_HUB_EMBEDDING_RUNTIME_IMAGE_IDENTITY",
+                "gcr.io/kaggle-images/python@sha256:c1fa4de30bc268e601e6dcddb6ceb2519b9adde3527dbbfb05e6bdfbbbdcd1a2",
+            ).strip(),
+            "runtime_image_source_commit": os.getenv(
+                "MY_DATA_HUB_EMBEDDING_RUNTIME_SOURCE_COMMIT", "fc61d5cda7da39530055bae9bd0e92865f995cd9"
+            ).strip(),
+            "runtime_python_series": os.getenv("MY_DATA_HUB_EMBEDDING_RUNTIME_PYTHON_SERIES", "3.12").strip(),
+        })
         callback = urlsplit(raw["callback_url"])
         if (
             raw["callback_url"] != CANONICAL_RUNTIME_CALLBACK_URL

@@ -52,6 +52,7 @@ from .source_attestation import executable_source_sha256
 MASTER_TERMINAL_OUTPUT_NAME = "my-data-hub-master-terminal.json"
 MAX_MASTER_TERMINAL_OUTPUT_BYTES = 256 * 1024
 MAX_MASTER_STATUS_BYTES = 16 * 1024
+EXECUTION_PINS_NAME = "execution-pins.json"
 MASTER_CONFIG_NAME = "master-config.json"
 POSTGRES_RUNTIME_ARCHIVE_NAME = "postgresql-18-runtime.bundle"
 POSTGRES_RUNTIME_MANIFEST_NAME = "postgresql-18-runtime.json"
@@ -120,6 +121,12 @@ class KaggleMasterLaunchAssets:
     tunnel_gateway_port: int
     tunnel_gateway_user: str
     tunnel_remote_port: int
+    runtime_image_identity: str = (
+        "gcr.io/kaggle-images/python@sha256:"
+        "c1fa4de30bc268e601e6dcddb6ceb2519b9adde3527dbbfb05e6bdfbbbdcd1a2"
+    )
+    runtime_image_source_commit: str = "fc61d5cda7da39530055bae9bd0e92865f995cd9"
+    runtime_python_series: str = "3.12"
     runtime_secret_bindings: Mapping[str, str] = field(default_factory=dict)
     notebook_code_file: str = "worker.ipynb"
     notebook_kernel_type: str = "notebook"
@@ -137,6 +144,12 @@ class KaggleMasterLaunchAssets:
                 raise MasterLaunchContractError(f"{field_name} must be exact owner/slug")
         if not self.source_identity or not self.source_version or not self.checkpoint_ref:
             raise MasterLaunchContractError("source/checkpoint identity must be exact")
+        if (
+            not re.fullmatch(r"[^@\s]+@sha256:[a-f0-9]{64}", self.runtime_image_identity)
+            or not re.fullmatch(r"[a-f0-9]{40}", self.runtime_image_source_commit)
+            or not re.fullmatch(r"[0-9]+\.[0-9]+", self.runtime_python_series)
+        ):
+            raise MasterLaunchContractError("master runtime image provenance is incomplete")
         if not self.dataset_files or not self.notebook_source:
             raise MasterLaunchContractError("master launch assets must be non-empty")
         if self.callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
@@ -297,6 +310,7 @@ def _runtime_bootstrap(
     status_helper_sha256: str,
     master_config_sha256: str,
     secret_bindings: Mapping[str, str],
+    execution_pins: bytes | None = None,
 ) -> str:
     # The callback token is loaded only from the exact private status Dataset.
     encoded = json.dumps(dict(values), sort_keys=True)
@@ -322,6 +336,15 @@ def _runtime_bootstrap(
         "run_id=_mdh_values['MY_DATA_HUB_RUN_ID'], attempt_id=_mdh_values['MY_DATA_HUB_ATTEMPT_ID'], "
         "notebook=_mdh_values['MY_DATA_HUB_SOURCE_IDENTITY'])\n"
     )
+    if execution_pins is not None:
+        bootstrap += (
+            f"_mdh_pins_body = {execution_pins!r}\n"
+            "_mdh_pins_path = _mdh_pathlib.Path('/kaggle/working/execution-pins.json')\n"
+            "_mdh_fd = _mdh_os.open(_mdh_pins_path, _mdh_os.O_WRONLY|_mdh_os.O_CREAT|_mdh_os.O_EXCL, 0o600)\n"
+            "with _mdh_os.fdopen(_mdh_fd, 'wb') as _mdh_pins_stream: _mdh_pins_stream.write(_mdh_pins_body)\n"
+            "_mdh_os.environ['MY_DATA_HUB_EXECUTION_PINS_PATH'] = str(_mdh_pins_path)\n"
+            "_mdh_os.environ['MY_DATA_HUB_EXECUTION_PINS_SHA256'] = _mdh_hashlib.sha256(_mdh_pins_body).hexdigest()\n"
+        )
     if secret_bindings:
         bootstrap += (
             "from kaggle_secrets import UserSecretsClient as _MdhSecrets\n"
@@ -392,6 +415,7 @@ def render_notebook_source(
     status_helper_sha256: str,
     master_config_sha256: str,
     secret_bindings: Mapping[str, str] | None = None,
+    execution_pins: bytes | None = None,
 ) -> bytes:
     source = _replace_nonsecret_markers(source, values)
     bootstrap = _runtime_bootstrap(
@@ -401,6 +425,7 @@ def render_notebook_source(
         status_helper_sha256=status_helper_sha256,
         master_config_sha256=master_config_sha256,
         secret_bindings=secret_bindings or {},
+        execution_pins=execution_pins,
     )
     if kernel_type == "script":
         return (bootstrap + "\n").encode() + source
@@ -479,6 +504,47 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             MASTER_CONFIG_NAME: canonical_json_bytes(master_config),
             POSTGRES_TLS_CERT_NAME: tls_certificate,
             POSTGRES_TLS_KEY_NAME: tls_private_key,
+        }
+
+    def _execution_pins(self, identity: Mapping[str, Any]) -> dict[str, object] | None:
+        try:
+            notebook = json.loads(self.assets.notebook_source)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        try:
+            contract = notebook.get("metadata", {}).get("my_data_hub", {}).get("execution_pin_contract")
+            if contract is None:
+                return None
+            asset_version = int(identity["asset_dataset"]["provider_version"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MasterLaunchContractError("generated master execution pin contract is absent") from exc
+        status = self._status_authority_row(identity).get("status_dataset", {})
+        status_ref = str(status.get("exact_version_ref", ""))
+        refs = [f"{self.assets.dataset_ref}/{asset_version}", status_ref]
+        checkpoint = identity.get("boot_checkpoint")
+        if isinstance(checkpoint, Mapping) and checkpoint.get("kind") == "VERIFIED":
+            refs.append(str(checkpoint["exact_version_ref"]))
+        wheel_names = sorted(name for name in self.assets.dataset_files if name.endswith(".whl"))
+        if len(wheel_names) != 1:
+            raise MasterLaunchContractError("master execution pins require one exact wheel")
+        return {
+            "schema": contract["schema"],
+            "notebook": contract["notebook"],
+            "python_series": self.assets.runtime_python_series,
+            "image_source_commit": self.assets.runtime_image_source_commit,
+            "kaggle_runtime_image_identity": self.assets.runtime_image_identity,
+            "input_dataset_versions": refs,
+            "immutable_asset_sha256s": {
+                "my_data_hub_wheel_sha256": hashlib.sha256(
+                    self.assets.dataset_files[wheel_names[0]]
+                ).hexdigest(),
+                "primary_source_sha256": notebook["metadata"]["my_data_hub"]["primary_source_sha256"],
+            },
+            "output_contract": contract["output_contract"],
+            "model": contract["model"],
+            "privacy": contract["privacy"],
+            "resource_class": contract["resource_class"],
+            "cleanup_retention_policy": contract["cleanup_retention_policy"],
         }
 
     def _master_config(self, identity: Mapping[str, Any]) -> dict[str, object]:
@@ -651,6 +717,8 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
                     "dataset_sources": dataset_sources,
                     "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
                     "disposable": False,
+                    "docker_image": self.assets.runtime_image_identity,
+                    "docker_image_pinning_type": "original",
                 },
             )
             result = self.adapter.push_private_master_notebook_pending_attestation(
@@ -666,6 +734,8 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
                 dataset_sources=dataset_sources,
                 enable_internet=self.assets.enable_internet,
                 timeout_seconds=self.assets.notebook_timeout_seconds,
+                docker_image=self.assets.runtime_image_identity,
+                docker_image_pinning_type="original",
             )
             return self._notebook_receipt(effect, result)
         if effect.effect_kind == "trigger_run":
@@ -894,15 +964,27 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
         status_dataset = status.get("status_dataset")
         if not isinstance(status_dataset, Mapping):
             raise MasterLaunchContractError("master status Dataset claim is absent")
+        pin_payload = self._execution_pins(identity)
+        values = self.assets.render_values(identity)
+        if pin_payload is not None:
+            values.update({
+                "MY_DATA_HUB_INPUT_DATASET_VERSIONS_JSON": json.dumps(
+                    pin_payload["input_dataset_versions"], separators=(",", ":")
+                ),
+                "MY_DATA_HUB_NOTEBOOK_IS_PRIVATE": "true",
+                "MY_DATA_HUB_KAGGLE_RUNTIME_IMAGE_IDENTITY": self.assets.runtime_image_identity,
+                "MY_DATA_HUB_KAGGLE_RUNTIME_SOURCE_COMMIT": self.assets.runtime_image_source_commit,
+            })
         return render_notebook_source(
             self.assets.notebook_source,
             kernel_type=self.assets.notebook_kernel_type,
-            values=self.assets.render_values(identity),
+            values=values,
             status_dataset_ref=str(status_dataset["provider_ref"]),
             status_config_sha256=str(status_dataset["status_config_sha256"]),
             status_helper_sha256=str(status_dataset["status_helper_sha256"]),
             master_config_sha256=str(status_dataset["master_config_sha256"]),
             secret_bindings=self.assets.runtime_secret_bindings,
+            execution_pins=(canonical_json_bytes(pin_payload) if pin_payload is not None else None),
         )
 
     def _assert_boot_checkpoint_current(self, status: Mapping[str, Any]) -> None:

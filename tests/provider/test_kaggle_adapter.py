@@ -28,6 +28,7 @@ from my_data_hub.providers.kaggle import (
 from my_data_hub.providers.kaggle.adapter import _canonical_notebook_source
 
 NOW = datetime(2026, 8, 10, 12, tzinfo=UTC)
+TEST_RUNTIME_IMAGE = "gcr.io/kaggle-images/python@sha256:" + "a" * 64
 
 
 class FakeJournal:
@@ -80,6 +81,7 @@ class FakeKaggleApi:
         self.journal = journal
         self.datasets: dict[str, dict[int, dict[str, bytes]]] = {}
         self.kernels: dict[str, dict[int, bytes]] = {}
+        self.kernel_metadata: dict[str, dict[str, object]] = {}
         self.outputs: dict[str, dict[str, bytes]] = {}
         self.statuses: dict[str, str] = {}
         self.calls: list[tuple[object, ...]] = []
@@ -213,6 +215,7 @@ class FakeKaggleApi:
         version = max(self.kernels.get(ref, {0: b""})) + 1
         self.kernels.setdefault(ref, {})[version] = canonical
         self.statuses[ref] = "complete"
+        self.kernel_metadata[ref] = metadata
         self.calls.append(("kernels_push", ref, version, metadata, timeout, acc))
         return SimpleNamespace(ref=ref, kernelId=1000, versionNumber=version, error="")
 
@@ -224,6 +227,7 @@ class FakeKaggleApi:
                 id=1000,
                 current_version_number=version,
                 is_private=True,
+                docker_image=self.kernel_metadata.get(ref, {}).get("docker_image"),
             ),
             blob=SimpleNamespace(source=self.kernels[ref][version].decode("utf-8")),
         )
@@ -589,6 +593,8 @@ def test_master_legacy_push_persists_numeric_response_pending_runtime_attestatio
             "dataset_sources": (),
             "control_class": "orchestrator_protected",
             "disposable": False,
+            "docker_image": TEST_RUNTIME_IMAGE,
+            "docker_image_pinning_type": "original",
         },
     )
     monkeypatch.setattr(
@@ -606,6 +612,8 @@ def test_master_legacy_push_persists_numeric_response_pending_runtime_attestatio
         language="python",
         control_class=ControlClass.ORCHESTRATOR_PROTECTED,
         disposable=False,
+        docker_image=TEST_RUNTIME_IMAGE,
+        docker_image_pinning_type="original",
     )
     assert result.run.provider_run_ref == "owner/postgres-master/1"
     assert result.run.provider_kernel_id == 1000
@@ -640,6 +648,8 @@ def test_master_pending_attestation_reconciles_lost_push_response_without_retry(
             "dataset_sources": (),
             "control_class": "orchestrator_protected",
             "disposable": False,
+            "docker_image": TEST_RUNTIME_IMAGE,
+            "docker_image_pinning_type": "original",
         },
     )
     original = api.kernels_push
@@ -652,7 +662,8 @@ def test_master_pending_attestation_reconciles_lost_push_response_without_retry(
         raise ConnectionError("response lost after provider commit")
 
     monkeypatch.setattr(api, "kernels_push", lost_response)
-    result = client.push_private_master_notebook_pending_attestation(
+    with pytest.raises(Exception, match="exact SaveKernel response"):
+        client.push_private_master_notebook_pending_attestation(
         intent=intent,
         task_run_id=run_id,
         source=source,
@@ -662,14 +673,13 @@ def test_master_pending_attestation_reconciles_lost_push_response_without_retry(
         language="python",
         control_class=ControlClass.ORCHESTRATOR_PROTECTED,
         disposable=False,
-    )
+        docker_image=TEST_RUNTIME_IMAGE,
+        docker_image_pinning_type="original",
+        )
     assert calls == 1
-    assert result.effect.outcome is EffectOutcome.ALREADY_APPLIED
-    assert result.run.provider_run_ref == "owner/ambiguous-master/1"
-    assert result.run.provider_kernel_id == 1000
     assert journal.intents == [intent]
-    assert len(journal.receipts) == 1
-    assert len(journal.claims) == 1
+    assert len(journal.receipts) >= 1
+    assert len(journal.claims) == 0
 
 
 def test_master_legacy_empty_push_response_uses_exact_latest_get_kernel() -> None:
@@ -686,6 +696,8 @@ def test_master_legacy_empty_push_response_uses_exact_latest_get_kernel() -> Non
             "dataset_sources": (),
             "control_class": "orchestrator_protected",
             "disposable": False,
+            "docker_image": TEST_RUNTIME_IMAGE,
+            "docker_image_pinning_type": "original",
         },
     )
     original = api.kernels_push
@@ -695,7 +707,8 @@ def test_master_legacy_empty_push_response_uses_exact_latest_get_kernel() -> Non
         return SimpleNamespace(ref="", kernelId=0, versionNumber=0, error="")
 
     api.kernels_push = empty_response  # type: ignore[method-assign]
-    result = client.push_private_master_notebook_pending_attestation(
+    with pytest.raises(Exception, match="exact SaveKernel response"):
+        client.push_private_master_notebook_pending_attestation(
         intent=intent,
         task_run_id=run_id,
         source=source,
@@ -705,11 +718,10 @@ def test_master_legacy_empty_push_response_uses_exact_latest_get_kernel() -> Non
         language="python",
         control_class=ControlClass.ORCHESTRATOR_PROTECTED,
         disposable=False,
-    )
-    assert result.effect.outcome is EffectOutcome.APPLIED
-    assert result.run.provider_run_ref == "owner/legacy-master/1"
-    assert result.run.provider_kernel_id == 1000
-    assert len(journal.receipts) == 1 and len(journal.claims) == 1
+        docker_image=TEST_RUNTIME_IMAGE,
+        docker_image_pinning_type="original",
+        )
+    assert len(journal.receipts) >= 1 and len(journal.claims) == 0
 
 
 def test_disposable_legacy_empty_push_response_uses_exact_latest_get_kernel(

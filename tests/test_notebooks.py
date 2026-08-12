@@ -192,7 +192,8 @@ def test_operational_notebook_accepts_only_exact_runtime_bound_pinset(
     pins = {
         "schema": "my-data-hub-notebook-execution-pins/v1",
         "notebook": spec.directory,
-        "python_version": platform.python_version(),
+        "python_series": ".".join(platform.python_version().split(".")[:2]),
+        "image_source_commit": "f" * 40,
         "kaggle_runtime_image_identity": image_identity,
         "input_dataset_versions": dataset_versions,
         "immutable_asset_sha256s": {
@@ -210,6 +211,7 @@ def test_operational_notebook_accepts_only_exact_runtime_bound_pinset(
     monkeypatch.setenv("MY_DATA_HUB_EXECUTION_PINS_PATH", str(pin_path))
     monkeypatch.setenv("MY_DATA_HUB_EXECUTION_PINS_SHA256", hashlib.sha256(pin_path.read_bytes()).hexdigest())
     monkeypatch.setenv("MY_DATA_HUB_KAGGLE_RUNTIME_IMAGE_IDENTITY", image_identity)
+    monkeypatch.setenv("MY_DATA_HUB_KAGGLE_RUNTIME_SOURCE_COMMIT", "f" * 40)
     monkeypatch.setenv("MY_DATA_HUB_INPUT_DATASET_VERSIONS_JSON", json.dumps(dataset_versions))
     monkeypatch.setenv("MY_DATA_HUB_NOTEBOOK_IS_PRIVATE", "true")
     monkeypatch.setenv("MY_DATA_HUB_WHEEL_PATH", str(wheel))
@@ -221,6 +223,14 @@ def test_operational_notebook_accepts_only_exact_runtime_bound_pinset(
         assert kwargs["check"] is True
 
     monkeypatch.setattr(subprocess, "run", record_install)
+    original_read_text = Path.read_text
+
+    def read_text(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if str(path) == "/etc/git_commit":
+            return "f" * 40
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
     exec(compile(notebook.cells[1].source, "<generated-install-cell>", "exec"), {})
     assert calls and calls[0][-1] == str(wheel)
 

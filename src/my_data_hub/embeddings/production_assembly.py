@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -72,6 +73,7 @@ class SSHEmbeddingAccessFactory:
 
 def build_embedding_production_assembly(
     adapter: object, *, broker: Any = None, master_instance: Callable[[], str] | None = None,
+    runtime_dataset_exact_ref: str | None = None,
 ) -> tuple[
     CentralEmbeddingWorkerLauncher, DirectoryEmbeddingCredentialAuthority
 ] | None:
@@ -83,14 +85,18 @@ def build_embedding_production_assembly(
     names = (
         "MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR", "MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_HOST",
         "MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_PORT", "MY_DATA_HUB_MASTER_TLS_CA_PATH",
-        "MY_DATA_HUB_EMBEDDING_RUNTIME_DATASET_EXACT_REF", "MY_DATA_HUB_EMBEDDING_RUNTIME_IMAGE_IDENTITY",
+        "MY_DATA_HUB_EMBEDDING_RUNTIME_IMAGE_IDENTITY",
         "MY_DATA_HUB_EMBEDDING_WHEEL_RELATIVE_PATH", "MY_DATA_HUB_EMBEDDING_WHEEL_SHA256",
         "MY_DATA_HUB_CALLBACK_URL", "MY_DATA_HUB_KAGGLE_OWNER",
         "MY_DATA_HUB_MASTER_TUNNEL_KNOWN_HOSTS_PATH",
+        "MY_DATA_HUB_EMBEDDING_RUNTIME_PYTHON_SERIES",
+        "MY_DATA_HUB_EMBEDDING_RUNTIME_SOURCE_COMMIT",
     )
     values = {name: os.getenv(name, "").strip() for name in names}
-    if not all(values.values()):
+    if not all(values.values()) or runtime_dataset_exact_ref is None:
         raise ValueError("embedding production assembly environment is incomplete")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[1-9][0-9]*", runtime_dataset_exact_ref):
+        raise ValueError("embedding runtime Dataset claim is not exact numeric")
     authority = DirectoryEmbeddingCredentialAuthority(Path(values[names[0]]))
     tunnel = WorkerReachableTunnel(
         values[names[1]], int(values[names[2]]), Path(values[names[3]])
@@ -99,14 +105,15 @@ def build_embedding_production_assembly(
     if not direct.ready or broker is None or master_instance is None:
         raise ValueError(direct.missing_component() or "embedding SSH tunnel authority unavailable")
     access = SSHEmbeddingAccessFactory(
-        direct, broker, master_instance, values[names[1]], int(values[names[2]]), Path(values[names[10]])
+        direct, broker, master_instance, values[names[1]], int(values[names[2]]), Path(values[names[9]])
     )
     launcher = CentralEmbeddingWorkerLauncher(
         adapter=adapter, access_factory=access,
         config=EmbeddingWorkerLaunchConfig(
-            owner=values[names[9]], runtime_dataset_exact_ref=values[names[4]],
-            runtime_image_identity=values[names[5]], wheel_relative_path=values[names[6]],
-            wheel_sha256=values[names[7]], callback_url=values[names[8]],
+            owner=values[names[8]], runtime_dataset_exact_ref=runtime_dataset_exact_ref,
+            runtime_image_identity=values[names[4]], wheel_relative_path=values[names[5]],
+            wheel_sha256=values[names[6]], callback_url=values[names[7]],
+            runtime_python_series=values[names[10]], runtime_image_source_commit=values[names[11]],
         ),
         journal_path=Path(values[names[0]]) / "launcher-journal.json",
     )
