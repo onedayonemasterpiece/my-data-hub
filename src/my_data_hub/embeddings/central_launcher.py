@@ -484,19 +484,39 @@ class CentralEmbeddingWorkerLauncher:
             )
 
     def _render_source(self, status_ref: str, task_run_id: UUID) -> bytes:
-        status_mount = f"/kaggle/input/{status_ref.split('/', 1)[1]}"
-        runtime_mount = f"/kaggle/input/{self.config.runtime_dataset_exact_ref.split('/', 1)[1]}"
         lines = [
             "import json, os, pathlib, subprocess, time",
             f'EXPECTED_TASK_RUN_ID={str(task_run_id)!r}',
-            f's=json.loads(pathlib.Path({status_mount!r}, "embedding-worker.json").read_text())',
+            'input_root=pathlib.Path("/kaggle/input")',
+            'if not input_root.is_dir() or input_root.is_symlink(): raise RuntimeError("unsafe Kaggle input root")',
+            "def safe_file(path,limit):",
+            "    rel=path.relative_to(input_root)",
+            "    return path.is_file() and not path.is_symlink() and path.stat().st_size<=limit and not any(input_root.joinpath(*rel.parts[:i]).is_symlink() for i in range(1,len(rel.parts)))",  # noqa: E501
+            "status_matches=[]",
+            'for candidate in input_root.rglob("embedding-worker.json"):',
+            "    if len(status_matches)>1: break",
+            "    if not safe_file(candidate,262144): continue",
+            "    try: payload=json.loads(candidate.read_bytes())",
+            "    except (ValueError,OSError): continue",
+            '    if payload.get("launch",{}).get("task_run_id")==EXPECTED_TASK_RUN_ID: status_matches.append((candidate,payload))',  # noqa: E501
+            'if len(status_matches)!=1: raise RuntimeError("exact worker status input is absent or ambiguous")',
+            "status_file,s=status_matches[0]; status_mount=status_file.parent",
             'assert s["schema_version"] == "embedding-worker-status.v1"',
-            f'pins=pathlib.Path({status_mount!r},"execution-pins.json")',
+            'pins=status_mount/"execution-pins.json"',
+            'if not safe_file(pins,262144): raise RuntimeError("worker execution pins are unsafe")',
             'os.environ["MY_DATA_HUB_EXECUTION_PINS_PATH"]=str(pins)',
             'os.environ["MY_DATA_HUB_EXECUTION_PINS_SHA256"]=__import__("hashlib").sha256(pins.read_bytes()).hexdigest()',
             'a=s["direct_access"]; m=s["launch"]; r=s["runtime"]',
             'if m["task_run_id"] != EXPECTED_TASK_RUN_ID: raise RuntimeError("task run mismatch")',
             'if int(a["epoch"]) != int(m["epoch"]): raise RuntimeError("epoch mismatch")',
+            "pin_payload=json.loads(pins.read_bytes())",
+            'if pin_payload.get("input_dataset_versions") != r["input_dataset_versions"]: raise RuntimeError("worker input claims differ")',  # noqa: E501
+            'if r["dataset_exact_ref"] not in r["input_dataset_versions"] or any(len(x.split("/"))!=3 or not x.rsplit("/",1)[1].isdigit() for x in r["input_dataset_versions"]): raise RuntimeError("worker input claims are not exact numeric")',  # noqa: E501
+            "wheel_matches=[]",
+            'for candidate in input_root.rglob(pathlib.Path(r["wheel_relative_path"]).name):',
+            '    if safe_file(candidate,134217728) and __import__("hashlib").sha256(candidate.read_bytes()).hexdigest()==r["wheel_sha256"]: wheel_matches.append(candidate)',  # noqa: E501
+            'if len(wheel_matches)!=1: raise RuntimeError("exact worker runtime input is absent or ambiguous")',
+            "wheel=wheel_matches[0]; rel=wheel.relative_to(input_root); runtime_mount=input_root/rel.parts[0]",
             'observed_commit=pathlib.Path("/etc/git_commit").read_text().strip()',
             'body=json.dumps({"task_run_id":m["task_run_id"],"source_sha256":__import__("hashlib").sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),"image_identity":r["image_identity"],"image_source_commit":observed_commit,"epoch":m["epoch"]}).encode()',
             'attest_url=s["callback"]["url"].rstrip("/")+"/embedding-worker-attestation"',
@@ -525,7 +545,7 @@ class CentralEmbeddingWorkerLauncher:
             'os.environ["MY_DATA_HUB_EMBEDDING_REQUEST_ID"]=m["request_id"]',
             'os.environ["MY_DATA_HUB_RUN_ID"]=m["task_run_id"]',
             'os.environ["MY_DATA_HUB_EMBEDDING_INPUT_JOBS_SHA256"]=m["input_jobs_sha256"]',
-            f'os.environ["MY_DATA_HUB_WHEEL_PATH"]=str(pathlib.Path({runtime_mount!r},r["wheel_relative_path"]))',
+            'os.environ["MY_DATA_HUB_WHEEL_PATH"]=str(wheel)',
             'os.environ["MY_DATA_HUB_WHEEL_SHA256"]=r["wheel_sha256"]',
             'os.environ["MY_DATA_HUB_KAGGLE_RUNTIME_IMAGE_IDENTITY"]=r["image_identity"]',
             f'os.environ["MY_DATA_HUB_KAGGLE_RUNTIME_SOURCE_COMMIT"]={self.config.runtime_image_source_commit!r}',
@@ -533,11 +553,13 @@ class CentralEmbeddingWorkerLauncher:
             'os.environ["MY_DATA_HUB_INPUT_DATASET_VERSIONS_JSON"]=json.dumps(r["input_dataset_versions"])',
             *( [
                 f'os.environ["MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_SHA256"]={self.config.dependency_manifest_sha256!r}',
-                f'os.environ["MY_DATA_HUB_EMBEDDING_DEPENDENCY_SMOKE_RECEIPT_PATH"]=str(pathlib.Path({status_mount!r},"embedding-dependency-smoke-receipt.json"))',
+                'os.environ["MY_DATA_HUB_EMBEDDING_DEPENDENCY_SMOKE_RECEIPT_PATH"]=str(status_mount/"embedding-dependency-smoke-receipt.json")',
                 f'os.environ["MY_DATA_HUB_EMBEDDING_DEPENDENCY_SMOKE_RECEIPT_SHA256"]={hashlib.sha256(self.config.dependency_smoke_receipt).hexdigest()!r}',
             ] if self.config.dependency_manifest_sha256 else []),
             'asset="e5-worker.json" if "multilingual-e5" in m["model_exact_id"] else "bge-worker.json"',
-            f'n=json.loads(pathlib.Path({runtime_mount!r},asset).read_text())',
+            "asset_matches=[p for p in runtime_mount.rglob(asset) if safe_file(p,4194304)]",
+            'if len(asset_matches)!=1: raise RuntimeError("worker generated asset is absent or ambiguous")',
+            "n=json.loads(asset_matches[0].read_text())",
             'for c in n["cells"]:',
             '    if c["cell_type"]=="code": exec(compile(c["source"],asset,"exec"),globals())',
         ]

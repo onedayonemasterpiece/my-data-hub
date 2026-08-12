@@ -256,18 +256,17 @@ class KaggleMasterLaunchAssets:
             "MY_DATA_HUB_SOURCE_VERSION": self.source_version,
             "MY_DATA_HUB_CHECKPOINT_REF": self.checkpoint_ref,
         }
-        input_root = f"/kaggle/input/{self.dataset_ref.split('/', 1)[1]}"
         values.update(
             {
-                "MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE": f"{input_root}/{POSTGRES_RUNTIME_ARCHIVE_NAME}",
+                "MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE": POSTGRES_RUNTIME_ARCHIVE_NAME,
                 "MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE_SHA256": hashlib.sha256(
                     self.dataset_files[POSTGRES_RUNTIME_ARCHIVE_NAME]
                 ).hexdigest(),
-                "MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST": f"{input_root}/{POSTGRES_RUNTIME_MANIFEST_NAME}",
+                "MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST": POSTGRES_RUNTIME_MANIFEST_NAME,
                 "MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST_SHA256": hashlib.sha256(
                     self.dataset_files[POSTGRES_RUNTIME_MANIFEST_NAME]
                 ).hexdigest(),
-                "MY_DATA_HUB_TUNNEL_KNOWN_HOSTS": f"{input_root}/{TUNNEL_KNOWN_HOSTS_NAME}",
+                "MY_DATA_HUB_TUNNEL_KNOWN_HOSTS": TUNNEL_KNOWN_HOSTS_NAME,
                 "MY_DATA_HUB_TUNNEL_KNOWN_HOSTS_SHA256": hashlib.sha256(
                     self.dataset_files[TUNNEL_KNOWN_HOSTS_NAME]
                 ).hexdigest(),
@@ -279,7 +278,7 @@ class KaggleMasterLaunchAssets:
                 "MY_DATA_HUB_CONTROL_PLANE_URL": self.callback_url.removesuffix("/internal/runtime/events"),
                 "MY_DATA_HUB_CHECKPOINT_DATASET_REF": self.checkpoint_ref,
                 "MY_DATA_HUB_CHECKPOINT_VERIFIER_REF": self.checkpoint_verifier_ref,
-                "MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_PATH": (f"{input_root}/{self.checkpoint_verifier_source_file}"),
+                "MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_PATH": self.checkpoint_verifier_source_file,
                 "MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_SHA256": hashlib.sha256(verifier_source).hexdigest(),
                 "MY_DATA_HUB_CHECKPOINT_PROBE_RELATIONS_JSON": json.dumps(
                     self.checkpoint_probe_relations, separators=(",", ":")
@@ -288,7 +287,7 @@ class KaggleMasterLaunchAssets:
         )
         wheels = sorted(path for path in self.dataset_files if path.endswith(".whl"))
         if len(wheels) == 1:
-            values["MY_DATA_HUB_WHEEL_PATH"] = f"{input_root}/{wheels[0]}"
+            values["MY_DATA_HUB_WHEEL_PATH"] = wheels[0]
             values["MY_DATA_HUB_WHEEL_SHA256"] = hashlib.sha256(self.dataset_files[wheels[0]]).hexdigest()
         return values
 
@@ -315,19 +314,73 @@ def _runtime_bootstrap(
     # The callback token is loaded only from the exact private status Dataset.
     encoded = json.dumps(dict(values), sort_keys=True)
     bindings = json.dumps(dict(secret_bindings), sort_keys=True)
-    status_mount = f"/kaggle/input/{status_dataset_ref.split('/', 1)[1]}"
     bootstrap = (
         "import hashlib as _mdh_hashlib, importlib.util as _mdh_importlib, os as _mdh_os, "
         "pathlib as _mdh_pathlib\n"
         f"_mdh_values = {encoded}\n"
+        "_mdh_input_root = _mdh_pathlib.Path('/kaggle/input')\n"
+        "if not _mdh_input_root.is_dir() or _mdh_input_root.is_symlink():\n"
+        "    raise RuntimeError('Kaggle input root is unavailable or unsafe')\n"
+        "def _mdh_exact_file(_name, _sha, _limit):\n"
+        "    _matches=[]; _seen=0\n"
+        "    for _candidate in _mdh_input_root.rglob(_name):\n"
+        "        _seen += 1\n"
+        "        if _seen > 4096: raise RuntimeError('Kaggle input discovery exceeds bound')\n"
+        "        if _candidate.is_symlink() or not _candidate.is_file(): continue\n"
+        "        _relative=_candidate.relative_to(_mdh_input_root)\n"
+        "        if any((_mdh_input_root.joinpath(*_relative.parts[:_i])).is_symlink() "
+        "for _i in range(1,len(_relative.parts))): continue\n"
+        "        if _candidate.stat().st_size > _limit: continue\n"
+        "        if _mdh_hashlib.sha256(_candidate.read_bytes()).hexdigest() == _sha: _matches.append(_candidate)\n"
+        "    if len(_matches) != 1: raise RuntimeError('exact Kaggle input asset is absent or ambiguous: '+_name)\n"
+        "    return _matches[0]\n"
+        f"_mdh_status_config = _mdh_exact_file('kaggle_run.json',{status_config_sha256!r},262144)\n"
+        "_mdh_status_root = _mdh_status_config.parent\n"
+        "_mdh_config = _mdh_status_config\n"
+        f"_mdh_helper = _mdh_exact_file('kaggle_status_client.py',{status_helper_sha256!r},262144)\n"
+        f"_mdh_master_config = _mdh_exact_file('master-config.json',{master_config_sha256!r},262144)\n"
+        "if _mdh_helper.parent != _mdh_status_root or _mdh_master_config.parent != _mdh_status_root:\n"
+        "    raise RuntimeError('master status Dataset file set differs')\n"
+        "_mdh_asset_paths={}\n"
+        "for _mdh_key,_mdh_sha,_mdh_limit in (\n"
+        " ('MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE','MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE_SHA256',536870912),\n"
+        " ('MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST','MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST_SHA256',1048576),\n"
+        " ('MY_DATA_HUB_TUNNEL_KNOWN_HOSTS','MY_DATA_HUB_TUNNEL_KNOWN_HOSTS_SHA256',65536),\n"
+        " ('MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_PATH','MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_SHA256',4194304),\n"
+        " ('MY_DATA_HUB_WHEEL_PATH','MY_DATA_HUB_WHEEL_SHA256',134217728)):\n"
+        "    if _mdh_key in _mdh_values:\n"
+        "        _mdh_asset_paths[_mdh_key]=_mdh_exact_file(_mdh_pathlib.Path(_mdh_values[_mdh_key]).name,"
+        "_mdh_values[_mdh_sha],_mdh_limit)\n"
+        "_mdh_asset_roots={_mdh_input_root/_path.relative_to(_mdh_input_root).parts[0] "
+        "for _path in _mdh_asset_paths.values()}\n"
+        "if len(_mdh_asset_roots) != 1:\n"
+        "    raise RuntimeError('master runtime Dataset file set differs')\n"
+        "for _mdh_key,_mdh_path in _mdh_asset_paths.items(): _mdh_values[_mdh_key]=str(_mdh_path)\n"
         "_mdh_os.environ.update(_mdh_values)\n"
-        f"_mdh_status_root = _mdh_pathlib.Path({status_mount!r})\n"
-        "_mdh_config = _mdh_status_root / 'kaggle_run.json'\n"
-        "_mdh_helper = _mdh_status_root / 'kaggle_status_client.py'\n"
-        "_mdh_master_config = _mdh_status_root / 'master-config.json'\n"
         f"assert _mdh_hashlib.sha256(_mdh_config.read_bytes()).hexdigest() == {status_config_sha256!r}\n"
         f"assert _mdh_hashlib.sha256(_mdh_helper.read_bytes()).hexdigest() == {status_helper_sha256!r}\n"
         f"assert _mdh_hashlib.sha256(_mdh_master_config.read_bytes()).hexdigest() == {master_config_sha256!r}\n"
+        "_mdh_master_payload=__import__('json').loads(_mdh_master_config.read_bytes())\n"
+        "if _mdh_master_payload.get('checkpoint_manifest_sha256'):\n"
+        "    _mdh_checkpoint_matches=[]\n"
+        "    for _mdh_index,_mdh_candidate in enumerate(_mdh_input_root.rglob('checkpoint-manifest.json')):\n"
+        "        if _mdh_index >= 4096: raise RuntimeError('checkpoint input discovery exceeds bound')\n"
+        "        _mdh_relative=_mdh_candidate.relative_to(_mdh_input_root)\n"
+        "        if _mdh_candidate.is_symlink() or any(("
+        "_mdh_input_root.joinpath(*_mdh_relative.parts[:_i])).is_symlink() "
+        "for _i in range(1,len(_mdh_relative.parts))) or not _mdh_candidate.is_file() or "
+        "_mdh_candidate.stat().st_size > 1048576: continue\n"
+        "        try: _mdh_checkpoint_payload=__import__('json').loads(_mdh_candidate.read_bytes())\n"
+        "        except (ValueError,OSError): continue\n"
+        "        if _mdh_checkpoint_payload.get('manifest_sha256') == "
+        "_mdh_master_payload['checkpoint_manifest_sha256']: _mdh_checkpoint_matches.append(_mdh_candidate.parent)\n"
+        "    if len(_mdh_checkpoint_matches) != 1: raise RuntimeError('exact checkpoint input is absent or ambiguous')\n"  # noqa: E501
+        "    _mdh_master_payload['checkpoint_directory']=str(_mdh_checkpoint_matches[0])\n"
+        "    _mdh_runtime_config=_mdh_pathlib.Path('/kaggle/working/master-config.json')\n"
+        "    _mdh_fd=_mdh_os.open(_mdh_runtime_config,_mdh_os.O_WRONLY|_mdh_os.O_CREAT|_mdh_os.O_EXCL,0o600)\n"
+        "    with _mdh_os.fdopen(_mdh_fd,'w') as _mdh_stream: "
+        "__import__('json').dump(_mdh_master_payload,_mdh_stream,sort_keys=True,separators=(',',':'))\n"
+        "    _mdh_master_config=_mdh_runtime_config\n"
         "_mdh_os.environ['MY_DATA_HUB_MASTER_CONFIG'] = str(_mdh_master_config)\n"
         "_mdh_spec = _mdh_importlib.spec_from_file_location('mdh_status_bootstrap', _mdh_helper)\n"
         "_mdh_module = _mdh_importlib.module_from_spec(_mdh_spec)\n"
@@ -558,7 +611,9 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             parts = exact_ref.split("/")
             if len(parts) != 3 or not parts[2].isdigit() or int(parts[2]) < 1:
                 raise MasterLaunchContractError("master boot checkpoint ref is not exact numeric")
-            checkpoint_directory = f"/kaggle/input/{parts[1]}"
+            # The exact directory is discovered from the self-hashed manifest
+            # in the generated bootstrap; provider mount names are not stable.
+            checkpoint_directory = None
         return {
             "master_instance_id": str(identity["master_instance_id"]),
             "run_id": str(identity["run_id"]),
