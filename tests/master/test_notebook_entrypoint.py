@@ -1218,6 +1218,33 @@ def test_run_master_suppresses_only_callback_lease_closure_after_exact_terminal_
         "my_data_hub.master_runtime.notebook_entrypoint._cleanup_epoch_principals",
         lambda **kwargs: events.append("credentials.drop"),
     )
+    # This unit test owns the active-loop outcome.  Keep every optional control
+    # poll hermetic so a live public control deployment cannot replace the
+    # injected heartbeat failure with its HTTP response.
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._master_acceptance_renewal_suspended",
+        lambda **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._master_acceptance_drain_requested",
+        lambda **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._claim_master_acceptance",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._claim_connector_checkpoint",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._claim_blogger_migration",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._claim_embedding_production",
+        lambda **kwargs: None,
+    )
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint._checkpoint_until_deadline", checkpoint_until)
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.time.sleep", lambda _seconds: None)
 
@@ -1376,6 +1403,22 @@ def test_run_master_never_checkpoints_unacknowledged_blogger_import_receipt(
     monkeypatch.setattr(
         "my_data_hub.master_runtime.notebook_entrypoint._cleanup_epoch_principals",
         lambda **kwargs: events.append("credentials.drop"),
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._master_acceptance_renewal_suspended",
+        lambda **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._master_acceptance_drain_requested",
+        lambda **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._claim_master_acceptance",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._claim_connector_checkpoint",
+        lambda **kwargs: None,
     )
     monkeypatch.setattr(
         "my_data_hub.master_runtime.notebook_entrypoint._claim_blogger_migration",
