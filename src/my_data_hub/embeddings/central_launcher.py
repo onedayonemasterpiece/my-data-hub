@@ -70,6 +70,8 @@ class EmbeddingWorkerLaunchReceipt:
     source_sha256: str
     credential_id: UUID
     credential_expires_at: datetime
+    status_claim: Any = None
+    notebook_claim: Any = None
 
 
 @dataclass(slots=True)
@@ -157,9 +159,40 @@ class CentralEmbeddingWorkerLauncher:
             task_run_id=metadata.task_run_id, status_dataset_exact_ref=exact_status,
             provider_run_ref=run.run.provider_run_ref, source_sha256=source_sha,
             credential_id=access.credential_id, credential_expires_at=access.expires_at,
+            status_claim=dataset.claim, notebook_claim=run.claim,
         )
         self._receipts[metadata.task_run_id] = receipt
         return receipt
+
+    def cleanup(self, task_run_id: UUID) -> tuple[object, object]:
+        """Idempotently revoke access then delete exact disposable resources."""
+
+        receipt = self._receipts.get(task_run_id)
+        if receipt is None or receipt.status_claim is None or receipt.notebook_claim is None:
+            raise ValueError("embedding worker cleanup lacks its exact durable claims")
+        revoke = getattr(self.access_factory, "revoke", None)
+        if not callable(revoke):
+            raise ValueError("embedding worker access revocation is unavailable")
+        revoke(receipt.credential_id, task_run_id=task_run_id)
+        operation_id = uuid5(NAMESPACE_URL, f"embedding-worker-cleanup:{task_run_id}")
+        results = []
+        for label, claim, action in (
+            ("notebook", receipt.notebook_claim, MutationAction.DELETE_NOTEBOOK),
+            ("status", receipt.status_claim, MutationAction.DELETE_DATASET),
+        ):
+            intent = ProviderEffectIntent.create(
+                operation_id=operation_id,
+                effect_id=uuid5(NAMESPACE_URL, f"embedding-worker-cleanup:{label}:{task_run_id}"),
+                idempotency_key=f"embedding-worker-cleanup:{label}:{task_run_id}",
+                task_id=task_run_id, action=action, provider_ref=claim.provider_ref,
+                expected_fingerprint=claim.fingerprint,
+                arguments={"claim_sha256": claim.claim_sha256,
+                           "provider_version": claim.provider_version},
+                requested_at=self.clock().astimezone(UTC),
+            )
+            results.append(self.adapter.delete_task_created_resource(intent=intent, claim=claim))
+        self._receipts.pop(task_run_id, None)
+        return results[0], results[1]
 
     def _render_source(self, status_ref: str) -> bytes:
         status_mount = f"/kaggle/input/{status_ref.split('/', 1)[1]}"

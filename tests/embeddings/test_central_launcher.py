@@ -5,12 +5,15 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID
 
+import pytest
+
 from my_data_hub.embeddings.central_launcher import (
     CentralEmbeddingWorkerLauncher,
     EmbeddingWorkerDirectAccess,
     EmbeddingWorkerLaunchConfig,
 )
 from my_data_hub.embeddings.direct_plane import EmbeddingLaunchMetadata
+from my_data_hub.providers.models import ProviderFingerprint
 
 
 class Adapter:
@@ -20,11 +23,23 @@ class Adapter:
 
     def create_private_dataset(self, **kwargs):  # type: ignore[no-untyped-def]
         self.datasets.append(kwargs)
-        return SimpleNamespace(claim=SimpleNamespace(provider_version=1))
+        return SimpleNamespace(claim=SimpleNamespace(
+            provider_ref="owner/status", provider_version=1, claim_sha256="e" * 64,
+            fingerprint=ProviderFingerprint(value="f" * 64),
+        ))
 
     def push_private_notebook_pending_runtime_attestation(self, **kwargs):  # type: ignore[no-untyped-def]
         self.runs.append(kwargs)
-        return SimpleNamespace(run=SimpleNamespace(provider_run_ref="owner/kernel/runs/1"))
+        return SimpleNamespace(
+            run=SimpleNamespace(provider_run_ref="owner/kernel/runs/1"),
+            claim=SimpleNamespace(
+                provider_ref="owner/kernel", provider_version=1, claim_sha256="d" * 64,
+                fingerprint=ProviderFingerprint(value="a" * 64),
+            ),
+        )
+
+    def delete_task_created_resource(self, **kwargs):  # type: ignore[no-untyped-def]
+        return kwargs["claim"].provider_ref
 
 
 def _metadata() -> EmbeddingLaunchMetadata:
@@ -95,3 +110,34 @@ def test_launcher_rejects_access_for_wrong_epoch_before_provider_mutation() -> N
     with pytest.raises(ValueError, match="another epoch"):
         launcher.launch(_metadata())
     assert adapter.datasets == adapter.runs == []
+
+
+def test_cleanup_requires_revocation_and_deletes_exact_claims() -> None:
+    adapter = Adapter()
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    revoked = []
+
+    class Access:
+        def __call__(self, _metadata, _token):  # type: ignore[no-untyped-def]
+            return EmbeddingWorkerDirectAccess(
+                database_url="postgresql://w:s@direct.example/hub", tls_ca_pem="ca",
+                expires_at=now + timedelta(minutes=5), epoch=7,
+                tunnel_endpoint="direct.example:443",
+                credential_id=UUID("33333333-3333-4333-8333-333333333333"),
+            )
+
+        def revoke(self, credential_id, *, task_run_id):  # type: ignore[no-untyped-def]
+            revoked.append((credential_id, task_run_id))
+
+    launcher = CentralEmbeddingWorkerLauncher(
+        adapter=adapter, access_factory=Access(),
+        config=EmbeddingWorkerLaunchConfig(
+            "owner", "owner/runtime/12", "image", "wheel.whl", "e" * 64, "https://c/e"
+        ), clock=lambda: now,
+    )
+    receipt = launcher.launch(_metadata())
+    deleted = launcher.cleanup(receipt.task_run_id)
+    assert revoked == [(receipt.credential_id, receipt.task_run_id)]
+    assert deleted == ("owner/kernel", "owner/status")
+    with pytest.raises(ValueError, match="exact durable claims"):
+        launcher.cleanup(receipt.task_run_id)
