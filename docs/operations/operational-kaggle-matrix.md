@@ -327,6 +327,13 @@ rejects commit/config drift. `fm16_resume_authorized=true` additionally requires
 restored state and the owner-envelope secret; the envelope is written mode 0600
 under runner temporary storage and is never uploaded. Provider calls still
 traverse the central MCP/Kaggle adapter, and the workflow has no Kaggle token.
+The workflow is routed only to the labelled self-hosted devstand runner. Its
+checked-in preflight requires the existing owner-only rotating OAuth file from
+the runner environment and rejects static MCP bearer copies. The file and all
+successor refresh tokens remain outside the workspace, runner temporary
+directory, uploaded controller state, logs, and GitHub secrets. Request-scoped
+authorization refreshes through the existing public-client refresh rotation,
+including the independent scheduled acceptance executed after the matrix.
 
 ```bash
 python scripts/provider/operational_kaggle_matrix.py preflight

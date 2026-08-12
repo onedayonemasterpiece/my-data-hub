@@ -173,9 +173,32 @@ exchange leaves the prior file unchanged and its exception contains no token val
 
 This file belongs in the existing owner-only devstand secret root and is reused by the
 devstand acceptance controller across process restarts. It must not be copied to GitHub
-Actions: refresh-token rotation would make an immutable repository secret stale after the
-first exchange. Existing short-lived bearer environment values remain a compatibility
-fallback for bounded probes, but are not sufficient evidence for the multi-hour matrix.
+Actions secrets, variables, artifacts or the workspace: refresh-token rotation would make
+an immutable repository secret stale after the first exchange. Existing short-lived bearer
+environment values remain a compatibility fallback for bounded probes, but are not
+sufficient evidence for the multi-hour matrix.
+
+`provider-real.yml` consequently targets only a self-hosted Linux runner carrying the
+dedicated `my-data-hub-devstand` label. The runner service supplies only the absolute local
+file path through `MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE`; the workflow does not define that
+variable and does not receive any MCP access or refresh token from GitHub. The checked-in
+controller preflight requires the self-hosted runner identity, validates the owner-owned
+mode-0600 file outside both the workspace and runner temporary directory, requires the
+`reader`, `operator`, and `provider` refresh families, and rejects inherited static MCP
+bearer variables. A GitHub-hosted dispatch cannot run this job because no matching runner
+is eligible.
+
+Both the operational driver and scheduled acceptance create authorization at request time.
+The latter uses asynchronous HTTP authentication backed by the same `BearerSource`, so each
+MCP HTTP request rechecks the cached expiry and atomically rotates the refresh family when
+needed. A token is never placed in command arguments, receipts, controller artifacts, or
+logs. Nightly's short bounded probes retain the static-source compatibility path.
+
+Devstand preflight (it prints only its typed outcome):
+
+```bash
+python scripts/provider/devstand_acceptance_controller.py preflight
+```
 
 The private file uses this exact shape (placeholders are not credentials):
 
@@ -195,9 +218,10 @@ The private file uses this exact shape (placeholders are not credentials):
 }
 ```
 
-Do not put this file below `artifacts/`, a status Dataset, a Notebook input, GitHub, or an
-MCP payload. A continuation uses the atomically persisted successor in the same devstand
-file; an expired/replayed family fails closed rather than falling back to a broad token.
+Do not put this file below `artifacts/`, a status Dataset, a Notebook input, GitHub, runner
+temporary storage, or an MCP payload. A continuation uses the atomically persisted successor
+in the same devstand file; an expired/replayed family fails closed rather than falling back
+to a broad token.
 
 ## Post-deploy negative proof
 

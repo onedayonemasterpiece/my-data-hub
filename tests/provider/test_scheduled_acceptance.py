@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import jsonschema
 import pytest
 
+from my_data_hub.auth.oauth_credentials import RotatingOAuthBearerSource
 from scripts.provider import scheduled_acceptance as acceptance
 
 NOW = datetime(2026, 8, 12, 12, tzinfo=UTC)
@@ -97,6 +98,65 @@ async def test_live_mcp_collection_accepts_pinned_sdk_snake_case_result_fields()
 async def test_live_mcp_collection_rejects_pinned_sdk_snake_case_error() -> None:
     with pytest.raises(RuntimeError, match=r"checkpoint\.status returned an error"):
         await acceptance._collect_mcp_session(SnakeCaseMCPSession(error_tool="checkpoint.status"))
+
+
+@pytest.mark.asyncio
+async def test_http_auth_rotates_refresh_family_after_simulated_300_seconds(
+    tmp_path: Path,
+) -> None:
+    import httpx2
+
+    clock = [1_000.0]
+    credential = tmp_path / "oauth.json"
+    credential.write_text(
+        json.dumps(
+            {
+                "schema_version": "my-data-hub-mcp-oauth-credentials.v1",
+                "token_endpoint": "https://identity.kenigevents.ru/token",
+                "resource": "https://mcp-datahub.kenigevents.ru/mcp",
+                "profiles": {
+                    "reader": {
+                        "client_id": "acceptance-reader",
+                        "refresh_token": "refresh-initial-" + "r" * 32,
+                        "access_token": None,
+                        "access_expires_at": None,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    credential.chmod(0o600)
+    calls = 0
+
+    def exchange(_endpoint: str, _parameters: dict[str, str]) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {
+            "access_token": f"access-{calls}-" + "a" * 32,
+            "refresh_token": f"refresh-{calls}-" + "b" * 32,
+            "token_type": "Bearer",
+            "expires_in": 300,
+        }
+
+    source = RotatingOAuthBearerSource(credential, now=lambda: clock[0], exchange=exchange)
+    auth = acceptance._bearer_auth(httpx2, source, "reader")
+
+    first = httpx2.Request("POST", "https://mcp-datahub.kenigevents.ru/mcp")
+    first_flow = auth.async_auth_flow(first)
+    await anext(first_flow)
+    await first_flow.aclose()
+    clock[0] = 1_301.0
+    second = httpx2.Request("POST", "https://mcp-datahub.kenigevents.ru/mcp")
+    second_flow = auth.async_auth_flow(second)
+    await anext(second_flow)
+    await second_flow.aclose()
+
+    assert calls == 2
+    assert first.headers["Authorization"] != second.headers["Authorization"]
+    assert json.loads(credential.read_text())["profiles"]["reader"]["refresh_token"].startswith(
+        "refresh-2-"
+    )
 
 
 @pytest.mark.asyncio
@@ -562,7 +622,9 @@ def test_workflows_execute_scheduled_runner_and_upload_its_receipts() -> None:
     assert "--notebook-lifecycle-receipt artifacts/notebook-canary.json" in provider
     assert "scheduled-provider-real.json" in provider
     assert "MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN" in nightly
-    assert "MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN" in provider
+    assert "MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN" not in provider
+    assert "MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE:" not in provider
+    assert "runs-on: [self-hosted, linux, my-data-hub-devstand]" in provider
     assert "MY_DATA_HUB_MCP_PROVIDER_OPERATOR_TOKEN" in nightly
     assert "KAGGLE_API_TOKEN" not in nightly
     assert "KAGGLE_USERNAME" not in nightly

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +15,7 @@ from my_data_hub.auth.oauth_credentials import (
     bearer_source_from_environment,
     validate_oauth_credential_file,
 )
+from scripts.provider.devstand_acceptance_controller import STATIC_MCP_BEARER_NAMES
 
 
 def _credential_file(path: Path, *, profiles: tuple[str, ...] = ("reader",)) -> Path:
@@ -104,4 +108,105 @@ def test_environment_prefers_private_refresh_file_over_static_bearers(
 def test_github_workflow_never_materializes_refresh_credentials() -> None:
     workflow = Path(".github/workflows/provider-real.yml").read_text()
     assert "MY_DATA_HUB_MCP_OAUTH_CREDENTIALS_JSON" not in workflow
-    assert "MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE" not in workflow
+    assert "runs-on: [self-hosted, linux, my-data-hub-devstand]" in workflow
+    assert "devstand_acceptance_controller.py preflight" in workflow
+    assert "MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE:" not in workflow
+    for static_name in (
+        "MY_DATA_HUB_MCP_CANARY_TOKEN:",
+        "MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN:",
+        "MY_DATA_HUB_MCP_MIGRATION_OPERATOR_TOKEN:",
+        "MY_DATA_HUB_MCP_PROVIDER_OPERATOR_TOKEN:",
+        "MY_DATA_HUB_DATA_MCP_READER_TOKEN:",
+        "MY_DATA_HUB_DATA_MCP_OPERATOR_TOKEN:",
+    ):
+        assert static_name not in workflow
+
+
+def test_devstand_preflight_accepts_private_file_without_printing_tokens(tmp_path: Path) -> None:
+    credential = _credential_file(
+        tmp_path / "oauth.json", profiles=("reader", "operator", "provider")
+    )
+    environment = {
+        **{key: value for key, value in os.environ.items() if key not in STATIC_MCP_BEARER_NAMES},
+        "MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE": str(credential),
+        "RUNNER_ENVIRONMENT": "self-hosted",
+    }
+    completed = subprocess.run(
+        [sys.executable, "scripts/provider/devstand_acceptance_controller.py", "preflight"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    combined = completed.stdout + completed.stderr
+    assert completed.returncode == 0
+    assert combined.strip() == "DEVSTAND_OAUTH_PREFLIGHT_OK"
+    assert "refresh-reader" not in combined
+    assert "access_token" not in combined
+
+
+def test_devstand_preflight_rejects_static_bearer_copy(tmp_path: Path) -> None:
+    credential = _credential_file(
+        tmp_path / "oauth.json", profiles=("reader", "operator", "provider")
+    )
+    environment = {
+        **{key: value for key, value in os.environ.items() if key not in STATIC_MCP_BEARER_NAMES},
+        "MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE": str(credential),
+        "MY_DATA_HUB_MCP_CANARY_TOKEN": "static-" + "s" * 32,
+        "RUNNER_ENVIRONMENT": "self-hosted",
+    }
+    completed = subprocess.run(
+        [sys.executable, "scripts/provider/devstand_acceptance_controller.py", "preflight"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    combined = completed.stdout + completed.stderr
+    assert completed.returncode == 78
+    assert "DEVSTAND_STATIC_MCP_BEARER_FORBIDDEN" in combined
+    assert "static-" not in combined
+
+
+def test_devstand_preflight_rejects_github_hosted_runner(tmp_path: Path) -> None:
+    credential = _credential_file(
+        tmp_path / "oauth.json", profiles=("reader", "operator", "provider")
+    )
+    environment = {
+        **{key: value for key, value in os.environ.items() if key not in STATIC_MCP_BEARER_NAMES},
+        "MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE": str(credential),
+        "RUNNER_ENVIRONMENT": "github-hosted",
+    }
+    completed = subprocess.run(
+        [sys.executable, "scripts/provider/devstand_acceptance_controller.py", "preflight"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert completed.returncode == 78
+    assert (completed.stdout + completed.stderr).strip() == "DEVSTAND_SELF_HOSTED_RUNNER_REQUIRED"
+
+
+def test_devstand_preflight_rejects_credential_below_workspace(tmp_path: Path) -> None:
+    (tmp_path / "workspace").mkdir()
+    credential = _credential_file(
+        tmp_path / "workspace" / "oauth.json", profiles=("reader", "operator", "provider")
+    )
+    environment = {
+        **{key: value for key, value in os.environ.items() if key not in STATIC_MCP_BEARER_NAMES},
+        "MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE": str(credential),
+        "GITHUB_WORKSPACE": str(tmp_path / "workspace"),
+        "RUNNER_ENVIRONMENT": "self-hosted",
+    }
+    completed = subprocess.run(
+        [sys.executable, "scripts/provider/devstand_acceptance_controller.py", "preflight"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert completed.returncode == 78
+    assert (completed.stdout + completed.stderr).strip() == (
+        "DEVSTAND_OAUTH_CREDENTIAL_PATH_EPHEMERAL"
+    )

@@ -19,8 +19,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
+from my_data_hub.auth.oauth_credentials import (
+    BearerSource,
+    StaticBearerSource,
+    bearer_source_from_environment,
+)
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.catalog import TOOL_CONTRACTS
 
@@ -644,14 +650,28 @@ async def _collect_mcp_session(session: object) -> dict[str, object]:
     return values
 
 
-async def _collect_mcp(endpoint: str, token: str) -> dict[str, object]:
+def _bearer_auth(httpx2: Any, source: BearerSource, profile: str) -> Any:
+    """Build request-scoped auth without retaining an expiring bearer in the client."""
+
+    auth_base = httpx2.Auth
+
+    class RequestBearerAuth(auth_base):  # type: ignore[misc, valid-type]
+        async def async_auth_flow(self, request: object):  # type: ignore[no-untyped-def]
+            token = await source.token(profile)
+            request.headers["Authorization"] = f"Bearer {token}"  # type: ignore[attr-defined]
+            yield request
+
+    return RequestBearerAuth()
+
+
+async def _collect_mcp(endpoint: str, bearers: BearerSource) -> dict[str, object]:
     import httpx2
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
 
     timeout = httpx2.Timeout(20.0, connect=5.0)
     async with httpx2.AsyncClient(
-        headers={"Authorization": f"Bearer {token}"},
+        auth=_bearer_auth(httpx2, bearers, "reader"),
         follow_redirects=False,
         timeout=timeout,
     ) as client, streamable_http_client(endpoint, http_client=client) as streams:
@@ -660,7 +680,7 @@ async def _collect_mcp(endpoint: str, token: str) -> dict[str, object]:
             return await _collect_mcp_session(session)
 
 
-async def _collect_live_inventory(endpoint: str, token: str) -> dict[str, object]:
+async def _collect_live_inventory(endpoint: str, bearers: BearerSource) -> dict[str, object]:
     """Read Kaggle inventory through the deployed control-owned adapter only."""
 
     import httpx2
@@ -669,7 +689,7 @@ async def _collect_live_inventory(endpoint: str, token: str) -> dict[str, object
 
     timeout = httpx2.Timeout(20.0, connect=5.0)
     async with httpx2.AsyncClient(
-        headers={"Authorization": f"Bearer {token}"},
+        auth=_bearer_auth(httpx2, bearers, "provider"),
         follow_redirects=False,
         timeout=timeout,
     ) as client, streamable_http_client(endpoint, http_client=client) as streams:
@@ -826,7 +846,7 @@ async def _collect_operator_session(
 
 async def _collect_operator(
     endpoint: str,
-    token: str,
+    bearers: BearerSource,
     *,
     mode: Mode,
     snapshot: Mapping[str, object],
@@ -838,7 +858,7 @@ async def _collect_operator(
 
     timeout = httpx2.Timeout(20.0, connect=5.0)
     async with httpx2.AsyncClient(
-        headers={"Authorization": f"Bearer {token}"},
+        auth=_bearer_auth(httpx2, bearers, "operator"),
         follow_redirects=False,
         timeout=timeout,
     ) as client, streamable_http_client(endpoint, http_client=client) as streams:
@@ -915,12 +935,15 @@ def collect_live(
     expected_commit: str,
     ledger_path: Path,
     lifecycle_paths: Mapping[str, Path],
+    bearer_source: BearerSource | None = None,
 ) -> Observations:
     observations = Observations()
     del ledger_path  # Durable provider effects exist only in the deployed control ledger.
+    bearers = bearer_source or StaticBearerSource(
+        {"reader": token, "operator": operator_token, "provider": provider_token}
+    )
     if (
         not _canonical_mcp_endpoint(endpoint)
-        or not token
         or len(expected_commit) != 40
         or any(character not in "0123456789abcdef" for character in expected_commit)
     ):
@@ -930,7 +953,7 @@ def collect_live(
         )
     else:
         try:
-            snapshot = asyncio.run(_collect_mcp(endpoint, token))
+            snapshot = asyncio.run(_collect_mcp(endpoint, bearers))
             observations.mcp_tools = set(snapshot["tools"])  # type: ignore[arg-type]
             observations.platform_status = dict(snapshot["platform"])  # type: ignore[arg-type]
             observations.master_status = dict(snapshot["master"])  # type: ignore[arg-type]
@@ -964,14 +987,14 @@ def collect_live(
                 "MCP_SCHEDULED_OBSERVATION_UNAVAILABLE",
                 f"bounded MCP status/auth probes ({type(exc).__name__})",
             )
-    if not _canonical_mcp_endpoint(endpoint) or not provider_token:
+    if not _canonical_mcp_endpoint(endpoint):
         observations.blockers["kaggle_inventory"] = (
             "PROVIDER_OPERATOR_MCP_CREDENTIAL_OR_ENDPOINT_MISSING",
             "exact provider-operator MCP credential and canonical endpoint",
         )
     else:
         try:
-            inventory = asyncio.run(_collect_live_inventory(endpoint, provider_token))
+            inventory = asyncio.run(_collect_live_inventory(endpoint, bearers))
             resources = inventory.get("resources")
             if (
                 inventory.get("bounded") is not True
@@ -993,38 +1016,32 @@ def collect_live(
                 f"control-owned adapter MCP observation ({type(exc).__name__})",
             )
     if observations.checkpoint_status is not None:
-        if not operator_token:
-            observations.blockers["operator_mcp"] = (
-                "MCP_ACCEPTANCE_OPERATOR_TOKEN_MISSING",
-                "owner/operator OAuth token for durable restore/rotation requests",
+        try:
+            observations.action_requests = asyncio.run(
+                _collect_operator(
+                    endpoint,
+                    bearers,
+                    mode=mode,
+                    snapshot={
+                        "checkpoint": observations.checkpoint_status,
+                        "master": observations.master_status or {},
+                        "provider": {"resources": observations.registered_resources or []},
+                    },
+                    workflow_run_id=workflow_run_id,
+                )
             )
-        else:
-            try:
-                observations.action_requests = asyncio.run(
-                    _collect_operator(
-                        endpoint,
-                        operator_token,
-                        mode=mode,
-                        snapshot={
-                            "checkpoint": observations.checkpoint_status,
-                            "master": observations.master_status or {},
-                            "provider": {"resources": observations.registered_resources or []},
-                        },
-                        workflow_run_id=workflow_run_id,
-                    )
-                )
-                observations.connector_status = observations.action_requests.pop("connector", None)
-                observations.stale_epoch_probe = observations.action_requests.pop(
-                    "stale_epoch_probe", None
-                )
-                observations.protected_resource_probe = observations.action_requests.pop(
-                    "protected_resource_probe", None
-                )
-            except Exception as exc:
-                observations.blockers["operator_mcp"] = (
-                    "MCP_ACCEPTANCE_ACTION_REQUEST_UNAVAILABLE",
-                    f"bounded exact MCP action request ({type(exc).__name__})",
-                )
+            observations.connector_status = observations.action_requests.pop("connector", None)
+            observations.stale_epoch_probe = observations.action_requests.pop(
+                "stale_epoch_probe", None
+            )
+            observations.protected_resource_probe = observations.action_requests.pop(
+                "protected_resource_probe", None
+            )
+        except Exception as exc:
+            observations.blockers["operator_mcp"] = (
+                "MCP_ACCEPTANCE_ACTION_REQUEST_UNAVAILABLE",
+                f"bounded exact MCP action request ({type(exc).__name__})",
+            )
     for kind, path in lifecycle_paths.items():
         try:
             observations.lifecycle_receipts[kind] = _load_receipt(path)
@@ -1158,6 +1175,9 @@ def main() -> int:
         expected_commit=expected_commit,
         ledger_path=args.ledger,
         lifecycle_paths=lifecycle_paths,
+        bearer_source=bearer_source_from_environment(
+            {"reader": token, "operator": operator_token, "provider": provider_token}
+        ),
     )
     checks = evaluate(
         mode,

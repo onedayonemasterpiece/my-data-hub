@@ -42,20 +42,16 @@ concurrency:
 
 jobs:
   private-notebook-canary:
-    runs-on: ubuntu-latest
+    # The multi-hour matrix runs only beside its owner-only rotating OAuth
+    # file. GitHub-hosted runners and copied access/refresh tokens are refused.
+    runs-on: [self-hosted, linux, my-data-hub-devstand]
     timeout-minutes: 360
     env:
       # Provider mutations and reconciliation use only the deployed control-owned
       # gateway. The runner has no Kaggle client credential and cannot replace
       # the checked-in operational driver with workflow variable content.
       MY_DATA_HUB_MCP_CANARY_ENDPOINT: ${{ vars.MY_DATA_HUB_MCP_CANARY_ENDPOINT || 'https://mcp-datahub.kenigevents.ru/mcp' }}
-      MY_DATA_HUB_MCP_CANARY_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_CANARY_TOKEN }}
-      MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_ACCEPTANCE_OPERATOR_TOKEN }}
-      MY_DATA_HUB_MCP_MIGRATION_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_MIGRATION_OPERATOR_TOKEN }}
-      MY_DATA_HUB_MCP_PROVIDER_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_MCP_PROVIDER_OPERATOR_TOKEN }}
       MY_DATA_HUB_DATA_CONTROL_TOKEN: ${{ secrets.MY_DATA_HUB_DATA_CONTROL_TOKEN }}
-      MY_DATA_HUB_DATA_MCP_READER_TOKEN: ${{ secrets.MY_DATA_HUB_DATA_MCP_READER_TOKEN }}
-      MY_DATA_HUB_DATA_MCP_OPERATOR_TOKEN: ${{ secrets.MY_DATA_HUB_DATA_MCP_OPERATOR_TOKEN }}
       # Non-secret exact claims for already-running disposable FM06/FM13/FM20
       # evidence Notebooks. Every claim is re-read through provider MCP.
       MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON: ${{ vars.MY_DATA_HUB_OPERATIONAL_EVIDENCE_CLAIMS_JSON }}
@@ -66,6 +62,9 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: python -m pip install -e '.[dev,kaggle]'
+
+      - name: Require devstand-local rotating OAuth authority
+        run: python scripts/provider/devstand_acceptance_controller.py preflight
 
       - name: Restore exact durable controller state for continuation
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.continuation_run_id != '' }}
