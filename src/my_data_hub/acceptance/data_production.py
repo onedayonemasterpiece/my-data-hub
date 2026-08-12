@@ -22,6 +22,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from my_data_hub.auth.oauth_credentials import (
+    BearerSource,
+    OAuthCredentialError,
+    StaticBearerSource,
+)
 from my_data_hub.embeddings.production import WORKER_ASSETS, EmbeddingProductionRequest
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.workloads.bloggers.master_stage import (
@@ -297,7 +302,7 @@ class _RejectRedirects(urllib.request.HTTPRedirectHandler):
 
 
 class StreamableHttpMcpMetadataClient(McpMetadataClient):
-    def __init__(self, endpoint: str, tokens: Mapping[str, str]) -> None:
+    def __init__(self, endpoint: str, tokens: Mapping[str, str] | BearerSource) -> None:
         parsed = urlsplit(endpoint)
         if (
             parsed.scheme != "https"
@@ -310,18 +315,19 @@ class StreamableHttpMcpMetadataClient(McpMetadataClient):
         ):
             raise ValueError("MCP endpoint must be a credential-free HTTPS /mcp URL")
         self.endpoint = endpoint
-        self._tokens = dict(tokens)
+        self._bearers = StaticBearerSource(tokens) if isinstance(tokens, Mapping) else tokens
 
     async def call(self, profile: str, tool: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         import httpx2
         from mcp import ClientSession
         from mcp.client.streamable_http import streamable_http_client
 
-        token = self._tokens.get(profile, "")
-        if not 24 <= len(token) <= 4096 or any(char.isspace() for char in token):
+        try:
+            token = await self._bearers.token(profile)
+        except OAuthCredentialError as exc:
             raise ProductionCapabilityBlocker(
                 f"MCP_{profile.upper()}_CREDENTIAL_ABSENT", "required MCP profile credential is absent"
-            )
+            ) from exc
         try:
             async with (
                 httpx2.AsyncClient(

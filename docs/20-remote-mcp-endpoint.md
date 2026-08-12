@@ -160,6 +160,45 @@ PY
 Revocation state lives only in the lightweight control ledger or issuer. The deleted
 `record_oauth_canary_revocation.py` canonical-PostgreSQL helper must not be restored.
 
+### Multi-hour acceptance credentials
+
+The issuer intentionally gives access tokens a short lifetime. A 60--90 minute soak or
+the full 24-scenario matrix must therefore not copy one access token into a six-hour job.
+The trusted driver accepts `MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE`, an absolute,
+owner-owned, non-symlink `0600` JSON file. It contains one independently scoped refresh
+family for each required `reader`, `operator`, or `provider` profile. The driver takes a
+cross-process lock, reuses a still-fresh access token, otherwise performs the public-client
+`refresh_token` exchange, and atomically records the successor refresh token. A failed
+exchange leaves the prior file unchanged and its exception contains no token value.
+
+This file belongs in the existing owner-only devstand secret root and is reused by the
+devstand acceptance controller across process restarts. It must not be copied to GitHub
+Actions: refresh-token rotation would make an immutable repository secret stale after the
+first exchange. Existing short-lived bearer environment values remain a compatibility
+fallback for bounded probes, but are not sufficient evidence for the multi-hour matrix.
+
+The private file uses this exact shape (placeholders are not credentials):
+
+```json
+{
+  "schema_version": "my-data-hub-mcp-oauth-credentials.v1",
+  "token_endpoint": "https://identity.kenigevents.ru/token",
+  "resource": "https://mcp-datahub.kenigevents.ru/mcp",
+  "profiles": {
+    "reader": {
+      "client_id": "acceptance-reader",
+      "refresh_token": "<owner-private refresh grant>",
+      "access_token": null,
+      "access_expires_at": null
+    }
+  }
+}
+```
+
+Do not put this file below `artifacts/`, a status Dataset, a Notebook input, GitHub, or an
+MCP payload. A continuation uses the atomically persisted successor in the same devstand
+file; an expired/replayed family fails closed rather than falling back to a broad token.
+
 ## Post-deploy negative proof
 
 On the devstand, immediately before verification, create a short-lived private bundle:

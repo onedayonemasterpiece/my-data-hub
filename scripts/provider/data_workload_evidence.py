@@ -24,6 +24,7 @@ from my_data_hub.acceptance.data_production import (
     run_production_data_workload,
 )
 from my_data_hub.acceptance.data_workloads import DataWorkloadPlan
+from my_data_hub.auth.oauth_credentials import bearer_source_from_environment
 from my_data_hub.hashing import canonical_json_bytes
 
 MAX_INPUT_BYTES = 256 * 1024
@@ -100,12 +101,18 @@ async def _run(args: argparse.Namespace) -> int:
         config.control_base_url,
         _token(args.control_token_env, optional=config.control_base_url.startswith("http://127.0.0.1:8080")),
     )
-    mcp = StreamableHttpMcpMetadataClient(
-        config.mcp_endpoint,
-        {
+    oauth_file = os.getenv("MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE", "").strip()
+    static_tokens = (
+        {"reader": "", "operator": ""}
+        if oauth_file
+        else {
             "reader": str(_token(args.reader_token_env)),
             "operator": str(_token(args.operator_token_env)),
-        },
+        }
+    )
+    mcp = StreamableHttpMcpMetadataClient(
+        config.mcp_endpoint,
+        bearer_source_from_environment(static_tokens),
     )
     gateway = ControlPlaneDataWorkloadGateway(
         plan=plan,

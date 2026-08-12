@@ -63,6 +63,13 @@ from my_data_hub.acceptance.master_lifecycle import (
     StaleReplayEvidence,
 )
 from my_data_hub.acceptance.scenario_operator import CheckpointAcceptanceLaunchStatus
+from my_data_hub.auth.oauth_credentials import (
+    BearerSource,
+    OAuthCredentialError,
+    StaticBearerSource,
+    bearer_source_from_environment,
+    validate_oauth_credential_file,
+)
 from my_data_hub.hashing import canonical_json_bytes
 
 if not __package__:
@@ -502,7 +509,7 @@ def _result_is_error(result: object) -> bool:
 class RemoteMcpGateway:
     """Bounded MCP client with profile-specific bearer credentials."""
 
-    def __init__(self, endpoint: str, tokens: Mapping[str, str]) -> None:
+    def __init__(self, endpoint: str, tokens: Mapping[str, str] | BearerSource) -> None:
         parsed = urlsplit(endpoint)
         if (
             parsed.scheme != "https"
@@ -515,13 +522,13 @@ class RemoteMcpGateway:
         ):
             raise ValueError("operational MCP endpoint must be a bounded HTTPS /mcp URL")
         self.endpoint = endpoint
-        self.tokens = dict(tokens)
+        self.bearers = StaticBearerSource(tokens) if isinstance(tokens, Mapping) else tokens
 
-    def _token(self, profile: str) -> str:
-        token = self.tokens.get(profile, "")
-        if not token:
-            raise MissingCredential(profile)
-        return token
+    async def _token(self, profile: str) -> str:
+        try:
+            return await self.bearers.token(profile)
+        except OAuthCredentialError as exc:
+            raise MissingCredential(profile) from exc
 
     async def _invoke(self, profile: str, tool: str | None, arguments: Mapping[str, Any]) -> object:
         import httpx2
@@ -529,9 +536,10 @@ class RemoteMcpGateway:
         from mcp.client.streamable_http import streamable_http_client
 
         timeout = httpx2.Timeout(25.0, connect=5.0)
+        token = await self._token(profile)
         async with (
             httpx2.AsyncClient(
-                headers={"Authorization": f"Bearer {self._token(profile)}"},
+                headers={"Authorization": f"Bearer {token}"},
                 follow_redirects=False,
                 timeout=timeout,
             ) as client,
@@ -965,12 +973,19 @@ def _prepare_data_workload(
         optional=production.control_base_url.startswith("http://127.0.0.1:8080"),
     ):
         raise ValueError("data workload control credential is absent or invalid")
-    for name in (
-        "MY_DATA_HUB_DATA_MCP_READER_TOKEN",
-        "MY_DATA_HUB_DATA_MCP_OPERATOR_TOKEN",
-    ):
-        if not _valid_secret(name):
-            raise ValueError(f"required data workload credential {name} is absent or invalid")
+    oauth_path = os.environ.get("MY_DATA_HUB_MCP_OAUTH_CREDENTIAL_FILE", "").strip()
+    if oauth_path:
+        validate_oauth_credential_file(
+            _owner_path(oauth_path, label="MCP OAuth credential file"),
+            required_profiles=frozenset({"reader", "operator"}),
+        )
+    else:
+        for name in (
+            "MY_DATA_HUB_DATA_MCP_READER_TOKEN",
+            "MY_DATA_HUB_DATA_MCP_OPERATOR_TOKEN",
+        ):
+            if not _valid_secret(name):
+                raise ValueError(f"required data workload credential {name} is absent or invalid")
     store = AtomicJsonStateStore(state_path)
     existed = state_path.exists()
     if request.resume_only and not existed:
@@ -3787,7 +3802,7 @@ def main() -> int:
         request = DriverRequest.model_validate_json(_bounded_json(args.request, maximum=MAX_REQUEST_BYTES))
         gateway = RemoteMcpGateway(
             os.environ.get("MY_DATA_HUB_MCP_CANARY_ENDPOINT", DEFAULT_ENDPOINT),
-            _tokens_from_environment(),
+            bearer_source_from_environment(_tokens_from_environment()),
         )
         result = asyncio.run(execute(request, gateway))
         _atomic_write(args.result, result.model_dump(mode="json"))
