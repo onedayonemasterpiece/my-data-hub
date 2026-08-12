@@ -17,7 +17,7 @@ from my_data_hub.workloads.bloggers.closure import (
     LOCAL_CONTROL_URL,
     ClosureConfig,
     StreamableHttpClosureMcp,
-    modern_kaggle_token_configured,
+    central_kaggle_credentials_configured,
     run_blogger_closure,
 )
 from my_data_hub.workloads.bloggers.master_stage import (
@@ -341,19 +341,26 @@ def test_accounting_mismatch_never_emits_durable_complete() -> None:
         run_blogger_closure(config(), control=FakeControl(), mcp=mcp)
 
 
-def test_modern_token_absence_is_detected_without_creating_state(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_central_kaggle_credential_shapes_are_shared_with_control(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.delenv("KAGGLE_API_TOKEN", raising=False)
+    monkeypatch.delenv("KAGGLE_USERNAME", raising=False)
+    monkeypatch.delenv("KAGGLE_KEY", raising=False)
     monkeypatch.setenv("KAGGLE_CONFIG_DIR", str(tmp_path))
-    assert modern_kaggle_token_configured() is False
+    assert central_kaggle_credentials_configured() is False
     assert list(tmp_path.iterdir()) == []
     token = tmp_path / "access_token"
     token.write_text("x" * 32)
-    assert modern_kaggle_token_configured() is True
+    token.chmod(0o600)
+    assert central_kaggle_credentials_configured() is True
     token.unlink()
     target = tmp_path / "other"
     target.write_text("x" * 32)
     token.symlink_to(target)
-    assert modern_kaggle_token_configured() is False
+    assert central_kaggle_credentials_configured() is False
+    token.unlink()
+    monkeypatch.setenv("KAGGLE_USERNAME", "existing-automation")
+    monkeypatch.setenv("KAGGLE_KEY", "x" * 32)
+    assert central_kaggle_credentials_configured() is True
 
 
 def test_control_ledger_claims_one_exact_runtime_and_preserves_metadata_only(tmp_path) -> None:  # type: ignore[no-untyped-def]

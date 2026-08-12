@@ -17,7 +17,7 @@ from my_data_hub.workloads.bloggers.closure import (
     ClosureConfig,
     LocalClosureControl,
     StreamableHttpClosureMcp,
-    modern_kaggle_token_configured,
+    central_kaggle_credentials_configured,
     run_blogger_closure,
 )
 from my_data_hub.workloads.bloggers.master_stage import (
@@ -49,7 +49,7 @@ def main() -> int:
     args = parse_args()
     # This is deliberately the first environmental/provider decision.  In
     # particular, no control request, ledger file, or receipt is created first.
-    if not modern_kaggle_token_configured():
+    if not central_kaggle_credentials_configured():
         return EXTERNAL_BLOCKED
     duplicate_resolution = None
     if args.duplicate_resolution_envelope is not None:

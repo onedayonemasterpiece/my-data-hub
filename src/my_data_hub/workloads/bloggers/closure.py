@@ -9,18 +9,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID, uuid5
 
 from my_data_hub.hashing import canonical_json_bytes
+from my_data_hub.providers.kaggle.credentials import kaggle_credentials_configured
 
 from .master_stage import (
     BLOGGER_REPLAY_STAGE_SCHEMA,
@@ -44,11 +43,16 @@ class BloggerClosureError(RuntimeError):
     pass
 
 
-def modern_kaggle_token_configured() -> bool:
-    if os.environ.get("KAGGLE_API_TOKEN", "").strip():
-        return True
-    path = Path(os.environ.get("KAGGLE_CONFIG_DIR", "~/.kaggle")).expanduser() / "access_token"
-    return path.is_file() and not path.is_symlink() and path.stat().st_size > 20
+def central_kaggle_credentials_configured() -> bool:
+    """Use the same credential-presence contract as the sole control adapter.
+
+    The closure process never constructs a Kaggle client.  This preflight only
+    prevents a control request when the devstand has no supported central
+    credential at all; both the pinned access-token form and the existing
+    legacy username/key pair used by the automated donor are valid.
+    """
+
+    return kaggle_credentials_configured()
 
 
 class ClosureControl(Protocol):
