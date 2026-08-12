@@ -465,6 +465,69 @@ def test_official_224_calls_are_private_and_exact(tmp_path: Path) -> None:
     assert api.datasets[created.claim.provider_ref][1] != api.datasets[created.claim.provider_ref][2]
 
 
+def test_exact_mcp_file_download_denies_oversize_tamper_and_symlink() -> None:
+    client, api, _journal = adapter()
+    task_id = uuid4()
+    files = {"payload.bin": b"original"}
+    from my_data_hub.providers.kaggle import mapping_sha256
+
+    intent = effect(
+        MutationAction.CREATE_DATASET,
+        "owner/mcp-download-denial",
+        task_id=task_id,
+        arguments={
+            "content_tree_sha256": mapping_sha256(files),
+            "control_class": "mcp_managed",
+            "disposable": True,
+        },
+    )
+    created = client.create_private_dataset(
+        intent=intent,
+        files=files,
+        title="MCP denial dataset",
+        control_class=ControlClass.MCP_MANAGED,
+        disposable=True,
+    )
+    digest = hashlib.sha256(files["payload.bin"]).hexdigest()
+    with pytest.raises(KaggleContractError, match="declaration is invalid"):
+        client.download_mcp_dataset_file_exact(
+            claim=created.claim,
+            path="payload.bin",
+            expected_size=64 * 1024 * 1024 + 1,
+            expected_sha256=digest,
+        )
+
+    api.datasets[created.claim.provider_ref][1]["payload.bin"] = b"tampered"
+    with pytest.raises(KagglePolicyError, match="hash differs"):
+        client.download_mcp_dataset_file_exact(
+            claim=created.claim,
+            path="payload.bin",
+            expected_size=len(files["payload.bin"]),
+            expected_sha256=digest,
+        )
+
+    api.datasets[created.claim.provider_ref][1]["payload.bin"] = files["payload.bin"]
+
+    def symlink_download(
+        _dataset: str,
+        _file_name: str,
+        path: str | None = None,
+        **_kwargs: object,
+    ) -> bool:
+        assert path is not None
+        (Path(path) / "payload.bin").symlink_to("/etc/passwd")
+        return True
+
+    api.dataset_download_file = symlink_download  # type: ignore[method-assign]
+    with pytest.raises(KaggleContractError, match="symbolic links"):
+        client.download_mcp_dataset_file_exact(
+            claim=created.claim,
+            path="payload.bin",
+            expected_size=len(files["payload.bin"]),
+            expected_sha256=digest,
+        )
+
+
 def test_checkpoint_directory_upload_streams_without_bytes_mapping(tmp_path: Path) -> None:
     client, api, _journal = adapter()
     task_id = uuid4()

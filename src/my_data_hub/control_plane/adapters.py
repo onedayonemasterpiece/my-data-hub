@@ -1433,11 +1433,10 @@ class KaggleMCPProviderGateway:
             else:
                 raise ValueError("provider files require UTF-8 strings or exact binary objects")
             total += len(encoded)
-            if total > 256 * 1024 and not contains_binary:
-                raise ValueError("provider files exceed the bounded request contract")
-            if contains_binary and total > 320 * 1024:
-                raise ValueError("provider files exceed the bounded request contract")
             result[path] = encoded
+        limit = 320 * 1024 if contains_binary else 256 * 1024
+        if total > limit:
+            raise ValueError("provider files exceed the bounded request contract")
         mapping_sha256(result)
         return result
 

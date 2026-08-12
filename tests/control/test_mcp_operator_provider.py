@@ -830,6 +830,7 @@ def test_batch_rejects_hash_tamper_and_wrong_principal_before_adapter(tmp_path: 
             },
             principal(),
         )
+
     assert adapter.create_calls == 0
 
     created = gateway.invoke(
@@ -867,6 +868,23 @@ def test_batch_rejects_hash_tamper_and_wrong_principal_before_adapter(tmp_path: 
             },
             principal("other"),
         )
+
+
+def test_mixed_binary_limit_is_independent_of_json_file_order() -> None:
+    text = "x" * (270 * 1024)
+    binary = {
+        "encoding": "base64",
+        "content_base64": "AA==",
+        "byte_size": 1,
+        "sha256": hashlib.sha256(b"\x00").hexdigest(),
+    }
+    first = KaggleMCPProviderGateway._files(
+        {"binary.bin": binary, "large.txt": text}
+    )
+    last = KaggleMCPProviderGateway._files(
+        {"large.txt": text, "binary.bin": binary}
+    )
+    assert first == last == {"binary.bin": b"\x00", "large.txt": text.encode()}
 
 
 def test_provider_run_rejects_legacy_raw_dataset_source_before_adapter(

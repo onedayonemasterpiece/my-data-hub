@@ -22,7 +22,7 @@
 
 - At most 100 upload files.
 - Legacy text-only content: 256 KiB UTF-8 total.
-- Binary object: 256 KiB per file and 320 KiB mixed raw total; create/version semantic JSON is capped at 512 KiB, so base64/manifest overhead lowers the practical raw maximum.
+- Binary object: 256 KiB declared per-file maximum and 320 KiB mixed raw validation ceiling; create/version semantic/internal JSON is capped at 512 KiB, so base64/manifest overhead lowers the practical raw maximum and 320 KiB is not claimed usable for every envelope.
 - Dataset list: 50 content rows per page; exact metadata preflight is bounded to 102 provider files and 64 MiB total.
 - Download: one exact file no larger than 64 MiB; at most 128 KiB raw per JSON result, continued by exact offset.
 - MCP response: existing 2 MiB maximum.

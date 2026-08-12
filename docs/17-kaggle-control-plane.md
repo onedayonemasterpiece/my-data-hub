@@ -426,9 +426,10 @@ path for exact private `mcp_managed` and `mcp_exchange` Dataset versions. Existi
 
 The gateway decodes strict canonical base64 and compares both declared size and SHA-256
 before the single injected Kaggle adapter sees bytes. A request has at most 100 files;
-one binary file is at most 256 KiB and mixed binary content is at most 320 KiB raw. The
-512 KiB semantic/internal JSON request limits still apply, so base64 expansion and the
-surrounding manifest make the practical raw batch maximum smaller than 320 KiB. Text-only
+one declared binary file is at most 256 KiB and mixed binary content has a 320 KiB raw
+validation ceiling. Create/version use a 512 KiB semantic/internal JSON request limit;
+base64 expansion and the surrounding manifest make the practical raw batch maximum
+smaller than 320 KiB, so 320 KiB is not claimed usable for every envelope. Text-only
 requests preserve their existing 256 KiB UTF-8 total bound.
 
 `provider.resources.list` accepts the exact task claim, an integer cursor and a limit up
