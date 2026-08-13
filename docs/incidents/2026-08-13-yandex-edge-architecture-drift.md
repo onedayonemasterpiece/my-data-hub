@@ -1,15 +1,15 @@
 # 2026-08-13 — Yandex edge architecture drift
 
-- Status: mitigated; cloud teardown pending soak/reboot
+- Status: mitigated; exact cloud teardown complete, host-reboot evidence pending
 - Severity: architecture/cost
 - Owner decision: public orchestration and ingress run on DevCoveer
 
 ## Impact
 
-`mcp-datahub.kenigevents.ru` and `identity.kenigevents.ru` currently resolve to a paid
-Yandex ALB/VM/NAT/tunnel edge even though the MCP, OAuth and control services run locally.
-The service remains available, but the deployment contradicts the intended personal-tool
-architecture and incurs unnecessary cloud cost.
+`mcp-datahub.kenigevents.ru` and `identity.kenigevents.ru` resolved to a paid Yandex
+ALB/VM/NAT/tunnel edge even though the MCP, OAuth and control services ran locally. The
+service remained available, but the deployment contradicted the intended personal-tool
+architecture and incurred unnecessary cloud cost.
 
 ## Root cause
 
@@ -34,7 +34,9 @@ not part of this incident and must remain unchanged.
 6. Only the exact task-owned edge graph is deleted; protected inventories match baseline.
 7. The final state contains no chargeable `my-data-hub public-edge` VM/ALB/NAT/disk/IP.
 
-Until every gate passes, this incident remains open and destructive cloud cleanup is forbidden.
+The owner-authorized cost cleanup proceeded after DNS propagation, local TLS/VPN checks,
+process recovery and provider stop tests proved independence. The remaining reboot gate keeps
+the incident open but does not justify retaining the already-independent paid edge.
 
 ## 2026-08-13 mitigation evidence
 
@@ -50,10 +52,21 @@ Until every gate passes, this incident remains open and destructive cloud cleanu
 - A real local Xray client passed the VLESS Reality path after updating the incompatible
   `www.microsoft.com` camouflage target to `www.bing.com` for Xray 26.3.27. Existing client
   subscriptions must be refreshed for that VPN-only setting change.
-- The task-owned Yandex ALB and VM are stopped. MCP/OAuth remained available from the local
-  address after each stop. Static website and bucket probes plus MX/DMARC/DKIM checks remained
-  healthy.
+- The task-owned Yandex ALB and VM were stopped first. MCP/OAuth remained available from the
+  local address after each stop. The exact labelled edge graph was then deleted: ALB/router/
+  backend/target, VM and auto-delete disk, reserved edge IP, task VPC/subnet/route/NAT/security
+  groups, tunnel Lockbox/service account, temporary overlap certificate and restricted tunnel
+  SSH key. No task edge ID remains in the default folder.
+- The shared DNS zone and the two public A records remain, now pointing to DevCoveer. All three
+  protected static buckets, both static CDN resources, the four unrelated site certificates,
+  mail records and the entire `kenigevents-email-prod` folder remain present. Static website,
+  bucket-object, MX/DMARC/DKIM and MCP/OAuth probes remained healthy after deletion.
+- During certificate staging, the old edge key was emitted by the provider CLI despite file
+  output arguments. The old certificate was treated as compromised: a fresh independent local
+  certificate was issued, activated on both ALB and DevCoveer during overlap, the old certificate
+  and local copy were deleted, and the temporary overlap certificate was deleted with the ALB.
 
-Final closure still requires the agreed soak/reboot recovery check and then deletion of only
-the exact edge allowlist, followed by a protected-inventory comparison. No bucket, CDN, shared
-DNS zone, Postbox/mail resource, Identity Hub or unrelated YDB resource is eligible for cleanup.
+The cost-removal and protected-inventory gates are complete. Final incident closure still
+requires one owner-authorized host reboot and post-boot ingress/VPN/OAuth verification; the
+current session cannot perform that privileged host action. No bucket, CDN, shared DNS zone,
+Postbox/mail resource, Identity Hub or unrelated YDB resource is eligible for cleanup.
