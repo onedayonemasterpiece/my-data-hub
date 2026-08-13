@@ -1,6 +1,6 @@
 # Remote MCP endpoint and OAuth operations
 
-Status: `PUBLIC DNS/TLS EDGE OBSERVED / APPLICATION AND OWNER LOGIN NOT DEPLOYED`
+Status: `PUBLIC SERVICE LIVE / LOCAL-EDGE CUTOVER PENDING`
 
 The canonical resource is exactly:
 
@@ -8,9 +8,9 @@ The canonical resource is exactly:
 https://mcp-datahub.kenigevents.ru/mcp
 ```
 
-The dedicated Yandex Cloud edge and hostname-valid certificate were observed on
+The Yandex Cloud edge was observed historically on
 2026-08-11 as recorded in
-[`operations/yandex-edge-deployment.md`](operations/yandex-edge-deployment.md). That
+[`operations/yandex-edge-deployment.md`](operations/yandex-edge-deployment.md). ADR-0019 retires that topology after a guarded local cutover. That historical
 observation does **not** prove that the reviewed remote-MCP/OAuth containers are installed:
 the application routes last returned `502`. Do not describe the endpoint, OAuth, ChatGPT,
 process recovery, reboot recovery, or master cold start as live until the signed v2

@@ -1,6 +1,6 @@
 # ADR-0013: Remote MCP is published at mcp-datahub.kenigevents.ru
 
-- Status: Accepted
+- Status: Superseded in part by ADR-0019
 - Date: 2026-08-09
 
 ## Context
@@ -21,7 +21,7 @@ It uses Streamable HTTP behind TLS termination and an OAuth 2.1 resource-server
 boundary. The exact audience/resource identifier is the public MCP URL. Development
 bearer mode remains loopback-only and is never enabled on the public listener.
 
-The Yandex Cloud edge/reverse proxy:
+The public edge/reverse proxy (runtime placement superseded by ADR-0019):
 
 - exposes only TCP 443 publicly;
 - redirects or rejects plaintext HTTP;

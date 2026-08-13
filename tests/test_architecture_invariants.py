@@ -59,6 +59,8 @@ def test_owner_approved_architecture_values_are_constant() -> None:
         "checkpoint_generations_minimum": 2,
         "direct_internal_data_plane": "required",
         "stable_external_mcp_on_devstand": "required",
+        "public_mcp_edge_runtime": "devstand",
+        "cloud_compute_mcp_edge": "forbidden",
     }
     assert values["safety"] == {
         "region_talk_state": "paused",
@@ -172,6 +174,8 @@ def test_repository_wide_deployment_surface_is_closed() -> None:
         "deploy/control-plane/install.sh",
         "deploy/control-plane/install_master_tunnel_broker.sh",
         "deploy/same-host/install.sh",
+        "deploy/local-edge/README.md",
+        "deploy/yandex-edge/README.md",
         "deploy/yandex-edge/autossh.service",
         "deploy/yandex-edge/cloud-init.yaml.tpl",
         "deploy/yandex-edge/create_tunnel_identity.sh",

@@ -7,7 +7,8 @@
 - [`vision/my-data-hub-target-vision.md`](vision/my-data-hub-target-vision.md)
 - accepted decisions in [`adr/`](adr/), especially corrective [`ADR-0016`](adr/0016-kaggle-postgresql-master-architecture-reset.md)
 - machine-readable [`architecture invariants`](../architecture/invariants.yaml)
-- [`architecture drift incident`](incidents/2026-08-10-local-postgres-architecture-drift.md)
+- [`database architecture drift incident`](incidents/2026-08-10-local-postgres-architecture-drift.md)
+- [`public-edge architecture drift incident`](incidents/2026-08-13-yandex-edge-architecture-drift.md)
 
 ## Baseline architecture
 
@@ -47,7 +48,7 @@ Supporting architecture documents:
 - [`19-test-first-rollout.md`](19-test-first-rollout.md) — PR, post-deploy, nightly,
   provider and restore workflows.
 - [`20-remote-mcp-endpoint.md`](20-remote-mcp-endpoint.md) —
-  `mcp-datahub.kenigevents.ru`, Yandex edge, OAuth and ChatGPT acceptance.
+  `mcp-datahub.kenigevents.ru`, DevCoveer local edge, OAuth and ChatGPT acceptance.
 - [`21-infrastructure-addendum-delivery.md`](21-infrastructure-addendum-delivery.md) — scope, accepted decisions, validation and implementation boundary.
 
 Associated decisions:
@@ -60,6 +61,7 @@ Associated decisions:
 - [`adr/0014-test-first-infrastructure-rollout.md`](adr/0014-test-first-infrastructure-rollout.md)
 - [`adr/0015-data-scope-and-pipeline-participation.md`](adr/0015-data-scope-and-pipeline-participation.md)
 - [`adr/0016-kaggle-postgresql-master-architecture-reset.md`](adr/0016-kaggle-postgresql-master-architecture-reset.md)
+- [`adr/0019-devcoveer-local-public-edge.md`](adr/0019-devcoveer-local-public-edge.md)
 
 Machine-readable design contracts:
 

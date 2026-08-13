@@ -1548,6 +1548,8 @@ def validate_deployment(report: Report) -> None:
         "checkpoint_generations_minimum": 2,
         "direct_internal_data_plane": "required",
         "stable_external_mcp_on_devstand": "required",
+        "public_mcp_edge_runtime": "devstand",
+        "cloud_compute_mcp_edge": "forbidden",
     }
     expected_safety = {
         "region_talk_state": "paused",
@@ -1765,6 +1767,8 @@ def validate_deployment(report: Report) -> None:
         "deploy/control-plane/install.sh",
         "deploy/control-plane/install_master_tunnel_broker.sh",
         "deploy/same-host/install.sh",
+        "deploy/local-edge/README.md",
+        "deploy/yandex-edge/README.md",
         "deploy/yandex-edge/autossh.service",
         "deploy/yandex-edge/cloud-init.yaml.tpl",
         "deploy/yandex-edge/create_tunnel_identity.sh",

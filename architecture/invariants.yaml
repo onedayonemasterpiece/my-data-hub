@@ -25,6 +25,8 @@ architecture:
   checkpoint_generations_minimum: 2
   direct_internal_data_plane: required
   stable_external_mcp_on_devstand: required
+  public_mcp_edge_runtime: devstand
+  cloud_compute_mcp_edge: forbidden
 safety:
   region_talk_state: paused
   production_publication: disabled
