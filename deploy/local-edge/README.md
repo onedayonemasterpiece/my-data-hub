@@ -25,3 +25,11 @@ certificate for both public names, automated renewal, `nginx -t`, Xray config va
 
 The stable public authorities remain unchanged. Do not regenerate OAuth client IDs,
 signing keys, the control ledger, connector names, issuer or resource URL.
+
+## Active host implementation
+
+The host renderer now implements the contract: exact MCP/OAuth SNI goes to local TLS
+`127.0.0.1:8444`, default/no-SNI remains on Reality `127.0.0.1:10443`, and application
+upstreams stay loopback-only. A local Certbot DNS-01 certificate is renewed by an owner
+user-systemd timer. OAuth access logs omit query strings. MTProto uses a Docker bridge and
+publishes only `1443/tcp`, so Erlang EPMD/distribution ports are not exposed by host networking.
