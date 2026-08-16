@@ -38,7 +38,13 @@ def metadata(**changes: object) -> bytes:
         "redirect_uris": [REDIRECT_URI],
         "response_types": ["code"],
         "grant_types": ["authorization_code", "refresh_token"],
+        # ChatGPT currently publishes private_key_jwt as its preferred method
+        # while also declaring that it can operate as a public ``none`` client.
+        # Our AS advertises only ``none`` and must select that common method.
+        "token_endpoint_auth_method": "private_key_jwt",
         "token_endpoint_auth_methods_supported": ["none", "private_key_jwt"],
+        "token_endpoint_auth_signing_alg": "RS256",
+        "jwks_uri": "https://chatgpt.com/oauth/jwks.json",
     }
     payload.update(changes)
     return json.dumps(payload).encode()
@@ -72,6 +78,18 @@ def test_resolver_accepts_exact_chatgpt_public_client_and_caches_nonsecret_metad
     assert first.allowed_scopes == SCOPES
     assert calls == [CLIENT_ID]
     assert not hasattr(first, "client_secret")
+
+
+def test_resolver_accepts_current_live_chatgpt_cimd_method_negotiation() -> None:
+    resolver = ChatGPTClientMetadataResolver(
+        allowed_scopes=SCOPES,
+        fetcher=lambda _client_id: response(),
+    )
+
+    client = resolver.resolve(CLIENT_ID)
+
+    assert client.client_id == CLIENT_ID
+    assert client.redirect_uris == (REDIRECT_URI,)
 
 
 def test_resolver_never_caches_invalid_or_error_metadata() -> None:
@@ -180,6 +198,7 @@ def test_resolver_rejects_every_nonexact_client_identifier_before_fetch(client_i
         response(body=b"x" * (32 * 1024 + 1)),
         response(body=metadata(client_id="https://chatgpt.com/oauth/other/client.json")),
         response(body=metadata(client_secret="forbidden")),
+        response(body=metadata(token_endpoint_auth_method="client_secret_post")),
         response(body=metadata(token_endpoint_auth_methods_supported=["client_secret_post"])),
         response(body=metadata(token_endpoint_auth_methods_supported=[{}])),
         response(body=metadata(redirect_uris=["https://evil.example/callback"])),
