@@ -2,7 +2,7 @@
 
 ## Status
 
-committed (pending final SHA substitution at commit time)
+committed
 
 ## Requirement IDs
 
@@ -27,7 +27,9 @@ committed (pending final SHA substitution at commit time)
 
 ## Head SHA
 
-Recorded in the final handoff after commit.
+Implementation commit: `05ecab4`.
+
+The final handoff also names the metadata-only follow-up commit containing this recorded SHA.
 
 ## Files changed
 
