@@ -19,6 +19,7 @@ committed; repository-validated, not live-deployed
 - CR5 successor-epoch checkpoint authority without rewriting the immutable writer receipt
 - CR6 expired exact durable replay with signature and ledger binding preserved
 - CR7 immutable PostgreSQL `committed_at` reconciliation
+- CR8 coordinator/ledger agreement for later request-bound checkpoint revisions
 
 ## Branch / base
 
@@ -69,6 +70,10 @@ committed; repository-validated, not live-deployed
 - Append-only migration `0021_blogger_reconcile_committed_at.sql` widens the fixed
   reconciliation function with the already-stored commit timestamp. The PostgreSQL
   facade and broker return that value instead of fabricating a control-plane time.
+- Blogger durability now follows the shared checkpoint coordinator's monotonic
+  containment rule: the exact deterministic request-bound current VERIFIED HEAD may
+  protect a revision later than the requested commit. A revision-14 checkpoint closes
+  a revision-13 request; revision 12 and unrelated operation/request HEADs do not.
 
 ## Commands run
 
@@ -85,7 +90,7 @@ committed; repository-validated, not live-deployed
 ## Verification
 
 - Full suite: 1,453 collected, 4 skipped, 0 failed.
-- Repository validator: `ok=true`, 4,568 checks, no errors or notes.
+- Repository validator: `ok=true`, 4,569 checks, no errors or notes.
 - Ruff: all checks passed.
 - Configured mypy set: no issues.
 - Notebook generator: no drift.

@@ -795,8 +795,18 @@ async def test_operator_runtime_requests_and_observes_bound_checkpoint_without_c
     assert unrelated_status["post_change_checkpoint_id"] is None
     assert ledger.checkpoint_head("postgres-master").current_checkpoint_id == unrelated_checkpoint_id  # type: ignore[union-attr]
 
+    older_checkpoint_id = _promote_checkpoint_for_active_operation(
+        ledger, active=active, revision=12
+    )
+    older_status = await service.invoke(
+        "bloggers.import.status", {"operation_id": applied["operation_id"]}
+    )
+    assert older_status["state"] == "CHECKPOINTING"
+    assert older_status["post_change_checkpoint_id"] is None
+    assert ledger.checkpoint_head("postgres-master").current_checkpoint_id == older_checkpoint_id  # type: ignore[union-attr]
+
     post_checkpoint_id = _promote_checkpoint_for_active_operation(
-        ledger, active=active, revision=13
+        ledger, active=active, revision=14
     )
     request_operation_id = f"connector-checkpoint:{request_id}"
     assert gate.blogger_checkpoint_coordinator.checkpoint_status(request_operation_id)[
@@ -965,7 +975,7 @@ async def test_active_new_epoch_reconciles_exact_old_epoch_receipt(tmp_path: Pat
     assert checkpointing["state"] == "CHECKPOINTING"
 
     post_checkpoint_id = _promote_checkpoint_for_active_operation(
-        ledger, active=active_b, revision=13
+        ledger, active=active_b, revision=14
     )
     durable = await service.invoke(
         "bloggers.import.status", {"operation_id": operation_id}

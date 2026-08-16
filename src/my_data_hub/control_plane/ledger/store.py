@@ -2614,6 +2614,9 @@ class ControlLedger:
             manifest = json.loads(str(checkpoint["manifest_json"])) if checkpoint is not None else None
         except (TypeError, ValueError, json.JSONDecodeError):
             manifest = None
+        protected_revision = (
+            manifest.get("canonical_revision") if isinstance(manifest, dict) else None
+        )
         if (
             request is None
             or request["state"] != "DURABLE_COMPLETE"
@@ -2629,7 +2632,9 @@ class ControlLedger:
             or not checkpoint["verified_at"]
             or checkpoint["current_checkpoint_id"] != checkpoint_id
             or not isinstance(manifest, dict)
-            or manifest.get("canonical_revision") != committed_revision
+            or not isinstance(protected_revision, int)
+            or isinstance(protected_revision, bool)
+            or protected_revision < committed_revision
         ):
             raise StaleRuntimeEvent(
                 "blogger checkpoint lacks its exact request-bound VERIFIED HEAD authority"
