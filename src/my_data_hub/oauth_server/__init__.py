@@ -11,6 +11,10 @@ from my_data_hub.oauth_server.client_metadata import (
     ClientMetadataResponse,
 )
 from my_data_hub.oauth_server.control_store import ControlLedgerOAuthGrantStore
+from my_data_hub.oauth_server.local_owner import (
+    LocalOwnerTokenAuthenticator,
+    LocalOwnerTokenPortal,
+)
 from my_data_hub.oauth_server.models import (
     AuthorizationServerSettings,
     OwnerAuthenticationChallenge,
@@ -29,6 +33,8 @@ __all__ = [
     "ClientMetadataError",
     "ClientMetadataResponse",
     "ControlLedgerOAuthGrantStore",
+    "LocalOwnerTokenAuthenticator",
+    "LocalOwnerTokenPortal",
     "MemoryOAuthGrantStore",
     "OAuthGrantStore",
     "OAuthHTTPPolicy",

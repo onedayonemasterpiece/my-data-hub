@@ -115,7 +115,7 @@ mcp_env="${MY_DATA_HUB_MCP_ENV_FILE:-$env_root/mcp-reader.env}"
 oauth_env="${MY_DATA_HUB_OAUTH_ENV_FILE:-$env_root/oauth.env}"
 connector_env="${MY_DATA_HUB_CONNECTOR_ENV_FILE:-$env_root/connectors.env}"
 oauth_key="${MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE:-$secret_root/oauth-signing-key.pem}"
-owner_oidc_client_secret="${MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE:-$secret_root/owner-oidc-client-secret}"
+owner_operator_token="${MY_DATA_HUB_OWNER_OPERATOR_TOKEN_FILE:-$secret_root/owner-operator.token}"
 owner_portal_state_key="${MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE:-$secret_root/owner-portal-state.key}"
 oauth_overlap_jwks="${MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE:-$runtime_root/oauth-public/overlap-jwks.json}"
 operator_gate_receipt="${MY_DATA_HUB_OPERATOR_SECURITY_GATE_RECEIPT_FILE:-$runtime_root/operator-security-gate.json}"
@@ -159,7 +159,7 @@ fi
 for path_value in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$asset_dir" \
   "$tls_dir" "$tls_ca_file" "$provider_env" "$mcp_env" "$oauth_env" "$oauth_key" "$oauth_overlap_jwks" \
   "$connector_env" \
-  "$owner_oidc_client_secret" "$owner_portal_state_key" \
+  "$owner_operator_token" "$owner_portal_state_key" \
   "$operator_gate_receipt" "$operator_gate_key" "$control_gateway_token" "$tunnel_broker_socket_dir" \
   "$checkpoint_upload_broker_key" \
   "$acceptance_socket_dir" "$acceptance_key" "$checkpoint_acceptance_deployment"; do
@@ -232,7 +232,26 @@ if [[ "$connector_runtime" == true ]]; then
   require_private_file "$connector_env" "connector environment"
 fi
 require_private_file "$oauth_key" "OAuth signing key"
-require_private_file "$owner_oidc_client_secret" "owner OIDC client secret"
+if [[ ! -e "$owner_operator_token" ]]; then
+  python3 - "$owner_operator_token" <<'PY'
+import os
+import secrets
+import sys
+
+descriptor = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    os.write(descriptor, (secrets.token_urlsafe(48) + "\n").encode("ascii"))
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+fi
+require_private_file "$owner_operator_token" "owner operator token"
+owner_operator_token_bytes="$(stat -c '%s' "$owner_operator_token")"
+if (( owner_operator_token_bytes < 32 || owner_operator_token_bytes > 1024 )); then
+  echo "owner operator token must contain 32..1024 bytes" >&2
+  exit 2
+fi
 if [[ ! -e "$owner_portal_state_key" ]]; then
   python3 - "$owner_portal_state_key" <<'PY'
 import os
@@ -300,11 +319,11 @@ if [[ "$connector_runtime" == true ]]; then
   fi
 fi
 reject_environment_keys "$provider_env" "provider environment" \
-  'MY_DATA_HUB_OAUTH_SIGNING_KEY|MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)|MY_DATA_HUB_KAGGLE_MASTER_(SOURCE_IDENTITY|SOURCE_VERSION|CHECKPOINT_REF|DATASET_REF|NOTEBOOK_REF|DATASET_DIR|NOTEBOOK_SOURCE)'
+  'MY_DATA_HUB_OAUTH_SIGNING_KEY|MY_DATA_HUB_OWNER_(OIDC_CLIENT_SECRET|OPERATOR_TOKEN)|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)|MY_DATA_HUB_KAGGLE_MASTER_(SOURCE_IDENTITY|SOURCE_VERSION|CHECKPOINT_REF|DATASET_REF|NOTEBOOK_REF|DATASET_DIR|NOTEBOOK_SOURCE)'
 reject_environment_keys "$mcp_env" "remote MCP environment" \
   'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_OAUTH_SIGNING_KEY|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)'
 reject_environment_keys "$oauth_env" "OAuth environment" \
-  'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)|MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET|MY_DATA_HUB_OWNER_PORTAL_STATE_KEY'
+  'KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_KAGGLE_[A-Z0-9_]+|MY_DATA_HUB_.*TOKEN_(ROOT|SECRET_NAME)|MY_DATA_HUB_OWNER_(OIDC_CLIENT_SECRET|OPERATOR_TOKEN|PORTAL_STATE_KEY)'
 if [[ "$provider_only" != true ]]; then
 python3 - "$provider_env" <<'PY'
 import json
@@ -648,7 +667,7 @@ MY_DATA_HUB_MCP_ENV_FILE=$mcp_env
 MY_DATA_HUB_OAUTH_ENV_FILE=$oauth_env
 MY_DATA_HUB_CONNECTOR_ENV_FILE=$connector_env
 MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE=$oauth_key
-MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE=$owner_oidc_client_secret
+MY_DATA_HUB_OWNER_OPERATOR_TOKEN_FILE=$owner_operator_token
 MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE=$owner_portal_state_key
 MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE=$oauth_overlap_jwks
 MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR=$tunnel_broker_socket_dir
