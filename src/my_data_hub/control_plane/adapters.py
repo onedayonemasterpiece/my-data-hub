@@ -1747,6 +1747,11 @@ class LedgerControlReader(ControlPlaneReader):
             "provider.resources.download",
             "provider.inventory.live",
             "provider.resources.delete",
+            "provider.upload.start",
+            "provider.upload.put_chunk",
+            "provider.upload.status",
+            "provider.upload.finalize",
+            "provider.upload.abort",
         }:
             if self.provider_gateway is None:
                 raise PermissionError("provider MCP gateway is not configured")

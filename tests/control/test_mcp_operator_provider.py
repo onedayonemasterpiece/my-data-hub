@@ -573,6 +573,40 @@ async def test_live_inventory_uses_only_injected_control_adapter_and_operator_sc
         )
 
 
+def test_ledger_control_reader_routes_every_chunked_upload_tool_to_provider_gateway(
+    tmp_path: Path,
+) -> None:
+    ledger = ControlLedger(tmp_path / "production-dispatch.sqlite3")
+
+    class RecordingGateway:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object], str]] = []
+
+        def invoke(self, tool, arguments, caller):  # type: ignore[no-untyped-def]
+            self.calls.append((tool, dict(arguments), caller.subject))
+            return {"routed_tool": tool}
+
+    gateway = RecordingGateway()
+    control = LedgerControlReader(ledger, provider_gateway=gateway)  # type: ignore[arg-type]
+    tools = (
+        "provider.upload.start",
+        "provider.upload.put_chunk",
+        "provider.upload.status",
+        "provider.upload.finalize",
+        "provider.upload.abort",
+    )
+
+    for tool in tools:
+        arguments = {"dispatch_marker": tool}
+        assert control.invoke_control(tool, arguments, principal()) == {
+            "routed_tool": tool
+        }
+
+    assert gateway.calls == [
+        (tool, {"dispatch_marker": tool}, "owner") for tool in tools
+    ]
+
+
 def _run_request(
     *,
     task_id: object,
