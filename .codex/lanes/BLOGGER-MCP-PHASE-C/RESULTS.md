@@ -16,6 +16,9 @@ committed; repository-validated, not live-deployed
 - CR2 real verified-checkpoint request/receipt lifecycle
 - CR3 authoritative structural schema plus mandatory semantic validation
 - CR4 exact committed apply replay without a second canonical broker effect
+- CR5 successor-epoch checkpoint authority without rewriting the immutable writer receipt
+- CR6 expired exact durable replay with signature and ledger binding preserved
+- CR7 immutable PostgreSQL `committed_at` reconciliation
 
 ## Branch / base
 
@@ -29,6 +32,9 @@ committed; repository-validated, not live-deployed
 - `5cd4899` — initial lane evidence.
 - `b508033` — reviewer follow-up: epoch reconciliation, checkpoint request/receipt,
   authoritative schema loading, and exact apply replay.
+- `dfd06c1` — reviewer follow-up evidence.
+- Final successor-authority/timestamp implementation and evidence commits are recorded
+  in the handoff after this file is committed.
 
 ## Implemented evidence
 
@@ -52,6 +58,17 @@ committed; repository-validated, not live-deployed
   and provider-only profiles still have no canonical blogger write authority.
 - Provider-only/upload catalogs retain their existing semantics; unified/default reader
   profiles still expose no `data.query` and no blogger writes.
+- The immutable canonical write receipt remains bound to its original writer epoch,
+  while post-change durability accepts only the exact deterministic checkpoint request
+  claimed by the current ACTIVE successor and its request-bound current VERIFIED HEAD
+  at the committed revision. An unrelated same-revision checkpoint cannot close it.
+- Exact committed replay remains available after the 300-second preview admission TTL.
+  The signed body, immutable operation/batch/request/plan/principal/client binding, and
+  stored durable state are still mandatory; expired new effects and forged receipts do
+  not pass and no second broker effect occurs.
+- Append-only migration `0021_blogger_reconcile_committed_at.sql` widens the fixed
+  reconciliation function with the already-stored commit timestamp. The PostgreSQL
+  facade and broker return that value instead of fabricating a control-plane time.
 
 ## Commands run
 
@@ -63,17 +80,18 @@ committed; repository-validated, not live-deployed
 - `uv run mypy`
 - `uv run python scripts/validate_repository.py`
 - `uv run python scripts/create_notebooks.py --check`
+- `MDH_RUN_DISPOSABLE_POSTGRES=1 uv run pytest -q tests/bloggers/test_discovery_postgres_live.py`
 
 ## Verification
 
-- Full suite: 1,452 collected, 4 skipped, 0 failed.
-- Repository validator: `ok=true`, 4,560 checks, no errors or notes.
+- Full suite: 1,453 collected, 4 skipped, 0 failed.
+- Repository validator: `ok=true`, 4,568 checks, no errors or notes.
 - Ruff: all checks passed.
 - Configured mypy set: no issues.
 - Notebook generator: no drift.
-- Disposable PostgreSQL test now includes real epoch-1 apply followed by epoch-2 exact
-  reconciliation. It remains opt-in and was skipped in the ordinary suite; no live proof
-  is claimed.
+- Disposable PostgreSQL test passed and proves reconciliation returns the exact
+  `committed_at` stored in `integration.blogger_discovery_apply_receipt`. The opt-in test
+  uses an ephemeral local container only; no production/live proof is claimed.
 
 ## Remaining live blockers / non-claims
 
