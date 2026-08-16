@@ -122,6 +122,13 @@ def _login(client: TestClient, params: dict[str, str]) -> str:
     login = client.get(challenged.headers["location"], follow_redirects=False)
     assert login.status_code == 200
     assert login.headers["referrer-policy"] == "origin"
+    assert (
+        login.headers["content-security-policy"]
+        == "default-src 'none'; style-src 'unsafe-inline'; "
+        "form-action https://identity.example.test; base-uri 'none'; "
+        "frame-ancestors 'none'"
+    )
+    assert '<form method="post" action="https://identity.example.test/owner/login"' in login.text
     assert "Операторский токен" in login.text
     assert TOKEN not in login.text
     import re
