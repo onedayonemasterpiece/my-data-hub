@@ -398,7 +398,6 @@ def test_production_runtime_local_owner_mode_needs_no_external_oidc(tmp_path: Pa
         },
         follow_redirects=False,
     )
-    assert challenged.status_code == 303
-    form = client.get(challenged.headers["location"], follow_redirects=False)
-    assert form.status_code == 200
-    assert "Операторский токен" in form.text
+    assert challenged.status_code == 200
+    assert "location" not in challenged.headers
+    assert "Операторский токен" in challenged.text

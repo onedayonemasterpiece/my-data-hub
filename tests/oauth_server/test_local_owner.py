@@ -117,10 +117,9 @@ def _params(client_id: str, redirect_uri: str) -> dict[str, str]:
 
 
 def _login(client: TestClient, params: dict[str, str]) -> str:
-    challenged = client.get("/authorize", params=params, follow_redirects=False)
-    assert challenged.status_code == 303
-    login = client.get(challenged.headers["location"], follow_redirects=False)
+    login = client.get("/authorize", params=params, follow_redirects=False)
     assert login.status_code == 200
+    assert "location" not in login.headers
     assert login.headers["referrer-policy"] == "origin"
     assert (
         login.headers["content-security-policy"]
@@ -242,8 +241,8 @@ def test_local_owner_form_completes_chatgpt_cimd_public_client() -> None:
 def test_local_owner_rejects_wrong_token_and_tampered_request_without_cookie() -> None:
     client = _client()
     params = _params("opencode-my-data-hub", "http://127.0.0.1:19876/mcp/oauth/callback")
-    challenged = client.get("/authorize", params=params, follow_redirects=False)
-    login = client.get(challenged.headers["location"], follow_redirects=False)
+    login = client.get("/authorize", params=params, follow_redirects=False)
+    assert login.status_code == 200
     import re
 
     sealed = re.search(r'name="owner_request" value="([^"]+)"', login.text)
