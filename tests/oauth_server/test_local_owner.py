@@ -121,10 +121,13 @@ def _login(client: TestClient, params: dict[str, str]) -> str:
     assert login.status_code == 200
     assert "location" not in login.headers
     assert login.headers["referrer-policy"] == "origin"
+    callback = urlsplit(params["redirect_uri"])
+    callback_origin = f"{callback.scheme}://{callback.netloc}"
     assert (
         login.headers["content-security-policy"]
         == "default-src 'none'; style-src 'unsafe-inline'; "
-        "form-action https://identity.example.test; base-uri 'none'; "
+        "form-action https://identity.example.test "
+        f"{callback_origin}; base-uri 'none'; "
         "frame-ancestors 'none'"
     )
     assert '<form method="post" action="https://identity.example.test/owner/login"' in login.text
@@ -156,6 +159,22 @@ def test_local_owner_form_completes_opencode_loopback_pkce_authorization() -> No
     )
     assert callback.startswith("http://127.0.0.1:19876/mcp/oauth/callback?")
     assert parse_qs(urlsplit(callback).query)["state"] == ["state-opencode-my-data-hub"]
+
+
+def test_local_owner_form_csp_allows_exact_chatgpt_callback_origin() -> None:
+    client = _client()
+    login = client.get(
+        "/authorize",
+        params=_params("chatgpt-public", "https://chatgpt.com/connector/oauth/callback-1"),
+        follow_redirects=False,
+    )
+    assert login.status_code == 200
+    assert (
+        login.headers["content-security-policy"]
+        == "default-src 'none'; style-src 'unsafe-inline'; "
+        "form-action https://identity.example.test https://chatgpt.com; "
+        "base-uri 'none'; frame-ancestors 'none'"
+    )
 
 
 def test_same_local_owner_form_completes_chatgpt_public_callback() -> None:
