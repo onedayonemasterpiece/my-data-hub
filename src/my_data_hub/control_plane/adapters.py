@@ -415,6 +415,26 @@ class ControlLedgerOAuthAuthority:
             allowed_scopes=frozenset(row["allowed_scopes"]),
         )
 
+    def register_resolved_client(
+        self,
+        record: OAuthClientRecord,
+        *,
+        principal_id: str,
+    ) -> OAuthClientRecord:
+        """Persist a validated CIMD client without re-enabling a disabled one."""
+
+        self.ledger.register_configured_oauth_client(
+            issuer=record.issuer,
+            client_id=record.client_id,
+            principal_id=principal_id,
+            allowed_scopes=record.allowed_scopes,
+            profile_kind="owner_operator",
+        )
+        persisted = self.get_client(record.issuer, record.client_id)
+        if persisted is None:
+            raise RuntimeError("resolved OAuth client was not persisted")
+        return persisted
+
     def record_oauth_audit(self, event: OAuthAuditEvent) -> None:
         self.ledger.append_audit(
             action=f"oauth:{event.event}:{event.outcome}",

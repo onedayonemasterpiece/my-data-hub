@@ -148,12 +148,28 @@ class AuthorizationService:
                 configured = await _invoke(self.client_metadata_resolver.resolve, client_id)
             except ClientMetadataError as exc:
                 raise OAuthProtocolError("invalid_client", status_code=401) from exc
-            return configured, OAuthClientRecord(
+            resolved = OAuthClientRecord(
                 issuer=self.settings.issuer,
                 client_id=client_id,
                 enabled=True,
                 allowed_scopes=configured.allowed_scopes,
             )
+            try:
+                persisted = await _invoke(
+                    self.control_ledger.register_resolved_client,
+                    resolved,
+                    principal_id=self.settings.owner_subject,
+                )
+            except Exception as exc:
+                raise OAuthProtocolError("temporarily_unavailable", status_code=503) from exc
+            if (
+                persisted.issuer != resolved.issuer
+                or persisted.client_id != resolved.client_id
+                or not persisted.enabled
+                or persisted.allowed_scopes != resolved.allowed_scopes
+            ):
+                raise OAuthProtocolError("invalid_client", status_code=401)
+            return configured, persisted
         try:
             record = await _invoke(self.control_ledger.get_client, self.settings.issuer, client_id)
         except Exception as exc:
