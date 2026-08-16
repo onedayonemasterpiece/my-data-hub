@@ -317,3 +317,88 @@ def test_runtime_registration_does_not_read_then_reenable_client(
         "https://auth.example.test", "chatgpt-reader"
     )
     assert configured is not None and configured["enabled"] is False
+
+
+def test_production_runtime_local_owner_mode_needs_no_external_oidc(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    key_path = tmp_path / "signing.pem"
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    key_path.chmod(0o600)
+    state_key = tmp_path / "owner-state.key"
+    state_key.write_bytes(b"l" * 32)
+    state_key.chmod(0o600)
+    operator_token = tmp_path / "owner-operator.token"
+    operator_token.write_text("local-owner-" + "x" * 48, encoding="utf-8")
+    operator_token.chmod(0o600)
+    issuer = "https://identity.example.test"
+    for name, value in {
+        "MY_DATA_HUB_CONTROL_LEDGER_PATH": str(tmp_path / "ledger.sqlite3"),
+        "MY_DATA_HUB_OAUTH_ISSUER": issuer,
+        "MY_DATA_HUB_OAUTH_OWNER_SUBJECT": "datahub-owner",
+        "MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE": str(key_path),
+        "MY_DATA_HUB_OAUTH_SIGNING_KEY_ID": "key-1",
+        "MY_DATA_HUB_MCP_OAUTH_RESOURCE": "https://mcp.example.test/mcp",
+        "MY_DATA_HUB_MCP_OAUTH_AUDIENCE": "https://mcp.example.test/mcp",
+        "MY_DATA_HUB_OAUTH_CLIENTS_JSON": json.dumps(
+            [
+                {
+                    "client_id": "opencode-my-data-hub",
+                    "redirect_uris": ["http://127.0.0.1:19876/mcp/oauth/callback"],
+                    "allowed_scopes": [
+                        "openid",
+                        "offline_access",
+                        "platform:read",
+                        "provider:read",
+                        "provider:write",
+                    ],
+                }
+            ]
+        ),
+        "MY_DATA_HUB_OWNER_AUTH_MODE": "local_token",
+        "MY_DATA_HUB_OWNER_OPERATOR_TOKEN_FILE": str(operator_token),
+        "MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE": str(state_key),
+    }.items():
+        monkeypatch.setenv(name, value)
+    for name in (
+        "MY_DATA_HUB_OWNER_LOGIN_URL",
+        "MY_DATA_HUB_OWNER_OIDC_ISSUER",
+        "MY_DATA_HUB_OWNER_OIDC_AUDIENCE",
+        "MY_DATA_HUB_OWNER_OIDC_JWKS_URL",
+        "MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    runtime = build_authorization_runtime()
+    route = next(
+        route
+        for route in runtime.app.app.routes  # type: ignore[attr-defined]
+        if getattr(route, "path", None) == "/owner/login" and "POST" in getattr(route, "methods", set())
+    )
+    assert route is not None
+    # The exact runtime object is wrapped by admission middleware; a live form
+    # request proves it assembled the local authenticator rather than OIDC.
+    client = TestClient(runtime.app, base_url=issuer)
+    challenged = client.get(
+        "/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "opencode-my-data-hub",
+            "redirect_uri": "http://127.0.0.1:19876/mcp/oauth/callback",
+            "resource": "https://mcp.example.test/mcp",
+            "scope": "openid offline_access provider:read",
+            "state": "state",
+            "nonce": "nonce",
+            "code_challenge": "A" * 43,
+            "code_challenge_method": "S256",
+        },
+        follow_redirects=False,
+    )
+    assert challenged.status_code == 303
+    form = client.get(challenged.headers["location"], follow_redirects=False)
+    assert form.status_code == 200
+    assert "Операторский токен" in form.text
