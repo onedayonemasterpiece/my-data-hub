@@ -2,7 +2,7 @@
 
 ## Status
 
-committed
+committed; repository-validated, not live-deployed
 
 ## Requirement IDs
 
@@ -12,73 +12,73 @@ committed
 - C04 bounded sanitized reads
 - C05 reader/unified/operator profile separation
 - C06 deploy/OAuth/docs/gates
+- CR1 old-epoch immutable apply reconciliation from the current ACTIVE epoch
+- CR2 real verified-checkpoint request/receipt lifecycle
+- CR3 authoritative structural schema plus mandatory semantic validation
+- CR4 exact committed apply replay without a second canonical broker effect
 
-## Branch
+## Branch / base
 
-`agent/mcp-r03/blogger-mcp-phase-c`
+- Branch: `agent/mcp-r03/blogger-mcp-phase-c`
+- Worktree: `/home/dev/.codex/worktrees/my-data-hub/blogger-mcp-phase-c`
+- Base SHA: `7530f24`
 
-## Worktree
+## Commits
 
-`/home/dev/.codex/worktrees/my-data-hub/blogger-mcp-phase-c`
+- `05ecab4` — initial typed blogger MCP implementation.
+- `5cd4899` — initial lane evidence.
+- `b508033` — reviewer follow-up: epoch reconciliation, checkpoint request/receipt,
+  authoritative schema loading, and exact apply replay.
 
-## Base SHA
+## Implemented evidence
 
-`7530f24`
-
-## Head SHA
-
-Implementation commit: `05ecab4`.
-
-The final handoff also names the metadata-only follow-up commit containing this recorded SHA.
-
-## Files changed
-
-- MCP catalog/server/service/runtime/PostgreSQL broker and configuration.
-- Control-ledger write-gate adapter wiring; no new business-row table or payload storage.
-- Existing connector PostgreSQL repository gained one fixed optional `mdh_connector_intake`
-  session-role setup for NOINHERIT broker credentials.
-- Official discovery ingress validator now executes structural JSON Schema plus semantic
-  Pydantic validation.
-- Unified/operator installer and OAuth scope contracts, focused tests and derived docs.
+- Discovery ingress loads the checked-in
+  `schemas/blogger-discovery-batch.v1.schema.json` (including its packaged wheel copy)
+  before the mandatory Pydantic semantic validator. An invalid URI accepted by the
+  generated Pydantic schema is rejected by the authoritative schema.
+- Exact successful `bloggers.import.apply` replay returns the durable stored result in
+  `COMMITTED_PENDING_CHECKPOINT`, `CHECKPOINTING`, `CHECKPOINT_VERIFIED`, and
+  `DURABLE_COMPLETE`; conflicting identity is rejected and no second PostgreSQL broker
+  request is made.
+- The current ACTIVE canonical-committer session can reconcile an exact immutable
+  APPLYING receipt created by an older fenced epoch. The old receipt's master/epoch,
+  request, plan, batch, principal, and client remain bound.
+- A canonical blogger commit creates a deterministic task-bound verified-checkpoint
+  request in the shared control ledger. Status reads never invent `CHECKPOINTING`:
+  that state appears only after the ACTIVE notebook claims the request, and terminal
+  durability requires its exact current VERIFIED checkpoint receipt.
+- Operator control-plane assembly exposes the master notebook's checkpoint-request
+  claim endpoint even when the optional connector-intake service is disabled. Unified
+  and provider-only profiles still have no canonical blogger write authority.
+- Provider-only/upload catalogs retain their existing semantics; unified/default reader
+  profiles still expose no `data.query` and no blogger writes.
 
 ## Commands run
 
 - `python3 -m compileall -q src tests`
-- `uv run ruff check .`
-- `uv run python scripts/validate_repository.py`
-- `uv run mypy`
-- `uv run python scripts/create_notebooks.py --check`
-- focused Phase-C and regression pytest sets
+- focused Phase-C, broker, control-runtime, brokered-checkpoint, deployment, and blogger
+  contract pytest sets
 - `uv run pytest -q`
+- `uv run ruff check .`
+- `uv run mypy`
+- `uv run python scripts/validate_repository.py`
+- `uv run python scripts/create_notebooks.py --check`
 
-## Tests / verification
+## Verification
 
-- Full suite: 1,447 collected, 4 skipped, 0 failed.
-- Repository validator: `ok=true`, 4,553 checks, no errors/notes.
+- Full suite: 1,452 collected, 4 skipped, 0 failed.
+- Repository validator: `ok=true`, 4,560 checks, no errors or notes.
 - Ruff: all checks passed.
-- Mypy configured set: no issues.
-- Notebook generator check: no drift.
-- Provider-only catalog remained the same exact named set; unified/default operational
-  reader profiles do not advertise `data.query` or any blogger write tool.
+- Configured mypy set: no issues.
+- Notebook generator: no drift.
+- Disposable PostgreSQL test now includes real epoch-1 apply followed by epoch-2 exact
+  reconciliation. It remains opt-in and was skipped in the ordinary suite; no live proof
+  is claimed.
 
-## Risks / observed live blockers
+## Remaining live blockers / non-claims
 
-- No live deployment, OAuth authorization, Kaggle run, public MCP call or production
-  PostgreSQL mutation was performed by this lane. Repository green is not live proof.
-- Inline typed rows can land directly after an ACTIVE master and connector credential are
-  available. An artifact claim deliberately remains
-  `AWAITING_VERIFIED_PROVIDER_MATERIALIZER`; provider readback/claim verification and the
-  dedicated materializer worker must produce a live receipt before that path can be called
-  end-to-end complete.
-- Import apply is `COMMITTED_PENDING_CHECKPOINT` until a later exact VERIFIED PostgreSQL
-  HEAD for the committed revision advances the control-ledger operation to
-  `DURABLE_COMPLETE`.
-
-## Merge notes
-
-- Cherry-pick the final lane commit onto the exact integration line.
-- Preserve the provider-only/live-upload catalog and gateway implementation already on
-  the integration branch; this lane intentionally does not alter provider schemas or
-  provider gateway semantics.
-- Deployment requires an independently approved operator action and fresh OAuth grants;
-  do not interpret this commit as that action.
+- This lane performed no live deployment, OAuth grant, Kaggle run, public MCP call,
+  production PostgreSQL mutation, or real checkpoint rotation.
+- Artifact-backed discovery remains blocked until the dedicated verified provider
+  materializer produces its live receipt; inline typed rows do not have that blocker.
+- Deployment still requires the approved operator profile and fresh OAuth authorization.
