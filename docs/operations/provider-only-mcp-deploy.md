@@ -131,3 +131,14 @@ OpenCode's credential storage, not in repository configuration, installer argume
 artifacts, or logs. Do not run it with command tracing enabled.
 
 No live install or restart was performed while implementing this profile.
+
+### Owner browser authorization for both clients
+
+The installed provider-only profile uses `MY_DATA_HUB_OWNER_AUTH_MODE=local_token`.
+OpenCode remains the pre-registered public PKCE client with its exact loopback callback;
+ChatGPT remains the CIMD-discovered public PKCE client with its exact ChatGPT HTTPS
+callback.  Both are authorized by the same HTTPS form at `identity.kenigevents.ru`, using
+the owner-only token file mounted only into the OAuth container.  This deliberately matches
+the working eventsBot MCP browser-token ceremony and does not redirect to Yandex Identity
+Hub.  The operator token is not an MCP bearer token and must never be added to either
+client configuration.

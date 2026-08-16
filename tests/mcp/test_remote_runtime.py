@@ -36,6 +36,7 @@ READER_SCOPES = frozenset(
         "data:read",
     }
 )
+OAUTH_PROTOCOL_SCOPES = frozenset({"openid", "offline_access"})
 
 
 def _configure(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
@@ -138,6 +139,36 @@ async def test_remote_runtime_uses_only_control_ledger_and_denies_revoked_token(
     )
     with pytest.raises(TokenValidationError):
         await runtime.validator.validate_token("signed-reader-token")
+
+
+@pytest.mark.asyncio
+async def test_remote_runtime_accepts_oauth_protocol_scopes_without_advertising_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    granted = READER_SCOPES | OAUTH_PROTOCOL_SCOPES
+    runtime = build_remote_runtime(decoder=lambda _token: _claims(scopes=sorted(granted)))
+    runtime.ledger.register_oauth_client(
+        issuer=ISSUER,
+        client_id="chatgpt-reader",
+        principal_id="datahub-reader",
+        allowed_scopes=granted,
+        profile_kind="reader",
+    )
+
+    identity = await runtime.validator.validate_token("signed-reader-token")
+    assert identity.scopes == granted
+
+    transport = httpx.ASGITransport(app=runtime.app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://mcp-datahub.kenigevents.ru"
+    ) as client:
+        metadata = await client.get(
+            "/.well-known/oauth-protected-resource/mcp",
+            headers={"Host": "mcp-datahub.kenigevents.ru"},
+        )
+    assert metadata.status_code == 200
+    assert OAUTH_PROTOCOL_SCOPES.isdisjoint(metadata.json()["scopes_supported"])
 
 
 @pytest.mark.asyncio

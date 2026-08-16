@@ -150,8 +150,9 @@ def test_compose_has_exact_opt_in_profile_split_secret_boundaries_and_loopback_p
     assert connector["extra_hosts"] == ["master-tunnel.internal:host-gateway"]
     assert not any("DATABASE_URL" in name or name.startswith("PG") for name in connector["environment"])
     oauth = services["oauth-server"]
-    assert oauth["environment"]["MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE"] == (
-        "/run/secrets/owner-oidc-client-secret"
+    assert oauth["environment"]["MY_DATA_HUB_OWNER_AUTH_MODE"] == "local_token"
+    assert oauth["environment"]["MY_DATA_HUB_OWNER_OPERATOR_TOKEN_FILE"] == (
+        "/run/secrets/owner-operator.token"
     )
     assert oauth["environment"]["MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE"] == ("/run/secrets/owner-portal-state.key")
     assert all(":ro" in binding for binding in oauth["volumes"] if "/run/secrets/" in binding)
@@ -176,7 +177,7 @@ def test_install_requires_private_split_inputs_without_static_master_credentials
         "MY_DATA_HUB_OAUTH_ENV_FILE",
         "MY_DATA_HUB_OAUTH_SIGNING_KEY_FILE",
         "MY_DATA_HUB_OAUTH_OVERLAP_JWKS_FILE",
-        "MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE",
+        "MY_DATA_HUB_OWNER_OPERATOR_TOKEN_FILE",
         "MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE",
         "MY_DATA_HUB_MASTER_TLS_DIR",
     ):
@@ -185,7 +186,9 @@ def test_install_requires_private_split_inputs_without_static_master_credentials
     assert 'require_private_file "$mcp_env"' in source
     assert 'require_private_file "$oauth_env"' in source
     assert 'require_private_file "$oauth_key"' in source
-    assert 'require_private_file "$owner_oidc_client_secret"' in source
+    assert 'require_private_file "$owner_operator_token"' in source
+    assert "secrets.token_urlsafe(48)" in source
+    assert "owner operator token must contain 32..1024 bytes" in source
     assert 'require_private_file "$owner_portal_state_key"' in source
     assert "owner portal state key must be exactly 32 bytes" in source
     assert 'require_regular_file "$oauth_overlap_jwks"' in source

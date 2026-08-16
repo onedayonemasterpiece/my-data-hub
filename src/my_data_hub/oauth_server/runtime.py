@@ -15,6 +15,7 @@ from my_data_hub.mcp.catalog import ALL_SCOPES, READER_PROFILE_SCOPES
 from .app import OAuthHTTPPolicy, create_authorization_app
 from .client_metadata import ChatGPTClientMetadataResolver
 from .control_store import ControlLedgerOAuthGrantStore
+from .local_owner import LocalOwnerTokenAuthenticator, LocalOwnerTokenPortal
 from .models import AuthorizationServerSettings, StaticClient
 from .owner_oidc import OIDCSessionOwnerAuthenticator
 from .owner_portal import OIDCLoginPortal
@@ -111,9 +112,7 @@ def _overlap_public_jwks() -> tuple[dict[str, object], ...]:
 
 
 def build_authorization_runtime() -> AuthorizationRuntime:
-    ledger = ControlLedger(
-        Path(os.getenv("MY_DATA_HUB_CONTROL_LEDGER_PATH", "/state/control.sqlite3"))
-    )
+    ledger = ControlLedger(Path(os.getenv("MY_DATA_HUB_CONTROL_LEDGER_PATH", "/state/control.sqlite3")))
     issuer = _required("MY_DATA_HUB_OAUTH_ISSUER")
     owner_subject = _required("MY_DATA_HUB_OAUTH_OWNER_SUBJECT")
     try:
@@ -151,54 +150,69 @@ def build_authorization_runtime() -> AuthorizationRuntime:
         )
     client_metadata_resolver = None
     if _boolean("MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED"):
-        cimd_scopes = frozenset(
-            _csv("MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES", ())
-        )
-        if not cimd_scopes or not cimd_scopes.issubset(
-            ALL_SCOPES | {"openid", "offline_access"}
-        ):
+        cimd_scopes = frozenset(_csv("MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES", ()))
+        if not cimd_scopes or not cimd_scopes.issubset(ALL_SCOPES | {"openid", "offline_access"}):
             raise RuntimeError("ChatGPT CIMD scopes must be an explicit bounded OAuth subset")
-        client_metadata_resolver = ChatGPTClientMetadataResolver(
-            allowed_scopes=cimd_scopes
-        )
+        client_metadata_resolver = ChatGPTClientMetadataResolver(allowed_scopes=cimd_scopes)
     service = AuthorizationService(
         settings=settings,
         control_ledger=authority,
         grant_store=ControlLedgerOAuthGrantStore(ledger),
         client_metadata_resolver=client_metadata_resolver,
     )
-    owner_login_url = _required("MY_DATA_HUB_OWNER_LOGIN_URL")
-    owner = OIDCSessionOwnerAuthenticator(
-        issuer=_required("MY_DATA_HUB_OWNER_OIDC_ISSUER"),
-        audience=_required("MY_DATA_HUB_OWNER_OIDC_AUDIENCE"),
-        jwks_url=_required("MY_DATA_HUB_OWNER_OIDC_JWKS_URL"),
-        login_url=owner_login_url,
-        authorization_url=f"{issuer}/authorize",
-        owner_subject=owner_subject,
-        cookie_name=os.getenv("MY_DATA_HUB_OWNER_SESSION_COOKIE", "mdh_owner_session"),
-        provider_subject=os.getenv("MY_DATA_HUB_OWNER_OIDC_SUBJECT", "").strip() or owner_subject,
-    )
-    owner_portal = None
-    portal_secret_path = os.getenv("MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE", "").strip()
-    if portal_secret_path:
-        if owner_login_url != f"{issuer}/owner/login":
-            raise RuntimeError("integrated owner portal requires the exact issuer login URL")
-        client_secret = _private_file("MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE").decode(
-            "utf-8"
-        ).strip()
-        if not client_secret:
-            raise RuntimeError("owner OIDC client secret file is empty")
-        owner_portal = OIDCLoginPortal(
-            authorization_endpoint=_required("MY_DATA_HUB_OWNER_OIDC_AUTHORIZATION_ENDPOINT"),
-            token_endpoint=_required("MY_DATA_HUB_OWNER_OIDC_TOKEN_ENDPOINT"),
-            client_id=_required("MY_DATA_HUB_OWNER_OIDC_AUDIENCE"),
-            client_secret=client_secret,
-            redirect_uri=f"{issuer}/owner/callback",
-            state_key=_private_file(
-                "MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE", exact_bytes=32, maximum_bytes=32
-            ),
-            authenticator=owner,
+    owner: LocalOwnerTokenAuthenticator | OIDCSessionOwnerAuthenticator
+    owner_portal: LocalOwnerTokenPortal | OIDCLoginPortal | None
+    owner_auth_mode = os.getenv("MY_DATA_HUB_OWNER_AUTH_MODE", "oidc").strip()
+    if owner_auth_mode == "local_token":
+        operator_token = (
+            _private_file("MY_DATA_HUB_OWNER_OPERATOR_TOKEN_FILE", maximum_bytes=1024).decode("utf-8").strip()
         )
+        owner = LocalOwnerTokenAuthenticator(
+            issuer=issuer,
+            authorization_url=f"{issuer}/authorize",
+            login_url=f"{issuer}/owner/login",
+            owner_subject=owner_subject,
+            operator_token=operator_token,
+            state_key=_private_file("MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE", exact_bytes=32, maximum_bytes=32),
+            cookie_name=os.getenv("MY_DATA_HUB_OWNER_SESSION_COOKIE", "mdh_owner_session"),
+        )
+        owner_portal = LocalOwnerTokenPortal(authenticator=owner)
+    elif owner_auth_mode == "oidc":
+        owner_login_url = _required("MY_DATA_HUB_OWNER_LOGIN_URL")
+        oidc_owner = OIDCSessionOwnerAuthenticator(
+            issuer=_required("MY_DATA_HUB_OWNER_OIDC_ISSUER"),
+            audience=_required("MY_DATA_HUB_OWNER_OIDC_AUDIENCE"),
+            jwks_url=_required("MY_DATA_HUB_OWNER_OIDC_JWKS_URL"),
+            login_url=owner_login_url,
+            authorization_url=f"{issuer}/authorize",
+            owner_subject=owner_subject,
+            cookie_name=os.getenv("MY_DATA_HUB_OWNER_SESSION_COOKIE", "mdh_owner_session"),
+            provider_subject=os.getenv("MY_DATA_HUB_OWNER_OIDC_SUBJECT", "").strip() or owner_subject,
+        )
+        owner_portal = None
+        portal_secret_path = os.getenv("MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE", "").strip()
+        if portal_secret_path:
+            if owner_login_url != f"{issuer}/owner/login":
+                raise RuntimeError("integrated owner portal requires the exact issuer login URL")
+            client_secret = _private_file("MY_DATA_HUB_OWNER_OIDC_CLIENT_SECRET_FILE").decode("utf-8").strip()
+            if not client_secret:
+                raise RuntimeError("owner OIDC client secret file is empty")
+            owner_portal = OIDCLoginPortal(
+                authorization_endpoint=_required("MY_DATA_HUB_OWNER_OIDC_AUTHORIZATION_ENDPOINT"),
+                token_endpoint=_required("MY_DATA_HUB_OWNER_OIDC_TOKEN_ENDPOINT"),
+                client_id=_required("MY_DATA_HUB_OWNER_OIDC_AUDIENCE"),
+                client_secret=client_secret,
+                redirect_uri=f"{issuer}/owner/callback",
+                state_key=_private_file(
+                    "MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE",
+                    exact_bytes=32,
+                    maximum_bytes=32,
+                ),
+                authenticator=oidc_owner,
+            )
+        owner = oidc_owner
+    else:
+        raise RuntimeError("MY_DATA_HUB_OWNER_AUTH_MODE must be exactly oidc or local_token")
     issuer_authority = urlsplit(issuer).netloc
     policy = OAuthHTTPPolicy(
         allowed_hosts=_csv(

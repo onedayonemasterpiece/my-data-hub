@@ -64,6 +64,7 @@ _PROVIDER_ONLY_MUTATIONS = frozenset(
         "provider.acceptance.claim.cleanup",
     }
 )
+_OAUTH_PROTOCOL_SCOPES = frozenset({"openid", "offline_access"})
 
 
 class ProviderOnlyWriteGate:
@@ -218,7 +219,11 @@ def build_remote_runtime(
             issuer=runtime_settings.mcp_oauth_issuer,
             audience=runtime_settings.mcp_oauth_audience,
             resource=runtime_settings.mcp_oauth_resource,
-            allowed_scopes=runtime_settings.mcp_scopes,
+            # ``openid`` selects the identity layer and ``offline_access``
+            # requests a refresh family.  They may therefore be present in a
+            # correctly issued resource access token, but they are not MCP
+            # tool capabilities and must not be advertised as such.
+            allowed_scopes=runtime_settings.mcp_scopes | _OAUTH_PROTOCOL_SCOPES,
             max_token_lifetime_seconds=runtime_settings.mcp_token_max_lifetime_seconds,
         ),
         revocations=ControlLedgerRevocationStore(authority),

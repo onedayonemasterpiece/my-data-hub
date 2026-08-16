@@ -1,6 +1,8 @@
-# Yandex Cloud public edge
+# Yandex Cloud public edge — retired topology
 
-Status: `PUBLIC TLS EDGE PROVISIONED / APPLICATION BACKENDS PARTIAL`
+Status: `TEMPORARY ROLLBACK PATH / DECOMMISSION PENDING`
+
+ADR-0019 supersedes this runtime topology. The following is historical deployment evidence only; provisioning is disabled.
 
 The existing DevCoveer host remains the lightweight control plane and keeps every
 my-data-hub listener on loopback. Its unrelated VPN/Xray ownership of public ports 80/443

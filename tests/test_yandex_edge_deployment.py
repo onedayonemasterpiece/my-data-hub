@@ -20,17 +20,18 @@ def load_renderer() -> ModuleType:
     return module
 
 
-def test_edge_shell_scripts_parse_and_old_token_does_not_provision() -> None:
+def test_edge_shell_scripts_parse_and_cloud_provision_is_retired() -> None:
     for name in ("create_tunnel_identity.sh", "provision.sh"):
         subprocess.run(["bash", "-n", str(EDGE / name)], check=True)
+    for token in ("WRONG_TOKEN", "PROVISION_MY_DATA_HUB_YANDEX_EDGE"):
         rejected = subprocess.run(
-            ["bash", str(EDGE / name), "WRONG_TOKEN"],
+            ["bash", str(EDGE / "provision.sh"), token],
             check=False,
             capture_output=True,
             text=True,
         )
-        assert rejected.returncode == 2
-        assert "usage:" in rejected.stderr
+        assert rejected.returncode == 78
+        assert "retired" in rejected.stderr.lower()
 
 
 def test_cloud_init_contains_only_lockbox_reference_and_fixed_tunnels(tmp_path: Path) -> None:
@@ -88,15 +89,8 @@ def test_edge_admission_and_network_contract_are_exact() -> None:
     assert "location ^~ /internal/" in nginx
     assert "proxy_set_header Forwarded \"\";" in proxy
     assert "proxy_set_header X-Forwarded-For \"\";" in proxy
-    assert "--public-ip" not in provision
-    assert "aws-v1-http-endpoint=enabled,aws-v1-http-token=disabled" in provision
-    assert "ipv4-address=10.210.0.10" in provision
-    assert "public-TLS,direction=ingress,port=443" in provision
-    assert "ALB-to-nginx,direction=ingress,port=8080,protocol=tcp,v4-cidrs=10.210.0.0/24" in provision
-    assert "ALB-to-nginx,direction=ingress,port=8080,protocol=tcp,security-group-id=" not in provision
-    assert "restricted-SSH-tunnel,direction=egress,port=22" in provision
-    assert "v4-cidrs=188.227.84.107/32" in provision
-    assert "port=5432" not in provision
+    assert "exit 78" in provision
+    assert "yc " not in provision
     assert "permitopen=\"127.0.0.1:8080\"" in identity
     assert "permitopen=\"127.0.0.1:8765\"" in identity
     assert "permitopen=\"127.0.0.1:8780\"" in identity

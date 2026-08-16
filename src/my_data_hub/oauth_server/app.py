@@ -202,6 +202,18 @@ def create_authorization_app(
             result = owner_login_portal.callback(request)
             return await result if inspect.isawaitable(result) else result
 
+        submit = getattr(owner_login_portal, "submit", None)
+        if callable(submit):
+
+            @app.post("/owner/login")
+            async def owner_login_submit(request: Request) -> Response:
+                try:
+                    parameters = await _form_parameters(request)
+                    result = submit(request, parameters)
+                    return await result if inspect.isawaitable(result) else result
+                except Exception:
+                    return JSONResponse({"error": "access_denied"}, status_code=403, headers=_no_store())
+
     @app.post("/token")
     async def token(request: Request) -> JSONResponse:
         try:
@@ -239,4 +251,8 @@ def create_authorization_app(
         allowed_origins=policy.allowed_origins,
         trusted_proxy_ips=policy.trusted_proxy_ips,
         limits=policy.limits,
+        # A basic HTML form POST may serialize Origin as ``null`` under
+        # ``no-referrer``.  ``origin`` exposes no path/query while preserving
+        # the exact issuer origin required by transport admission.
+        referrer_policy="origin",
     )
