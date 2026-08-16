@@ -1,0 +1,56 @@
+{
+  "schema": "my-data-hub.oauth-two-client-live/v1",
+  "observed_at": "2026-08-16T07:21:31Z",
+  "deployed_commit": "26a5e1c510278d7a80044df2cf532563d049d5ed",
+  "deployment_host": "devstand",
+  "public_remote_ip": "188.227.84.107",
+  "provider_only_mode": true,
+  "containers_healthy": [
+    "control-plane",
+    "remote-mcp",
+    "oauth-server"
+  ],
+  "oauth": {
+    "issuer": "https://identity.kenigevents.ru",
+    "owner_auth_mode": "local_token",
+    "pkce_methods": ["S256"],
+    "grant_types": ["authorization_code", "refresh_token"],
+    "token_endpoint_auth_methods": ["none"],
+    "cimd_supported": true,
+    "raw_operator_token_recorded": false
+  },
+  "clients": {
+    "opencode": {
+      "kind": "static_public_pkce_loopback",
+      "client_id": "opencode-my-data-hub",
+      "server_live_flow": "PASS_TEST_FAMILY_REVOKED",
+      "owner_connection": "AWAITING_OWNER_BROWSER_FLOW"
+    },
+    "chatgpt": {
+      "kind": "cimd_public_pkce_https_callback",
+      "server_readiness": "PASS",
+      "owner_connection": "AWAITING_OWNER_BROWSER_FLOW"
+    }
+  },
+  "live_mcp_probe": {
+    "oauth_browser_form": true,
+    "authorization_code_exchange": true,
+    "initialize": true,
+    "tools_list": true,
+    "platform_status": true,
+    "tool_count": 12,
+    "batch_tools": [
+      "provider.resources.create",
+      "provider.resources.version",
+      "provider.resources.list",
+      "provider.resources.download",
+      "provider.resources.delete"
+    ],
+    "test_credential_family_revoked": true
+  },
+  "owner_secret_delivery": {
+    "channel": "telegram_saved_messages",
+    "message_id": 34684,
+    "secret_value_in_receipt": false
+  }
+}

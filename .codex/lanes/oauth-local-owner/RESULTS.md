@@ -37,9 +37,24 @@
   ChatGPT CIMD dynamic public-client authorization, wrong-token denial, and
   tampered-state denial.
 
-## Honest live boundary
+## Live deployment follow-up
 
-No deployment or production token rotation is claimed by this implementation
-receipt.  Live closure requires deploying the reviewed commit on this same
-devstand, verifying public discovery/form redirects, and completing one browser
-authorization from the owner's local OpenCode plus one from ChatGPT.
+- Merged implementation: `c74e369d015e653b8fe2bf8f91af5cc2e00abd11`.
+- A live probe then found that remote MCP rejected the correctly issued protocol
+  scopes `openid offline_access`; the narrow resource-server correction was
+  merged as `26a5e1c510278d7a80044df2cf532563d049d5ed` and deployed through the reviewed
+  provider-only installer on the same devstand.
+- All three local containers are healthy at that exact commit.  Public OAuth
+  discovery and protected-resource metadata are HTTP 200; unauthenticated MCP is
+  the expected HTTP 401 at remote IP `188.227.84.107`.
+- A live static-client proof completed owner form, authorization-code exchange,
+  MCP initialize, tools/list, and `platform.status`.  It observed the exact
+  deployed commit and all batch provider tools.  The proof refresh/access family
+  was revoked immediately afterward.
+- The owner operator token was delivered as a document to the approved Telegram
+  Saved Messages session (message id `34684`); no token value is recorded here.
+
+Owner interaction remains for the two durable user connections: authorize local
+OpenCode and, independently, ChatGPT CIMD.  Server-side readiness is proven; those
+client-held refresh families are not fabricated or claimed before the owner
+completes each browser flow.
