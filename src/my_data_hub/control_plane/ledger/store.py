@@ -2262,6 +2262,11 @@ class ControlLedger:
                 or int(row["epoch"] or 0) != failed_epoch
             ):
                 raise StaleRuntimeEvent("blogger preview restart does not match the dead epoch")
+            self._require_blogger_preview_epoch_dead(
+                connection,
+                master_instance_id=failed_master_instance_id,
+                epoch=failed_epoch,
+            )
             old_plan_sha256 = str(row["plan_sha256"])
             connection.execute(
                 "UPDATE mcp_blogger_import_operations SET state='WAITING_MASTER',"
@@ -2291,6 +2296,38 @@ class ControlLedger:
             ).fetchone()
             assert current is not None
             return self._blogger_import_from_row(current)
+
+    @staticmethod
+    def _require_blogger_preview_epoch_dead(
+        connection: sqlite3.Connection,
+        *,
+        master_instance_id: str,
+        epoch: int,
+    ) -> None:
+        authority = connection.execute(
+            "SELECT current_epoch FROM service_epochs WHERE service_kind='postgres-master'"
+        ).fetchone()
+        if authority is None:
+            raise StaleRuntimeEvent(
+                "blogger preview reset lacks authoritative PostgreSQL epoch state"
+            )
+        current_epoch = int(authority["current_epoch"])
+        if current_epoch > epoch:
+            return
+        service = connection.execute(
+            "SELECT state FROM services WHERE service_kind='postgres-master' "
+            "AND master_instance_id=? AND epoch=?",
+            (master_instance_id, epoch),
+        ).fetchone()
+        if (
+            current_epoch == epoch
+            and service is not None
+            and str(service["state"]) in {"FENCED", "STOPPED"}
+        ):
+            return
+        raise StaleRuntimeEvent(
+            "blogger preview reset requires an authoritatively stopped or fenced PostgreSQL epoch"
+        )
 
     def begin_blogger_import_apply(
         self, operation_id: str, *, preview_receipt: str, plan_sha256: str

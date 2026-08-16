@@ -54,8 +54,17 @@ not return a terminal business failure merely because the master was initially a
 If an epoch dies after preview but before apply, the metadata ledger permits only an
 explicit PREVIEWED-state reset that preserves the request identity, records the discarded
 plan, binds a new ACTIVE epoch plus its current verified pre-change checkpoint, and builds
-a new preview. APPLYING is never reset because its commit outcome is ambiguous and must be
-reconciled instead.
+a new preview. The reset is rejected while the exact PostgreSQL service epoch remains
+authoritatively ACTIVE or DRAINING; the control ledger must observe a newer fencing epoch
+or the exact service state `FENCED`/`STOPPED`. APPLYING is never reset because its commit
+outcome is ambiguous and must be reconciled instead.
+
+The published JSON Schema is the first, structural validation stage. Draft 2020-12 cannot
+express equality between `url` and `normalized_url`, uniqueness of selected nested identity
+fields across otherwise different rows, or UTF-8 byte length. Every public ingress must
+therefore also call
+`my_data_hub.workloads.bloggers.discovery.validate_submit_discovery_batch`; this mandatory
+semantic stage enforces those invariants. Passing the JSON Schema alone is not acceptance.
 
 That catalog/server/service/control-gateway wiring is intentionally **not part of this
 Phase B lane**, because those shared files are owned by the provider integration lane.

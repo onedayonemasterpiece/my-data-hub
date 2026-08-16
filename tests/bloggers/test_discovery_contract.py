@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
@@ -18,6 +19,7 @@ from my_data_hub.workloads.bloggers.discovery import (
     SubmitDiscoveryBatch,
     blogger_import_plan_sha256,
     blogger_import_request_sha256,
+    validate_submit_discovery_batch,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -60,7 +62,7 @@ def inline_request(**changes: object) -> SubmitDiscoveryBatch:
         "rows": [row()],
     }
     value.update(changes)
-    return SubmitDiscoveryBatch.model_validate(value)
+    return validate_submit_discovery_batch(value)
 
 
 def test_closed_row_normalizes_account_identity_and_has_stable_hash() -> None:
@@ -146,11 +148,62 @@ def test_import_and_plan_hashes_are_order_stable_and_bind_revision() -> None:
 def test_repository_json_schema_is_closed_and_matches_examples() -> None:
     schema = json.loads((ROOT / "schemas/blogger-discovery-batch.v1.schema.json").read_text())
     Draft202012Validator.check_schema(schema)
+    assert schema["x-mdh-semantic-validator"].endswith(
+        ".validate_submit_discovery_batch"
+    )
     validator = Draft202012Validator(schema, format_checker=FormatChecker())
     payload = inline_request().model_dump(mode="json", exclude_none=False)
     assert list(validator.iter_errors(payload)) == []
     payload["unexpected"] = True
     assert any(error.validator == "additionalProperties" for error in validator.iter_errors(payload))
+
+
+def _mismatched_normalized_url(payload: dict[str, object]) -> None:
+    payload["rows"][0]["accounts"][0]["normalized_url"] = "https://example.net/other"  # type: ignore[index]
+
+
+def _duplicate_source_identity(payload: dict[str, object]) -> None:
+    duplicate = deepcopy(payload["rows"][0])  # type: ignore[index]
+    duplicate["display_name"] = "Иное имя"
+    duplicate["accounts"][0]["handle"] = "OtherHandle"  # type: ignore[index]
+    duplicate["accounts"][0]["url"] = "https://t.me/OtherHandle"  # type: ignore[index]
+    duplicate["accounts"][0]["normalized_url"] = "https://t.me/OtherHandle"  # type: ignore[index]
+    payload["rows"].append(duplicate)  # type: ignore[union-attr]
+
+
+def _cross_row_account_identity(payload: dict[str, object]) -> None:
+    duplicate = deepcopy(payload["rows"][0])  # type: ignore[index]
+    duplicate["source_record_id"] = "search-result-002"
+    duplicate["display_name"] = "Иное имя"
+    payload["rows"].append(duplicate)  # type: ignore[union-attr]
+
+
+def _oversize_utf8_evidence(payload: dict[str, object]) -> None:
+    payload["rows"][0]["evidence"] = {"text": "Я" * 1001}  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        _mismatched_normalized_url,
+        _duplicate_source_identity,
+        _cross_row_account_identity,
+        _oversize_utf8_evidence,
+    ],
+)
+def test_two_stage_public_validator_rejects_cross_value_invariants(
+    mutate,  # type: ignore[no-untyped-def]
+) -> None:
+    schema = json.loads((ROOT / "schemas/blogger-discovery-batch.v1.schema.json").read_text())
+    structural_validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    payload = inline_request().model_dump(mode="json", exclude_none=False)
+    mutate(payload)
+
+    # These invariants are deliberately outside draft 2020-12. A schema-only
+    # pass is not public-contract acceptance; the named semantic stage is mandatory.
+    assert list(structural_validator.iter_errors(payload)) == []
+    with pytest.raises(ValidationError):
+        validate_submit_discovery_batch(payload)
 
 
 @pytest.mark.parametrize(

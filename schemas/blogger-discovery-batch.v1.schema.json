@@ -1,6 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.my-data-hub.local/blogger-discovery-batch.v1.schema.json",
+  "$comment": "This schema is the structural stage of a two-stage public contract. Consumers MUST also run my_data_hub.workloads.bloggers.discovery.validate_submit_discovery_batch for cross-value equality, cross-row identity uniqueness, and UTF-8 byte bounds.",
+  "x-mdh-semantic-validator": "my_data_hub.workloads.bloggers.discovery.validate_submit_discovery_batch",
   "$defs": {
     "BloggerDiscoveryRow": {
       "additionalProperties": false,

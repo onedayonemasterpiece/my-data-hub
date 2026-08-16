@@ -8,6 +8,7 @@ server-owned and therefore absent from the caller-controlled models.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Any, Literal
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -266,6 +267,20 @@ class SubmitDiscoveryBatch(BaseModel):
         return canonical_json_bytes(
             self.connector_envelope().model_dump(mode="json", exclude_none=True)
         )
+
+
+def validate_submit_discovery_batch(
+    payload: Mapping[str, Any],
+) -> SubmitDiscoveryBatch:
+    """Apply the mandatory semantic stage of the public discovery contract.
+
+    JSON Schema validates the closed wire shape and all locally expressible
+    bounds. Cross-value equality, cross-row uniqueness and UTF-8 byte bounds
+    are enforced here because draft 2020-12 cannot express them. Public ingress
+    must run both stages rather than treating the schema alone as complete.
+    """
+
+    return SubmitDiscoveryBatch.model_validate(payload)
 
 
 def blogger_import_request_sha256(

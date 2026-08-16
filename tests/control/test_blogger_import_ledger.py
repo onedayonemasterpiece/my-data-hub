@@ -64,6 +64,49 @@ def _identity(checkpoint_id: str) -> dict[str, object]:
     }
 
 
+def _record_service_authority(
+    ledger: ControlLedger,
+    *,
+    master_instance_id: str,
+    epoch: int,
+    state: str,
+) -> None:
+    connection = sqlite3.connect(ledger.path)
+    try:
+        connection.execute(
+            "INSERT INTO service_epochs(service_kind,current_epoch,updated_at) "
+            "VALUES ('postgres-master',?,?)",
+            (epoch, "2026-08-16T12:00:00Z"),
+        )
+        connection.execute(
+            "INSERT INTO services(service_instance_id,service_kind,run_id,attempt_id,"
+            "master_instance_id,epoch,endpoint,protocol,tls_fingerprint,capabilities_json,"
+            "canonical_revision,schema_version,lease_until,state,latest_event_id,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                f"postgres-{epoch}",
+                "postgres-master",
+                f"run-{epoch}",
+                f"attempt-{epoch}",
+                master_instance_id,
+                epoch,
+                "tunnel://postgres",
+                "postgresql+tls",
+                None,
+                "[]",
+                12,
+                "20",
+                "2099-01-01T00:00:00Z",
+                state,
+                f"event-{epoch}",
+                "2026-08-16T12:00:00Z",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _checkpoint(
     ledger: ControlLedger,
     *,
@@ -406,6 +449,12 @@ def test_checkpoint_identity_cannot_swap_between_verified_and_durable(tmp_path: 
 
 def test_dead_epoch_preview_can_rebind_and_repreview_but_applying_cannot(tmp_path: Path) -> None:
     ledger, checkpoint_id = _ledger_with_checkpoint(tmp_path)
+    _record_service_authority(
+        ledger,
+        master_instance_id="master-1",
+        epoch=7,
+        state="ACTIVE",
+    )
     identity = _identity(checkpoint_id)
     ledger.ensure_blogger_import_operation(**identity)  # type: ignore[arg-type]
     ledger.record_blogger_import_preview(
@@ -419,6 +468,27 @@ def test_dead_epoch_preview_can_rebind_and_repreview_but_applying_cannot(tmp_pat
             "account_count": 1,
         },
     )
+    with pytest.raises(StaleRuntimeEvent, match="stopped or fenced"):
+        ledger.restart_blogger_import_after_preview_epoch_loss(
+            str(identity["operation_id"]),
+            failed_master_instance_id="master-1",
+            failed_epoch=7,
+        )
+    connection = sqlite3.connect(ledger.path)
+    try:
+        connection.execute(
+            "UPDATE services SET state='DRAINING' WHERE service_kind='postgres-master' AND epoch=7"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with pytest.raises(StaleRuntimeEvent, match="stopped or fenced"):
+        ledger.restart_blogger_import_after_preview_epoch_loss(
+            str(identity["operation_id"]),
+            failed_master_instance_id="master-1",
+            failed_epoch=7,
+        )
+    assert ledger.allocate_epoch("postgres-master") == 8
     restarted = ledger.restart_blogger_import_after_preview_epoch_loss(
         str(identity["operation_id"]),
         failed_master_instance_id="master-1",
