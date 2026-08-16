@@ -213,6 +213,12 @@ class LocalOwnerTokenPortal:
 
     def begin(self, request: Request, *, return_to: str) -> Response:
         sealed = self.authenticator.seal_request(return_to)
+        issuer = urlsplit(self.authenticator.issuer)
+        issuer_origin = urlunsplit((issuer.scheme, issuer.netloc, "", "", ""))
+        # Use the already-validated absolute issuer endpoint both in the form
+        # and CSP.  Some Chrome launch contexts reject ``'self'`` for an OAuth
+        # popup even though the visible top-level URL is same-origin.
+        login_url = html.escape(self.authenticator.login_url, quote=True)
         body = f"""<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
 <title>my-data-hub — авторизация</title>
@@ -222,7 +228,7 @@ input{{width:100%;box-sizing:border-box;padding:.7rem;margin:.5rem 0 1rem}}
 button{{padding:.7rem 1rem}}.muted{{color:#666}}</style></head><body><main>
 <h1>my-data-hub</h1><p>Подтвердите подключение OpenCode или ChatGPT к MCP.</p>
 <p class=\"muted\">Токен используется только этой формой и не передаётся MCP или Kaggle.</p>
-<form method=\"post\" action=\"/owner/login\" autocomplete=\"off\">
+<form method=\"post\" action=\"{login_url}\" autocomplete=\"off\">
 <input type=\"hidden\" name=\"owner_request\" value=\"{html.escape(sealed, quote=True)}\">
 <label>Операторский токен<br>
 <input type=\"password\" name=\"operator_token\" required autofocus autocomplete=\"off\"></label>
@@ -239,7 +245,7 @@ button{{padding:.7rem 1rem}}.muted{{color:#666}}</style></head><body><main>
                 "Referrer-Policy": "origin",
                 "Content-Security-Policy": (
                     "default-src 'none'; style-src 'unsafe-inline'; "
-                    "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+                    f"form-action {issuer_origin}; base-uri 'none'; frame-ancestors 'none'"
                 ),
             },
         )
