@@ -311,6 +311,31 @@ def test_cimd_authorization_uses_exact_resource_redirect_scope_and_pkce(
     assert service_harness.resolver_calls == [CLIENT_ID]
 
 
+def test_current_chatgpt_code_flow_is_valid_without_nonce(
+    service_harness: ServiceHarness,
+) -> None:
+    verifier = "A" * 43
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+
+    request = asyncio.run(
+        service_harness.service.validate_authorization_request(
+            {
+                "response_type": "code",
+                "client_id": CLIENT_ID,
+                "redirect_uri": REDIRECT_URI,
+                "resource": RESOURCE,
+                "scope": "openid offline_access platform:read provider:read provider:write",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "state": "oauth_s_exact",
+                "ui_locales": "ru-RU",
+            }
+        )
+    )
+
+    assert request.nonce is None
+
+
 def test_cimd_public_client_exchanges_pkce_code_and_rotates_refresh_token(
     service_harness: ServiceHarness,
 ) -> None:

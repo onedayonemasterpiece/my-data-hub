@@ -196,7 +196,10 @@ class AuthorizationService:
         if not set(scopes).issubset(allowed):
             raise OAuthProtocolError("invalid_scope")
         nonce = parameters.get("nonce")
-        if "openid" in scopes and (not nonce or len(nonce) > 255):
+        # OIDC Core makes nonce optional for the authorization-code flow.  If
+        # supplied, preserve it exactly into the ID token; otherwise PKCE and
+        # state retain the code-flow request binding without inventing one.
+        if nonce is not None and (not nonce or len(nonce) > 255):
             raise OAuthProtocolError("invalid_request")
         state = parameters.get("state")
         if state is not None and (not state or len(state) > 1024):
