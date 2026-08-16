@@ -57,6 +57,7 @@ from my_data_hub.providers.models import (
     ResourceLease,
 )
 from my_data_hub.providers.policy import PolicyDenied
+from my_data_hub.workloads.bloggers.discovery import blogger_import_request_sha256
 
 
 def _revocation_reference(query: OAuthRevocationQuery) -> str:
@@ -128,6 +129,14 @@ class LedgerWriteGate(WriteGate):
                 allowed_resource_class=resource_class,
                 private_resource_only=True,
             )
+        if tool in {"bloggers.import.preview", "bloggers.import.apply"}:
+            return self._authorize_blogger_import(
+                principal=principal,
+                tool=tool,
+                arguments=arguments,
+                master=master,
+                checkpoint=checkpoint,
+            )
         if tool not in {"data.change.preview", "data.change.apply"}:
             raise PermissionError("write gate does not authorize this tool")
         request_sha256 = self._change_request_sha(arguments)
@@ -194,6 +203,8 @@ class LedgerWriteGate(WriteGate):
         permit: WritePermit,
         result: Mapping[str, Any],
     ) -> dict[str, Any]:
+        if permit.tool.startswith("bloggers.import."):
+            return self._record_blogger_import_result(permit=permit, result=result)
         if permit.tool == "data.change.preview":
             affected = int(result.get("affected_rows", -1))
             payload = {
@@ -230,6 +241,210 @@ class LedgerWriteGate(WriteGate):
                 "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
             }
         return dict(result)
+
+    def prepare_blogger_import(
+        self, *, principal: AccessIdentity, arguments: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Persist only owner/request hashes before an automatic master ensure."""
+
+        request_sha256 = blogger_import_request_sha256(
+            batch_id=str(arguments.get("batch_id", "")),
+            expected_revision=int(arguments.get("expected_revision", -1)),
+            idempotency_key=str(arguments.get("idempotency_key", "")),
+        )
+        operation_id = self._digest(
+            {
+                "kind": "mcp-blogger-import-v1",
+                "principal": principal.subject,
+                "client_id": principal.client_id,
+                "idempotency_key": str(arguments["idempotency_key"]),
+            }
+        )
+        record, _created = self.ledger.ensure_blogger_import_operation(
+            operation_id=operation_id,
+            batch_id=str(arguments["batch_id"]),
+            idempotency_key=str(arguments["idempotency_key"]),
+            principal_id=principal.subject,
+            client_id=principal.client_id,
+            master_instance_id=None,
+            epoch=None,
+            expected_revision=int(arguments["expected_revision"]),
+            request_sha256=request_sha256,
+            pre_change_checkpoint_id=None,
+        )
+        return record
+
+    def mark_blogger_import_waiting_master(self, *, operation_id: str) -> dict[str, Any]:
+        return self.ledger.mark_blogger_import_waiting_master(operation_id)
+
+    def _authorize_blogger_import(
+        self,
+        *,
+        principal: AccessIdentity,
+        tool: str,
+        arguments: Mapping[str, Any],
+        master: MasterSnapshot,
+        checkpoint: Mapping[str, Any],
+    ) -> WritePermit:
+        request_sha256 = blogger_import_request_sha256(
+            batch_id=str(arguments.get("batch_id", "")),
+            expected_revision=int(arguments.get("expected_revision", -1)),
+            idempotency_key=str(arguments.get("idempotency_key", "")),
+        )
+        if arguments.get("expected_revision") != master.canonical_revision:
+            raise PermissionError("blogger request revision differs from ACTIVE canonical state")
+        if tool == "bloggers.import.preview":
+            record = self.prepare_blogger_import(principal=principal, arguments=arguments)
+            if record["state"] == "PREVIEWED" and (
+                record["master_instance_id"] != master.instance_id
+                or record["epoch"] != master.epoch
+            ):
+                record = self.ledger.restart_blogger_import_after_preview_epoch_loss(
+                    str(record["operation_id"]),
+                    failed_master_instance_id=str(record["master_instance_id"]),
+                    failed_epoch=int(record["epoch"]),
+                )
+            if record["state"] not in {"REQUESTED", "WAITING_MASTER", "PREVIEWED"}:
+                raise PermissionError("blogger preview operation is no longer previewable")
+            if record["state"] != "PREVIEWED":
+                record = self.ledger.bind_blogger_import_active_master(
+                    str(record["operation_id"]),
+                    master_instance_id=str(master.instance_id),
+                    epoch=int(master.epoch),
+                    pre_change_checkpoint_id=str(checkpoint["checkpoint_id"]),
+                )
+            operation_id = str(record["operation_id"])
+            preview_bound = False
+        else:
+            receipt = self._verify_blogger_preview(str(arguments.get("preview_receipt", "")))
+            operation_id = str(receipt.get("operation_id", ""))
+            record = self.ledger.blogger_import_operation(operation_id)
+            if (
+                record is None
+                or record["principal_id"] != principal.subject
+                or record["client_id"] != principal.client_id
+                or record["batch_id"] != str(UUID(str(arguments.get("batch_id", ""))))
+                or record["master_instance_id"] != master.instance_id
+                or record["epoch"] != master.epoch
+                or record["expected_revision"] != master.canonical_revision
+                or record["request_sha256"] != request_sha256
+                or record["plan_sha256"] != receipt.get("plan_sha256")
+                or record["pre_change_checkpoint_id"] != checkpoint["checkpoint_id"]
+            ):
+                raise PermissionError("blogger apply does not bind the durable preview")
+            self.ledger.begin_blogger_import_apply(
+                operation_id,
+                preview_receipt=str(arguments["preview_receipt"]),
+                plan_sha256=str(record["plan_sha256"]),
+            )
+            preview_bound = True
+        return WritePermit(
+            permit_id=operation_id,
+            tool=tool,
+            principal=principal.subject,
+            client_id=principal.client_id,
+            master_epoch=int(master.epoch),
+            canonical_revision=int(master.canonical_revision),
+            expires_at=int(self.clock()) + self.permit_ttl_seconds,
+            preview_bound=preview_bound,
+            checkpoint_lifecycle_bound=True,
+            pre_change_checkpoint_verified=True,
+        )
+
+    def blogger_broker_arguments(
+        self,
+        *,
+        permit: WritePermit,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        record = self.ledger.blogger_import_operation(permit.permit_id)
+        if record is None:
+            raise PermissionError("blogger import operation disappeared")
+        result = {
+            "operation_id": permit.permit_id,
+            "batch_id": record["batch_id"],
+            "request_sha256": record["request_sha256"],
+            "expected_revision": record["expected_revision"],
+            "principal_id": record["principal_id"],
+            "client_id": record["client_id"],
+            "_write_permit": {
+                "permit_id": permit.permit_id,
+                "tool": permit.tool,
+                "master_epoch": permit.master_epoch,
+                "canonical_revision": permit.canonical_revision,
+                "expires_at": permit.expires_at,
+            },
+        }
+        if permit.tool == "bloggers.import.apply":
+            result["plan_sha256"] = record["plan_sha256"]
+        return result
+
+    def _record_blogger_import_result(
+        self, *, permit: WritePermit, result: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        if permit.tool == "bloggers.import.preview":
+            summary = result.get("summary")
+            if not isinstance(summary, Mapping):
+                raise PermissionError("blogger preview omitted its bounded summary")
+            plan_sha256 = str(result.get("plan_sha256", ""))
+            existing = self.ledger.blogger_import_operation(permit.permit_id)
+            if existing is not None and existing["state"] == "PREVIEWED":
+                if (
+                    existing["plan_sha256"] != plan_sha256
+                    or existing["preview_summary"]
+                    != {key: int(value) for key, value in summary.items()}
+                ):
+                    raise PermissionError("blogger preview replay differs from immutable plan")
+                return {
+                    **result,
+                    "operation_id": permit.permit_id,
+                    "status": existing["state"],
+                    "preview_receipt": existing["preview_receipt"],
+                    "pre_change_checkpoint_id": existing["pre_change_checkpoint_id"],
+                    "duplicate": True,
+                }
+            payload = {
+                "kind": "mcp-blogger-preview-v1",
+                "operation_id": permit.permit_id,
+                "principal": permit.principal,
+                "client_id": permit.client_id,
+                "master_epoch": permit.master_epoch,
+                "canonical_revision": permit.canonical_revision,
+                "plan_sha256": plan_sha256,
+                "expires_at": int(self.clock()) + 300,
+            }
+            receipt = self._sign(payload)
+            record = self.ledger.record_blogger_import_preview(
+                permit.permit_id,
+                preview_receipt=receipt,
+                plan_sha256=plan_sha256,
+                summary={key: int(value) for key, value in summary.items()},
+            )
+            return {
+                **result,
+                "operation_id": permit.permit_id,
+                "status": record["state"],
+                "preview_receipt": receipt,
+                "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
+            }
+        record = self.ledger.record_blogger_import_commit(
+            permit.permit_id,
+            affected_rows=int(result.get("affected_rows", -1)),
+            committed_revision=int(result.get("committed_revision", -1)),
+        )
+        return {
+            **result,
+            "operation_id": permit.permit_id,
+            "status": record["state"],
+            "canonical_revision": record["committed_revision"],
+            "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
+        }
+
+    def _verify_blogger_preview(self, token: str) -> dict[str, Any]:
+        payload = self._verify_signed_payload(token)
+        if payload.get("kind") != "mcp-blogger-preview-v1":
+            raise PermissionError("blogger preview receipt has the wrong contract")
+        return payload
 
     def reconciliation_request(
         self,
@@ -272,6 +487,123 @@ class LedgerWriteGate(WriteGate):
             "expected_revision": record["expected_revision"],
             "principal_id": record["principal_id"],
             "client_id": record["client_id"],
+        }
+
+    def blogger_reconciliation_request(
+        self,
+        *,
+        principal: AccessIdentity,
+        master: MasterSnapshot,
+        operation_id: str | None = None,
+        arguments: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if master.state is not MasterState.ACTIVE or not master.instance_id or not master.epoch:
+            return None
+        if arguments is not None:
+            preview = self._verify_blogger_preview(str(arguments.get("preview_receipt", "")))
+            requested_operation_id = str(preview.get("operation_id", ""))
+        else:
+            requested_operation_id = str(operation_id or "")
+        record = self.ledger.blogger_import_operation(requested_operation_id)
+        if record is None:
+            return None
+        if (
+            record["principal_id"] != principal.subject
+            or record["client_id"] != principal.client_id
+            or record["master_instance_id"] != master.instance_id
+            or record["epoch"] != master.epoch
+        ):
+            raise PermissionError("blogger reconciliation differs from durable identity")
+        if arguments is not None:
+            request_sha256 = blogger_import_request_sha256(
+                batch_id=str(arguments.get("batch_id", "")),
+                expected_revision=int(arguments.get("expected_revision", -1)),
+                idempotency_key=str(arguments.get("idempotency_key", "")),
+            )
+            if record["request_sha256"] != request_sha256:
+                raise PermissionError("blogger retry differs from original exact request")
+        if record["state"] == "PREVIEWED":
+            return None
+        if record["state"] != "APPLYING":
+            raise PermissionError("blogger apply was already admitted; use bloggers.import.status")
+        return {
+            "operation_id": record["operation_id"],
+            "batch_id": record["batch_id"],
+            "request_sha256": record["request_sha256"],
+            "plan_sha256": record["plan_sha256"],
+            "master_instance_id": record["master_instance_id"],
+            "master_epoch": record["epoch"],
+            "expected_revision": record["expected_revision"],
+            "principal_id": record["principal_id"],
+            "client_id": record["client_id"],
+        }
+
+    def record_reconciled_blogger_import(
+        self, *, operation_id: str, receipt: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        if receipt.get("found") is not True or str(receipt.get("operation_id", "")) != operation_id:
+            raise PermissionError("canonical blogger receipt was not found")
+        record = self.ledger.reconcile_blogger_import_commit(
+            operation_id,
+            request_sha256=str(receipt.get("request_sha256", "")),
+            plan_sha256=str(receipt.get("plan_sha256", "")),
+            master_instance_id=str(receipt.get("master_instance_id", "")),
+            epoch=int(receipt.get("master_epoch", 0)),
+            expected_revision=int(receipt.get("expected_revision", -1)),
+            principal_id=str(receipt.get("principal_id", "")),
+            client_id=str(receipt.get("client_id", "")),
+            affected_rows=int(receipt.get("affected_rows", -1)),
+            committed_revision=int(receipt.get("committed_revision", -1)),
+            committed_at=str(receipt.get("committed_at", "")),
+        )
+        return {
+            "operation_id": operation_id,
+            "status": record["state"],
+            "affected_rows": record["affected_rows"],
+            "master_epoch": record["epoch"],
+            "canonical_revision": record["committed_revision"],
+            "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
+            "reconciled": True,
+        }
+
+    def blogger_import_status(
+        self, operation_id: str, principal: AccessIdentity
+    ) -> dict[str, Any]:
+        record = self.ledger.blogger_import_operation(operation_id)
+        if record is None or (
+            record["principal_id"] != principal.subject
+            or record["client_id"] != principal.client_id
+        ):
+            return {"found": False}
+        if record["state"] in {"COMMITTED_PENDING_CHECKPOINT", "CHECKPOINTING"}:
+            if record["state"] == "COMMITTED_PENDING_CHECKPOINT":
+                record = self.ledger.advance_blogger_import_checkpoint(
+                    operation_id, state="CHECKPOINTING"
+                )
+            post = self._post_change_checkpoint(record)
+            if post is not None:
+                record = self.ledger.advance_blogger_import_checkpoint(
+                    operation_id,
+                    state="CHECKPOINT_VERIFIED",
+                    post_change_checkpoint_id=str(post["checkpoint_id"]),
+                )
+                record = self.ledger.advance_blogger_import_checkpoint(
+                    operation_id,
+                    state="DURABLE_COMPLETE",
+                    post_change_checkpoint_id=str(post["checkpoint_id"]),
+                )
+        return {
+            "found": True,
+            "operation_id": operation_id,
+            "batch_id": record["batch_id"],
+            "state": record["state"],
+            "master_epoch": record["epoch"],
+            "expected_revision": record["expected_revision"],
+            "committed_revision": record["committed_revision"],
+            "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
+            "post_change_checkpoint_id": record["post_change_checkpoint_id"],
+            "retry_allowed": record["state"] in {"REQUESTED", "WAITING_MASTER", "PREVIEWED"},
+            "reconciliation_required": record["state"] == "APPLYING",
         }
 
     def record_reconciled_write(
@@ -374,6 +706,12 @@ class LedgerWriteGate(WriteGate):
         return f"{_b64(raw)}.{_b64(hmac.new(self.signing_secret, raw, hashlib.sha256).digest())}"
 
     def _verify_preview(self, token: str) -> dict[str, Any]:
+        payload = self._verify_signed_payload(token)
+        if payload.get("kind") != "mcp-write-preview-v1":
+            raise PermissionError("preview receipt has the wrong contract")
+        return payload
+
+    def _verify_signed_payload(self, token: str) -> dict[str, Any]:
         try:
             encoded, signature = token.split(".", 1)
             raw = urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
@@ -384,7 +722,7 @@ class LedgerWriteGate(WriteGate):
             raise PermissionError("preview receipt is invalid") from exc
         if not hmac.compare_digest(supplied, expected) or not isinstance(payload, dict):
             raise PermissionError("preview receipt is invalid")
-        if payload.get("kind") != "mcp-write-preview-v1" or int(payload.get("expires_at", 0)) <= int(self.clock()):
+        if int(payload.get("expires_at", 0)) <= int(self.clock()):
             raise PermissionError("preview receipt is expired or has the wrong contract")
         return payload
 
@@ -1601,6 +1939,10 @@ class LedgerControlReader(ControlPlaneReader):
             }
         if tool == "data.change.status" and self.write_gate is not None:
             return self.write_gate.write_status(str(arguments.get("operation_id", "")), principal)
+        if tool == "bloggers.import.status" and self.write_gate is not None:
+            return self.write_gate.blogger_import_status(
+                str(arguments.get("operation_id", "")), principal
+            )
         if tool in {"operation.get", "data.change.status"}:
             record = self.ledger.get_operation(str(arguments.get("operation_id", "")))
             if record is None and tool == "operation.get":

@@ -32,6 +32,26 @@ from my_data_hub.mcp.provider_schemas import (
 from my_data_hub.mcp.service import HubService
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
 from my_data_hub.mcp.transport import ToolSecurityMetadataMiddleware
+from my_data_hub.workloads.bloggers.discovery import (
+    SubmitDiscoveryBatch,
+    validate_submit_discovery_batch,
+)
+
+READER_PROFILE_TOOLS = frozenset(
+    {
+        "platform.status",
+        "master.status",
+        "operation.get",
+        "checkpoint.status",
+        "embedding.coverage",
+        "embedding.production.capabilities",
+        "provider.resources.status",
+        "bloggers.list",
+        "bloggers.get",
+        "bloggers.search",
+        "bloggers.statistics",
+    }
+)
 
 PROVIDER_ONLY_TOOLS = frozenset(
     {
@@ -54,21 +74,7 @@ PROVIDER_ONLY_TOOLS = frozenset(
         "provider.acceptance.claim.cleanup",
     }
 )
-UNIFIED_BOOTSTRAP_TOOLS = PROVIDER_ONLY_TOOLS | frozenset(
-    name
-    for name, contract in TOOL_CONTRACTS.items()
-    if contract.scope
-    in {
-        "platform:read",
-        "master:read",
-        "operation:read",
-        "checkpoint:read",
-        "embedding:read",
-        "provider:read",
-        "bloggers:read",
-        "data:read",
-    }
-)
+UNIFIED_BOOTSTRAP_TOOLS = PROVIDER_ONLY_TOOLS | READER_PROFILE_TOOLS
 
 
 def oauth_resource_metadata_url(resource: str) -> str:
@@ -91,6 +97,7 @@ class MCPDependencies:
     acceptance_scenarios_enabled: bool = False
     provider_only_profile_enabled: bool = False
     unified_bootstrap_profile_enabled: bool = False
+    reader_profile_enabled: bool = False
 
 
 def _local_identity(settings: Settings) -> AccessIdentity | None:
@@ -133,6 +140,8 @@ def _profile_tool_names(dependencies: MCPDependencies) -> set[str]:
         names &= PROVIDER_ONLY_TOOLS
     if dependencies.unified_bootstrap_profile_enabled:
         names &= UNIFIED_BOOTSTRAP_TOOLS
+    if dependencies.reader_profile_enabled:
+        names &= READER_PROFILE_TOOLS
     return names
 
 
@@ -351,37 +360,33 @@ def create_server(
     ) -> dict[str, Any]:
         return await service.invoke("provider.acceptance.claim.cleanup", locals())
 
-    async def bloggers_list(cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
-        return await service.invoke("bloggers.list", {"cursor": cursor, "limit": limit})
+    async def bloggers_list(
+        project_slug: str,
+        after_name: str | None = None,
+        after_blogger_id: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return await service.invoke("bloggers.list", locals())
 
-    async def bloggers_get(blogger_id: str) -> dict[str, Any]:
-        return await service.invoke("bloggers.get", {"blogger_id": blogger_id})
+    async def bloggers_get(project_slug: str, blogger_id: str) -> dict[str, Any]:
+        return await service.invoke("bloggers.get", locals())
 
     async def bloggers_search(
-        query: str,
-        cursor: str | None = None,
+        project_slug: str,
+        query: str | None = None,
+        after_name: str | None = None,
+        after_blogger_id: str | None = None,
         limit: int = 20,
-        e5_query_vector: list[float] | None = None,
-        bge_m3_query_vector: list[float] | None = None,
     ) -> dict[str, Any]:
-        return await service.invoke(
-            "bloggers.search",
-            {
-                "query": query,
-                "cursor": cursor,
-                "limit": limit,
-                "e5_query_vector": e5_query_vector,
-                "bge_m3_query_vector": bge_m3_query_vector,
-            },
-        )
+        return await service.invoke("bloggers.search", locals())
 
     async def bloggers_provenance(blogger_id: str, limit: int = 50) -> dict[str, Any]:
         return await service.invoke(
             "bloggers.provenance", {"blogger_id": blogger_id, "limit": limit}
         )
 
-    async def bloggers_statistics() -> dict[str, Any]:
-        return await service.invoke("bloggers.statistics", {})
+    async def bloggers_statistics(project_slug: str) -> dict[str, Any]:
+        return await service.invoke("bloggers.statistics", locals())
 
     async def bloggers_migration_accounting(export_batch_id: str) -> dict[str, Any]:
         return await service.invoke(
@@ -437,6 +442,21 @@ def create_server(
         batch_id: str, expected_revision: int, idempotency_key: str, preview_receipt: str
     ) -> dict[str, Any]:
         return await service.invoke("bloggers.import.apply", locals())
+
+    async def bloggers_import_status(operation_id: str) -> dict[str, Any]:
+        return await service.invoke("bloggers.import.status", locals())
+
+    async def submit_discovery_batch(payload: SubmitDiscoveryBatch) -> dict[str, Any]:
+        # The MCP SDK advertises the closed structural model.  Revalidate the
+        # received JSON through the official two-stage validator before any
+        # ACTIVE-master or connector action.
+        validated = validate_submit_discovery_batch(
+            payload.model_dump(mode="json", exclude_none=True)
+        )
+        return await service.invoke(
+            "submit_discovery_batch",
+            {"payload": validated.model_dump(mode="json", exclude_none=True)},
+        )
 
     def provider_arguments(
         resource_ref: str,
@@ -641,6 +661,8 @@ def create_server(
         "data.change.status": data_change_status,
         "bloggers.import.preview": bloggers_import_preview,
         "bloggers.import.apply": bloggers_import_apply,
+        "bloggers.import.status": bloggers_import_status,
+        "submit_discovery_batch": submit_discovery_batch,
     }
     for tool_name in TOOL_CONTRACTS:
         register(tool_name, functions[tool_name])

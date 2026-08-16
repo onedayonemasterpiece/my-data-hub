@@ -272,7 +272,7 @@ class SubmitDiscoveryBatch(BaseModel):
 def validate_submit_discovery_batch(
     payload: Mapping[str, Any],
 ) -> SubmitDiscoveryBatch:
-    """Apply the mandatory semantic stage of the public discovery contract.
+    """Apply the mandatory structural and semantic public-ingress stages.
 
     JSON Schema validates the closed wire shape and all locally expressible
     bounds. Cross-value equality, cross-row uniqueness and UTF-8 byte bounds
@@ -280,7 +280,17 @@ def validate_submit_discovery_batch(
     must run both stages rather than treating the schema alone as complete.
     """
 
-    return SubmitDiscoveryBatch.model_validate(payload)
+    # Keep the executable structural schema beside the official Pydantic
+    # semantic validator.  This is deliberately done at ingress instead of
+    # assuming that an MCP client validated the advertised input schema.
+    from jsonschema import Draft202012Validator, FormatChecker
+    from pydantic_core import to_jsonable_python
+
+    document = to_jsonable_python(dict(payload))
+    Draft202012Validator(
+        SubmitDiscoveryBatch.model_json_schema(), format_checker=FormatChecker()
+    ).validate(document)
+    return SubmitDiscoveryBatch.model_validate(document)
 
 
 def blogger_import_request_sha256(

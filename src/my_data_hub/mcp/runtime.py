@@ -296,6 +296,11 @@ def build_remote_runtime(
         acceptance_scenarios_enabled=runtime_settings.mcp_acceptance_scenarios_enabled,
         provider_only_profile_enabled=runtime_settings.mcp_provider_profile_enabled,
         unified_bootstrap_profile_enabled=runtime_settings.mcp_unified_bootstrap_profile_enabled,
+        reader_profile_enabled=not (
+            runtime_settings.mcp_operator_profile_enabled
+            or runtime_settings.mcp_provider_profile_enabled
+            or runtime_settings.mcp_unified_bootstrap_profile_enabled
+        ),
     )
     app = create_streamable_http_app(
         runtime_settings,

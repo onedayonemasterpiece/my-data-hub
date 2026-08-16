@@ -286,7 +286,6 @@ class Settings:
                 "provider:read",
                 "provider:write",
                 "bloggers:read",
-                "data:read",
             }
         )
         if self.mcp_unified_bootstrap_profile_enabled and (
@@ -326,6 +325,7 @@ class Settings:
             "acceptance:probe",
             "data:write",
             "migration:operate",
+            "bloggers:write",
             "provider:write",
         }
         if self.mcp_remote_enabled and (
@@ -425,6 +425,7 @@ class Settings:
         if self.mcp_write_enabled and not {
             "data:write",
             "migration:operate",
+            "bloggers:write",
             "provider:write",
         }.intersection(self.mcp_scopes):
             raise ConfigurationError("MCP write mode requires an explicit write scope")

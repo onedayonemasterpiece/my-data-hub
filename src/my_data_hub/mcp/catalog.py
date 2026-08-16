@@ -72,9 +72,21 @@ _WRITES = (
     ),
     ToolContract("data.change.preview", "data:write", False, role="operator"),
     ToolContract("data.change.apply", "data:write", False, destructive=True, role="operator"),
-    ToolContract("bloggers.import.preview", "migration:operate", False, role="migration_operator"),
     ToolContract(
-        "bloggers.import.apply", "migration:operate", False, destructive=True, role="migration_operator"
+        "submit_discovery_batch", "bloggers:write", False, role="connector"
+    ),
+    ToolContract(
+        "bloggers.import.preview", "bloggers:write", False, role="canonical_committer"
+    ),
+    ToolContract(
+        "bloggers.import.apply",
+        "bloggers:write",
+        False,
+        destructive=True,
+        role="canonical_committer",
+    ),
+    ToolContract(
+        "bloggers.import.status", "bloggers:write", True, role="canonical_committer"
     ),
     ToolContract("provider.resources.create", "provider:write", False, open_world=True, role="provider_operator"),
     ToolContract("provider.resources.version", "provider:write", False, open_world=True, role="provider_operator"),
@@ -159,6 +171,10 @@ READER_PROFILE_SCOPES = frozenset(
         "embedding:read",
         "provider:read",
         "bloggers:read",
+        # Legacy OAuth reader registrations may still carry this scope.  The
+        # operational reader/unified tool allowlist excludes ``data.query``;
+        # retaining the scope here avoids reclassifying an existing reader as
+        # an owner/operator during issuer reconciliation.
         "data:read",
     }
 )

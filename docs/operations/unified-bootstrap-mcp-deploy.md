@@ -5,7 +5,7 @@
 `INSTALL_MY_DATA_HUB_UNIFIED_BOOTSTRAP` is the bounded production profile that combines
 one central Kaggle adapter, the private provider Dataset tools, the canonical Kaggle
 master lifecycle, and reader tools in the same devstand control deployment. It does not
-grant `master:ensure`, `data:write`, `migration:operate`, `acceptance:operate`, an
+grant `master:ensure`, `data:write`, `migration:operate`, `bloggers:write`, `acceptance:operate`, an
 operator PostgreSQL role, DDL, or generic canonical write authority.
 
 Provider Dataset operations remain independent of canonical master state. A private
@@ -23,7 +23,7 @@ session.
 The MCP resource scopes are exactly:
 
 ```text
-platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,data:read,provider:write
+platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,provider:write
 ```
 
 Acceptance scenario request/status tools are not advertised unless their concrete
@@ -46,7 +46,7 @@ the unified scope string:
   "url": "https://mcp-datahub.kenigevents.ru/mcp",
   "oauth": {
     "clientId": "opencode-my-data-hub-unified",
-    "scope": "openid offline_access platform:read master:read operation:read checkpoint:read embedding:read provider:read bloggers:read data:read provider:write",
+    "scope": "openid offline_access platform:read master:read operation:read checkpoint:read embedding:read provider:read bloggers:read provider:write",
     "callbackPort": 19876,
     "redirectUri": "http://127.0.0.1:19876/mcp/oauth/callback"
   }
@@ -86,7 +86,7 @@ write.
 A release is operationally proven only after retaining sanitized receipts for:
 
 1. exact deployed commit and installer readiness JSON;
-2. OpenCode and ChatGPT catalogs with the exact bounded scopes and no acceptance/data-write tools;
+2. OpenCode and ChatGPT catalogs with the exact bounded scopes and no generic SQL, acceptance, or canonical write tools;
 3. provider Dataset create while master is `ABSENT`, with no master ensure request;
 4. a cold bounded read returning a durable `WAITING_FOR_MASTER` operation;
 5. the reconcile bridge consuming that operation and making one Kaggle master launch;

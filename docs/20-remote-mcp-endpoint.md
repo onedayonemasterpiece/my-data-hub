@@ -18,18 +18,17 @@ post-deploy verifier passes against the deployed merge commit.
 
 ## Exact reader surface
 
-`chatgpt-reader` must discover these 15 tools and no others:
+The default reader and unified bootstrap profiles discover only the fixed typed
+reader tools below (the unified profile additionally includes the exact provider-only
+catalog). They expose neither generic SQL nor write/status receipts owned by another
+principal:
 
 ```text
 bloggers.get
 bloggers.list
-bloggers.migration.accounting
-bloggers.provenance
 bloggers.search
 bloggers.statistics
 checkpoint.status
-data.change.status
-data.query
 embedding.coverage
 embedding.production.capabilities
 master.status
@@ -41,6 +40,13 @@ provider.resources.status
 `chatgpt-owner-operator` is a separate static public OAuth client. It receives the reader
 scopes plus guarded operator scopes only when the server-side write gate is enabled. Merely
 connecting the owner client never enables writes.
+
+The separate owner/operator profile adds `submit_discovery_batch`,
+`bloggers.import.preview`, `bloggers.import.apply` and `bloggers.import.status` under
+`bloggers:write`. Submission accepts a closed typed row batch or an immutable private
+provider artifact claim. Import preview/apply calls fixed PostgreSQL procedures through
+the existing ACTIVE-epoch `connector` and `canonical_committer` credentials; it never
+accepts SQL, a relation name, a database URL or credentials from the MCP caller.
 
 ## Owner authorization: local devstand browser token
 

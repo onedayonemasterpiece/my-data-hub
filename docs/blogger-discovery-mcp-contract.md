@@ -1,6 +1,7 @@
-# Blogger discovery MCP contract (Phase B)
+# Blogger discovery MCP contract (Phase B + Phase C wiring)
 
-Status: **implemented and proven as an internal contract; not yet exposed by the shared MCP catalog/broker**.
+Status: **implemented in the repository and wired into the shared typed MCP catalog/broker;
+live deployment and a real ACTIVE-master receipt remain separate operational evidence**.
 
 This phase provides the bounded PostgreSQL-side and control-ledger primitives for the
 owner workflow “find a batch of bloggers/accounts, preview it, apply approved canonical
@@ -44,7 +45,7 @@ memberships, public account coordinates and nullable historical profile fields.
 with a maximum of 100 rows. It exposes no evidence payload, arbitrary relation/column,
 generic SQL, DDL, owner role or unrestricted database role.
 
-## Cold-master continuation and shared wiring boundary
+## Cold-master continuation and shared wiring
 
 The eventual MCP broker must persist the typed operation before calling `ensure_master`.
 If no master is ACTIVE, the operation stays pending while the existing Kaggle lifecycle
@@ -66,10 +67,13 @@ therefore also call
 `my_data_hub.workloads.bloggers.discovery.validate_submit_discovery_batch`; this mandatory
 semantic stage enforces those invariants. Passing the JSON Schema alone is not acceptance.
 
-That catalog/server/service/control-gateway wiring is intentionally **not part of this
-Phase B lane**, because those shared files are owned by the provider integration lane.
-Until the shared wiring is merged and deployed, these contracts are not a claim that the
-public `bloggers.import` or reader tools are available in OpenCode/ChatGPT.
+Phase C exposes `submit_discovery_batch`, `bloggers.import.preview`,
+`bloggers.import.apply`, `bloggers.import.status` and fixed project-scoped blogger reads.
+The default reader/unified profile exposes typed reads only; the write lifecycle is in the
+separate `bloggers:write` operator profile. Provider-only and unified provider uploads keep
+their existing catalog and control gateway. Repository wiring is not evidence that the
+current public endpoint has been deployed or that a live Kaggle master/materializer has
+completed an artifact claim.
 
 ## Security properties
 

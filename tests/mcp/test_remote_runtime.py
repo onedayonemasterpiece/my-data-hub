@@ -39,7 +39,6 @@ READER_SCOPES = frozenset(
         "embedding:read",
         "provider:read",
         "bloggers:read",
-        "data:read",
     }
 )
 OAUTH_PROTOCOL_SCOPES = frozenset({"openid", "offline_access"})
@@ -253,6 +252,8 @@ async def test_standard_mcp_client_lists_reader_catalog_and_reads_absent_status(
         result = await session.call_tool("platform.status", {})
     names = {tool.name for tool in tools.tools}
     assert "bloggers.search" in names
+    assert "data.query" not in names
+    assert "submit_discovery_batch" not in names
     assert "data.change.apply" not in names
     assert result.is_error is False
     assert result.structured_content["master_state"] == "ABSENT"
@@ -561,7 +562,7 @@ def test_unified_bootstrap_gate_allows_provider_effect_during_active_master_only
 
 @pytest.mark.parametrize(
     "scopes",
-    [UNIFIED_SCOPES - {"data:read"}, UNIFIED_SCOPES | {"data:write"}],
+    [UNIFIED_SCOPES - {"bloggers:read"}, UNIFIED_SCOPES | {"data:read"}],
 )
 def test_unified_bootstrap_profile_rejects_nonexact_scope_catalog(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scopes: frozenset[str]
