@@ -6,7 +6,7 @@ from base64 import b64encode
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from threading import Event
+from threading import Barrier, Event
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -388,6 +388,98 @@ def test_terminal_receipt_is_authoritative_over_orphan_active_directory(
     assert store.abort(reference(aborted_request), identity()) == aborted
     assert store.start(aborted_request, identity()) == aborted
     assert store.status(reference(quarantined_request), identity())["state"] == "QUARANTINED"
+
+
+def test_concurrent_receipt_readers_idempotently_remove_one_orphan_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import my_data_hub.control_plane.provider_uploads as upload_module
+
+    store = ProviderChunkedUploadStore(tmp_path / "concurrent-cleanup")
+    arguments = start_arguments({"orphan.bin": b"orphan"})
+    store.start(arguments, identity())
+    put(store, arguments, "orphan.bin", 0, b"orphan")
+    original_rmtree = upload_module.shutil.rmtree
+
+    def preserve_active(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        candidate = Path(path)
+        if candidate.parent == store.uploads:
+            return None
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(upload_module.shutil, "rmtree", preserve_active)
+    finalized = store.finalize(
+        reference(arguments),
+        identity(),
+        lambda *_args: {"provider_ref": "owner/photo-batch", "provider_version": 1},
+    )
+    upload_id = finalized["upload_id"]
+    assert store._directory(upload_id).is_dir()
+
+    both_observed_directory = Barrier(2)
+
+    def synchronized_rmtree(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        both_observed_directory.wait(timeout=2)
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(upload_module.shutil, "rmtree", synchronized_rmtree)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda _index: store.status(reference(arguments), identity()),
+                range(2),
+            )
+        )
+    assert results == [finalized, finalized]
+    active = store._directory(upload_id)
+    assert not active.exists()
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    active.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ProviderUploadConflict, match="private and real"):
+        store.status(reference(arguments), identity())
+    active.unlink()
+    active.mkdir(mode=0o700)
+    active.chmod(0o755)
+    with pytest.raises(ProviderUploadConflict, match="private and real"):
+        store.status(reference(arguments), identity())
+    original_rmtree(active)
+
+
+@pytest.mark.parametrize("terminal", ["FINALIZED", "ABORTED"])
+def test_put_chunk_terminalization_between_precheck_and_lock_is_terminal_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal: str,
+) -> None:
+    store = ProviderChunkedUploadStore(tmp_path / terminal.lower())
+    arguments = start_arguments({"race.bin": b"race"})
+    store.start(arguments, identity())
+    put(store, arguments, "race.bin", 0, b"race")
+    payload = arguments["payload"]
+    assert isinstance(payload, dict)
+    upload_id = payload["upload_id"]
+    assert isinstance(upload_id, str)
+    original_lock = store._lock
+    attempting_active_lock = Event()
+
+    @contextmanager
+    def observed_lock(candidate: str, *, create: bool = False):  # type: ignore[no-untyped-def]
+        attempting_active_lock.set()
+        with original_lock(candidate, create=create) as directory:
+            yield directory
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with original_lock(upload_id) as directory:
+            monkeypatch.setattr(store, "_lock", observed_lock)
+            future = pool.submit(put, store, arguments, "race.bin", 0, b"race")
+            assert attempting_active_lock.wait(timeout=2)
+            state = json.loads((directory / "state.json").read_text())
+            store._terminal(directory, state, terminal)
+        with pytest.raises(ProviderUploadConflict, match="already terminal"):
+            future.result(timeout=2)
+    assert store.status(reference(arguments), identity())["state"] == terminal
 
 
 def test_global_and_principal_quotas_are_restart_and_concurrency_safe(tmp_path: Path) -> None:

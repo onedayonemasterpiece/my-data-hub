@@ -235,10 +235,22 @@ class ProviderChunkedUploadStore:
 
     def _remove_orphan_active_directory(self, upload_id: str) -> None:
         directory = self._directory(upload_id)
-        if not directory.exists() and not directory.is_symlink():
+        try:
+            metadata = directory.lstat()
+        except FileNotFoundError:
             return
-        _require_private_real_directory(directory)
-        shutil.rmtree(directory)
+        except OSError as exc:
+            raise ProviderUploadConflict("upload staging directory cannot be inspected") from exc
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_mode & 0o077:
+            raise ProviderUploadConflict("upload staging directory is not private and real")
+        try:
+            shutil.rmtree(directory)
+        except FileNotFoundError:
+            # Another authoritative receipt reader removed the same orphan.
+            pass
+        except OSError as exc:
+            # In particular, do not tolerate an object/symlink replacement after lstat.
+            raise ProviderUploadConflict("upload staging directory cleanup is unsafe") from exc
         _fsync_directory(self.uploads)
 
     def _active_usage(self) -> tuple[int, int, dict[tuple[str, str], tuple[int, int]]]:
@@ -411,6 +423,20 @@ class ProviderChunkedUploadStore:
         if receipt is None:
             raise error
         return receipt
+
+    @contextmanager
+    def _active_lock_or_terminal_conflict(
+        self,
+        upload_id: str,
+        arguments: Mapping[str, Any],
+        principal: AccessIdentity,
+    ):  # type: ignore[no-untyped-def]
+        try:
+            with self._lock(upload_id) as directory:
+                yield directory
+        except ProviderUploadNotFound as exc:
+            self._receipt_after_active_loss(upload_id, arguments, principal, exc)
+            raise ProviderUploadConflict("upload is already terminal") from exc
 
     def _start_receipt_replay(
         self,
@@ -639,7 +665,9 @@ class ProviderChunkedUploadStore:
             raise ProviderUploadError("upload chunk size or sha256 differs from its bytes")
         if self._read_receipt(upload_id, arguments, principal) is not None:
             raise ProviderUploadConflict("upload is already terminal")
-        with self._lock(upload_id) as directory:
+        with self._active_lock_or_terminal_conflict(
+            upload_id, arguments, principal
+        ) as directory:
             state = self._load_active(directory, arguments, principal)
             item = self._find_file(state, path)
             received = sum(int(chunk["byte_size"]) for chunk in item["chunks"])

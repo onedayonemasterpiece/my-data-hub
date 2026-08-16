@@ -498,6 +498,10 @@ removes any orphan active directory without changing FINALIZED/ABORTED/QUARANTIN
 Start/status/finalize/abort also re-read that exact bound receipt when terminalization
 wins the race between their initial receipt check and active-lock acquisition, rather
 than returning a transient staging-not-found error.
+Chunk writes perform the same bound receipt reconciliation and return the defined
+already-terminal conflict. Concurrent authoritative receipt readers idempotently
+converge while removing one orphan directory; an observed symlink or non-private
+replacement remains a hard contract failure.
 Production deployment mounts the private host
 `MY_DATA_HUB_PROVIDER_UPLOAD_DIR` only into central control at `/uploads`, never into the
 remote MCP process.
