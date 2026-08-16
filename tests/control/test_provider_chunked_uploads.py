@@ -4,7 +4,9 @@ import hashlib
 import json
 from base64 import b64encode
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -505,3 +507,60 @@ def test_chunks_or_assembled_ancestor_symlink_never_writes_outside_staging(tmp_p
         store.finalize(reference(arguments), identity(), lambda *_args: {})
     assert not any(outside.iterdir())
     assert store.status(reference(arguments), identity())["state"] == "QUARANTINED"
+
+
+@pytest.mark.parametrize(
+    ("operation", "terminal"),
+    [
+        ("status", "QUARANTINED"),
+        ("finalize", "FINALIZED"),
+        ("abort", "ABORTED"),
+        ("start", "ABORTED"),
+    ],
+)
+def test_terminalization_between_precheck_and_active_lock_returns_authoritative_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    terminal: str,
+) -> None:
+    store = ProviderChunkedUploadStore(tmp_path / operation)
+    arguments = start_arguments({"race.bin": b"race"})
+    store.start(arguments, identity())
+    original_lock = store._lock
+    attempting_active_lock = Event()
+
+    @contextmanager
+    def observed_lock(upload_id: str, *, create: bool = False):  # type: ignore[no-untyped-def]
+        attempting_active_lock.set()
+        with original_lock(upload_id, create=create) as directory:
+            yield directory
+
+    def run_operation() -> dict[str, object]:
+        if operation == "status":
+            return store.status(reference(arguments), identity())
+        if operation == "finalize":
+            return store.finalize(
+                reference(arguments),
+                identity(),
+                lambda *_args: pytest.fail("terminal race must not execute a second effect"),
+            )
+        if operation == "abort":
+            return store.abort(reference(arguments), identity())
+        return store.start(arguments, identity())
+
+    payload = arguments["payload"]
+    assert isinstance(payload, dict)
+    upload_id = payload["upload_id"]
+    assert isinstance(upload_id, str)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with original_lock(upload_id) as directory:
+            monkeypatch.setattr(store, "_lock", observed_lock)
+            future = pool.submit(run_operation)
+            assert attempting_active_lock.wait(timeout=2)
+            state = json.loads((directory / "state.json").read_text())
+            store._terminal(directory, state, terminal)
+        result = future.result(timeout=2)
+    assert result["state"] == terminal
+    assert not any(store.uploads.iterdir())
+    assert store.status(reference(arguments), identity())["state"] == terminal

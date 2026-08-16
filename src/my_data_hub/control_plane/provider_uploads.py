@@ -54,6 +54,10 @@ class ProviderUploadExpired(ProviderUploadError):
     """The bounded staging lease expired and its raw bytes were removed."""
 
 
+class ProviderUploadNotFound(ProviderUploadError):
+    """Active staging disappeared; callers must check for a terminal receipt."""
+
+
 def _safe_path(value: object) -> str:
     if not isinstance(value, str) or not 1 <= len(value) <= 1000:
         raise ProviderUploadError("upload file path is invalid")
@@ -314,12 +318,17 @@ class ProviderChunkedUploadStore:
             directory.chmod(0o700)
             _fsync_directory(self.uploads)
         if not directory.is_dir() or directory.is_symlink():
-            raise ProviderUploadError("upload was not found")
+            raise ProviderUploadNotFound("upload was not found")
         lock_path = directory / ".lock"
-        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        except FileNotFoundError as exc:
+            raise ProviderUploadNotFound("upload was not found") from exc
         try:
             os.fchmod(descriptor, 0o600)
             fcntl.flock(descriptor, fcntl.LOCK_EX)
+            if not directory.is_dir() or directory.is_symlink():
+                raise ProviderUploadNotFound("upload was not found")
             yield directory
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
@@ -390,6 +399,32 @@ class ProviderChunkedUploadStore:
         self._assert_binding(receipt, arguments, principal)
         self._remove_orphan_active_directory(upload_id)
         return receipt
+
+    def _receipt_after_active_loss(
+        self,
+        upload_id: str,
+        arguments: Mapping[str, Any],
+        principal: AccessIdentity,
+        error: ProviderUploadNotFound,
+    ) -> dict[str, Any]:
+        receipt = self._read_receipt(upload_id, arguments, principal)
+        if receipt is None:
+            raise error
+        return receipt
+
+    def _start_receipt_replay(
+        self,
+        receipt: Mapping[str, Any],
+        *,
+        request_sha256: str,
+        arguments: Mapping[str, Any],
+        principal: AccessIdentity,
+    ) -> dict[str, Any]:
+        if receipt.get("request_sha256") != request_sha256:
+            raise ProviderUploadConflict("upload_id replay differs from its exact start request")
+        self._assert_binding(receipt, arguments, principal)
+        self._remove_orphan_active_directory(str(receipt["upload_id"]))
+        return self._public(receipt)
 
     def start(self, arguments: Mapping[str, Any], principal: AccessIdentity) -> dict[str, Any]:
         payload = arguments.get("payload")
@@ -494,23 +529,41 @@ class ProviderChunkedUploadStore:
         with self._root_lock():
             receipt = self._terminal_receipt(upload_id)
             if receipt is not None:
-                if receipt.get("request_sha256") != request_sha256:
-                    raise ProviderUploadConflict(
-                        "upload_id replay differs from its exact start request"
-                    )
-                self._assert_binding(receipt, arguments, principal)
-                self._remove_orphan_active_directory(upload_id)
-                return self._public(receipt)
+                return self._start_receipt_replay(
+                    receipt,
+                    request_sha256=request_sha256,
+                    arguments=arguments,
+                    principal=principal,
+                )
             directory = self._directory(upload_id)
             if directory.exists() or directory.is_symlink():
-                with self._lock(upload_id) as locked:
-                    prior = _read_json(locked / "state.json")
-                    if prior.get("request_sha256") != request_sha256:
-                        raise ProviderUploadConflict(
-                            "upload_id replay differs from its exact start request"
-                        )
-                    self._assert_binding(prior, arguments, principal)
-                    return self._public(prior)
+                try:
+                    with self._lock(upload_id) as locked:
+                        prior = _read_json(locked / "state.json")
+                        if prior.get("request_sha256") != request_sha256:
+                            raise ProviderUploadConflict(
+                                "upload_id replay differs from its exact start request"
+                            )
+                        self._assert_binding(prior, arguments, principal)
+                        return self._public(prior)
+                except ProviderUploadNotFound as exc:
+                    receipt = self._terminal_receipt(upload_id)
+                    if receipt is None:
+                        raise exc
+                    return self._start_receipt_replay(
+                        receipt,
+                        request_sha256=request_sha256,
+                        arguments=arguments,
+                        principal=principal,
+                    )
+            receipt = self._terminal_receipt(upload_id)
+            if receipt is not None:
+                return self._start_receipt_replay(
+                    receipt,
+                    request_sha256=request_sha256,
+                    arguments=arguments,
+                    principal=principal,
+                )
             self._admit_upload(total=total, principal=principal)
             with self._lock(upload_id, create=True) as locked:
                 chunks = locked / "chunks"
@@ -704,9 +757,14 @@ class ProviderChunkedUploadStore:
         receipt = self._read_receipt(upload_id, arguments, principal)
         if receipt is not None:
             return self._public(receipt)
-        with self._lock(upload_id) as directory:
-            state = self._load_active(directory, arguments, principal)
-            return self._public(state)
+        try:
+            with self._lock(upload_id) as directory:
+                state = self._load_active(directory, arguments, principal)
+                return self._public(state)
+        except ProviderUploadNotFound as exc:
+            return self._public(
+                self._receipt_after_active_loss(upload_id, arguments, principal, exc)
+            )
 
     def _assemble(self, directory: Path, state: Mapping[str, Any]) -> Path:
         _require_private_real_directory(directory)
@@ -790,39 +848,45 @@ class ProviderChunkedUploadStore:
             if receipt.get("state") != "FINALIZED":
                 raise ProviderUploadConflict("upload is already terminal")
             return self._public(receipt)
-        with self._lock(upload_id) as directory:
-            state = self._load_active(directory, arguments, principal)
-            if state.get("state") not in {"READY", "FINALIZING"}:
-                raise ProviderUploadError("upload is incomplete")
-            try:
-                assembled = self._assemble(directory, state)
-                state["state"] = "FINALIZING"
-                state["updated_at"] = int(self.clock())
-                _atomic_json(directory / "state.json", state)
-                result = dict(callback(state, assembled, principal))
-            except ProviderUploadConflict:
-                if directory.exists() and (directory / "state.json").exists():
-                    self._terminal(directory, state, "QUARANTINED")
-                raise
-            except Exception:
-                if directory.exists() and (directory / "state.json").exists():
-                    state["state"] = "READY"
+        try:
+            with self._lock(upload_id) as directory:
+                state = self._load_active(directory, arguments, principal)
+                if state.get("state") not in {"READY", "FINALIZING"}:
+                    raise ProviderUploadError("upload is incomplete")
+                try:
+                    assembled = self._assemble(directory, state)
+                    state["state"] = "FINALIZING"
                     state["updated_at"] = int(self.clock())
                     _atomic_json(directory / "state.json", state)
-                    shutil.rmtree(directory / "assembled", ignore_errors=True)
-                raise
-            state["state"] = "FINALIZED"
-            state["updated_at"] = int(self.clock())
-            state["result"] = result
-            receipt_value = {**state, "schema_version": RECEIPT_SCHEMA}
-            receipt_value["files"] = [
-                {
-                    **{key: item[key] for key in ("path", "byte_size", "sha256")},
-                    "received_bytes": item["byte_size"],
-                }
-                for item in state["files"]
-            ]
-            _atomic_json(self._receipt_path(upload_id), receipt_value)
+                    result = dict(callback(state, assembled, principal))
+                except ProviderUploadConflict:
+                    if directory.exists() and (directory / "state.json").exists():
+                        self._terminal(directory, state, "QUARANTINED")
+                    raise
+                except Exception:
+                    if directory.exists() and (directory / "state.json").exists():
+                        state["state"] = "READY"
+                        state["updated_at"] = int(self.clock())
+                        _atomic_json(directory / "state.json", state)
+                        shutil.rmtree(directory / "assembled", ignore_errors=True)
+                    raise
+                state["state"] = "FINALIZED"
+                state["updated_at"] = int(self.clock())
+                state["result"] = result
+                receipt_value = {**state, "schema_version": RECEIPT_SCHEMA}
+                receipt_value["files"] = [
+                    {
+                        **{key: item[key] for key in ("path", "byte_size", "sha256")},
+                        "received_bytes": item["byte_size"],
+                    }
+                    for item in state["files"]
+                ]
+                _atomic_json(self._receipt_path(upload_id), receipt_value)
+        except ProviderUploadNotFound as exc:
+            receipt = self._receipt_after_active_loss(upload_id, arguments, principal, exc)
+            if receipt.get("state") != "FINALIZED":
+                raise ProviderUploadConflict("upload is already terminal") from exc
+            return self._public(receipt)
         self._remove_orphan_active_directory(upload_id)
         return self._public(receipt_value)
 
@@ -838,10 +902,17 @@ class ProviderChunkedUploadStore:
             if receipt.get("state") == "FINALIZED":
                 raise ProviderUploadConflict("finalized upload cannot be aborted")
             return self._public(receipt)
-        with self._lock(upload_id) as directory:
-            state = self._load_active(directory, arguments, principal)
-            self._terminal(directory, state, "ABORTED")
-            receipt_value = _read_json(self._receipt_path(upload_id))
+        try:
+            with self._lock(upload_id) as directory:
+                state = self._load_active(directory, arguments, principal)
+                self._terminal(directory, state, "ABORTED")
+                receipt_value = _read_json(self._receipt_path(upload_id))
+        except ProviderUploadNotFound as exc:
+            receipt_value = self._receipt_after_active_loss(
+                upload_id, arguments, principal, exc
+            )
+            if receipt_value.get("state") == "FINALIZED":
+                raise ProviderUploadConflict("finalized upload cannot be aborted") from exc
         return self._public(receipt_value)
 
     def _terminal(self, directory: Path, state: Mapping[str, Any], terminal: str) -> None:

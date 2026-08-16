@@ -495,6 +495,9 @@ results only, never raw file bytes. Successful, aborted, expired or quarantined 
 remove raw staging; bounded terminal receipts remain for replay and are reaped after
 seven days. A valid terminal receipt is authoritative after a crash: expiry reaping
 removes any orphan active directory without changing FINALIZED/ABORTED/QUARANTINED.
+Start/status/finalize/abort also re-read that exact bound receipt when terminalization
+wins the race between their initial receipt check and active-lock acquisition, rather
+than returning a transient staging-not-found error.
 Production deployment mounts the private host
 `MY_DATA_HUB_PROVIDER_UPLOAD_DIR` only into central control at `/uploads`, never into the
 remote MCP process.
