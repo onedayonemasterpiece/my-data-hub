@@ -2111,7 +2111,7 @@ def create_app(
                     *(["operator"] if operator_credential_enabled else []),
                     *(
                         ["connector", "canonical_committer"]
-                        if runtime.connector_runtime_enabled
+                        if operator_credential_enabled or runtime.connector_runtime_enabled
                         else []
                     ),
                 ]
@@ -2176,7 +2176,8 @@ def create_app(
             *(["operator"] if operation.state == "ACTIVE" and operator_credential_enabled else []),
             *(
                 ["connector", "canonical_committer"]
-                if operation.state == "ACTIVE" and runtime.connector_runtime_enabled
+                if operation.state == "ACTIVE"
+                and (operator_credential_enabled or runtime.connector_runtime_enabled)
                 else []
             ),
         ]
@@ -2247,7 +2248,12 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, Any]:
-        if not runtime.connector_runtime_enabled:
+        # Operator canonical writes use the same task-bound verified-checkpoint
+        # request queue as connector commits.  The queue consumer is the
+        # master notebook itself, so it must remain available for the explicit
+        # operator profile even when the optional connector-intake service is
+        # disabled.  Unified/provider-only profiles still cannot open it.
+        if not (runtime.connector_runtime_enabled or operator_credential_enabled):
             raise HTTPException(status_code=404, detail={"code": "connector_runtime_disabled"})
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=401, detail={"code": "runtime_token_required"})

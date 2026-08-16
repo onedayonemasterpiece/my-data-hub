@@ -8,8 +8,12 @@ server-owned and therefore absent from the caller-controlled models.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping
 from datetime import datetime
+from functools import lru_cache
+from importlib import resources
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import quote, urlsplit, urlunsplit
 from uuid import UUID
@@ -35,6 +39,27 @@ MAX_EVIDENCE_PROPERTIES = 20
 MAX_ARTIFACT_BYTES = 10_737_418_240
 
 Sha256 = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+
+
+@lru_cache(maxsize=1)
+def _authoritative_discovery_schema() -> dict[str, Any]:
+    """Load the checked-in contract in source and its force-included wheel twin."""
+
+    source = Path(__file__).resolve().parents[4] / "schemas" / "blogger-discovery-batch.v1.schema.json"
+    try:
+        raw = (
+            source.read_text(encoding="utf-8")
+            if source.is_file()
+            else resources.files("my_data_hub")
+            .joinpath("schemas/blogger-discovery-batch.v1.schema.json")
+            .read_text(encoding="utf-8")
+        )
+        schema = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("authoritative blogger discovery schema is unavailable") from exc
+    if not isinstance(schema, dict):
+        raise RuntimeError("authoritative blogger discovery schema is not an object")
+    return schema
 
 
 def _sha256(value: Any) -> str:
@@ -288,7 +313,7 @@ def validate_submit_discovery_batch(
 
     document = to_jsonable_python(dict(payload))
     Draft202012Validator(
-        SubmitDiscoveryBatch.model_json_schema(), format_checker=FormatChecker()
+        _authoritative_discovery_schema(), format_checker=FormatChecker()
     ).validate(document)
     return SubmitDiscoveryBatch.model_validate(document)
 

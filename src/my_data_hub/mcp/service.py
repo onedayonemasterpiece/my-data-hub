@@ -440,6 +440,14 @@ class HubService:
                 str(arguments.get("sql", "")), self._parameters(arguments)
             )
             self._require_write_contract(arguments, apply=tool.endswith(".apply"))
+        if tool == "bloggers.import.apply":
+            replay_reader = getattr(self.write_gate, "blogger_apply_replay", None)
+            if replay_reader is None:
+                raise HubPermissionError("blogger apply replay gate is not configured")
+            replay = await _await(replay_reader(principal=identity, arguments=arguments))
+            if replay is not None:
+                self._require_durable_operation(replay)
+                return dict(replay)
         prepared: Mapping[str, Any] | None = None
         if tool == "bloggers.import.preview":
             prepare = getattr(self.write_gate, "prepare_blogger_import", None)

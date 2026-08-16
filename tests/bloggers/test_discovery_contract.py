@@ -37,10 +37,10 @@ def row(**changes: object) -> dict[str, object]:
             {
                 "platform": "telegram",
                 "handle": "TestBlogger",
-                "url": "HTTPS://T.ME:443/TestBlogger/#fragment",
+                "url": "https://t.me/TestBlogger",
             }
         ],
-        "source_uri": "https://search.example/results/1#fragment",
+        "source_uri": "https://search.example/results/1",
         "observed_at": NOW.isoformat(),
         "evidence": {"query": "калининград блогер", "rank": 1},
     }
@@ -66,12 +66,22 @@ def inline_request(**changes: object) -> SubmitDiscoveryBatch:
 
 
 def test_closed_row_normalizes_account_identity_and_has_stable_hash() -> None:
-    observed = BloggerDiscoveryRow.model_validate(row())
+    raw = row(
+        accounts=[
+            {
+                "platform": "telegram",
+                "handle": "TestBlogger",
+                "url": "HTTPS://T.ME:443/TestBlogger/#fragment",
+            }
+        ],
+        source_uri="https://search.example/results/1#fragment",
+    )
+    observed = BloggerDiscoveryRow.model_validate(raw)
     assert observed.accounts[0].platform == "telegram"
     assert observed.accounts[0].url == "https://t.me/TestBlogger"
     assert observed.accounts[0].normalized_url == "https://t.me/TestBlogger"
     assert observed.source_uri == "https://search.example/results/1"
-    assert observed.row_sha256 == BloggerDiscoveryRow.model_validate(row()).row_sha256
+    assert observed.row_sha256 == BloggerDiscoveryRow.model_validate(raw).row_sha256
     with pytest.raises(ValidationError, match="extra_forbidden"):
         BloggerDiscoveryRow.model_validate(row(secret="must-not-land"))
 
@@ -117,8 +127,18 @@ def test_cross_row_account_collision_and_duplicate_source_are_rejected() -> None
     second = row(source_record_id="search-result-002", display_name="Другой")
     with pytest.raises(ValidationError, match="account identity"):
         inline_request(rows=[row(), second])
+    duplicate_source = row(
+        display_name="Иное имя",
+        accounts=[
+            {
+                "platform": "telegram",
+                "handle": "OtherHandle",
+                "url": "https://t.me/OtherHandle",
+            }
+        ],
+    )
     with pytest.raises(ValidationError, match="source_record_id"):
-        inline_request(rows=[row(), row()])
+        inline_request(rows=[row(), duplicate_source])
 
 
 def test_import_and_plan_hashes_are_order_stable_and_bind_revision() -> None:

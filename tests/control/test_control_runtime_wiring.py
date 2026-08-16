@@ -729,7 +729,12 @@ def test_runtime_callback_reaches_active_through_production_app_wiring(tmp_path:
         headers={"Authorization": f"Bearer {token}"},
     )
     assert activation.status_code == 200
-    assert activation.json()["credential_roles"] == ["reader", "operator"]
+    assert activation.json()["credential_roles"] == [
+        "reader",
+        "operator",
+        "connector",
+        "canonical_committer",
+    ]
 
     key_blob = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20" + b"k" * 32
     public_key = "ssh-ed25519 " + base64.b64encode(key_blob).decode()

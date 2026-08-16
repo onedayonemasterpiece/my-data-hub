@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import pytest
 
@@ -15,6 +16,7 @@ from my_data_hub.mcp.postgres_broker import (
     PostgresMasterSessionBroker,
     SessionBrokerError,
 )
+from my_data_hub.workloads.bloggers.discovery_postgres import BloggerImportApplyReceipt
 
 
 def identity() -> AccessIdentity:
@@ -227,3 +229,68 @@ def test_blogger_migration_accounting_rejects_non_uuid_without_query() -> None:
 
     with pytest.raises(SessionBrokerError, match="exact UUID"):
         session._dispatch(Cursor(), {"export_batch_id": "not-a-uuid"})
+
+
+def test_current_epoch_committer_can_reconcile_exact_old_epoch_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_master = "22222222-2222-4222-8222-222222222222"
+    old_master = "11111111-1111-4111-8111-111111111111"
+    reconcile_request = replace(
+        request(),
+        master_instance_id=current_master,
+        epoch=8,
+        role="canonical_committer",
+        tool="bloggers.import.reconcile",
+    )
+    session = PostgresMasterSession(
+        reconcile_request,
+        replace(
+            credential(),
+            master_instance_id=current_master,
+            epoch=8,
+            role="canonical_committer",
+        ),
+    )
+    observed: dict[str, object] = {}
+
+    def reconcile(_cursor, _identity, *, plan_sha256, master_instance_id, master_epoch):  # type: ignore[no-untyped-def]
+        observed.update(
+            plan_sha256=plan_sha256,
+            master_instance_id=str(master_instance_id),
+            master_epoch=master_epoch,
+        )
+        return BloggerImportApplyReceipt(
+            operation_id="a" * 64,
+            batch_id=UUID("33333333-3333-4333-8333-333333333333"),
+            plan_sha256="c" * 64,
+            affected_rows=2,
+            revision_after=13,
+            duplicate=True,
+        )
+
+    monkeypatch.setattr(
+        "my_data_hub.workloads.bloggers.discovery_postgres.BloggerDiscoveryPostgres.reconcile",
+        reconcile,
+    )
+    result = session._dispatch_blogger_import(
+        object(),
+        {
+            "operation_id": "a" * 64,
+            "batch_id": "33333333-3333-4333-8333-333333333333",
+            "request_sha256": "b" * 64,
+            "plan_sha256": "c" * 64,
+            "master_instance_id": old_master,
+            "master_epoch": 7,
+            "expected_revision": 12,
+            "principal_id": identity().subject,
+            "client_id": identity().client_id,
+        },
+    )
+    assert observed == {
+        "plan_sha256": "c" * 64,
+        "master_instance_id": old_master,
+        "master_epoch": 7,
+    }
+    assert result["receipt_master_instance_id"] == old_master
+    assert result["receipt_master_epoch"] == 7

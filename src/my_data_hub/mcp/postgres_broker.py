@@ -452,11 +452,6 @@ class PostgresMasterSession(MasterSession):
                 cursor, identity, plan_sha256=str(arguments["plan_sha256"])
             )
         else:
-            if (
-                arguments["master_instance_id"] != self.request.master_instance_id
-                or int(arguments["master_epoch"]) != self.request.epoch
-            ):
-                raise SessionBrokerError("blogger reconciliation epoch differs from the session")
             receipt = BloggerDiscoveryPostgres.reconcile(
                 cursor,
                 identity,
@@ -476,8 +471,8 @@ class PostgresMasterSession(MasterSession):
             "committed_at": datetime.now(UTC),
             "duplicate": receipt.duplicate,
             "request_sha256": identity.request_sha256,
-            "master_instance_id": self.request.master_instance_id,
-            "master_epoch": self.request.epoch,
+            "receipt_master_instance_id": str(arguments.get("master_instance_id", self.request.master_instance_id)),
+            "receipt_master_epoch": int(arguments.get("master_epoch", self.request.epoch)),
             "expected_revision": identity.expected_revision,
             "principal_id": identity.principal_id,
             "client_id": identity.client_id,

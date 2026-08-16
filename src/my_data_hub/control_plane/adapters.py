@@ -6,6 +6,7 @@ import json
 import time
 from base64 import b64decode, b64encode, urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -17,8 +18,9 @@ from my_data_hub.auth.control import (
     OAuthClientRecord,
     OAuthRevocationQuery,
 )
+from my_data_hub.connectors.checkpoint_control import ControlLedgerVerifiedCheckpointCoordinator
 from my_data_hub.control_plane.acceptance_evidence import AcceptanceEvidenceController
-from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.control_plane.ledger import ControlLedger, ControlLedgerError
 from my_data_hub.control_plane.provider_uploads import ProviderChunkedUploadStore
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.contracts import (
@@ -84,6 +86,7 @@ class LedgerWriteGate(WriteGate):
         if not 30 <= permit_ttl_seconds <= 300:
             raise ValueError("write permit TTL must be between 30 and 300 seconds")
         self.ledger = ledger
+        self.blogger_checkpoint_coordinator = ControlLedgerVerifiedCheckpointCoordinator(ledger)
         self.signing_secret = signing_secret
         self.clock = clock
         self.permit_ttl_seconds = permit_ttl_seconds
@@ -379,6 +382,57 @@ class LedgerWriteGate(WriteGate):
             result["plan_sha256"] = record["plan_sha256"]
         return result
 
+    def blogger_apply_replay(
+        self, *, principal: AccessIdentity, arguments: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """Return an already committed exact outcome without another data-plane effect."""
+
+        preview = self._verify_blogger_preview(str(arguments.get("preview_receipt", "")))
+        operation_id = str(preview.get("operation_id", ""))
+        record = self.ledger.blogger_import_operation(operation_id)
+        if record is None:
+            return None
+        request_sha256 = blogger_import_request_sha256(
+            batch_id=str(arguments.get("batch_id", "")),
+            expected_revision=int(arguments.get("expected_revision", -1)),
+            idempotency_key=str(arguments.get("idempotency_key", "")),
+        )
+        try:
+            batch_id = str(UUID(str(arguments.get("batch_id", ""))))
+        except ValueError as exc:
+            raise PermissionError("blogger apply replay batch identity is invalid") from exc
+        if (
+            record["principal_id"] != principal.subject
+            or record["client_id"] != principal.client_id
+            or record["batch_id"] != batch_id
+            or record["request_sha256"] != request_sha256
+            or record["plan_sha256"] != preview.get("plan_sha256")
+        ):
+            raise PermissionError("blogger apply replay differs from immutable identity")
+        durable_states = {
+            "COMMITTED_PENDING_CHECKPOINT",
+            "CHECKPOINTING",
+            "CHECKPOINT_VERIFIED",
+            "DURABLE_COMPLETE",
+        }
+        if record["state"] not in durable_states:
+            return None
+        checkpoint = self._blogger_checkpoint_status(record, request_if_missing=True)
+        record = checkpoint["record"]
+        return {
+            "operation_id": operation_id,
+            "batch_id": record["batch_id"],
+            "status": record["state"],
+            "affected_rows": record["affected_rows"],
+            "master_epoch": record["epoch"],
+            "canonical_revision": record["committed_revision"],
+            "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
+            "post_change_checkpoint_id": record["post_change_checkpoint_id"],
+            "duplicate": True,
+            "checkpoint_request_id": checkpoint["request_id"],
+            "checkpoint_request_state": checkpoint["state"],
+        }
+
     def _record_blogger_import_result(
         self, *, permit: WritePermit, result: Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -432,12 +486,16 @@ class LedgerWriteGate(WriteGate):
             affected_rows=int(result.get("affected_rows", -1)),
             committed_revision=int(result.get("committed_revision", -1)),
         )
+        checkpoint = self._blogger_checkpoint_status(record, request_if_missing=True)
+        record = checkpoint["record"]
         return {
             **result,
             "operation_id": permit.permit_id,
             "status": record["state"],
             "canonical_revision": record["committed_revision"],
             "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
+            "checkpoint_request_id": checkpoint["request_id"],
+            "checkpoint_request_state": checkpoint["state"],
         }
 
     def _verify_blogger_preview(self, token: str) -> dict[str, Any]:
@@ -510,8 +568,6 @@ class LedgerWriteGate(WriteGate):
         if (
             record["principal_id"] != principal.subject
             or record["client_id"] != principal.client_id
-            or record["master_instance_id"] != master.instance_id
-            or record["epoch"] != master.epoch
         ):
             raise PermissionError("blogger reconciliation differs from durable identity")
         if arguments is not None:
@@ -526,6 +582,8 @@ class LedgerWriteGate(WriteGate):
             return None
         if record["state"] != "APPLYING":
             raise PermissionError("blogger apply was already admitted; use bloggers.import.status")
+        if not record["master_instance_id"] or not record["epoch"]:
+            raise PermissionError("blogger reconciliation lacks its immutable receipt epoch")
         return {
             "operation_id": record["operation_id"],
             "batch_id": record["batch_id"],
@@ -547,8 +605,8 @@ class LedgerWriteGate(WriteGate):
             operation_id,
             request_sha256=str(receipt.get("request_sha256", "")),
             plan_sha256=str(receipt.get("plan_sha256", "")),
-            master_instance_id=str(receipt.get("master_instance_id", "")),
-            epoch=int(receipt.get("master_epoch", 0)),
+            master_instance_id=str(receipt.get("receipt_master_instance_id", "")),
+            epoch=int(receipt.get("receipt_master_epoch", 0)),
             expected_revision=int(receipt.get("expected_revision", -1)),
             principal_id=str(receipt.get("principal_id", "")),
             client_id=str(receipt.get("client_id", "")),
@@ -556,6 +614,8 @@ class LedgerWriteGate(WriteGate):
             committed_revision=int(receipt.get("committed_revision", -1)),
             committed_at=str(receipt.get("committed_at", "")),
         )
+        checkpoint = self._blogger_checkpoint_status(record, request_if_missing=True)
+        record = checkpoint["record"]
         return {
             "operation_id": operation_id,
             "status": record["state"],
@@ -564,6 +624,8 @@ class LedgerWriteGate(WriteGate):
             "canonical_revision": record["committed_revision"],
             "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
             "reconciled": True,
+            "checkpoint_request_id": checkpoint["request_id"],
+            "checkpoint_request_state": checkpoint["state"],
         }
 
     def blogger_import_status(
@@ -575,23 +637,8 @@ class LedgerWriteGate(WriteGate):
             or record["client_id"] != principal.client_id
         ):
             return {"found": False}
-        if record["state"] in {"COMMITTED_PENDING_CHECKPOINT", "CHECKPOINTING"}:
-            if record["state"] == "COMMITTED_PENDING_CHECKPOINT":
-                record = self.ledger.advance_blogger_import_checkpoint(
-                    operation_id, state="CHECKPOINTING"
-                )
-            post = self._post_change_checkpoint(record)
-            if post is not None:
-                record = self.ledger.advance_blogger_import_checkpoint(
-                    operation_id,
-                    state="CHECKPOINT_VERIFIED",
-                    post_change_checkpoint_id=str(post["checkpoint_id"]),
-                )
-                record = self.ledger.advance_blogger_import_checkpoint(
-                    operation_id,
-                    state="DURABLE_COMPLETE",
-                    post_change_checkpoint_id=str(post["checkpoint_id"]),
-                )
+        checkpoint = self._blogger_checkpoint_status(record, request_if_missing=True)
+        record = checkpoint["record"]
         return {
             "found": True,
             "operation_id": operation_id,
@@ -604,7 +651,85 @@ class LedgerWriteGate(WriteGate):
             "post_change_checkpoint_id": record["post_change_checkpoint_id"],
             "retry_allowed": record["state"] in {"REQUESTED", "WAITING_MASTER", "PREVIEWED"},
             "reconciliation_required": record["state"] == "APPLYING",
+            "checkpoint_request_id": checkpoint["request_id"],
+            "checkpoint_request_state": checkpoint["state"],
         }
+
+    @staticmethod
+    def _blogger_checkpoint_request_id(record: Mapping[str, Any]) -> str:
+        identity = {
+            "kind": "mcp-blogger-import-checkpoint-v1",
+            "operation_id": str(record["operation_id"]),
+            "batch_id": str(record["batch_id"]),
+            "canonical_revision": int(record["committed_revision"]),
+        }
+        return hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
+
+    def _blogger_checkpoint_status(
+        self, record: dict[str, Any], *, request_if_missing: bool
+    ) -> dict[str, Any]:
+        """Project only the task-bound production checkpoint request/receipt.
+
+        The canonical transaction's outbox row is an audit intent, not proof
+        that a checkpoint was requested.  The shared control-ledger request is
+        claimed by the ACTIVE notebook runtime and is the only source allowed
+        to advance this public lifecycle.
+        """
+
+        if record["state"] not in {
+            "COMMITTED_PENDING_CHECKPOINT",
+            "CHECKPOINTING",
+            "CHECKPOINT_VERIFIED",
+            "DURABLE_COMPLETE",
+        }:
+            return {"record": record, "request_id": None, "state": "NOT_REQUIRED"}
+        request_id = self._blogger_checkpoint_request_id(record)
+        operation_id = f"connector-checkpoint:{request_id}"
+        request = self.ledger.connector_checkpoint_request(operation_id)
+        if (
+            request is None
+            and request_if_missing
+            and record["state"] in {"COMMITTED_PENDING_CHECKPOINT", "CHECKPOINTING"}
+        ):
+            # A canonical commit may race the end of its ACTIVE lease.
+            # Preserve the honest pending result; a later status/replay can
+            # bind the same deterministic request to a live successor.
+            with suppress(ControlLedgerError):
+                self.blogger_checkpoint_coordinator.request_verified_checkpoint(
+                    operation_id=operation_id,
+                    canonical_revision=int(record["committed_revision"]),
+                    idempotency_key=request_id,
+                )
+            request = self.ledger.connector_checkpoint_request(operation_id)
+        if request is None:
+            return {"record": record, "request_id": request_id, "state": "NOT_REQUESTED"}
+
+        observed = self.blogger_checkpoint_coordinator.checkpoint_status(operation_id)
+        state = str(observed["state"])
+        if state == "CHECKPOINTING" and record["state"] == "COMMITTED_PENDING_CHECKPOINT":
+            record = self.ledger.advance_blogger_import_checkpoint(
+                str(record["operation_id"]), state="CHECKPOINTING"
+            )
+        if state == "DURABLE_COMPLETE" and record["state"] in {
+            "COMMITTED_PENDING_CHECKPOINT",
+            "CHECKPOINTING",
+        }:
+            if record["state"] == "COMMITTED_PENDING_CHECKPOINT":
+                record = self.ledger.advance_blogger_import_checkpoint(
+                    str(record["operation_id"]), state="CHECKPOINTING"
+                )
+            checkpoint_id = str(observed["checkpoint_id"])
+            record = self.ledger.advance_blogger_import_checkpoint(
+                str(record["operation_id"]),
+                state="CHECKPOINT_VERIFIED",
+                post_change_checkpoint_id=checkpoint_id,
+            )
+            record = self.ledger.advance_blogger_import_checkpoint(
+                str(record["operation_id"]),
+                state="DURABLE_COMPLETE",
+                post_change_checkpoint_id=checkpoint_id,
+            )
+        return {"record": record, "request_id": request_id, "state": state}
 
     def record_reconciled_write(
         self,

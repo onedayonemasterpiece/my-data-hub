@@ -368,6 +368,46 @@ def test_typed_blogger_preview_apply_replay_and_role_boundary() -> None:
                 )
             connection.rollback()
 
+        # Reconciliation is an immutable receipt lookup, not an old-epoch
+        # mutation.  A newly ACTIVE epoch credential must therefore be able to
+        # read the exact epoch-1 receipt after epoch 1 is fenced.
+        successor = MasterIdentity(
+            UUID("55555555-5555-4555-8555-555555555555"), "docker-blogger-2", 2
+        )
+        successor_password = "successor-committer-password-long-enough"
+        with psycopg.connect(admin_url) as admin:
+            gate = DatabaseGate(admin)
+            gate.fence(master, "disposable-successor")
+            gate.acquire(successor, now + timedelta(minutes=10))
+            gate.activate(successor)
+            CredentialProvisioner(admin, gate).create(
+                principal="mdh_e2_committer_feedface",
+                password=successor_password,
+                group="mdh_canonical_committer",
+                identity=successor,
+                credential_id=UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+                expires_at=now + timedelta(minutes=9),
+                now=now,
+            )
+        successor_url = _role_url(
+            port,
+            "mdh_e2_committer_feedface",
+            successor_password,
+            "mdh_canonical_committer",
+        )
+        with psycopg.connect(successor_url, row_factory=dict_row) as successor_connection:
+            successor_reconciled = BloggerDiscoveryPostgres.reconcile(
+                successor_connection,
+                identity,
+                plan_sha256=preview.plan_sha256,
+                master_instance_id=master.master_instance_id,
+                master_epoch=master.epoch,
+            )
+            successor_connection.commit()
+            assert successor_reconciled is not None
+            assert successor_reconciled.duplicate is True
+            assert successor_reconciled.revision_after == applied.revision_after
+
         with psycopg.connect(admin_url) as admin:
             assert admin.execute(
                 "SELECT display_name FROM hub.bloggers_v1 WHERE display_name=%s",
