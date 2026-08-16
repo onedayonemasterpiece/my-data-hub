@@ -268,7 +268,13 @@ def _verified_checkpoint(
     return checkpoint_id
 
 
-def _verified_post_change_checkpoint(ledger: ControlLedger) -> str:
+def _verified_post_change_checkpoint(
+    ledger: ControlLedger,
+    *,
+    master_id: str = "11111111-1111-4111-8111-111111111111",
+    epoch: int = 7,
+    revision: int = 13,
+) -> str:
     head = ledger.checkpoint_head("postgres-master")
     assert head is not None and head.current_checkpoint_id is not None
     operation_id = str(uuid4())
@@ -279,8 +285,8 @@ def _verified_post_change_checkpoint(ledger: ControlLedger) -> str:
         intent={"source": "canonical_outbox:verified_checkpoint_required"},
         initial_state="READY",
         identity={
-            "master_instance_id": "11111111-1111-4111-8111-111111111111",
-            "epoch": 7,
+            "master_instance_id": master_id,
+            "epoch": epoch,
         },
     )
     checkpoint_id = str(uuid4())
@@ -292,11 +298,13 @@ def _verified_post_change_checkpoint(ledger: ControlLedger) -> str:
         manifest_sha256="e" * 64,
         source_checkpoint_id=head.current_checkpoint_id,
         source_head_generation=head.generation,
-        master_instance_id="11111111-1111-4111-8111-111111111111",
-        epoch=7,
-        manifest_payload={"canonical_revision": 13},
+        master_instance_id=master_id,
+        epoch=epoch,
+        manifest_payload={"canonical_revision": revision},
     )
-    ledger.mark_checkpoint_uploaded(checkpoint_id, "owner/checkpoints:2")
+    ledger.mark_checkpoint_uploaded(
+        checkpoint_id, f"owner/checkpoints:{head.generation + 1}"
+    )
     ledger.mark_checkpoint_readback_verified(checkpoint_id)
     ledger.mark_checkpoint_restore_verified(checkpoint_id)
     ledger.promote_checkpoint(
@@ -331,6 +339,9 @@ def _activate_master(
         identity=identity,
         allocate_epoch_for="postgres-master",
     )
+    stored = ledger.get_operation(operation_id)
+    assert stored is not None
+    identity["epoch"] = int(stored.identity["epoch"])
     ledger.record_attempt(
         attempt_id=attempt_id,
         run_id=run_id,
@@ -339,7 +350,7 @@ def _activate_master(
         source_version="git:" + "a" * 40,
         service_instance_id=service_instance_id,
         master_instance_id=master_id,
-        epoch=1,
+        epoch=int(identity["epoch"]),
         state="RUNNING",
     )
     ledger.activate_service_operation(
@@ -350,7 +361,7 @@ def _activate_master(
         run_id=run_id,
         attempt_id=attempt_id,
         master_instance_id=master_id,
-        epoch=1,
+        epoch=int(identity["epoch"]),
         endpoint="tunnel://127.0.0.1:25432",
         protocol="postgresql+tls",
         tls_fingerprint="sha256:" + "b" * 64,
@@ -384,7 +395,9 @@ def _promote_checkpoint_for_active_operation(
         epoch=int(active["epoch"]),
         manifest_payload={"canonical_revision": revision},
     )
-    ledger.mark_checkpoint_uploaded(checkpoint_id, "owner/checkpoints:2")
+    ledger.mark_checkpoint_uploaded(
+        checkpoint_id, f"owner/checkpoints:{head.generation + 1}"
+    )
     ledger.mark_checkpoint_readback_verified(checkpoint_id)
     ledger.mark_checkpoint_restore_verified(checkpoint_id)
     ledger.promote_checkpoint(
@@ -465,7 +478,8 @@ async def test_blogger_apply_uses_exact_preview_plan_and_enters_checkpoint_lifec
 ) -> None:
     ledger = ControlLedger(tmp_path / "control.sqlite3")
     _verified_checkpoint(ledger)
-    gate = LedgerWriteGate(ledger, signing_secret=b"s" * 32, clock=lambda: 2_000_000_000)
+    now = [2_000_000_000]
+    gate = LedgerWriteGate(ledger, signing_secret=b"s" * 32, clock=lambda: now[0])
     broker = Broker(
         {
             "operation_id": "ignored",
@@ -494,7 +508,7 @@ async def test_blogger_apply_uses_exact_preview_plan_and_enters_checkpoint_lifec
         broker=broker,
         write_gate=gate,
         fallback_identity=owner(),
-        clock=lambda: 2_000_000_000,
+        clock=lambda: now[0],
     )
     arguments = {
         "batch_id": "11111111-1111-4111-8111-111111111111",
@@ -542,6 +556,15 @@ async def test_blogger_apply_uses_exact_preview_plan_and_enters_checkpoint_lifec
     assert replay["canonical_revision"] == 13
     assert len(broker.requests) == request_count
 
+    now[0] += 301
+    expired_replay = await service.invoke(
+        "bloggers.import.apply",
+        {**arguments, "preview_receipt": preview["preview_receipt"]},
+    )
+    assert expired_replay["status"] == "COMMITTED_PENDING_CHECKPOINT"
+    assert expired_replay["duplicate"] is True
+    assert len(broker.requests) == request_count
+
     with pytest.raises(PermissionError):
         await service.invoke(
             "bloggers.import.apply",
@@ -550,6 +573,15 @@ async def test_blogger_apply_uses_exact_preview_plan_and_enters_checkpoint_lifec
                 "idempotency_key": "conflicting-import-replay",
                 "preview_receipt": preview["preview_receipt"],
             },
+        )
+    assert len(broker.requests) == request_count
+    forged_receipt = preview["preview_receipt"][:-1] + (
+        "A" if preview["preview_receipt"][-1] != "A" else "B"
+    )
+    with pytest.raises(PermissionError):
+        await service.invoke(
+            "bloggers.import.apply",
+            {**arguments, "preview_receipt": forged_receipt},
         )
     assert len(broker.requests) == request_count
 
@@ -561,27 +593,6 @@ async def test_blogger_apply_uses_exact_preview_plan_and_enters_checkpoint_lifec
         {**arguments, "preview_receipt": preview["preview_receipt"]},
     )
     assert checkpointing["status"] == "CHECKPOINTING"
-    post_checkpoint_id = _verified_post_change_checkpoint(ledger)
-    ledger.advance_blogger_import_checkpoint(
-        applied["operation_id"],
-        state="CHECKPOINT_VERIFIED",
-        post_change_checkpoint_id=post_checkpoint_id,
-    )
-    verified = await service.invoke(
-        "bloggers.import.apply",
-        {**arguments, "preview_receipt": preview["preview_receipt"]},
-    )
-    assert verified["status"] == "CHECKPOINT_VERIFIED"
-    ledger.advance_blogger_import_checkpoint(
-        applied["operation_id"],
-        state="DURABLE_COMPLETE",
-        post_change_checkpoint_id=post_checkpoint_id,
-    )
-    durable = await service.invoke(
-        "bloggers.import.apply",
-        {**arguments, "preview_receipt": preview["preview_receipt"]},
-    )
-    assert durable["status"] == "DURABLE_COMPLETE"
     assert len(broker.requests) == request_count
 
 
@@ -774,26 +785,63 @@ async def test_operator_runtime_requests_and_observes_bound_checkpoint_without_c
     assert checkpointing["checkpoint_request_state"] == "CHECKPOINTING"
     assert ledger.checkpoint_head("postgres-master").current_checkpoint_id == pre_checkpoint_id  # type: ignore[union-attr]
 
+    unrelated_checkpoint_id = _verified_post_change_checkpoint(
+        ledger, master_id=master_id, epoch=1, revision=13
+    )
+    unrelated_status = await service.invoke(
+        "bloggers.import.status", {"operation_id": applied["operation_id"]}
+    )
+    assert unrelated_status["state"] == "CHECKPOINTING"
+    assert unrelated_status["post_change_checkpoint_id"] is None
+    assert ledger.checkpoint_head("postgres-master").current_checkpoint_id == unrelated_checkpoint_id  # type: ignore[union-attr]
+
     post_checkpoint_id = _promote_checkpoint_for_active_operation(
         ledger, active=active, revision=13
     )
-    durable = await service.invoke(
-        "bloggers.import.status", {"operation_id": applied["operation_id"]}
+    request_operation_id = f"connector-checkpoint:{request_id}"
+    assert gate.blogger_checkpoint_coordinator.checkpoint_status(request_operation_id)[
+        "state"
+    ] == "DURABLE_COMPLETE"
+    ledger.advance_blogger_import_checkpoint(
+        applied["operation_id"],
+        state="CHECKPOINT_VERIFIED",
+        post_change_checkpoint_id=post_checkpoint_id,
     )
-    assert durable["state"] == "DURABLE_COMPLETE"
-    assert durable["post_change_checkpoint_id"] == post_checkpoint_id
-    assert durable["checkpoint_request_state"] == "DURABLE_COMPLETE"
+    broker_count = len(broker.requests)
+    verified_replay = await service.invoke(
+        "bloggers.import.apply",
+        {**arguments, "preview_receipt": preview["preview_receipt"]},
+    )
+    assert verified_replay["status"] == "CHECKPOINT_VERIFIED"
+    assert len(broker.requests) == broker_count
+    ledger.advance_blogger_import_checkpoint(
+        applied["operation_id"],
+        state="DURABLE_COMPLETE",
+        post_change_checkpoint_id=post_checkpoint_id,
+    )
+    durable_replay = await service.invoke(
+        "bloggers.import.apply",
+        {**arguments, "preview_receipt": preview["preview_receipt"]},
+    )
+    assert durable_replay["status"] == "DURABLE_COMPLETE"
+    assert durable_replay["post_change_checkpoint_id"] == post_checkpoint_id
+    assert durable_replay["checkpoint_request_state"] == "DURABLE_COMPLETE"
+    assert len(broker.requests) == broker_count
 
 
 @pytest.mark.asyncio
 async def test_active_new_epoch_reconciles_exact_old_epoch_receipt(tmp_path: Path) -> None:
     ledger = ControlLedger(tmp_path / "control.sqlite3")
-    _verified_checkpoint(ledger)
+    old_master_id = "11111111-1111-4111-8111-111111111111"
+    new_master_id = "22222222-2222-4222-8222-222222222222"
+    _verified_checkpoint(ledger, master_id=old_master_id, epoch=1, revision=12)
+    active_a = _activate_master(ledger, master_id=old_master_id, revision=12)
+    assert active_a["epoch"] == 1
     gate = LedgerWriteGate(ledger, signing_secret=b"s" * 32, clock=lambda: 2_000_000_000)
     old_master = MasterSnapshot(
         MasterState.ACTIVE,
-        instance_id="11111111-1111-4111-8111-111111111111",
-        epoch=7,
+        instance_id=old_master_id,
+        epoch=1,
         canonical_revision=12,
     )
     preview_broker = Broker(
@@ -808,7 +856,7 @@ async def test_active_new_epoch_reconciles_exact_old_epoch_receipt(tmp_path: Pat
                 "quarantine_count": 0,
                 "account_count": 1,
             },
-            "master_epoch": 7,
+            "master_epoch": 1,
             "canonical_revision": 12,
         }
     )
@@ -834,10 +882,18 @@ async def test_active_new_epoch_reconciles_exact_old_epoch_receipt(tmp_path: Pat
     operation_id = preview["operation_id"]
     assert ledger.blogger_import_operation(operation_id)["state"] == "APPLYING"  # type: ignore[index]
 
+    ledger.transition_operation(
+        str(active_a["operation_id"]),
+        expected_state="ACTIVE",
+        new_state="FENCED",
+        metadata={"reason": "test-successor"},
+    )
+    active_b = _activate_master(ledger, master_id=new_master_id, revision=13)
+    assert active_b["epoch"] == 2
     new_master = MasterSnapshot(
         MasterState.ACTIVE,
-        instance_id="22222222-2222-4222-8222-222222222222",
-        epoch=8,
+        instance_id=new_master_id,
+        epoch=2,
         canonical_revision=13,
     )
     reconcile_broker = Broker(
@@ -856,7 +912,7 @@ async def test_active_new_epoch_reconciles_exact_old_epoch_receipt(tmp_path: Pat
             "expected_revision": 12,
             "principal_id": owner().subject,
             "client_id": owner().client_id,
-            "master_epoch": 8,
+            "master_epoch": 2,
             "canonical_revision": 13,
         }
     )
@@ -872,6 +928,48 @@ async def test_active_new_epoch_reconciles_exact_old_epoch_receipt(tmp_path: Pat
         "bloggers.import.status", {"operation_id": operation_id}
     )
     assert status["state"] == "COMMITTED_PENDING_CHECKPOINT"
-    assert ledger.blogger_import_operation(operation_id)["epoch"] == 7  # type: ignore[index]
-    assert reconcile_broker.requests[0].epoch == 8
+    assert status["checkpoint_request_state"] == "REQUESTED"
+    request_id = status["checkpoint_request_id"]
+    request = ledger.connector_checkpoint_request(f"connector-checkpoint:{request_id}")
+    assert request is not None
+    assert request["master_operation_id"] == active_b["operation_id"]
+    assert request["master_instance_id"] == new_master_id
+    assert request["epoch"] == 2
+    assert ledger.blogger_import_operation(operation_id)["epoch"] == 1  # type: ignore[index]
+    assert reconcile_broker.requests[0].epoch == 2
     assert reconcile_broker.requests[0].role == "canonical_committer"
+
+    token = "s" * 64
+    ledger.store_runtime_token_hash(str(active_b["run_id"]), str(active_b["attempt_id"]), token)
+    app = create_app(
+        ControlPlaneSettings(
+            ledger_path=ledger.path,
+            operator_credentials_enabled=True,
+            connector_runtime_enabled=False,
+        ),
+        ledger=ledger,
+    )
+    claim = TestClient(app).get(
+        f"/internal/runtime/connector-checkpoint/{active_b['run_id']}/{active_b['attempt_id']}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-MDH-Master-Instance-ID": new_master_id,
+            "X-MDH-Epoch": "2",
+        },
+    )
+    assert claim.status_code == 200
+    assert claim.json()["operation_id"] == f"connector-checkpoint:{request_id}"
+    checkpointing = await service.invoke(
+        "bloggers.import.status", {"operation_id": operation_id}
+    )
+    assert checkpointing["state"] == "CHECKPOINTING"
+
+    post_checkpoint_id = _promote_checkpoint_for_active_operation(
+        ledger, active=active_b, revision=13
+    )
+    durable = await service.invoke(
+        "bloggers.import.status", {"operation_id": operation_id}
+    )
+    assert durable["state"] == "DURABLE_COMPLETE"
+    assert durable["post_change_checkpoint_id"] == post_checkpoint_id
+    assert ledger.blogger_import_operation(operation_id)["epoch"] == 1  # type: ignore[index]

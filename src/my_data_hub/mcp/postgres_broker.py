@@ -461,14 +461,13 @@ class PostgresMasterSession(MasterSession):
             )
             if receipt is None:
                 return {"found": False, "operation_id": identity.operation_id}
-        return {
+        result = {
             "found": True,
             "operation_id": receipt.operation_id,
             "batch_id": str(receipt.batch_id),
             "plan_sha256": receipt.plan_sha256,
             "affected_rows": receipt.affected_rows,
             "committed_revision": receipt.revision_after,
-            "committed_at": datetime.now(UTC),
             "duplicate": receipt.duplicate,
             "request_sha256": identity.request_sha256,
             "receipt_master_instance_id": str(arguments.get("master_instance_id", self.request.master_instance_id)),
@@ -478,6 +477,9 @@ class PostgresMasterSession(MasterSession):
             "client_id": identity.client_id,
             "status": "COMMITTED_PENDING_CHECKPOINT",
         }
+        if receipt.committed_at is not None:
+            result["committed_at"] = receipt.committed_at
+        return result
 
     def _assert_restricted_login(self, cursor: Any) -> None:
         row = cursor.execute(

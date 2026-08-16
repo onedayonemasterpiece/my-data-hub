@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -36,6 +37,7 @@ def _ledger_with_checkpoint(tmp_path: Path) -> tuple[ControlLedger, str]:
         source_checkpoint_id=None,
         master_instance_id="master-1",
         epoch=7,
+        manifest_payload={"canonical_revision": 12},
     )
     ledger.mark_checkpoint_uploaded(checkpoint_id, "owner/checkpoints:1")
     ledger.mark_checkpoint_readback_verified(checkpoint_id)
@@ -116,8 +118,9 @@ def _checkpoint(
     master_instance_id: str,
     epoch: int,
     promote: bool = True,
+    operation_id: str | None = None,
 ) -> str:
-    operation_id = str(uuid4())
+    operation_id = operation_id or str(uuid4())
     ledger.ensure_operation(
         operation_id=operation_id,
         idempotency_key=f"checkpoint-{checkpoint_id}",
@@ -136,6 +139,7 @@ def _checkpoint(
         source_head_generation=parent_generation,
         master_instance_id=master_instance_id,
         epoch=epoch,
+        manifest_payload={"canonical_revision": 13},
     )
     if promote:
         ledger.mark_checkpoint_uploaded(
@@ -405,12 +409,13 @@ def test_checkpoint_identity_cannot_swap_between_verified_and_durable(tmp_path: 
         epoch=7,
         promote=False,
     )
-    with pytest.raises(StaleRuntimeEvent, match="exact verified PostgreSQL HEAD"):
+    with pytest.raises(StaleRuntimeEvent, match="exact request-bound VERIFIED HEAD"):
         ledger.advance_blogger_import_checkpoint(
             str(identity["operation_id"]),
             state="CHECKPOINT_VERIFIED",
             post_change_checkpoint_id=candidate_unverified,
         )
+    checkpoint_operation_id = str(uuid4())
     verified_a = _checkpoint(
         ledger,
         parent_id=checkpoint_id,
@@ -418,7 +423,39 @@ def test_checkpoint_identity_cannot_swap_between_verified_and_durable(tmp_path: 
         checkpoint_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         master_instance_id="master-1",
         epoch=7,
+        operation_id=checkpoint_operation_id,
     )
+    request_identity = {
+        "kind": "mcp-blogger-import-checkpoint-v1",
+        "operation_id": str(identity["operation_id"]),
+        "batch_id": str(identity["batch_id"]),
+        "canonical_revision": 13,
+    }
+    request_id = hashlib.sha256(
+        json.dumps(
+            request_identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode()
+    ).hexdigest()
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute(
+            "INSERT INTO connector_checkpoint_requests(operation_id,idempotency_key,"
+            "canonical_revision,master_operation_id,master_instance_id,epoch,state,"
+            "checkpoint_id,manifest_sha256,verified_at,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,'DURABLE_COMPLETE',?,?,?,?,?)",
+            (
+                f"connector-checkpoint:{request_id}",
+                request_id,
+                13,
+                checkpoint_operation_id,
+                "master-1",
+                7,
+                verified_a,
+                "a" * 64,
+                "2026-08-16T12:00:00Z",
+                "2026-08-16T12:00:00Z",
+                "2026-08-16T12:00:00Z",
+            ),
+        )
     ledger.advance_blogger_import_checkpoint(
         str(identity["operation_id"]),
         state="CHECKPOINT_VERIFIED",

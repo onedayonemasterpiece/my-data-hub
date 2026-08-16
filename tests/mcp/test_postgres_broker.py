@@ -253,6 +253,7 @@ def test_current_epoch_committer_can_reconcile_exact_old_epoch_receipt(
         ),
     )
     observed: dict[str, object] = {}
+    committed_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=UTC)
 
     def reconcile(_cursor, _identity, *, plan_sha256, master_instance_id, master_epoch):  # type: ignore[no-untyped-def]
         observed.update(
@@ -267,6 +268,7 @@ def test_current_epoch_committer_can_reconcile_exact_old_epoch_receipt(
             affected_rows=2,
             revision_after=13,
             duplicate=True,
+            committed_at=committed_at,
         )
 
     monkeypatch.setattr(
@@ -294,3 +296,4 @@ def test_current_epoch_committer_can_reconcile_exact_old_epoch_receipt(
     }
     assert result["receipt_master_instance_id"] == old_master
     assert result["receipt_master_epoch"] == 7
+    assert result["committed_at"] == committed_at

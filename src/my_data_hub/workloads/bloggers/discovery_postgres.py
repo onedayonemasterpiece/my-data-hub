@@ -2,13 +2,14 @@
 
 This module intentionally accepts no SQL text.  The short-lived brokered
 ``mdh_canonical_committer`` session can call only the fixed functions installed
-by migration 0020.
+by migrations 0020 and 0021.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -87,9 +88,15 @@ class BloggerImportApplyReceipt:
     affected_rows: int
     revision_after: int
     duplicate: bool
+    committed_at: datetime | None = None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> BloggerImportApplyReceipt:
+        committed_at = row.get("committed_at")
+        if committed_at is not None and not isinstance(committed_at, datetime):
+            raise ValueError("apply receipt committed_at must be a datetime")
+        if isinstance(committed_at, datetime) and committed_at.tzinfo is None:
+            raise ValueError("apply receipt committed_at must be timezone-aware")
         result = cls(
             operation_id=_hash(str(row["operation_id"]), "operation_id"),
             batch_id=UUID(str(row["batch_id"])),
@@ -97,6 +104,9 @@ class BloggerImportApplyReceipt:
             affected_rows=int(row["affected_rows"]),
             revision_after=int(row["revision_after"]),
             duplicate=bool(row["duplicate"]),
+            committed_at=(
+                committed_at.astimezone(UTC) if isinstance(committed_at, datetime) else None
+            ),
         )
         if result.affected_rows < 1 or result.revision_after < 1:
             raise ValueError("apply receipt must describe a positive canonical commit")

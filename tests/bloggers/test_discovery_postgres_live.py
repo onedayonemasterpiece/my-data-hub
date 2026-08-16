@@ -407,8 +407,15 @@ def test_typed_blogger_preview_apply_replay_and_role_boundary() -> None:
             assert successor_reconciled is not None
             assert successor_reconciled.duplicate is True
             assert successor_reconciled.revision_after == applied.revision_after
+            assert successor_reconciled.committed_at is not None
 
         with psycopg.connect(admin_url) as admin:
+            stored_committed_at = admin.execute(
+                "SELECT committed_at FROM integration.blogger_discovery_apply_receipt "
+                "WHERE operation_id=%s",
+                (identity.operation_id,),
+            ).fetchone()[0]
+            assert successor_reconciled.committed_at == stored_committed_at
             assert admin.execute(
                 "SELECT display_name FROM hub.bloggers_v1 WHERE display_name=%s",
                 ("Проверяемый автор",),

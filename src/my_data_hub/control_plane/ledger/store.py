@@ -2549,15 +2549,15 @@ class ControlLedger:
             if state in {"CHECKPOINT_VERIFIED", "DURABLE_COMPLETE"}:
                 if (
                     effective_checkpoint_id is None
-                    or existing["master_instance_id"] is None
-                    or existing["epoch"] is None
+                    or existing["committed_revision"] is None
                 ):
-                    raise StaleRuntimeEvent("blogger durable checkpoint lacks epoch authority")
-                self._require_blogger_checkpoint_authority(
+                    raise StaleRuntimeEvent("blogger durable checkpoint lacks request authority")
+                self._require_blogger_post_checkpoint_authority(
                     connection,
+                    operation_id=operation_id,
+                    batch_id=str(existing["batch_id"]),
+                    committed_revision=int(existing["committed_revision"]),
                     checkpoint_id=str(effective_checkpoint_id),
-                    master_instance_id=str(existing["master_instance_id"]),
-                    epoch=int(existing["epoch"]),
                 )
             connection.execute(
                 "UPDATE mcp_blogger_import_operations SET state=?,post_change_checkpoint_id=?,"
@@ -2581,6 +2581,61 @@ class ControlLedger:
             return self._blogger_import_from_row(current)
 
     @staticmethod
+    def _require_blogger_post_checkpoint_authority(
+        connection: sqlite3.Connection,
+        *,
+        operation_id: str,
+        batch_id: str,
+        committed_revision: int,
+        checkpoint_id: str,
+    ) -> None:
+        request_identity = {
+            "kind": "mcp-blogger-import-checkpoint-v1",
+            "operation_id": operation_id,
+            "batch_id": batch_id,
+            "canonical_revision": committed_revision,
+        }
+        request_id = hashlib.sha256(_canonical_json(request_identity).encode()).hexdigest()
+        request = connection.execute(
+            "SELECT * FROM connector_checkpoint_requests WHERE operation_id=? "
+            "AND idempotency_key=?",
+            (f"connector-checkpoint:{request_id}", request_id),
+        ).fetchone()
+        checkpoint = connection.execute(
+            "SELECT candidate.operation_id,candidate.status,candidate.master_instance_id,"
+            "candidate.epoch,candidate.service_kind,candidate.manifest_json,"
+            "candidate.version_ref,candidate.verified_at,head.current_checkpoint_id "
+            "FROM checkpoint_candidates candidate "
+            "LEFT JOIN checkpoint_heads head ON head.service_kind=candidate.service_kind "
+            "WHERE candidate.checkpoint_id=?",
+            (checkpoint_id,),
+        ).fetchone()
+        try:
+            manifest = json.loads(str(checkpoint["manifest_json"])) if checkpoint is not None else None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            manifest = None
+        if (
+            request is None
+            or request["state"] != "DURABLE_COMPLETE"
+            or request["checkpoint_id"] != checkpoint_id
+            or int(request["canonical_revision"]) != committed_revision
+            or checkpoint is None
+            or checkpoint["status"] != "VERIFIED"
+            or checkpoint["service_kind"] != "postgres-master"
+            or checkpoint["operation_id"] != request["master_operation_id"]
+            or checkpoint["master_instance_id"] != request["master_instance_id"]
+            or int(checkpoint["epoch"]) != int(request["epoch"])
+            or not checkpoint["version_ref"]
+            or not checkpoint["verified_at"]
+            or checkpoint["current_checkpoint_id"] != checkpoint_id
+            or not isinstance(manifest, dict)
+            or manifest.get("canonical_revision") != committed_revision
+        ):
+            raise StaleRuntimeEvent(
+                "blogger checkpoint lacks its exact request-bound VERIFIED HEAD authority"
+            )
+
+    @staticmethod
     def _require_blogger_checkpoint_authority(
         connection: sqlite3.Connection,
         *,
@@ -2588,6 +2643,8 @@ class ControlLedger:
         master_instance_id: str,
         epoch: int,
     ) -> None:
+        """Require the exact pre-change VERIFIED HEAD for the preview epoch."""
+
         checkpoint = connection.execute(
             "SELECT candidate.status,candidate.master_instance_id,candidate.epoch,"
             "candidate.service_kind,head.current_checkpoint_id "

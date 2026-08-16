@@ -4,6 +4,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = (ROOT / "sql/migrations/0020_blogger_discovery_intake.sql").read_text()
+RECONCILE_TIMESTAMP_MIGRATION = (
+    ROOT / "sql/migrations/0021_blogger_reconcile_committed_at.sql"
+).read_text()
 ROLE_CONTRACT = (ROOT / "sql/admin/role_contract.sql").read_text()
 
 
@@ -49,6 +52,16 @@ def test_staging_preview_apply_and_reconcile_are_closed_contracts() -> None:
     assert "integration.blogger_discovery_quarantine" in MIGRATION
     assert "UNIQUE (batch_id, source_record_id)" in MIGRATION
     assert "normalized_record jsonb NOT NULL CHECK (jsonb_typeof(normalized_record) = 'object')" in MIGRATION
+
+
+def test_reconcile_returns_the_immutable_postgres_commit_timestamp() -> None:
+    assert "DROP FUNCTION integration.reconcile_blogger_discovery" in RECONCILE_TIMESTAMP_MIGRATION
+    assert "committed_at timestamptz" in RECONCILE_TIMESTAMP_MIGRATION
+    assert "receipt.committed_at, true" in RECONCILE_TIMESTAMP_MIGRATION
+    assert "clock_timestamp()" not in RECONCILE_TIMESTAMP_MIGRATION.split("RETURNS TABLE", 1)[1].split(
+        "UPDATE hub.canonical_state", 1
+    )[0]
+    assert "TO mdh_canonical_committer" in RECONCILE_TIMESTAMP_MIGRATION
 
 
 def test_reader_view_is_sanitized_and_role_contract_is_minimum() -> None:

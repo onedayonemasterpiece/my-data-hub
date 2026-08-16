@@ -387,7 +387,12 @@ class LedgerWriteGate(WriteGate):
     ) -> dict[str, Any] | None:
         """Return an already committed exact outcome without another data-plane effect."""
 
-        preview = self._verify_blogger_preview(str(arguments.get("preview_receipt", "")))
+        # A committed result is immutable and remains replayable after the
+        # admission receipt TTL. Signature and full body binding are still
+        # mandatory; only the clock check is deferred until we know whether
+        # this is an exact durable replay or a new effect.
+        supplied_receipt = str(arguments.get("preview_receipt", ""))
+        preview = self._verify_blogger_preview(supplied_receipt, allow_expired=True)
         operation_id = str(preview.get("operation_id", ""))
         record = self.ledger.blogger_import_operation(operation_id)
         if record is None:
@@ -402,7 +407,12 @@ class LedgerWriteGate(WriteGate):
         except ValueError as exc:
             raise PermissionError("blogger apply replay batch identity is invalid") from exc
         if (
-            record["principal_id"] != principal.subject
+            record["preview_receipt"] != supplied_receipt
+            or preview.get("principal") != principal.subject
+            or preview.get("client_id") != principal.client_id
+            or preview.get("master_epoch") != record["epoch"]
+            or preview.get("canonical_revision") != record["expected_revision"]
+            or record["principal_id"] != principal.subject
             or record["client_id"] != principal.client_id
             or record["batch_id"] != batch_id
             or record["request_sha256"] != request_sha256
@@ -498,8 +508,10 @@ class LedgerWriteGate(WriteGate):
             "checkpoint_request_state": checkpoint["state"],
         }
 
-    def _verify_blogger_preview(self, token: str) -> dict[str, Any]:
-        payload = self._verify_signed_payload(token)
+    def _verify_blogger_preview(
+        self, token: str, *, allow_expired: bool = False
+    ) -> dict[str, Any]:
+        payload = self._verify_signed_payload(token, allow_expired=allow_expired)
         if payload.get("kind") != "mcp-blogger-preview-v1":
             raise PermissionError("blogger preview receipt has the wrong contract")
         return payload
@@ -836,7 +848,9 @@ class LedgerWriteGate(WriteGate):
             raise PermissionError("preview receipt has the wrong contract")
         return payload
 
-    def _verify_signed_payload(self, token: str) -> dict[str, Any]:
+    def _verify_signed_payload(
+        self, token: str, *, allow_expired: bool = False
+    ) -> dict[str, Any]:
         try:
             encoded, signature = token.split(".", 1)
             raw = urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
@@ -847,7 +861,7 @@ class LedgerWriteGate(WriteGate):
             raise PermissionError("preview receipt is invalid") from exc
         if not hmac.compare_digest(supplied, expected) or not isinstance(payload, dict):
             raise PermissionError("preview receipt is invalid")
-        if int(payload.get("expires_at", 0)) <= int(self.clock()):
+        if not allow_expired and int(payload.get("expires_at", 0)) <= int(self.clock()):
             raise PermissionError("preview receipt is expired or has the wrong contract")
         return payload
 
