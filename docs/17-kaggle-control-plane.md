@@ -481,11 +481,21 @@ intent. A lost successful response is answered from the terminal receipt without
 Kaggle again.
 
 The bounded contract allows at most 100 files, 64 MiB per file, 256 MiB total and a TTL
-from 5 minutes to 24 hours. Raw staging lives outside SQLite with directory mode 0700 and
-file mode 0600. The control ledger and terminal receipts contain hashes, sizes, claims and
-provider results only, never raw file bytes. Successful, aborted, expired or quarantined
-uploads remove raw staging; bounded terminal receipts remain for replay and are reaped
-after seven days. Production deployment mounts the private host
+from 5 minutes to 24 hours. Admission is serialized by a root-wide lock and additionally
+allows at most 32 active uploads / 1 GiB declared globally and at most 8 active uploads /
+512 MiB for one OAuth subject/client pair. Admission reserves 512 MiB of real filesystem
+free space; chunk writes recheck that floor. Exact start replay is found before quota
+accounting and therefore never double-counts.
+
+Raw staging lives outside SQLite with directory mode 0700 and file mode 0600. Chunk and
+assembly ancestors are checked with no-follow/private-directory rules before every write
+or read, so replacing `chunks` or an assembly parent with a symlink cannot redirect bytes.
+The control ledger and terminal receipts contain hashes, sizes, claims and provider
+results only, never raw file bytes. Successful, aborted, expired or quarantined uploads
+remove raw staging; bounded terminal receipts remain for replay and are reaped after
+seven days. A valid terminal receipt is authoritative after a crash: expiry reaping
+removes any orphan active directory without changing FINALIZED/ABORTED/QUARANTINED.
+Production deployment mounts the private host
 `MY_DATA_HUB_PROVIDER_UPLOAD_DIR` only into central control at `/uploads`, never into the
 remote MCP process.
 

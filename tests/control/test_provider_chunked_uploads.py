@@ -3,15 +3,23 @@ from __future__ import annotations
 import hashlib
 import json
 from base64 import b64encode
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
 from my_data_hub.control_plane.provider_uploads import (
+    MAX_ACTIVE_DECLARED_BYTES,
+    MAX_ACTIVE_UPLOADS,
+    MAX_PRINCIPAL_ACTIVE_UPLOADS,
+    MAX_PRINCIPAL_DECLARED_BYTES,
     MAX_UPLOAD_CHUNK_BYTES,
     MAX_UPLOAD_FILE_BYTES,
     MAX_UPLOAD_FILES,
+    MAX_UPLOAD_TOTAL_BYTES,
+    MIN_UPLOAD_DISK_RESERVE_BYTES,
     ProviderChunkedUploadStore,
     ProviderUploadConflict,
     ProviderUploadError,
@@ -26,6 +34,10 @@ class Clock:
 
     def __call__(self) -> float:
         return float(self.value)
+
+
+def ample_disk(_path: Path) -> SimpleNamespace:
+    return SimpleNamespace(free=10 * 1024 * 1024 * 1024)
 
 
 def identity(*, subject: str = "owner", client_id: str = "opencode") -> AccessIdentity:
@@ -307,3 +319,189 @@ def test_reaper_removes_expired_raw_upload_and_old_terminal_receipt(tmp_path: Pa
     assert store.status(reference(arguments), identity())["state"] == "EXPIRED"
     clock.value += 7 * 86_400 + 1
     assert store.reap_expired() == {"expired_uploads": 0, "receipts_removed": 1}
+
+
+def test_terminal_receipt_is_authoritative_over_orphan_active_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import my_data_hub.control_plane.provider_uploads as upload_module
+
+    clock = Clock()
+    store = ProviderChunkedUploadStore(tmp_path / "uploads", clock=clock)
+    original_rmtree = upload_module.shutil.rmtree
+
+    def preserve_upload_directory(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        candidate = Path(path)
+        if candidate.parent == store.uploads:
+            return None
+        return original_rmtree(path, *args, **kwargs)
+
+    finalized_request = start_arguments({"final.bin": b"final"})
+    store.start(finalized_request, identity())
+    put(store, finalized_request, "final.bin", 0, b"final")
+    monkeypatch.setattr(upload_module.shutil, "rmtree", preserve_upload_directory)
+    finalized = store.finalize(
+        reference(finalized_request),
+        identity(),
+        lambda *_args: {"provider_ref": "owner/photo-batch", "provider_version": 1},
+    )
+    finalized_id = finalized["upload_id"]
+    finalized_receipt = store._receipt_path(finalized_id).read_bytes()
+    assert store._directory(finalized_id).exists()
+
+    aborted_request = start_arguments({"abort.bin": b"abort"})
+    store.start(aborted_request, identity())
+    aborted = store.abort(reference(aborted_request), identity())
+    aborted_id = aborted["upload_id"]
+    aborted_receipt = store._receipt_path(aborted_id).read_bytes()
+    assert store._directory(aborted_id).exists()
+
+    quarantined_request = start_arguments({"bad.bin": b"original"})
+    store.start(quarantined_request, identity())
+    put(store, quarantined_request, "bad.bin", 0, b"original")
+    with pytest.raises(ProviderUploadConflict):
+        put(store, quarantined_request, "bad.bin", 0, b"changed!")
+    quarantined_payload = quarantined_request["payload"]
+    assert isinstance(quarantined_payload, dict)
+    quarantined_id = str(quarantined_payload["upload_id"])
+    quarantined_receipt = store._receipt_path(quarantined_id).read_bytes()
+    assert store._directory(quarantined_id).exists()
+
+    monkeypatch.setattr(upload_module.shutil, "rmtree", original_rmtree)
+    assert store.status(reference(finalized_request), identity())["state"] == "FINALIZED"
+    assert not store._directory(finalized_id).exists()
+    assert store._receipt_path(finalized_id).read_bytes() == finalized_receipt
+    clock.value += 3601
+    assert store.reap_expired() == {"expired_uploads": 0, "receipts_removed": 0}
+    assert not any(store.uploads.iterdir())
+    assert store._receipt_path(finalized_id).read_bytes() == finalized_receipt
+    assert store._receipt_path(aborted_id).read_bytes() == aborted_receipt
+    assert store._receipt_path(quarantined_id).read_bytes() == quarantined_receipt
+    assert store.start(finalized_request, identity()) == finalized
+    assert store.finalize(
+        reference(finalized_request),
+        identity(),
+        lambda *_args: pytest.fail("authoritative receipt must prevent a second effect"),
+    ) == finalized
+    assert store.abort(reference(aborted_request), identity()) == aborted
+    assert store.start(aborted_request, identity()) == aborted
+    assert store.status(reference(quarantined_request), identity())["state"] == "QUARANTINED"
+
+
+def test_global_and_principal_quotas_are_restart_and_concurrency_safe(tmp_path: Path) -> None:
+    root = tmp_path / "quota"
+    store = ProviderChunkedUploadStore(root, disk_usage=ample_disk)
+
+    requests = [start_arguments({"tiny.bin": bytes([index % 251 + 1])}) for index in range(MAX_ACTIVE_UPLOADS + 8)]
+
+    def start_one(index: int) -> str:
+        try:
+            store.start(requests[index], identity(subject=f"owner-{index}", client_id=f"client-{index}"))
+        except ProviderUploadError:
+            return "rejected"
+        return "accepted"
+
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        outcomes = list(executor.map(start_one, range(len(requests))))
+    assert outcomes.count("accepted") == MAX_ACTIVE_UPLOADS
+    assert outcomes.count("rejected") == 8
+
+    principal_root = tmp_path / "principal-quota"
+    principal_store = ProviderChunkedUploadStore(principal_root, disk_usage=ample_disk)
+    owner = identity(subject="same-owner", client_id="same-client")
+    active = [start_arguments({"tiny.bin": b"x"}) for _ in range(MAX_PRINCIPAL_ACTIVE_UPLOADS)]
+    for request in active:
+        principal_store.start(request, owner)
+    restarted = ProviderChunkedUploadStore(principal_root, disk_usage=ample_disk)
+    assert restarted.start(active[0], owner)["state"] == "OPEN"
+    with pytest.raises(ProviderUploadError, match="principal active"):
+        restarted.start(start_arguments({"extra.bin": b"x"}), owner)
+
+
+def test_declared_byte_and_disk_reserve_quotas_are_admitted_without_allocation(tmp_path: Path) -> None:
+    def declared(size: int) -> dict[str, object]:
+        request = start_arguments({"declared.bin": b"x"})
+        payload = request["payload"]
+        assert isinstance(payload, dict)
+        remaining = size
+        files = []
+        while remaining:
+            byte_size = min(remaining, MAX_UPLOAD_FILE_BYTES)
+            files.append(
+                {
+                    "path": f"declared-{len(files)}.bin",
+                    "byte_size": byte_size,
+                    "sha256": "a" * 64,
+                }
+            )
+            remaining -= byte_size
+        payload["files"] = files
+        return request
+
+    principal_store = ProviderChunkedUploadStore(
+        tmp_path / "principal-bytes", disk_usage=ample_disk
+    )
+    owner = identity(subject="byte-owner", client_id="byte-client")
+    for _ in range(MAX_PRINCIPAL_DECLARED_BYTES // MAX_UPLOAD_TOTAL_BYTES):
+        principal_store.start(declared(MAX_UPLOAD_TOTAL_BYTES), owner)
+    with pytest.raises(ProviderUploadError, match="principal active"):
+        principal_store.start(declared(1), owner)
+
+    global_store = ProviderChunkedUploadStore(tmp_path / "global-bytes", disk_usage=ample_disk)
+    for index in range(MAX_ACTIVE_DECLARED_BYTES // MAX_UPLOAD_TOTAL_BYTES):
+        global_store.start(
+            declared(MAX_UPLOAD_TOTAL_BYTES),
+            identity(subject=f"global-{index}", client_id=f"global-client-{index}"),
+        )
+    with pytest.raises(ProviderUploadError, match="global active"):
+        global_store.start(
+            declared(1), identity(subject="global-extra", client_id="global-client-extra")
+        )
+
+    request = declared(2_500_000)
+    reserve_store = ProviderChunkedUploadStore(
+        tmp_path / "disk-reserve",
+        disk_usage=lambda _path: SimpleNamespace(
+            free=MIN_UPLOAD_DISK_RESERVE_BYTES + 2_500_000 - 1
+        ),
+    )
+    with pytest.raises(ProviderUploadError, match="disk reserve"):
+        reserve_store.start(request, identity())
+
+    available = {"free": MIN_UPLOAD_DISK_RESERVE_BYTES + 10_000}
+    write_store = ProviderChunkedUploadStore(
+        tmp_path / "write-reserve",
+        disk_usage=lambda _path: SimpleNamespace(free=available["free"]),
+    )
+    write_request = start_arguments({"tiny.bin": b"x"})
+    write_store.start(write_request, identity())
+    available["free"] = MIN_UPLOAD_DISK_RESERVE_BYTES
+    with pytest.raises(ProviderUploadError, match="disk reserve"):
+        put(write_store, write_request, "tiny.bin", 0, b"x")
+
+
+def test_chunks_or_assembled_ancestor_symlink_never_writes_outside_staging(tmp_path: Path) -> None:
+    store = ProviderChunkedUploadStore(tmp_path / "uploads")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    arguments = start_arguments({"nested/file.bin": b"private"})
+    store.start(arguments, identity())
+    payload = arguments["payload"]
+    assert isinstance(payload, dict)
+    upload_directory = store._directory(str(payload["upload_id"]))
+    chunks = upload_directory / "chunks"
+    chunks.rmdir()
+    chunks.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ProviderUploadConflict, match="private and real"):
+        put(store, arguments, "nested/file.bin", 0, b"private")
+    assert not any(outside.iterdir())
+
+    chunks.unlink()
+    chunks.mkdir(mode=0o700)
+    put(store, arguments, "nested/file.bin", 0, b"private")
+    assembled = upload_directory / "assembled"
+    assembled.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ProviderUploadConflict, match="assembled"):
+        store.finalize(reference(arguments), identity(), lambda *_args: {})
+    assert not any(outside.iterdir())
+    assert store.status(reference(arguments), identity())["state"] == "QUARANTINED"
