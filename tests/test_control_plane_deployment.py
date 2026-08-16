@@ -10,10 +10,17 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "deploy/control-plane/install.sh"
 COMPOSE = ROOT / "compose.control-plane.yaml"
+DOCKERFILE = ROOT / "deploy/control-plane/Dockerfile"
 
 
 def installer_source() -> str:
     return INSTALLER.read_text(encoding="utf-8")
+
+
+def test_control_plane_image_includes_all_wheel_force_include_roots() -> None:
+    source = DOCKERFILE.read_text(encoding="utf-8")
+    assert "COPY sql ./sql" in source
+    assert "COPY schemas ./schemas" in source
 
 
 def provider_oauth_client_probe_source() -> str:

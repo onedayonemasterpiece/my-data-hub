@@ -12,6 +12,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY sql ./sql
+COPY schemas ./schemas
 RUN pip install '.[kaggle]'
 
 USER mdh
