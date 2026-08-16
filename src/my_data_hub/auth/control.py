@@ -71,6 +71,13 @@ class OAuthControlLedger(Protocol):
         self, issuer: str, client_id: str
     ) -> OAuthClientRecord | Awaitable[OAuthClientRecord | None] | None: ...
 
+    def register_resolved_client(
+        self,
+        record: OAuthClientRecord,
+        *,
+        principal_id: str,
+    ) -> OAuthClientRecord | Awaitable[OAuthClientRecord]: ...
+
     def record_oauth_audit(self, event: OAuthAuditEvent) -> Awaitable[None] | None: ...
 
 

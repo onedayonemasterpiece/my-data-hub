@@ -40,6 +40,16 @@ class Ledger:
         scopes = self.clients.get(client_id)
         return None if scopes is None else OAuthClientRecord(issuer, client_id, True, scopes)
 
+    def register_resolved_client(
+        self,
+        record: OAuthClientRecord,
+        *,
+        principal_id: str,
+    ) -> OAuthClientRecord:
+        assert principal_id == "datahub-owner"
+        self.clients[record.client_id] = record.allowed_scopes
+        return record
+
     def is_revoked(self, query: OAuthRevocationQuery) -> bool:
         return False
 

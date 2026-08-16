@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from my_data_hub.auth.control import OAuthAuditEvent, OAuthRevocationQuery
+from my_data_hub.auth.control import OAuthAuditEvent, OAuthClientRecord, OAuthRevocationQuery
 from my_data_hub.control_plane.adapters import ControlLedgerOAuthAuthority
 from my_data_hub.control_plane.ledger import ControlLedger
 
@@ -64,3 +64,33 @@ def test_configured_oauth_client_refresh_preserves_atomic_disabled_state(tmp_pat
         "principal_id": "new-owner",
         "profile_kind": "owner_operator",
     }
+
+
+def test_resolved_cimd_client_is_persisted_without_reenabling_disabled_client(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    ledger = ControlLedger(tmp_path / "control.sqlite3")
+    authority = ControlLedgerOAuthAuthority(ledger)
+    record = OAuthClientRecord(
+        issuer="https://identity.example",
+        client_id="https://chatgpt.com/oauth/exact/client.json",
+        enabled=True,
+        allowed_scopes=frozenset({"openid", "provider:read", "provider:write"}),
+    )
+
+    first = authority.register_resolved_client(record, principal_id="datahub-owner")
+    ledger.register_oauth_client(
+        issuer=record.issuer,
+        client_id=record.client_id,
+        principal_id="datahub-owner",
+        allowed_scopes=record.allowed_scopes,
+        profile_kind="owner_operator",
+        enabled=False,
+    )
+    disabled = authority.register_resolved_client(record, principal_id="datahub-owner")
+
+    assert first == record
+    assert disabled == OAuthClientRecord(
+        issuer=record.issuer,
+        client_id=record.client_id,
+        enabled=False,
+        allowed_scopes=record.allowed_scopes,
+    )
