@@ -8,6 +8,7 @@ from base64 import b64decode, b64encode, urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -18,6 +19,7 @@ from my_data_hub.auth.control import (
 )
 from my_data_hub.control_plane.acceptance_evidence import AcceptanceEvidenceController
 from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.control_plane.provider_uploads import ProviderChunkedUploadStore
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.contracts import (
     ControlPlaneReader,
@@ -38,7 +40,7 @@ from my_data_hub.providers.exchange import (
     ExchangeManifest,
     validate_exchange_manifest_for_mutation,
 )
-from my_data_hub.providers.kaggle import KaggleProviderAdapter, mapping_sha256
+from my_data_hub.providers.kaggle import KaggleProviderAdapter, directory_sha256, mapping_sha256
 from my_data_hub.providers.kaggle.contracts import (
     EffectOutcome,
     MutationAction,
@@ -454,14 +456,28 @@ class ControlLedgerOAuthAuthority:
 class KaggleMCPProviderGateway:
     """Exact metadata gateway over the repository's single Kaggle adapter."""
 
-    def __init__(self, ledger: ControlLedger, adapter: KaggleProviderAdapter) -> None:
+    def __init__(
+        self,
+        ledger: ControlLedger,
+        adapter: KaggleProviderAdapter,
+        *,
+        upload_root: Path | None = None,
+        upload_clock: Callable[[], float] = time.time,
+    ) -> None:
         self.ledger = ledger
         self.adapter = adapter
         self.policy = ProviderPolicy()
+        self.uploads = (
+            ProviderChunkedUploadStore(upload_root, clock=upload_clock)
+            if upload_root is not None
+            else None
+        )
 
     def invoke(self, tool: str, arguments: Mapping[str, Any], principal: AccessIdentity) -> dict[str, Any]:
         if tool == "provider.inventory.live":
             return self._live_inventory(arguments, principal)
+        if tool.startswith("provider.upload."):
+            return self._upload(tool, arguments, principal)
         provider_ref = str(arguments.get("resource_ref", ""))
         control_class = ControlClass(str(arguments.get("control_class", "")))
         if control_class not in {ControlClass.MCP_MANAGED, ControlClass.MCP_EXCHANGE}:
@@ -486,6 +502,63 @@ class KaggleMCPProviderGateway:
         if tool == "provider.resources.delete":
             return self._delete(provider_ref, control_class, payload, principal)
         raise ValueError("unsupported provider gateway tool")
+
+    def _upload(
+        self, tool: str, arguments: Mapping[str, Any], principal: AccessIdentity
+    ) -> dict[str, Any]:
+        if self.uploads is None:
+            raise PermissionError("provider chunked upload staging is not configured")
+        if tool == "provider.upload.start":
+            return self.uploads.start(arguments, principal)
+        if tool == "provider.upload.put_chunk":
+            return self.uploads.put_chunk(arguments, principal)
+        if tool == "provider.upload.status":
+            return self.uploads.status(arguments, principal)
+        if tool == "provider.upload.abort":
+            return self.uploads.abort(arguments, principal)
+        if tool == "provider.upload.finalize":
+            return self.uploads.finalize(arguments, principal, self._finalize_upload)
+        raise ValueError("unsupported provider upload tool")
+
+    def _finalize_upload(
+        self, state: Mapping[str, Any], assembled: Path, principal: AccessIdentity
+    ) -> dict[str, Any]:
+        if (
+            state.get("control_class") != ControlClass.MCP_MANAGED.value
+            or state.get("private") is not True
+            or state.get("principal") != principal.subject
+            or state.get("client_id") != principal.client_id
+        ):
+            raise PermissionError("upload finalization binding is invalid")
+        arguments = {
+            "content_tree_sha256": directory_sha256(assembled),
+            "control_class": ControlClass.MCP_MANAGED.value,
+            "disposable": bool(state["disposable"]),
+        }
+        intent = self._intent(
+            state,
+            str(state["resource_ref"]),
+            MutationAction.CREATE_DATASET,
+            arguments=arguments,
+        )
+        result = self.adapter.create_private_dataset_from_directory(
+            intent=intent,
+            source_directory=assembled,
+            title=str(state["title"]),
+            control_class=ControlClass.MCP_MANAGED,
+            disposable=bool(state["disposable"]),
+        )
+        manifest = [
+            {key: item[key] for key in ("path", "byte_size", "sha256")}
+            for item in state["files"]
+        ]
+        self._register_dataset_manifest(result, created_by=principal.subject, manifest=manifest)
+        return self._dataset_response(result)
+
+    def reap_uploads(self) -> dict[str, int]:
+        if self.uploads is None:
+            return {"expired_uploads": 0, "receipts_removed": 0}
+        return self.uploads.reap_expired()
 
     def _live_inventory(
         self, arguments: Mapping[str, Any], principal: AccessIdentity
@@ -1172,6 +1245,27 @@ class KaggleMCPProviderGateway:
             expected_fingerprint=expected_fingerprint,
             arguments=arguments,
             requested_at=self.ledger.clock.now(),
+        )
+
+    def _register_dataset_manifest(
+        self, result: Any, *, created_by: str, manifest: list[dict[str, Any]]
+    ) -> None:
+        metadata = {
+            "claim": result.claim.model_dump(mode="json"),
+            "identity": result.identity.model_dump(mode="json"),
+            "mcp_access": {"created_by": created_by},
+            "content_manifest": sorted(manifest, key=lambda item: str(item["path"])),
+        }
+        self.ledger.register_provider_resource(
+            provider="kaggle",
+            resource_ref=result.identity.provider_ref,
+            resource_kind=ProviderKind.DATASET.value,
+            source_identity=str(result.claim.task_id),
+            source_version=str(result.identity.version),
+            control_class=result.claim.control_class.value,
+            private=True,
+            state="complete",
+            metadata=metadata,
         )
 
     def _register_dataset(

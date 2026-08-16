@@ -510,7 +510,58 @@ def test_control_provider_gateway_requires_service_auth_and_uses_injected_single
         headers={"Authorization": "Bearer " + "g" * 32},
     )
     assert rejected.status_code == 422
+    assert rejected.json()["detail"]["code"] == "provider_gateway_secret_forbidden"
+    assert len(rejected.json()["detail"]["correlation_id"]) == 36
     assert len(gateway.calls) == 3
+
+
+def test_control_provider_gateway_redacts_raw_adapter_failure_and_emits_correlation(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "provider-gateway-redaction.sqlite3"
+    ledger = ControlLedger(path)
+
+    class FailingGateway:
+        def invoke(self, *_args):  # type: ignore[no-untyped-def]
+            raise RuntimeError("KAGGLE_API_TOKEN=must-not-cross raw provider body")
+
+    app = create_app(
+        ControlPlaneSettings(
+            ledger_path=path,
+            operator_credentials_enabled=True,
+            provider_gateway_enabled=True,
+        ),
+        ledger=ledger,
+        master_runtime=runtime(ledger, FakeKaggleRuntime()),
+        provider_gateway=FailingGateway(),  # type: ignore[arg-type]
+        provider_gateway_token=b"g" * 32,
+    )
+    now = datetime.now(UTC)
+    response = TestClient(app).post(
+        "/internal/mcp-provider/invoke",
+        headers={"Authorization": "Bearer " + "g" * 32},
+        json={
+            "tool": "provider.inventory.live",
+            "arguments": {"limit": 100},
+            "principal": {
+                "subject": "owner",
+                "client_id": "owner-operator",
+                "scopes": ["provider:write"],
+                "audience": "mcp",
+                "expires_at": int((now + timedelta(minutes=2)).timestamp()),
+                "issuer": "https://issuer.example",
+                "issued_at": int((now - timedelta(minutes=1)).timestamp()),
+                "resource": "https://mcp.example/mcp",
+            },
+        },
+    )
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert detail["code"] == "provider_gateway_internal_failure"
+    assert len(detail["correlation_id"]) == 36
+    assert "KAGGLE_API_TOKEN" not in response.text
+    assert "KAGGLE_API_TOKEN" not in caplog.text
+    assert detail["correlation_id"] in caplog.text
 
 
 def test_control_ensure_runs_one_physical_launch_under_concurrency_and_restart(tmp_path: Path) -> None:

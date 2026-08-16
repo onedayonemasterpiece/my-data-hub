@@ -98,3 +98,37 @@ class ProviderDeletePayload(_ExactProviderPayload):
     effect_id: UUID
     idempotency_key: str = Field(min_length=8, max_length=300)
     claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class ProviderUploadFile(_ExactProviderPayload):
+    path: str = Field(min_length=1, max_length=1000)
+    byte_size: int = Field(ge=0, le=67_108_864)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class ProviderUploadStartPayload(_ExactProviderPayload):
+    kind: Literal["dataset"]
+    upload_id: UUID
+    task_id: UUID
+    effect_id: UUID
+    idempotency_key: str = Field(min_length=8, max_length=300)
+    title: str = Field(min_length=6, max_length=50)
+    disposable: bool
+    files: list[ProviderUploadFile] = Field(min_length=1, max_length=100)
+    ttl_seconds: int = Field(default=3600, ge=300, le=86_400)
+
+
+class ProviderUploadChunkPayload(_ExactProviderPayload):
+    upload_id: UUID
+    task_id: UUID
+    path: str = Field(min_length=1, max_length=1000)
+    offset: int = Field(ge=0, le=67_108_863)
+    encoding: Literal["base64"]
+    content_base64: str = Field(min_length=4, max_length=32_768)
+    byte_size: int = Field(ge=1, le=24_576)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class ProviderUploadReferencePayload(_ExactProviderPayload):
+    upload_id: UUID
+    task_id: UUID

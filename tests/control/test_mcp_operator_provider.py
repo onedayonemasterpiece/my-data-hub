@@ -350,6 +350,22 @@ class FakeAdapter:
         self.dataset_files[(intent.provider_ref, 1)] = dict(files)
         return result
 
+    def create_private_dataset_from_directory(  # type: ignore[no-untyped-def]
+        self, *, intent, source_directory, title, control_class, disposable
+    ):
+        files = {
+            path.relative_to(source_directory).as_posix(): path.read_bytes()
+            for path in source_directory.rglob("*")
+            if path.is_file()
+        }
+        return self.create_private_dataset(
+            intent=intent,
+            files=files,
+            title=title,
+            control_class=control_class,
+            disposable=disposable,
+        )
+
     def create_private_dataset_version(self, *, intent, claim, files, version_notes):  # type: ignore[no-untyped-def]
         assert files and version_notes
         self.version_calls += 1
@@ -675,6 +691,88 @@ def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_
         principal(),
     )
     assert deleted["outcome"] == "applied"
+
+
+def test_chunked_upload_finalize_uses_single_adapter_and_durable_manifest(tmp_path: Path) -> None:
+    ledger = ControlLedger(tmp_path / "chunked.sqlite3")
+    adapter = FakeAdapter(ledger)
+    gateway = KaggleMCPProviderGateway(
+        ledger,
+        adapter,  # type: ignore[arg-type]
+        upload_root=tmp_path / "provider-uploads",
+    )
+    task_id = uuid4()
+    upload_id = uuid4()
+    content = b"private-provider-bytes" * 20_000
+    common = {
+        "resource_ref": "owner/chunked-data",
+        "control_class": "mcp_managed",
+        "private": True,
+    }
+    start = {
+        **common,
+        "payload": {
+            "kind": "dataset",
+            "upload_id": str(upload_id),
+            "task_id": str(task_id),
+            "effect_id": str(uuid4()),
+            "idempotency_key": "provider-chunked-create-1",
+            "title": "MCP chunked private dataset",
+            "disposable": True,
+            "files": [
+                {
+                    "path": "nested/payload.bin",
+                    "byte_size": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+            ],
+            "ttl_seconds": 3600,
+        },
+    }
+    assert gateway.invoke("provider.upload.start", start, principal())["state"] == "OPEN"
+    for offset in range(0, len(content), 24 * 1024):
+        chunk = content[offset : offset + 24 * 1024]
+        gateway.invoke(
+            "provider.upload.put_chunk",
+            {
+                **common,
+                "payload": {
+                    "upload_id": str(upload_id),
+                    "task_id": str(task_id),
+                    "path": "nested/payload.bin",
+                    "offset": offset,
+                    "encoding": "base64",
+                    "content_base64": b64encode(chunk).decode("ascii"),
+                    "byte_size": len(chunk),
+                    "sha256": hashlib.sha256(chunk).hexdigest(),
+                },
+            },
+            principal(),
+        )
+    finalized = gateway.invoke(
+        "provider.upload.finalize",
+        {
+            **common,
+            "payload": {"upload_id": str(upload_id), "task_id": str(task_id)},
+        },
+        principal(),
+    )
+    assert finalized["state"] == "FINALIZED"
+    result = finalized["result"]
+    assert result["provider_ref"] == "owner/chunked-data"
+    assert adapter.create_calls == 1
+    assert adapter.dataset_files[("owner/chunked-data", 1)] == {"nested/payload.bin": content}
+    projection = ledger.provider_resource("owner/chunked-data", "1")
+    assert projection is not None
+    assert projection["metadata"]["content_manifest"] == [
+        {
+            "path": "nested/payload.bin",
+            "byte_size": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    ]
+    assert content not in ledger.path.read_bytes()
+    assert not any((tmp_path / "provider-uploads" / "uploads").iterdir())
 
 
 def test_binary_batch_round_trip_is_claim_bound_chunked_and_json_safe(tmp_path: Path) -> None:

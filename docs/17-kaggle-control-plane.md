@@ -448,6 +448,47 @@ authorization. Provider-owned manifests are never listed as content or downloada
 Traversal, symlinks, reserved metadata, checkpoint/PostgreSQL artifact names, unexpected
 provider files, oversize files and content tamper fail before returning bytes.
 
+### 8.6 Restart-safe MCP chunked Dataset upload
+
+Large local file batches do **not** require the Kaggle master Notebook or PostgreSQL.
+They are provider-only effects: the stable remote MCP sends bounded chunks to private
+filesystem staging in the central control-plane container, and only that process calls
+the existing injected Kaggle adapter. Kaggle credentials never enter the remote MCP or
+the caller. Existing `provider.resources.create`/`version` calls and chunked downloads
+remain compatible.
+
+The provider-operator workflow for a new private `mcp_managed` Dataset is:
+
+1. call `provider.upload.start` with the destination `resource_ref`, one `upload_id`,
+   `task_id`, `effect_id`, idempotency key, title, TTL and an exact ordered file manifest
+   (`path`, byte size, SHA-256);
+2. call `provider.upload.put_chunk` for each file at its exact next offset, using canonical
+   base64, declared byte size and chunk SHA-256; raw chunks are at most 24 KiB, keeping
+   each tool call well below large JSON argument limits;
+3. call `provider.upload.status` after a disconnect/restart to resume from each returned
+   `received_bytes`;
+4. call `provider.upload.finalize` only after state `READY`; it verifies every chunk and
+   whole-file hash, reconstructs a private directory, and executes the same durable
+   Kaggle create intent/claim/idempotency path as the direct tool;
+5. call `provider.upload.abort` to remove an abandoned upload. Expiry reaping provides
+   the same raw-byte cleanup automatically.
+
+Every lifecycle call repeats and verifies the exact resource, task, OAuth subject and
+OAuth client binding. Exact chunk/start/finalize replays are idempotent; changed replays,
+offset gaps, tamper, traversal, symlinks and reserved PostgreSQL/checkpoint/provider paths
+are rejected. A process restart after `FINALIZING` safely reconciles the same provider
+intent. A lost successful response is answered from the terminal receipt without calling
+Kaggle again.
+
+The bounded contract allows at most 100 files, 64 MiB per file, 256 MiB total and a TTL
+from 5 minutes to 24 hours. Raw staging lives outside SQLite with directory mode 0700 and
+file mode 0600. The control ledger and terminal receipts contain hashes, sizes, claims and
+provider results only, never raw file bytes. Successful, aborted, expired or quarantined
+uploads remove raw staging; bounded terminal receipts remain for replay and are reaped
+after seven days. Production deployment mounts the private host
+`MY_DATA_HUB_PROVIDER_UPLOAD_DIR` only into central control at `/uploads`, never into the
+remote MCP process.
+
 The contract was exercised against the real pinned `kaggle==2.2.4` provider on
 2026-08-12: a disposable private Dataset was created with three mixed text/binary files,
 listed, two exact files were downloaded and hash-verified, a second version was created

@@ -61,6 +61,10 @@ _PROVIDER_ONLY_MUTATIONS = frozenset(
         "provider.resources.version",
         "provider.resources.run",
         "provider.resources.delete",
+        "provider.upload.start",
+        "provider.upload.put_chunk",
+        "provider.upload.finalize",
+        "provider.upload.abort",
         "provider.acceptance.claim.cleanup",
     }
 )

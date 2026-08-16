@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import tempfile
 from contextlib import asynccontextmanager, suppress
@@ -40,6 +41,7 @@ from my_data_hub.control_plane.ledger import (
     MasterAdmissionRejected,
     StaleRuntimeEvent,
 )
+from my_data_hub.control_plane.provider_uploads import ProviderUploadConflict
 from my_data_hub.control_plane.runtime import (
     ControlPlaneMasterRuntime,
     MasterRuntimeSettings,
@@ -75,7 +77,12 @@ from my_data_hub.providers.kaggle import (
     KaggleProviderAdapter,
 )
 from my_data_hub.providers.kaggle.contracts import (
+    KaggleAmbiguousMutation,
+    KaggleContractError,
     KaggleKernelRunIdentity,
+    KaggleNotFound,
+    KagglePolicyError,
+    KaggleProviderError,
     MutationAction,
     ProviderEffectIntent,
     ProviderEffectReceipt,
@@ -93,6 +100,8 @@ from my_data_hub.workloads.bloggers.master_stage import (
     BloggerQuarantineReceipt,
     resolution_matches_quarantine,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 DATABASE_ENVIRONMENT_NAMES = (
     "MY_DATA_HUB_DATABASE_URL",
@@ -251,6 +260,7 @@ class ControlPlaneSettings:
     operator_credentials_enabled: bool = False
     provider_gateway_enabled: bool = False
     provider_only_mode: bool = False
+    provider_upload_root: Path | None = None
     acceptance_scenarios_enabled: bool = False
     connector_runtime_enabled: bool = False
 
@@ -264,6 +274,12 @@ class ControlPlaneSettings:
         if self.acceptance_scenarios_enabled and not self.provider_gateway_enabled:
             raise ControlPlaneConfigurationError(
                 "acceptance scenarios require the authenticated single control gateway"
+            )
+        if self.provider_upload_root is not None and (
+            not self.provider_upload_root.is_absolute() or self.provider_upload_root.is_symlink()
+        ):
+            raise ControlPlaneConfigurationError(
+                "provider upload staging root must be an absolute non-symlink path"
             )
         if self.provider_only_mode and (
             not self.provider_gateway_enabled
@@ -303,6 +319,9 @@ class ControlPlaneSettings:
             operator_credentials_enabled=_boolean("MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED"),
             provider_gateway_enabled=_boolean("MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED"),
             provider_only_mode=_boolean("MY_DATA_HUB_PROVIDER_ONLY_MODE"),
+            provider_upload_root=Path(
+                os.getenv("MY_DATA_HUB_PROVIDER_UPLOAD_ROOT", "/uploads")
+            ).expanduser(),
             acceptance_scenarios_enabled=_boolean("MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED"),
             connector_runtime_enabled=_boolean("MY_DATA_HUB_CONNECTOR_RUNTIME_ENABLED"),
         )
@@ -365,7 +384,11 @@ def create_app(
             raise ControlPlaneConfigurationError("master runtime and app must share one control ledger")
         provider_status = "available"
     if provider_gateway is None and provider_adapter is not None:
-        provider_gateway = KaggleMCPProviderGateway(control_ledger, provider_adapter)
+        provider_gateway = KaggleMCPProviderGateway(
+            control_ledger,
+            provider_adapter,
+            upload_root=runtime.provider_upload_root if runtime.provider_gateway_enabled else None,
+        )
     def _exact_master_asset_claim(settings: MasterRuntimeSettings | None) -> dict[str, Any] | None:
         if settings is None or not hasattr(settings, "assets"):
             return None
@@ -514,6 +537,17 @@ def create_app(
     async def lifespan(_app: FastAPI):
         stopped = asyncio.Event()
         task: asyncio.Task[None] | None = None
+        upload_reaper_task: asyncio.Task[None] | None = None
+
+        async def reconcile_upload_expiry() -> None:
+            while not stopped.is_set():
+                if provider_gateway is not None:
+                    with suppress(Exception):
+                        await asyncio.to_thread(provider_gateway.reap_uploads)
+                try:
+                    await asyncio.wait_for(stopped.wait(), timeout=30.0)
+                except TimeoutError:
+                    continue
 
         async def reconcile_requests() -> None:
             while not stopped.is_set():
@@ -580,12 +614,16 @@ def create_app(
 
         if master_runtime is not None:
             task = asyncio.create_task(reconcile_requests())
+        if provider_gateway is not None and getattr(provider_gateway, "uploads", None) is not None:
+            upload_reaper_task = asyncio.create_task(reconcile_upload_expiry())
         try:
             yield
         finally:
             stopped.set()
             if task is not None:
                 await task
+            if upload_reaper_task is not None:
+                await upload_reaper_task
 
     app = FastAPI(
         title="my-data-hub lightweight control plane",
@@ -917,6 +955,11 @@ def create_app(
                     "provider.resources.download",
                     "provider.inventory.live",
                     "provider.resources.delete",
+                    "provider.upload.start",
+                    "provider.upload.put_chunk",
+                    "provider.upload.status",
+                    "provider.upload.finalize",
+                    "provider.upload.abort",
                     "provider.acceptance.claim.get",
                     "provider.acceptance.claim.cleanup",
                 }
@@ -932,6 +975,11 @@ def create_app(
                     "provider.resources.download",
                     "provider.inventory.live",
                     "provider.resources.delete",
+                    "provider.upload.start",
+                    "provider.upload.put_chunk",
+                    "provider.upload.status",
+                    "provider.upload.finalize",
+                    "provider.upload.abort",
                     "provider.acceptance.dataset.lifecycle",
                     "provider.acceptance.notebook.lifecycle",
                     "provider.acceptance.claim.get",
@@ -950,6 +998,11 @@ def create_app(
             request: Request,
             authorization: str | None = Header(default=None),
         ) -> dict[str, Any]:
+            correlation_id = str(uuid4())
+
+            def gateway_detail(code: str) -> dict[str, str]:
+                return {"code": code, "correlation_id": correlation_id}
+
             supplied = (
                 authorization.removeprefix("Bearer ").strip()
                 if authorization and authorization.startswith("Bearer ")
@@ -957,16 +1010,22 @@ def create_app(
             )
             expected = provider_gateway_token.decode("ascii") if provider_gateway_token else ""
             if not supplied or not hmac.compare_digest(supplied, expected):
-                raise HTTPException(status_code=401, detail={"code": "provider_gateway_token_invalid"})
+                raise HTTPException(status_code=401, detail=gateway_detail("provider_gateway_token_invalid"))
             raw = await request.body()
             if len(raw) > 512 * 1024:
-                raise HTTPException(status_code=413, detail={"code": "provider_gateway_request_too_large"})
+                raise HTTPException(
+                    status_code=413, detail=gateway_detail("provider_gateway_request_too_large")
+                )
             try:
                 body = json.loads(raw)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise HTTPException(status_code=400, detail={"code": "provider_gateway_json_invalid"}) from exc
+                raise HTTPException(
+                    status_code=400, detail=gateway_detail("provider_gateway_json_invalid")
+                ) from exc
             if not isinstance(body, dict) or set(body) != {"tool", "arguments", "principal"}:
-                raise HTTPException(status_code=422, detail={"code": "provider_gateway_envelope_invalid"})
+                raise HTTPException(
+                    status_code=422, detail=gateway_detail("provider_gateway_envelope_invalid")
+                )
             tool = body["tool"]
             arguments = body["arguments"]
             principal = body["principal"]
@@ -999,7 +1058,9 @@ def create_app(
                 or not isinstance(principal["issued_at"], int)
                 or isinstance(principal["issued_at"], bool)
             ):
-                raise HTTPException(status_code=422, detail={"code": "provider_gateway_contract_invalid"})
+                raise HTTPException(
+                    status_code=422, detail=gateway_detail("provider_gateway_contract_invalid")
+                )
             now = int(datetime.now(UTC).timestamp())
             try:
                 identity = AccessIdentity(
@@ -1014,7 +1075,9 @@ def create_app(
                     resource=str(principal["resource"]),
                 )
             except (TypeError, ValueError) as exc:
-                raise HTTPException(status_code=422, detail={"code": "provider_gateway_principal_invalid"}) from exc
+                raise HTTPException(
+                    status_code=422, detail=gateway_detail("provider_gateway_principal_invalid")
+                ) from exc
             contract = TOOL_CONTRACTS[tool]
             if (
                 not identity.subject
@@ -1023,7 +1086,9 @@ def create_app(
                 or identity.expires_at <= now
                 or contract.scope not in identity.scopes
             ):
-                raise HTTPException(status_code=403, detail={"code": "provider_gateway_principal_denied"})
+                raise HTTPException(
+                    status_code=403, detail=gateway_detail("provider_gateway_principal_denied")
+                )
 
             forbidden = {"authorization", "database_url", "dsn", "password", "private_key", "secret", "token"}
 
@@ -1031,7 +1096,10 @@ def create_app(
                 if isinstance(value, dict):
                     for key, nested in value.items():
                         if str(key).casefold() in forbidden:
-                            raise HTTPException(status_code=422, detail={"code": "provider_gateway_secret_forbidden"})
+                            raise HTTPException(
+                                status_code=422,
+                                detail=gateway_detail("provider_gateway_secret_forbidden"),
+                            )
                         reject_secrets(nested)
                 elif isinstance(value, list):
                     for nested in value:
@@ -1041,15 +1109,53 @@ def create_app(
             assert provider_control is not None
             try:
                 result = await asyncio.to_thread(provider_control.invoke_control, tool, arguments, identity)
-            except PermissionError as exc:
-                raise HTTPException(status_code=403, detail={"code": "provider_gateway_policy_denied"}) from exc
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail={"code": "provider_gateway_request_invalid"}) from exc
+            except (PermissionError, KagglePolicyError) as exc:
+                code, status_code = "provider_gateway_policy_denied", 403
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
+            except KaggleAmbiguousMutation as exc:
+                code, status_code = "provider_gateway_effect_ambiguous", 409
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
+            except KaggleNotFound as exc:
+                code, status_code = "provider_gateway_not_found", 404
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
+            except ProviderUploadConflict as exc:
+                code, status_code = "provider_gateway_upload_conflict", 409
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
+            except (ValueError, KaggleContractError) as exc:
+                code, status_code = "provider_gateway_request_invalid", 422
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
+            except KaggleProviderError as exc:
+                code, status_code = "provider_gateway_effect_failed", 502
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
             except Exception as exc:
-                raise HTTPException(status_code=502, detail={"code": "provider_gateway_effect_failed"}) from exc
+                code, status_code = "provider_gateway_internal_failure", 502
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
             encoded = canonical_json_bytes(result)
             if len(encoded) > 2 * 1024 * 1024:
-                raise HTTPException(status_code=502, detail={"code": "provider_gateway_response_too_large"})
+                raise HTTPException(
+                    status_code=502, detail=gateway_detail("provider_gateway_response_too_large")
+                )
             return result
 
     @app.get("/control/v1/master")

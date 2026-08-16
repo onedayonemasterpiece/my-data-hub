@@ -334,6 +334,24 @@ def test_provider_only_override_removes_master_mounts_and_static_bearers() -> No
         "KAGGLE_KEY",
     ):
         assert forbidden not in override
+    control, remote = override.split("  remote-mcp:", 1)
+    assert 'MY_DATA_HUB_PROVIDER_UPLOAD_ROOT: /uploads' in control
+    assert 'MY_DATA_HUB_PROVIDER_UPLOAD_DIR:?provider upload directory is required}:/uploads' in control
+    assert "/uploads" not in remote
+
+
+def test_chunked_upload_staging_is_private_and_mounted_only_into_central_control() -> None:
+    source = installer_source()
+    assert 'provider_upload_dir="${MY_DATA_HUB_PROVIDER_UPLOAD_DIR:-$runtime_root/provider-uploads}"' in source
+    assert 'private_dirs+=("$provider_upload_dir")' in source
+    assert "MY_DATA_HUB_PROVIDER_UPLOAD_DIR=$provider_upload_dir" in source
+    start = source.index('cat > "$operator_override"')
+    end = source.index('chmod 600 "$operator_override"', start)
+    operator_override = source[start:end]
+    control, remote = operator_override.split("  remote-mcp:", 1)
+    assert 'MY_DATA_HUB_PROVIDER_UPLOAD_ROOT: /uploads' in control
+    assert 'MY_DATA_HUB_PROVIDER_UPLOAD_DIR:?provider upload directory is required}:/uploads' in control
+    assert "/uploads" not in remote
 
 
 def test_fm08_host_supervisor_is_explicit_private_and_has_one_restart_target() -> None:

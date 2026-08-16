@@ -24,6 +24,9 @@ from my_data_hub.mcp.provider_schemas import (
     ProviderListPayload,
     ProviderReadPayload,
     ProviderRunPayload,
+    ProviderUploadChunkPayload,
+    ProviderUploadReferencePayload,
+    ProviderUploadStartPayload,
     ProviderVersionPayload,
 )
 from my_data_hub.mcp.service import HubService
@@ -42,6 +45,11 @@ PROVIDER_ONLY_TOOLS = frozenset(
         "provider.resources.download",
         "provider.inventory.live",
         "provider.resources.delete",
+        "provider.upload.start",
+        "provider.upload.put_chunk",
+        "provider.upload.status",
+        "provider.upload.finalize",
+        "provider.upload.abort",
         "provider.acceptance.claim.get",
         "provider.acceptance.claim.cleanup",
     }
@@ -409,7 +417,10 @@ def create_server(
         | ProviderReadPayload
         | ProviderListPayload
         | ProviderDownloadPayload
-        | ProviderDeletePayload,
+        | ProviderDeletePayload
+        | ProviderUploadStartPayload
+        | ProviderUploadChunkPayload
+        | ProviderUploadReferencePayload,
     ) -> dict[str, Any]:
         return {
             "resource_ref": resource_ref,
@@ -487,6 +498,61 @@ def create_server(
     async def provider_inventory_live(limit: int = 100) -> dict[str, Any]:
         return await service.invoke("provider.inventory.live", {"limit": limit})
 
+    async def provider_upload_start(
+        resource_ref: str,
+        control_class: Literal["mcp_managed"],
+        private: Literal[True],
+        payload: ProviderUploadStartPayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.upload.start",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
+    async def provider_upload_put_chunk(
+        resource_ref: str,
+        control_class: Literal["mcp_managed"],
+        private: Literal[True],
+        payload: ProviderUploadChunkPayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.upload.put_chunk",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
+    async def provider_upload_status(
+        resource_ref: str,
+        control_class: Literal["mcp_managed"],
+        private: Literal[True],
+        payload: ProviderUploadReferencePayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.upload.status",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
+    async def provider_upload_finalize(
+        resource_ref: str,
+        control_class: Literal["mcp_managed"],
+        private: Literal[True],
+        payload: ProviderUploadReferencePayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.upload.finalize",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
+    async def provider_upload_abort(
+        resource_ref: str,
+        control_class: Literal["mcp_managed"],
+        private: Literal[True],
+        payload: ProviderUploadReferencePayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.upload.abort",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
     async def provider_resources_delete(
         resource_ref: str,
         control_class: Literal["mcp_managed", "mcp_exchange"],
@@ -527,6 +593,11 @@ def create_server(
         "provider.resources.download": provider_resources_download,
         "provider.inventory.live": provider_inventory_live,
         "provider.resources.delete": provider_resources_delete,
+        "provider.upload.start": provider_upload_start,
+        "provider.upload.put_chunk": provider_upload_put_chunk,
+        "provider.upload.status": provider_upload_status,
+        "provider.upload.finalize": provider_upload_finalize,
+        "provider.upload.abort": provider_upload_abort,
         "bloggers.list": bloggers_list,
         "bloggers.get": bloggers_get,
         "bloggers.search": bloggers_search,

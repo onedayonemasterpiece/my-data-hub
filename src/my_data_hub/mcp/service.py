@@ -57,6 +57,7 @@ _CONTROL_TOOLS = frozenset(
         "provider.resources.list",
         "provider.resources.download",
         "provider.inventory.live",
+        "provider.upload.status",
         "provider.acceptance.claim.get",
         "runtime.events.history",
         "acceptance.scenario.request",
@@ -70,6 +71,10 @@ _PROVIDER_WRITES = frozenset(
         "provider.resources.version",
         "provider.resources.run",
         "provider.resources.delete",
+        "provider.upload.start",
+        "provider.upload.put_chunk",
+        "provider.upload.finalize",
+        "provider.upload.abort",
         "provider.acceptance.dataset.lifecycle",
         "provider.acceptance.notebook.lifecycle",
         "provider.acceptance.claim.cleanup",
@@ -159,7 +164,7 @@ class HubService:
             arguments,
             max_bytes=(
                 512 * 1024
-                if tool in {"provider.resources.create", "provider.resources.version"}
+                if tool in {"provider.resources.create", "provider.resources.version", "provider.upload.start"}
                 else 256 * 1024
             ),
         )

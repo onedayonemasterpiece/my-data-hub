@@ -105,6 +105,7 @@ fi
 env_root="${MY_DATA_HUB_CONTROL_ENV_DIR:-$runtime_root/env}"
 secret_root="${MY_DATA_HUB_CONTROL_SECRET_DIR:-$runtime_root/secrets}"
 ledger_dir="${MY_DATA_HUB_CONTROL_LEDGER_DIR:-$runtime_root/control-ledger}"
+provider_upload_dir="${MY_DATA_HUB_PROVIDER_UPLOAD_DIR:-$runtime_root/provider-uploads}"
 session_dir="${MY_DATA_HUB_MASTER_SESSION_DIR:-$runtime_root/master-sessions}"
 embedding_credential_dir="${MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR:-$runtime_root/embedding-credentials}"
 asset_dir="${MY_DATA_HUB_MASTER_ASSET_DIR:-$runtime_root/master-assets}"
@@ -156,7 +157,7 @@ if [[ -n "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SUPERVISOR:-}" ]]; then
   fi
   acceptance_supervisor=true
 fi
-for path_value in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$asset_dir" \
+for path_value in "$env_root" "$secret_root" "$ledger_dir" "$provider_upload_dir" "$session_dir" "$asset_dir" \
   "$tls_dir" "$tls_ca_file" "$provider_env" "$mcp_env" "$oauth_env" "$oauth_key" "$oauth_overlap_jwks" \
   "$connector_env" \
   "$owner_operator_token" "$owner_portal_state_key" \
@@ -169,6 +170,10 @@ for path_value in "$env_root" "$secret_root" "$ledger_dir" "$session_dir" "$asse
 done
 mkdir -p "$env_root" "$secret_root" "$ledger_dir" "$HOME/.config/systemd/user"
 private_dirs=("$env_root" "$secret_root" "$ledger_dir")
+if [[ "$provider_only" == true || "$operator_profile" == true ]]; then
+  mkdir -p "$provider_upload_dir"
+  private_dirs+=("$provider_upload_dir")
+fi
 if [[ "$provider_only" != true ]]; then
   mkdir -p "$session_dir" "$embedding_credential_dir" "$tls_dir"
   chmod 700 "$embedding_credential_dir"
@@ -505,10 +510,12 @@ services:
       MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED: "true"
       MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED: "true"
       MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE: /run/secrets/mcp-control-gateway.token
+      MY_DATA_HUB_PROVIDER_UPLOAD_ROOT: /uploads
       MY_DATA_HUB_TUNNEL_BROKER_SOCKET: ""
       MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED: "false"
     volumes: !override
       - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:?control ledger directory is required}:/ledger"
+      - "${MY_DATA_HUB_PROVIDER_UPLOAD_DIR:?provider upload directory is required}:/uploads"
       - "${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:?provider gateway token is required}:/run/secrets/mcp-control-gateway.token:ro"
   remote-mcp:
     environment:
@@ -565,7 +572,9 @@ services:
       MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED: "true"
       MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED: "true"
       MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE: /run/secrets/mcp-control-gateway.token
+      MY_DATA_HUB_PROVIDER_UPLOAD_ROOT: /uploads
     volumes:
+      - "${MY_DATA_HUB_PROVIDER_UPLOAD_DIR:?provider upload directory is required}:/uploads"
       - "${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:?provider control gateway token is required}:/run/secrets/mcp-control-gateway.token:ro"
   remote-mcp:
     environment:
@@ -659,6 +668,7 @@ MY_DATA_HUB_IMAGE_TAG=$commit
 MY_DATA_HUB_CONTROL_UID=$(id -u)
 MY_DATA_HUB_CONTROL_GID=$(id -g)
 MY_DATA_HUB_CONTROL_LEDGER_DIR=$ledger_dir
+MY_DATA_HUB_PROVIDER_UPLOAD_DIR=$provider_upload_dir
 MY_DATA_HUB_MASTER_SESSION_DIR=$session_dir
 MY_DATA_HUB_MASTER_ASSET_DIR=$asset_dir
 MY_DATA_HUB_MASTER_TLS_DIR=$tls_dir
