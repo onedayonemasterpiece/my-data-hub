@@ -19,8 +19,15 @@ class ToolSecurityMetadataMiddleware:
     tool's top-level field after the SDK has validated the core result.
     """
 
-    def __init__(self, app: Any, *, max_response_bytes: int = 2_097_152) -> None:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        security_schemes: list[dict[str, Any]] | None = None,
+        max_response_bytes: int = 2_097_152,
+    ) -> None:
         self.app = app
+        self.security_schemes = security_schemes or DEFAULT_SECURITY_SCHEMES
         self.max_response_bytes = max_response_bytes
 
     async def __call__(self, scope: dict[str, Any], receive: ASGIReceive, send: ASGISend) -> None:
@@ -61,7 +68,7 @@ class ToolSecurityMetadataMiddleware:
             tools = result.get("tools") if isinstance(result, dict) else None
             if not isinstance(tools, list):
                 raise ValueError
-            result["securitySchemes"] = DEFAULT_SECURITY_SCHEMES
+            result["securitySchemes"] = self.security_schemes
             for tool in tools:
                 if not isinstance(tool, dict) or tool.get("name") not in TOOL_CONTRACTS:
                     raise ValueError

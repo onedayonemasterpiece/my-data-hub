@@ -231,7 +231,7 @@ class HubService:
         if snapshot.state is MasterState.ABSENT:
             return (await self._ensure(identity, intent=intent)).public()
         if snapshot.operation_id:
-            return {
+            result = {
                 **snapshot.public(),
                 "terminal": snapshot.state
                 in {
@@ -241,6 +241,17 @@ class HubService:
                     MasterState.ORPHANED,
                 },
             }
+            if not result["terminal"]:
+                result.update(
+                    outcome="WAITING_FOR_MASTER",
+                    retryable=True,
+                    continuation={
+                        "operation_id": snapshot.operation_id,
+                        "status_tool": "operation.get",
+                        "retry_original_request_when": "state=ACTIVE",
+                    },
+                )
+            return result
         raise MasterUnavailableError("non-ACTIVE master state has no durable operation_id")
 
     async def _control(
@@ -492,8 +503,6 @@ class HubService:
         provider_only = (
             permit.canonical_data_independent
             and tool in _PROVIDER_WRITES
-            and master.state is MasterState.ABSENT
-            and master.epoch is None
             and permit.master_epoch == 0
             and permit.canonical_revision == 0
             and not permit.checkpoint_lifecycle_bound
@@ -503,7 +512,7 @@ class HubService:
             permit.tool != tool
             or permit.principal != identity.subject
             or permit.client_id != identity.client_id
-            or permit.master_epoch != (master.epoch or 0)
+            or (not provider_only and permit.master_epoch != (master.epoch or 0))
             or permit.expires_at <= int(self.clock())
             or (not provider_only and not permit.checkpoint_lifecycle_bound)
         ):

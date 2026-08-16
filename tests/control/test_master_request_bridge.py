@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from my_data_hub.control_plane.adapters import LedgerMasterResolver
+from my_data_hub.control_plane.adapters import LedgerControlReader, LedgerMasterResolver
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.control_plane.runtime import ControlPlaneMasterRuntime, MasterRuntimeSettings
 from my_data_hub.mcp.contracts import MasterState
 from my_data_hub.mcp.oauth import AccessIdentity
+from my_data_hub.mcp.service import HubService
 from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator
 from my_data_hub.providers.kaggle import KaggleMasterLaunchAssets
 
@@ -61,10 +63,22 @@ def test_mcp_cold_start_request_is_durably_bridged_to_one_provider_run(
         MasterRuntimeSettings(assets=assets),
     )
     resolver = LedgerMasterResolver(ledger)
+    service = HubService(resolver, fallback_identity=identity())
+    waiting = asyncio.run(service.invoke("bloggers.search", {"query": "cold"}))
+    assert waiting["outcome"] == "WAITING_FOR_MASTER"
+    assert waiting["continuation"]["status_tool"] == "operation.get"
+    first_operation_id = waiting["operation_id"]
+    status = LedgerControlReader(ledger).invoke_control(
+        "operation.get", {"operation_id": first_operation_id}, identity()
+    )
+    assert status["found"] is True
+    assert status["outcome"] == "WAITING_FOR_MASTER"
+    assert status["state"] == "REQUESTED"
     first = resolver.ensure_master(identity(), intent="mcp-read:bloggers.search")
     duplicate = resolver.ensure_master(identity(), intent="mcp-read:bloggers.search")
+    assert first.operation_id == first_operation_id
     assert first.operation_id == duplicate.operation_id
-    assert not first.duplicate and duplicate.duplicate
+    assert first.duplicate and duplicate.duplicate
     assert resolver.resolve_master(identity()).state is MasterState.REQUESTED
 
     handle = runtime.reconcile_requested_once()
@@ -99,3 +113,23 @@ def test_mcp_cold_start_request_is_durably_bridged_to_one_provider_run(
     assert active.public()["operation_id"] == handle.operation_id
     assert active.provider_run_ref == f"owner/master-runtime/run/{handle.run_id}"
     assert active.public()["provider_run_ref"] == active.provider_run_ref
+    operation = LedgerControlReader(ledger).invoke_control(
+        "operation.get", {"operation_id": first_operation_id}, identity()
+    )
+    assert operation["state"] == "ACTIVE"
+
+
+def test_operation_status_finds_an_older_unconsumed_master_request(tmp_path: Path) -> None:
+    ledger = ControlLedger(tmp_path / "multiple-requests.sqlite3")
+    resolver = LedgerMasterResolver(ledger)
+    older = resolver.ensure_master(identity(), intent="mcp-read:bloggers.search")
+    newer = resolver.ensure_master(identity(), intent="mcp-read:data.query")
+    assert older.operation_id != newer.operation_id
+
+    status = LedgerControlReader(ledger).invoke_control(
+        "operation.get", {"operation_id": older.operation_id}, identity()
+    )
+
+    assert status["found"] is True
+    assert status["operation_id"] == older.operation_id
+    assert status["outcome"] == "WAITING_FOR_MASTER"

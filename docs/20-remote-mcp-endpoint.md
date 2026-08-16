@@ -212,3 +212,10 @@ to the control ledger before the file is published. Pass the private file as
 `--negative-credentials-file`; the verifier additionally checks missing auth, wrong Host
 and wrong Origin. Delete the bundle after the run. A synthetic test receipt is not live
 evidence.
+
+## Bounded unified deployment profile
+
+For the non-operator profile that keeps private provider Dataset tools available while
+canonical reads durably autostart the Kaggle PostgreSQL master, see
+[`operations/unified-bootstrap-mcp-deploy.md`](operations/unified-bootstrap-mcp-deploy.md).
+Provider-only installation remains a separate unchanged action.

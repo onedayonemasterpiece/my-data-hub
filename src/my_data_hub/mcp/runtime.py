@@ -156,6 +156,41 @@ class ProviderOnlyWriteGate:
         raise PermissionError("provider-only gate has no canonical reconciliation path")
 
 
+class UnifiedBootstrapWriteGate(ProviderOnlyWriteGate):
+    """Permit only provider effects while canonical master lifecycle stays independent."""
+
+    def authorize_write(
+        self,
+        *,
+        principal: AccessIdentity,
+        tool: str,
+        arguments: Mapping[str, object],
+        master: MasterSnapshot,
+    ) -> WritePermit:
+        # The provider Dataset API is a separate control surface.  It must stay
+        # usable before, during, and after a canonical master epoch, but this
+        # gate never authorizes a canonical data-plane mutation.
+        if tool not in _PROVIDER_ONLY_MUTATIONS or "provider:write" not in principal.scopes:
+            raise PermissionError("unified bootstrap write gate rejects this tool or scope")
+        resource_class = (
+            "mcp_managed"
+            if tool == "provider.acceptance.claim.cleanup"
+            else str(arguments.get("control_class", ""))
+        )
+        if resource_class not in {"mcp_managed", "mcp_exchange"}:
+            raise PermissionError("unified bootstrap accepts only MCP-controlled resources")
+        if tool != "provider.acceptance.claim.cleanup" and arguments.get("private") is not True:
+            raise PermissionError("unified bootstrap accepts only private resources")
+        # Reuse the signed, canonical-data-independent permit construction by
+        # presenting the only state accepted by the provider-only base gate.
+        return super().authorize_write(
+            principal=principal,
+            tool=tool,
+            arguments=arguments,
+            master=MasterSnapshot(MasterState.ABSENT),
+        )
+
+
 def build_remote_runtime(
     *,
     settings: Settings | None = None,
@@ -182,9 +217,10 @@ def build_remote_runtime(
         if not (
             runtime_settings.mcp_operator_profile_enabled
             or runtime_settings.mcp_provider_profile_enabled
+            or runtime_settings.mcp_unified_bootstrap_profile_enabled
         ):
             raise ConfigurationError(
-                "remote MCP writes require an explicit owner/operator or provider-only profile"
+                "remote MCP writes require an explicit owner/operator, provider-only, or unified bootstrap profile"
             )
         if write_gate is None:
             secret_path = Path(os.getenv("MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE", "")).expanduser()
@@ -196,11 +232,12 @@ def build_remote_runtime(
             secret = secret_path.read_bytes().strip()
             if mode & 0o077 or not 32 <= len(secret) <= 256:
                 raise ConfigurationError("operator write-gate secret violates the bounded private-file contract")
-            write_gate = (
-                ProviderOnlyWriteGate(secret)
-                if runtime_settings.mcp_provider_profile_enabled
-                else LedgerWriteGate(control_ledger, signing_secret=secret)
-            )
+            if runtime_settings.mcp_provider_profile_enabled:
+                write_gate = ProviderOnlyWriteGate(secret)
+            elif runtime_settings.mcp_unified_bootstrap_profile_enabled:
+                write_gate = UnifiedBootstrapWriteGate(secret)
+            else:
+                write_gate = LedgerWriteGate(control_ledger, signing_secret=secret)
         if provider_control is None:
             try:
                 provider_control = AuthenticatedProviderControlClient.from_token_file(
@@ -258,6 +295,7 @@ def build_remote_runtime(
         sql_policy=exact_sql_policy,
         acceptance_scenarios_enabled=runtime_settings.mcp_acceptance_scenarios_enabled,
         provider_only_profile_enabled=runtime_settings.mcp_provider_profile_enabled,
+        unified_bootstrap_profile_enabled=runtime_settings.mcp_unified_bootstrap_profile_enabled,
     )
     app = create_streamable_http_app(
         runtime_settings,

@@ -38,6 +38,28 @@ def run_provider_oauth_client_probe(tmp_path: Path, clients: list[object]) -> su
     )
 
 
+def unified_oauth_client_probe_source() -> str:
+    source = installer_source()
+    marker = 'unified_oauth_client_id="$(python3 - "$oauth_env" <<\'PY\'\n'
+    start = source.index(marker) + len(marker)
+    return source[start : source.index("\nPY\n)", start)]
+
+
+def run_unified_oauth_client_probe(tmp_path: Path, clients: list[object]) -> subprocess.CompletedProcess[str]:
+    oauth_env = tmp_path / "oauth.env"
+    oauth_env.write_text(
+        f"MY_DATA_HUB_OAUTH_CLIENTS_JSON='{json.dumps(clients)}'\n",
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        ["python3", "-", str(oauth_env)],
+        input=unified_oauth_client_probe_source(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def test_deployment_tokens_are_explicit_and_legacy_token_remains_forbidden() -> None:
     invalid = subprocess.run(
         ["bash", str(INSTALLER), "NOT_AN_INSTALL_GATE"],
@@ -338,6 +360,83 @@ def test_provider_only_override_removes_master_mounts_and_static_bearers() -> No
     assert 'MY_DATA_HUB_PROVIDER_UPLOAD_ROOT: /uploads' in control
     assert 'MY_DATA_HUB_PROVIDER_UPLOAD_DIR:?provider upload directory is required}:/uploads' in control
     assert "/uploads" not in remote
+
+
+def test_unified_bootstrap_action_combines_master_runtime_provider_and_bounded_reads() -> None:
+    source = installer_source()
+    assert "INSTALL_MY_DATA_HUB_UNIFIED_BOOTSTRAP" in source
+    start = source.index('cat > "$unified_bootstrap_override"')
+    end = source.index('chmod 600 "$unified_bootstrap_override"', start)
+    override = source[start:end]
+    exact_scopes = (
+        "platform:read,master:read,operation:read,checkpoint:read,embedding:read,"
+        "provider:read,bloggers:read,data:read,provider:write"
+    )
+    assert 'MY_DATA_HUB_UNIFIED_BOOTSTRAP_MODE: "true"' in override
+    assert 'MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED: "false"' in override
+    assert 'MY_DATA_HUB_MCP_UNIFIED_BOOTSTRAP_PROFILE_ENABLED: "true"' in override
+    assert f"MY_DATA_HUB_MCP_SCOPES: {exact_scopes}" in override
+    assert "data:write" not in override
+    assert "master:ensure" not in override
+    assert "acceptance:operate" not in override
+    assert "migration:operate" not in override
+    assert (
+        "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access," + exact_scopes
+    ) in override
+    assert 'unified_bootstrap_compose_arg=" -f $unified_bootstrap_override"' in source
+
+
+def test_unified_bootstrap_opencode_client_requires_exact_scopes_and_loopback(tmp_path: Path) -> None:
+    exact = [
+        "openid",
+        "offline_access",
+        "platform:read",
+        "master:read",
+        "operation:read",
+        "checkpoint:read",
+        "embedding:read",
+        "provider:read",
+        "provider:write",
+        "bloggers:read",
+        "data:read",
+    ]
+    valid = run_unified_oauth_client_probe(
+        tmp_path,
+        [{
+            "client_id": "opencode-my-data-hub-unified",
+            "redirect_uris": ["http://127.0.0.1:19876/mcp/oauth/callback"],
+            "allowed_scopes": exact,
+        }],
+    )
+    assert valid.returncode == 0
+    assert valid.stdout == "opencode-my-data-hub-unified\n"
+
+    extra = run_unified_oauth_client_probe(
+        tmp_path,
+        [{
+            "client_id": "unsafe-overbroad",
+            "redirect_uris": ["http://127.0.0.1:19876/mcp/oauth/callback"],
+            "allowed_scopes": [*exact, "data:write"],
+        }],
+    )
+    assert extra.returncode == 0
+    assert extra.stdout == "\n"
+
+
+def test_unified_bootstrap_readiness_precedes_release_commit_and_is_rollback_guarded() -> None:
+    source = installer_source()
+    readiness = source.index("unified bootstrap readiness did not prove both master runtime and provider gateway")
+    release_commit = source.index('mv -Tf "$next_link" "$current"')
+    trap_removed = source.index("trap - ERR", release_commit)
+    rollback = source.index("rollback()")
+    trap_installed = source.index("trap rollback ERR")
+    assert rollback < trap_installed < readiness < release_commit < trap_removed
+    for required in (
+        'receipt.get("master_runtime_ready") is True',
+        'receipt.get("master_provider_status") == "available"',
+        'receipt.get("provider_gateway_ready") is True',
+    ):
+        assert required in source
 
 
 def test_chunked_upload_staging_is_private_and_mounted_only_into_central_control() -> None:

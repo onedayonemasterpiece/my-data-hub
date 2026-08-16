@@ -260,6 +260,7 @@ class ControlPlaneSettings:
     operator_credentials_enabled: bool = False
     provider_gateway_enabled: bool = False
     provider_only_mode: bool = False
+    unified_bootstrap_mode: bool = False
     provider_upload_root: Path | None = None
     acceptance_scenarios_enabled: bool = False
     connector_runtime_enabled: bool = False
@@ -269,7 +270,9 @@ class ControlPlaneSettings:
             raise ControlPlaneConfigurationError("control-plane listener is invalid")
         if self.scheduler_enabled or self.production_publish_enabled or self.remote_mcp_writes_enabled:
             raise ControlPlaneConfigurationError("PR-A control-plane write and publication gates must remain false")
-        if self.provider_gateway_enabled and not self.operator_credentials_enabled:
+        if self.provider_gateway_enabled and not (
+            self.operator_credentials_enabled or self.unified_bootstrap_mode
+        ):
             raise ControlPlaneConfigurationError("provider gateway requires the explicit operator credential gate")
         if self.acceptance_scenarios_enabled and not self.provider_gateway_enabled:
             raise ControlPlaneConfigurationError(
@@ -290,6 +293,18 @@ class ControlPlaneSettings:
         ):
             raise ControlPlaneConfigurationError(
                 "provider-only control requires only the authenticated provider gateway"
+            )
+        if self.unified_bootstrap_mode and (
+            self.provider_only_mode
+            or self.operator_credentials_enabled
+            or not self.provider_gateway_enabled
+            or self.master_runtime is None
+            or self.acceptance_scenarios_enabled
+            or self.connector_runtime_enabled
+        ):
+            raise ControlPlaneConfigurationError(
+                "unified bootstrap control requires the master runtime and provider gateway "
+                "without operator, acceptance, or connector authority"
             )
 
     @classmethod
@@ -319,6 +334,7 @@ class ControlPlaneSettings:
             operator_credentials_enabled=_boolean("MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED"),
             provider_gateway_enabled=_boolean("MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED"),
             provider_only_mode=_boolean("MY_DATA_HUB_PROVIDER_ONLY_MODE"),
+            unified_bootstrap_mode=_boolean("MY_DATA_HUB_UNIFIED_BOOTSTRAP_MODE"),
             provider_upload_root=Path(
                 os.getenv("MY_DATA_HUB_PROVIDER_UPLOAD_ROOT", "/uploads")
             ).expanduser(),
@@ -389,6 +405,12 @@ def create_app(
             provider_adapter,
             upload_root=runtime.provider_upload_root if runtime.provider_gateway_enabled else None,
         )
+    if runtime.unified_bootstrap_mode and (
+        master_runtime is None or provider_gateway is None or provider_status != "available"
+    ):
+        raise ControlPlaneConfigurationError(
+            "unified bootstrap runtime requires the concrete master and central provider adapter"
+        )
     def _exact_master_asset_claim(settings: MasterRuntimeSettings | None) -> dict[str, Any] | None:
         if settings is None or not hasattr(settings, "assets"):
             return None
@@ -431,7 +453,7 @@ def create_app(
     # Provider mutations are deferred to the lifespan reconciler; app
     # construction remains side-effect free and embedding admission closed.
     if runtime.provider_gateway_enabled:
-        if not operator_credential_enabled or provider_gateway is None:
+        if not (operator_credential_enabled or runtime.unified_bootstrap_mode) or provider_gateway is None:
             raise ControlPlaneConfigurationError("provider gateway requires the single authenticated control adapter")
         if provider_gateway_token is None:
             token_path = Path(os.getenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE", "")).expanduser()
@@ -908,11 +930,14 @@ def create_app(
             "lifecycle_implementation": "durable_control_ledger_v1",
             "production_publication": runtime.production_publish_enabled,
             "remote_mcp_writes": runtime.remote_mcp_writes_enabled,
+            "master_runtime_ready": app.state.master_runtime is not None,
+            "master_provider_status": app.state.master_provider_status,
+            "provider_gateway_ready": app.state.provider_gateway is not None,
+            "unified_bootstrap_mode": runtime.unified_bootstrap_mode,
         }
         if runtime.provider_only_mode:
             result.update(
                 provider_only_mode=True,
-                provider_gateway_ready=app.state.provider_gateway is not None,
             )
         return result
 

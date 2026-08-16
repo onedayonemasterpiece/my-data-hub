@@ -1603,6 +1603,20 @@ class LedgerControlReader(ControlPlaneReader):
             return self.write_gate.write_status(str(arguments.get("operation_id", "")), principal)
         if tool in {"operation.get", "data.change.status"}:
             record = self.ledger.get_operation(str(arguments.get("operation_id", "")))
+            if record is None and tool == "operation.get":
+                request = self.ledger.master_request_by_operation_id(
+                    str(arguments.get("operation_id", ""))
+                )
+                if request is not None:
+                    return {
+                        "found": True,
+                        "operation_id": str(request["operation_id"]),
+                        "operation_kind": "ensure_master",
+                        "state": "REQUESTED",
+                        "outcome": "WAITING_FOR_MASTER",
+                        "retryable": True,
+                        "updated_at": str(request["updated_at"]),
+                    }
             return (
                 {"found": False}
                 if record is None

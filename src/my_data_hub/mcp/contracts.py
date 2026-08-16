@@ -83,6 +83,13 @@ class EnsureMasterReceipt:
             "duplicate": self.duplicate,
             "intent": self.intent,
             "terminal": False,
+            "outcome": "WAITING_FOR_MASTER",
+            "retryable": True,
+            "continuation": {
+                "operation_id": self.operation_id,
+                "status_tool": "operation.get",
+                "retry_original_request_when": "state=ACTIVE",
+            },
         }
 
 

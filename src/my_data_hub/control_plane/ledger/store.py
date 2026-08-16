@@ -1643,6 +1643,16 @@ class ControlLedger:
             ).fetchone()
         return dict(row) if row else None
 
+    def master_request_by_operation_id(self, operation_id: str) -> dict[str, Any] | None:
+        if not operation_id:
+            return None
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_requests WHERE operation_id=? ORDER BY created_at DESC,request_id DESC LIMIT 1",
+                (operation_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
     def claim_master_request(self, *, claim_seconds: int = 900) -> dict[str, Any] | None:
         if not 30 <= claim_seconds <= 3_600:
             raise ValueError("master request claim lifetime is outside policy")

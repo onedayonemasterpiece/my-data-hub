@@ -389,6 +389,47 @@ def test_provider_only_control_settings_reject_master_or_acceptance_coupling(tmp
         )
 
 
+def test_unified_bootstrap_readiness_requires_concrete_master_and_provider_gateway(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unified.sqlite3"
+    ledger = ControlLedger(path)
+    wired = runtime(ledger, FakeKaggleRuntime())
+
+    class Gateway:
+        def invoke(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return {"outcome": "applied"}
+
+    settings = ControlPlaneSettings(
+        ledger_path=path,
+        master_runtime=MasterRuntimeSettings(assets()),
+        provider_gateway_enabled=True,
+        unified_bootstrap_mode=True,
+    )
+    app = create_app(
+        settings,
+        ledger=ledger,
+        master_runtime=wired,
+        provider_gateway=Gateway(),  # type: ignore[arg-type]
+        provider_gateway_token=b"g" * 32,
+    )
+    receipt = TestClient(app).get("/health/ready").json()
+    assert receipt["ok"] is True
+    assert receipt["unified_bootstrap_mode"] is True
+    assert receipt["master_runtime_ready"] is True
+    assert receipt["master_provider_status"] == "available"
+    assert receipt["provider_gateway_ready"] is True
+    assert receipt["master_state"] == "ABSENT"
+    assert receipt["data_plane_ready"] is False
+
+    with pytest.raises(Exception, match="unified bootstrap"):
+        ControlPlaneSettings(
+            ledger_path=path,
+            provider_gateway_enabled=True,
+            unified_bootstrap_mode=True,
+        )
+
+
 def test_production_master_ensure_reports_missing_broker_configuration_before_provider_mutation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
