@@ -96,6 +96,14 @@ GRANT SELECT, INSERT, UPDATE ON search.document, search.embedding_job,
 GRANT SELECT, INSERT ON search.embedding_768, search.embedding_1024 TO mdh_canonical_committer;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA integration, sync TO mdh_canonical_committer;
 GRANT EXECUTE ON FUNCTION hub.advance_canonical_revision(bigint) TO mdh_canonical_committer;
+GRANT SELECT ON hub.bloggers_v1 TO mdh_mcp_reader;
+GRANT EXECUTE ON FUNCTION integration.materialize_blogger_discovery_artifact(uuid,text,jsonb,text)
+    TO mdh_connector_intake;
+GRANT EXECUTE ON FUNCTION
+    integration.preview_blogger_discovery(uuid,text,text,bigint,text,text),
+    integration.apply_blogger_discovery(uuid,text,text,text,bigint,text,text),
+    integration.reconcile_blogger_discovery(text,text,text,uuid,bigint,bigint,text,text)
+    TO mdh_canonical_committer;
 GRANT SELECT ON ALL TABLES IN SCHEMA hub, analysis, orchestration, sync, region_talk, joplin
     TO mdh_mcp_reader;
 -- Raw migration payloads and exact artifact locators are migration-owner-only.

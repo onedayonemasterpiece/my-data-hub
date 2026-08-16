@@ -1968,6 +1968,500 @@ class ControlLedger:
             assert row is not None
             return self._mcp_write_from_row(row), True
 
+    def ensure_blogger_import_operation(
+        self,
+        *,
+        operation_id: str,
+        batch_id: str,
+        idempotency_key: str,
+        principal_id: str,
+        client_id: str,
+        master_instance_id: str | None,
+        epoch: int | None,
+        expected_revision: int,
+        request_sha256: str,
+        pre_change_checkpoint_id: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist only the identity/hash metadata for one typed blogger preview."""
+
+        try:
+            exact_batch_id = str(UUID(batch_id))
+        except ValueError as exc:
+            raise ValueError("blogger import batch_id is invalid") from exc
+        if (
+            not re.fullmatch(r"[a-f0-9]{64}", operation_id)
+            or not re.fullmatch(r"[a-f0-9]{64}", request_sha256)
+            or not 8 <= len(idempotency_key) <= 300
+            or not principal_id
+            or not client_id
+            or expected_revision < 0
+        ):
+            raise ValueError("blogger import operation identity is invalid")
+        binding = (master_instance_id, epoch, pre_change_checkpoint_id)
+        if not (
+            all(value is None for value in binding)
+            or (
+                isinstance(master_instance_id, str)
+                and bool(master_instance_id)
+                and isinstance(epoch, int)
+                and epoch >= 1
+                and isinstance(pre_change_checkpoint_id, str)
+                and bool(pre_change_checkpoint_id)
+            )
+        ):
+            raise ValueError("blogger import master binding must be wholly absent or complete")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=? OR "
+                "(principal_id=? AND client_id=? AND idempotency_key=?) OR "
+                "(principal_id=? AND client_id=? AND batch_id=?)",
+                (
+                    operation_id,
+                    principal_id,
+                    client_id,
+                    idempotency_key,
+                    principal_id,
+                    client_id,
+                    exact_batch_id,
+                ),
+            ).fetchone()
+            expected = {
+                "operation_id": operation_id,
+                "batch_id": exact_batch_id,
+                "idempotency_key": idempotency_key,
+                "principal_id": principal_id,
+                "client_id": client_id,
+                "expected_revision": expected_revision,
+                "request_sha256": request_sha256,
+            }
+            if row is not None:
+                existing = self._blogger_import_from_row(row)
+                if any(existing[key] != value for key, value in expected.items()):
+                    raise IdempotencyConflict(
+                        "blogger import identity was reused for a different batch or request"
+                    )
+                existing_binding = (
+                    existing["master_instance_id"],
+                    existing["epoch"],
+                    existing["pre_change_checkpoint_id"],
+                )
+                if any(value is not None for value in binding) and existing_binding != binding:
+                    raise IdempotencyConflict(
+                        "blogger import identity was reused with a different master binding"
+                    )
+                return existing, False
+            connection.execute(
+                "INSERT INTO mcp_blogger_import_operations("
+                "operation_id,batch_id,idempotency_key,principal_id,client_id,master_instance_id,"
+                "epoch,expected_revision,request_sha256,state,pre_change_checkpoint_id,created_at,updated_at"
+                ") VALUES (?,?,?,?,?,?,?,?,?,'REQUESTED',?,?,?)",
+                (
+                    operation_id,
+                    exact_batch_id,
+                    idempotency_key,
+                    principal_id,
+                    client_id,
+                    master_instance_id,
+                    epoch,
+                    expected_revision,
+                    request_sha256,
+                    pre_change_checkpoint_id,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO mcp_blogger_import_events(operation_id,state,metadata_json,recorded_at) "
+                "VALUES (?,'REQUESTED',?,?)",
+                (
+                    operation_id,
+                    _safe_json(
+                        {
+                            "batch_id": exact_batch_id,
+                            "request_sha256": request_sha256,
+                            "expected_revision": expected_revision,
+                        }
+                    ),
+                    now,
+                ),
+            )
+            current = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert current is not None
+            return self._blogger_import_from_row(current), True
+
+    def bind_blogger_import_active_master(
+        self,
+        operation_id: str,
+        *,
+        master_instance_id: str,
+        epoch: int,
+        pre_change_checkpoint_id: str,
+    ) -> dict[str, Any]:
+        """Bind a persisted cold-start request to one ACTIVE epoch and checkpoint."""
+
+        if not master_instance_id or epoch < 1 or not pre_change_checkpoint_id:
+            raise ValueError("blogger import ACTIVE-master binding is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if row is None or str(row["state"]) not in {"REQUESTED", "WAITING_MASTER"}:
+                raise StaleRuntimeEvent("blogger import cannot bind an ACTIVE master in this state")
+            existing = self._blogger_import_from_row(row)
+            current_binding = (
+                existing["master_instance_id"],
+                existing["epoch"],
+                existing["pre_change_checkpoint_id"],
+            )
+            requested_binding = (master_instance_id, epoch, pre_change_checkpoint_id)
+            if all(value is not None for value in current_binding):
+                if current_binding == requested_binding:
+                    return existing
+                raise IdempotencyConflict("blogger import is already bound to a different epoch")
+            connection.execute(
+                "UPDATE mcp_blogger_import_operations SET master_instance_id=?,epoch=?,"
+                "pre_change_checkpoint_id=?,updated_at=? WHERE operation_id=?",
+                (master_instance_id, epoch, pre_change_checkpoint_id, now, operation_id),
+            )
+            connection.execute(
+                "INSERT INTO mcp_blogger_import_events(operation_id,state,metadata_json,recorded_at) "
+                "VALUES (?,?,?,?)",
+                (
+                    operation_id,
+                    str(row["state"]),
+                    _safe_json(
+                        {
+                            "active_master_bound": True,
+                            "master_instance_id": master_instance_id,
+                            "epoch": epoch,
+                            "pre_change_checkpoint_id": pre_change_checkpoint_id,
+                        }
+                    ),
+                    now,
+                ),
+            )
+            current = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert current is not None
+            return self._blogger_import_from_row(current)
+
+    def record_blogger_import_preview(
+        self,
+        operation_id: str,
+        *,
+        preview_receipt: str,
+        plan_sha256: str,
+        summary: Mapping[str, int],
+    ) -> dict[str, Any]:
+        allowed = {
+            "create_actor_count",
+            "link_existing_count",
+            "quarantine_count",
+            "account_count",
+        }
+        if (
+            not preview_receipt
+            or not re.fullmatch(r"[a-f0-9]{64}", plan_sha256)
+            or set(summary) != allowed
+            or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in summary.values())
+        ):
+            raise ValueError("blogger preview receipt or bounded summary is invalid")
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+        if row is None or any(
+            row[column] is None
+            for column in ("master_instance_id", "epoch", "pre_change_checkpoint_id")
+        ):
+            raise StaleRuntimeEvent("blogger preview requires an ACTIVE-master binding")
+        if row is not None and str(row["state"]) == "PREVIEWED":
+            existing = self._blogger_import_from_row(row)
+            if (
+                existing["preview_receipt"] == preview_receipt
+                and existing["plan_sha256"] == plan_sha256
+                and existing["preview_summary"] == dict(summary)
+            ):
+                return existing
+            raise IdempotencyConflict("blogger preview replay differs from immutable plan")
+        return self._transition_blogger_import(
+            operation_id,
+            expected_states={"REQUESTED", "WAITING_MASTER"},
+            new_state="PREVIEWED",
+            updates={
+                "preview_receipt": preview_receipt,
+                "plan_sha256": plan_sha256,
+                "preview_summary_json": _safe_json(dict(summary)),
+            },
+            metadata={"plan_sha256": plan_sha256, **summary},
+        )
+
+    def mark_blogger_import_waiting_master(self, operation_id: str) -> dict[str, Any]:
+        """Checkpoint a cold-start wait without terminalizing the owner request."""
+
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+        if row is not None and str(row["state"]) == "WAITING_MASTER":
+            return self._blogger_import_from_row(row)
+        return self._transition_blogger_import(
+            operation_id,
+            expected_states={"REQUESTED"},
+            new_state="WAITING_MASTER",
+            updates={},
+            metadata={"continuation": "resume_preview_after_active_master"},
+        )
+
+    def begin_blogger_import_apply(
+        self, operation_id: str, *, preview_receipt: str, plan_sha256: str
+    ) -> dict[str, Any]:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT preview_receipt,plan_sha256 FROM mcp_blogger_import_operations "
+                "WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+        if (
+            row is None
+            or not hmac.compare_digest(str(row["preview_receipt"] or ""), preview_receipt)
+            or not hmac.compare_digest(str(row["plan_sha256"] or ""), plan_sha256)
+        ):
+            raise PermissionError("blogger apply does not bind the durable preview and plan")
+        return self._transition_blogger_import(
+            operation_id,
+            expected_states={"PREVIEWED"},
+            new_state="APPLYING",
+            updates={},
+            metadata={"plan_sha256": plan_sha256},
+        )
+
+    def record_blogger_import_commit(
+        self, operation_id: str, *, affected_rows: int, committed_revision: int
+    ) -> dict[str, Any]:
+        if affected_rows < 1 or committed_revision < 1:
+            raise ValueError("blogger commit result is invalid")
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+        if row is not None and str(row["state"]) in {
+            "COMMITTED_PENDING_CHECKPOINT",
+            "CHECKPOINTING",
+            "CHECKPOINT_VERIFIED",
+            "DURABLE_COMPLETE",
+        }:
+            existing = self._blogger_import_from_row(row)
+            if (
+                existing["affected_rows"] == affected_rows
+                and existing["committed_revision"] == committed_revision
+            ):
+                return existing
+            raise IdempotencyConflict("blogger commit replay differs from immutable receipt")
+        return self._transition_blogger_import(
+            operation_id,
+            expected_states={"APPLYING"},
+            new_state="COMMITTED_PENDING_CHECKPOINT",
+            updates={
+                "affected_rows": affected_rows,
+                "committed_revision": committed_revision,
+                "committed_at": _format_time(self.clock.now()),
+            },
+            metadata={"affected_rows": affected_rows, "committed_revision": committed_revision},
+        )
+
+    def reconcile_blogger_import_commit(
+        self,
+        operation_id: str,
+        *,
+        request_sha256: str,
+        plan_sha256: str,
+        master_instance_id: str,
+        epoch: int,
+        expected_revision: int,
+        principal_id: str,
+        client_id: str,
+        affected_rows: int,
+        committed_revision: int,
+        committed_at: str,
+    ) -> dict[str, Any]:
+        if (
+            not re.fullmatch(r"[a-f0-9]{64}", request_sha256)
+            or not re.fullmatch(r"[a-f0-9]{64}", plan_sha256)
+            or not master_instance_id
+            or epoch < 1
+            or expected_revision < 0
+            or not principal_id
+            or not client_id
+            or affected_rows < 1
+            or committed_revision != expected_revision + 1
+            or not committed_at
+        ):
+            raise ValueError("canonical blogger reconciliation receipt is invalid")
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if row is None:
+                raise StaleRuntimeEvent("blogger reconciliation has no durable preview intent")
+            record = self._blogger_import_from_row(row)
+            expected = {
+                "request_sha256": request_sha256,
+                "plan_sha256": plan_sha256,
+                "master_instance_id": master_instance_id,
+                "epoch": epoch,
+                "expected_revision": expected_revision,
+                "principal_id": principal_id,
+                "client_id": client_id,
+            }
+            if any(record[key] != value for key, value in expected.items()):
+                raise StaleRuntimeEvent(
+                    "canonical blogger receipt differs from durable preview identity"
+                )
+            if record["state"] != "APPLYING":
+                if (
+                    record["state"]
+                    in {
+                        "COMMITTED_PENDING_CHECKPOINT",
+                        "CHECKPOINTING",
+                        "CHECKPOINT_VERIFIED",
+                        "DURABLE_COMPLETE",
+                    }
+                    and record["affected_rows"] == affected_rows
+                    and record["committed_revision"] == committed_revision
+                ):
+                    return record
+                raise StaleRuntimeEvent("blogger reconciliation is stale or conflicts")
+            now = _format_time(self.clock.now())
+            connection.execute(
+                "UPDATE mcp_blogger_import_operations SET state='COMMITTED_PENDING_CHECKPOINT',"
+                "affected_rows=?,committed_revision=?,committed_at=?,updated_at=? WHERE operation_id=?",
+                (affected_rows, committed_revision, committed_at, now, operation_id),
+            )
+            connection.execute(
+                "INSERT INTO mcp_blogger_import_events(operation_id,state,metadata_json,recorded_at) "
+                "VALUES (?,'COMMITTED_PENDING_CHECKPOINT',?,?)",
+                (
+                    operation_id,
+                    _safe_json(
+                        {
+                            "affected_rows": affected_rows,
+                            "committed_revision": committed_revision,
+                            "reconciled_from": "canonical_postgres_receipt",
+                        }
+                    ),
+                    now,
+                ),
+            )
+            current = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert current is not None
+            return self._blogger_import_from_row(current)
+
+    def blogger_import_operation(self, operation_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+        return self._blogger_import_from_row(row) if row else None
+
+    def advance_blogger_import_checkpoint(
+        self,
+        operation_id: str,
+        *,
+        state: str,
+        post_change_checkpoint_id: str | None = None,
+    ) -> dict[str, Any]:
+        allowed = {
+            "CHECKPOINTING": {"COMMITTED_PENDING_CHECKPOINT", "CHECKPOINTING"},
+            "CHECKPOINT_VERIFIED": {"CHECKPOINTING", "CHECKPOINT_VERIFIED"},
+            "DURABLE_COMPLETE": {"CHECKPOINT_VERIFIED", "DURABLE_COMPLETE"},
+        }
+        if state not in allowed or (state != "CHECKPOINTING" and not post_change_checkpoint_id):
+            raise ValueError("blogger checkpoint transition is invalid")
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+        if row is not None and str(row["state"]) == state:
+            existing = self._blogger_import_from_row(row)
+            if (
+                post_change_checkpoint_id is None
+                or existing["post_change_checkpoint_id"] == post_change_checkpoint_id
+            ):
+                return existing
+            raise IdempotencyConflict("blogger checkpoint replay differs from immutable identity")
+        updates = (
+            {"post_change_checkpoint_id": post_change_checkpoint_id}
+            if post_change_checkpoint_id is not None
+            else {}
+        )
+        return self._transition_blogger_import(
+            operation_id,
+            expected_states=allowed[state],
+            new_state=state,
+            updates=updates,
+            metadata={"post_change_checkpoint_id": post_change_checkpoint_id},
+        )
+
+    def _transition_blogger_import(
+        self,
+        operation_id: str,
+        *,
+        expected_states: set[str],
+        new_state: str,
+        updates: Mapping[str, Any],
+        metadata: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        allowed_columns = {
+            "preview_receipt",
+            "plan_sha256",
+            "preview_summary_json",
+            "affected_rows",
+            "committed_revision",
+            "committed_at",
+            "post_change_checkpoint_id",
+        }
+        if not set(updates) <= allowed_columns:
+            raise ValueError("unsupported blogger import projection update")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if row is None or str(row["state"]) not in expected_states:
+                raise StaleRuntimeEvent("blogger import lifecycle transition is stale")
+            assignments = ["state=?", "updated_at=?", *(f"{column}=?" for column in updates)]
+            values = [new_state, now, *updates.values(), operation_id]
+            connection.execute(
+                f"UPDATE mcp_blogger_import_operations SET {','.join(assignments)} "
+                "WHERE operation_id=?",
+                values,
+            )
+            connection.execute(
+                "INSERT INTO mcp_blogger_import_events(operation_id,state,metadata_json,recorded_at) "
+                "VALUES (?,?,?,?)",
+                (operation_id, new_state, _safe_json(dict(metadata)), now),
+            )
+            current = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert current is not None
+            return self._blogger_import_from_row(current)
+
+    @staticmethod
+    def _blogger_import_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(zip(row.keys(), row, strict=True))
+        if result.get("preview_summary_json"):
+            result["preview_summary"] = json.loads(result["preview_summary_json"])
+        return result
+
     def record_mcp_write_preview(
         self,
         operation_id: str,

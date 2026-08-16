@@ -187,7 +187,7 @@ def test_duplicate_quarantine_explicit_resolution_and_exact_replay_are_lossless(
             ).fetchone()[0] == 1
             assert connection.execute(
                 "SELECT schema_revision,canonical_revision FROM hub.canonical_state WHERE singleton"
-            ).fetchone() == (17, 1)
+            ).fetchone() == (20, 1)
             connection.execute("SET ROLE mdh_migration_operator")
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 connection.execute(
