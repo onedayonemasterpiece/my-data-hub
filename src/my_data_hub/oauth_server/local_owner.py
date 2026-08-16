@@ -232,6 +232,11 @@ button{{padding:.7rem 1rem}}.muted{{color:#666}}</style></head><body><main>
             status_code=200,
             headers={
                 **_no_store(),
+                # ``no-referrer`` can serialize the Origin of a basic form
+                # POST as ``null``.  Preserve only the issuer origin so the
+                # admission boundary can enforce the exact same-origin POST
+                # without disclosing the sealed return URL.
+                "Referrer-Policy": "origin",
                 "Content-Security-Policy": (
                     "default-src 'none'; style-src 'unsafe-inline'; "
                     "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"

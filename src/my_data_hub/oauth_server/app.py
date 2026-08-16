@@ -251,4 +251,8 @@ def create_authorization_app(
         allowed_origins=policy.allowed_origins,
         trusted_proxy_ips=policy.trusted_proxy_ips,
         limits=policy.limits,
+        # A basic HTML form POST may serialize Origin as ``null`` under
+        # ``no-referrer``.  ``origin`` exposes no path/query while preserving
+        # the exact issuer origin required by transport admission.
+        referrer_policy="origin",
     )

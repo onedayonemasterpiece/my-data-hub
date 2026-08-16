@@ -121,6 +121,7 @@ def _login(client: TestClient, params: dict[str, str]) -> str:
     assert challenged.status_code == 303
     login = client.get(challenged.headers["location"], follow_redirects=False)
     assert login.status_code == 200
+    assert login.headers["referrer-policy"] == "origin"
     assert "Операторский токен" in login.text
     assert TOKEN not in login.text
     import re
@@ -130,6 +131,7 @@ def _login(client: TestClient, params: dict[str, str]) -> str:
     granted = client.post(
         "/owner/login",
         data={"owner_request": sealed.group(1), "operator_token": TOKEN},
+        headers={"Origin": ISSUER},
         follow_redirects=False,
     )
     assert granted.status_code == 303
@@ -253,3 +255,12 @@ def test_local_owner_rejects_wrong_token_and_tampered_request_without_cookie() -
     )
     assert tampered.status_code == 403
     assert "mdh_owner_session=" not in tampered.headers.get("set-cookie", "")
+
+    foreign_origin = client.post(
+        "/owner/login",
+        data={"owner_request": sealed.group(1), "operator_token": TOKEN},
+        headers={"Origin": "https://mcp.example.test"},
+        follow_redirects=False,
+    )
+    assert foreign_origin.status_code == 403
+    assert foreign_origin.json() == {"error": "origin_not_allowed"}
