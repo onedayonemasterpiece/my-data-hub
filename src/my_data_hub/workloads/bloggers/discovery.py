@@ -98,7 +98,9 @@ class DiscoveryAccount(BaseModel):
 
 
 class BloggerDiscoveryRow(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, str_strip_whitespace=True, allow_inf_nan=False
+    )
 
     source_record_id: str = Field(min_length=1, max_length=500)
     actor_kind: Literal["person", "organisation", "outlet", "collective", "unknown"]

@@ -11,7 +11,11 @@ Base: `c0d2a8d82278fab658fe8f9b79e81f4b7a14f06a`
 - Minimum connector/reader/canonical-committer grants; no generic SQL or broad canonical
   DML grant.
 - Metadata-only control migration 028 plus packaged twin, with exact replay/conflict,
-  preview/apply/reconcile and checkpoint lifecycle ledger projections.
+  atomic preview/apply/reconcile and checkpoint lifecycle ledger projections, verified
+  checkpoint authority, immutable durable checkpoint identity, and PREVIEWED-only
+  dead-epoch rebind/re-preview continuation.
+- Dedicated ACTIVE-epoch materializer role with exact accepted artifact claim/principal
+  binding and full typed validation before artifact landing; generic connector denial.
 - Unit/static tests for closed schemas, deterministic hashes, fixed SQL surfaces,
   metadata-only replay/conflict and append-only events.
 - Disposable PostgreSQL proof for connector landing, semantic quarantine, direct-DML
@@ -31,7 +35,7 @@ Base: `c0d2a8d82278fab658fe8f9b79e81f4b7a14f06a`
 Passed on 2026-08-16:
 
 - `uv run python -m compileall -q src tests`
-- `uv run python scripts/validate_repository.py` — `4478` checks, no errors/notes
+- `uv run python scripts/validate_repository.py` — `4479` checks, no errors/notes
 - `uv run python scripts/create_notebooks.py --check` — no drift
 - `uv run ruff check .`
 - `uv run pytest -q` — complete repository suite passed (four expected skips; two

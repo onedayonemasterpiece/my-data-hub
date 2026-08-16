@@ -17,6 +17,7 @@ CREATE TABLE mcp_blogger_import_operations (
     )),
     preview_receipt TEXT,
     preview_summary_json TEXT,
+    preview_generation INTEGER NOT NULL DEFAULT 0 CHECK (preview_generation >= 0),
     affected_rows INTEGER CHECK (affected_rows IS NULL OR affected_rows >= 0),
     committed_revision INTEGER CHECK (committed_revision IS NULL OR committed_revision >= 1),
     pre_change_checkpoint_id TEXT REFERENCES checkpoint_candidates(checkpoint_id),

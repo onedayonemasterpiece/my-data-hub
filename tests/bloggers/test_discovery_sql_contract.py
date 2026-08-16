@@ -36,6 +36,14 @@ def test_staging_preview_apply_and_reconcile_are_closed_contracts() -> None:
         assert "SECURITY DEFINER" in function_sql
         assert "master_control.assert_session_write_epoch" in function_sql
     assert "REVOKE ALL ON FUNCTION" in MIGRATION
+    materialize_sql = _function("materialize_blogger_discovery_artifact")
+    assert "mdh_blogger_materializer" in materialize_sql
+    assert "accepted.authenticated_principal <> 'service:mcp-blogger-discovery-artifact-v1'" in materialize_sql
+    assert "artifact record violates closed blogger discovery contract" in materialize_sql
+    assert "TO mdh_blogger_materializer" in ROLE_CONTRACT
+    assert "TO mdh_connector_intake" not in ROLE_CONTRACT.split(
+        "integration.materialize_blogger_discovery_artifact", 1
+    )[1].split(";", 1)[0]
     assert "requested_sql" not in MIGRATION
     assert "sql_text" not in MIGRATION
     assert "integration.blogger_discovery_quarantine" in MIGRATION

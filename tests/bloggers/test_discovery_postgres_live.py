@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -21,6 +22,7 @@ from my_data_hub.master_runtime.credentials import CredentialProvisioner
 from my_data_hub.master_runtime.database_gate import DatabaseGate
 from my_data_hub.workloads.bloggers.discovery import (
     BloggerDiscoveryRow,
+    ProviderArtifactClaim,
     SubmitDiscoveryBatch,
 )
 from my_data_hub.workloads.bloggers.discovery_postgres import (
@@ -102,6 +104,7 @@ def test_typed_blogger_preview_apply_replay_and_role_boundary() -> None:
         )
         connector_password = "connector-password-long-enough"
         committer_password = "committer-password-long-enough"
+        materializer_password = "materializer-password-long-enough"
         with psycopg.connect(admin_url) as admin:
             gate = DatabaseGate(admin)
             gate.acquire(master, now + timedelta(minutes=10))
@@ -113,6 +116,15 @@ def test_typed_blogger_preview_apply_replay_and_role_boundary() -> None:
                 group="mdh_connector_intake",
                 identity=master,
                 credential_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                expires_at=now + timedelta(minutes=9),
+                now=now,
+            )
+            provisioner.create(
+                principal="mdh_e1_materializer_facefeed",
+                password=materializer_password,
+                group="mdh_blogger_materializer",
+                identity=master,
+                credential_id=UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
                 expires_at=now + timedelta(minutes=9),
                 now=now,
             )
@@ -193,6 +205,80 @@ def test_typed_blogger_preview_apply_replay_and_role_boundary() -> None:
             authenticated_principal="service:mcp-blogger-discovery-inline-v1",
         )
         assert invalid_decision.receipt is not None
+        artifact_request = SubmitDiscoveryBatch(
+            batch_id=UUID("44444444-4444-4444-8444-444444444444"),
+            idempotency_key="discovery-live-artifact",
+            project_slug="region-talk",
+            produced_at=now,
+            observed_period=ObservedPeriod(
+                start=now - timedelta(hours=1), end=now, timezone="UTC"
+            ),
+            artifact=ProviderArtifactClaim(
+                resource_ref="owner/private-bloggers",
+                control_class="mcp_exchange",
+                provider_version=9,
+                path="exports/bloggers.json",
+                media_type="application/json",
+                byte_size=1024,
+                sha256="9" * 64,
+                claim_sha256="8" * 64,
+                record_count=1,
+            ),
+        )
+        artifact_decision = ConnectorIntakeService(
+            PostgresConnectorAcceptanceRepository(connector_url)
+        ).submit(
+            artifact_request.connector_envelope_bytes(),
+            authenticated_connector_id="mcp-blogger-discovery-artifact-v1",
+            authenticated_principal="service:mcp-blogger-discovery-artifact-v1",
+            artifact_record_count=1,
+        )
+        assert artifact_decision.receipt is not None
+        artifact_records = [request.rows[0].model_dump(mode="json")]  # type: ignore[index]
+        with psycopg.connect(connector_url) as generic_connector:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                generic_connector.execute(
+                    "SELECT integration.materialize_blogger_discovery_artifact(%s,%s,%s::jsonb,%s)",
+                    (
+                        artifact_request.batch_id,
+                        "9" * 64,
+                        json.dumps(artifact_records),
+                        "mdh_e1_connector_deadbeef",
+                    ),
+                )
+            generic_connector.rollback()
+        materializer_url = _role_url(
+            port,
+            "mdh_e1_materializer_facefeed",
+            materializer_password,
+            "mdh_blogger_materializer",
+        )
+        with psycopg.connect(materializer_url) as materializer:
+            invalid_artifact_records = [
+                {**artifact_records[0], "accounts": [{"platform": "telegram"}]}
+            ]
+            with pytest.raises(psycopg.errors.InvalidParameterValue, match="artifact account"):
+                materializer.execute(
+                    "SELECT integration.materialize_blogger_discovery_artifact(%s,%s,%s::jsonb,%s)",
+                    (
+                        artifact_request.batch_id,
+                        "9" * 64,
+                        json.dumps(invalid_artifact_records),
+                        "mdh_e1_materializer_facefeed",
+                    ),
+                )
+            materializer.rollback()
+            materialized_sha = materializer.execute(
+                "SELECT integration.materialize_blogger_discovery_artifact(%s,%s,%s::jsonb,%s)",
+                (
+                    artifact_request.batch_id,
+                    "9" * 64,
+                    json.dumps(artifact_records),
+                    "mdh_e1_materializer_facefeed",
+                ),
+            ).fetchone()[0]
+            materializer.commit()
+            assert len(materialized_sha) == 64
 
         operation_id = "d" * 64
         identity = BloggerImportIdentity(
@@ -247,6 +333,18 @@ def test_typed_blogger_preview_apply_replay_and_role_boundary() -> None:
             assert applied.duplicate is False
             assert applied.revision_after == 1
             assert applied.affected_rows >= 1
+
+            reconciled = BloggerDiscoveryPostgres.reconcile(
+                connection,
+                identity,
+                plan_sha256=preview.plan_sha256,
+                master_instance_id=master.master_instance_id,
+                master_epoch=master.epoch,
+            )
+            connection.commit()
+            assert reconciled is not None
+            assert reconciled.duplicate is True
+            assert reconciled.revision_after == applied.revision_after
 
             replay = BloggerDiscoveryPostgres.apply(
                 connection, identity, plan_sha256=preview.plan_sha256

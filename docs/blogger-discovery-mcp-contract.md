@@ -17,7 +17,9 @@ does not create a second database runtime.
 2. The connector boundary accepts the exact envelope into the ACTIVE master's
    `integration.batch`/`integration.batch_payload` landing tables. Artifact records are
    materialized only through `integration.materialize_blogger_discovery_artifact` after
-   provider verification.
+   provider verification. A dedicated, ACTIVE-epoch-bound `mdh_blogger_materializer`
+   credential (not the generic connector role) must match the exact artifact connector,
+   authenticated service principal, numeric provider claim and full closed row contract.
 3. `integration.preview_blogger_discovery` constructs one immutable plan bound to batch,
    request hash, owner principal/client, ACTIVE master instance/epoch and expected
    canonical revision. Invalid or ambiguous rows are quarantined. Replays return the
@@ -49,6 +51,11 @@ If no master is ACTIVE, the operation stays pending while the existing Kaggle li
 starts/restores PostgreSQL. After an ACTIVE epoch and role-bound short-lived credential
 exist, the broker resumes the same operation at landing/preview/apply/reconcile; it must
 not return a terminal business failure merely because the master was initially absent.
+If an epoch dies after preview but before apply, the metadata ledger permits only an
+explicit PREVIEWED-state reset that preserves the request identity, records the discarded
+plan, binds a new ACTIVE epoch plus its current verified pre-change checkpoint, and builds
+a new preview. APPLYING is never reset because its commit outcome is ambiguous and must be
+reconciled instead.
 
 That catalog/server/service/control-gateway wiring is intentionally **not part of this
 Phase B lane**, because those shared files are owned by the provider integration lane.
@@ -65,4 +72,7 @@ public `bloggers.import` or reader tools are available in OpenCode/ChatGPT.
   are denied.
 - Every write function verifies the short-lived login's ACTIVE epoch; expired epochs are
   fenced.
+- Pre-change and post-change checkpoint IDs must be VERIFIED, be the current PostgreSQL
+  checkpoint HEAD, and match the operation's master instance/epoch. The checkpoint ID
+  recorded at `CHECKPOINT_VERIFIED` cannot be replaced at `DURABLE_COMPLETE`.
 - Dataset artifacts are transport/checkpoint inputs, never the live database.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import uuid4
 
@@ -36,6 +37,15 @@ def _ledger_with_checkpoint(tmp_path: Path) -> tuple[ControlLedger, str]:
         master_instance_id="master-1",
         epoch=7,
     )
+    ledger.mark_checkpoint_uploaded(checkpoint_id, "owner/checkpoints:1")
+    ledger.mark_checkpoint_readback_verified(checkpoint_id)
+    ledger.mark_checkpoint_restore_verified(checkpoint_id)
+    ledger.promote_checkpoint(
+        "postgres-master",
+        checkpoint_id,
+        expected_generation=0,
+        expected_parent_checkpoint_id=None,
+    )
     return ledger, checkpoint_id
 
 
@@ -52,6 +62,51 @@ def _identity(checkpoint_id: str) -> dict[str, object]:
         "request_sha256": "b" * 64,
         "pre_change_checkpoint_id": checkpoint_id,
     }
+
+
+def _checkpoint(
+    ledger: ControlLedger,
+    *,
+    parent_id: str,
+    parent_generation: int,
+    checkpoint_id: str,
+    master_instance_id: str,
+    epoch: int,
+    promote: bool = True,
+) -> str:
+    operation_id = str(uuid4())
+    ledger.ensure_operation(
+        operation_id=operation_id,
+        idempotency_key=f"checkpoint-{checkpoint_id}",
+        operation_kind="ensure_master",
+        intent={"source": "test"},
+        initial_state="READY",
+        identity={"master_instance_id": master_instance_id, "epoch": epoch},
+    )
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=checkpoint_id,
+        operation_id=operation_id,
+        dataset_ref="owner/checkpoints",
+        version_ref=None,
+        manifest_sha256=checkpoint_id.replace("-", "")[:1] * 64,
+        source_checkpoint_id=parent_id,
+        source_head_generation=parent_generation,
+        master_instance_id=master_instance_id,
+        epoch=epoch,
+    )
+    if promote:
+        ledger.mark_checkpoint_uploaded(
+            checkpoint_id, f"owner/checkpoints:{parent_generation + 1}"
+        )
+        ledger.mark_checkpoint_readback_verified(checkpoint_id)
+        ledger.mark_checkpoint_restore_verified(checkpoint_id)
+        ledger.promote_checkpoint(
+            "postgres-master",
+            checkpoint_id,
+            expected_generation=parent_generation,
+            expected_parent_checkpoint_id=parent_id,
+        )
+    return checkpoint_id
 
 
 def test_blogger_import_lifecycle_is_metadata_only_and_exactly_replayable(tmp_path: Path) -> None:
@@ -244,3 +299,208 @@ def test_cold_master_request_is_persisted_then_bound_and_resumed(tmp_path: Path)
         },
     )
     assert resumed["state"] == "PREVIEWED"
+
+
+def test_pre_change_checkpoint_requires_verified_matching_current_head(tmp_path: Path) -> None:
+    ledger, checkpoint_id = _ledger_with_checkpoint(tmp_path)
+    candidate_id = _checkpoint(
+        ledger,
+        parent_id=checkpoint_id,
+        parent_generation=1,
+        checkpoint_id="77777777-7777-4777-8777-777777777777",
+        master_instance_id="master-1",
+        epoch=7,
+        promote=False,
+    )
+    cold = {
+        **_identity(checkpoint_id),
+        "operation_id": "7" * 64,
+        "batch_id": "77777777-7777-4777-8777-777777777778",
+        "idempotency_key": "candidate-checkpoint-must-fail",
+        "master_instance_id": None,
+        "epoch": None,
+        "pre_change_checkpoint_id": None,
+    }
+    ledger.ensure_blogger_import_operation(**cold)  # type: ignore[arg-type]
+    with pytest.raises(StaleRuntimeEvent, match="exact verified PostgreSQL HEAD"):
+        ledger.bind_blogger_import_active_master(
+            str(cold["operation_id"]),
+            master_instance_id="master-1",
+            epoch=7,
+            pre_change_checkpoint_id=candidate_id,
+        )
+
+
+def test_checkpoint_identity_cannot_swap_between_verified_and_durable(tmp_path: Path) -> None:
+    ledger, checkpoint_id = _ledger_with_checkpoint(tmp_path)
+    identity = _identity(checkpoint_id)
+    ledger.ensure_blogger_import_operation(**identity)  # type: ignore[arg-type]
+    ledger.record_blogger_import_preview(
+        str(identity["operation_id"]),
+        preview_receipt="preview",
+        plan_sha256="d" * 64,
+        summary={
+            "create_actor_count": 1,
+            "link_existing_count": 0,
+            "quarantine_count": 0,
+            "account_count": 1,
+        },
+    )
+    ledger.begin_blogger_import_apply(
+        str(identity["operation_id"]), preview_receipt="preview", plan_sha256="d" * 64
+    )
+    ledger.record_blogger_import_commit(
+        str(identity["operation_id"]), affected_rows=2, committed_revision=13
+    )
+    ledger.advance_blogger_import_checkpoint(str(identity["operation_id"]), state="CHECKPOINTING")
+    candidate_unverified = _checkpoint(
+        ledger,
+        parent_id=checkpoint_id,
+        parent_generation=1,
+        checkpoint_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        master_instance_id="master-1",
+        epoch=7,
+        promote=False,
+    )
+    with pytest.raises(StaleRuntimeEvent, match="exact verified PostgreSQL HEAD"):
+        ledger.advance_blogger_import_checkpoint(
+            str(identity["operation_id"]),
+            state="CHECKPOINT_VERIFIED",
+            post_change_checkpoint_id=candidate_unverified,
+        )
+    verified_a = _checkpoint(
+        ledger,
+        parent_id=checkpoint_id,
+        parent_generation=1,
+        checkpoint_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        master_instance_id="master-1",
+        epoch=7,
+    )
+    ledger.advance_blogger_import_checkpoint(
+        str(identity["operation_id"]),
+        state="CHECKPOINT_VERIFIED",
+        post_change_checkpoint_id=verified_a,
+    )
+    candidate_b = _checkpoint(
+        ledger,
+        parent_id=verified_a,
+        parent_generation=2,
+        checkpoint_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        master_instance_id="master-1",
+        epoch=7,
+        promote=False,
+    )
+    with pytest.raises(IdempotencyConflict, match="cannot be replaced"):
+        ledger.advance_blogger_import_checkpoint(
+            str(identity["operation_id"]),
+            state="DURABLE_COMPLETE",
+            post_change_checkpoint_id=candidate_b,
+        )
+    durable = ledger.advance_blogger_import_checkpoint(
+        str(identity["operation_id"]),
+        state="DURABLE_COMPLETE",
+        post_change_checkpoint_id=verified_a,
+    )
+    assert durable["post_change_checkpoint_id"] == verified_a
+
+
+def test_dead_epoch_preview_can_rebind_and_repreview_but_applying_cannot(tmp_path: Path) -> None:
+    ledger, checkpoint_id = _ledger_with_checkpoint(tmp_path)
+    identity = _identity(checkpoint_id)
+    ledger.ensure_blogger_import_operation(**identity)  # type: ignore[arg-type]
+    ledger.record_blogger_import_preview(
+        str(identity["operation_id"]),
+        preview_receipt="old-preview",
+        plan_sha256="d" * 64,
+        summary={
+            "create_actor_count": 1,
+            "link_existing_count": 0,
+            "quarantine_count": 0,
+            "account_count": 1,
+        },
+    )
+    restarted = ledger.restart_blogger_import_after_preview_epoch_loss(
+        str(identity["operation_id"]),
+        failed_master_instance_id="master-1",
+        failed_epoch=7,
+    )
+    assert restarted["state"] == "WAITING_MASTER"
+    assert restarted["preview_generation"] == 1
+    assert restarted["plan_sha256"] is None
+    next_head = _checkpoint(
+        ledger,
+        parent_id=checkpoint_id,
+        parent_generation=1,
+        checkpoint_id="88888888-8888-4888-8888-888888888888",
+        master_instance_id="master-2",
+        epoch=8,
+    )
+    ledger.bind_blogger_import_active_master(
+        str(identity["operation_id"]),
+        master_instance_id="master-2",
+        epoch=8,
+        pre_change_checkpoint_id=next_head,
+    )
+    repreviewed = ledger.record_blogger_import_preview(
+        str(identity["operation_id"]),
+        preview_receipt="new-preview",
+        plan_sha256="e" * 64,
+        summary={
+            "create_actor_count": 0,
+            "link_existing_count": 1,
+            "quarantine_count": 0,
+            "account_count": 1,
+        },
+    )
+    assert repreviewed["state"] == "PREVIEWED"
+    assert repreviewed["master_instance_id"] == "master-2"
+    ledger.begin_blogger_import_apply(
+        str(identity["operation_id"]),
+        preview_receipt="new-preview",
+        plan_sha256="e" * 64,
+    )
+    with pytest.raises(StaleRuntimeEvent, match="dead epoch"):
+        ledger.restart_blogger_import_after_preview_epoch_loss(
+            str(identity["operation_id"]),
+            failed_master_instance_id="master-2",
+            failed_epoch=8,
+        )
+
+
+def test_concurrent_exact_preview_and_commit_retries_converge(tmp_path: Path) -> None:
+    ledger, checkpoint_id = _ledger_with_checkpoint(tmp_path)
+    identity = _identity(checkpoint_id)
+    operation_id = str(identity["operation_id"])
+    ledger.ensure_blogger_import_operation(**identity)  # type: ignore[arg-type]
+    summary = {
+        "create_actor_count": 1,
+        "link_existing_count": 0,
+        "quarantine_count": 0,
+        "account_count": 1,
+    }
+
+    def preview():  # type: ignore[no-untyped-def]
+        return ledger.record_blogger_import_preview(
+            operation_id,
+            preview_receipt="concurrent-preview",
+            plan_sha256="d" * 64,
+            summary=summary,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        previews = list(pool.map(lambda _: preview(), range(4)))
+    assert all(item == previews[0] for item in previews)
+    ledger.begin_blogger_import_apply(
+        operation_id,
+        preview_receipt="concurrent-preview",
+        plan_sha256="d" * 64,
+    )
+
+    def commit():  # type: ignore[no-untyped-def]
+        return ledger.record_blogger_import_commit(
+            operation_id, affected_rows=2, committed_revision=13
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        commits = list(pool.map(lambda _: commit(), range(4)))
+    assert all(item == commits[0] for item in commits)

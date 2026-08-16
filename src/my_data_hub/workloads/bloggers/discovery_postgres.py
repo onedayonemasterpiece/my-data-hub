@@ -155,7 +155,7 @@ class BloggerDiscoveryPostgres:
         if master_epoch < 1:
             raise ValueError("master_epoch must be positive")
         row = cursor.execute(
-            "SELECT * FROM integration.reconcile_blogger_discovery(%s,%s,%s,%s::uuid,%s,%s,%s,%s::uuid)",
+            "SELECT * FROM integration.reconcile_blogger_discovery(%s,%s,%s,%s::uuid,%s,%s,%s,%s::text)",
             (
                 identity.operation_id,
                 identity.request_sha256,

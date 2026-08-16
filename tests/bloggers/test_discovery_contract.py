@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import ValidationError
 
 from my_data_hub.connectors.contracts import DeliveryMode, validate_envelope_bytes
@@ -146,8 +146,45 @@ def test_import_and_plan_hashes_are_order_stable_and_bind_revision() -> None:
 def test_repository_json_schema_is_closed_and_matches_examples() -> None:
     schema = json.loads((ROOT / "schemas/blogger-discovery-batch.v1.schema.json").read_text())
     Draft202012Validator.check_schema(schema)
-    validator = Draft202012Validator(schema)
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
     payload = inline_request().model_dump(mode="json", exclude_none=False)
     assert list(validator.iter_errors(payload)) == []
     payload["unexpected"] = True
     assert any(error.validator == "additionalProperties" for error in validator.iter_errors(payload))
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload["rows"][0]["accounts"].__setitem__(0, {"platform": "telegram"}),
+        lambda payload: payload["rows"][0].__setitem__("source_uri", "not-a-url"),
+        lambda payload: payload["rows"][0].__setitem__("observed_at", "2026-08-16T12:00:00"),
+        lambda payload: payload["rows"][0].__setitem__("evidence", {str(i): i for i in range(21)}),
+        lambda payload: payload.__setitem__("rows", [payload["rows"][0], payload["rows"][0]]),
+    ],
+)
+def test_repository_json_schema_rejects_expressible_semantic_violations(mutate) -> None:  # type: ignore[no-untyped-def]
+    schema = json.loads((ROOT / "schemas/blogger-discovery-batch.v1.schema.json").read_text())
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    payload = inline_request().model_dump(mode="json", exclude_none=False)
+    mutate(payload)
+    assert list(validator.iter_errors(payload))
+
+
+def test_repository_json_schema_rejects_unsafe_artifact_path() -> None:
+    schema = json.loads((ROOT / "schemas/blogger-discovery-batch.v1.schema.json").read_text())
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    artifact = ProviderArtifactClaim(
+        resource_ref="owner/private-bloggers",
+        control_class="mcp_exchange",
+        provider_version=7,
+        path="exports/bloggers.jsonl",
+        media_type="application/jsonl",
+        byte_size=1234,
+        sha256="a" * 64,
+        claim_sha256="b" * 64,
+        record_count=12,
+    )
+    payload = inline_request(rows=None, artifact=artifact).model_dump(mode="json", exclude_none=False)
+    payload["artifact"]["path"] = "../secret.jsonl"
+    assert list(validator.iter_errors(payload))

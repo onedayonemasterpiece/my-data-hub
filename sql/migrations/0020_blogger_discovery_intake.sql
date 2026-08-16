@@ -165,27 +165,124 @@ AS $$
 DECLARE
     session_is_superuser boolean;
     accepted integration.batch%ROWTYPE;
+    accepted_claim jsonb;
     calculated_sha256 text;
     count_records integer;
+    record jsonb;
+    account jsonb;
+    evidence_item record;
 BEGIN
     SELECT rolsuper INTO STRICT session_is_superuser FROM pg_roles WHERE rolname = session_user;
-    IF session_is_superuser OR NOT pg_has_role(session_user, 'mdh_connector_intake', 'member') THEN
-        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'artifact materialization requires exact connector intake login';
+    IF session_is_superuser OR NOT pg_has_role(session_user, 'mdh_blogger_materializer', 'member') THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'artifact materialization requires dedicated materializer login';
     END IF;
     PERFORM master_control.assert_session_write_epoch();
     SELECT * INTO STRICT accepted FROM integration.batch WHERE batch_id = requested_batch_id;
     IF accepted.data_product <> 'mcp.bloggers.discovery.artifact.v1'
        OR accepted.delivery_mode <> 'artifact_handoff'
        OR accepted.status <> 'accepted'
+       OR accepted.connector_id <> 'mcp-blogger-discovery-artifact-v1'
+       OR accepted.authenticated_principal <> 'service:mcp-blogger-discovery-artifact-v1'
        OR requested_verified_artifact_sha256 IS DISTINCT FROM accepted.payload_sha256
-       OR requested_materialized_by IS NULL
-       OR length(requested_materialized_by) NOT BETWEEN 1 AND 300
+       OR requested_materialized_by IS DISTINCT FROM session_user::text
        OR jsonb_typeof(requested_records) <> 'array' THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'artifact materialization differs from accepted exact claim';
+    END IF;
+    SELECT artifact_reference INTO STRICT accepted_claim
+    FROM integration.batch_payload WHERE batch_id = requested_batch_id;
+    IF accepted_claim->>'sha256' IS DISTINCT FROM accepted.payload_sha256
+       OR accepted_claim->>'locator' !~ '^kaggle-private://[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/versions/[1-9][0-9]*/'
+       OR accepted_claim->>'locator' ~ '/versions/(latest|current)/' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'artifact materialization lacks an exact immutable provider claim';
     END IF;
     count_records := jsonb_array_length(requested_records);
     IF count_records NOT BETWEEN 1 AND 500 OR count_records <> accepted.record_count THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'artifact materialization record count differs from manifest';
+    END IF;
+    FOR record IN SELECT value FROM jsonb_array_elements(requested_records) AS item(value) LOOP
+        IF jsonb_typeof(record) <> 'object'
+           OR NOT (record ?& ARRAY['source_record_id','actor_kind','display_name','accounts','source_uri','observed_at'])
+           OR EXISTS (SELECT 1 FROM jsonb_object_keys(record) key
+                      WHERE key NOT IN ('source_record_id','actor_kind','display_name','canonical_name','summary','accounts','source_uri','observed_at','evidence'))
+           OR record->>'source_record_id' IS NULL
+           OR record->>'actor_kind' IS NULL
+           OR record->>'display_name' IS NULL
+           OR record->>'source_uri' IS NULL
+           OR record->>'observed_at' IS NULL
+           OR length(record->>'source_record_id') NOT BETWEEN 1 AND 500
+           OR record->>'actor_kind' NOT IN ('person','organisation','outlet','collective','unknown')
+           OR length(record->>'display_name') NOT BETWEEN 1 AND 1000
+           OR (record->>'canonical_name' IS NOT NULL AND length(record->>'canonical_name') NOT BETWEEN 1 AND 1000)
+           OR (record->>'summary' IS NOT NULL AND length(record->>'summary') NOT BETWEEN 1 AND 16384)
+           OR record->>'source_uri' !~ '^https?://[^/@[:space:]]+([/?].*)?$'
+           OR position('#' IN record->>'source_uri') > 0
+           OR NOT pg_input_is_valid(record->>'observed_at', 'timestamp with time zone')
+           OR record->>'observed_at' !~ '(Z|[+-][0-9]{2}:[0-9]{2})$'
+           OR jsonb_typeof(record->'accounts') <> 'array'
+           OR jsonb_array_length(record->'accounts') NOT BETWEEN 1 AND 25
+           OR jsonb_typeof(coalesce(record->'evidence','{}'::jsonb)) <> 'object'
+           OR (SELECT count(*) FROM jsonb_object_keys(
+                   coalesce(record->'evidence','{}'::jsonb))) > 20 THEN
+            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'artifact record violates closed blogger discovery contract';
+        END IF;
+        FOR evidence_item IN SELECT key, value FROM jsonb_each(coalesce(record->'evidence','{}'::jsonb)) LOOP
+            IF length(evidence_item.key) NOT BETWEEN 1 AND 100
+               OR jsonb_typeof(evidence_item.value) NOT IN ('string','number','boolean','null')
+               OR (jsonb_typeof(evidence_item.value) = 'string'
+                   AND octet_length(evidence_item.value #>> '{}') > 2000) THEN
+                RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'artifact evidence violates bounded scalar contract';
+            END IF;
+        END LOOP;
+        FOR account IN SELECT value FROM jsonb_array_elements(record->'accounts') AS item(value) LOOP
+            IF jsonb_typeof(account) <> 'object'
+               OR NOT (account ? 'platform')
+               OR EXISTS (SELECT 1 FROM jsonb_object_keys(account) key
+                          WHERE key NOT IN ('platform','external_id','handle','url','normalized_url'))
+               OR account->>'platform' IS NULL
+               OR account->>'platform' !~ '^[a-z0-9][a-z0-9_.-]{0,99}$'
+               OR num_nonnulls(account->>'external_id', account->>'handle', account->>'url') = 0
+               OR (account->>'external_id' IS NOT NULL AND length(account->>'external_id') NOT BETWEEN 1 AND 500)
+               OR (account->>'handle' IS NOT NULL AND length(account->>'handle') NOT BETWEEN 1 AND 500)
+               OR (account->>'url' IS NOT NULL AND (
+                    account->>'url' !~ '^https?://[^/@[:space:]]+([/?].*)?$'
+                    OR position('#' IN account->>'url') > 0
+                    OR account->>'normalized_url' IS DISTINCT FROM account->>'url'))
+               OR (account->>'normalized_url' IS NOT NULL AND (
+                    account->>'normalized_url' !~ '^https?://[^/@[:space:]]+([/?].*)?$'
+                    OR position('#' IN account->>'normalized_url') > 0)) THEN
+                RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'artifact account violates closed blogger discovery contract';
+            END IF;
+        END LOOP;
+        IF EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(record->'accounts') WITH ORDINALITY left_account(value, ordinal),
+                 jsonb_array_elements(record->'accounts') WITH ORDINALITY right_account(value, ordinal)
+            WHERE left_account.ordinal < right_account.ordinal
+              AND lower(left_account.value->>'platform') = lower(right_account.value->>'platform')
+              AND coalesce('e:'||(left_account.value->>'external_id'),
+                           'u:'||(left_account.value->>'normalized_url'),
+                           'h:'||lower(left_account.value->>'handle'))
+                  = coalesce('e:'||(right_account.value->>'external_id'),
+                             'u:'||(right_account.value->>'normalized_url'),
+                             'h:'||lower(right_account.value->>'handle'))
+        ) THEN
+            RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'artifact row repeats one account identity';
+        END IF;
+    END LOOP;
+    IF EXISTS (
+        SELECT 1 FROM jsonb_array_elements(requested_records) item(value)
+        GROUP BY value->>'source_record_id' HAVING count(*) > 1
+    ) OR EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(requested_records) item(value),
+             jsonb_array_elements(value->'accounts') account(value)
+        GROUP BY lower(account.value->>'platform'),
+                 coalesce('e:'||(account.value->>'external_id'),
+                          'u:'||(account.value->>'normalized_url'),
+                          'h:'||lower(account.value->>'handle'))
+        HAVING count(DISTINCT item.value->>'source_record_id') > 1
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'artifact batch repeats source or cross-row account identity';
     END IF;
     calculated_sha256 := encode(sha256(convert_to(requested_records::text, 'UTF8')), 'hex');
     INSERT INTO integration.blogger_discovery_artifact_landing (
@@ -734,7 +831,7 @@ REVOKE ALL ON FUNCTION
     FROM PUBLIC;
 GRANT SELECT ON hub.bloggers_v1 TO mdh_mcp_reader;
 GRANT EXECUTE ON FUNCTION integration.materialize_blogger_discovery_artifact(uuid,text,jsonb,text)
-    TO mdh_connector_intake;
+    TO mdh_blogger_materializer;
 GRANT EXECUTE ON FUNCTION
     integration.preview_blogger_discovery(uuid,text,text,bigint,text,text),
     integration.apply_blogger_discovery(uuid,text,text,text,bigint,text,text),
