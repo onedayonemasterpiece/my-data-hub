@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -114,6 +115,31 @@ def test_master_mount_discovery_survives_provider_slug_normalization(tmp_path: P
     assert str(values["MY_DATA_HUB_WHEEL_PATH"]).startswith(str(tmp_path / "provider-normalized-assets-v17"))
     assert len(scope["_mdh_dependency_paths"]) == 2
     assert scope["_mdh_status_root"] == tmp_path / "provider-normalized-status-v9" / "nested"
+
+
+def test_master_bootstrap_scrubs_platform_kaggle_lifecycle_credentials_before_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret_names = (
+        "KAGGLE_KEY",
+        "KAGGLE_API_TOKEN",
+        "KAGGLE_API_V1_TOKEN",
+        "KAGGLE_ACCESS_TOKEN",
+    )
+    for name in secret_names:
+        monkeypatch.setenv(name, f"platform-injected-{name}")
+    monkeypatch.setenv("KAGGLE_USERNAME", "non-secret-platform-account")
+
+    source, _ = _bootstrap(tmp_path)
+    scope: dict[str, object] = {}
+    exec(compile(source, "master-bootstrap", "exec"), scope)
+
+    assert all(name not in os.environ for name in secret_names)
+    assert os.environ["KAGGLE_USERNAME"] == "non-secret-platform-account"
+    assert "platform-injected" not in repr(scope)
+    scrub = source.index("_mdh_os.environ.pop(_mdh_credential_name, None)")
+    first_asset_read = source.index("_mdh_exact_file('kaggle_run.json'")
+    assert scrub < first_asset_read
 
 
 def test_master_mount_discovery_rejects_ambiguous_exact_assets(tmp_path: Path) -> None:

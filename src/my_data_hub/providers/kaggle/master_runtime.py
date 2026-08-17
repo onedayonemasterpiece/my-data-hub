@@ -432,6 +432,11 @@ def _runtime_bootstrap(
     bootstrap = (
         "import hashlib as _mdh_hashlib, importlib.util as _mdh_importlib, os as _mdh_os, "
         "pathlib as _mdh_pathlib\n"
+        "# Kaggle injects KAGGLE_API_V1_TOKEN into official Notebook runtimes.\n"
+        "# Remove every account-level lifecycle credential before reading assets or importing app code.\n"
+        "for _mdh_credential_name in ('KAGGLE_KEY','KAGGLE_API_TOKEN','KAGGLE_API_V1_TOKEN',"
+        "'KAGGLE_ACCESS_TOKEN'):\n"
+        "    _mdh_os.environ.pop(_mdh_credential_name, None)\n"
         f"_mdh_values = {encoded}\n"
         "_mdh_input_root = _mdh_pathlib.Path('/kaggle/input')\n"
         "if not _mdh_input_root.is_dir() or _mdh_input_root.is_symlink():\n"
