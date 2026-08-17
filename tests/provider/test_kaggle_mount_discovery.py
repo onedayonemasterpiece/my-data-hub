@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,32 @@ def _put(path: Path, body: bytes) -> str:
 def _bootstrap(tmp_path: Path) -> tuple[str, dict[str, str]]:
     status = tmp_path / "provider-normalized-status-v9" / "nested"
     assets = tmp_path / "provider-normalized-assets-v17" / "payload"
+    psycopg = b"psycopg-wheel"
+    binary = b"psycopg-binary-wheel"
+    dependencies = [
+        {
+            "distribution": "psycopg",
+            "filename": "psycopg-3.3.4-py3-none-any.whl",
+            "sha256": hashlib.sha256(psycopg).hexdigest(),
+            "version": "3.3.4",
+        },
+        {
+            "distribution": "psycopg-binary",
+            "filename": "psycopg_binary-3.3.4-cp312.whl",
+            "sha256": hashlib.sha256(binary).hexdigest(),
+            "version": "3.3.4",
+        },
+    ]
+    manifest = {
+        "schema_version": "my-data-hub-embedding-worker-dependencies.v1",
+        "runtime": {
+            "image_identity": "image@example@sha256:" + "1" * 64,
+            "source_commit": "2" * 40,
+            "python_abi": "cp312",
+            "platform": "manylinux2014_x86_64",
+        },
+        "wheels": dependencies,
+    }
     bodies = {
         "kaggle_run.json": b"status",
         "kaggle_status_client.py": b"helper",
@@ -26,6 +53,11 @@ def _bootstrap(tmp_path: Path) -> tuple[str, dict[str, str]]:
         "tunnel-known-hosts": b"known",
         "verifier.py": b"verifier",
         "project.whl": b"wheel",
+        "embedding-worker-dependencies.json": json.dumps(
+            manifest, sort_keys=True, separators=(",", ":")
+        ).encode(),
+        "embedding-worker-wheelhouse/psycopg-3.3.4-py3-none-any.whl": psycopg,
+        "embedding-worker-wheelhouse/psycopg_binary-3.3.4-cp312.whl": binary,
     }
     hashes = {
         name: _put(
@@ -50,6 +82,16 @@ def _bootstrap(tmp_path: Path) -> tuple[str, dict[str, str]]:
         "MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_SHA256": hashes["verifier.py"],
         "MY_DATA_HUB_WHEEL_PATH": "project.whl",
         "MY_DATA_HUB_WHEEL_SHA256": hashes["project.whl"],
+        "MY_DATA_HUB_PYTHON_DEPENDENCY_MANIFEST": "embedding-worker-dependencies.json",
+        "MY_DATA_HUB_PYTHON_DEPENDENCY_MANIFEST_SHA256": hashes[
+            "embedding-worker-dependencies.json"
+        ],
+        "MY_DATA_HUB_MASTER_PYTHON_DEPENDENCIES_JSON": json.dumps(
+            dependencies, sort_keys=True, separators=(",", ":")
+        ),
+        "MY_DATA_HUB_KAGGLE_RUNTIME_IMAGE_IDENTITY": manifest["runtime"]["image_identity"],
+        "MY_DATA_HUB_KAGGLE_RUNTIME_SOURCE_COMMIT": manifest["runtime"]["source_commit"],
+        "MY_DATA_HUB_RUNTIME_PYTHON_ABI": "cp312",
     }
     source = _runtime_bootstrap(
         values,
@@ -70,6 +112,7 @@ def test_master_mount_discovery_survives_provider_slug_normalization(tmp_path: P
     values = scope["_mdh_values"]
     assert isinstance(values, dict)
     assert str(values["MY_DATA_HUB_WHEEL_PATH"]).startswith(str(tmp_path / "provider-normalized-assets-v17"))
+    assert len(scope["_mdh_dependency_paths"]) == 2
     assert scope["_mdh_status_root"] == tmp_path / "provider-normalized-status-v9" / "nested"
 
 
@@ -89,3 +132,16 @@ def test_master_mount_discovery_rejects_required_files_split_across_mounts(tmp_p
     verifier.replace(separated)
     with pytest.raises(RuntimeError, match="file set differs"):
         exec(compile(source, "master-bootstrap", "exec"), {})
+
+
+def test_master_bootstrap_accepts_the_pinned_archive_root_directory() -> None:
+    source = _runtime_bootstrap(
+        {},
+        status_dataset_ref="owner/status",
+        status_config_sha256="a" * 64,
+        status_helper_sha256="b" * 64,
+        master_config_sha256="c" * 64,
+        secret_bindings={},
+    )
+
+    assert "(m.name != 'pgsql' and not m.name.startswith('pgsql/'))" in source

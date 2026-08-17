@@ -1380,6 +1380,98 @@ class ControlLedger:
                 ),
             )
 
+    def project_master_terminal_failure(
+        self,
+        *,
+        operation_id: str,
+        run_id: str,
+        attempt_id: str,
+        service_instance_id: str,
+        epoch: int,
+        expected_operation_state: str,
+        event_id: str,
+    ) -> None:
+        """Fence a provider-terminal master even before service registration.
+
+        Kaggle can fail after the run was durably triggered but before the
+        Notebook emits its first authenticated service event.  In that state
+        there is intentionally no ``services`` row yet; requiring one would
+        strand the operation in REGISTERING forever.
+        """
+
+        now = _format_time(self.clock.now())
+        metadata = _safe_json({"event_id": event_id, "code": "PROVIDER_TERMINAL_FAILED"})
+        with self._transaction() as connection:
+            operation = connection.execute(
+                "SELECT state FROM operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            attempt = connection.execute(
+                "SELECT state,service_instance_id,epoch FROM run_attempts "
+                "WHERE operation_id=? AND run_id=? AND attempt_id=?",
+                (operation_id, run_id, attempt_id),
+            ).fetchone()
+            current = connection.execute(
+                "SELECT current_epoch FROM service_epochs WHERE service_kind='postgres-master'"
+            ).fetchone()
+            service = connection.execute(
+                "SELECT state,epoch FROM services WHERE service_instance_id=?", (service_instance_id,)
+            ).fetchone()
+            status_authority = connection.execute(
+                "SELECT resource_lease_json FROM master_status_dataset_authorities WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if operation is None or attempt is None or current is None:
+                raise StaleRuntimeEvent("provider-terminal master identity is incomplete")
+            if operation["state"] == "FAILED" and attempt["state"] == "FAILED":
+                return
+            if (
+                operation["state"] != expected_operation_state
+                or attempt["service_instance_id"] != service_instance_id
+                or int(attempt["epoch"]) != epoch
+                or int(current[0]) != epoch
+                or (service is not None and int(service["epoch"]) != epoch)
+            ):
+                raise StaleRuntimeEvent("provider-terminal master identity is stale or fenced")
+            connection.execute(
+                "UPDATE operations SET state='FAILED',updated_at=? WHERE operation_id=? AND state=?",
+                (now, operation_id, expected_operation_state),
+            )
+            connection.execute(
+                "UPDATE run_attempts SET state='FAILED',updated_at=? "
+                "WHERE operation_id=? AND run_id=? AND attempt_id=? AND epoch=?",
+                (now, operation_id, run_id, attempt_id, epoch),
+            )
+            if service is not None:
+                connection.execute(
+                    "UPDATE services SET state='FENCED',latest_event_id=?,updated_at=? "
+                    "WHERE service_instance_id=? AND epoch=?",
+                    (event_id, now, service_instance_id, epoch),
+                )
+            connection.execute(
+                "UPDATE runtime_token_hashes SET revoked_at=? WHERE run_id=? AND attempt_id=?",
+                (now, run_id, attempt_id),
+            )
+            if status_authority is not None:
+                lease = json.loads(str(status_authority["resource_lease_json"]))
+                try:
+                    lease_id = str(lease["lease_id"])
+                    holder_id = str(lease["holder_id"])
+                    lease_epoch = int(lease["epoch"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise StaleRuntimeEvent("provider-terminal master resource lease is invalid") from exc
+                if holder_id != run_id:
+                    raise StaleRuntimeEvent("provider-terminal master resource lease differs")
+                connection.execute(
+                    "UPDATE resource_leases SET released_at=? WHERE lease_id=? AND holder_id=? AND epoch=? "
+                    "AND released_at IS NULL",
+                    (now, lease_id, holder_id, lease_epoch),
+                )
+            connection.execute(
+                "INSERT INTO operation_log(operation_id,from_state,to_state,recorded_at,metadata_json) "
+                "VALUES (?,?,'FAILED',?,?)",
+                (operation_id, expected_operation_state, now, metadata),
+            )
+
     def renew_service(self, service_instance_id: str, epoch: int, lease_until: datetime, event_id: str) -> None:
         now = self.clock.now()
         if lease_until <= now:

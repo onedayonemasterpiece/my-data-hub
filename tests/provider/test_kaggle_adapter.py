@@ -26,6 +26,7 @@ from my_data_hub.providers.kaggle import (
     TaskResourceClaim,
 )
 from my_data_hub.providers.kaggle.adapter import _canonical_notebook_source
+from my_data_hub.providers.kaggle.source_attestation import executable_source_sha256
 
 NOW = datetime(2026, 8, 10, 12, tzinfo=UTC)
 TEST_RUNTIME_IMAGE = "gcr.io/kaggle-images/python@sha256:" + "a" * 64
@@ -259,6 +260,7 @@ class FakeKaggleApi:
                 current_version_number=version,
                 is_private=True,
                 docker_image=self.kernel_metadata.get(ref, {}).get("docker_image"),
+                kernel_type=self.kernel_metadata.get(ref, {}).get("kernel_type"),
             ),
             blob=SimpleNamespace(source=self.kernels[ref][version].decode("utf-8")),
         )
@@ -744,6 +746,59 @@ def test_master_legacy_push_persists_numeric_response_pending_runtime_attestatio
     assert not any(call[0] == "kernels_pull" for call in api.calls)
 
 
+def test_master_notebook_push_is_bound_to_the_runtime_executable_source_hash() -> None:
+    client, _api, journal = adapter()
+    run_id = uuid4()
+    source = json.dumps(
+        {
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "execution_count": None,
+                    "metadata": {},
+                    "outputs": [{"output_type": "stream", "text": "mutable"}],
+                    "source": f'RUN_ID = "{run_id}"\n',
+                }
+            ],
+            "metadata": {"mutable_provider_metadata": True},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+    ).encode()
+    source_sha = executable_source_sha256(source, kernel_type="notebook")
+    intent = effect(
+        MutationAction.PUSH_NOTEBOOK,
+        "owner/postgres-master-notebook",
+        task_id=run_id,
+        arguments={
+            "task_run_id": str(run_id),
+            "source_sha256": source_sha,
+            "dataset_sources": (),
+            "control_class": "orchestrator_protected",
+            "disposable": False,
+            "docker_image": TEST_RUNTIME_IMAGE,
+            "docker_image_pinning_type": "original",
+        },
+    )
+
+    result = client.push_private_master_notebook_pending_attestation(
+        intent=intent,
+        task_run_id=run_id,
+        source=source,
+        title="postgres-master-notebook",
+        code_file="worker.ipynb",
+        kernel_type="notebook",
+        language="python",
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=False,
+        docker_image=TEST_RUNTIME_IMAGE,
+        docker_image_pinning_type="original",
+    )
+
+    assert result.run.source_sha256 == source_sha
+    assert journal.intents == [intent]
+
+
 def test_master_pending_attestation_reconciles_lost_push_response_without_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -947,6 +1002,7 @@ def test_fm08_termination_reconciles_lost_delete_response_without_second_delete(
     task_run_id = uuid4()
     provider_ref = "owner/fm08-old-master"
     api.kernels[provider_ref] = {1: b"source"}
+    api.kernel_metadata[provider_ref] = {"kernel_type": "script"}
     source_sha256 = hashlib.sha256(b"source").hexdigest()
     run = KaggleKernelRunIdentity(
         provider_ref=provider_ref,

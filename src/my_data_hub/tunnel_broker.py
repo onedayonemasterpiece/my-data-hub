@@ -1293,9 +1293,19 @@ class TunnelBroker:
         with self._lock():
             state = self._load_or_fail_closed()
             active = state.active
+            if active is None:
+                # A provider run may fail before the Notebook ever activates
+                # its tunnel. Deactivation is idempotent in that exact
+                # fail-closed state; the epoch high-water mark still prevents
+                # an old certificate from becoming active later.
+                self._write_principal(None)
+                self._write_worker_principals(state)
+                self._write_krl(state.revoked_serials)
+                self.session_terminator(self.account)
+                self._terminate_workers_if_issued(state)
+                return
             if (
-                active is None
-                or active.master_instance_id != instance
+                active.master_instance_id != instance
                 or active.run_id != run_id
                 or active.attempt_id != attempt_id
                 or active.epoch != epoch

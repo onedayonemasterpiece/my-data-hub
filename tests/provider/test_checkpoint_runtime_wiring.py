@@ -51,6 +51,7 @@ from my_data_hub.providers.kaggle import (
     ProviderEffectReceipt,
     TaskResourceClaim,
 )
+from my_data_hub.providers.kaggle.source_attestation import executable_source_sha256
 from my_data_hub.providers.models import ControlClass, ProviderFingerprint, ProviderKind
 from my_data_hub.runtime_sdk import CHECKPOINT_VERIFIER_TIMEOUT_SECONDS
 
@@ -277,7 +278,7 @@ class FakeVerifierAdapter:
             task_run_id=run_id,
             provider_ref="owner/checkpoint-verifier",
             source_version=4,
-            source_sha256=hashlib.sha256(source).hexdigest(),
+            source_sha256=executable_source_sha256(source, kernel_type="notebook"),
             provider_kernel_id=77,
             provider_run_ref="owner/checkpoint-verifier/4",
             started_at=NOW,

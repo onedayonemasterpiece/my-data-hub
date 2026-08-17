@@ -27,7 +27,6 @@ from my_data_hub.db.migrations import discover_migrations
 from my_data_hub.hashing import canonical_json_bytes, sha256_value
 from my_data_hub.providers.kaggle.adapter import (
     KaggleProviderAdapter,
-    _canonical_notebook_source,
     directory_sha256,
     tree_sha256,
 )
@@ -46,6 +45,7 @@ from my_data_hub.providers.kaggle.control_journal import (
     AuthenticatedControlPlaneClient,
     ControlPlaneRuntimeIdentity,
 )
+from my_data_hub.providers.kaggle.source_attestation import executable_source_sha256
 from my_data_hub.providers.models import ControlClass, ProviderKind
 from my_data_hub.runtime_sdk.lifetime import (
     CHECKPOINT_ARCHIVE_COMMAND_TIMEOUT_SECONDS,
@@ -792,8 +792,7 @@ class KaggleCheckpointRestoreVerifier:
             manifest=manifest,
             execution=execution,
         )
-        canonical_source = _canonical_notebook_source(source, kernel_type=self.assets.kernel_type)
-        source_sha = hashlib.sha256(canonical_source).hexdigest()
+        source_sha = executable_source_sha256(source, kernel_type=self.assets.kernel_type)
         dataset_source = f"{provider_ref}/{version}"
         dataset_sources = (execution["runtime_dataset_exact_ref"], dataset_source)
         if len(dataset_sources) != len(set(dataset_sources)):

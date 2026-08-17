@@ -56,7 +56,7 @@ def _install_postgres_runtime() -> Path:
         if any(
             item.islnk()
             or (item.issym() and ("/" in item.linkname or ".." in PurePosixPath(item.linkname).parts))
-            or not item.name.startswith("pgsql/")
+            or (item.name != "pgsql" and not item.name.startswith("pgsql/"))
             or ".." in PurePosixPath(item.name).parts
             for item in members
         ):

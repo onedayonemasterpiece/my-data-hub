@@ -19,7 +19,7 @@ from types import MappingProxyType
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from my_data_hub.hashing import canonical_json_bytes
+from my_data_hub.hashing import canonical_json_bytes, sha256_value
 from my_data_hub.orchestrator.master.evidence import MasterTerminalOutput, PlatformStatus
 from my_data_hub.orchestrator.master.provider import (
     EffectReconciliation,
@@ -30,7 +30,7 @@ from my_data_hub.orchestrator.master.provider import (
     ProviderEffectReceipt,
     ReconciliationStatus,
 )
-from my_data_hub.providers.models import ControlClass
+from my_data_hub.providers.models import ControlClass, ProviderKind
 from my_data_hub.runtime_sdk import CANONICAL_RUNTIME_CALLBACK_URL, KAGGLE_PROVIDER_TIMEOUT_SECONDS
 from my_data_hub.workloads.bloggers.master_stage import BloggerImportStageReceipt
 
@@ -59,6 +59,8 @@ POSTGRES_RUNTIME_MANIFEST_NAME = "postgresql-18-runtime.json"
 TUNNEL_KNOWN_HOSTS_NAME = "tunnel-known-hosts"
 POSTGRES_TLS_CERT_NAME = "postgres-server.crt"
 POSTGRES_TLS_KEY_NAME = "postgres-server.key"
+PYTHON_DEPENDENCY_MANIFEST_NAME = "embedding-worker-dependencies.json"
+MASTER_PYTHON_DEPENDENCY_DISTRIBUTIONS = ("psycopg", "psycopg-binary")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 POSTGRES_RUNTIME_RECIPE_SHA256 = "3fbcf52450dd44e3eb0eb7b826ebdb84a4293fbc54b713408083f10b44964d61"
 POSTGRESQL_SOURCE_URL = "https://ftp.postgresql.org/pub/source/v18.4/postgresql-18.4.tar.bz2"
@@ -242,6 +244,86 @@ class KaggleMasterLaunchAssets:
             or any(not line.startswith("|") or " ssh-ed25519 " not in line or len(line) > 4096 for line in lines)
         ):
             raise MasterLaunchContractError("tunnel known_hosts is not a reviewed hashed host-key asset")
+        if PYTHON_DEPENDENCY_MANIFEST_NAME in self.dataset_files:
+            self.master_python_dependencies()
+
+    def master_python_dependencies(self) -> tuple[dict[str, object], ...]:
+        """Return the exact offline psycopg wheels needed by the master runtime."""
+
+        body = self.dataset_files[PYTHON_DEPENDENCY_MANIFEST_NAME]
+        try:
+            manifest = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise MasterLaunchContractError("master Python dependency manifest is invalid JSON") from exc
+        if body != canonical_json_bytes(manifest):
+            raise MasterLaunchContractError("master Python dependency manifest is not canonical JSON")
+        expected_keys = {
+            "schema_version",
+            "source_lock_sha256",
+            "index_url",
+            "runtime",
+            "install_order",
+            "required_image_distributions",
+            "wheels",
+            "smoke_requirement",
+        }
+        runtime = manifest.get("runtime") if isinstance(manifest, dict) else None
+        wheels = manifest.get("wheels") if isinstance(manifest, dict) else None
+        if (
+            not isinstance(manifest, dict)
+            or set(manifest) != expected_keys
+            or manifest.get("schema_version") != "my-data-hub-embedding-worker-dependencies.v1"
+            or not isinstance(runtime, dict)
+            or runtime.get("image_identity") != self.runtime_image_identity
+            or runtime.get("source_commit") != self.runtime_image_source_commit
+            or runtime.get("python_abi") != "cp312"
+            or runtime.get("platform") != "manylinux2014_x86_64"
+            or not isinstance(wheels, list)
+            or not wheels
+            or any(not isinstance(item, dict) for item in wheels)
+            or manifest.get("install_order") != [item.get("filename") for item in wheels]
+            or len({item.get("distribution") for item in wheels}) != len(wheels)
+        ):
+            raise MasterLaunchContractError("master Python dependency provenance is incomplete")
+        by_distribution = {
+            item.get("distribution"): item
+            for item in wheels
+            if isinstance(item, dict) and isinstance(item.get("distribution"), str)
+        }
+        if set(MASTER_PYTHON_DEPENDENCY_DISTRIBUTIONS) - set(by_distribution):
+            raise MasterLaunchContractError("master psycopg dependency wheels are absent")
+        selected: list[dict[str, object]] = []
+        for distribution in MASTER_PYTHON_DEPENDENCY_DISTRIBUTIONS:
+            item = by_distribution[distribution]
+            filename = item.get("filename")
+            sha256 = item.get("sha256")
+            byte_size = item.get("byte_size")
+            version = item.get("version")
+            path = f"embedding-worker-wheelhouse/{filename}"
+            if (
+                not isinstance(filename, str)
+                or Path(filename).name != filename
+                or not isinstance(sha256, str)
+                or not _SHA256.fullmatch(sha256)
+                or not isinstance(byte_size, int)
+                or isinstance(byte_size, bool)
+                or byte_size <= 0
+                or not isinstance(version, str)
+                or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", version)
+                or path not in self.dataset_files
+                or len(self.dataset_files[path]) != byte_size
+                or hashlib.sha256(self.dataset_files[path]).hexdigest() != sha256
+            ):
+                raise MasterLaunchContractError("master psycopg dependency wheel differs from manifest")
+            selected.append(
+                {
+                    "distribution": distribution,
+                    "filename": filename,
+                    "sha256": sha256,
+                    "version": version,
+                }
+            )
+        return tuple(selected)
 
     def project_wheel(self) -> tuple[str, bytes]:
         """Return the single top-level application wheel, excluding worker dependencies."""
@@ -268,6 +350,9 @@ class KaggleMasterLaunchAssets:
             "MY_DATA_HUB_SOURCE_IDENTITY": self.source_identity,
             "MY_DATA_HUB_SOURCE_VERSION": self.source_version,
             "MY_DATA_HUB_CHECKPOINT_REF": self.checkpoint_ref,
+            "MY_DATA_HUB_KAGGLE_RUNTIME_IMAGE_IDENTITY": self.runtime_image_identity,
+            "MY_DATA_HUB_KAGGLE_RUNTIME_SOURCE_COMMIT": self.runtime_image_source_commit,
+            "MY_DATA_HUB_RUNTIME_PYTHON_ABI": "cp" + self.runtime_python_series.replace(".", ""),
         }
         values.update(
             {
@@ -285,6 +370,18 @@ class KaggleMasterLaunchAssets:
                 ).hexdigest(),
             }
         )
+        if PYTHON_DEPENDENCY_MANIFEST_NAME in self.dataset_files:
+            values.update(
+                {
+                    "MY_DATA_HUB_PYTHON_DEPENDENCY_MANIFEST": PYTHON_DEPENDENCY_MANIFEST_NAME,
+                    "MY_DATA_HUB_PYTHON_DEPENDENCY_MANIFEST_SHA256": hashlib.sha256(
+                        self.dataset_files[PYTHON_DEPENDENCY_MANIFEST_NAME]
+                    ).hexdigest(),
+                    "MY_DATA_HUB_MASTER_PYTHON_DEPENDENCIES_JSON": json.dumps(
+                        self.master_python_dependencies(), sort_keys=True, separators=(",", ":")
+                    ),
+                }
+            )
         verifier_source = self.dataset_files[self.checkpoint_verifier_source_file]
         values.update(
             {
@@ -303,6 +400,8 @@ class KaggleMasterLaunchAssets:
         except MasterLaunchContractError:
             pass
         else:
+            if PYTHON_DEPENDENCY_MANIFEST_NAME not in self.dataset_files:
+                raise MasterLaunchContractError("master offline psycopg dependencies are absent")
             values["MY_DATA_HUB_WHEEL_PATH"] = wheel_name
             values["MY_DATA_HUB_WHEEL_SHA256"] = hashlib.sha256(wheel).hexdigest()
         return values
@@ -362,11 +461,46 @@ def _runtime_bootstrap(
         " ('MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE','MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE_SHA256',536870912),\n"
         " ('MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST','MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST_SHA256',1048576),\n"
         " ('MY_DATA_HUB_TUNNEL_KNOWN_HOSTS','MY_DATA_HUB_TUNNEL_KNOWN_HOSTS_SHA256',65536),\n"
+        " ('MY_DATA_HUB_PYTHON_DEPENDENCY_MANIFEST','MY_DATA_HUB_PYTHON_DEPENDENCY_MANIFEST_SHA256',1048576),\n"
         " ('MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_PATH','MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_SHA256',4194304),\n"
         " ('MY_DATA_HUB_WHEEL_PATH','MY_DATA_HUB_WHEEL_SHA256',134217728)):\n"
         "    if _mdh_key in _mdh_values:\n"
         "        _mdh_asset_paths[_mdh_key]=_mdh_exact_file(_mdh_pathlib.Path(_mdh_values[_mdh_key]).name,"
         "_mdh_values[_mdh_sha],_mdh_limit)\n"
+        "_mdh_dependency_paths=[]\n"
+        "if 'MY_DATA_HUB_PYTHON_DEPENDENCY_MANIFEST' in _mdh_values:\n"
+        "    _mdh_dependency_manifest_path=_mdh_asset_paths['MY_DATA_HUB_PYTHON_DEPENDENCY_MANIFEST']\n"
+        "    _mdh_dependency_body=_mdh_dependency_manifest_path.read_bytes()\n"
+        "    _mdh_dependency_manifest=__import__('json').loads(_mdh_dependency_body)\n"
+        "    if _mdh_dependency_body != __import__('json').dumps(_mdh_dependency_manifest,sort_keys=True,"
+        "separators=(',',':'),ensure_ascii=False).encode():\n"
+        "        raise RuntimeError('master Python dependency manifest is not canonical JSON')\n"
+        "    _mdh_required_dependencies=__import__('json').loads("
+        "_mdh_values['MY_DATA_HUB_MASTER_PYTHON_DEPENDENCIES_JSON'])\n"
+        "    _mdh_manifest_wheels=_mdh_dependency_manifest.get('wheels',[])\n"
+        "    if (_mdh_dependency_manifest.get('schema_version') != "
+        "'my-data-hub-embedding-worker-dependencies.v1' or "
+        "_mdh_dependency_manifest.get('runtime',{}).get('image_identity') != "
+        "_mdh_values['MY_DATA_HUB_KAGGLE_RUNTIME_IMAGE_IDENTITY'] or "
+        "_mdh_dependency_manifest.get('runtime',{}).get('source_commit') != "
+        "_mdh_values['MY_DATA_HUB_KAGGLE_RUNTIME_SOURCE_COMMIT'] or "
+        "_mdh_dependency_manifest.get('runtime',{}).get('python_abi') != "
+        "_mdh_values['MY_DATA_HUB_RUNTIME_PYTHON_ABI'] or "
+        "_mdh_dependency_manifest.get('runtime',{}).get('platform') != 'manylinux2014_x86_64' or "
+        "not isinstance(_mdh_manifest_wheels,list) or "
+        "not isinstance(_mdh_required_dependencies,list) or len(_mdh_required_dependencies) != 2):\n"
+        "        raise RuntimeError('master Python dependency provenance differs')\n"
+        "    for _mdh_dependency in _mdh_required_dependencies:\n"
+        "        if (not isinstance(_mdh_dependency,dict) or set(_mdh_dependency) != "
+        "{'distribution','filename','sha256','version'} or "
+        "_mdh_dependency.get('distribution') not in {'psycopg','psycopg-binary'} or "
+        "sum(1 for _item in _mdh_manifest_wheels if isinstance(_item,dict) and "
+        "all(_item.get(_key) == _mdh_dependency.get(_key) for _key in _mdh_dependency)) != 1):\n"
+        "            raise RuntimeError('master Python dependency selection differs')\n"
+        "        _mdh_dependency_path=_mdh_exact_file(_mdh_dependency['filename'],"
+        "_mdh_dependency['sha256'],16777216)\n"
+        "        _mdh_dependency_paths.append((_mdh_dependency,_mdh_dependency_path))\n"
+        "        _mdh_asset_paths['dependency:'+_mdh_dependency['distribution']]=_mdh_dependency_path\n"
         "_mdh_asset_roots={_mdh_input_root/_path.relative_to(_mdh_input_root).parts[0] "
         "for _path in _mdh_asset_paths.values()}\n"
         "if len(_mdh_asset_roots) != 1:\n"
@@ -423,7 +557,16 @@ def _runtime_bootstrap(
             "    _mdh_os.environ[_mdh_env] = _mdh_value\n"
         )
     bootstrap += (
-        "import json as _mdh_json, tarfile as _mdh_tarfile\n"
+        "import importlib.metadata as _mdh_metadata, json as _mdh_json, subprocess as _mdh_subprocess, "
+        "sys as _mdh_sys, tarfile as _mdh_tarfile\n"
+        "for _mdh_dependency,_mdh_dependency_path in _mdh_dependency_paths:\n"
+        "    _mdh_subprocess.run([_mdh_sys.executable,'-m','pip','install','--no-index','--no-deps',"
+        "'--disable-pip-version-check',str(_mdh_dependency_path)],check=True)\n"
+        "    if _mdh_metadata.version(_mdh_dependency['distribution']) != _mdh_dependency['version']:\n"
+        "        raise RuntimeError('master Python dependency version differs after offline install')\n"
+        "import psycopg as _mdh_psycopg\n"
+        "if getattr(_mdh_psycopg.pq,'__impl__',None) != 'binary':\n"
+        "    raise RuntimeError('master psycopg binary implementation is unavailable')\n"
         "_mdh_archive = _mdh_pathlib.Path(_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE'])\n"
         "_mdh_manifest_path = _mdh_pathlib.Path(_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST'])\n"
         "if _mdh_hashlib.sha256(_mdh_archive.read_bytes()).hexdigest() != "
@@ -445,7 +588,7 @@ def _runtime_bootstrap(
         "        raise RuntimeError('PostgreSQL runtime archive exceeds fixed bounds')\n"
         "    if any(m.islnk() or (m.issym() and ('/' in m.linkname or "
         "'..' in _mdh_pathlib.PurePosixPath(m.linkname).parts)) or "
-        "not m.name.startswith('pgsql/') or "
+        "(m.name != 'pgsql' and not m.name.startswith('pgsql/')) or "
         "'..' in _mdh_pathlib.PurePosixPath(m.name).parts for m in _mdh_members):\n"
         "        raise RuntimeError('PostgreSQL runtime archive contains an unsafe member')\n"
         "    _mdh_tar.extractall(_mdh_pg_root, members=_mdh_members, filter='data')\n"
@@ -734,6 +877,9 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
                 path: _replace_nonsecret_markers(content, self.assets.render_values(effect.exact_identity))
                 for path, content in self.assets.dataset_files.items()
             }
+            reusable = self._reusable_asset_dataset_receipt(effect, files)
+            if reusable is not None:
+                return reusable
             intent = self._intent(
                 effect,
                 MutationAction.CREATE_DATASET,
@@ -820,6 +966,13 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
     def reconcile(self, effect: PlannedProviderEffect) -> EffectReconciliation:
         self._validate_effect(effect)
         if effect.effect_kind == "ensure_dataset":
+            files = {
+                path: _replace_nonsecret_markers(content, self.assets.render_values(effect.exact_identity))
+                for path, content in self.assets.dataset_files.items()
+            }
+            reusable = self._reusable_asset_dataset_receipt(effect, files)
+            if reusable is not None:
+                return EffectReconciliation(ReconciliationStatus.FOUND, reusable)
             # Replaying the exact deterministic create intent is safe: the adapter
             # performs exact package readback on provider conflict and returns
             # ALREADY_APPLIED rather than creating a second dataset.
@@ -847,6 +1000,110 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             except Exception:
                 return EffectReconciliation(ReconciliationStatus.AMBIGUOUS)
         return EffectReconciliation(ReconciliationStatus.AMBIGUOUS)
+
+    def _reusable_asset_dataset_receipt(
+        self,
+        effect: PlannedProviderEffect,
+        files: Mapping[str, bytes],
+    ) -> ProviderEffectReceipt | None:
+        """Reuse one immutable, exactly read-back master asset Dataset.
+
+        The asset Dataset is release-scoped, while master operations are
+        run-scoped.  Recreating the same provider ref for every cold start
+        would change only the adapter control manifest and make an otherwise
+        identical immutable Dataset unreconcilable.  A later master therefore
+        adopts the original durable claim only after matching the current
+        release bytes, original effect authority, receipt, and live numeric
+        provider readback.
+        """
+
+        claim_lookup = getattr(self.status_authority, "latest_provider_resource_claim", None)
+        authority_lookup = getattr(self.status_authority, "provider_effect_authority", None)
+        arguments_lookup = getattr(self.status_authority, "provider_effect_arguments_sha256", None)
+        provider_receipt_lookup = getattr(self.status_authority, "latest_provider_effect_receipt", None)
+        effect_lookup = getattr(self.status_authority, "get_effect_by_idempotency_key", None)
+        idempotency_lookup = getattr(self.status_authority, "provider_effect_idempotency_key", None)
+        if (
+            not callable(claim_lookup)
+            or not callable(authority_lookup)
+            or not callable(arguments_lookup)
+            or not callable(provider_receipt_lookup)
+            or not callable(effect_lookup)
+            or not callable(idempotency_lookup)
+        ):
+            return None
+        claim = claim_lookup(
+            provider_ref=self.assets.dataset_ref,
+            resource_kind=ProviderKind.DATASET.value,
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
+        )
+        if not isinstance(claim, Mapping) or claim.get("disposable") is not False:
+            return None
+        original_effect_id = str(claim.get("effect_id", ""))
+        authority = authority_lookup(original_effect_id)
+        provider_receipt = provider_receipt_lookup(original_effect_id)
+        if not isinstance(authority, Mapping) or not isinstance(provider_receipt, Mapping):
+            return None
+        expected_key = f"{authority.get('operation_id', '')}:ensure_dataset"
+        original_effect = effect_lookup(expected_key)
+        original_exact = (
+            original_effect.receipt.get("exact_identity")
+            if original_effect is not None and isinstance(original_effect.receipt, Mapping)
+            else None
+        )
+        fingerprint = claim.get("fingerprint")
+        expected_arguments = sha256_value(
+            {
+                "content_tree_sha256": self._mapping_sha(files),
+                "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
+                "disposable": False,
+            }
+        )
+        if (
+            authority.get("action") != MutationAction.CREATE_DATASET.value
+            or authority.get("provider_ref") != self.assets.dataset_ref
+            or idempotency_lookup(original_effect_id) != expected_key
+            or str(uuid5(NAMESPACE_URL, expected_key)) != original_effect_id
+            or arguments_lookup(original_effect_id) != expected_arguments
+            or provider_receipt.get("provider_version") != claim.get("provider_version")
+            or provider_receipt.get("observed_fingerprint") != fingerprint
+            or provider_receipt.get("outcome") not in {"applied", "already_applied"}
+            or not isinstance(original_exact, Mapping)
+            or getattr(getattr(original_effect, "state", None), "value", None) != "APPLIED"
+            or original_exact.get("provider_ref") != self.assets.dataset_ref
+            or original_exact.get("provider_version") != claim.get("provider_version")
+            or not isinstance(original_exact.get("package_sha256"), str)
+            or not isinstance(fingerprint, Mapping)
+            or not isinstance(fingerprint.get("value"), str)
+        ):
+            return None
+        try:
+            version = int(claim["provider_version"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if version < 1:
+            return None
+        observed = self.adapter.read_private_dataset(
+            provider_ref=self.assets.dataset_ref,
+            version=version,
+        )
+        if (
+            observed.provider_ref != self.assets.dataset_ref
+            or observed.version != version
+            or observed.privacy != "private"
+            or observed.package_sha256 != original_exact["package_sha256"]
+            or observed.fingerprint.value != fingerprint["value"]
+        ):
+            raise MasterLaunchContractError("reusable master asset Dataset live readback differs")
+        return self._receipt(
+            effect,
+            self.assets.dataset_ref,
+            {
+                "provider_ref": observed.provider_ref,
+                "provider_version": observed.version,
+                "package_sha256": observed.package_sha256,
+            },
+        )
 
     def observe_terminal(self, query: MasterTerminalQuery) -> MasterTerminalEvidence:
         """Read bounded terminal evidence from this exact launched Notebook run."""

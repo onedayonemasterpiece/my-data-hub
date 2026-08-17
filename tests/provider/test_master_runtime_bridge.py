@@ -8,11 +8,12 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import pytest
 
 from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.hashing import canonical_json_bytes, sha256_value
 from my_data_hub.orchestrator.master import MasterCoordinator, MasterIntent, MasterState
 from my_data_hub.providers.kaggle import (
     KaggleKernelRunIdentity,
@@ -20,6 +21,7 @@ from my_data_hub.providers.kaggle import (
     KaggleMasterRuntimeProvider,
     MasterLaunchContractError,
 )
+from my_data_hub.providers.kaggle.master_runtime import _runtime_bootstrap
 from my_data_hub.providers.kaggle.source_attestation import executable_source_sha256
 from my_data_hub.runtime_sdk import (
     KAGGLE_HARD_CAP_SECONDS,
@@ -175,6 +177,58 @@ class FakeKaggleAdapter:
             return None
         return self.run
 
+    def read_private_dataset(self, *, provider_ref: str, version: int) -> object:
+        self.calls["dataset_readback"] += 1
+        return SimpleNamespace(
+            provider_ref=provider_ref,
+            version=version,
+            privacy="private",
+            package_sha256="a" * 64,
+            fingerprint=SimpleNamespace(value="f" * 64),
+        )
+
+
+class _ReusableAssetAuthority:
+    def __init__(self, ledger: ControlLedger, *, operation_id: str, arguments_sha256: str) -> None:
+        self.ledger = ledger
+        self.operation_id = operation_id
+        self.arguments_sha256 = arguments_sha256
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.ledger, name)
+
+    def latest_provider_resource_claim(self, **_: object) -> dict[str, object]:
+        return {
+            "effect_id": str(uuid5(NAMESPACE_URL, f"{self.operation_id}:ensure_dataset")),
+            "provider_ref": "owner/master-launch",
+            "provider_version": 1,
+            "kind": "dataset",
+            "control_class": "orchestrator_protected",
+            "disposable": False,
+            "fingerprint": {"algorithm": "sha256", "value": "f" * 64},
+        }
+
+    def provider_effect_authority(self, _effect_id: str) -> dict[str, str]:
+        return {
+            "operation_id": self.operation_id,
+            "action": "create_dataset",
+            "provider_ref": "owner/master-launch",
+        }
+
+    def provider_effect_arguments_sha256(self, _effect_id: str) -> str:
+        return self.arguments_sha256
+
+    def provider_effect_idempotency_key(self, _effect_id: str) -> str:
+        return f"{self.operation_id}:ensure_dataset"
+
+    @staticmethod
+    def latest_provider_effect_receipt(_effect_id: str) -> dict[str, object]:
+        return {
+            "provider_version": 1,
+            "observed_fingerprint": {"algorithm": "sha256", "value": "f" * 64},
+            "outcome": "applied",
+        }
+
 
 def test_concrete_bridge_launches_dataset_notebook_and_run_once(tmp_path: Path) -> None:
     launch = KaggleMasterLaunchAssets(
@@ -311,6 +365,146 @@ def _launch() -> KaggleMasterLaunchAssets:
         tunnel_gateway_user="mdh_tunnel",
         tunnel_remote_port=25432,
     )
+
+
+def _launch_with_offline_master_dependencies() -> KaggleMasterLaunchAssets:
+    launch = _launch()
+    psycopg = b"psycopg-wheel"
+    binary = b"psycopg-binary-wheel"
+    manifest = {
+        "schema_version": "my-data-hub-embedding-worker-dependencies.v1",
+        "source_lock_sha256": "1" * 64,
+        "index_url": "https://pypi.org/simple",
+        "runtime": {
+            "image_identity": launch.runtime_image_identity,
+            "source_commit": launch.runtime_image_source_commit,
+            "python_abi": "cp312",
+            "platform": "manylinux2014_x86_64",
+        },
+        "install_order": ["psycopg-3.3.4-py3-none-any.whl", "psycopg_binary-3.3.4-cp312.whl"],
+        "required_image_distributions": [],
+        "wheels": [
+            {
+                "distribution": "psycopg",
+                "filename": "psycopg-3.3.4-py3-none-any.whl",
+                "sha256": hashlib.sha256(psycopg).hexdigest(),
+                "byte_size": len(psycopg),
+                "version": "3.3.4",
+            },
+            {
+                "distribution": "psycopg-binary",
+                "filename": "psycopg_binary-3.3.4-cp312.whl",
+                "sha256": hashlib.sha256(binary).hexdigest(),
+                "byte_size": len(binary),
+                "version": "3.3.4",
+            },
+        ],
+        "smoke_requirement": {},
+    }
+    files = dict(launch.dataset_files)
+    files.update(
+        {
+            "my_data_hub-0.1.0-py3-none-any.whl": b"project-wheel",
+            "embedding-worker-dependencies.json": canonical_json_bytes(manifest),
+            "embedding-worker-wheelhouse/psycopg-3.3.4-py3-none-any.whl": psycopg,
+            "embedding-worker-wheelhouse/psycopg_binary-3.3.4-cp312.whl": binary,
+        }
+    )
+    return replace(launch, dataset_files=files)
+
+
+def test_master_launch_selects_only_exact_offline_psycopg_wheels() -> None:
+    launch = _launch_with_offline_master_dependencies()
+
+    dependencies = launch.master_python_dependencies()
+    values = launch.render_values(
+        {
+            "operation_id": uuid4(),
+            "run_id": uuid4(),
+            "attempt_id": uuid4(),
+            "service_instance_id": uuid4(),
+            "master_instance_id": uuid4(),
+            "epoch": 1,
+        }
+    )
+
+    assert [item["distribution"] for item in dependencies] == ["psycopg", "psycopg-binary"]
+    assert json.loads(values["MY_DATA_HUB_MASTER_PYTHON_DEPENDENCIES_JSON"]) == list(dependencies)
+    assert "--no-index','--no-deps" in _runtime_bootstrap(
+        values,
+        status_dataset_ref="owner/status",
+        status_config_sha256="a" * 64,
+        status_helper_sha256="b" * 64,
+        master_config_sha256="c" * 64,
+        secret_bindings={},
+    )
+
+
+def test_master_launch_rejects_project_wheel_without_offline_psycopg_dependencies() -> None:
+    launch = _launch()
+    files = dict(launch.dataset_files)
+    files["my_data_hub-0.1.0-py3-none-any.whl"] = b"project-wheel"
+    incomplete = replace(launch, dataset_files=files)
+
+    with pytest.raises(MasterLaunchContractError, match="offline psycopg"):
+        incomplete.render_values(
+            {
+                "operation_id": uuid4(),
+                "run_id": uuid4(),
+                "attempt_id": uuid4(),
+                "service_instance_id": uuid4(),
+                "master_instance_id": uuid4(),
+                "epoch": 1,
+            }
+        )
+
+
+def test_distinct_master_operation_reuses_exact_immutable_asset_dataset(tmp_path: Path) -> None:
+    launch = _launch()
+    adapter = FakeKaggleAdapter()
+    ledger = ControlLedger(tmp_path / "control.sqlite3")
+    first_intent = MasterIntent(
+        idempotency_key="first-master",
+        source_identity=launch.source_identity,
+        source_version=launch.source_version,
+        checkpoint_ref=launch.checkpoint_ref,
+        dataset_ref=launch.dataset_ref,
+        notebook_ref=launch.notebook_ref,
+    )
+    first_coordinator = _coordinator(ledger, adapter, launch, first_intent)
+    first = first_coordinator.ensure_master(first_intent)
+    adapter.status_state = "failed"
+    assert first_coordinator.reconcile_operation(first.operation_id, first_intent).state is MasterState.FAILED
+    adapter.status_state = "running"
+    arguments_sha256 = sha256_value(
+        {
+            "content_tree_sha256": KaggleMasterRuntimeProvider._mapping_sha(launch.dataset_files),
+            "control_class": "orchestrator_protected",
+            "disposable": False,
+        }
+    )
+    authority = _ReusableAssetAuthority(
+        ledger,
+        operation_id=first.operation_id,
+        arguments_sha256=arguments_sha256,
+    )
+    second_intent = MasterIntent(
+        idempotency_key="second-master",
+        source_identity=launch.source_identity,
+        source_version=launch.source_version,
+        checkpoint_ref=launch.checkpoint_ref,
+        dataset_ref=launch.dataset_ref,
+        notebook_ref=launch.notebook_ref,
+    )
+    provider = KaggleMasterRuntimeProvider(adapter, launch, status_authority=authority)  # type: ignore[arg-type]
+    _prepare_status_authority(ledger, provider, second_intent)
+
+    second = MasterCoordinator(ledger, provider).ensure_master(second_intent)
+
+    assert first.operation_id != second.operation_id
+    assert second.state is MasterState.REGISTERING
+    assert adapter.calls["dataset"] == 1
+    assert adapter.calls["dataset_readback"] == 1
 
 
 def _runtime_event(handle, launch, event_type, sequence, *, phase=None, status=None, data=None):  # type: ignore[no-untyped-def]
@@ -637,6 +831,39 @@ def test_provider_error_terminalizes_active_master_without_accepting_stale_outpu
     )
     assert service == (MasterState.FENCED.value,)
     assert not ledger.runtime_token_valid(handle.run_id, handle.attempt_id, SECRET)
+
+
+def test_provider_error_before_first_runtime_event_terminalizes_without_service_row(
+    tmp_path: Path,
+) -> None:
+    launch = _launch()
+    adapter = FakeKaggleAdapter()
+    ledger = ControlLedger(tmp_path / "control.sqlite3")
+    intent = MasterIntent(
+        idempotency_key="failed-before-registration",
+        source_identity=launch.source_identity,
+        source_version=launch.source_version,
+        checkpoint_ref=launch.checkpoint_ref,
+        dataset_ref=launch.dataset_ref,
+        notebook_ref=launch.notebook_ref,
+    )
+    coordinator = _coordinator(ledger, adapter, launch, intent)
+    handle = coordinator.ensure_master(intent, runtime_secret=SECRET)
+    assert handle.state is MasterState.REGISTERING
+    assert ledger.resolve_service("postgres-master") is None
+    adapter.status_state = "failed"
+
+    recovered = coordinator.reconcile_operation(handle.operation_id, intent)
+
+    assert recovered.state is MasterState.FAILED
+    assert ledger.resolve_service("postgres-master") is None
+    assert not ledger.runtime_token_valid(handle.run_id, handle.attempt_id, SECRET)
+    row = (
+        sqlite3.connect(ledger.path)
+        .execute("SELECT state FROM run_attempts WHERE attempt_id=?", (handle.attempt_id,))
+        .fetchone()
+    )
+    assert row == (MasterState.FAILED.value,)
 
 
 @pytest.mark.parametrize(

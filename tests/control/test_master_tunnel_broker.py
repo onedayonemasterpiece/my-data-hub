@@ -195,6 +195,24 @@ def test_deactivate_revokes_certificate_blanks_principal_and_terminates_account(
         )
 
 
+def test_deactivate_is_idempotent_before_tunnel_activation(tmp_path: Path) -> None:
+    broker, terminated, _ca = _broker(tmp_path)
+
+    for _ in range(2):
+        broker.deactivate(
+            master_instance_id=INSTANCE,
+            run_id=RUN_ID,
+            attempt_id=ATTEMPT_ID,
+            epoch=1,
+            reason="provider_terminal_failed",
+        )
+
+    state = json.loads(broker.state_path.read_text(encoding="utf-8"))
+    assert state["active"] is None
+    assert broker.principals_path.read_text(encoding="ascii") == ""
+    assert terminated == [DEFAULT_ACCOUNT, DEFAULT_ACCOUNT]
+
+
 def test_exact_serial_revocation_is_immediate_and_wrong_serial_is_only_denied(tmp_path: Path) -> None:
     broker, terminated, _ca = _broker(tmp_path)
     active = broker.activate(
