@@ -192,3 +192,36 @@ def test_operation_status_finds_an_older_unconsumed_master_request(tmp_path: Pat
     assert status["found"] is True
     assert status["operation_id"] == older.operation_id
     assert status["outcome"] == "WAITING_FOR_MASTER"
+
+
+def test_terminal_cold_start_allows_one_exact_next_epoch_request(tmp_path: Path) -> None:
+    ledger = ControlLedger(tmp_path / "terminal-retry.sqlite3")
+    resolver = LedgerMasterResolver(ledger)
+    first = resolver.ensure_master(identity(), intent="mcp-read:bloggers.statistics")
+    claimed = ledger.claim_master_request()
+    assert claimed is not None
+    first_identity = MasterCoordinator.identity_for(str(claimed["idempotency_key"]))
+    operation, created = ledger.ensure_master_operation(
+        operation_id=first_identity["operation_id"],
+        idempotency_key=str(claimed["idempotency_key"]),
+        intent={"test": "terminal cold start"},
+        identity=first_identity,
+    )
+    assert created and operation.operation_id == first.operation_id
+    ledger.transition_operation(
+        operation.operation_id,
+        expected_state=RuntimeMasterState.REQUESTED.value,
+        new_state=RuntimeMasterState.FAILED.value,
+        metadata={"failure_code": "provider_terminal"},
+    )
+    ledger.complete_master_request(str(claimed["request_id"]), operation.operation_id)
+
+    assert resolver.resolve_master(identity()).state is MasterState.ABSENT
+    retry = resolver.ensure_master(identity(), intent="mcp-read:bloggers.statistics")
+    duplicate = resolver.ensure_master(identity(), intent="mcp-read:bloggers.statistics")
+
+    assert retry.operation_id != first.operation_id
+    assert retry.operation_id == duplicate.operation_id
+    assert retry.duplicate is False
+    assert duplicate.duplicate is True
+    assert ledger.current_epoch("postgres-master") == 1

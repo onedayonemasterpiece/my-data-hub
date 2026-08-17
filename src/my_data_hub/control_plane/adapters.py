@@ -2475,7 +2475,15 @@ class LedgerMasterResolver(MasterResolver):
         return MasterSnapshot(state=MasterState.ABSENT)
 
     def ensure_master(self, principal: AccessIdentity, *, intent: str) -> EnsureMasterReceipt:
-        key = f"mcp:{principal.subject}:{intent}"
+        # A cold-start request is idempotent only for the epoch it is trying
+        # to allocate.  Reusing the bare semantic key after a terminal
+        # provider failure would replay the historical DONE bridge request
+        # and its FAILED operation forever while falsely reporting REQUESTED.
+        # The ledger epoch is allocated atomically by ensure_master_operation;
+        # until that happens concurrent callers observe the same target and
+        # therefore still collapse to one exact request.
+        target_epoch = self.ledger.current_epoch("postgres-master") + 1
+        key = f"mcp:{principal.subject}:{intent}:epoch:{target_epoch}"
         identity = MasterCoordinator.identity_for(key)
         request, created = self.ledger.request_master(
             request_id=hashlib.sha256(f"request:{key}".encode()).hexdigest(),
