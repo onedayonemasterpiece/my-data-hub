@@ -171,3 +171,5 @@ def test_master_bootstrap_accepts_the_pinned_archive_root_directory() -> None:
     )
 
     assert "(m.name != 'pgsql' and not m.name.startswith('pgsql/'))" in source
+    assert "_mdh_pathlib.Path('/tmp/mdh-postgresql-runtime')" in source
+    assert "/kaggle/working/mdh-postgresql-runtime" not in source

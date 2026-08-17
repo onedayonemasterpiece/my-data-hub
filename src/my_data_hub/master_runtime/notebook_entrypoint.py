@@ -71,7 +71,7 @@ MASTER_TERMINAL_OUTPUT_NAME = "my-data-hub-master-terminal.json"
 MASTER_TERMINAL_SCHEMA_VERSION = "my-data-hub-master-terminal.v1"
 MASTER_TERMINAL_MAX_BYTES = 256 * 1024
 POSTGRES_RUNTIME_LIBRARY_PATH = (
-    "/kaggle/working/mdh-postgresql-runtime/pgsql/lib:/kaggle/working/mdh-postgresql-runtime/pgsql/lib/runtime-deps"
+    "/tmp/mdh-postgresql-runtime/pgsql/lib:/tmp/mdh-postgresql-runtime/pgsql/lib/runtime-deps"
 )
 _MASTER_TERMINAL_EVENT_TYPES = (
     RuntimeEventType.RUNTIME_DRAINING,

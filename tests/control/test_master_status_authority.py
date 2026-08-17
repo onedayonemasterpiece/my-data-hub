@@ -344,6 +344,7 @@ def test_verified_head_is_in_status_config_and_attached_by_exact_numeric_version
     assert config["checkpoint_manifest_sha256"] == "c" * 64
     assert config["checkpoint_head_generation"] == 1
     assert config["checkpoint_directory"] is None
+    assert config["postgres_bin"] == "/tmp/mdh-postgresql-runtime/pgsql/bin"
     assert adapter.dataset_sources == (
         "owner/master-assets/1",
         f"owner/mdh-master-status-{UUID(handle.run_id).hex}/1",
