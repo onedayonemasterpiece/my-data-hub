@@ -488,8 +488,13 @@ def test_root_installer_is_explicitly_gated_and_does_not_add_listener_or_vpn(tmp
         "control.sock",
         "OnUnitActiveSec=5s",
         "systemctl reload ssh.service",
+        "RuntimeDirectory=$broker_runtime_directory",
+        "RuntimeDirectoryMode=0750",
+        "systemctl is-active --quiet my-data-hub-master-tunnel-broker.service",
+        "stat.S_ISSOCK",
     ):
         assert required in source
+    assert "ExecStartPre=/usr/bin/install -d" not in source
     lowered = source.casefold()
     assert "listenaddress" not in lowered
     assert "vpn" not in lowered
