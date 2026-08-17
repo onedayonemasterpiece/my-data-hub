@@ -229,3 +229,41 @@ def test_terminal_cold_start_allows_one_exact_next_epoch_request(tmp_path: Path)
     assert retry.duplicate is False
     assert duplicate.duplicate is True
     assert ledger.current_epoch("postgres-master") == 1
+
+
+def test_reconcile_consumes_bridge_request_for_already_terminal_operation(tmp_path: Path) -> None:
+    ledger = ControlLedger(tmp_path / "terminal-bridge-recovery.sqlite3")
+    resolver = LedgerMasterResolver(ledger)
+    first = resolver.ensure_master(identity(), intent="mcp-read:bloggers.statistics")
+    claimed = ledger.claim_master_request()
+    assert claimed is not None
+    exact = MasterCoordinator.identity_for(str(claimed["idempotency_key"]))
+    operation, created = ledger.ensure_master_operation(
+        operation_id=exact["operation_id"],
+        idempotency_key=str(claimed["idempotency_key"]),
+        intent={"test": "terminal bridge recovery"},
+        identity=exact,
+    )
+    assert created and operation.operation_id == first.operation_id
+    ledger.transition_operation(
+        operation.operation_id,
+        expected_state=RuntimeMasterState.REQUESTED.value,
+        new_state=RuntimeMasterState.FAILED.value,
+        metadata={"failure_code": "provider_terminal"},
+    )
+    # Simulate the control process dying after the operation became terminal
+    # but before the bridge request was acknowledged.  The expired claim is
+    # reclaimed on startup; it must not be released into an infinite retry.
+    ledger.release_master_request(str(claimed["request_id"]))
+
+    runtime = object.__new__(ControlPlaneMasterRuntime)
+    runtime.ledger = ledger
+    terminal = runtime.reconcile_requested_once()
+
+    assert terminal is not None
+    assert terminal.operation_id == first.operation_id
+    assert terminal.state is RuntimeMasterState.FAILED
+    request = ledger.master_request_by_operation_id(first.operation_id)
+    assert request is not None
+    assert request["state"] == "DONE"
+    assert resolver.resolve_master(identity()).state is MasterState.ABSENT

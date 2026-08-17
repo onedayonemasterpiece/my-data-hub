@@ -900,6 +900,23 @@ class ControlPlaneMasterRuntime:
         request = self.ledger.claim_master_request()
         if request is None:
             return None
+        existing = self.ledger.get_operation(str(request["operation_id"]))
+        if existing is not None and existing.state in {
+            MasterState.STOPPED.value,
+            MasterState.FAILED.value,
+            MasterState.FENCED.value,
+            MasterState.ORPHANED.value,
+        }:
+            # The provider lifecycle may become terminal immediately before a
+            # control-process restart, leaving its bridge request claimed but
+            # unacknowledged.  Replaying ``ensure`` cannot make that immutable
+            # operation non-terminal and used to release the request forever.
+            # Consume the recovered bridge so the resolver exposes ABSENT and
+            # the next cold call can allocate exactly one new epoch.
+            self.ledger.complete_master_request(
+                str(request["request_id"]), existing.operation_id
+            )
+            return self._handle(existing)
         try:
             handle, _duplicate = self.ensure(str(request["idempotency_key"]))
             if handle.operation_id != str(request["operation_id"]):
