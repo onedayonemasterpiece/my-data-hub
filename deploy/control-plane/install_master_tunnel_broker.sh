@@ -103,7 +103,8 @@ for tunnel_account in "$account" "$worker_account"; do
   usermod --shell /usr/sbin/nologin --password '*' "$tunnel_account"
   install -d -o "$tunnel_account" -g "$tunnel_account" -m 0700 "$tunnel_home"
 done
-install -d -o root -g root -m 0700 "$state_root" "$(dirname "$ca_private")"
+install -d -o root -g root -m 0711 "$state_root"
+install -d -o root -g root -m 0700 "$(dirname "$ca_private")"
 install -d -o root -g root -m 0755 "$(dirname "$broker_program")" "$(dirname "$sshd_fragment")" "$unit_root"
 install -o root -g root -m 0755 "$broker_source" "$broker_program"
 install -o root -g root -m 0644 "$broker_source" "$(dirname "$broker_ipc_program")/tunnel_broker.py"
@@ -253,7 +254,7 @@ if ! systemctl is-active --quiet my-data-hub-master-tunnel-broker.service; then
   echo "master tunnel broker service is not active" >&2
   exit 2
 fi
-if ! python3 - "$broker_socket" "$control_gid" <<'PY'
+if ! python3 - "$broker_socket" "$control_gid" "$state_root" <<'PY'
 import os
 from pathlib import Path
 import stat
@@ -262,6 +263,7 @@ import time
 
 socket_path = Path(sys.argv[1])
 expected_gid = int(sys.argv[2])
+state_root = Path(sys.argv[3])
 deadline = time.monotonic() + 5.0
 while time.monotonic() < deadline:
     try:
@@ -288,6 +290,30 @@ if (
     or stat.S_IMODE(parent.st_mode) != 0o750
 ):
     raise SystemExit("master tunnel broker runtime directory violates its owner/mode contract")
+
+state_directory = state_root.lstat()
+if (
+    not stat.S_ISDIR(state_directory.st_mode)
+    or state_directory.st_uid != 0
+    or state_directory.st_gid != 0
+    or stat.S_IMODE(state_directory.st_mode) != 0o711
+):
+    raise SystemExit("master tunnel broker state directory violates its searchable owner/mode contract")
+for name, mode in (
+    ("authorized_principals", 0o644),
+    ("authorized_worker_principals", 0o644),
+    ("revoked.krl", 0o644),
+    ("state.json", 0o600),
+    ("broker.lock", 0o600),
+):
+    item = (state_root / name).lstat()
+    if (
+        not stat.S_ISREG(item.st_mode)
+        or item.st_uid != 0
+        or item.st_gid != 0
+        or stat.S_IMODE(item.st_mode) != mode
+    ):
+        raise SystemExit(f"master tunnel broker state file violates its owner/mode contract: {name}")
 PY
 then
   systemctl status my-data-hub-master-tunnel-broker.service --no-pager -l >&2 || true

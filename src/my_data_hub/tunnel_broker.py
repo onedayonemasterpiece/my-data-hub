@@ -478,10 +478,14 @@ class TunnelBroker:
         return completed
 
     def _lock(self) -> Any:
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # sshd opens AuthorizedPrincipalsFile after temporarily switching to
+        # the dedicated tunnel UID.  Keep the root-owned directory
+        # non-listable/non-writable but searchable so those public 0644 files
+        # are reachable; state.json, locks and CA material remain 0600.
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o711)
         if self.root.is_symlink() or not self.root.is_dir():
             raise TunnelBrokerError("broker root must remain a non-symlink directory")
-        os.chmod(self.root, 0o700)
+        os.chmod(self.root, 0o711)
         stream = self.lock_path.open("a+b")
         os.chmod(self.lock_path, 0o600)
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
