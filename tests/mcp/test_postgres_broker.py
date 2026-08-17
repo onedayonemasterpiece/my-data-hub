@@ -7,6 +7,7 @@ from uuid import UUID
 
 import pytest
 
+from my_data_hub.control_plane.runtime import SessionCredential
 from my_data_hub.mcp.contracts import ExecutionLimits, SessionRequest
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.mcp.postgres_broker import (
@@ -68,6 +69,26 @@ def test_private_epoch_credential_round_trip_and_exact_binding(tmp_path) -> None
         source.load(request(epoch=8))
     with pytest.raises(SessionBrokerError, match="absent"):
         PostgresMasterSessionBroker(source).issue_session(request(role="operator"))
+
+
+def test_production_registrar_accepts_control_plane_session_credential(tmp_path) -> None:
+    """The runtime endpoint and the on-disk registrar share one validation contract."""
+
+    root = tmp_path / "sessions"
+    source = DirectoryEpochCredentialSource(root)
+    value = credential()
+    stored = source.store(
+        SessionCredential(
+            master_instance_id=value.master_instance_id,
+            epoch=value.epoch,
+            role=value.role,
+            database_url=value.database_url,
+            expires_at=value.expires_at,
+        )
+    )
+
+    assert stored.stat().st_mode & 0o077 == 0
+    assert source.load(request()).database_url == value.database_url
 
 
 def test_epoch_credential_rejects_expiry_non_tls_and_non_loopback(tmp_path) -> None:  # type: ignore[no-untyped-def]

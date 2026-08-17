@@ -199,6 +199,26 @@ class SessionCredential:
     database_url: str = field(repr=False)
     expires_at: Any
 
+    def validate_binding(
+        self, *, master_instance_id: str, epoch: int, role: str, now: datetime
+    ) -> None:
+        """Use the registrar's canonical epoch/TLS validation at the runtime boundary."""
+
+        from my_data_hub.mcp.postgres_broker import EpochDatabaseCredential
+
+        EpochDatabaseCredential(
+            master_instance_id=self.master_instance_id,
+            epoch=self.epoch,
+            role=self.role,
+            database_url=self.database_url,
+            expires_at=self.expires_at,
+        ).validate_binding(
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            role=role,
+            now=now,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class MasterRuntimeSettings:
