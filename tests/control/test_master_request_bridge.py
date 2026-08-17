@@ -4,13 +4,22 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from my_data_hub.control_plane.adapters import LedgerControlReader, LedgerMasterResolver
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.control_plane.runtime import ControlPlaneMasterRuntime, MasterRuntimeSettings
 from my_data_hub.mcp.contracts import MasterState
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.mcp.service import HubService
-from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator
+from my_data_hub.orchestrator.master import (
+    FakeKaggleRuntime,
+    MasterCoordinator,
+    MasterHandle,
+)
+from my_data_hub.orchestrator.master import (
+    MasterState as RuntimeMasterState,
+)
 from my_data_hub.providers.kaggle import KaggleMasterLaunchAssets
 
 
@@ -117,6 +126,56 @@ def test_mcp_cold_start_request_is_durably_bridged_to_one_provider_run(
         "operation.get", {"operation_id": first_operation_id}, identity()
     )
     assert operation["state"] == "ACTIVE"
+
+
+def test_requested_provider_projection_keeps_cold_start_request_reconcilable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = ControlLedger(tmp_path / "control.sqlite3")
+    runtime = object.__new__(ControlPlaneMasterRuntime)
+    runtime.ledger = ledger
+    resolver = LedgerMasterResolver(ledger)
+    waiting = asyncio.run(
+        HubService(resolver, fallback_identity=identity()).invoke(
+            "bloggers.search", {"project_slug": "region-talk", "query": "cold"}
+        )
+    )
+    operation = ledger.get_operation(str(waiting["operation_id"]))
+    assert operation is None
+
+    def requested_once(_runtime: ControlPlaneMasterRuntime, idempotency_key: str):
+        exact = MasterCoordinator.identity_for(idempotency_key)
+        operation, duplicate = ledger.ensure_master_operation(
+            operation_id=exact["operation_id"],
+            idempotency_key=idempotency_key,
+            intent={"test": True},
+            identity=exact,
+        )
+        durable = operation.identity
+        return MasterHandle(
+            operation_id=operation.operation_id,
+            run_id=str(durable["run_id"]),
+            attempt_id=str(durable["attempt_id"]),
+            service_instance_id=str(durable["service_instance_id"]),
+            master_instance_id=str(durable["master_instance_id"]),
+            epoch=int(durable["epoch"]),
+            state=RuntimeMasterState.REQUESTED,
+        ), duplicate
+
+    monkeypatch.setattr(ControlPlaneMasterRuntime, "ensure", requested_once)
+    first = runtime.reconcile_requested_once()
+    assert first is not None and first.state is RuntimeMasterState.REQUESTED
+    request = ledger.master_request_by_operation_id(first.operation_id)
+    assert request is not None
+    assert request["state"] == "PENDING"
+    assert request["attempts"] == 1
+
+    second = runtime.reconcile_requested_once()
+    assert second is not None and second.operation_id == first.operation_id
+    request = ledger.master_request_by_operation_id(first.operation_id)
+    assert request is not None
+    assert request["state"] == "PENDING"
+    assert request["attempts"] == 2
 
 
 def test_operation_status_finds_an_older_unconsumed_master_request(tmp_path: Path) -> None:

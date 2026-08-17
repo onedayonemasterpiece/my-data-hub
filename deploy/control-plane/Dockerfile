@@ -6,7 +6,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app
 
 RUN useradd --create-home --uid 10001 mdh \
-    && install -d -o mdh -g mdh -m 0700 /state
+    # Production Compose deliberately replaces the image user with the
+    # owning host UID and mounts private 0700 state directories below this
+    # path.  The mount-point parent must therefore be traversable without
+    # making any mounted state listable or readable.
+    && install -d -o mdh -g mdh -m 0711 /state
 
 WORKDIR /app
 COPY pyproject.toml README.md ./

@@ -21,6 +21,7 @@ def test_control_plane_image_includes_all_wheel_force_include_roots() -> None:
     source = DOCKERFILE.read_text(encoding="utf-8")
     assert "COPY sql ./sql" in source
     assert "COPY schemas ./schemas" in source
+    assert "install -d -o mdh -g mdh -m 0711 /state" in source
 
 
 def provider_oauth_client_probe_source() -> str:

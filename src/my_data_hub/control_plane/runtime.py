@@ -903,6 +903,14 @@ class ControlPlaneMasterRuntime:
             handle, _duplicate = self.ensure(str(request["idempotency_key"]))
             if handle.operation_id != str(request["operation_id"]):
                 raise RuntimeError("master request operation identity differs from coordinator")
+            # A real provider effect can be durable while its local
+            # post-effect projection is not yet recoverable (for example,
+            # after response loss).  REQUESTED is therefore not a consumed
+            # bridge request: release it so the bounded reconcile loop keeps
+            # driving the same operation instead of stranding it forever.
+            if handle.state is MasterState.REQUESTED:
+                self.ledger.release_master_request(str(request["request_id"]))
+                return handle
             self.ledger.complete_master_request(str(request["request_id"]), handle.operation_id)
             return handle
         except Exception:
