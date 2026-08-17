@@ -87,7 +87,7 @@ def _payload() -> dict[str, object]:
     }
 
 
-def test_bootstrap_superuser_installs_only_required_extensions_before_owner_role(
+def test_bootstrap_superuser_executes_the_reviewed_password_free_role_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     statements: list[str] = []
@@ -119,19 +119,14 @@ def test_bootstrap_superuser_installs_only_required_extensions_before_owner_role
         lambda database_url, *, autocommit: Connection(),
     )
 
-    _bootstrap_owner("postgresql:///postgres")
+    bootstrap_sql = (Path(__file__).parents[2] / "sql/admin/bootstrap_roles.sql").read_text()
+    _bootstrap_owner("postgresql:///postgres", bootstrap_sql)
 
-    assert statements[:4] == [
-        "CREATE EXTENSION IF NOT EXISTS pgcrypto",
-        "CREATE EXTENSION IF NOT EXISTS citext",
-        "CREATE EXTENSION IF NOT EXISTS vector",
-        "CREATE EXTENSION IF NOT EXISTS pg_trgm",
-    ]
-    assert statements[4].startswith("DO $$ BEGIN IF NOT EXISTS")
-    assert statements[5:] == [
-        "GRANT mdh_owner TO postgres",
-        "GRANT CREATE,TEMPORARY ON DATABASE postgres TO mdh_owner",
-    ]
+    assert statements == [" ".join(bootstrap_sql.split())]
+    assert "CREATE EXTENSION IF NOT EXISTS vector" in statements[0]
+    assert "mdh_master_controller" in statements[0]
+    assert "mdh_blogger_materializer" in statements[0]
+    assert "PASSWORD" not in statements[0]
 
 
 def test_master_notebook_config_requires_exact_fields_and_source_binding(tmp_path: Path) -> None:

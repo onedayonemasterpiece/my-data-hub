@@ -1610,27 +1610,14 @@ def _wait_for_activation(
     raise TimeoutError("control plane did not activate the exact master epoch")
 
 
-def _bootstrap_owner(database_url: str) -> None:
+def _bootstrap_owner(database_url: str, bootstrap_sql: str) -> None:
+    if not bootstrap_sql.strip() or len(bootstrap_sql.encode()) > 131_072:
+        raise RuntimeError("bootstrap role contract is absent or exceeds its bound")
     with psycopg.connect(database_url, autocommit=True) as connection, connection.cursor() as cursor:
-        # The migration runner deliberately assumes the bounded NOLOGIN,
-        # NOSUPERUSER owner role.  Install the four reviewed capabilities
-        # while this local bootstrap connection is still the isolated
-        # ``postgres`` superuser; subsequent migrations only observe the
-        # already-present extensions through idempotent declarations.
-        for statement in (
-            "CREATE EXTENSION IF NOT EXISTS pgcrypto",
-            "CREATE EXTENSION IF NOT EXISTS citext",
-            "CREATE EXTENSION IF NOT EXISTS vector",
-            "CREATE EXTENSION IF NOT EXISTS pg_trgm",
-        ):
-            cursor.execute(statement)
-        cursor.execute(
-            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='mdh_owner') THEN "
-            "CREATE ROLE mdh_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT "
-            "NOREPLICATION NOBYPASSRLS; END IF; END $$"
-        )
-        cursor.execute("GRANT mdh_owner TO postgres")
-        cursor.execute("GRANT CREATE,TEMPORARY ON DATABASE postgres TO mdh_owner")
+        # This is the only local privileged SQL boundary.  The reviewed file
+        # creates password-free NOLOGIN group roles and the four exact
+        # extensions required before owner-scoped append-only migrations.
+        cursor.execute(bootstrap_sql)
 
 
 def run_master(
@@ -1764,7 +1751,10 @@ def run_master(
         supervisor.write_configuration()
 
     def apply_migrations() -> None:
-        _bootstrap_owner(database_url)
+        bootstrap_role_resource = files("my_data_hub.master_runtime").joinpath(
+            "sql/admin/bootstrap_roles.sql"
+        )
+        _bootstrap_owner(database_url, bootstrap_role_resource.read_text(encoding="utf-8"))
         migration_resource = files("my_data_hub.master_runtime").joinpath("sql/migrations")
         with as_file(migration_resource) as directory:
             migrate(database_url, directory)
