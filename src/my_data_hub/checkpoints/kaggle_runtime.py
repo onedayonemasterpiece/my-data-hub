@@ -1376,8 +1376,15 @@ def _reject_notebook_kaggle_credentials() -> None:
         "KAGGLE_API_V1_TOKEN",
         "KAGGLE_ACCESS_TOKEN",
     )
-    if any(os.environ.get(name, "").strip() for name in forbidden_environment):
-        raise CheckpointRuntimeError("Kaggle lifecycle credentials are forbidden in the master Notebook")
+    present_environment = sorted(
+        name for name in forbidden_environment if os.environ.get(name, "").strip()
+    )
+    if present_environment:
+        # Names are public contract identifiers; values remain undisclosed.
+        raise CheckpointRuntimeError(
+            "Kaggle lifecycle credential environment is forbidden in the master Notebook: "
+            + ",".join(present_environment)
+        )
     home = Path(os.environ.get("HOME", "~")).expanduser()
     forbidden_files = (home / ".kaggle" / "kaggle.json", home / ".kaggle" / "access_token")
     if any(path.exists() for path in forbidden_files):

@@ -98,7 +98,7 @@ def test_master_checkpoint_runtime_rejects_every_kaggle_lifecycle_credential(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv(name, "must-not-enter-master")
-    with pytest.raises(CheckpointRuntimeError, match="forbidden in the master Notebook"):
+    with pytest.raises(CheckpointRuntimeError, match=rf"forbidden in the master Notebook: {name}"):
         _reject_notebook_kaggle_credentials()
 
 
