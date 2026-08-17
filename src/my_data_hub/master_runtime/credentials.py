@@ -149,5 +149,14 @@ class CredentialProvisioner:
             raise ValueError("invalid broker principal")
         with self.connection.cursor() as cursor:
             cursor.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = %s", (principal,))
+            database_name = cursor.execute("SELECT current_database()").fetchone()[0]
+            # create() grants CONNECT directly because PostgreSQL checks it
+            # before the NOINHERIT LOGIN can SET ROLE.  A database ACL is a
+            # dependency of the LOGIN, so it must be removed before DROP ROLE.
+            cursor.execute(
+                sql.SQL("REVOKE CONNECT ON DATABASE {} FROM {}").format(
+                    sql.Identifier(database_name), sql.Identifier(principal)
+                )
+            )
             cursor.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(principal)))
         self.connection.commit()
