@@ -501,6 +501,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def release_asset_dataset_ref(owner: str, source_commit: str) -> str:
+    """Return a release-scoped immutable Dataset ref within Kaggle's slug bound."""
+
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or not re.fullmatch(r"[a-f0-9]{40}", source_commit):
+        raise ValueError("release asset Dataset identity is invalid")
+    return f"{owner}/mdh-master-assets-{source_commit[:32]}"
+
+
 def main() -> int:
     args = parse_args()
     root = Path(__file__).resolve().parents[2]
@@ -512,7 +520,7 @@ def main() -> int:
         root=root,
         output=args.output.expanduser().resolve(),
         source_commit=commit,
-        launch_dataset_ref=f"{owner}/my-data-hub-master-assets",
+        launch_dataset_ref=release_asset_dataset_ref(owner, commit),
         master_notebook_ref=f"{owner}/my-data-hub-postgres-master",
         checkpoint_dataset_ref=f"{owner}/my-data-hub-checkpoints",
         checkpoint_verifier_ref=f"{owner}/my-data-hub-checkpoint-verifier",

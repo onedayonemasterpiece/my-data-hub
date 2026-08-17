@@ -24,6 +24,14 @@ digest-pinned, both upstream archives are SHA-256 pinned, pgvector disables host
 outside Git and must match the explicit CLI digest; the known-host file must already use
 OpenSSH hashed-host syntax.
 
+Each build also derives a release-scoped private Dataset slug
+`mdh-master-assets-<first-32-hex-of-commit>`. This prevents a new reviewed release from
+trying to recreate a different package under the preceding release's immutable Dataset
+ref. The full source commit and every byte hash remain authoritative in the bundle and
+provider receipts; the bounded slug prefix is only the provider locator. Repeated master
+starts for the same release reuse the exact numeric Dataset claim after a fresh private
+readback and never create a duplicate version.
+
 ## Offline E5/BGE dependency closure
 
 `scripts/provider/assets/embedding-worker-wheel-lock.v1.json` is the canonical source

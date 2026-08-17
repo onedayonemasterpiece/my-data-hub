@@ -10,10 +10,17 @@ from jsonschema import Draft202012Validator
 
 from scripts.provider import build_master_assets as build_module
 from scripts.provider import verify_master_assets as verify_module
-from scripts.provider.build_master_assets import AssetBundleError, build_bundle
+from scripts.provider.build_master_assets import AssetBundleError, build_bundle, release_asset_dataset_ref
 from scripts.provider.verify_master_assets import AssetVerificationError, verify_bundle
 
 COMMIT = "1" * 40
+
+
+def test_release_asset_dataset_ref_is_commit_scoped_and_kaggle_bounded() -> None:
+    ref = release_asset_dataset_ref("owner", "0123456789abcdef" * 2 + "01234567")
+
+    assert ref == "owner/mdh-master-assets-0123456789abcdef0123456789abcdef"
+    assert len(ref.split("/", 1)[1]) == 50
 
 
 @pytest.fixture(autouse=True)
