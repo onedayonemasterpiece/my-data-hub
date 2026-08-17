@@ -178,3 +178,20 @@ def test_master_bootstrap_accepts_the_pinned_archive_root_directory() -> None:
     traversable = source.index("_mdh_pg_root.chmod(0o755)")
     library_binding = source.index("_mdh_os.environ['LD_LIBRARY_PATH']")
     assert extracted < traversable < library_binding
+
+
+def test_master_bootstrap_makes_tls_parent_traversable_only_after_private_files() -> None:
+    source = _runtime_bootstrap(
+        {},
+        status_dataset_ref="owner/status",
+        status_config_sha256="a" * 64,
+        status_helper_sha256="b" * 64,
+        master_config_sha256="c" * 64,
+        secret_bindings={},
+    )
+
+    private_root = source.index("_mdh_tls_root.mkdir(mode=0o700")
+    private_file = source.index("_mdh_os.open(_mdh_tls_output")
+    postgres_traverse = source.index("_mdh_tls_root.chmod(0o711)")
+    known_hosts = source.index("_mdh_known_hosts =")
+    assert private_root < private_file < postgres_traverse < known_hosts

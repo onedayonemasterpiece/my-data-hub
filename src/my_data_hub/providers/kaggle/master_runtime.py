@@ -620,6 +620,11 @@ def _runtime_bootstrap(
         "    with _mdh_os.fdopen(_mdh_fd, 'wb') as _mdh_stream:\n"
         "        _mdh_stream.write(_mdh_tls_body)\n"
         "    _mdh_os.environ[_mdh_tls_env] = str(_mdh_tls_output)\n"
+        # PostgreSQL is deliberately executed as uid/gid 65534.  Keep the
+        # root-owned directory unlistable, but grant traversal after both
+        # mode-0600 files are complete; ``PostgresSupervisor`` subsequently
+        # chowns only those exact files to the restricted runtime identity.
+        "_mdh_tls_root.chmod(0o711)\n"
         "_mdh_known_hosts = _mdh_pathlib.Path(_mdh_values['MY_DATA_HUB_TUNNEL_KNOWN_HOSTS'])\n"
         "if _mdh_hashlib.sha256(_mdh_known_hosts.read_bytes()).hexdigest() != "
         "_mdh_values['MY_DATA_HUB_TUNNEL_KNOWN_HOSTS_SHA256']:\n"
