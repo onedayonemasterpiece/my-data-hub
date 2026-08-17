@@ -173,6 +173,11 @@ class PostgresConfig:
         return (
             "# Local bootstrap is socket-only and owned by the isolated notebook runtime; "
             "the tunnel reaches loopback TLS.\n"
+            # Physical base backups open a replication connection, which has
+            # no database name and therefore does not match ``local all``.
+            # Keep this authority socket-local and restricted to the bootstrap
+            # superuser used by the in-Notebook checkpoint creator.
+            "local replication postgres trust\n"
             "local all postgres trust\n"
             "local all all scram-sha-256\n"
             "hostnossl all all 0.0.0.0/0 reject\n"
