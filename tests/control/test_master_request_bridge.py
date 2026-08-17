@@ -94,6 +94,10 @@ def test_mcp_cold_start_request_is_durably_bridged_to_one_provider_run(
     assert handle is not None and handle.operation_id == first.operation_id
     assert handle.state.value == MasterState.REGISTERING.value
     assert runtime.reconcile_requested_once() is None
+    ongoing = runtime.reconcile_incomplete_once()
+    assert len(ongoing) == 1
+    assert ongoing[0].operation_id == first.operation_id
+    assert ongoing[0].state.value == MasterState.REGISTERING.value
     assert provider.physical_effect_counts == {
         "ensure_dataset": 1,
         "push_notebook": 1,

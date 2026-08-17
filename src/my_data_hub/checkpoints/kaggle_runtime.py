@@ -1366,8 +1366,11 @@ def _reject_notebook_kaggle_credentials() -> None:
     a checkpoint or contacting the control plane.
     """
 
+    # Kaggle itself exposes the account name as non-secret runtime metadata.
+    # A username alone cannot authenticate the SDK and must not make every
+    # official Notebook fail before bootstrap.  Reject every secret-bearing
+    # half of the supported credential modes (and credential files) instead.
     forbidden_environment = (
-        "KAGGLE_USERNAME",
         "KAGGLE_KEY",
         "KAGGLE_API_TOKEN",
         "KAGGLE_API_V1_TOKEN",

@@ -576,6 +576,11 @@ def create_app(
                 if master_runtime is not None:
                     with suppress(Exception):
                         await asyncio.to_thread(master_runtime.reconcile_requested_once)
+                        reconcile_incomplete = getattr(
+                            master_runtime, "reconcile_incomplete_once", None
+                        )
+                        if reconcile_incomplete is not None:
+                            await asyncio.to_thread(reconcile_incomplete)
                         reconcile_acceptance = getattr(master_runtime, "reconcile_acceptance_once", None)
                         if reconcile_acceptance is not None:
                             await asyncio.to_thread(reconcile_acceptance)

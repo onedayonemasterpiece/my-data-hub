@@ -918,6 +918,23 @@ class ControlPlaneMasterRuntime:
             self.ledger.release_master_request(str(request["request_id"]))
             raise
 
+    def reconcile_incomplete_once(self) -> list[MasterHandle]:
+        """Poll every admitted master lifecycle after its bridge request is consumed.
+
+        The request bridge is deliberately completed once all three launch
+        effects are durable.  The provider Notebook is still REGISTERING at
+        that point, so a separate bounded reconciliation pass must continue
+        observing its exact run for an authenticated callback or a terminal
+        provider result.
+        """
+
+        operations = self.ledger.incomplete_operations("ensure_master")
+        intents = {
+            operation.idempotency_key: self.intent(operation.idempotency_key)
+            for operation in operations
+        }
+        return self.coordinator.reconcile_all(intents)
+
     def reconcile_acceptance_once(self) -> dict[str, Any] | None:
         self.ledger.record_acceptance_consumer_heartbeat(self.acceptance_executor is not None)
         operations = [

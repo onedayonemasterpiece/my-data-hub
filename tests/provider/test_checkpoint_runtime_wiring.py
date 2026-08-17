@@ -91,7 +91,7 @@ def _verifier_assets(**updates: object) -> KaggleCheckpointVerifierAssets:
 
 @pytest.mark.parametrize(
     "name",
-    ["KAGGLE_USERNAME", "KAGGLE_KEY", "KAGGLE_API_TOKEN", "KAGGLE_API_V1_TOKEN", "KAGGLE_ACCESS_TOKEN"],
+    ["KAGGLE_KEY", "KAGGLE_API_TOKEN", "KAGGLE_API_V1_TOKEN", "KAGGLE_ACCESS_TOKEN"],
 )
 def test_master_checkpoint_runtime_rejects_every_kaggle_lifecycle_credential(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
@@ -100,6 +100,17 @@ def test_master_checkpoint_runtime_rejects_every_kaggle_lifecycle_credential(
     monkeypatch.setenv(name, "must-not-enter-master")
     with pytest.raises(CheckpointRuntimeError, match="forbidden in the master Notebook"):
         _reject_notebook_kaggle_credentials()
+
+
+def test_master_checkpoint_runtime_accepts_kaggle_platform_username_without_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KAGGLE_USERNAME", "platform-account-metadata")
+    for name in ("KAGGLE_KEY", "KAGGLE_API_TOKEN", "KAGGLE_API_V1_TOKEN", "KAGGLE_ACCESS_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+    _reject_notebook_kaggle_credentials()
 
 
 @pytest.mark.parametrize("relative", [".kaggle/kaggle.json", ".kaggle/access_token"])
