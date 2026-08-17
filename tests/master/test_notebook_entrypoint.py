@@ -24,6 +24,7 @@ from my_data_hub.master_runtime.notebook_entrypoint import (
     CheckpointShutdownError,
     NotebookMasterConfig,
     _activation_url,
+    _bootstrap_owner,
     _checkpoint_before_stop,
     _checkpoint_until_deadline,
     _cleanup_epoch_principals,
@@ -84,6 +85,53 @@ def _payload() -> dict[str, object]:
         "source_identity": "owner/postgres-master",
         "source_version": "1",
     }
+
+
+def test_bootstrap_superuser_installs_only_required_extensions_before_owner_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+
+    class Cursor:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def execute(self, statement):  # type: ignore[no-untyped-def]
+            statements.append(" ".join(str(statement).split()))
+            return self
+
+    class Connection:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        @staticmethod
+        def cursor() -> Cursor:
+            return Cursor()
+
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint.psycopg.connect",
+        lambda database_url, *, autocommit: Connection(),
+    )
+
+    _bootstrap_owner("postgresql:///postgres")
+
+    assert statements[:4] == [
+        "CREATE EXTENSION IF NOT EXISTS pgcrypto",
+        "CREATE EXTENSION IF NOT EXISTS citext",
+        "CREATE EXTENSION IF NOT EXISTS vector",
+        "CREATE EXTENSION IF NOT EXISTS pg_trgm",
+    ]
+    assert statements[4].startswith("DO $$ BEGIN IF NOT EXISTS")
+    assert statements[5:] == [
+        "GRANT mdh_owner TO postgres",
+        "GRANT CREATE,TEMPORARY ON DATABASE postgres TO mdh_owner",
+    ]
 
 
 def test_master_notebook_config_requires_exact_fields_and_source_binding(tmp_path: Path) -> None:

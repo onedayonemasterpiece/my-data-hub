@@ -1612,6 +1612,18 @@ def _wait_for_activation(
 
 def _bootstrap_owner(database_url: str) -> None:
     with psycopg.connect(database_url, autocommit=True) as connection, connection.cursor() as cursor:
+        # The migration runner deliberately assumes the bounded NOLOGIN,
+        # NOSUPERUSER owner role.  Install the four reviewed capabilities
+        # while this local bootstrap connection is still the isolated
+        # ``postgres`` superuser; subsequent migrations only observe the
+        # already-present extensions through idempotent declarations.
+        for statement in (
+            "CREATE EXTENSION IF NOT EXISTS pgcrypto",
+            "CREATE EXTENSION IF NOT EXISTS citext",
+            "CREATE EXTENSION IF NOT EXISTS vector",
+            "CREATE EXTENSION IF NOT EXISTS pg_trgm",
+        ):
+            cursor.execute(statement)
         cursor.execute(
             "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='mdh_owner') THEN "
             "CREATE ROLE mdh_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT "
