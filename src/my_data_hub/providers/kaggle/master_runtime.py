@@ -243,6 +243,19 @@ class KaggleMasterLaunchAssets:
         ):
             raise MasterLaunchContractError("tunnel known_hosts is not a reviewed hashed host-key asset")
 
+    def project_wheel(self) -> tuple[str, bytes]:
+        """Return the single top-level application wheel, excluding worker dependencies."""
+
+        names = sorted(
+            path
+            for path in self.dataset_files
+            if path.endswith(".whl") and "/" not in path
+        )
+        if len(names) != 1:
+            raise MasterLaunchContractError("master assets require one exact top-level project wheel")
+        name = names[0]
+        return name, self.dataset_files[name]
+
     def render_values(self, identity: Mapping[str, Any]) -> dict[str, str]:
         values = {
             "MY_DATA_HUB_CALLBACK_URL": self.callback_url,
@@ -285,10 +298,13 @@ class KaggleMasterLaunchAssets:
                 ),
             }
         )
-        wheels = sorted(path for path in self.dataset_files if path.endswith(".whl"))
-        if len(wheels) == 1:
-            values["MY_DATA_HUB_WHEEL_PATH"] = wheels[0]
-            values["MY_DATA_HUB_WHEEL_SHA256"] = hashlib.sha256(self.dataset_files[wheels[0]]).hexdigest()
+        try:
+            wheel_name, wheel = self.project_wheel()
+        except MasterLaunchContractError:
+            pass
+        else:
+            values["MY_DATA_HUB_WHEEL_PATH"] = wheel_name
+            values["MY_DATA_HUB_WHEEL_SHA256"] = hashlib.sha256(wheel).hexdigest()
         return values
 
 
@@ -577,9 +593,7 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
         checkpoint = identity.get("boot_checkpoint")
         if isinstance(checkpoint, Mapping) and checkpoint.get("kind") == "VERIFIED":
             refs.append(str(checkpoint["exact_version_ref"]))
-        wheel_names = sorted(name for name in self.assets.dataset_files if name.endswith(".whl"))
-        if len(wheel_names) != 1:
-            raise MasterLaunchContractError("master execution pins require one exact wheel")
+        _wheel_name, wheel = self.assets.project_wheel()
         return {
             "schema": contract["schema"],
             "notebook": contract["notebook"],
@@ -589,7 +603,7 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             "input_dataset_versions": refs,
             "immutable_asset_sha256s": {
                 "my_data_hub_wheel_sha256": hashlib.sha256(
-                    self.assets.dataset_files[wheel_names[0]]
+                    wheel
                 ).hexdigest(),
                 "primary_source_sha256": notebook["metadata"]["my_data_hub"]["primary_source_sha256"],
             },

@@ -258,7 +258,14 @@ def test_checkpoint_verifier_factory_uses_exact_verified_master_asset_claim(
     monkeypatch.setenv("MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE", str(key))
     base = assets()
     wheel_name = "my_data_hub-0.1.0-py3-none-any.whl"
-    launch = replace(base, dataset_files={**base.dataset_files, wheel_name: b"exact-wheel"})
+    launch = replace(
+        base,
+        dataset_files={
+            **base.dataset_files,
+            wheel_name: b"exact-wheel",
+            "embedding-worker-wheelhouse/dependency.whl": b"offline-dependency-wheel",
+        },
+    )
     ledger = ControlLedger(tmp_path / "verified-assets.sqlite3")
     journal = ControlLedgerKaggleJournal(ledger)
     operation_id = uuid4()

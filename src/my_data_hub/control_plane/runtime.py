@@ -57,6 +57,7 @@ from my_data_hub.providers.kaggle.credentials import kaggle_credentials_configur
 from my_data_hub.providers.kaggle.master_runtime import (
     POSTGRES_RUNTIME_ARCHIVE_NAME,
     POSTGRES_RUNTIME_MANIFEST_NAME,
+    MasterLaunchContractError,
 )
 from my_data_hub.providers.models import ControlClass, ProviderFingerprint, ProviderKind
 from my_data_hub.runtime_sdk import CANONICAL_RUNTIME_CALLBACK_URL
@@ -1070,10 +1071,12 @@ def _checkpoint_verifier_assets_from_verified_master_claim(
         version = int(claim["provider_version"])
     except (KeyError, TypeError, ValueError) as exc:
         raise MasterProviderUnavailable("master asset Dataset claim has no exact numeric version") from exc
-    wheels = tuple(sorted(name for name in assets.dataset_files if name.endswith(".whl")))
-    if version < 1 or len(wheels) != 1:
-        raise MasterProviderUnavailable("verified master assets lack one exact verifier wheel")
-    wheel = wheels[0]
+    try:
+        wheel, wheel_bytes = assets.project_wheel()
+    except MasterLaunchContractError as exc:
+        raise MasterProviderUnavailable("verified master assets lack one exact verifier wheel") from exc
+    if version < 1:
+        raise MasterProviderUnavailable("master asset Dataset claim has no exact numeric version")
     try:
         verifier_source = assets.dataset_files[assets.checkpoint_verifier_source_file]
         archive = assets.dataset_files[POSTGRES_RUNTIME_ARCHIVE_NAME]
@@ -1089,7 +1092,7 @@ def _checkpoint_verifier_assets_from_verified_master_claim(
         runtime_image_source_commit=assets.runtime_image_source_commit,
         runtime_python_series=assets.runtime_python_series,
         wheel_relative_path=wheel,
-        wheel_sha256=hashlib.sha256(assets.dataset_files[wheel]).hexdigest(),
+        wheel_sha256=hashlib.sha256(wheel_bytes).hexdigest(),
         postgres_runtime_archive_relative_path=POSTGRES_RUNTIME_ARCHIVE_NAME,
         postgres_runtime_archive_sha256=hashlib.sha256(archive).hexdigest(),
         postgres_runtime_manifest_relative_path=POSTGRES_RUNTIME_MANIFEST_NAME,

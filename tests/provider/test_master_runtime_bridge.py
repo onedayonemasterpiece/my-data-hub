@@ -226,6 +226,68 @@ def test_concrete_bridge_launches_dataset_notebook_and_run_once(tmp_path: Path) 
         replace(launch, callback_url="https://attacker.example/internal/runtime/events")
 
 
+def test_master_selects_the_root_project_wheel_when_dependency_wheelhouse_is_present() -> None:
+    launch = _launch()
+    project_name = "my_data_hub-0.1.0-py3-none-any.whl"
+    launch = replace(
+        launch,
+        dataset_files={
+            **launch.dataset_files,
+            project_name: b"project-wheel",
+            "embedding-worker-wheelhouse/dependency.whl": b"dependency-wheel",
+        },
+    )
+
+    assert launch.project_wheel() == (project_name, b"project-wheel")
+
+    pinned_source = json.dumps(
+        {
+            "cells": [],
+            "metadata": {
+                "my_data_hub": {
+                    "execution_pin_contract": {
+                        "schema": "pins.v1",
+                        "notebook": "postgres-master",
+                        "output_contract": "master.v1",
+                        "model": {},
+                        "privacy": "private",
+                        "resource_class": "orchestrator_protected",
+                        "cleanup_retention_policy": {},
+                    },
+                    "primary_source_sha256": "a" * 64,
+                }
+            },
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+    ).encode()
+    launch = replace(launch, notebook_source=pinned_source)
+    run_id = str(uuid4())
+    attempt_id = str(uuid4())
+    authority = SimpleNamespace(
+        master_status_dataset_authority=lambda _operation_id: {
+            "run_id": run_id,
+            "attempt_id": attempt_id,
+            "state": "READY",
+            "status_dataset": {"exact_version_ref": "owner/status/1"},
+        }
+    )
+    provider = KaggleMasterRuntimeProvider(FakeKaggleAdapter(), launch, status_authority=authority)  # type: ignore[arg-type]
+
+    pins = provider._execution_pins(
+        {
+            "operation_id": str(uuid4()),
+            "run_id": run_id,
+            "attempt_id": attempt_id,
+            "asset_dataset": {"provider_version": 1},
+        }
+    )
+    assert pins is not None
+    assert pins["immutable_asset_sha256s"]["my_data_hub_wheel_sha256"] == hashlib.sha256(
+        b"project-wheel"
+    ).hexdigest()
+
+
 def _launch() -> KaggleMasterLaunchAssets:
     return KaggleMasterLaunchAssets(
         source_identity="owner/postgres-master",
