@@ -64,14 +64,14 @@ from .bootstrap import BootstrapRequest, MasterBootstrap
 from .contracts import BootSource, MasterIdentity, MasterPaths
 from .credentials import CredentialProvisioner, LoginPolicy
 from .database_gate import DatabaseGate
-from .postgres import PostgresBinaries, PostgresConfig, PostgresSupervisor
+from .postgres import PostgresBinaries, PostgresConfig, PostgresSupervisor, SubprocessRunner
 from .tunnel import ReverseTunnelSpec, TunnelSupervisor
 
 MASTER_TERMINAL_OUTPUT_NAME = "my-data-hub-master-terminal.json"
 MASTER_TERMINAL_SCHEMA_VERSION = "my-data-hub-master-terminal.v1"
 MASTER_TERMINAL_MAX_BYTES = 256 * 1024
 POSTGRES_RUNTIME_LIBRARY_PATH = (
-    "/tmp/mdh-postgresql-runtime/pgsql/lib:/tmp/mdh-postgresql-runtime/pgsql/lib/runtime-deps"
+    "/opt/mdh-postgresql-runtime/pgsql/lib:/opt/mdh-postgresql-runtime/pgsql/lib/runtime-deps"
 )
 _MASTER_TERMINAL_EVENT_TYPES = (
     RuntimeEventType.RUNTIME_DRAINING,
@@ -308,17 +308,15 @@ def validate_relocated_postgres_runtime(config: NotebookMasterConfig) -> None:
 
     if os.environ.get("LD_LIBRARY_PATH") != POSTGRES_RUNTIME_LIBRARY_PATH:
         raise RuntimeError("PostgreSQL runtime library path is not the exact relocated binding")
+    runner = SubprocessRunner()
     for name in ("initdb", "pg_ctl", "psql"):
         executable = config.postgres_bin / name
         if executable.is_symlink() or not executable.is_file() or not os.access(executable, os.X_OK):
             raise RuntimeError(f"relocated PostgreSQL tool is unavailable: {name}")
-        completed = subprocess.run(
+        completed = runner.run(
             [str(executable), "--version"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=os.environ.copy(),
+            timeout_seconds=10,
+            environment=os.environ.copy(),
         )
         if len(completed.stdout) > 4096 or "18.4" not in completed.stdout:
             raise RuntimeError(f"relocated PostgreSQL tool version differs: {name}")

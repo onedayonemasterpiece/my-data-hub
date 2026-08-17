@@ -171,5 +171,10 @@ def test_master_bootstrap_accepts_the_pinned_archive_root_directory() -> None:
     )
 
     assert "(m.name != 'pgsql' and not m.name.startswith('pgsql/'))" in source
-    assert "_mdh_pathlib.Path('/tmp/mdh-postgresql-runtime')" in source
+    assert "_mdh_pathlib.Path('/opt/mdh-postgresql-runtime')" in source
+    assert "/tmp/mdh-postgresql-runtime" not in source
     assert "/kaggle/working/mdh-postgresql-runtime" not in source
+    extracted = source.index("_mdh_tar.extractall(_mdh_pg_root")
+    traversable = source.index("_mdh_pg_root.chmod(0o755)")
+    library_binding = source.index("_mdh_os.environ['LD_LIBRARY_PATH']")
+    assert extracted < traversable < library_binding

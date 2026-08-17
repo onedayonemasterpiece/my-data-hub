@@ -585,11 +585,12 @@ def _runtime_bootstrap(
         "_mdh_pg_manifest.get('archive_sha256') != "
         "_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE_SHA256']:\n"
         "    raise RuntimeError('PostgreSQL runtime provenance differs')\n"
-        # Kaggle mounts /kaggle/working with no-exec semantics in committed
-        # Notebook runs.  The pinned PostgreSQL ELF runtime must live on the
-        # container's ephemeral executable filesystem; PGDATA remains under
-        # /kaggle/working and is still the only persisted runtime state.
-        "_mdh_pg_root = _mdh_pathlib.Path('/tmp/mdh-postgresql-runtime')\n"
+        # Kaggle's writable data/tmp mounts are noexec.  Its root Notebook can
+        # install packages on the executable container overlay, so keep the
+        # hash-bounded runtime in /opt and PGDATA separately under working/.
+        # The root-created directory becomes traverse-only for the restricted
+        # PostgreSQL uid after extraction.
+        "_mdh_pg_root = _mdh_pathlib.Path('/opt/mdh-postgresql-runtime')\n"
         "_mdh_pg_root.mkdir(mode=0o700, parents=True, exist_ok=False)\n"
         "with _mdh_tarfile.open(_mdh_archive, 'r:gz') as _mdh_tar:\n"
         "    _mdh_members = _mdh_tar.getmembers()\n"
@@ -601,9 +602,10 @@ def _runtime_bootstrap(
         "'..' in _mdh_pathlib.PurePosixPath(m.name).parts for m in _mdh_members):\n"
         "        raise RuntimeError('PostgreSQL runtime archive contains an unsafe member')\n"
         "    _mdh_tar.extractall(_mdh_pg_root, members=_mdh_members, filter='data')\n"
+        "_mdh_pg_root.chmod(0o755)\n"
         "_mdh_os.environ['LD_LIBRARY_PATH'] = "
-        "'/tmp/mdh-postgresql-runtime/pgsql/lib:"
-        "/tmp/mdh-postgresql-runtime/pgsql/lib/runtime-deps'\n"
+        "'/opt/mdh-postgresql-runtime/pgsql/lib:"
+        "/opt/mdh-postgresql-runtime/pgsql/lib/runtime-deps'\n"
         "_mdh_tls_root = _mdh_pathlib.Path('/kaggle/working/mdh-tls')\n"
         "_mdh_tls_root.mkdir(mode=0o700, parents=True, exist_ok=False)\n"
         "for _mdh_tls_name, _mdh_tls_hash, _mdh_tls_env in "
@@ -793,7 +795,7 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             "checkpoint_manifest_sha256": str(checkpoint["manifest_sha256"]) if verified else None,
             "checkpoint_head_generation": int(checkpoint["generation"]),
             "lease_seconds": 120,
-            "postgres_bin": "/tmp/mdh-postgresql-runtime/pgsql/bin",
+            "postgres_bin": "/opt/mdh-postgresql-runtime/pgsql/bin",
             "postgres_port": 15432,
             "tunnel_gateway_host": self.assets.tunnel_gateway_host,
             "tunnel_gateway_port": self.assets.tunnel_gateway_port,

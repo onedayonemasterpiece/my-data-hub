@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -139,6 +140,38 @@ def test_relocated_postgres_preflight_uses_exact_library_path_and_real_tools(
     monkeypatch.setenv("LD_LIBRARY_PATH", "/attacker")
     with pytest.raises(RuntimeError, match="exact relocated"):
         validate_relocated_postgres_runtime(config)
+
+
+def test_relocated_postgres_preflight_runs_as_the_restricted_postgres_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "master.json"
+    payload = _payload()
+    postgres_bin = tmp_path / "pgsql/bin"
+    postgres_bin.mkdir(parents=True)
+    payload["postgres_bin"] = str(postgres_bin)
+    config_path.write_text(json.dumps(payload))
+    config = NotebookMasterConfig.load(config_path)
+    for name in ("initdb", "pg_ctl", "psql"):
+        tool = postgres_bin / name
+        tool.write_text("fixture")
+        tool.chmod(0o700)
+    observed: list[tuple[str, ...]] = []
+
+    def run(_self, arguments, *, timeout_seconds, environment=None):  # type: ignore[no-untyped-def]
+        observed.append(tuple(arguments))
+        return subprocess.CompletedProcess(arguments, 0, f"{Path(arguments[0]).name} (PostgreSQL) 18.4\n", "")
+
+    monkeypatch.setenv("LD_LIBRARY_PATH", POSTGRES_RUNTIME_LIBRARY_PATH)
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.SubprocessRunner.run", run)
+
+    validate_relocated_postgres_runtime(config)
+
+    assert observed == [
+        (str(postgres_bin / "initdb"), "--version"),
+        (str(postgres_bin / "pg_ctl"), "--version"),
+        (str(postgres_bin / "psql"), "--version"),
+    ]
 
 
 def test_fm10_observed_directive_stays_suspended_when_ack_response_is_lost(
