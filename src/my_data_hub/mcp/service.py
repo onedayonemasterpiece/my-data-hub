@@ -693,6 +693,7 @@ class HubService:
                     role=role,
                     tool=tool,
                     limits=limits,
+                    canonical_revision=master.canonical_revision,
                 )
             )
         )

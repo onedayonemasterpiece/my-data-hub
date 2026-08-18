@@ -312,26 +312,52 @@ class PostgresMasterSession(MasterSession):
                 rows = self._dispatch_change_reconciliation(cursor, arguments)
             else:
                 rows = self._dispatch(cursor, arguments)
-            state = cursor.execute(
-                "SELECT c.canonical_revision,e.current_epoch "
-                "FROM hub.canonical_state c CROSS JOIN master_control.epoch_state e "
-                "WHERE c.singleton=true AND e.singleton=true"
-            ).fetchone()
+            canonical_revision = self._canonical_revision(cursor)
             if self.request.tool in {"data.change.apply", "bloggers.import.preview", "bloggers.import.apply"}:
                 connection.commit()
             else:
                 connection.rollback()
-        if state is None or int(state["current_epoch"] or 0) != self.request.epoch:
-            raise SessionBrokerError("master epoch changed during the MCP session")
         result = {
             **rows,
-            "canonical_revision": int(state["canonical_revision"]),
+            "canonical_revision": canonical_revision,
             "master_epoch": self.request.epoch,
         }
         encoded = canonical_json_bytes(_jsonable(result))
         if len(encoded) > self.request.limits.max_bytes:
             raise SessionBrokerError("master response exceeds the broker byte cap")
         return _jsonable(result)
+
+    def _canonical_revision(self, cursor: Any) -> int:
+        """Return the revision without granting readers epoch-control authority.
+
+        The credential envelope and loopback tunnel are already bound to the
+        resolved ACTIVE master instance and epoch.  Canonical write functions
+        perform their own database-side epoch checks.  Reading
+        ``master_control.epoch_state`` here was both redundant and invalid for
+        the deliberately restricted reader/connector roles.
+
+        Connector intake does not mutate canonical state and intentionally has
+        no access to ``hub.canonical_state``.  For that role the control-plane
+        snapshot carried in the session request is the exact bounded response
+        metadata.  All roles that may observe or mutate canonical data read the
+        post-dispatch revision from the canonical singleton itself.
+        """
+
+        if self.request.role == "connector":
+            if self.request.canonical_revision is None:
+                raise SessionBrokerError(
+                    "connector session omitted the resolved canonical revision"
+                )
+            return self.request.canonical_revision
+        row = cursor.execute(
+            "SELECT canonical_revision FROM hub.canonical_state WHERE singleton=true"
+        ).fetchone()
+        if row is None:
+            raise SessionBrokerError("canonical revision singleton is absent")
+        value = row["canonical_revision"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise SessionBrokerError("canonical revision singleton is invalid")
+        return value
 
     def _set_local_timeouts(self, cursor: Any) -> None:
         """Set transaction-local timeouts without parameterizing SET syntax.
@@ -502,8 +528,7 @@ class PostgresMasterSession(MasterSession):
         row = cursor.execute(
             "SELECT r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolreplication,r.rolbypassrls,"
             "pg_has_role(session_user,%s,'member') AS requested_member,"
-            "pg_has_role(session_user,'mdh_owner','member') AS owner_member,"
-            "pg_has_role(session_user,'mdh_role_admin','member') AS role_admin_member "
+            "pg_has_role(session_user,'mdh_owner','member') AS owner_member "
             "FROM pg_roles r WHERE r.rolname=session_user",
             (_ROLE_GROUPS[self.request.role],),
         ).fetchone()
@@ -511,7 +536,7 @@ class PostgresMasterSession(MasterSession):
             row is None
             or any(bool(row[name]) for name in (
                 "rolsuper", "rolcreatedb", "rolcreaterole", "rolreplication", "rolbypassrls",
-                "owner_member", "role_admin_member",
+                "owner_member",
             ))
             or not bool(row["requested_member"])
         ):

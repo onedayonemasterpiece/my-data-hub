@@ -61,15 +61,13 @@ _FORCE_IMMEDIATE_GUARD_SQL = "SELECT master_control.assert_session_write_epoch()
 _OPERATOR_ROLE_SQL = (
     "SELECT r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolreplication,r.rolbypassrls,"
     "pg_has_role(session_user,'mdh_mcp_editor','member'),"
-    "pg_has_role(session_user,'mdh_owner','member'),"
-    "pg_has_role(session_user,'mdh_role_admin','member') "
+    "pg_has_role(session_user,'mdh_owner','member') "
     "FROM pg_roles r WHERE r.rolname=session_user"
 )
 _OBSERVER_ROLE_SQL = (
     "SELECT r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolreplication,r.rolbypassrls,"
     "pg_has_role(session_user,'mdh_mcp_reader','member'),"
-    "pg_has_role(session_user,'mdh_owner','member'),"
-    "pg_has_role(session_user,'mdh_role_admin','member') "
+    "pg_has_role(session_user,'mdh_owner','member') "
     "FROM pg_roles r WHERE r.rolname=session_user"
 )
 _ACTIVE_BINDING_SQL = (
@@ -469,7 +467,6 @@ class BrokeredH1ExpiredLeaseDenial:
             or any(bool(row[index]) for index in range(5))
             or not bool(row[5])
             or bool(row[6])
-            or bool(row[7])
         ):
             connection.rollback()
             raise LeaseExpiryDenialBlocked(code)

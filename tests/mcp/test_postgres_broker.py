@@ -151,8 +151,9 @@ def test_restricted_login_rejects_superuser_or_wrong_group() -> None:
         def __init__(self, row):  # type: ignore[no-untyped-def]
             self.row = row
 
-        def execute(self, _statement, parameters=()):  # type: ignore[no-untyped-def]
+        def execute(self, statement, parameters=()):  # type: ignore[no-untyped-def]
             assert parameters == ("mdh_mcp_editor",)
+            assert "mdh_role_admin" not in statement
             return self
 
         def fetchone(self):  # type: ignore[no-untyped-def]
@@ -166,7 +167,6 @@ def test_restricted_login_rejects_superuser_or_wrong_group() -> None:
         "rolbypassrls": False,
         "requested_member": True,
         "owner_member": False,
-        "role_admin_member": False,
     }
     session._assert_restricted_login(Cursor(safe))
     with pytest.raises(SessionBrokerError, match="restricted role login"):
@@ -203,6 +203,42 @@ def test_session_timeouts_use_set_config_with_text_values() -> None:
             (f"{session.request.limits.timeout_ms}ms",),
         ),
     ]
+
+
+def test_session_revision_does_not_require_master_control_access() -> None:
+    session = PostgresMasterSession(request(), credential())
+
+    class Cursor:
+        statement = ""
+
+        def execute(self, statement, parameters=()):  # type: ignore[no-untyped-def]
+            assert not parameters
+            self.statement = statement
+            return self
+
+        def fetchone(self):  # type: ignore[no-untyped-def]
+            return {"canonical_revision": 13}
+
+    cursor = Cursor()
+    assert session._canonical_revision(cursor) == 13
+    assert "hub.canonical_state" in cursor.statement
+    assert "master_control" not in cursor.statement
+
+
+def test_connector_session_uses_resolved_revision_without_canonical_table_access() -> None:
+    connector_request = replace(
+        request(), role="connector", tool="submit_discovery_batch", canonical_revision=17
+    )
+    session = PostgresMasterSession(
+        connector_request,
+        replace(credential(), role="connector"),
+    )
+
+    class Cursor:
+        def execute(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("connector must not query canonical or epoch-control tables")
+
+    assert session._canonical_revision(Cursor()) == 17
 
 
 @pytest.mark.asyncio

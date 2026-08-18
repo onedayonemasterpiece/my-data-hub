@@ -116,6 +116,11 @@ class SessionRequest:
     role: str
     tool: str
     limits: ExecutionLimits
+    canonical_revision: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.canonical_revision is not None and self.canonical_revision < 0:
+            raise ValueError("session canonical revision must be non-negative")
 
 
 @runtime_checkable
