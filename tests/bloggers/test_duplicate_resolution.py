@@ -16,6 +16,7 @@ from my_data_hub.workloads.bloggers.importer import (
     _build_resolution_plan,
     _DuplicateClaim,
     _observe,
+    _should_apply_duplicate_resolutions,
 )
 from my_data_hub.workloads.bloggers.master_stage import (
     BLOGGER_REPLAY_STAGE_SCHEMA,
@@ -88,6 +89,38 @@ def test_resolution_requires_exact_members_and_explicit_canonical_target() -> No
             decided_by="owner-review:test",
             reason="Invalid ordering must fail closed.",
         )
+
+
+def test_explicit_resolution_is_eligible_on_fresh_or_quarantined_exact_snapshot() -> None:
+    resolutions = (object(),)
+    assert _should_apply_duplicate_resolutions(
+        has_duplicate_groups=True,
+        all_new=True,
+        all_replay=False,
+        prior_status="landing",
+        supplied_resolutions=resolutions,
+    )
+    assert _should_apply_duplicate_resolutions(
+        has_duplicate_groups=True,
+        all_new=False,
+        all_replay=True,
+        prior_status="rejected",
+        supplied_resolutions=resolutions,
+    )
+    assert not _should_apply_duplicate_resolutions(
+        has_duplicate_groups=True,
+        all_new=True,
+        all_replay=False,
+        prior_status="landing",
+        supplied_resolutions=(),
+    )
+    assert not _should_apply_duplicate_resolutions(
+        has_duplicate_groups=True,
+        all_new=False,
+        all_replay=True,
+        prior_status="accepted",
+        supplied_resolutions=resolutions,
+    )
 
 
 def test_existing_account_owner_must_be_selected_without_implicit_merge() -> None:

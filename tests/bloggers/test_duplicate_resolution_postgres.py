@@ -156,17 +156,61 @@ def test_duplicate_quarantine_explicit_resolution_and_exact_replay_are_lossless(
             )
             assert replay == resolved
 
+            fresh_rows = [
+                {
+                    **_row("blogger-003", "Второй канонический автор"),
+                    "telegram_url": "https://t.me/second_shared_identity",
+                },
+                {
+                    **_row("blogger-004", "Второй дубликат"),
+                    "telegram_url": "https://t.me/second_shared_identity",
+                },
+            ]
+            fresh_identity_hash = hashlib.sha256(
+                b"telegram\0https://t.me/second_shared_identity"
+            ).hexdigest()
+            fresh_canonical_actor = transform_row(
+                BloggerSourceRow.from_mapping(fresh_rows[0])
+            ).actor_id
+            fresh_resolution = DuplicateResolution(
+                identity_sha256=fresh_identity_hash,
+                canonical_record_id="blogger-003",
+                canonical_actor_id=fresh_canonical_actor,
+                member_record_ids=("blogger-003", "blogger-004"),
+                decided_by="owner-review:prior-epoch",
+                reason="A prior exact quarantine already established this duplicate group.",
+            )
+            fresh_resolved = BloggerSnapshotImporter().import_rows(
+                connection,
+                project_id=project_id,
+                snapshot_at=datetime(2026, 8, 12, tzinfo=UTC),
+                expected_row_count=2,
+                rows=fresh_rows,
+                source_code_revision="fixture",
+                duplicate_resolutions=(fresh_resolution,),
+            )
+            assert fresh_resolved.accounting_complete
+            assert fresh_resolved.actor_count == 1
+            assert fresh_resolved.duplicate_group_count == 1
+            assert fresh_resolved.duplicate_groups_pending == 0
+            assert fresh_resolved.export.dispositions["deduplicated"] == 1
+
         with psycopg.connect(database_url) as connection:
             assert connection.execute(
                 "SELECT count(*) FROM migration.raw_record"
-            ).fetchone()[0] == 2
+            ).fetchone()[0] == 4
             assert connection.execute(
                 "SELECT count(*) FROM migration.row_disposition WHERE disposition='quarantined'"
-            ).fetchone()[0] == 2
+            ).fetchone()[0] == 4
             assert connection.execute(
                 "SELECT array_agg(disposition ORDER BY disposition) "
                 "FROM migration.blogger_replay_disposition"
-            ).fetchone()[0] == ["deduplicated", "normalized"]
+            ).fetchone()[0] == [
+                "deduplicated",
+                "deduplicated",
+                "normalized",
+                "normalized",
+            ]
             assert connection.execute(
                 "SELECT duplicate_group_count,resolved_duplicate_group_count,duplicate_groups_pending "
                 "FROM migration.blogger_duplicate_accounting"
@@ -174,20 +218,20 @@ def test_duplicate_quarantine_explicit_resolution_and_exact_replay_are_lossless(
             assert connection.execute(
                 "SELECT count(*),count(DISTINCT target_pk->>'actor_id') "
                 "FROM migration.legacy_identity_map WHERE source_table='region_talk_external_blogger_evidence'"
-            ).fetchone() == (2, 1)
+            ).fetchone() == (4, 2)
             assert connection.execute(
                 "SELECT count(*) FROM region_talk.bloggers_ru_v1"
-            ).fetchone()[0] == 1
+            ).fetchone()[0] == 2
             assert connection.execute(
                 "SELECT count(*) FROM migration.blogger_replay"
-            ).fetchone()[0] == 1
+            ).fetchone()[0] == 2
             assert connection.execute(
                 "SELECT count(*) FROM sync.external_outbox "
                 "WHERE aggregate_type='blogger_import' AND effect_kind='verified_checkpoint_required'"
-            ).fetchone()[0] == 1
+            ).fetchone()[0] == 2
             assert connection.execute(
                 "SELECT schema_revision,canonical_revision FROM hub.canonical_state WHERE singleton"
-            ).fetchone() == (20, 1)
+            ).fetchone() == (21, 2)
             connection.execute("SET ROLE mdh_migration_operator")
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 connection.execute(
