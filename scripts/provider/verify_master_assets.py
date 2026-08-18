@@ -58,6 +58,15 @@ DEPENDENCY_IMAGE_DISTRIBUTIONS = [
     "typing-extensions",
 ]
 EMBEDDING_DEPENDENCY_SMOKE_RUNNER_NAME = "embedding-dependency-smoke.py"
+MASTER_YDB_DEPENDENCY_MANIFEST_NAME = "master-ydb-dependency.json"
+MASTER_YDB_WHEELHOUSE_NAME = "master-python-wheelhouse"
+MASTER_YDB_WHEEL_NAME = "ydb-3.31.2-py3-none-any.whl"
+MASTER_YDB_WHEEL_SHA256 = "043b91af7dab122e9ee24cb1948576f324dc9b6dbb45952d2e7c58d99e2c5ddb"
+MASTER_YDB_WHEEL_SOURCE_URL = (
+    "https://files.pythonhosted.org/packages/f4/2c/"
+    "0822896487b379b3dfce9011428728c3e22dcf311a29eacf5e47d203e182/"
+    "ydb-3.31.2-py3-none-any.whl"
+)
 
 
 class AssetVerificationError(RuntimeError):
@@ -242,6 +251,8 @@ def verify_bundle(
         "embedding_bge_worker",
         "embedding_dependency_manifest",
         "embedding_dependency_smoke_runner",
+        "master_ydb_dependency_manifest",
+        "master_ydb_wheel",
     }:
         raise AssetVerificationError("master asset inventory is invalid")
     expected_paths = {
@@ -254,6 +265,8 @@ def verify_bundle(
         "embedding_bge_worker": "dataset/bge-worker.json",
         "embedding_dependency_manifest": f"dataset/{EMBEDDING_DEPENDENCY_MANIFEST_NAME}",
         "embedding_dependency_smoke_runner": f"dataset/{EMBEDDING_DEPENDENCY_SMOKE_RUNNER_NAME}",
+        "master_ydb_dependency_manifest": f"dataset/{MASTER_YDB_DEPENDENCY_MANIFEST_NAME}",
+        "master_ydb_wheel": f"dataset/{MASTER_YDB_WHEELHOUSE_NAME}/{MASTER_YDB_WHEEL_NAME}",
     }
     verified_assets: dict[str, dict[str, object]] = {}
     for name, raw in assets.items():
@@ -395,6 +408,29 @@ def verify_bundle(
         != assets["embedding_dependency_smoke_runner"]["sha256"]
     ):
         raise AssetVerificationError("embedding dependency smoke runner differs from the release")
+    ydb_manifest_body = (bundle / str(assets["master_ydb_dependency_manifest"]["path"])).read_bytes()
+    try:
+        ydb_manifest: Any = json.loads(ydb_manifest_body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AssetVerificationError("master YDB dependency manifest is invalid JSON") from exc
+    ydb_wheel = assets["master_ydb_wheel"]
+    if (
+        ydb_manifest_body
+        != json.dumps(ydb_manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        or not isinstance(ydb_manifest, dict)
+        or set(ydb_manifest)
+        != {"schema_version", "index_url", "runtime", "version", "filename", "sha256", "source_url"}
+        or ydb_manifest.get("schema_version") != "my-data-hub-master-ydb-wheel-lock.v1"
+        or ydb_manifest.get("index_url") != "https://pypi.org/simple"
+        or ydb_manifest.get("runtime")
+        != {"python_abi": "cp312", "source_commit": KAGGLE_CPU_IMAGE_SOURCE_COMMIT}
+        or ydb_manifest.get("version") != "3.31.2"
+        or ydb_manifest.get("filename") != MASTER_YDB_WHEEL_NAME
+        or ydb_manifest.get("sha256") != MASTER_YDB_WHEEL_SHA256
+        or ydb_manifest.get("source_url") != MASTER_YDB_WHEEL_SOURCE_URL
+        or ydb_wheel.get("sha256") != MASTER_YDB_WHEEL_SHA256
+    ):
+        raise AssetVerificationError("master YDB dependency differs from the exact lock")
     for name in ("embedding_e5_worker", "embedding_bge_worker"):
         _verify_embedding_worker_asset(
             (bundle / str(assets[name]["path"])).read_bytes()
@@ -460,7 +496,7 @@ def verify_bundle(
     observed_files = {path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.is_file()}
     observed_directories = {path.relative_to(bundle).as_posix() for path in bundle.rglob("*") if path.is_dir()}
     if observed_files != expected_files or observed_directories != {
-        "dataset", f"dataset/{EMBEDDING_WHEELHOUSE_NAME}"
+        "dataset", f"dataset/{EMBEDDING_WHEELHOUSE_NAME}", f"dataset/{MASTER_YDB_WHEELHOUSE_NAME}"
     }:
         raise AssetVerificationError("master asset bundle contains unexpected paths")
     canonical_manifest = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")

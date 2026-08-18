@@ -21,7 +21,14 @@ from my_data_hub.providers.kaggle import (
     KaggleMasterRuntimeProvider,
     MasterLaunchContractError,
 )
-from my_data_hub.providers.kaggle.master_runtime import _runtime_bootstrap
+from my_data_hub.providers.kaggle.master_runtime import (
+    MASTER_YDB_DEPENDENCY_MANIFEST_NAME,
+    MASTER_YDB_VERSION,
+    MASTER_YDB_WHEEL_DIRECTORY,
+    MASTER_YDB_WHEEL_NAME,
+    MASTER_YDB_WHEEL_SOURCE_URL,
+    _runtime_bootstrap,
+)
 from my_data_hub.providers.kaggle.source_attestation import executable_source_sha256
 from my_data_hub.runtime_sdk import (
     KAGGLE_HARD_CAP_SECONDS,
@@ -369,13 +376,36 @@ def _launch() -> KaggleMasterLaunchAssets:
     )
 
 
-def test_master_status_delivers_bound_ydb_token_without_embedding_secret_in_source() -> None:
-    launch = replace(
-        _launch(),
+def _launch_with_ydb_dependency() -> KaggleMasterLaunchAssets:
+    launch = _launch()
+    wheel = b"exact-ydb-wheel"
+    manifest = {
+        "schema_version": "my-data-hub-master-ydb-wheel-lock.v1",
+        "index_url": "https://pypi.org/simple",
+        "runtime": {
+            "python_abi": "cp312",
+            "source_commit": launch.runtime_image_source_commit,
+        },
+        "version": MASTER_YDB_VERSION,
+        "filename": MASTER_YDB_WHEEL_NAME,
+        "sha256": hashlib.sha256(wheel).hexdigest(),
+        "source_url": MASTER_YDB_WHEEL_SOURCE_URL,
+    }
+    return replace(
+        launch,
+        dataset_files={
+            **launch.dataset_files,
+            MASTER_YDB_DEPENDENCY_MANIFEST_NAME: canonical_json_bytes(manifest),
+            f"{MASTER_YDB_WHEEL_DIRECTORY}/{MASTER_YDB_WHEEL_NAME}": wheel,
+        },
         ydb_endpoint="grpcs://ydb.serverless.yandexcloud.net:2135",
         ydb_database="/ru-central1/b1ghfk15fpug7mn5439l/etnkibjidis0o6stn2cq",
         ydb_reader_service_account_id="ajeri3qs6jbijih0bs5d",
     )
+
+
+def test_master_status_delivers_bound_ydb_token_without_embedding_secret_in_source() -> None:
+    launch = _launch_with_ydb_dependency()
     provider = KaggleMasterRuntimeProvider(object(), launch, ydb_access_token=YDB_TOKEN)  # type: ignore[arg-type]
     identity = {
         "operation_id": str(uuid4()),
@@ -408,6 +438,9 @@ def test_master_status_delivers_bound_ydb_token_without_embedding_secret_in_sour
     )
     assert YDB_TOKEN not in bootstrap
     assert "YDB_ACCESS_TOKEN_CREDENTIALS" in bootstrap
+    assert "pip','install','--no-index','--no-deps" in bootstrap
+    assert "__import__('ydb')" in bootstrap
+    assert json.loads(values["MY_DATA_HUB_MASTER_YDB_DEPENDENCY_JSON"])["version"] == "3.31.2"
     assert values["MY_DATA_HUB_YDB_READER_SERVICE_ACCOUNT_ID"] == "ajeri3qs6jbijih0bs5d"
 
 
@@ -416,6 +449,14 @@ def test_ydb_runtime_token_and_owner_pinned_configuration_are_all_or_nothing() -
         replace(_launch(), ydb_endpoint="grpcs://ydb.serverless.yandexcloud.net:2135")
     with pytest.raises(MasterLaunchContractError, match="binding is incomplete"):
         KaggleMasterRuntimeProvider(object(), _launch(), ydb_access_token=YDB_TOKEN)  # type: ignore[arg-type]
+
+    with pytest.raises(MasterLaunchContractError, match="dependency manifest is absent"):
+        replace(
+            _launch(),
+            ydb_endpoint="grpcs://ydb.serverless.yandexcloud.net:2135",
+            ydb_database="/ru-central1/b1ghfk15fpug7mn5439l/etnkibjidis0o6stn2cq",
+            ydb_reader_service_account_id="ajeri3qs6jbijih0bs5d",
+        )
 
 
 def _launch_with_offline_master_dependencies() -> KaggleMasterLaunchAssets:

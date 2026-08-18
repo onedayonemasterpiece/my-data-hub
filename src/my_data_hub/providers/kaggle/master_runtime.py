@@ -63,6 +63,16 @@ POSTGRES_TLS_KEY_NAME = "postgres-server.key"
 YDB_ACCESS_TOKEN_NAME = "ydb-access-token"
 PYTHON_DEPENDENCY_MANIFEST_NAME = "embedding-worker-dependencies.json"
 MASTER_PYTHON_DEPENDENCY_DISTRIBUTIONS = ("psycopg", "psycopg-binary")
+MASTER_YDB_DEPENDENCY_MANIFEST_NAME = "master-ydb-dependency.json"
+MASTER_YDB_WHEEL_DIRECTORY = "master-python-wheelhouse"
+MASTER_YDB_VERSION = "3.31.2"
+MASTER_YDB_WHEEL_NAME = "ydb-3.31.2-py3-none-any.whl"
+MASTER_YDB_WHEEL_SHA256 = "043b91af7dab122e9ee24cb1948576f324dc9b6dbb45952d2e7c58d99e2c5ddb"
+MASTER_YDB_WHEEL_SOURCE_URL = (
+    "https://files.pythonhosted.org/packages/f4/2c/"
+    "0822896487b379b3dfce9011428728c3e22dcf311a29eacf5e47d203e182/"
+    "ydb-3.31.2-py3-none-any.whl"
+)
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 POSTGRES_RUNTIME_RECIPE_SHA256 = "3fbcf52450dd44e3eb0eb7b826ebdb84a4293fbc54b713408083f10b44964d61"
 POSTGRESQL_SOURCE_URL = "https://ftp.postgresql.org/pub/source/v18.4/postgresql-18.4.tar.bz2"
@@ -206,6 +216,8 @@ class KaggleMasterLaunchAssets:
             or not re.fullmatch(r"aje[a-z0-9]{17}", self.ydb_reader_service_account_id or "")
         ):
             raise MasterLaunchContractError("YDB runtime configuration is not owner-pinned")
+        if all(ydb_values):
+            self.master_ydb_dependency()
 
     def _validate_runtime_assets(self) -> None:
         required = {
@@ -345,6 +357,51 @@ class KaggleMasterLaunchAssets:
             )
         return tuple(selected)
 
+    def master_ydb_dependency(self) -> dict[str, str]:
+        """Return the exact offline YDB SDK wheel used by the ACTIVE master."""
+
+        try:
+            body = self.dataset_files[MASTER_YDB_DEPENDENCY_MANIFEST_NAME]
+        except KeyError as exc:
+            raise MasterLaunchContractError("master YDB dependency manifest is absent") from exc
+        try:
+            manifest = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise MasterLaunchContractError("master YDB dependency manifest is invalid JSON") from exc
+        expected = {
+            "schema_version",
+            "index_url",
+            "runtime",
+            "version",
+            "filename",
+            "sha256",
+            "source_url",
+        }
+        wheel_path = f"{MASTER_YDB_WHEEL_DIRECTORY}/{MASTER_YDB_WHEEL_NAME}"
+        if (
+            body != canonical_json_bytes(manifest)
+            or not isinstance(manifest, dict)
+            or set(manifest) != expected
+            or manifest.get("schema_version") != "my-data-hub-master-ydb-wheel-lock.v1"
+            or manifest.get("index_url") != "https://pypi.org/simple"
+            or manifest.get("runtime")
+            != {"python_abi": "cp312", "source_commit": self.runtime_image_source_commit}
+            or manifest.get("version") != MASTER_YDB_VERSION
+            or manifest.get("filename") != MASTER_YDB_WHEEL_NAME
+            or not isinstance(manifest.get("sha256"), str)
+            or not _SHA256.fullmatch(str(manifest.get("sha256")))
+            or manifest.get("source_url") != MASTER_YDB_WHEEL_SOURCE_URL
+            or wheel_path not in self.dataset_files
+            or hashlib.sha256(self.dataset_files[wheel_path]).hexdigest() != manifest.get("sha256")
+        ):
+            raise MasterLaunchContractError("master YDB dependency differs from the reviewed artifact")
+        return {
+            "distribution": "ydb",
+            "version": MASTER_YDB_VERSION,
+            "filename": MASTER_YDB_WHEEL_NAME,
+            "sha256": str(manifest["sha256"]),
+        }
+
     def project_wheel(self) -> tuple[str, bytes]:
         """Return the single top-level application wheel, excluding worker dependencies."""
 
@@ -391,12 +448,20 @@ class KaggleMasterLaunchAssets:
             }
         )
         if self.ydb_endpoint is not None:
+            ydb_dependency = self.master_ydb_dependency()
             values.update(
                 {
                     "MY_DATA_HUB_YDB_ENDPOINT": self.ydb_endpoint,
                     "MY_DATA_HUB_YDB_DATABASE": str(self.ydb_database),
                     "MY_DATA_HUB_YDB_READER_SERVICE_ACCOUNT_ID": str(
                         self.ydb_reader_service_account_id
+                    ),
+                    "MY_DATA_HUB_YDB_DEPENDENCY_MANIFEST": MASTER_YDB_DEPENDENCY_MANIFEST_NAME,
+                    "MY_DATA_HUB_YDB_DEPENDENCY_MANIFEST_SHA256": hashlib.sha256(
+                        self.dataset_files[MASTER_YDB_DEPENDENCY_MANIFEST_NAME]
+                    ).hexdigest(),
+                    "MY_DATA_HUB_MASTER_YDB_DEPENDENCY_JSON": json.dumps(
+                        ydb_dependency, sort_keys=True, separators=(",", ":")
                     ),
                 }
             )
@@ -498,6 +563,7 @@ def _runtime_bootstrap(
         " ('MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST','MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST_SHA256',1048576),\n"
         " ('MY_DATA_HUB_TUNNEL_KNOWN_HOSTS','MY_DATA_HUB_TUNNEL_KNOWN_HOSTS_SHA256',65536),\n"
         " ('MY_DATA_HUB_PYTHON_DEPENDENCY_MANIFEST','MY_DATA_HUB_PYTHON_DEPENDENCY_MANIFEST_SHA256',1048576),\n"
+        " ('MY_DATA_HUB_YDB_DEPENDENCY_MANIFEST','MY_DATA_HUB_YDB_DEPENDENCY_MANIFEST_SHA256',16384),\n"
         " ('MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_PATH','MY_DATA_HUB_CHECKPOINT_VERIFIER_SOURCE_SHA256',4194304),\n"
         " ('MY_DATA_HUB_WHEEL_PATH','MY_DATA_HUB_WHEEL_SHA256',134217728)):\n"
         "    if _mdh_key in _mdh_values:\n"
@@ -537,6 +603,27 @@ def _runtime_bootstrap(
         "_mdh_dependency['sha256'],16777216)\n"
         "        _mdh_dependency_paths.append((_mdh_dependency,_mdh_dependency_path))\n"
         "        _mdh_asset_paths['dependency:'+_mdh_dependency['distribution']]=_mdh_dependency_path\n"
+        "_mdh_ydb_dependency_path=None\n"
+        "if 'MY_DATA_HUB_YDB_DEPENDENCY_MANIFEST' in _mdh_values:\n"
+        "    _mdh_ydb_manifest_path=_mdh_asset_paths['MY_DATA_HUB_YDB_DEPENDENCY_MANIFEST']\n"
+        "    _mdh_ydb_manifest_body=_mdh_ydb_manifest_path.read_bytes()\n"
+        "    _mdh_ydb_manifest=__import__('json').loads(_mdh_ydb_manifest_body)\n"
+        "    _mdh_ydb_dependency=__import__('json').loads("
+        "_mdh_values['MY_DATA_HUB_MASTER_YDB_DEPENDENCY_JSON'])\n"
+        "    if (_mdh_ydb_manifest_body != __import__('json').dumps(_mdh_ydb_manifest,sort_keys=True,"
+        "separators=(',',':'),ensure_ascii=False).encode() or "
+        "_mdh_ydb_manifest.get('schema_version') != 'my-data-hub-master-ydb-wheel-lock.v1' or "
+        "_mdh_ydb_manifest.get('runtime') != {'python_abi':'cp312','source_commit':"
+        "_mdh_values['MY_DATA_HUB_KAGGLE_RUNTIME_SOURCE_COMMIT']} or "
+        "not isinstance(_mdh_ydb_dependency,dict) or set(_mdh_ydb_dependency) != "
+        "{'distribution','filename','sha256','version'} or "
+        "_mdh_ydb_dependency.get('distribution') != 'ydb' or "
+        "any(_mdh_ydb_manifest.get(_key) != _mdh_ydb_dependency.get(_key) "
+        "for _key in ('filename','sha256','version'))):\n"
+        "        raise RuntimeError('master YDB dependency provenance differs')\n"
+        "    _mdh_ydb_dependency_path=_mdh_exact_file(_mdh_ydb_dependency['filename'],"
+        "_mdh_ydb_dependency['sha256'],16777216)\n"
+        "    _mdh_asset_paths['dependency:ydb']=_mdh_ydb_dependency_path\n"
         "_mdh_asset_roots={_mdh_input_root/_path.relative_to(_mdh_input_root).parts[0] "
         "for _path in _mdh_asset_paths.values()}\n"
         "if len(_mdh_asset_roots) != 1:\n"
@@ -604,6 +691,12 @@ def _runtime_bootstrap(
         "import psycopg as _mdh_psycopg\n"
         "if getattr(_mdh_psycopg.pq,'__impl__',None) != 'binary':\n"
         "    raise RuntimeError('master psycopg binary implementation is unavailable')\n"
+        "if _mdh_ydb_dependency_path is not None:\n"
+        "    _mdh_subprocess.run([_mdh_sys.executable,'-m','pip','install','--no-index','--no-deps',"
+        "'--disable-pip-version-check',str(_mdh_ydb_dependency_path)],check=True)\n"
+        "    if _mdh_metadata.version('ydb') != _mdh_ydb_dependency['version']:\n"
+        "        raise RuntimeError('master YDB dependency version differs after offline install')\n"
+        "    __import__('ydb')\n"
         "_mdh_archive = _mdh_pathlib.Path(_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE'])\n"
         "_mdh_manifest_path = _mdh_pathlib.Path(_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST'])\n"
         "if _mdh_hashlib.sha256(_mdh_archive.read_bytes()).hexdigest() != "

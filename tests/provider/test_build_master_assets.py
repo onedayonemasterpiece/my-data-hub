@@ -28,6 +28,12 @@ def _approved_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     digest = hashlib.sha256(b"exact-postgresql-runtime").hexdigest()
     monkeypatch.setattr(build_module, "APPROVED_POSTGRES_RUNTIME_SHA256", digest)
     monkeypatch.setattr(verify_module, "APPROVED_POSTGRES_RUNTIME_SHA256", digest)
+    monkeypatch.setattr(
+        build_module, "MASTER_YDB_WHEEL_SHA256", hashlib.sha256(b"exact-test-ydb-wheel").hexdigest()
+    )
+    monkeypatch.setattr(
+        verify_module, "MASTER_YDB_WHEEL_SHA256", hashlib.sha256(b"exact-test-ydb-wheel").hexdigest()
+    )
 
 
 def _root(tmp_path: Path) -> Path:
@@ -109,6 +115,26 @@ def _dependency_inputs(tmp_path: Path) -> tuple[Path, Path]:
     return wheelhouse, lock_path
 
 
+def _master_ydb_inputs(tmp_path: Path) -> tuple[Path, Path]:
+    wheel = tmp_path / build_module.MASTER_YDB_WHEEL_NAME
+    wheel.write_bytes(b"exact-test-ydb-wheel")
+    lock = {
+        "schema_version": "my-data-hub-master-ydb-wheel-lock.v1",
+        "index_url": "https://pypi.org/simple",
+        "runtime": {
+            "python_abi": "cp312",
+            "source_commit": build_module.KAGGLE_CPU_IMAGE_SOURCE_COMMIT,
+        },
+        "version": build_module.MASTER_YDB_VERSION,
+        "filename": build_module.MASTER_YDB_WHEEL_NAME,
+        "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+        "source_url": build_module.MASTER_YDB_WHEEL_SOURCE_URL,
+    }
+    lock_path = tmp_path / "master-ydb-wheel-lock.v1.json"
+    lock_path.write_text(json.dumps(lock, sort_keys=True, separators=(",", ":")))
+    return wheel, lock_path
+
+
 def _build(tmp_path: Path) -> tuple[Path, dict[str, object], Path]:
     root = _root(tmp_path)
     output = tmp_path / "bundle"
@@ -117,6 +143,7 @@ def _build(tmp_path: Path) -> tuple[Path, dict[str, object], Path]:
     known_hosts = tmp_path / "known_hosts"
     known_hosts.write_bytes(b"|1|aaaa|bbbb ssh-ed25519 AAAA\n")
     wheelhouse, dependency_lock = _dependency_inputs(tmp_path)
+    ydb_wheel, ydb_lock = _master_ydb_inputs(tmp_path)
     manifest = build_bundle(
         root=root,
         output=output,
@@ -131,6 +158,8 @@ def _build(tmp_path: Path) -> tuple[Path, dict[str, object], Path]:
         tunnel_known_hosts=known_hosts,
         embedding_wheelhouse=wheelhouse,
         embedding_dependency_lock=dependency_lock,
+        master_ydb_wheel=ydb_wheel,
+        master_ydb_dependency_lock=ydb_lock,
         wheel_builder=_wheel_builder,
     )
     return output, manifest, dependency_lock
@@ -164,7 +193,7 @@ def test_build_bundle_is_exact_secret_free_and_schema_valid(tmp_path: Path) -> N
         "schema_version": "my-data-hub-master-asset-bundle.v1",
         "source_commit": COMMIT,
         "manifest_sha256": hashlib.sha256((output / "master-asset-bundle.json").read_bytes()).hexdigest(),
-        "asset_count": 15,
+        "asset_count": 17,
         "verified": True,
     }
 
@@ -194,6 +223,7 @@ def test_build_bundle_rejects_ambiguous_identity(tmp_path: Path, field: str, val
         "wheel_builder": _wheel_builder,
     }
     arguments["embedding_wheelhouse"], arguments["embedding_dependency_lock"] = _dependency_inputs(tmp_path)
+    arguments["master_ydb_wheel"], arguments["master_ydb_dependency_lock"] = _master_ydb_inputs(tmp_path)
     Path(arguments["postgres_runtime_archive"]).write_bytes(b"exact-postgresql-runtime")
     Path(arguments["tunnel_known_hosts"]).write_bytes(b"|1|aaaa|bbbb ssh-ed25519 AAAA\n")
     arguments[field] = value
@@ -217,6 +247,7 @@ def test_build_bundle_refuses_source_checkout_output_and_nonempty_output(tmp_pat
         "wheel_builder": _wheel_builder,
     }
     common["embedding_wheelhouse"], common["embedding_dependency_lock"] = _dependency_inputs(tmp_path)
+    common["master_ydb_wheel"], common["master_ydb_dependency_lock"] = _master_ydb_inputs(tmp_path)
     Path(common["postgres_runtime_archive"]).write_bytes(b"exact-postgresql-runtime")
     Path(common["tunnel_known_hosts"]).write_bytes(b"|1|aaaa|bbbb ssh-ed25519 AAAA\n")
     with pytest.raises(AssetBundleError, match="outside"):
