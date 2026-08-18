@@ -323,6 +323,36 @@ def test_atomic_data_admission_rejects_drain_without_stranding_requests(tmp_path
         )
 
 
+def test_blogger_admission_allows_only_canonical_authorization_identifier_metadata(tmp_path: Path) -> None:
+    ledger, operation_id, _ = active_admission_ledger(tmp_path)
+    authorization_id = "44444444-4444-4444-8444-444444444444"
+
+    admitted, created = ledger.admit_blogger_migration_request(
+        request_id="blogger-replay-request",
+        operation_id=operation_id,
+        request_sha256="4" * 64,
+        request={
+            "schema_version": "blogger-replay-test",
+            "duplicate_resolution": {"authorization_id": authorization_id},
+        },
+    )
+
+    assert created is True
+    assert admitted["request"]["duplicate_resolution"]["authorization_id"] == authorization_id
+    for field, value in (
+        ("authorization_id", "Bearer secret-value"),
+        ("authorization", authorization_id),
+        ("authorization_header", authorization_id),
+    ):
+        with pytest.raises(EventRejected, match="secret-bearing field"):
+            ledger.admit_blogger_migration_request(
+                request_id=f"rejected-{field}",
+                operation_id=operation_id,
+                request_sha256="5" * 64,
+                request={"schema_version": "blogger-replay-test", field: value},
+            )
+
+
 def test_quarantine_receipt_is_idempotent_and_cannot_be_altered(tmp_path: Path) -> None:
     ledger = ledger_at(tmp_path)
     operation, _ = ledger.ensure_operation(

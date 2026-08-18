@@ -9,7 +9,7 @@ import sqlite3
 import stat
 import threading
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -73,7 +73,15 @@ def _safe_json(value: Mapping[str, Any] | None, *, max_bytes: int = MAX_METADATA
             for key, nested in candidate.items():
                 lowered = str(key).lower()
                 safe_boolean_observation = lowered == "credentials_invalidated" and nested is True
-                if any(fragment in lowered for fragment in _SECRET_FRAGMENTS) and not safe_boolean_observation:
+                safe_authorization_identifier = False
+                if lowered == "authorization_id" and isinstance(nested, str):
+                    with suppress(ValueError):
+                        safe_authorization_identifier = str(UUID(nested)) == nested
+                if (
+                    any(fragment in lowered for fragment in _SECRET_FRAGMENTS)
+                    and not safe_boolean_observation
+                    and not safe_authorization_identifier
+                ):
                     raise EventRejected(f"secret-bearing field is forbidden in the control ledger: {key}")
                 inspect(nested)
         elif isinstance(candidate, (list, tuple)):
