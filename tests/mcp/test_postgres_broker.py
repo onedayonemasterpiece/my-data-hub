@@ -175,6 +175,36 @@ def test_restricted_login_rejects_superuser_or_wrong_group() -> None:
         session._assert_restricted_login(Cursor({**safe, "requested_member": False}))
 
 
+def test_session_timeouts_use_set_config_with_text_values() -> None:
+    session = PostgresMasterSession(request(), credential())
+
+    class Cursor:
+        def __init__(self) -> None:
+            self.queries: list[tuple[str, tuple[str, ...]]] = []
+
+        def execute(self, statement, parameters=()):  # type: ignore[no-untyped-def]
+            self.queries.append((statement, parameters))
+            return self
+
+    cursor = Cursor()
+    session._set_local_timeouts(cursor)
+
+    assert cursor.queries == [
+        (
+            "SELECT pg_catalog.set_config('statement_timeout', %s, true)",
+            (f"{session.request.limits.timeout_ms}ms",),
+        ),
+        (
+            "SELECT pg_catalog.set_config('lock_timeout', %s, true)",
+            (f"{min(2_000, session.request.limits.timeout_ms)}ms",),
+        ),
+        (
+            "SELECT pg_catalog.set_config('idle_in_transaction_session_timeout', %s, true)",
+            (f"{session.request.limits.timeout_ms}ms",),
+        ),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_broker_issues_one_exact_epoch_session(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     source = DirectoryEpochCredentialSource(tmp_path / "sessions")

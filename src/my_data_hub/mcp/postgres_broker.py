@@ -299,9 +299,7 @@ class PostgresMasterSession(MasterSession):
                 "bloggers.import.reconcile",
             }
             cursor.execute("SET TRANSACTION READ WRITE" if is_change else "SET TRANSACTION READ ONLY")
-            cursor.execute("SET LOCAL statement_timeout = %s", (self.request.limits.timeout_ms,))
-            cursor.execute("SET LOCAL lock_timeout = %s", (min(2_000, self.request.limits.timeout_ms),))
-            cursor.execute("SET LOCAL idle_in_transaction_session_timeout = %s", (self.request.limits.timeout_ms,))
+            self._set_local_timeouts(cursor)
             cursor.execute("SET LOCAL ROLE " + _ROLE_GROUPS[self.request.role])
             self._assert_restricted_login(cursor)
             if self.request.tool == "submit_discovery_batch":
@@ -334,6 +332,25 @@ class PostgresMasterSession(MasterSession):
         if len(encoded) > self.request.limits.max_bytes:
             raise SessionBrokerError("master response exceeds the broker byte cap")
         return _jsonable(result)
+
+    def _set_local_timeouts(self, cursor: Any) -> None:
+        """Set transaction-local timeouts without parameterizing SET syntax.
+
+        PostgreSQL's ``SET ... = value`` production does not accept a bind
+        placeholder. ``set_config`` accepts a bound text value and its final
+        ``true`` argument keeps each setting transaction-local.
+        """
+
+        values = (
+            ("statement_timeout", self.request.limits.timeout_ms),
+            ("lock_timeout", min(2_000, self.request.limits.timeout_ms)),
+            ("idle_in_transaction_session_timeout", self.request.limits.timeout_ms),
+        )
+        for setting, milliseconds in values:
+            cursor.execute(
+                f"SELECT pg_catalog.set_config('{setting}', %s, true)",
+                (f"{milliseconds}ms",),
+            )
 
     def _dispatch_discovery_submission(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if self.request.role != "connector" or set(arguments) != {"payload"}:
