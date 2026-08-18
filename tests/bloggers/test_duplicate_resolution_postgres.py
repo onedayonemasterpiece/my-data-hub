@@ -8,6 +8,7 @@ import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -100,6 +101,7 @@ def test_duplicate_quarantine_explicit_resolution_and_exact_replay_are_lossless(
             project_id = connection.execute(
                 "SELECT project_id FROM hub.project WHERE slug='region-talk'"
             ).fetchone()[0]
+            assert project_id == UUID("da92f94f-5848-4a4b-bca7-12f797288aa7")
             blocked = BloggerSnapshotImporter().import_rows(
                 connection, project_id=project_id, snapshot_at=snapshot_at,
                 expected_row_count=2, rows=rows, source_code_revision="fixture",
@@ -182,7 +184,13 @@ def test_duplicate_quarantine_explicit_resolution_and_exact_replay_are_lossless(
             )
             fresh_resolved = BloggerSnapshotImporter().import_rows(
                 connection,
-                project_id=project_id,
+                # A duplicate-resolution envelope is authorized against the
+                # prior master epoch.  Before the first verified checkpoint,
+                # a replacement master bootstraps the same logical project
+                # with a different physical UUID, so the replay must resolve
+                # the stable Region Talk project rather than insert the stale
+                # UUID into project-bound canonical tables.
+                project_id=UUID("da92f94f-5848-4a4b-bca7-12f797288aa7"),
                 snapshot_at=datetime(2026, 8, 12, tzinfo=UTC),
                 expected_row_count=2,
                 rows=fresh_rows,
@@ -231,7 +239,7 @@ def test_duplicate_quarantine_explicit_resolution_and_exact_replay_are_lossless(
             ).fetchone()[0] == 2
             assert connection.execute(
                 "SELECT schema_revision,canonical_revision FROM hub.canonical_state WHERE singleton"
-            ).fetchone() == (21, 2)
+            ).fetchone() == (22, 2)
             connection.execute("SET ROLE mdh_migration_operator")
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 connection.execute(
