@@ -208,6 +208,15 @@ class CheckpointUploadLedger:
         return dict(row)
 
     def publication_runtime_authority(self, checkpoint_id: str) -> dict[str, Any] | None:
+        """Recover central finalization after every immutable blob is durable.
+
+        A runtime lease authorizes blob admission.  Once the exact declared
+        file set is uploaded, central Dataset finalization and independent
+        verification must survive a slow provider response and runtime lease
+        expiry.  This query deliberately grants no blob URL and requires the
+        exact current, draining epoch plus a checkpointing operation.
+        """
+
         now = _time(self.ledger.clock.now())
         with self.ledger._reader() as connection:
             row = connection.execute(
@@ -215,10 +224,17 @@ class CheckpointUploadLedger:
                 "p.master_run_ref,p.epoch,s.lease_until FROM checkpoint_blob_publications p "
                 "JOIN services s ON s.service_instance_id=p.service_instance_id "
                 "JOIN service_epochs e ON e.service_kind=s.service_kind "
+                "JOIN operations o ON o.operation_id=p.operation_id "
                 "WHERE p.checkpoint_id=? AND s.service_kind='postgres-master' "
                 "AND s.run_id=p.run_id AND s.attempt_id=p.attempt_id "
                 "AND s.master_instance_id=p.master_instance_id AND s.epoch=p.epoch "
-                "AND e.current_epoch=p.epoch AND s.state IN ('ACTIVE','DRAINING') AND s.lease_until>?",
+                "AND e.current_epoch=p.epoch "
+                "AND ((s.state IN ('ACTIVE','DRAINING') AND s.lease_until>? "
+                "AND o.state IN ('ACTIVE','DRAINING','CHECKPOINTING')) "
+                "OR (s.state='DRAINING' AND o.state IN ('CHECKPOINTING','CHECKPOINT_FAILED'))) "
+                "AND (SELECT count(*) FROM checkpoint_blob_upload_claims c "
+                "WHERE c.checkpoint_id=p.checkpoint_id AND c.state IN ('UPLOADED','CONSUMED'))="
+                "p.expected_file_count",
                 (checkpoint_id, now),
             ).fetchone()
         return dict(row) if row is not None else None

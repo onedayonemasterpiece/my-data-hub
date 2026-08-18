@@ -778,11 +778,110 @@ def test_partial_upload_and_expired_authority_cannot_promote(tmp_path: Path) -> 
         service.finalize(CHECKPOINT, authority)
     assert adapter.finalized == 0
     assert ledger.checkpoint_head("postgres-master") is None
-
     ledger.clock.advance(delta=timedelta(minutes=11))  # type: ignore[attr-defined]
     with pytest.raises(LeaseRejected):
         service.prepare(_specs(package, manifest)[1], authority)
     assert ledger.checkpoint_head("postgres-master") is None
+
+
+def test_complete_publication_reconciles_after_runtime_lease_expires(tmp_path: Path) -> None:
+    ledger, package, manifest, adapter, verifier, service, authority = _fixture(tmp_path)
+    _upload_all(package, manifest, service, authority)
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="ACTIVE",
+        operation_state="DRAINING",
+        service_state="DRAINING",
+        event_id="runtime-draining",
+    )
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="DRAINING",
+        operation_state="CHECKPOINTING",
+        service_state="DRAINING",
+        event_id="checkpoint-started",
+    )
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="CHECKPOINTING",
+        operation_state="CHECKPOINT_FAILED",
+        service_state="DRAINING",
+        event_id="checkpoint-client-timeout",
+    )
+    ledger.clock.advance(delta=timedelta(minutes=11))  # type: ignore[attr-defined]
+
+    with pytest.raises(LeaseRejected):
+        service.finalize(CHECKPOINT, authority)
+
+    recovered = service.reconcile_pending_once()
+
+    assert recovered == [service.status(CHECKPOINT)]
+    assert recovered[0]["state"] == "PROMOTED"
+    assert adapter.finalized == 1
+    assert verifier.calls == 1
+    head = ledger.checkpoint_head("postgres-master")
+    assert head is not None and head.current_checkpoint_id == str(CHECKPOINT)
+
+
+def test_terminal_failed_checkpoint_can_be_explicitly_fenced_for_replacement(tmp_path: Path) -> None:
+    ledger, package, manifest, _adapter, _verifier, service, authority = _fixture(tmp_path)
+    ledger.store_runtime_token_hash(str(RUN), str(ATTEMPT), "runtime-token")
+    _upload_all(package, manifest, service, authority)
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="ACTIVE",
+        operation_state="DRAINING",
+        service_state="DRAINING",
+        event_id="runtime-draining",
+    )
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="DRAINING",
+        operation_state="CHECKPOINTING",
+        service_state="DRAINING",
+        event_id="checkpoint-started",
+    )
+    service._fail(CHECKPOINT, "RUNTIME_AUTHORITY_EXPIRED", quarantine=False)
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="CHECKPOINTING",
+        operation_state="CHECKPOINT_FAILED",
+        service_state="DRAINING",
+        event_id="checkpoint-failed",
+    )
+
+    ledger.fence_checkpoint_failed_master(
+        operation_id=str(OPERATION),
+        run_id=str(RUN),
+        attempt_id=str(ATTEMPT),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        event_id="operator-checkpoint-failure-recovery",
+    )
+    # Exact replay is idempotent and all runtime admission is retired.
+    ledger.fence_checkpoint_failed_master(
+        operation_id=str(OPERATION),
+        run_id=str(RUN),
+        attempt_id=str(ATTEMPT),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        event_id="operator-checkpoint-failure-recovery",
+    )
+    assert ledger.get_operation(str(OPERATION)).state == "FENCED"  # type: ignore[union-attr]
+    assert ledger.resolve_service("postgres-master") is None
+    assert not ledger.runtime_token_valid(str(RUN), str(ATTEMPT), "runtime-token")
 
 
 class _RuntimeMetadataClient:

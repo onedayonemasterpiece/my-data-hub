@@ -687,10 +687,25 @@ class BrokeredCheckpointUploadService:
     def finalize(self, checkpoint_id: UUID, authority: RuntimeUploadAuthority) -> dict[str, Any]:
         """Finalize, independently verify, and CAS-promote one exact publication."""
 
+        return self._finalize(checkpoint_id, authority, durable_recovery=False)
+
+    def _finalize(
+        self,
+        checkpoint_id: UUID,
+        authority: RuntimeUploadAuthority,
+        *,
+        durable_recovery: bool,
+    ) -> dict[str, Any]:
+        """Finalize normally or recover centrally after every blob is durable."""
+
         publication = self.ledger.publication(str(checkpoint_id))
         if publication is None:
             raise BrokeredCheckpointError("checkpoint publication is absent")
-        _candidate, manifest = self._validate_publication(publication, authority)
+        _candidate, manifest = self._validate_publication(
+            publication,
+            authority,
+            durable_recovery=durable_recovery,
+        )
         if authority.authority_kind == "acceptance":
             return self._finalize_acceptance(checkpoint_id, publication, manifest, authority)
         if publication["state"] == "PROMOTED":
@@ -844,7 +859,11 @@ class BrokeredCheckpointUploadService:
                 master_run_ref=str(refreshed["master_run_ref"]),
                 lease_until=datetime.fromisoformat(str(refreshed["lease_until"]).replace("Z", "+00:00")),
             )
-            self._validate_publication(publication, current_authority)
+            self._validate_publication(
+                publication,
+                current_authority,
+                durable_recovery=durable_recovery,
+            )
             if publication["state"] == "VERIFIED":
                 promoted = registry.promote(
                     checkpoint_id,
@@ -1083,7 +1102,7 @@ class BrokeredCheckpointUploadService:
                 lease_until=datetime.fromisoformat(str(raw["lease_until"]).replace("Z", "+00:00")),
             )
             try:
-                results.append(self.finalize(checkpoint_id, authority))
+                results.append(self._finalize(checkpoint_id, authority, durable_recovery=True))
             except BrokeredCheckpointError:
                 continue
         return results
@@ -1141,7 +1160,11 @@ class BrokeredCheckpointUploadService:
         return tuple(expected), tuple(provider_files), package_sha256
 
     def _validate_publication(
-        self, publication: dict[str, Any], authority: RuntimeUploadAuthority
+        self,
+        publication: dict[str, Any],
+        authority: RuntimeUploadAuthority,
+        *,
+        durable_recovery: bool = False,
     ) -> tuple[dict[str, Any], CheckpointManifest]:
         if (
             publication["operation_id"] != authority.operation_id
@@ -1168,7 +1191,7 @@ class BrokeredCheckpointUploadService:
             content_sha256=hashlib.sha256(canonical_json(manifest.payload()) + b"\n").hexdigest(),
             manifest_sha256=manifest.manifest_sha256,
         )
-        return self._validate(probe, authority)
+        return self._validate(probe, authority, durable_recovery=durable_recovery)
 
     def _fail(self, checkpoint_id: UUID, code: str, *, quarantine: bool) -> None:
         state = "QUARANTINED" if quarantine else "FAILED"
@@ -1241,10 +1264,29 @@ class BrokeredCheckpointUploadService:
         }
 
     def _validate(
-        self, spec: CheckpointBlobSpec, authority: RuntimeUploadAuthority
+        self,
+        spec: CheckpointBlobSpec,
+        authority: RuntimeUploadAuthority,
+        *,
+        durable_recovery: bool = False,
     ) -> tuple[dict[str, Any], CheckpointManifest]:
         if authority.authority_kind == "acceptance":
+            if durable_recovery:
+                raise LeaseRejected("checkpoint acceptance authority cannot use central recovery")
             self._validate_acceptance_authority(spec, authority)
+        elif durable_recovery:
+            recovered = self.ledger.publication_runtime_authority(str(spec.checkpoint_id))
+            if not (
+                recovered is not None
+                and str(spec.operation_id) == authority.operation_id == str(recovered["operation_id"])
+                and authority.run_id == str(recovered["run_id"])
+                and authority.attempt_id == str(recovered["attempt_id"])
+                and authority.master_instance_id == str(recovered["master_instance_id"])
+                and authority.service_instance_id == str(recovered["service_instance_id"])
+                and spec.master_run_ref == authority.master_run_ref == str(recovered["master_run_ref"])
+                and spec.epoch == authority.epoch == int(recovered["epoch"])
+            ):
+                raise LeaseRejected("checkpoint central recovery authority is unavailable")
         elif (
             str(spec.operation_id) != authority.operation_id
             or spec.master_run_ref != authority.master_run_ref
@@ -1264,7 +1306,11 @@ class BrokeredCheckpointUploadService:
         allowed_operation_states = (
             {"INTENT_COMMITTED", "RUNNING"}
             if authority.authority_kind == "acceptance"
-            else {"DRAINING", "CHECKPOINTING", "ACTIVE"}
+            else (
+                {"DRAINING", "CHECKPOINTING", "CHECKPOINT_FAILED", "ACTIVE"}
+                if durable_recovery
+                else {"DRAINING", "CHECKPOINTING", "ACTIVE"}
+            )
         )
         if operation is None or operation.state not in allowed_operation_states:
             raise BrokeredCheckpointError("checkpoint operation is not in an upload-capable phase")

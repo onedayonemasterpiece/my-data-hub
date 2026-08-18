@@ -1539,6 +1539,143 @@ class ControlLedger:
                 ),
             )
 
+    def fence_checkpoint_failed_master(
+        self,
+        *,
+        operation_id: str,
+        run_id: str,
+        attempt_id: str,
+        service_instance_id: str,
+        epoch: int,
+        event_id: str,
+    ) -> None:
+        """Fence an unrecoverable failed checkpoint after tunnel deactivation.
+
+        This operator boundary is intentionally narrower than a generic state
+        edit: the exact current runtime must already be draining, its
+        publication must be terminally failed, and no candidate from the
+        operation may be the verified HEAD.  Provider termination/tunnel
+        deactivation remains an external precondition; this transaction only
+        retires the control authority so a replacement epoch can be admitted.
+        """
+
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            operation = connection.execute(
+                "SELECT state FROM operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            attempt = connection.execute(
+                "SELECT state,service_instance_id,epoch FROM run_attempts "
+                "WHERE operation_id=? AND run_id=? AND attempt_id=?",
+                (operation_id, run_id, attempt_id),
+            ).fetchone()
+            service = connection.execute(
+                "SELECT state,run_id,attempt_id,master_instance_id,epoch FROM services "
+                "WHERE service_instance_id=?",
+                (service_instance_id,),
+            ).fetchone()
+            current = connection.execute(
+                "SELECT current_epoch FROM service_epochs WHERE service_kind='postgres-master'"
+            ).fetchone()
+            token = connection.execute(
+                "SELECT revoked_at FROM runtime_token_hashes WHERE run_id=? AND attempt_id=?",
+                (run_id, attempt_id),
+            ).fetchone()
+            if (
+                operation is not None
+                and operation["state"] == "FENCED"
+                and attempt is not None
+                and attempt["state"] == "FENCED"
+                and service is not None
+                and service["state"] == "FENCED"
+                and token is not None
+                and token["revoked_at"] is not None
+            ):
+                return
+            terminal_publications = connection.execute(
+                "SELECT count(*) FROM checkpoint_blob_publications "
+                "WHERE operation_id=? AND state IN ('FAILED','QUARANTINED')",
+                (operation_id,),
+            ).fetchone()
+            nonterminal_publications = connection.execute(
+                "SELECT count(*) FROM checkpoint_blob_publications "
+                "WHERE operation_id=? AND state NOT IN ('FAILED','QUARANTINED')",
+                (operation_id,),
+            ).fetchone()
+            verified_authority = connection.execute(
+                "SELECT count(*) FROM checkpoint_candidates c "
+                "LEFT JOIN checkpoint_heads h ON h.current_checkpoint_id=c.checkpoint_id "
+                "WHERE c.operation_id=? AND (c.status='VERIFIED' OR h.current_checkpoint_id IS NOT NULL)",
+                (operation_id,),
+            ).fetchone()
+            if not (
+                operation is not None
+                and operation["state"] == "CHECKPOINT_FAILED"
+                and attempt is not None
+                and attempt["service_instance_id"] == service_instance_id
+                and int(attempt["epoch"]) == epoch
+                and service is not None
+                and service["state"] == "DRAINING"
+                and service["run_id"] == run_id
+                and service["attempt_id"] == attempt_id
+                and int(service["epoch"]) == epoch
+                and current is not None
+                and int(current["current_epoch"]) == epoch
+                and terminal_publications is not None
+                and int(terminal_publications[0]) >= 1
+                and nonterminal_publications is not None
+                and int(nonterminal_publications[0]) == 0
+                and verified_authority is not None
+                and int(verified_authority[0]) == 0
+            ):
+                raise StaleRuntimeEvent("checkpoint-failed master is not safely fenceable")
+            connection.execute(
+                "UPDATE operations SET state='FENCED',updated_at=? "
+                "WHERE operation_id=? AND state='CHECKPOINT_FAILED'",
+                (now, operation_id),
+            )
+            connection.execute(
+                "UPDATE run_attempts SET state='FENCED',updated_at=? "
+                "WHERE operation_id=? AND run_id=? AND attempt_id=? AND epoch=?",
+                (now, operation_id, run_id, attempt_id, epoch),
+            )
+            connection.execute(
+                "UPDATE services SET state='FENCED',latest_event_id=?,updated_at=? "
+                "WHERE service_instance_id=? AND epoch=? AND state='DRAINING'",
+                (event_id, now, service_instance_id, epoch),
+            )
+            connection.execute(
+                "UPDATE runtime_token_hashes SET revoked_at=? WHERE run_id=? AND attempt_id=?",
+                (now, run_id, attempt_id),
+            )
+            status_authority = connection.execute(
+                "SELECT resource_lease_json FROM master_status_dataset_authorities WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if status_authority is not None:
+                lease = json.loads(str(status_authority["resource_lease_json"]))
+                if str(lease.get("holder_id")) != run_id:
+                    raise StaleRuntimeEvent("checkpoint-failed resource lease differs")
+                connection.execute(
+                    "UPDATE resource_leases SET released_at=? WHERE lease_id=? AND holder_id=? AND epoch=? "
+                    "AND released_at IS NULL",
+                    (now, str(lease["lease_id"]), run_id, int(lease["epoch"])),
+                )
+            connection.execute(
+                "INSERT INTO operation_log(operation_id,from_state,to_state,recorded_at,metadata_json) "
+                "VALUES (?,'CHECKPOINT_FAILED','FENCED',?,?)",
+                (
+                    operation_id,
+                    now,
+                    _safe_json(
+                        {
+                            "code": "OPERATOR_CHECKPOINT_FAILURE_RECOVERY",
+                            "event_id": event_id,
+                        }
+                    ),
+                ),
+            )
+
     def list_provider_resources(self, *, limit: int = 100) -> list[dict[str, Any]]:
         if not 1 <= limit <= 500:
             raise ValueError("provider resource limit must be between 1 and 500")

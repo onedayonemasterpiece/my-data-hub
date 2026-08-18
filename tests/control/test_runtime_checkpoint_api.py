@@ -283,6 +283,73 @@ def test_broker_api_is_metadata_only_fenced_and_secret_redacted(tmp_path: Path) 
     assert client.post(path, json=payload, headers=fenced).status_code == 409
 
 
+def test_expired_checkpoint_runtime_can_only_read_recovery_status(tmp_path: Path) -> None:
+    _unused, ledger, headers = _app(tmp_path)
+    manifest = _manifest(tmp_path)
+    ControlLedgerCheckpointRegistry(
+        ledger,
+        operation_id=str(OPERATION),
+        dataset_ref="owner/checkpoints",
+    ).add_candidate(manifest)
+    broker = BrokeredCheckpointUploadService(
+        ledger,
+        _BlobOnlyAdapter(),  # type: ignore[arg-type]
+        CheckpointUploadSecretBox(b"k" * 32),
+    )
+    client = TestClient(
+        create_app(
+            ControlPlaneSettings(ledger_path=ledger.path),
+            ledger=ledger,
+            master_runtime=_runtime(ledger),
+            checkpoint_upload_broker=broker,
+        )
+    )
+    item = manifest.files[0]
+    payload = {
+        "operation_id": str(OPERATION),
+        "checkpoint_id": str(CHECKPOINT),
+        "master_run_ref": "owner/master/17",
+        "epoch": 1,
+        "file_name": item.path,
+        "content_length": item.byte_size,
+        "content_type": "application/octet-stream",
+        "content_sha256": item.sha256,
+        "manifest_sha256": manifest.manifest_sha256,
+    }
+    path = f"/internal/checkpoints/{CHECKPOINT}/blob-uploads/prepare"
+    assert client.post(path, json=payload, headers=headers).status_code == 200
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="ACTIVE",
+        operation_state="DRAINING",
+        service_state="DRAINING",
+        event_id="draining-event",
+    )
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="DRAINING",
+        operation_state="CHECKPOINTING",
+        service_state="DRAINING",
+        event_id="checkpoint-event",
+    )
+    with ledger._transaction() as connection:
+        connection.execute(
+            "UPDATE services SET lease_until=? WHERE service_instance_id=?",
+            ("2020-01-01T00:00:00.000000Z", str(SERVICE)),
+        )
+
+    assert client.get("/internal/checkpoints/runtime-upload-authority", headers=headers).status_code == 200
+    publication = client.get(f"/internal/checkpoints/{CHECKPOINT}/publication", headers=headers)
+    assert publication.status_code == 200
+    assert publication.json()["operation_id"] == str(OPERATION)
+    # Recovery reads never renew admission or issue another provider URL.
+    assert client.post(path, json=payload, headers=headers).status_code == 409
+
+
 def test_remote_journal_requires_exact_runtime_identity(tmp_path: Path) -> None:
     app, ledger, headers = _app(tmp_path)
     intent = ProviderEffectIntent.create(

@@ -2817,7 +2817,10 @@ def create_app(
         return {"claim": claim}
 
     def _broker_runtime_authority(
-        operation: _ProviderOperationAuthority, *, checkpoint_id: str | None = None
+        operation: _ProviderOperationAuthority,
+        *,
+        checkpoint_id: str | None = None,
+        allow_expired_read: bool = False,
     ) -> RuntimeUploadAuthority:
         if checkpoint_upload_broker is None:
             raise HTTPException(status_code=503, detail={"code": "checkpoint_upload_broker_unavailable"})
@@ -2871,7 +2874,15 @@ def create_app(
             master_instance_id=str(identity.get("master_instance_id", "")),
             epoch=int(identity.get("epoch", 0)),
         )
-        if snapshot is None:
+        operation_record = control_ledger.get_operation(operation.operation_id)
+        expired_read = (
+            allow_expired_read
+            and snapshot is None
+            and operation_record is not None
+            and operation_record.state in {"CHECKPOINTING", "CHECKPOINT_FAILED"}
+            and control_ledger.current_epoch("postgres-master") == int(identity.get("epoch", 0))
+        )
+        if snapshot is None and not expired_read:
             raise HTTPException(status_code=409, detail={"code": "checkpoint_runtime_lease_invalid"})
         return RuntimeUploadAuthority(
             operation_id=operation.operation_id,
@@ -2881,7 +2892,11 @@ def create_app(
             service_instance_id=str(identity["service_instance_id"]),
             epoch=int(identity["epoch"]),
             master_run_ref=run.provider_run_ref,
-            lease_until=datetime.fromisoformat(str(snapshot["lease_until"]).replace("Z", "+00:00")),
+            lease_until=(
+                datetime.fromisoformat(str(snapshot["lease_until"]).replace("Z", "+00:00"))
+                if snapshot is not None
+                else control_ledger.clock.now()
+            ),
         )
 
     @app.get("/internal/checkpoints/{checkpoint_id}/runtime-upload-authority")
@@ -2901,8 +2916,13 @@ def create_app(
             attempt_id=attempt_id,
             master_instance_id=master_instance_id,
             epoch=epoch,
+            allowed_states=frozenset({"ACTIVE", "DRAINING", "CHECKPOINTING", "CHECKPOINT_FAILED"}),
         )
-        authority = _broker_runtime_authority(operation, checkpoint_id=checkpoint_id)
+        authority = _broker_runtime_authority(
+            operation,
+            checkpoint_id=checkpoint_id,
+            allow_expired_read=True,
+        )
         return {
             "master_run_ref": authority.master_run_ref,
             "epoch": authority.epoch,
@@ -2926,10 +2946,11 @@ def create_app(
             attempt_id=attempt_id,
             master_instance_id=master_instance_id,
             epoch=epoch,
+            allowed_states=frozenset({"ACTIVE", "DRAINING", "CHECKPOINTING", "CHECKPOINT_FAILED"}),
         )
         if operation.acceptance is not None:
             raise HTTPException(status_code=409, detail={"code": "acceptance_checkpoint_required"})
-        authority = _broker_runtime_authority(operation)
+        authority = _broker_runtime_authority(operation, allow_expired_read=True)
         return {"master_run_ref": authority.master_run_ref}
 
     @app.post("/internal/checkpoints/{checkpoint_id}/blob-uploads/prepare")
@@ -3047,8 +3068,13 @@ def create_app(
             attempt_id=attempt_id,
             master_instance_id=master_instance_id,
             epoch=epoch,
+            allowed_states=frozenset({"ACTIVE", "DRAINING", "CHECKPOINTING", "CHECKPOINT_FAILED"}),
         )
-        _broker_runtime_authority(operation, checkpoint_id=checkpoint_id)
+        _broker_runtime_authority(
+            operation,
+            checkpoint_id=checkpoint_id,
+            allow_expired_read=True,
+        )
         publication = checkpoint_upload_broker.status(UUID(checkpoint_id))  # type: ignore[union-attr]
         if publication["operation_id"] != operation.operation_id:
             raise HTTPException(status_code=403, detail={"code": "checkpoint_publication_forbidden"})
