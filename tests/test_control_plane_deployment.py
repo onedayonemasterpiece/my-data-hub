@@ -253,6 +253,21 @@ def test_operator_profile_keeps_kaggle_authority_only_in_control_process() -> No
     assert "KAGGLE_API_TOKEN" not in json.dumps(compose["services"]["remote-mcp"])
 
 
+def test_operator_profile_keeps_chatgpt_cimd_with_exact_operator_scopes() -> None:
+    source = installer_source()
+    start = source.index('cat > "$operator_override"')
+    end = source.index('chmod 600 "$operator_override"', start)
+    operator_override = source[start:end]
+    exact_scopes = (
+        "openid,offline_access,platform:read,master:read,operation:read,checkpoint:read,"
+        "embedding:read,provider:read,bloggers:read,data:read,master:ensure,master:rotate,"
+        "recovery:request,acceptance:probe,acceptance:operate,data:write,migration:operate,"
+        "bloggers:write,provider:write"
+    )
+    assert 'MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED: "true"' in operator_override
+    assert f"MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: {exact_scopes}" in operator_override
+
+
 def test_remote_mcp_host_network_uses_only_loopback_control_gateway() -> None:
     source = installer_source()
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))

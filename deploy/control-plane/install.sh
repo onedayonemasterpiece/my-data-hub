@@ -717,6 +717,10 @@ services:
     volumes:
       - "${MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE:?write gate key is required}:/run/secrets/mcp-write-gate.key:ro"
       - "${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:?provider control gateway token is required}:/run/secrets/mcp-control-gateway.token:ro"
+  oauth-server:
+    environment:
+      MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED: "true"
+      MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access,platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,acceptance:operate,data:write,migration:operate,bloggers:write,provider:write
 YAML
   chmod 600 "$operator_override"
   operator_compose_arg=" -f $operator_override"
