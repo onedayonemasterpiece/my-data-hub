@@ -34,6 +34,7 @@ from my_data_hub.workloads.bloggers.master_stage import BloggerImportStageReceip
 SECRET = "a" * 64
 TLS_CERTIFICATE = b"-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n"
 TLS_CERTIFICATE_SHA256 = hashlib.sha256(TLS_CERTIFICATE).hexdigest()
+YDB_TOKEN = "ydb-" + "t" * 64
 
 
 def _prepare_status_authority(
@@ -365,6 +366,55 @@ def _launch() -> KaggleMasterLaunchAssets:
         tunnel_gateway_user="mdh_tunnel",
         tunnel_remote_port=25432,
     )
+
+
+def test_master_status_delivers_bound_ydb_token_without_embedding_secret_in_source() -> None:
+    launch = replace(
+        _launch(),
+        ydb_endpoint="grpcs://ydb.serverless.yandexcloud.net:2135",
+        ydb_database="/ru-central1/b1ghfk15fpug7mn5439l/etnkibjidis0o6stn2cq",
+        ydb_reader_service_account_id="ajeri3qs6jbijih0bs5d",
+    )
+    provider = KaggleMasterRuntimeProvider(object(), launch, ydb_access_token=YDB_TOKEN)  # type: ignore[arg-type]
+    identity = {
+        "operation_id": str(uuid4()),
+        "run_id": str(uuid4()),
+        "attempt_id": str(uuid4()),
+        "service_instance_id": str(uuid4()),
+        "master_instance_id": str(uuid4()),
+        "epoch": 1,
+        "status_resource_lease": {"lease_id": "lease"},
+        "boot_checkpoint": {"kind": "EMPTY", "generation": 0},
+    }
+    private_key = b"-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n"
+    files = provider.status_files(
+        identity,
+        SECRET,
+        tls_certificate=TLS_CERTIFICATE,
+        tls_private_key=private_key,
+    )
+    status = json.loads(files["kaggle_run.json"])
+    assert files["ydb-access-token"] == YDB_TOKEN.encode()
+    assert status["ydb_access_token_sha256"] == hashlib.sha256(YDB_TOKEN.encode()).hexdigest()
+    values = launch.render_values(identity)
+    bootstrap = _runtime_bootstrap(
+        values,
+        status_dataset_ref="owner/status",
+        status_config_sha256=hashlib.sha256(files["kaggle_run.json"]).hexdigest(),
+        status_helper_sha256=hashlib.sha256(files["kaggle_status_client.py"]).hexdigest(),
+        master_config_sha256=hashlib.sha256(files["master-config.json"]).hexdigest(),
+        secret_bindings={},
+    )
+    assert YDB_TOKEN not in bootstrap
+    assert "YDB_ACCESS_TOKEN_CREDENTIALS" in bootstrap
+    assert values["MY_DATA_HUB_YDB_READER_SERVICE_ACCOUNT_ID"] == "ajeri3qs6jbijih0bs5d"
+
+
+def test_ydb_runtime_token_and_owner_pinned_configuration_are_all_or_nothing() -> None:
+    with pytest.raises(MasterLaunchContractError, match="configuration must be complete"):
+        replace(_launch(), ydb_endpoint="grpcs://ydb.serverless.yandexcloud.net:2135")
+    with pytest.raises(MasterLaunchContractError, match="binding is incomplete"):
+        KaggleMasterRuntimeProvider(object(), _launch(), ydb_access_token=YDB_TOKEN)  # type: ignore[arg-type]
 
 
 def _launch_with_offline_master_dependencies() -> KaggleMasterLaunchAssets:

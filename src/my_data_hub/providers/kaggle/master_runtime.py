@@ -59,6 +59,7 @@ POSTGRES_RUNTIME_MANIFEST_NAME = "postgresql-18-runtime.json"
 TUNNEL_KNOWN_HOSTS_NAME = "tunnel-known-hosts"
 POSTGRES_TLS_CERT_NAME = "postgres-server.crt"
 POSTGRES_TLS_KEY_NAME = "postgres-server.key"
+YDB_ACCESS_TOKEN_NAME = "ydb-access-token"
 PYTHON_DEPENDENCY_MANIFEST_NAME = "embedding-worker-dependencies.json"
 MASTER_PYTHON_DEPENDENCY_DISTRIBUTIONS = ("psycopg", "psycopg-binary")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -78,7 +79,9 @@ MASTER_STATUS_HELPER = (
     b"    value = json.loads(raw)\n"
     b'    expected = {"schema_version","run_id","attempt_id","kind","notebook",'
     b'"callback_url","token","resource_leases","tls_certificate_sha256","tls_key_material_sha256"}\n'
-    b"    if set(value) != expected or value['schema_version'] != 'my-data-hub-kaggle-run.v1':\n"
+    b"    optional = {'ydb_access_token_sha256'}\n"
+    b"    if set(value) not in (expected, expected | optional) or "
+    b"value['schema_version'] != 'my-data-hub-kaggle-run.v1':\n"
     b'        raise RuntimeError("status input shape invalid")\n'
     b"    if value['kind'] != 'postgres-master' or value['run_id'] != run_id:\n"
     b'        raise RuntimeError("status input run binding invalid")\n'
@@ -130,6 +133,9 @@ class KaggleMasterLaunchAssets:
     runtime_image_source_commit: str = "fc61d5cda7da39530055bae9bd0e92865f995cd9"
     runtime_python_series: str = "3.12"
     runtime_secret_bindings: Mapping[str, str] = field(default_factory=dict)
+    ydb_endpoint: str | None = None
+    ydb_database: str | None = None
+    ydb_reader_service_account_id: str | None = None
     notebook_code_file: str = "worker.ipynb"
     notebook_kernel_type: str = "notebook"
     notebook_language: str = "python"
@@ -186,6 +192,19 @@ class KaggleMasterLaunchAssets:
         for environment_name, secret_name in self.runtime_secret_bindings.items():
             if environment_name not in allowed_secret_bindings or not secret_name:
                 raise MasterLaunchContractError("runtime secret binding is invalid")
+        ydb_values = (
+            self.ydb_endpoint,
+            self.ydb_database,
+            self.ydb_reader_service_account_id,
+        )
+        if any(ydb_values) and not all(ydb_values):
+            raise MasterLaunchContractError("YDB runtime configuration must be complete")
+        if all(ydb_values) and (
+            self.ydb_endpoint != "grpcs://ydb.serverless.yandexcloud.net:2135"
+            or not re.fullmatch(r"/ru-central1/[a-z0-9]+/[a-z0-9]+", self.ydb_database or "")
+            or not re.fullmatch(r"aje[a-z0-9]{17}", self.ydb_reader_service_account_id or "")
+        ):
+            raise MasterLaunchContractError("YDB runtime configuration is not owner-pinned")
 
     def _validate_runtime_assets(self) -> None:
         required = {
@@ -370,6 +389,16 @@ class KaggleMasterLaunchAssets:
                 ).hexdigest(),
             }
         )
+        if self.ydb_endpoint is not None:
+            values.update(
+                {
+                    "MY_DATA_HUB_YDB_ENDPOINT": self.ydb_endpoint,
+                    "MY_DATA_HUB_YDB_DATABASE": str(self.ydb_database),
+                    "MY_DATA_HUB_YDB_READER_SERVICE_ACCOUNT_ID": str(
+                        self.ydb_reader_service_account_id
+                    ),
+                }
+            )
         if PYTHON_DEPENDENCY_MANIFEST_NAME in self.dataset_files:
             values.update(
                 {
@@ -543,6 +572,17 @@ def _runtime_bootstrap(
         "_mdh_status = _mdh_module.load_run_config(_mdh_config, "
         "run_id=_mdh_values['MY_DATA_HUB_RUN_ID'], attempt_id=_mdh_values['MY_DATA_HUB_ATTEMPT_ID'], "
         "notebook=_mdh_values['MY_DATA_HUB_SOURCE_IDENTITY'])\n"
+        "if 'ydb_access_token_sha256' in _mdh_status:\n"
+        f"    _mdh_ydb_token_path = _mdh_status_root / {YDB_ACCESS_TOKEN_NAME!r}\n"
+        "    if (_mdh_ydb_token_path.is_symlink() or not _mdh_ydb_token_path.is_file() or "
+        "_mdh_ydb_token_path.stat().st_size > 4096):\n"
+        "        raise RuntimeError('YDB access token status asset is unsafe')\n"
+        "    _mdh_ydb_token = _mdh_ydb_token_path.read_bytes()\n"
+        "    if (_mdh_hashlib.sha256(_mdh_ydb_token).hexdigest() != "
+        "_mdh_status['ydb_access_token_sha256'] or not 24 <= len(_mdh_ydb_token) <= 4096 "
+        "or any(_character in b' \\t\\r\\n' for _character in _mdh_ydb_token)):\n"
+        "        raise RuntimeError('YDB access token status asset differs')\n"
+        "    _mdh_os.environ['YDB_ACCESS_TOKEN_CREDENTIALS'] = _mdh_ydb_token.decode('ascii')\n"
     )
     if execution_pins is not None:
         bootstrap += (
@@ -686,10 +726,19 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
         assets: KaggleMasterLaunchAssets,
         *,
         status_authority: object | None = None,
+        ydb_access_token: str | None = None,
     ) -> None:
         self.adapter = adapter
         self.assets = assets
         self.status_authority = status_authority
+        token = ydb_access_token.strip() if ydb_access_token is not None else None
+        if token is not None and (
+            not 24 <= len(token) <= 4096 or any(character.isspace() for character in token)
+        ):
+            raise MasterLaunchContractError("YDB access token is invalid")
+        if (assets.ydb_endpoint is None) != (token is None):
+            raise MasterLaunchContractError("YDB runtime token/configuration binding is incomplete")
+        self._ydb_access_token = token
 
     def status_dataset_ref(self, identity: Mapping[str, Any]) -> str:
         owner = self.assets.notebook_ref.split("/", 1)[0]
@@ -722,17 +771,24 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             "tls_certificate_sha256": hashlib.sha256(tls_certificate).hexdigest(),
             "tls_key_material_sha256": hashlib.sha256(tls_private_key).hexdigest(),
         }
+        if self._ydb_access_token is not None:
+            value["ydb_access_token_sha256"] = hashlib.sha256(
+                self._ydb_access_token.encode("utf-8")
+            ).hexdigest()
         encoded = canonical_json_bytes(value)
         if len(encoded) > MAX_MASTER_STATUS_BYTES:
             raise MasterLaunchContractError("master status config exceeds 16 KiB")
         master_config = self._master_config(identity)
-        return {
+        files = {
             "kaggle_run.json": encoded,
             "kaggle_status_client.py": MASTER_STATUS_HELPER,
             MASTER_CONFIG_NAME: canonical_json_bytes(master_config),
             POSTGRES_TLS_CERT_NAME: tls_certificate,
             POSTGRES_TLS_KEY_NAME: tls_private_key,
         }
+        if self._ydb_access_token is not None:
+            files[YDB_ACCESS_TOKEN_NAME] = self._ydb_access_token.encode("utf-8")
+        return files
 
     def _execution_pins(self, identity: Mapping[str, Any]) -> dict[str, object] | None:
         try:

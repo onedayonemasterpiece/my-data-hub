@@ -258,6 +258,16 @@ class MasterRuntimeSettings:
             ).strip(),
             "runtime_python_series": os.getenv("MY_DATA_HUB_EMBEDDING_RUNTIME_PYTHON_SERIES", "3.12").strip(),
         })
+        ydb_names = {
+            "ydb_endpoint": "MY_DATA_HUB_YDB_ENDPOINT",
+            "ydb_database": "MY_DATA_HUB_YDB_DATABASE",
+            "ydb_reader_service_account_id": "MY_DATA_HUB_YDB_READER_SERVICE_ACCOUNT_ID",
+        }
+        ydb_values = {key: os.getenv(name, "").strip() for key, name in ydb_names.items()}
+        if any(ydb_values.values()) and not all(ydb_values.values()):
+            raise ValueError("YDB master runtime configuration must be complete")
+        if all(ydb_values.values()):
+            raw.update(ydb_values)
         callback = urlsplit(raw["callback_url"])
         if (
             raw["callback_url"] != CANONICAL_RUNTIME_CALLBACK_URL
@@ -581,7 +591,12 @@ class ControlPlaneMasterRuntime:
             self.settings.assets,
             notebook_ref=str(row["replacement_notebook_ref"]),
         )
-        recovery_provider = KaggleMasterRuntimeProvider(provider.adapter, assets, status_authority=self.ledger)
+        recovery_provider = KaggleMasterRuntimeProvider(
+            provider.adapter,
+            assets,
+            status_authority=self.ledger,
+            ydb_access_token=provider._ydb_access_token,
+        )
         recovery_coordinator = MasterCoordinator(
             self.ledger,
             recovery_provider,
@@ -1241,7 +1256,13 @@ def build_production_runtime(
             adapter,
             None,
         )
-    provider = KaggleMasterRuntimeProvider(adapter, settings.assets, status_authority=ledger)
+    ydb_access_token = os.getenv("MY_DATA_HUB_YDB_ACCESS_TOKEN_CREDENTIALS", "").strip() or None
+    provider = KaggleMasterRuntimeProvider(
+        adapter,
+        settings.assets,
+        status_authority=ledger,
+        ydb_access_token=ydb_access_token,
+    )
     coordinator = MasterCoordinator(
         ledger,
         provider,
