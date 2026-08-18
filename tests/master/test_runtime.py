@@ -174,6 +174,8 @@ def test_reverse_tunnel_is_loopback_only_and_disables_shell_agent_and_unknown_ho
     arguments = spec.arguments(now=NOW)
     joined = " ".join(arguments)
     assert "-N -T" in joined
+    assert arguments[:4] == ["ssh", "-F", "/dev/null", "-N"]
+    assert "ClearAllForwardings=yes" not in joined
     assert "StrictHostKeyChecking=yes" in joined
     assert "ForwardAgent=no" in joined
     assert f"CertificateFile={certificate}" in joined
