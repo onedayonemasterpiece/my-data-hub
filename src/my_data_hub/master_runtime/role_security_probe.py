@@ -366,7 +366,26 @@ def build_role_security_evidence(
     """Reduce the full probe output to a bounded, authenticated control receipt."""
 
     if not result.get("ok") or result.get("failures"):
-        raise RuntimeError("PostgreSQL role/security verification failed")
+        summaries: list[str] = []
+        failures = result.get("failures")
+        if isinstance(failures, list):
+            for failure in failures[:8]:
+                if not isinstance(failure, dict):
+                    continue
+                parts = []
+                for key in ("role", "name", "sqlstate"):
+                    value = str(failure.get(key) or "unknown")[:80]
+                    parts.append(
+                        "".join(
+                            character
+                            if character.isalnum() or character in "._- "
+                            else "_"
+                            for character in value
+                        )
+                    )
+                summaries.append(":".join(parts))
+        suffix = f" ({';'.join(summaries)})" if summaries else ""
+        raise RuntimeError(f"PostgreSQL role/security verification failed{suffix}")
     probes = result.get("probes")
     if not isinstance(probes, list) or not probes:
         raise RuntimeError("PostgreSQL role/security verification returned no probes")

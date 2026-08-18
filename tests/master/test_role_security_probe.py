@@ -43,12 +43,27 @@ def test_security_evidence_binds_full_probe_hashes_without_probe_bodies() -> Non
 
 
 def test_security_evidence_rejects_any_failed_probe() -> None:
-    with pytest.raises(RuntimeError, match="verification failed"):
+    with pytest.raises(RuntimeError, match="verification failed") as captured:
         build_role_security_evidence(
-            {"ok": False, "failures": [{"name": "ddl"}], "probes": []},
+            {
+                "ok": False,
+                "failures": [
+                    {
+                        "role": "mdh_mcp_reader",
+                        "name": "ddl\nnot-a-log-line",
+                        "sqlstate": "42501",
+                        "detail": "must not be copied into the runtime log",
+                    }
+                ],
+                "probes": [],
+            },
             source_commit="a" * 40,
             master_instance_id="33333333-3333-4333-8333-333333333333",
             epoch=1,
             schema_version=1,
             canonical_revision=0,
         )
+    message = str(captured.value)
+    assert "mdh_mcp_reader:ddl_not-a-log-line:42501" in message
+    assert "must not be copied" not in message
+    assert "\n" not in message
