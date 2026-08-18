@@ -28,6 +28,17 @@ def test_cimd_toggle_and_scope_configuration_are_fail_closed(monkeypatch) -> Non
     assert runtime_module._csv("MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES", ()) == ()
 
 
+def test_cimd_scope_parser_accepts_the_complete_bounded_catalog(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    values = tuple(f"scope:{index}" for index in range(18))
+    monkeypatch.setenv("MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES", ",".join(values))
+
+    assert runtime_module._csv(
+        "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES",
+        (),
+        maximum_values=18,
+    ) == values
+
+
 def test_production_oauth_runtime_uses_durable_ledger_and_external_owner_login(
     monkeypatch, tmp_path: Path
 ) -> None:  # type: ignore[no-untyped-def]
