@@ -1181,7 +1181,11 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
         claim_lookup = getattr(self.status_authority, "latest_provider_resource_claim", None)
         authority_lookup = getattr(self.status_authority, "provider_effect_authority", None)
         arguments_lookup = getattr(self.status_authority, "provider_effect_arguments_sha256", None)
-        provider_receipt_lookup = getattr(self.status_authority, "latest_provider_effect_receipt", None)
+        provider_receipt_lookup = getattr(
+            self.status_authority, "latest_successful_provider_effect_receipt", None
+        )
+        if not callable(provider_receipt_lookup):
+            provider_receipt_lookup = getattr(self.status_authority, "latest_provider_effect_receipt", None)
         effect_lookup = getattr(self.status_authority, "get_effect_by_idempotency_key", None)
         idempotency_lookup = getattr(self.status_authority, "provider_effect_idempotency_key", None)
         if (

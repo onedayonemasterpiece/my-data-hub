@@ -422,7 +422,7 @@ def create_app(
         if claim is None:
             return None
         authority = control_ledger.provider_effect_authority(str(claim["effect_id"]))
-        receipt = control_ledger.latest_provider_effect_receipt(str(claim["effect_id"]))
+        receipt = control_ledger.latest_successful_provider_effect_receipt(str(claim["effect_id"]))
         expected_content_tree_sha256 = KaggleMasterRuntimeProvider._mapping_sha(settings.assets.dataset_files)
         expected_arguments_sha256 = sha256_value(
             {

@@ -1382,6 +1382,51 @@ def test_deleted_failed_checkpoint_version_is_retired_before_provider_version_re
     assert ledger.checkpoint_candidate(replacement_id)["version_ref"] == version_ref
 
 
+def test_successful_provider_receipt_survives_later_uncertain_observation(tmp_path: Path) -> None:
+    ledger = ControlLedger(tmp_path / "control.sqlite3")
+    operation = ledger.ensure_operation(
+        operation_id=str(uuid4()),
+        idempotency_key="provider-receipt-order",
+        operation_kind="ensure_master",
+        intent={"source": "test"},
+        initial_state="REQUESTED",
+        identity={"epoch": 1},
+    )[0]
+    effect_id = str(uuid4())
+    ledger.persist_provider_effect_intent(
+        {
+            "effect_id": effect_id,
+            "operation_id": operation.operation_id,
+            "idempotency_key": "provider-receipt-order:effect",
+            "task_id": str(uuid4()),
+            "action": "create_dataset",
+            "provider_ref": "owner/assets",
+            "request_sha256": "b" * 64,
+        }
+    )
+    applied = {
+        "effect_id": effect_id,
+        "action": "create_dataset",
+        "provider_ref": "owner/assets",
+        "outcome": "applied",
+        "provider_version": 1,
+        "observed_fingerprint": {"algorithm": "sha256", "value": "c" * 64},
+    }
+    ledger.persist_provider_effect_receipt(effect_id, applied)
+    uncertain = {
+        "effect_id": effect_id,
+        "action": "create_dataset",
+        "provider_ref": "owner/assets",
+        "outcome": "uncertain",
+        "provider_version": None,
+        "observed_fingerprint": None,
+    }
+    ledger.persist_provider_effect_receipt(effect_id, uncertain)
+
+    assert ledger.latest_provider_effect_receipt(effect_id) == uncertain
+    assert ledger.latest_successful_provider_effect_receipt(effect_id) == applied
+
+
 def test_checkpoint_promotion_keeps_previous_and_failed_candidate_cannot_advance(tmp_path: Path) -> None:
     ledger = ledger_at(tmp_path)
     operation, _ = ledger.ensure_operation(

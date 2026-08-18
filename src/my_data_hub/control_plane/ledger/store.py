@@ -3336,6 +3336,26 @@ class ControlLedger:
             ).fetchone()
         return json.loads(str(row["receipt_json"])) if row else None
 
+    def latest_successful_provider_effect_receipt(self, effect_id: str) -> dict[str, Any] | None:
+        """Return the newest conclusive success for one immutable provider effect.
+
+        A transport-loss reconciliation can append ``uncertain`` after an earlier
+        exact readback was durably recorded.  Such a later observation must not
+        erase the successful receipt used to bind an immutable resource claim.
+        """
+
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT receipt_json FROM provider_effect_receipts WHERE effect_id=? "
+                "ORDER BY sequence DESC",
+                (effect_id,),
+            ).fetchall()
+        for row in rows:
+            receipt = json.loads(str(row["receipt_json"]))
+            if receipt.get("outcome") in {"applied", "already_applied"}:
+                return receipt
+        return None
+
     def ensure_acceptance_evidence_task(
         self,
         *,

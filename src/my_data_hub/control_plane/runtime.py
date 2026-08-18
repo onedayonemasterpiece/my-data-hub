@@ -1111,7 +1111,7 @@ def _checkpoint_verifier_assets_from_verified_master_claim(
         raise MasterProviderUnavailable("exact master asset Dataset claim is unavailable")
     effect_id = str(claim.get("effect_id", ""))
     authority = ledger.provider_effect_authority(effect_id)
-    receipt = ledger.latest_provider_effect_receipt(effect_id)
+    receipt = ledger.latest_successful_provider_effect_receipt(effect_id)
     expected_key = f"{authority['operation_id']}:ensure_dataset" if authority is not None else ""
     expected_arguments_sha256 = sha256_value(
         {
