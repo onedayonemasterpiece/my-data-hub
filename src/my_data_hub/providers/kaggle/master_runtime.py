@@ -1216,6 +1216,23 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             if original_effect is not None and isinstance(original_effect.receipt, Mapping)
             else None
         )
+        original_state = getattr(getattr(original_effect, "state", None), "value", None)
+        completed_original = (
+            isinstance(original_exact, Mapping)
+            and original_state == "APPLIED"
+            and original_exact.get("provider_ref") == self.assets.dataset_ref
+            and original_exact.get("provider_version") == claim.get("provider_version")
+            and isinstance(original_exact.get("package_sha256"), str)
+        )
+        recovering_current = (
+            original_effect is not None
+            and original_effect.effect_id == effect.effect_id == original_effect_id
+            and original_effect.idempotency_key == effect.idempotency_key == expected_key
+            and original_effect.effect_kind == effect.effect_kind == "ensure_dataset"
+            and original_state == "IN_PROGRESS"
+            and original_effect.receipt is None
+            and effect.exact_identity.get("exact_ref") == self.assets.dataset_ref
+        )
         fingerprint = claim.get("fingerprint")
         expected_arguments = sha256_value(
             {
@@ -1233,11 +1250,7 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             or provider_receipt.get("provider_version") != claim.get("provider_version")
             or provider_receipt.get("observed_fingerprint") != fingerprint
             or provider_receipt.get("outcome") not in {"applied", "already_applied"}
-            or not isinstance(original_exact, Mapping)
-            or getattr(getattr(original_effect, "state", None), "value", None) != "APPLIED"
-            or original_exact.get("provider_ref") != self.assets.dataset_ref
-            or original_exact.get("provider_version") != claim.get("provider_version")
-            or not isinstance(original_exact.get("package_sha256"), str)
+            or not (completed_original or recovering_current)
             or not isinstance(fingerprint, Mapping)
             or not isinstance(fingerprint.get("value"), str)
         ):
@@ -1256,7 +1269,10 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             observed.provider_ref != self.assets.dataset_ref
             or observed.version != version
             or observed.privacy != "private"
-            or observed.package_sha256 != original_exact["package_sha256"]
+            or (
+                completed_original
+                and observed.package_sha256 != original_exact["package_sha256"]
+            )
             or observed.fingerprint.value != fingerprint["value"]
         ):
             raise MasterLaunchContractError("reusable master asset Dataset live readback differs")

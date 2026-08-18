@@ -15,6 +15,7 @@ import pytest
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.hashing import canonical_json_bytes, sha256_value
 from my_data_hub.orchestrator.master import MasterCoordinator, MasterIntent, MasterState
+from my_data_hub.orchestrator.master.provider import PlannedProviderEffect, ReconciliationStatus
 from my_data_hub.providers.kaggle import (
     KaggleKernelRunIdentity,
     KaggleMasterLaunchAssets,
@@ -237,6 +238,8 @@ class _ReusableAssetAuthority:
             "observed_fingerprint": {"algorithm": "sha256", "value": "f" * 64},
             "outcome": "applied",
         }
+
+    latest_successful_provider_effect_receipt = latest_provider_effect_receipt
 
 
 def test_concrete_bridge_launches_dataset_notebook_and_run_once(tmp_path: Path) -> None:
@@ -596,6 +599,76 @@ def test_distinct_master_operation_reuses_exact_immutable_asset_dataset(tmp_path
     assert first.operation_id != second.operation_id
     assert second.state is MasterState.REGISTERING
     assert adapter.calls["dataset"] == 1
+    assert adapter.calls["dataset_readback"] == 1
+
+
+def test_same_master_operation_recovers_asset_dataset_after_provider_receipt_loss(
+    tmp_path: Path,
+) -> None:
+    launch = _launch()
+    adapter = FakeKaggleAdapter()
+    ledger = ControlLedger(tmp_path / "control.sqlite3")
+    operation_id = str(uuid4())
+    effect_id = str(uuid5(NAMESPACE_URL, f"{operation_id}:ensure_dataset"))
+    exact_identity = {
+        "operation_id": operation_id,
+        "run_id": str(uuid4()),
+        "attempt_id": str(uuid4()),
+        "service_instance_id": str(uuid4()),
+        "master_instance_id": str(uuid4()),
+        "epoch": 1,
+        "source_identity": launch.source_identity,
+        "source_version": launch.source_version,
+        "exact_ref": launch.dataset_ref,
+        "checkpoint_ref": launch.checkpoint_ref,
+        "operation_requested_at": datetime.now(UTC).isoformat(),
+    }
+    ledger.ensure_operation(
+        operation_id=operation_id,
+        idempotency_key="asset-response-loss",
+        operation_kind="ensure_master",
+        intent={"source": "test"},
+        initial_state="REQUESTED",
+        identity=exact_identity,
+    )
+    ledger.plan_effect(
+        effect_id=effect_id,
+        operation_id=operation_id,
+        idempotency_key=f"{operation_id}:ensure_dataset",
+        effect_kind="ensure_dataset",
+        exact_identity=exact_identity,
+    )
+    assert ledger.claim_effect(effect_id) is not None
+    authority = _ReusableAssetAuthority(
+        ledger,
+        operation_id=operation_id,
+        arguments_sha256=sha256_value(
+            {
+                "content_tree_sha256": KaggleMasterRuntimeProvider._mapping_sha(launch.dataset_files),
+                "control_class": "orchestrator_protected",
+                "disposable": False,
+            }
+        ),
+    )
+    provider = KaggleMasterRuntimeProvider(adapter, launch, status_authority=authority)  # type: ignore[arg-type]
+
+    reconciled = provider.reconcile(
+        PlannedProviderEffect(
+            effect_id=effect_id,
+            idempotency_key=f"{operation_id}:ensure_dataset",
+            effect_kind="ensure_dataset",
+            exact_identity=exact_identity,
+        )
+    )
+
+    assert reconciled.status is ReconciliationStatus.FOUND
+    assert reconciled.receipt is not None
+    assert reconciled.receipt.exact_identity == {
+        "provider_ref": launch.dataset_ref,
+        "provider_version": 1,
+        "package_sha256": "a" * 64,
+    }
+    assert adapter.calls["dataset"] == 0
     assert adapter.calls["dataset_readback"] == 1
 
 
