@@ -116,6 +116,12 @@ services:
     # networking lets this unprivileged process reach that loopback without
     # exposing the tunnel on a Docker bridge or a public interface.
     network_mode: host
+    # Connector/committer credentials intentionally use the stable tunnel
+    # alias because the optional connector service runs on a Docker bridge.
+    # This process uses host networking, where that same tunnel is the host
+    # loopback socket; bind the alias locally instead of relying on DNS.
+    extra_hosts:
+      - "master-tunnel.internal:127.0.0.1"
     image: my-data-hub-control-plane:${MY_DATA_HUB_IMAGE_TAG:-architecture-reset}
     build:
       context: .

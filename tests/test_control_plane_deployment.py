@@ -164,6 +164,9 @@ def test_compose_has_exact_opt_in_profile_split_secret_boundaries_and_loopback_p
         "oauth-server": {"condition": "service_healthy"},
     }
     assert services["remote-mcp"]["network_mode"] == "host"
+    assert services["remote-mcp"]["extra_hosts"] == [
+        "master-tunnel.internal:127.0.0.1"
+    ]
     assert services["remote-mcp"]["environment"]["MY_DATA_HUB_MCP_HOST"] == "127.0.0.1"
     assert "ports" not in services["remote-mcp"]
     assert services["oauth-server"]["depends_on"] == {"control-plane": {"condition": "service_healthy"}}
