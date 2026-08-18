@@ -20,6 +20,7 @@ from my_data_hub.checkpoints.brokered_upload import (
     CheckpointUploadSecretBox,
     RuntimeUploadAuthority,
 )
+from my_data_hub.checkpoints.kaggle_runtime import CheckpointRuntimeError
 from my_data_hub.checkpoints.manifest import RestoreProbe, build_manifest, canonical_json, write_manifest
 from my_data_hub.checkpoints.provider_storage import checkpoint_provider_file_name
 from my_data_hub.checkpoints.registry import ControlLedgerCheckpointRegistry
@@ -118,6 +119,18 @@ class FailingRestoreVerifier:
     def verify_restore(self, **kwargs: object) -> dict[str, object]:
         del kwargs
         raise self.failure
+
+
+class RevisionedRestoreVerifier(FakeRestoreVerifier):
+    def __init__(self, revision: str) -> None:
+        self.revision_sha256 = revision
+        self.calls = 0
+
+
+class RevisionedFailingRestoreVerifier(FailingRestoreVerifier):
+    def __init__(self, revision: str) -> None:
+        super().__init__(CheckpointRuntimeError("missing exact runtime dependency"))
+        self.revision_sha256 = revision
 
 
 def _fixture(tmp_path: Path):  # type: ignore[no-untyped-def]
@@ -706,6 +719,43 @@ def test_verifier_failure_preserves_head_and_fails_candidate(tmp_path: Path, fai
     assert ledger.checkpoint_head("postgres-master") is None
     assert ledger.checkpoint_candidate(str(CHECKPOINT))["status"] == "FAILED"  # type: ignore[index]
     assert service.status(CHECKPOINT)["state"] == "FAILED"
+
+
+def test_new_verifier_revision_recovers_exact_failed_dataset_without_reupload(tmp_path: Path) -> None:
+    ledger, package, manifest, adapter, _verifier, _service, authority = _fixture(tmp_path)
+    old = RevisionedFailingRestoreVerifier("a" * 64)
+    failed = BrokeredCheckpointUploadService(
+        ledger,
+        adapter,
+        CheckpointUploadSecretBox(b"k" * 32),
+        old,
+    )
+    _upload_all(package, manifest, failed, authority)
+    with pytest.raises(CheckpointRuntimeError, match="runtime dependency"):
+        failed.finalize(CHECKPOINT, authority)
+
+    first = failed.status(CHECKPOINT)
+    assert first["state"] == "FAILED"
+    assert failed.reconcile_pending_once() == []
+    assert adapter.finalized == 1
+
+    fixed_verifier = RevisionedRestoreVerifier("b" * 64)
+    recovered = BrokeredCheckpointUploadService(
+        ledger,
+        adapter,
+        CheckpointUploadSecretBox(b"k" * 32),
+        fixed_verifier,
+    )
+    receipts = recovered.reconcile_pending_once()
+
+    assert len(receipts) == 1 and receipts[0]["state"] == "PROMOTED"
+    assert adapter.finalized == 1
+    assert fixed_verifier.calls == 1
+    publication = recovered.ledger.publication(str(CHECKPOINT))
+    assert publication is not None
+    assert publication["verifier_attempts"] == 2
+    assert publication["verifier_revision_sha256"] == "b" * 64
+    assert ledger.checkpoint_head("postgres-master").current_checkpoint_id == str(CHECKPOINT)  # type: ignore[union-attr]
 
 
 def test_failed_second_candidate_preserves_exact_current_and_previous_head(tmp_path: Path) -> None:

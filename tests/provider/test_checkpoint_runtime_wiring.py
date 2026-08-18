@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -85,6 +86,10 @@ def _verifier_assets(**updates: object) -> KaggleCheckpointVerifierAssets:
         "postgres_runtime_archive_sha256": "e" * 64,
         "postgres_runtime_manifest_relative_path": "postgresql-18-runtime.json",
         "postgres_runtime_manifest_sha256": "f" * 64,
+        "psycopg_wheel_relative_path": "embedding-worker-wheelhouse/psycopg.whl",
+        "psycopg_wheel_sha256": "1" * 64,
+        "psycopg_binary_wheel_relative_path": "embedding-worker-wheelhouse/psycopg_binary.whl",
+        "psycopg_binary_wheel_sha256": "2" * 64,
     }
     values.update(updates)
     return KaggleCheckpointVerifierAssets(**values)  # type: ignore[arg-type]
@@ -641,9 +646,13 @@ def test_rendered_verifier_discovers_normalized_mounts_and_rejects_ambiguity(
     wheel = b"wheel"
     archive = b"archive"
     runtime_manifest = b"runtime-manifest"
+    psycopg_wheel = b"psycopg-wheel"
+    psycopg_binary_wheel = b"psycopg-binary-wheel"
     (runtime_root / "project.whl").write_bytes(wheel)
     (runtime_root / "postgres.bundle").write_bytes(archive)
     (runtime_root / "postgres.json").write_bytes(runtime_manifest)
+    (runtime_root / "psycopg.whl").write_bytes(psycopg_wheel)
+    (runtime_root / "psycopg_binary.whl").write_bytes(psycopg_binary_wheel)
     for logical_name, provider_name in CHECKPOINT_PROVIDER_FILE_NAMES.items():
         (checkpoint_root / provider_name).write_bytes((package / logical_name).read_bytes())
     if duplicate_runtime_file:
@@ -657,6 +666,10 @@ def test_rendered_verifier_discovers_normalized_mounts_and_rejects_ambiguity(
         postgres_runtime_archive_sha256=hashlib.sha256(archive).hexdigest(),
         postgres_runtime_manifest_relative_path="runtime/postgres.json",
         postgres_runtime_manifest_sha256=hashlib.sha256(runtime_manifest).hexdigest(),
+        psycopg_wheel_relative_path="dependencies/psycopg.whl",
+        psycopg_wheel_sha256=hashlib.sha256(psycopg_wheel).hexdigest(),
+        psycopg_binary_wheel_relative_path="dependencies/psycopg_binary.whl",
+        psycopg_binary_wheel_sha256=hashlib.sha256(psycopg_binary_wheel).hexdigest(),
     )
     source, _pins_sha = _render_verifier_source(
         assets,
@@ -682,7 +695,18 @@ def test_rendered_verifier_discovers_normalized_mounts_and_rejects_ambiguity(
             exec(compile(bootstrap, "<verifier-bootstrap>", "exec"), {})
     else:
         monkeypatch.delenv("MY_DATA_HUB_CHECKPOINT_DIRECTORY", raising=False)
+        installs: list[tuple[str, ...]] = []
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda arguments, **_kwargs: installs.append(tuple(str(item) for item in arguments)),
+        )
         exec(compile(bootstrap, "<verifier-bootstrap>", "exec"), {})
+        assert [Path(arguments[-1]).name for arguments in installs] == [
+            "psycopg.whl",
+            "psycopg_binary.whl",
+        ]
+        assert all("--no-index" in arguments and "--no-deps" in arguments for arguments in installs)
         assert Path(os.environ["MY_DATA_HUB_CHECKPOINT_DIRECTORY"]) == working / "checkpoint-package"
         assert (working / "checkpoint-package/physical/base.tar.gz").read_bytes() == b"base"
         assert Path(os.environ["MY_DATA_HUB_WHEEL_PATH"]) == runtime_root / "project.whl"

@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import os
 import shutil
-import subprocess
 import tempfile
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Protocol
+
+from my_data_hub.master_runtime.postgres import (
+    KAGGLE_POSTGRES_GID,
+    KAGGLE_POSTGRES_UID,
+    SubprocessRunner,
+)
 
 from .manifest import CheckpointManifest
 from .publisher import assert_restore_equality
@@ -25,9 +31,15 @@ class RestoreCommandRunner(Protocol):
 
 class _SubprocessRestoreRunner:
     def run(self, arguments: list[str], *, timeout_seconds: int) -> None:
-        result = subprocess.run(arguments, check=False, capture_output=True, text=True, timeout=timeout_seconds)
-        if result.returncode:
-            raise RestoreVerifierError(f"{Path(arguments[0]).name} failed with exit {result.returncode}")
+        pgdata = _pgdata_argument(arguments)
+        if os.geteuid() == 0:
+            _give_restore_working_to_postgres(pgdata.parent.parent)
+            _give_tree_to_postgres(pgdata.parent)
+            _give_bundled_runtime_to_postgres(Path(arguments[0]))
+        try:
+            SubprocessRunner().run(arguments, timeout_seconds=timeout_seconds)
+        except Exception as exc:
+            raise RestoreVerifierError(str(exc)) from exc
 
 
 class IsolatedPostgresRestoreVerifier:
@@ -151,3 +163,48 @@ class IsolatedPostgresRestoreVerifier:
 
 def _quote_setting(value: object) -> str:
     return str(value).replace("'", "''")
+
+
+def _pgdata_argument(arguments: list[str]) -> Path:
+    try:
+        value = Path(arguments[arguments.index("--pgdata") + 1])
+    except (ValueError, IndexError) as exc:
+        raise RestoreVerifierError("pg_ctl command lacks exact PGDATA") from exc
+    if not value.is_absolute() or value.is_symlink() or not value.parent.is_dir():
+        raise RestoreVerifierError("pg_ctl PGDATA is outside the isolated restore")
+    return value
+
+
+def _give_tree_to_postgres(root: Path) -> None:
+    if root.is_symlink() or not root.is_dir():
+        raise RestoreVerifierError("isolated restore root is unsafe")
+    os.chown(root, KAGGLE_POSTGRES_UID, KAGGLE_POSTGRES_GID)
+    for directory, names, files in os.walk(root, followlinks=False):
+        base = Path(directory)
+        for name in (*names, *files):
+            child = base / name
+            if child.is_symlink():
+                raise RestoreVerifierError("isolated restore tree contains a symlink")
+            os.chown(child, KAGGLE_POSTGRES_UID, KAGGLE_POSTGRES_GID)
+
+
+def _give_restore_working_to_postgres(root: Path) -> None:
+    if root.is_symlink() or not root.is_dir():
+        raise RestoreVerifierError("isolated restore working root is unsafe")
+    os.chown(root, KAGGLE_POSTGRES_UID, KAGGLE_POSTGRES_GID)
+    root.chmod(0o700)
+
+
+def _give_bundled_runtime_to_postgres(executable: Path) -> None:
+    runtime_root = Path("/kaggle/working/checkpoint-postgresql-runtime")
+    try:
+        executable.relative_to(runtime_root)
+    except ValueError:
+        return
+    if runtime_root.is_symlink() or not runtime_root.is_dir():
+        raise RestoreVerifierError("bundled PostgreSQL runtime root is unsafe")
+    # The reviewed archive intentionally contains bounded internal library
+    # symlinks. Its files are already executable/readable; only the private
+    # root created by the Notebook must become traversable by the dropped uid.
+    os.chown(runtime_root, KAGGLE_POSTGRES_UID, KAGGLE_POSTGRES_GID)
+    runtime_root.chmod(0o700)

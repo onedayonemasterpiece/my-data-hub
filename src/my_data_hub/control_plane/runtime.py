@@ -1152,6 +1152,11 @@ def _checkpoint_verifier_assets_from_verified_master_claim(
         runtime_manifest = assets.dataset_files[POSTGRES_RUNTIME_MANIFEST_NAME]
     except KeyError as exc:
         raise MasterProviderUnavailable("verified master assets lack checkpoint verifier runtime files") from exc
+    python_dependencies = {
+        str(item["distribution"]): item for item in assets.master_python_dependencies()
+    }
+    psycopg = python_dependencies["psycopg"]
+    psycopg_binary = python_dependencies["psycopg-binary"]
     return KaggleCheckpointVerifierAssets(
         notebook_ref=assets.checkpoint_verifier_ref,
         notebook_source=verifier_source,
@@ -1166,6 +1171,12 @@ def _checkpoint_verifier_assets_from_verified_master_claim(
         postgres_runtime_archive_sha256=hashlib.sha256(archive).hexdigest(),
         postgres_runtime_manifest_relative_path=POSTGRES_RUNTIME_MANIFEST_NAME,
         postgres_runtime_manifest_sha256=hashlib.sha256(runtime_manifest).hexdigest(),
+        psycopg_wheel_relative_path=f"embedding-worker-wheelhouse/{psycopg['filename']}",
+        psycopg_wheel_sha256=str(psycopg["sha256"]),
+        psycopg_binary_wheel_relative_path=(
+            f"embedding-worker-wheelhouse/{psycopg_binary['filename']}"
+        ),
+        psycopg_binary_wheel_sha256=str(psycopg_binary["sha256"]),
     )
 
 

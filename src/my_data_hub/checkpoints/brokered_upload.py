@@ -179,6 +179,9 @@ class BrokeredKaggleAdapter(Protocol):
 
 
 class BrokeredRestoreVerifier(Protocol):
+    @property
+    def revision_sha256(self) -> str: ...
+
     def verify_restore(
         self,
         *,
@@ -584,6 +587,31 @@ class BrokeredCheckpointUploadService:
         self.restore_verifier_factory = restore_verifier_factory
         self.forced_failure_verifier_factory = forced_failure_verifier_factory
 
+    def _restore_verifier_for(self, publication: dict[str, Any]) -> BrokeredRestoreVerifier:
+        verifier = self.restore_verifier
+        if verifier is None and self.restore_verifier_factory is not None:
+            verifier = self.restore_verifier_factory(
+                UUID(str(publication["operation_id"])),
+                UUID(str(publication["run_id"])),
+            )
+        if verifier is None:
+            raise BrokeredCheckpointError("independent restore verifier is unavailable")
+        return verifier
+
+    @staticmethod
+    def _verifier_revision(verifier: BrokeredRestoreVerifier) -> str:
+        revision = getattr(verifier, "revision_sha256", None)
+        if isinstance(revision, str) and _SHA256.fullmatch(revision):
+            return revision
+        # Compatibility for injected test verifiers. Production verifiers expose
+        # an exact asset/source-bound revision above.
+        return sha256_value(
+            {
+                "schema_version": "my-data-hub-checkpoint-verifier-revision.v1",
+                "verifier_type": f"{type(verifier).__module__}.{type(verifier).__qualname__}",
+            }
+        )
+
     def prepare(self, spec: CheckpointBlobSpec, authority: RuntimeUploadAuthority) -> CheckpointBlobGrant:
         try:
             candidate, manifest = self._validate(spec, authority)
@@ -793,23 +821,17 @@ class BrokeredCheckpointUploadService:
         try:
             registry.uploaded(checkpoint_id, exact_ref)
             registry.package_uploaded(checkpoint_id, package_sha256)
+            verifier: BrokeredRestoreVerifier | None = None
+            if publication["state"] in {"DATASET_RESOLVED", "VERIFYING"}:
+                verifier = self._restore_verifier_for(publication)
             if publication["state"] == "DATASET_RESOLVED":
-                publication = self.ledger.transition(
+                assert verifier is not None
+                publication = self.ledger.start_verification(
                     str(checkpoint_id),
-                    expected_states=frozenset({"DATASET_RESOLVED"}),
-                    state="VERIFYING",
-                    event_type="verifier.started",
-                    evidence={"exact_version_ref": exact_ref},
+                    verifier_revision_sha256=self._verifier_revision(verifier),
                 )
             if publication["state"] == "VERIFYING":
-                verifier = self.restore_verifier
-                if verifier is None and self.restore_verifier_factory is not None:
-                    verifier = self.restore_verifier_factory(
-                        UUID(str(publication["operation_id"])),
-                        UUID(str(publication["run_id"])),
-                    )
-                if verifier is None:
-                    raise BrokeredCheckpointError("independent restore verifier is unavailable")
+                assert verifier is not None
                 dataset_identity = KaggleDatasetIdentity(
                     provider_ref=str(publication["dataset_ref"]),
                     version=expected_version,
@@ -1086,6 +1108,20 @@ class BrokeredCheckpointUploadService:
 
     def reconcile_pending_once(self) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
+        for checkpoint_value in self.ledger.failed_verifier_publications():
+            publication = self.ledger.publication(checkpoint_value)
+            if publication is None:
+                continue
+            try:
+                verifier = self._restore_verifier_for(publication)
+                reopened = self.ledger.retry_failed_verification(
+                    checkpoint_value,
+                    verifier_revision_sha256=self._verifier_revision(verifier),
+                )
+            except (BrokeredCheckpointError, IdempotencyConflict):
+                continue
+            if reopened is None:
+                continue
         for checkpoint_value in self.ledger.pending_publications():
             checkpoint_id = UUID(checkpoint_value)
             raw = self.ledger.publication_runtime_authority(checkpoint_value)

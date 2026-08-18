@@ -28,6 +28,7 @@ from my_data_hub.control_plane.runtime import (
     build_production_runtime,
 )
 from my_data_hub.embeddings.production import EmbeddingProductionRequest
+from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator
 from my_data_hub.providers.kaggle import (
     ControlLedgerKaggleJournal,
@@ -258,12 +259,49 @@ def test_checkpoint_verifier_factory_uses_exact_verified_master_asset_claim(
     monkeypatch.setenv("MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE", str(key))
     base = assets()
     wheel_name = "my_data_hub-0.1.0-py3-none-any.whl"
+    psycopg = b"psycopg-wheel"
+    psycopg_binary = b"psycopg-binary-wheel"
+    dependency_manifest = {
+        "schema_version": "my-data-hub-embedding-worker-dependencies.v1",
+        "source_lock_sha256": "1" * 64,
+        "index_url": "https://pypi.org/simple",
+        "runtime": {
+            "image_identity": base.runtime_image_identity,
+            "source_commit": base.runtime_image_source_commit,
+            "python_abi": "cp312",
+            "platform": "manylinux2014_x86_64",
+        },
+        "install_order": [
+            "psycopg-3.3.4-py3-none-any.whl",
+            "psycopg_binary-3.3.4-cp312.whl",
+        ],
+        "required_image_distributions": [],
+        "wheels": [
+            {
+                "distribution": "psycopg",
+                "filename": "psycopg-3.3.4-py3-none-any.whl",
+                "sha256": hashlib.sha256(psycopg).hexdigest(),
+                "byte_size": len(psycopg),
+                "version": "3.3.4",
+            },
+            {
+                "distribution": "psycopg-binary",
+                "filename": "psycopg_binary-3.3.4-cp312.whl",
+                "sha256": hashlib.sha256(psycopg_binary).hexdigest(),
+                "byte_size": len(psycopg_binary),
+                "version": "3.3.4",
+            },
+        ],
+        "smoke_requirement": {},
+    }
     launch = replace(
         base,
         dataset_files={
             **base.dataset_files,
             wheel_name: b"exact-wheel",
-            "embedding-worker-wheelhouse/dependency.whl": b"offline-dependency-wheel",
+            "embedding-worker-dependencies.json": canonical_json_bytes(dependency_manifest),
+            "embedding-worker-wheelhouse/psycopg-3.3.4-py3-none-any.whl": psycopg,
+            "embedding-worker-wheelhouse/psycopg_binary-3.3.4-cp312.whl": psycopg_binary,
         },
     )
     ledger = ControlLedger(tmp_path / "verified-assets.sqlite3")

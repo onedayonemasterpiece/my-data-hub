@@ -251,6 +251,24 @@ class CheckpointUploadLedger:
             ).fetchall()
         return [str(row[0]) for row in rows]
 
+    def failed_verifier_publications(self, *, limit: int = 10) -> list[str]:
+        """Return only failed master publications eligible for revision-aware inspection."""
+
+        if not 1 <= limit <= 100:
+            raise ValueError("checkpoint publication scan limit is invalid")
+        with self.ledger._reader() as connection:
+            rows = connection.execute(
+                "SELECT checkpoint_id FROM checkpoint_blob_publications "
+                "WHERE authority_kind='master' AND state='FAILED' "
+                "AND failure_code='CheckpointRuntimeError' AND exact_version_ref IS NOT NULL "
+                "AND (verifier_attempts<3 OR verifier_recovery_attempts<2 OR "
+                "(SELECT count(*) FROM checkpoint_verifier_extended_recovery_attempts x "
+                "WHERE x.checkpoint_id=checkpoint_blob_publications.checkpoint_id)<3) "
+                "ORDER BY updated_at,checkpoint_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
     def ensure_claim(
         self,
         *,
@@ -623,6 +641,183 @@ class CheckpointUploadLedger:
             if row["exact_version_ref"] != exact_version_ref:
                 raise IdempotencyConflict("checkpoint dataset exact version changed")
             return dict(row)
+
+    def start_verification(self, checkpoint_id: str, *, verifier_revision_sha256: str) -> dict[str, Any]:
+        """Durably bind one verifier revision before launching its provider effect."""
+
+        if not _SHA256.fullmatch(verifier_revision_sha256):
+            raise ValueError("checkpoint verifier revision is invalid")
+        now = _time(self.ledger.clock.now())
+        with self.ledger._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM checkpoint_blob_publications WHERE checkpoint_id=?", (checkpoint_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(checkpoint_id)
+            if row["state"] == "DATASET_RESOLVED":
+                changed = connection.execute(
+                    "UPDATE checkpoint_blob_publications SET state='VERIFYING',"
+                    "verifier_revision_sha256=?,verifier_attempts=verifier_attempts+1,updated_at=? "
+                    "WHERE checkpoint_id=? AND state='DATASET_RESOLVED' AND verifier_attempts<3",
+                    (verifier_revision_sha256, now, checkpoint_id),
+                ).rowcount
+                if changed != 1:
+                    raise IdempotencyConflict("checkpoint verifier attempt allocation is exhausted")
+                refreshed = connection.execute(
+                    "SELECT * FROM checkpoint_blob_publications WHERE checkpoint_id=?", (checkpoint_id,)
+                ).fetchone()
+                assert refreshed is not None
+                self._event(
+                    connection,
+                    checkpoint_id,
+                    None,
+                    "verifier.started",
+                    {
+                        "exact_version_ref": refreshed["exact_version_ref"],
+                        "verifier_revision_sha256": verifier_revision_sha256,
+                        "attempt": int(refreshed["verifier_attempts"]),
+                    },
+                    now,
+                )
+                return dict(refreshed)
+            if (
+                row["state"] != "VERIFYING"
+                or row["verifier_revision_sha256"] != verifier_revision_sha256
+            ):
+                raise IdempotencyConflict("checkpoint verifier revision differs from durable attempt")
+            return dict(row)
+
+    def retry_failed_verification(
+        self,
+        checkpoint_id: str,
+        *,
+        verifier_revision_sha256: str,
+    ) -> dict[str, Any] | None:
+        """Reopen only an exact non-HEAD verifier failure with a newer revision.
+
+        Dataset bytes and the numeric provider version are immutable and reused;
+        upload/finalize effects are never repeated.
+        """
+
+        if not _SHA256.fullmatch(verifier_revision_sha256):
+            raise ValueError("checkpoint verifier revision is invalid")
+        now = _time(self.ledger.clock.now())
+        with self.ledger._transaction() as connection:
+            publication = connection.execute(
+                "SELECT * FROM checkpoint_blob_publications WHERE checkpoint_id=?", (checkpoint_id,)
+            ).fetchone()
+            if publication is None:
+                raise KeyError(checkpoint_id)
+            if publication["state"] != "FAILED" or publication["failure_code"] != "CheckpointRuntimeError":
+                return None
+            if publication["verifier_revision_sha256"] == verifier_revision_sha256:
+                return None
+            extended = connection.execute(
+                "SELECT count(*) AS total FROM checkpoint_verifier_extended_recovery_attempts "
+                "WHERE checkpoint_id=?",
+                (checkpoint_id,),
+            ).fetchone()
+            extended_count = int(extended["total"] if extended is not None else 0)
+            normal_exhausted = int(publication["verifier_attempts"]) >= 3
+            recovery_exhausted = int(publication["verifier_recovery_attempts"]) >= 2
+            if (
+                (normal_exhausted and recovery_exhausted and extended_count >= 3)
+                or not publication["exact_version_ref"]
+            ):
+                return None
+            candidate = connection.execute(
+                "SELECT * FROM checkpoint_candidates WHERE checkpoint_id=?", (checkpoint_id,)
+            ).fetchone()
+            claims = connection.execute(
+                "SELECT count(*) AS total,sum(CASE WHEN state='CONSUMED' THEN 1 ELSE 0 END) AS consumed "
+                "FROM checkpoint_blob_upload_claims WHERE checkpoint_id=?",
+                (checkpoint_id,),
+            ).fetchone()
+            head_contains = connection.execute(
+                "SELECT 1 FROM checkpoint_heads WHERE current_checkpoint_id=? OR previous_checkpoint_id=? LIMIT 1",
+                (checkpoint_id, checkpoint_id),
+            ).fetchone()
+            head = connection.execute(
+                "SELECT generation,current_checkpoint_id FROM checkpoint_heads WHERE service_kind='postgres-master'"
+            ).fetchone()
+            generation = int(head["generation"]) if head is not None else 0
+            current_checkpoint_id = head["current_checkpoint_id"] if head is not None else None
+            if (
+                candidate is None
+                or candidate["status"] != "FAILED"
+                or candidate["failure_code"] != "CheckpointRuntimeError"
+                or candidate["version_ref"] != publication["exact_version_ref"]
+                or candidate["operation_id"] != publication["operation_id"]
+                or candidate["master_instance_id"] != publication["master_instance_id"]
+                or int(candidate["epoch"]) != int(publication["epoch"])
+                or int(candidate["source_head_generation"]) != int(publication["source_head_generation"])
+                or generation != int(publication["source_head_generation"])
+                or candidate["source_checkpoint_id"] != current_checkpoint_id
+                or head_contains is not None
+                or claims is None
+                or int(claims["total"] or 0) != int(publication["expected_file_count"])
+                or int(claims["consumed"] or 0) != int(publication["expected_file_count"])
+            ):
+                raise IdempotencyConflict("failed verifier publication no longer has exact retry authority")
+            connection.execute(
+                "UPDATE checkpoint_candidates SET status='UPLOADED',failure_code=NULL "
+                "WHERE checkpoint_id=? AND status='FAILED' AND failure_code='CheckpointRuntimeError'",
+                (checkpoint_id,),
+            )
+            if normal_exhausted and recovery_exhausted:
+                exists = connection.execute(
+                    "SELECT 1 FROM checkpoint_verifier_extended_recovery_attempts "
+                    "WHERE checkpoint_id=? AND verifier_revision_sha256=?",
+                    (checkpoint_id, verifier_revision_sha256),
+                ).fetchone()
+                if exists is not None:
+                    raise IdempotencyConflict("checkpoint verifier revision was already attempted")
+                connection.execute(
+                    "INSERT INTO checkpoint_verifier_extended_recovery_attempts("
+                    "checkpoint_id,verifier_revision_sha256,sequence,recovered_failure_code,created_at) "
+                    "VALUES (?,?,?,?,?)",
+                    (
+                        checkpoint_id,
+                        verifier_revision_sha256,
+                        extended_count + 1,
+                        "CheckpointRuntimeError",
+                        now,
+                    ),
+                )
+            changed = connection.execute(
+                "UPDATE checkpoint_blob_publications SET state='VERIFYING',failure_code=NULL,"
+                "verifier_revision_sha256=?,"
+                "verifier_attempts=verifier_attempts+CASE WHEN verifier_attempts<3 THEN 1 ELSE 0 END,"
+                "verifier_recovery_attempts=verifier_recovery_attempts+"
+                "CASE WHEN verifier_attempts>=3 AND verifier_recovery_attempts<2 THEN 1 ELSE 0 END,"
+                "verifier_run_ref=NULL,verifier_receipt_sha256=NULL,verifier_evidence_json=NULL,updated_at=? "
+                "WHERE checkpoint_id=? AND state='FAILED' AND failure_code='CheckpointRuntimeError'",
+                (verifier_revision_sha256, now, checkpoint_id),
+            ).rowcount
+            if changed != 1:
+                raise IdempotencyConflict("failed verifier publication retry lost its CAS")
+            refreshed = connection.execute(
+                "SELECT * FROM checkpoint_blob_publications WHERE checkpoint_id=?", (checkpoint_id,)
+            ).fetchone()
+            assert refreshed is not None
+            self._event(
+                connection,
+                checkpoint_id,
+                None,
+                "verifier.started",
+                {
+                    "exact_version_ref": refreshed["exact_version_ref"],
+                    "verifier_revision_sha256": verifier_revision_sha256,
+                    "attempt": int(refreshed["verifier_attempts"]),
+                    "recovery_attempt": int(refreshed["verifier_recovery_attempts"]),
+                    "extended_recovery_attempt": extended_count + 1
+                    if normal_exhausted and recovery_exhausted
+                    else 0,
+                    "recovered_failure": "CheckpointRuntimeError",
+                },
+                now,
+            )
+            return dict(refreshed)
 
     def transition(
         self,
