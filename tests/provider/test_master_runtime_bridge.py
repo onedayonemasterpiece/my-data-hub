@@ -79,6 +79,7 @@ def _prepare_status_authority(
         tls_certificate=TLS_CERTIFICATE,
         tls_private_key=private_key,
     )
+    assert json.loads(files["master-config.json"])["lease_seconds"] == 300
     stored, _ = ledger.ensure_master_status_dataset_authority(
         operation_id=identity["operation_id"],
         run_id=identity["run_id"],

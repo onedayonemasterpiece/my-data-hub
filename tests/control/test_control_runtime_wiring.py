@@ -821,6 +821,17 @@ def test_active_runtime_claims_only_its_exact_blogger_request(tmp_path: Path) ->
         headers={"Authorization": f"Bearer {token}"},
     )
     assert accepted.status_code == 200
+    already_active = client.post(
+        "/control/v1/master/ensure",
+        json={"idempotency_key": "blogger-closure-new-key-after-active"},
+    )
+    assert already_active.status_code == 200
+    assert already_active.json() == {
+        "operation_id": operation.operation_id,
+        "master_state": "ACTIVE",
+        "duplicate": True,
+        "terminal": True,
+    }
     request = BloggerMigrationRequest(
         request_id=uuid4(),
         operation_id=operation.operation_id,

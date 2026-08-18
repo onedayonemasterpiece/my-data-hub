@@ -1210,6 +1210,19 @@ def create_app(
                 else "provider_unavailable"
             )
             raise HTTPException(status_code=503, detail={"code": code})
+        active_service = control_ledger.resolve_service("postgres-master")
+        if active_service is not None:
+            active_operation = control_ledger.operation_for_attempt(
+                active_service.run_id,
+                active_service.attempt_id,
+            )
+            if active_operation is not None and active_operation.state == "ACTIVE":
+                return {
+                    "operation_id": active_operation.operation_id,
+                    "master_state": active_operation.state,
+                    "duplicate": True,
+                    "terminal": True,
+                }
         try:
             handle, duplicate = master_runtime.ensure(key)
         except Exception as exc:

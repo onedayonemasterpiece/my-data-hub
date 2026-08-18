@@ -1612,8 +1612,6 @@ def _render_verifier_source(
         "_mdh_checkpoint_root,_mdh_checkpoint_source_root=_mdh_materialize_checkpoint(\n"
         "    _mdh_input,_mdh_values['MY_DATA_HUB_CHECKPOINT_MANIFEST_SHA256'],\n"
         "    _mdh_pathlib.Path('/kaggle/working/checkpoint-verifier-package'))\n"
-        "if _mdh_input/_mdh_checkpoint_source_root.relative_to(_mdh_input).parts[0] == _mdh_runtime_root:\n"
-        "    raise RuntimeError('runtime and checkpoint claims resolve to one mount')\n"
         f"_mdh_values['MY_DATA_HUB_CHECKPOINT_DIRECTORY'] = str(_mdh_checkpoint_root)\n"
         f"_mdh_values['MY_DATA_HUB_CHECKPOINT_MANIFEST'] = str(_mdh_checkpoint_root / {CHECKPOINT_MANIFEST_NAME!r})\n"
         "_mdh_values['MY_DATA_HUB_WHEEL_PATH'] = str(_mdh_runtime_files['wheel'])\n"

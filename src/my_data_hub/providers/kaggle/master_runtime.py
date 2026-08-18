@@ -847,7 +847,11 @@ class KaggleMasterRuntimeProvider(MasterRuntimeProvider):
             "checkpoint_exact_version_ref": str(checkpoint["exact_version_ref"]) if verified else None,
             "checkpoint_manifest_sha256": str(checkpoint["manifest_sha256"]) if verified else None,
             "checkpoint_head_generation": int(checkpoint["generation"]),
-            "lease_seconds": 120,
+            # Blogger migration reserves up to five minutes for two fresh
+            # read-only YDB scans plus the transaction-bound import.  The
+            # previous two-minute lease made that production stage
+            # structurally inadmissible even while the Notebook was healthy.
+            "lease_seconds": 300,
             "postgres_bin": "/opt/mdh-postgresql-runtime/pgsql/bin",
             "postgres_port": 15432,
             "tunnel_gateway_host": self.assets.tunnel_gateway_host,
