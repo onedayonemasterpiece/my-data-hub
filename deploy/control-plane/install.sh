@@ -529,7 +529,7 @@ services:
       MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED: "false"
       MY_DATA_HUB_MCP_PROVIDER_PROFILE_ENABLED: "true"
       MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "false"
-      MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL: http://control-plane:8080/internal/mcp-provider/invoke
+      MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL: http://127.0.0.1:8080/internal/mcp-provider/invoke
       MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE: /run/secrets/mcp-control-gateway.token
       MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE: /run/secrets/mcp-write-gate.key
       MY_DATA_HUB_MCP_SCOPES: platform:read,provider:read,provider:write
@@ -653,7 +653,7 @@ services:
       MY_DATA_HUB_MCP_PROVIDER_PROFILE_ENABLED: "false"
       MY_DATA_HUB_MCP_UNIFIED_BOOTSTRAP_PROFILE_ENABLED: "true"
       MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "false"
-      MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL: http://control-plane:8080/internal/mcp-provider/invoke
+      MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL: http://127.0.0.1:8080/internal/mcp-provider/invoke
       MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE: /run/secrets/mcp-control-gateway.token
       MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE: /run/secrets/mcp-write-gate.key
       MY_DATA_HUB_MCP_SCOPES: platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,provider:write
@@ -710,7 +710,7 @@ services:
       MY_DATA_HUB_MCP_WRITE_ENABLED: "true"
       MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED: "true"
       MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE: /run/secrets/mcp-write-gate.key
-      MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL: http://control-plane:8080/internal/mcp-provider/invoke
+      MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL: http://127.0.0.1:8080/internal/mcp-provider/invoke
       MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE: /run/secrets/mcp-control-gateway.token
       MY_DATA_HUB_MCP_SCOPES: platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,acceptance:operate,data:write,migration:operate,bloggers:write,provider:write
     volumes:

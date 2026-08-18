@@ -163,6 +163,9 @@ def test_compose_has_exact_opt_in_profile_split_secret_boundaries_and_loopback_p
         "control-plane": {"condition": "service_healthy"},
         "oauth-server": {"condition": "service_healthy"},
     }
+    assert services["remote-mcp"]["network_mode"] == "host"
+    assert services["remote-mcp"]["environment"]["MY_DATA_HUB_MCP_HOST"] == "127.0.0.1"
+    assert "ports" not in services["remote-mcp"]
     assert services["oauth-server"]["depends_on"] == {"control-plane": {"condition": "service_healthy"}}
 
     env_files = {name: service["env_file"][0]["path"] for name, service in services.items()}
@@ -187,13 +190,14 @@ def test_compose_has_exact_opt_in_profile_split_secret_boundaries_and_loopback_p
     assert oauth["environment"]["MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE"] == ("/run/secrets/owner-portal-state.key")
     assert all(":ro" in binding for binding in oauth["volumes"] if "/run/secrets/" in binding)
 
-    for service in services.values():
+    for name, service in services.items():
         assert service["restart"] == "unless-stopped"
         assert service["logging"] == {
             "driver": "json-file",
             "options": {"max-size": "10m", "max-file": "5"},
         }
-        assert all(binding.startswith("127.0.0.1:") for binding in service["ports"])
+        if name != "remote-mcp":
+            assert all(binding.startswith("127.0.0.1:") for binding in service["ports"])
     serialized = COMPOSE.read_text(encoding="utf-8").casefold()
     for forbidden in ("pgdata", "pg_dump", "db migrate", "connector-committer"):
         assert forbidden not in serialized
@@ -247,6 +251,20 @@ def test_operator_profile_keeps_kaggle_authority_only_in_control_process() -> No
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
     assert compose["services"]["control-plane"]["environment"]["MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED"] == "false"
     assert "KAGGLE_API_TOKEN" not in json.dumps(compose["services"]["remote-mcp"])
+
+
+def test_remote_mcp_host_network_uses_only_loopback_control_gateway() -> None:
+    source = installer_source()
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    remote = compose["services"]["remote-mcp"]
+    assert remote["network_mode"] == "host"
+    assert remote["environment"]["MY_DATA_HUB_MCP_HOST"] == "127.0.0.1"
+    assert "ports" not in remote
+    assert "http://control-plane:8080/internal/mcp-provider/invoke" not in source
+    assert source.count(
+        "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL: "
+        "http://127.0.0.1:8080/internal/mcp-provider/invoke"
+    ) == 3
 
 
 def test_provider_only_mcp_action_is_explicit_and_skips_master_only_prerequisites() -> None:

@@ -1678,8 +1678,10 @@ def validate_deployment(report: Report) -> None:
         "remote MCP owner/operator writes are not fail-closed",
     )
     report.check(
-        remote_mcp.get("ports") == ["127.0.0.1:${MY_DATA_HUB_MCP_PORT:-8765}:8765"],
-        "remote MCP upstream must bind loopback only",
+        remote_mcp.get("network_mode") == "host"
+        and remote_mcp.get("environment", {}).get("MY_DATA_HUB_MCP_HOST") == "127.0.0.1"
+        and "ports" not in remote_mcp,
+        "remote MCP must use host networking while binding only the devstand loopback",
     )
     connector_intake = control.get("services", {}).get("connector-intake")
     if connector_intake is not None:
