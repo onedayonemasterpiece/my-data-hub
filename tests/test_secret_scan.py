@@ -11,6 +11,12 @@ def test_secret_scan_detects_strong_tokens_and_private_keys() -> None:
     assert "private-key" in findings(private_key)
 
 
+def test_secret_scan_allows_only_the_exact_invalid_historical_test_pem() -> None:
+    sentinel = "-----BEGIN " + "PRIVATE KEY-----\nTEST\n-----END PRIVATE " + "KEY-----"
+    assert findings(sentinel) == []
+    assert "private-key" in findings(sentinel.replace("TEST", "QUJDREVGR0g="))
+
+
 def test_secret_scan_detects_nonplaceholder_sensitive_assignment() -> None:
     assignment = "KAGGLE_API_" + "TOKEN=" + "sensitive-value-123456789"
     assert findings(assignment) == ["credential-assignment"]

@@ -42,10 +42,20 @@ _SAFE_ASSIGNMENT_FRAGMENTS = (
     "runtime-secret-long-enough",
 )
 
+# A historical unit-test patch used this exact deliberately invalid three-line
+# value to exercise TLS file plumbing. Keep the reachable-history scan strict
+# for every real PEM body while allowing only that byte-for-byte sentinel.
+_INVALID_TEST_PEM_SENTINEL = (
+    "-----BEGIN " + "PRIVATE KEY-----\nTEST\n-----END PRIVATE " + "KEY-----"
+)
+_INVALID_TEST_PEM_SOURCE_SENTINEL = _INVALID_TEST_PEM_SENTINEL.replace("\n", "\\n")
+
 
 def findings(text: str) -> list[str]:
-    found = [name for name, pattern in _STRONG_PATTERNS if pattern.search(text)]
-    for match in _ASSIGNMENT.finditer(text):
+    scanned = text.replace(_INVALID_TEST_PEM_SENTINEL, "test-only-invalid-pem-sentinel")
+    scanned = scanned.replace(_INVALID_TEST_PEM_SOURCE_SENTINEL, "test-only-invalid-pem-sentinel")
+    found = [name for name, pattern in _STRONG_PATTERNS if pattern.search(scanned)]
+    for match in _ASSIGNMENT.finditer(scanned):
         value = match.group(1)
         lowered = value.casefold()
         if len(value) < 16 or any(fragment in lowered for fragment in _SAFE_ASSIGNMENT_FRAGMENTS):

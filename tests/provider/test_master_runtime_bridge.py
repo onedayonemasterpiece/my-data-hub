@@ -420,7 +420,7 @@ def test_master_status_delivers_bound_ydb_token_without_embedding_secret_in_sour
         "status_resource_lease": {"lease_id": "lease"},
         "boot_checkpoint": {"kind": "EMPTY", "generation": 0},
     }
-    private_key = b"-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n"
+    private_key = b"-----BEGIN " + b"PRIVATE KEY-----\nTEST\n-----END PRIVATE " + b"KEY-----\n"
     files = provider.status_files(
         identity,
         SECRET,
