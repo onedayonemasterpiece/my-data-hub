@@ -323,6 +323,7 @@ class Settings:
             "master:rotate",
             "recovery:request",
             "acceptance:probe",
+            "acceptance:operate",
             "data:write",
             "migration:operate",
             "bloggers:write",

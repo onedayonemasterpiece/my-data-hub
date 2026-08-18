@@ -261,11 +261,12 @@ def test_operator_profile_keeps_chatgpt_cimd_with_exact_operator_scopes() -> Non
     exact_scopes = (
         "openid,offline_access,platform:read,master:read,operation:read,checkpoint:read,"
         "embedding:read,provider:read,bloggers:read,data:read,master:ensure,master:rotate,"
-        "recovery:request,acceptance:probe,acceptance:operate,data:write,migration:operate,"
+        "recovery:request,acceptance:probe,data:write,migration:operate,"
         "bloggers:write,provider:write"
     )
     assert 'MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED: "true"' in operator_override
     assert f"MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: {exact_scopes}" in operator_override
+    assert "acceptance:operate" not in operator_override
 
 
 def test_remote_mcp_host_network_uses_only_loopback_control_gateway() -> None:
@@ -536,7 +537,11 @@ def test_acceptance_scenarios_are_owner_opt_in_and_use_provider_status_input() -
     assert 'value.get("brokered_checkpoint_upload") is not True' in source
     start = source.index('cat > "$acceptance_scenarios_override"')
     end = source.index('chmod 600 "$acceptance_scenarios_override"', start)
-    assert 'MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "false"' not in source[start:end]
+    acceptance_override = source[start:end]
+    assert 'MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "false"' not in acceptance_override
+    assert "MY_DATA_HUB_MCP_SCOPES:" in acceptance_override
+    assert "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES:" in acceptance_override
+    assert "acceptance:operate" in acceptance_override
     assert "MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED" not in COMPOSE.read_text()
 
 
