@@ -11,7 +11,7 @@ from uuid import UUID
 
 import pytest
 
-from my_data_hub.db.migrations import migrate
+from my_data_hub.db.migrations import discover_migrations, migrate
 from my_data_hub.master_runtime.contracts import MasterIdentity
 from my_data_hub.master_runtime.credentials import CredentialProvisioner
 from my_data_hub.master_runtime.database_gate import DatabaseGate
@@ -401,9 +401,10 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
                 "SELECT highest_epoch,current_epoch,gate_state FROM master_control.epoch_state"
             ).fetchone()
             assert state == (3, 3, "open")
+            expected_schema_revision = discover_migrations(ROOT / "sql/migrations")[-1].version
             assert admin.execute(
                 "SELECT schema_revision FROM hub.canonical_state WHERE singleton"
-            ).fetchone()[0] == 19
+            ).fetchone()[0] == expected_schema_revision
             assert admin.execute(
                 "SELECT canonical_revision FROM hub.canonical_state WHERE singleton"
             ).fetchone()[0] == first_import.canonical_revision
