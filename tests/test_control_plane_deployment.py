@@ -261,12 +261,13 @@ def test_operator_profile_keeps_chatgpt_cimd_with_exact_operator_scopes() -> Non
     exact_scopes = (
         "openid,offline_access,platform:read,master:read,operation:read,checkpoint:read,"
         "embedding:read,provider:read,bloggers:read,data:read,master:ensure,master:rotate,"
-        "recovery:request,acceptance:probe,data:write,migration:operate,"
+        "recovery:request,acceptance:probe,data:write,"
         "bloggers:write,provider:write"
     )
     assert 'MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED: "true"' in operator_override
     assert f"MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: {exact_scopes}" in operator_override
     assert "acceptance:operate" not in operator_override
+    assert "migration:operate" not in operator_override
 
 
 def test_remote_mcp_host_network_uses_only_loopback_control_gateway() -> None:
