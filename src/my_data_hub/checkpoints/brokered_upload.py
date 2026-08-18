@@ -33,6 +33,7 @@ from my_data_hub.providers.kaggle.contracts import (
 )
 
 from .manifest import CheckpointManifest, canonical_json, load_and_verify
+from .provider_storage import checkpoint_provider_file_name
 from .publisher import PublishReceipt
 from .registry import ControlLedgerCheckpointRegistry
 
@@ -643,7 +644,7 @@ class BrokeredCheckpointUploadService:
         self.ledger.claim_start(str(claim_id))
         try:
             grant = self.adapter.start_brokered_dataset_blob(
-                file_name=spec.file_name,
+                file_name=checkpoint_provider_file_name(spec.file_name),
                 content_length=spec.content_length,
                 content_type=spec.content_type,
                 last_modified_epoch_seconds=int(manifest.created_at.timestamp()),
@@ -1132,7 +1133,8 @@ class BrokeredCheckpointUploadService:
                     "total_bytes": int(row["content_length"]),
                 }
             ).decode()
-            expected.append((str(row["file_name"]), int(row["content_length"]), description))
+            provider_name = checkpoint_provider_file_name(str(row["file_name"]))
+            expected.append((provider_name, int(row["content_length"]), description))
             entries.append(
                 {
                     "path": str(row["file_name"]),
@@ -1146,7 +1148,7 @@ class BrokeredCheckpointUploadService:
                     raise BrokeredCheckpointError("checkpoint provider blob token is unavailable")
                 provider_files.append(
                     BrokeredDatasetFile(
-                        name=str(row["file_name"]),
+                        name=provider_name,
                         total_bytes=int(row["content_length"]),
                         description=description,
                         blob_token=self.secret_box.open(

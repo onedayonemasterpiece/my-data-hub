@@ -19,6 +19,7 @@ from types import MappingProxyType
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from my_data_hub.checkpoints.provider_storage import checkpoint_materializer_source
 from my_data_hub.hashing import canonical_json_bytes, sha256_value
 from my_data_hub.orchestrator.master.evidence import MasterTerminalOutput, PlatformStatus
 from my_data_hub.orchestrator.master.provider import (
@@ -461,7 +462,8 @@ def _runtime_bootstrap(
     bootstrap = (
         "import hashlib as _mdh_hashlib, importlib.util as _mdh_importlib, os as _mdh_os, "
         "pathlib as _mdh_pathlib\n"
-        "# Kaggle injects KAGGLE_API_V1_TOKEN into official Notebook runtimes.\n"
+        + checkpoint_materializer_source()
+        + "# Kaggle injects KAGGLE_API_V1_TOKEN into official Notebook runtimes.\n"
         "# Remove every account-level lifecycle credential before reading assets or importing app code.\n"
         "for _mdh_credential_name in ('KAGGLE_KEY','KAGGLE_API_TOKEN','KAGGLE_API_V1_TOKEN',"
         "'KAGGLE_ACCESS_TOKEN'):\n"
@@ -546,20 +548,10 @@ def _runtime_bootstrap(
         f"assert _mdh_hashlib.sha256(_mdh_master_config.read_bytes()).hexdigest() == {master_config_sha256!r}\n"
         "_mdh_master_payload=__import__('json').loads(_mdh_master_config.read_bytes())\n"
         "if _mdh_master_payload.get('checkpoint_manifest_sha256'):\n"
-        "    _mdh_checkpoint_matches=[]\n"
-        "    for _mdh_index,_mdh_candidate in enumerate(_mdh_input_root.rglob('checkpoint-manifest.json')):\n"
-        "        if _mdh_index >= 4096: raise RuntimeError('checkpoint input discovery exceeds bound')\n"
-        "        _mdh_relative=_mdh_candidate.relative_to(_mdh_input_root)\n"
-        "        if _mdh_candidate.is_symlink() or any(("
-        "_mdh_input_root.joinpath(*_mdh_relative.parts[:_i])).is_symlink() "
-        "for _i in range(1,len(_mdh_relative.parts))) or not _mdh_candidate.is_file() or "
-        "_mdh_candidate.stat().st_size > 1048576: continue\n"
-        "        try: _mdh_checkpoint_payload=__import__('json').loads(_mdh_candidate.read_bytes())\n"
-        "        except (ValueError,OSError): continue\n"
-        "        if _mdh_checkpoint_payload.get('manifest_sha256') == "
-        "_mdh_master_payload['checkpoint_manifest_sha256']: _mdh_checkpoint_matches.append(_mdh_candidate.parent)\n"
-        "    if len(_mdh_checkpoint_matches) != 1: raise RuntimeError('exact checkpoint input is absent or ambiguous')\n"  # noqa: E501
-        "    _mdh_master_payload['checkpoint_directory']=str(_mdh_checkpoint_matches[0])\n"
+        "    _mdh_checkpoint_root,_mdh_checkpoint_source_root=_mdh_materialize_checkpoint(\n"
+        "        _mdh_input_root,_mdh_master_payload['checkpoint_manifest_sha256'],\n"
+        "        _mdh_pathlib.Path('/kaggle/working/master-boot-checkpoint'))\n"
+        "    _mdh_master_payload['checkpoint_directory']=str(_mdh_checkpoint_root)\n"
         "    _mdh_runtime_config=_mdh_pathlib.Path('/kaggle/working/master-config.json')\n"
         "    _mdh_fd=_mdh_os.open(_mdh_runtime_config,_mdh_os.O_WRONLY|_mdh_os.O_CREAT|_mdh_os.O_EXCL,0o600)\n"
         "    with _mdh_os.fdopen(_mdh_fd,'w') as _mdh_stream: "

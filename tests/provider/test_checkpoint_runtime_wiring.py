@@ -31,6 +31,7 @@ from my_data_hub.checkpoints.kaggle_runtime import (
     _render_verifier_source,
 )
 from my_data_hub.checkpoints.manifest import RestoreProbe, build_manifest, load_and_verify, write_manifest
+from my_data_hub.checkpoints.provider_storage import CHECKPOINT_PROVIDER_FILE_NAMES
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.checkpoints.registry import CheckpointHead
 from my_data_hub.hashing import canonical_json_bytes
@@ -643,9 +644,8 @@ def test_rendered_verifier_discovers_normalized_mounts_and_rejects_ambiguity(
     (runtime_root / "project.whl").write_bytes(wheel)
     (runtime_root / "postgres.bundle").write_bytes(archive)
     (runtime_root / "postgres.json").write_bytes(runtime_manifest)
-    (checkpoint_root / "checkpoint-manifest.json").write_bytes(
-        canonical_json_bytes(manifest.payload())
-    )
+    for logical_name, provider_name in CHECKPOINT_PROVIDER_FILE_NAMES.items():
+        (checkpoint_root / provider_name).write_bytes((package / logical_name).read_bytes())
     if duplicate_runtime_file:
         duplicate = input_root / "unrelated-provider-mount"
         duplicate.mkdir()
@@ -671,6 +671,9 @@ def test_rendered_verifier_discovers_normalized_mounts_and_rejects_ambiguity(
     image_commit = tmp_path / "git_commit"
     image_commit.write_text("c" * 40)
     bootstrap = bootstrap.replace("/kaggle/input", str(input_root)).replace(
+        "/kaggle/working/checkpoint-verifier-package",
+        str(working / "checkpoint-package"),
+    ).replace(
         "/kaggle/working/checkpoint-verifier-execution-pins.json",
         str(working / "execution-pins.json"),
     ).replace("/etc/git_commit", str(image_commit))
@@ -680,7 +683,8 @@ def test_rendered_verifier_discovers_normalized_mounts_and_rejects_ambiguity(
     else:
         monkeypatch.delenv("MY_DATA_HUB_CHECKPOINT_DIRECTORY", raising=False)
         exec(compile(bootstrap, "<verifier-bootstrap>", "exec"), {})
-        assert Path(os.environ["MY_DATA_HUB_CHECKPOINT_DIRECTORY"]) == checkpoint_root
+        assert Path(os.environ["MY_DATA_HUB_CHECKPOINT_DIRECTORY"]) == working / "checkpoint-package"
+        assert (working / "checkpoint-package/physical/base.tar.gz").read_bytes() == b"base"
         assert Path(os.environ["MY_DATA_HUB_WHEEL_PATH"]) == runtime_root / "project.whl"
         assert json.loads(os.environ["MY_DATA_HUB_INPUT_DATASET_VERSIONS_JSON"]) == [
             "owner/master-assets/3",

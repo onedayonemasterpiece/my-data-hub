@@ -21,6 +21,7 @@ from my_data_hub.checkpoints.brokered_upload import (
     RuntimeUploadAuthority,
 )
 from my_data_hub.checkpoints.manifest import RestoreProbe, build_manifest, canonical_json, write_manifest
+from my_data_hub.checkpoints.provider_storage import checkpoint_provider_file_name
 from my_data_hub.checkpoints.registry import ControlLedgerCheckpointRegistry
 from my_data_hub.connectors.checkpoint_control import (
     ControlLedgerVerifiedCheckpointCoordinator,
@@ -1045,9 +1046,10 @@ def test_fresh_runtime_process_skips_durable_completed_put_without_capability_le
     receipt = restarted_provider.publish(package=package, manifest_path=manifest_path)
 
     expected_files = {item.path for item in manifest.files} | {"checkpoint-manifest.json"}
+    expected_provider_files = {checkpoint_provider_file_name(name) for name in expected_files}
     assert receipt.exact_version_ref == "owner/checkpoints/1"
     assert set(puts) == expected_files and len(puts) == len(expected_files)
-    assert set(adapter.started) == expected_files and len(adapter.started) == len(expected_files)
+    assert set(adapter.started) == expected_provider_files and len(adapter.started) == len(expected_files)
     assert adapter.finalized == 1 and verifier.calls == 1
 
 

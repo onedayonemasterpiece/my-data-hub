@@ -60,6 +60,7 @@ from .manifest import (
     load_and_verify,
     write_manifest,
 )
+from .provider_storage import checkpoint_materializer_source
 from .publisher import PublishError, PublishReceipt
 from .registry import CheckpointHead, CheckpointRegistryContract
 from .restore_probe import collect_restore_probe
@@ -1574,7 +1575,8 @@ def _render_verifier_source(
     bootstrap = (
         "import hashlib as _mdh_hashlib, json as _mdh_json, os as _mdh_os, "
         "pathlib as _mdh_pathlib, platform as _mdh_platform\n"
-        f"_mdh_values = {json.dumps(values, sort_keys=True)}\n"
+        + checkpoint_materializer_source()
+        + f"_mdh_values = {json.dumps(values, sort_keys=True)}\n"
         f"_mdh_pins_body = {pins_body!r}\n"
         f"_mdh_runtime_names = {runtime_names!r}\n"
         f"_mdh_runtime_hashes = {runtime_hashes!r}\n"
@@ -1607,17 +1609,10 @@ def _render_verifier_source(
         "for path in _mdh_runtime_files.values()}\n"
         "if len(_mdh_runtime_mounts) != 1: raise RuntimeError('runtime Dataset file set differs')\n"
         "_mdh_runtime_root=next(iter(_mdh_runtime_mounts))\n"
-        f"_mdh_checkpoint_manifests=[path for path in _mdh_files if path.name == {CHECKPOINT_MANIFEST_NAME!r}]\n"
-        "_mdh_checkpoint_matches=[]\n"
-        "for _mdh_checkpoint_manifest in _mdh_checkpoint_manifests:\n"
-        "    try: _mdh_checkpoint_payload=_mdh_json.loads(_mdh_checkpoint_manifest.read_bytes())\n"
-        "    except (OSError,ValueError): continue\n"
-        "    if _mdh_checkpoint_payload.get('manifest_sha256') == "
-        "_mdh_values['MY_DATA_HUB_CHECKPOINT_MANIFEST_SHA256']:\n"
-        "        _mdh_checkpoint_matches.append(_mdh_checkpoint_manifest.parent)\n"
-        "if len(_mdh_checkpoint_matches) != 1: raise RuntimeError('exact checkpoint Dataset mount is ambiguous')\n"
-        "_mdh_checkpoint_root=_mdh_checkpoint_matches[0]\n"
-        "if _mdh_input/_mdh_checkpoint_root.relative_to(_mdh_input).parts[0] == _mdh_runtime_root:\n"
+        "_mdh_checkpoint_root,_mdh_checkpoint_source_root=_mdh_materialize_checkpoint(\n"
+        "    _mdh_input,_mdh_values['MY_DATA_HUB_CHECKPOINT_MANIFEST_SHA256'],\n"
+        "    _mdh_pathlib.Path('/kaggle/working/checkpoint-verifier-package'))\n"
+        "if _mdh_input/_mdh_checkpoint_source_root.relative_to(_mdh_input).parts[0] == _mdh_runtime_root:\n"
         "    raise RuntimeError('runtime and checkpoint claims resolve to one mount')\n"
         f"_mdh_values['MY_DATA_HUB_CHECKPOINT_DIRECTORY'] = str(_mdh_checkpoint_root)\n"
         f"_mdh_values['MY_DATA_HUB_CHECKPOINT_MANIFEST'] = str(_mdh_checkpoint_root / {CHECKPOINT_MANIFEST_NAME!r})\n"
