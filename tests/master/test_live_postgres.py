@@ -83,7 +83,9 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
         with psycopg.connect(admin_url) as admin:
             security = run_role_security_probes(admin)
         assert security["ok"] is True
-        assert security["probe_count"] == 90
+        assert security["probe_count"] == 94
+        assert security["role_probe_count"] == 16
+        assert security["security_probe_count"] == 78
         assert security["failures"] == []
 
         now = datetime.now(UTC)

@@ -17,8 +17,11 @@
 - Focused master, control-ledger, runtime callback, operator-gate and deployment tests
   pass.
 - A disposable tmpfs PostgreSQL 18 + pgvector instance applied every migration and the
-  role contract, then passed 90/90 real probes: 16 positive role probes and 74
-  adversarial security probes. The instance and its tmpfs data were destroyed.
+  role contract, then passed 94/94 real probes: 16 positive role probes and 78
+  adversarial security probes. The extra database-level `CREATE SCHEMA` denial keeps
+  extension authority proven even when Kaggle's immutable runtime reports an absent
+  optional extension before checking role privilege. The instance and its tmpfs data
+  were destroyed.
 - Full repository gates are recorded in the integration commit that contains this file.
 
 ## Honest live boundary

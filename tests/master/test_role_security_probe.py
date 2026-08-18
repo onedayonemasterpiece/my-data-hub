@@ -4,7 +4,16 @@ from datetime import UTC, datetime
 
 import pytest
 
-from my_data_hub.master_runtime.role_security_probe import build_role_security_evidence
+from my_data_hub.master_runtime.role_security_probe import (
+    _is_expected_denial,
+    build_role_security_evidence,
+)
+
+
+def test_extension_unavailable_is_safe_only_with_separate_database_create_probe() -> None:
+    assert _is_expected_denial("extension management", "0A000") is True
+    assert _is_expected_denial("database schema create", "0A000") is False
+    assert _is_expected_denial("extension management", "42501") is True
 
 
 def test_security_evidence_binds_full_probe_hashes_without_probe_bodies() -> None:

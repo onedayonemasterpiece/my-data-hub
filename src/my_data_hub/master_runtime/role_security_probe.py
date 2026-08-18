@@ -50,6 +50,17 @@ def _positive(cursor: Any, role: str, name: str, statement: str) -> Probe:
         cursor.execute("RESET ROLE")
 
 
+def _is_expected_denial(name: str, sqlstate: str | None) -> bool:
+    if sqlstate in {"42501", "P0001"}:
+        return True
+    # PostgreSQL checks whether an extension control file exists before it
+    # checks the caller's CREATE privilege.  The immutable Kaggle runtime does
+    # not ship hstore, so 0A000 is also a proven no-effect terminal denial.
+    # A separate CREATE SCHEMA probe below still proves that the role has no
+    # database-level CREATE authority.
+    return name == "extension management" and sqlstate == "0A000"
+
+
 def _negative(cursor: Any, role: str, name: str, statement: str) -> Probe:
     cursor.execute("RESET ROLE")
     _set_role(cursor, role)
@@ -65,7 +76,7 @@ def _negative(cursor: Any, role: str, name: str, statement: str) -> Probe:
             role,
             name,
             "deny",
-            sqlstate in {"42501", "P0001"},
+            _is_expected_denial(name, sqlstate),
             sqlstate,
             str(exc).splitlines()[0],
         )
@@ -214,6 +225,7 @@ def run_role_security_probes(connection: Any) -> dict[str, Any]:
         adversarial = {
             "permanent DDL": "CREATE TABLE hub.mcp_forbidden(id integer)",
             "temporary DDL": "CREATE TEMP TABLE mcp_forbidden(id integer)",
+            "database schema create": "CREATE SCHEMA mcp_forbidden",
             "role management": "CREATE ROLE mcp_forbidden",
             "extension management": "CREATE EXTENSION hstore WITH SCHEMA public",
             "server file": "SELECT pg_read_file('/etc/passwd', 0, 1)",
