@@ -303,6 +303,13 @@ def test_provider_only_mcp_action_is_explicit_and_skips_master_only_prerequisite
     assert "operator_profile_gate.py" not in provider_branch.split("else", 1)[0]
 
 
+def test_control_plane_tmpfs_can_hold_master_asset_staging_and_exact_readback() -> None:
+    """The central adapter holds upload staging plus zip+tree readback concurrently."""
+
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    assert compose["services"]["control-plane"]["tmpfs"] == ["/tmp:size=256m,mode=1777"]
+
+
 def test_provider_only_probe_recognizes_exact_opencode_public_loopback_client(tmp_path: Path) -> None:
     result = run_provider_oauth_client_probe(
         tmp_path,

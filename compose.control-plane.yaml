@@ -60,7 +60,11 @@ services:
     user: "${MY_DATA_HUB_CONTROL_UID:-1000}:${MY_DATA_HUB_CONTROL_GID:-1000}"
     read_only: true
     tmpfs:
-      - /tmp:size=64m,mode=1777
+      # Master asset creation keeps the staged tree while the central adapter
+      # downloads an exact zip+tree readback.  The verified bundle is already
+      # larger than 20 MiB, so 64 MiB cannot hold both representations plus
+      # SDK scratch space and leaves the durable ensure operation stuck.
+      - /tmp:size=256m,mode=1777
     env_file:
       - path: "${MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE:-./.state/control-plane/provider.env}"
         required: true
