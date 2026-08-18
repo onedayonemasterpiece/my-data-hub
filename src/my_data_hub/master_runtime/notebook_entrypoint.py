@@ -57,6 +57,7 @@ from my_data_hub.workloads.bloggers.master_stage import (
     BloggerMigrationQuarantined,
     BloggerMigrationRequest,
     BloggerStageContext,
+    blogger_failure_code,
     execute_blogger_migration_stage,
 )
 
@@ -2080,7 +2081,7 @@ def run_master(
                             suffix="/failed",
                             payload={
                                 "request_id": str(migration_request.request_id),
-                                "failure_code": type(exc).__name__[:100],
+                                "failure_code": blogger_failure_code(exc),
                             },
                         )
                     raise
