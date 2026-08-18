@@ -10,9 +10,11 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from my_data_hub.hashing import canonical_json_bytes
+from my_data_hub.workloads.bloggers.accounting import BloggerExportAccumulator
 from my_data_hub.workloads.bloggers.importer import (
     DuplicateResolution,
     DuplicateResolutionConflict,
+    _accumulate_terminal_evidence,
     _build_resolution_plan,
     _DuplicateClaim,
     _observe,
@@ -121,6 +123,51 @@ def test_explicit_resolution_is_eligible_on_fresh_or_quarantined_exact_snapshot(
         prior_status="accepted",
         supplied_resolutions=resolutions,
     )
+
+
+def test_duplicate_write_order_does_not_change_ordered_source_evidence() -> None:
+    first = _observe(source_row(record_id="blogger-001"), 0)
+    second = _observe(
+        source_row(
+            record_id="blogger-002",
+            blogger_name="Вторая строка того же автора",
+            evidence_url="https://example.test/evidence/2",
+        ),
+        1,
+    )
+    batch_id = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    snapshot_at = datetime(2026, 8, 18, tzinfo=UTC)
+    expected = BloggerExportAccumulator(batch_id, snapshot_at)
+    for item in (first, second):
+        expected.add_evidence(
+            record_id=item.logical_id,
+            canonical_bytes=item.payload_bytes,
+            disposition=item.projection.disposition,  # type: ignore[union-attr]
+            source_file_sha256=item.row.source_file_sha256,  # type: ignore[union-attr]
+        )
+    expected_receipt = expected.finish(expected_row_count=2)
+
+    naive_write_order = BloggerExportAccumulator(batch_id, snapshot_at)
+    for item in (second, first):
+        naive_write_order.add_evidence(
+            record_id=item.logical_id,
+            canonical_bytes=item.payload_bytes,
+            disposition=item.projection.disposition,  # type: ignore[union-attr]
+            source_file_sha256=item.row.source_file_sha256,  # type: ignore[union-attr]
+        )
+    assert naive_write_order.finish(expected_row_count=2).logical_sha256 != expected_receipt.logical_sha256
+
+    observed_receipt = _accumulate_terminal_evidence(
+        batch_id,
+        snapshot_at,
+        (
+            (second, second.projection.disposition, "actor-ordered-write"),  # type: ignore[union-attr]
+            (first, first.projection.disposition, "actor-ordered-write"),  # type: ignore[union-attr]
+        ),
+    ).finish(expected_row_count=2)
+
+    assert observed_receipt.logical_sha256 == expected_receipt.logical_sha256
+    assert observed_receipt.record_id_set_sha256 == expected_receipt.record_id_set_sha256
 
 
 def test_existing_account_owner_must_be_selected_without_implicit_merge() -> None:

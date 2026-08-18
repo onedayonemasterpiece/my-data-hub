@@ -317,6 +317,32 @@ def _observe(raw: Any, ordinal: int) -> _Observation:
     )
 
 
+def _accumulate_terminal_evidence(
+    batch_id: UUID,
+    snapshot_at: datetime,
+    terminal: Iterable[tuple[_Observation, BloggerDisposition, str]],
+) -> BloggerExportAccumulator:
+    """Rebuild source evidence in the original ordered-scan sequence.
+
+    Duplicate resolution deliberately writes canonical rows in actor order so
+    the canonical side is deterministic.  Source evidence, however, is bound
+    to YDB's ``ORDER BY record_id`` stream and must not inherit that different
+    write order.  The scan ordinal is immutable within the already-materialized
+    bounded snapshot, so sorting by it restores the exact source hash without
+    retaining another copy of any business row.
+    """
+
+    accumulator = BloggerExportAccumulator(batch_id, snapshot_at)
+    for item, disposition, _reason in sorted(terminal, key=lambda value: value[0].ordinal):
+        accumulator.add_evidence(
+            record_id=item.logical_id,
+            canonical_bytes=item.payload_bytes,
+            disposition=disposition,
+            source_file_sha256=item.row.source_file_sha256 if item.row else None,
+        )
+    return accumulator
+
+
 def _blocked_hash(items: list[tuple[_Observation, BloggerDisposition, str]]) -> str:
     value = [
         {
@@ -1033,14 +1059,7 @@ class BloggerSnapshotImporter:
                     # the same receipt/no-op.
                     replayed_count = 0
 
-                accumulator = BloggerExportAccumulator(batch_id, snapshot_at)
-                for item, disposition, _reason in terminal:
-                    accumulator.add_evidence(
-                        record_id=item.logical_id,
-                        canonical_bytes=item.payload_bytes,
-                        disposition=disposition,
-                        source_file_sha256=item.row.source_file_sha256 if item.row else None,
-                    )
+                accumulator = _accumulate_terminal_evidence(batch_id, snapshot_at, terminal)
                 export = accumulator.finish(
                     expected_row_count=expected_row_count, allow_incomplete=not can_commit
                 )
