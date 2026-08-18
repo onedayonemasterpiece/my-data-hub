@@ -23,6 +23,15 @@ def test_release_asset_dataset_ref_is_commit_scoped_and_kaggle_bounded() -> None
     assert len(ref.split("/", 1)[1]) == 50
 
 
+def test_repository_master_ydb_lock_is_canonical_and_exact() -> None:
+    path = Path(__file__).parents[2] / build_module.MASTER_YDB_WHEEL_LOCK_PATH
+    body = path.read_bytes()
+    value = json.loads(body)
+
+    assert body == json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    assert value["sha256"] == "043b91af7dab122e9ee24cb1948576f324dc9b6dbb45952d2e7c58d99e2c5ddb"
+
+
 @pytest.fixture(autouse=True)
 def _approved_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     digest = hashlib.sha256(b"exact-postgresql-runtime").hexdigest()
