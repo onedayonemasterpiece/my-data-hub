@@ -5937,6 +5937,105 @@ class ControlLedger:
                 ):
                     raise StaleRuntimeEvent("checkpoint candidate cannot be uploaded from its current state")
 
+    def retire_failed_checkpoint_version(
+        self,
+        checkpoint_id: str,
+        *,
+        version_ref: str,
+        deletion_effect_id: str,
+        deletion_receipt_sha256: str,
+    ) -> dict[str, Any]:
+        """Release a deleted failed provider version without losing its audit identity.
+
+        The caller must first persist an exact DELETE_DATASET intent and an
+        APPLIED/ABSENT receipt after provider read-back.  Only a terminal
+        failed candidate that is not either durable HEAD may be retired.
+        """
+
+        if not version_ref or len(version_ref) > 512:
+            raise ValueError("retired checkpoint exact version ref is invalid")
+        if len(deletion_receipt_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in deletion_receipt_sha256
+        ):
+            raise ValueError("checkpoint deletion receipt hash is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM retired_checkpoint_versions WHERE checkpoint_id=?",
+                (checkpoint_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["version_ref"] != version_ref
+                    or existing["deletion_effect_id"] != deletion_effect_id
+                    or existing["deletion_receipt_sha256"] != deletion_receipt_sha256
+                ):
+                    raise StaleRuntimeEvent("retired checkpoint version replay differs")
+                return dict(existing)
+
+            candidate = connection.execute(
+                "SELECT dataset_ref,version_ref,status FROM checkpoint_candidates WHERE checkpoint_id=?",
+                (checkpoint_id,),
+            ).fetchone()
+            publication = connection.execute(
+                "SELECT state,exact_version_ref FROM checkpoint_blob_publications WHERE checkpoint_id=?",
+                (checkpoint_id,),
+            ).fetchone()
+            head = connection.execute(
+                "SELECT current_checkpoint_id,previous_checkpoint_id FROM checkpoint_heads "
+                "WHERE current_checkpoint_id=? OR previous_checkpoint_id=? LIMIT 1",
+                (checkpoint_id, checkpoint_id),
+            ).fetchone()
+            authority = connection.execute(
+                "SELECT i.action,i.provider_ref,r.receipt_json,r.receipt_sha256 "
+                "FROM provider_effect_intents i JOIN provider_effect_receipts r ON r.effect_id=i.effect_id "
+                "WHERE i.effect_id=? AND r.receipt_sha256=? ORDER BY r.sequence DESC LIMIT 1",
+                (deletion_effect_id, deletion_receipt_sha256),
+            ).fetchone()
+            if candidate is None or candidate["status"] != "FAILED" or head is not None:
+                raise StaleRuntimeEvent("only a non-HEAD failed checkpoint version may be retired")
+            exact_ref = candidate["version_ref"] or (
+                publication["exact_version_ref"] if publication is not None else None
+            )
+            if (
+                exact_ref != version_ref
+                or publication is None
+                or publication["state"] not in {"FAILED", "QUARANTINED"}
+            ):
+                raise StaleRuntimeEvent("failed checkpoint retirement version binding differs")
+            if authority is None or authority["action"] != "delete_dataset":
+                raise StaleRuntimeEvent("checkpoint retirement lacks its exact deletion receipt")
+            if authority["provider_ref"] != candidate["dataset_ref"]:
+                raise StaleRuntimeEvent("checkpoint deletion receipt targets another Dataset")
+            receipt = json.loads(str(authority["receipt_json"]))
+            if (
+                receipt.get("action") != "delete_dataset"
+                or receipt.get("outcome") not in {"applied", "already_applied", "not_found"}
+                or "absent" not in str(receipt.get("detail_code", ""))
+            ):
+                raise StaleRuntimeEvent("checkpoint deletion receipt is not terminal absence evidence")
+            connection.execute(
+                "INSERT INTO retired_checkpoint_versions(checkpoint_id,dataset_ref,version_ref,"
+                "deletion_effect_id,deletion_receipt_sha256,retired_at) VALUES (?,?,?,?,?,?)",
+                (
+                    checkpoint_id,
+                    candidate["dataset_ref"],
+                    version_ref,
+                    deletion_effect_id,
+                    deletion_receipt_sha256,
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE checkpoint_candidates SET version_ref=NULL WHERE checkpoint_id=? AND status='FAILED'",
+                (checkpoint_id,),
+            )
+            row = connection.execute(
+                "SELECT * FROM retired_checkpoint_versions WHERE checkpoint_id=?", (checkpoint_id,)
+            ).fetchone()
+            assert row is not None
+            return dict(row)
+
     def record_checkpoint_package_sha256(self, checkpoint_id: str, package_sha256: str) -> None:
         if len(package_sha256) != 64 or any(char not in "0123456789abcdef" for char in package_sha256):
             raise ValueError("checkpoint package hash is invalid")

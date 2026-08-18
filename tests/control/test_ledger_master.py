@@ -166,7 +166,7 @@ def test_sqlite_pragmas_permissions_and_append_only_logs(tmp_path: Path) -> None
         .execute("SELECT version FROM control_schema_migrations ORDER BY version")
         .fetchall()
     )
-    assert migrations == [(version,) for version in range(1, 29)]
+    assert migrations == [(version,) for version in range(1, 30)]
 
     operation, _ = ledger.ensure_operation(
         operation_id=str(uuid4()),
@@ -1266,6 +1266,120 @@ def test_lost_terminal_response_replays_exact_duplicate_and_empties_spool(tmp_pa
         coordinator.accept_runtime_event(
             json.dumps(altered, sort_keys=True, separators=(",", ":")).encode(), header_token=SECRET
         )
+
+
+def test_deleted_failed_checkpoint_version_is_retired_before_provider_version_reuse(tmp_path: Path) -> None:
+    ledger = ledger_at(tmp_path)
+    operation, _ = ledger.ensure_operation(
+        operation_id=str(uuid4()),
+        idempotency_key="failed-checkpoint-version-retirement",
+        operation_kind="checkpoint",
+        intent={"service_kind": "postgres-master"},
+        initial_state="CHECKPOINT_FAILED",
+        identity={"epoch": 1},
+    )
+    checkpoint_id = str(uuid4())
+    version_ref = "owner/checkpoints/1"
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=checkpoint_id,
+        operation_id=operation.operation_id,
+        dataset_ref="owner/checkpoints",
+        version_ref=version_ref,
+        manifest_sha256="a" * 64,
+        source_checkpoint_id=None,
+        source_head_generation=0,
+        master_instance_id=str(uuid4()),
+        epoch=1,
+    )
+    ledger.fail_checkpoint(checkpoint_id, "TEST_FAILURE")
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute(
+            "INSERT INTO checkpoint_blob_publications("
+            "checkpoint_id,operation_id,run_id,attempt_id,master_instance_id,service_instance_id,"
+            "master_run_ref,epoch,dataset_ref,manifest_sha256,source_head_generation,"
+            "expected_file_count,expected_total_bytes,state,exact_version_ref,expected_provider_version,"
+            "finalize_attempts,failure_code,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'FAILED',?,1,1,'TEST_FAILURE',?,?)",
+            (
+                checkpoint_id,
+                operation.operation_id,
+                str(uuid4()),
+                str(uuid4()),
+                str(uuid4()),
+                str(uuid4()),
+                "owner/master/1",
+                1,
+                "owner/checkpoints",
+                "a" * 64,
+                0,
+                1,
+                1,
+                version_ref,
+                "2026-08-18T00:00:00.000000Z",
+                "2026-08-18T00:00:00.000000Z",
+            ),
+        )
+
+    effect_id = str(uuid4())
+    ledger.persist_provider_effect_intent(
+        {
+            "effect_id": effect_id,
+            "operation_id": operation.operation_id,
+            "idempotency_key": "delete-failed-checkpoint-version",
+            "task_id": str(uuid4()),
+            "action": "delete_dataset",
+            "provider_ref": "owner/checkpoints",
+            "request_sha256": "b" * 64,
+        }
+    )
+    ledger.persist_provider_effect_receipt(
+        effect_id,
+        {
+            "effect_id": effect_id,
+            "action": "delete_dataset",
+            "provider_ref": "owner/checkpoints",
+            "outcome": "applied",
+            "detail_code": "failed_checkpoint_dataset_absent",
+        },
+    )
+    with sqlite3.connect(ledger.path) as connection:
+        receipt_sha256 = str(
+            connection.execute(
+                "SELECT receipt_sha256 FROM provider_effect_receipts WHERE effect_id=?", (effect_id,)
+            ).fetchone()[0]
+        )
+
+    retired = ledger.retire_failed_checkpoint_version(
+        checkpoint_id,
+        version_ref=version_ref,
+        deletion_effect_id=effect_id,
+        deletion_receipt_sha256=receipt_sha256,
+    )
+    assert retired["version_ref"] == version_ref
+    assert ledger.checkpoint_candidate(checkpoint_id)["version_ref"] is None
+    assert (
+        ledger.retire_failed_checkpoint_version(
+            checkpoint_id,
+            version_ref=version_ref,
+            deletion_effect_id=effect_id,
+            deletion_receipt_sha256=receipt_sha256,
+        )["deletion_receipt_sha256"]
+        == receipt_sha256
+    )
+
+    replacement_id = str(uuid4())
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=replacement_id,
+        operation_id=operation.operation_id,
+        dataset_ref="owner/checkpoints",
+        version_ref=version_ref,
+        manifest_sha256="c" * 64,
+        source_checkpoint_id=None,
+        source_head_generation=0,
+        master_instance_id=str(uuid4()),
+        epoch=2,
+    )
+    assert ledger.checkpoint_candidate(replacement_id)["version_ref"] == version_ref
 
 
 def test_checkpoint_promotion_keeps_previous_and_failed_candidate_cannot_advance(tmp_path: Path) -> None:
