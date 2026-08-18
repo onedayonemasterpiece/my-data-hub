@@ -938,6 +938,13 @@ def _connector_checkpoint_url(callback_url: str, run_id: str, attempt_id: str) -
     return f"{base}/internal/runtime/connector-checkpoint/{run_id}/{attempt_id}"
 
 
+def _security_evidence_url(callback_url: str, run_id: str, attempt_id: str) -> str:
+    if callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
+        raise ValueError("callback URL does not match the owner-pinned HTTPS runtime endpoint")
+    base = callback_url.removesuffix("/internal/runtime/events")
+    return f"{base}/internal/runtime/security-evidence/{run_id}/{attempt_id}"
+
+
 def _runtime_metadata_headers(config: NotebookMasterConfig, run_secret: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {run_secret}",
@@ -945,6 +952,72 @@ def _runtime_metadata_headers(config: NotebookMasterConfig, run_secret: str) -> 
         "X-MDH-Master-Instance-ID": str(config.master_instance_id),
         "X-MDH-Epoch": str(config.epoch),
     }
+
+
+def _post_security_evidence(
+    *,
+    config: NotebookMasterConfig,
+    callback_url: str,
+    run_secret: str,
+    evidence: dict[str, Any],
+    attempts: int = 3,
+    sleep: Any = time.sleep,
+) -> None:
+    encoded = canonical_json_bytes(evidence)
+    if len(encoded) > 16 * 1024 or not 1 <= attempts <= 5:
+        raise RuntimeError("master security evidence transport bounds are invalid")
+    for attempt in range(attempts):
+        request = urllib.request.Request(
+            _security_evidence_url(callback_url, config.run_id, config.attempt_id),
+            data=encoded,
+            headers=_runtime_metadata_headers(config, run_secret),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                body = json.loads(response.read(16 * 1024))
+            if (
+                body.get("recorded") is True
+                and body.get("role_verification_sha256") == evidence["role_verification_sha256"]
+                and body.get("security_test_receipt_sha256") == evidence["security_test_receipt_sha256"]
+            ):
+                return
+        except Exception:
+            pass
+        if attempt + 1 < attempts:
+            sleep(min(2**attempt, 2))
+    raise RuntimeError("control did not acknowledge exact master security evidence")
+
+
+def _record_master_security_evidence(
+    *,
+    config: NotebookMasterConfig,
+    callback_url: str,
+    run_secret: str,
+    database_url: str,
+    ready: Any,
+) -> None:
+    from my_data_hub.master_runtime.role_security_probe import (
+        build_role_security_evidence,
+        run_role_security_probes,
+    )
+
+    with psycopg.connect(database_url) as security_connection:
+        security_result = run_role_security_probes(security_connection)
+    security_evidence = build_role_security_evidence(
+        security_result,
+        source_commit=config.source_version,
+        master_instance_id=str(config.master_instance_id),
+        epoch=config.epoch,
+        schema_version=int(ready.schema_version),
+        canonical_revision=int(ready.canonical_revision),
+    )
+    _post_security_evidence(
+        config=config,
+        callback_url=callback_url,
+        run_secret=run_secret,
+        evidence=security_evidence,
+    )
 
 
 def _claim_blogger_migration(
@@ -1868,6 +1941,13 @@ def run_master(
         gate = DatabaseGate(gate_connection)
         _require_active_window(active_deadline=active_deadline)
         gate.activate(identity)
+        _record_master_security_evidence(
+            config=config,
+            callback_url=callback_url,
+            run_secret=run_secret,
+            database_url=database_url,
+            ready=ready,
+        )
     except Exception:
         if gate_connection is not None:
             with suppress(Exception):

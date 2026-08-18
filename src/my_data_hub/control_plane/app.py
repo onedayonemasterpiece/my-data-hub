@@ -2537,6 +2537,46 @@ def create_app(
             "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
         }
 
+    @app.post("/internal/runtime/security-evidence/{run_id}/{attempt_id}")
+    async def runtime_security_evidence(
+        run_id: str,
+        attempt_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        raw = await request.body()
+        if len(raw) > 16 * 1024:
+            raise HTTPException(status_code=413, detail={"code": "master_security_evidence_too_large"})
+        try:
+            body = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail={"code": "master_security_evidence_invalid"}) from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=422, detail={"code": "master_security_evidence_invalid"})
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            allowed_states=frozenset({"ACTIVE"}),
+        )
+        try:
+            stored = control_ledger.record_master_security_evidence(
+                operation_id=operation.operation_id,
+                evidence=body,
+            )
+        except (ValueError, ControlLedgerError) as exc:
+            raise HTTPException(status_code=409, detail={"code": "master_security_evidence_rejected"}) from exc
+        return {
+            "recorded": True,
+            "evidence_sha256": stored["evidence_sha256"],
+            "role_verification_sha256": stored["role_verification_sha256"],
+            "security_test_receipt_sha256": stored["security_test_receipt_sha256"],
+        }
+
     @app.post("/internal/provider-journal/intents")
     async def provider_journal_intent(
         request: Request,

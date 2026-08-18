@@ -692,7 +692,8 @@ if [[ "$operator_profile" == true ]]; then
   require_private_file "$control_gateway_token" "provider control gateway token"
   require_central_kaggle_credentials
   python3 "$release/scripts/operator_profile_gate.py" verify \
-    --commit "$commit" --receipt "$operator_gate_receipt" --signing-key-file "$operator_gate_key"
+    --commit "$commit" --receipt "$operator_gate_receipt" --signing-key-file "$operator_gate_key" \
+    --control-ledger "$ledger_dir/control.sqlite3"
   operator_override="$runtime_root/operator-profile.$commit.yaml"
   cat > "$operator_override" <<'YAML'
 services:

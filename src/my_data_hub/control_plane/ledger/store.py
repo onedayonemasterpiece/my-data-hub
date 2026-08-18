@@ -7135,6 +7135,108 @@ class ControlLedger:
                 raise IdempotencyConflict("master terminal recovery evidence identity collision")
         return audit_id
 
+    def record_master_security_evidence(
+        self, *, operation_id: str, evidence: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        required = {
+            "contract",
+            "source_commit",
+            "master_instance_id",
+            "epoch",
+            "schema_version",
+            "canonical_revision",
+            "outcome",
+            "role_probe_count",
+            "security_probe_count",
+            "role_verification_sha256",
+            "security_test_receipt_sha256",
+            "observed_at",
+        }
+        if set(evidence) != required or evidence.get("contract") != "my-data-hub-master-security-evidence.v1":
+            raise ValueError("master security evidence differs from its exact contract")
+        if evidence.get("outcome") != "PASSED":
+            raise ValueError("master security evidence is not successful")
+        for key in ("source_commit", "role_verification_sha256", "security_test_receipt_sha256"):
+            expected = 40 if key == "source_commit" else 64
+            value = evidence.get(key)
+            if not isinstance(value, str) or len(value) != expected or not re.fullmatch(r"[a-f0-9]+", value):
+                raise ValueError(f"master security evidence {key} is invalid")
+        for key, minimum in (("epoch", 1), ("schema_version", 1), ("canonical_revision", 0),
+                             ("role_probe_count", 1), ("security_probe_count", 1)):
+            value = evidence.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+                raise ValueError(f"master security evidence {key} is invalid")
+        try:
+            master_instance_id = str(UUID(str(evidence["master_instance_id"])))
+            observed_at = _format_time(_parse_time(str(evidence["observed_at"])))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("master security evidence identity or time is invalid") from exc
+        evidence_json = _safe_json(evidence)
+        evidence_sha256 = hashlib.sha256(evidence_json.encode("utf-8")).hexdigest()
+        with self._transaction() as connection:
+            operation = connection.execute(
+                "SELECT operation_id,state,identity_json FROM operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if operation is None:
+                raise StaleRuntimeEvent("master security evidence operation is absent")
+            identity = json.loads(operation["identity_json"])
+            if (
+                operation["state"] != "ACTIVE"
+                or str(identity.get("run_id", "")) == ""
+                or str(identity.get("attempt_id", "")) == ""
+                or str(identity.get("master_instance_id")) != master_instance_id
+                or int(identity.get("epoch", 0)) != int(evidence["epoch"])
+            ):
+                raise StaleRuntimeEvent("master security evidence differs from the ACTIVE operation")
+            values = (
+                operation_id,
+                str(identity["run_id"]),
+                str(identity["attempt_id"]),
+                master_instance_id,
+                int(evidence["epoch"]),
+                str(evidence["source_commit"]),
+                int(evidence["schema_version"]),
+                int(evidence["canonical_revision"]),
+                int(evidence["role_probe_count"]),
+                int(evidence["security_probe_count"]),
+                str(evidence["role_verification_sha256"]),
+                str(evidence["security_test_receipt_sha256"]),
+                observed_at,
+                evidence_sha256,
+            )
+            try:
+                connection.execute(
+                    "INSERT INTO master_security_evidence(operation_id,run_id,attempt_id,master_instance_id,epoch,"
+                    "source_commit,schema_version,canonical_revision,role_probe_count,security_probe_count,"
+                    "role_verification_sha256,security_test_receipt_sha256,observed_at,evidence_sha256) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    values,
+                )
+            except sqlite3.IntegrityError:
+                stored = connection.execute(
+                    "SELECT * FROM master_security_evidence WHERE operation_id=?", (operation_id,)
+                ).fetchone()
+                if stored is None or tuple(stored) != values:
+                    raise IdempotencyConflict("master security evidence identity collision") from None
+            stored = connection.execute(
+                "SELECT * FROM master_security_evidence WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert stored is not None
+            return dict(stored)
+
+    def latest_master_security_evidence(self, *, source_commit: str | None = None) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            if source_commit is None:
+                row = connection.execute(
+                    "SELECT * FROM master_security_evidence ORDER BY observed_at DESC LIMIT 1"
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT * FROM master_security_evidence WHERE source_commit=? ORDER BY observed_at DESC LIMIT 1",
+                    (source_commit,),
+                ).fetchone()
+            return dict(row) if row is not None else None
+
     @staticmethod
     def _operation_from_row(row: sqlite3.Row) -> OperationRecord:
         return OperationRecord(

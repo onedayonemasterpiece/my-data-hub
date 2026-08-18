@@ -1322,6 +1322,10 @@ def test_run_master_suppresses_only_callback_lease_closure_after_exact_terminal_
         lambda **kwargs: None,
     )
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint._checkpoint_until_deadline", checkpoint_until)
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._record_master_security_evidence",
+        lambda **kwargs: events.append("security.evidence"),
+    )
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.time.sleep", lambda _seconds: None)
 
     started_at = time.monotonic()
@@ -1511,6 +1515,10 @@ def test_run_master_never_checkpoints_unacknowledged_blogger_import_receipt(
     monkeypatch.setattr(
         "my_data_hub.master_runtime.notebook_entrypoint._checkpoint_until_deadline",
         lambda **kwargs: pytest.fail("unacknowledged blogger receipt must never be checkpointed"),
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._record_master_security_evidence",
+        lambda **kwargs: events.append("security.evidence"),
     )
 
     with pytest.raises(BloggerReceiptDeliveryError, match="persistent receipt outage"):

@@ -18,6 +18,7 @@ from my_data_hub.control_plane.ledger import (
     EffectState,
     EventDisposition,
     EventRejected,
+    IdempotencyConflict,
     MasterAdmissionRejected,
     StaleRuntimeEvent,
     discover_control_migrations,
@@ -166,7 +167,7 @@ def test_sqlite_pragmas_permissions_and_append_only_logs(tmp_path: Path) -> None
         .execute("SELECT version FROM control_schema_migrations ORDER BY version")
         .fetchall()
     )
-    assert migrations == [(version,) for version in range(1, 33)]
+    assert migrations == [(version,) for version in range(1, 34)]
 
     operation, _ = ledger.ensure_operation(
         operation_id=str(uuid4()),
@@ -254,6 +255,32 @@ def test_packaged_and_repository_control_migrations_are_identical() -> None:
     repository = discover_control_migrations(root / "control_migrations")
     packaged = discover_control_migrations(Path(control_migration_module.__file__).with_name("sql"))
     assert [(item.version, item.sha256) for item in repository] == [(item.version, item.sha256) for item in packaged]
+
+
+def test_master_security_evidence_is_exact_append_only_active_authority(tmp_path: Path) -> None:
+    ledger, operation_id, _checkpoint_id = active_admission_ledger(tmp_path)
+    evidence = {
+        "contract": "my-data-hub-master-security-evidence.v1",
+        "source_commit": "a" * 40,
+        "master_instance_id": "33333333-3333-4333-8333-333333333333",
+        "epoch": 1,
+        "schema_version": 21,
+        "canonical_revision": 12,
+        "outcome": "PASSED",
+        "role_probe_count": 16,
+        "security_probe_count": 61,
+        "role_verification_sha256": "b" * 64,
+        "security_test_receipt_sha256": "c" * 64,
+        "observed_at": "2026-08-11T12:00:00Z",
+    }
+    stored = ledger.record_master_security_evidence(operation_id=operation_id, evidence=evidence)
+    assert stored["role_probe_count"] == 16
+    assert ledger.record_master_security_evidence(operation_id=operation_id, evidence=evidence) == stored
+    assert ledger.latest_master_security_evidence(source_commit="a" * 40) == stored
+
+    conflict = dict(evidence, security_probe_count=60)
+    with pytest.raises(IdempotencyConflict):
+        ledger.record_master_security_evidence(operation_id=operation_id, evidence=conflict)
 
 
 def test_atomic_data_admission_rejects_drain_without_stranding_requests(tmp_path: Path) -> None:
