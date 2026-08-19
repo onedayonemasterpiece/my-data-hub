@@ -130,21 +130,35 @@ class ControlLedger:
         with self._permission_lock:
             for suffix in ("", "-wal", "-shm"):
                 candidate = Path(f"{self.path}{suffix}")
-                flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
                 try:
-                    descriptor = os.open(candidate, flags)
+                    before = os.stat(candidate, follow_symlinks=False)
                 except FileNotFoundError:
                     # SQLite may unlink WAL/SHM while a connection is closing.
                     # Absence is safe; each connection tightens new sidecars.
                     continue
                 except OSError as exc:
                     raise ValueError("control ledger files must be regular non-symlinks") from exc
+
+                if not stat.S_ISREG(before.st_mode):
+                    raise ValueError("control ledger files must be regular non-symlinks")
                 try:
-                    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                        raise ValueError("control ledger files must be regular non-symlinks")
-                    os.fchmod(descriptor, 0o600)
-                finally:
-                    os.close(descriptor)
+                    # Do not open and close the database, WAL or SHM paths here.  On
+                    # POSIX, closing any descriptor for a file releases every advisory
+                    # lock that this process holds for that inode.  Doing so while a
+                    # sibling SQLite connection is active can invalidate WAL locking
+                    # and crash a process with SIGBUS.  Path-based chmod preserves the
+                    # SQLite descriptors and their locks.
+                    os.chmod(candidate, 0o600, follow_symlinks=False)
+                    after = os.stat(candidate, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise ValueError("control ledger files must be regular non-symlinks") from exc
+                if (
+                    not stat.S_ISREG(after.st_mode)
+                    or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+                ):
+                    raise ValueError("control ledger files must be stable regular non-symlinks")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(

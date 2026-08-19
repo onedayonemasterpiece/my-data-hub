@@ -238,14 +238,34 @@ def test_embedding_request_is_durable_exactly_once_and_epoch_bound(tmp_path: Pat
 
 def test_mode_tightening_tolerates_a_wal_unlinked_during_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ledger = ledger_at(tmp_path)
+    real_stat = os.stat
+    wal_missing = False
+
+    def racy_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        nonlocal wal_missing
+        if str(path).endswith("-wal") and not wal_missing:
+            wal_missing = True
+            raise FileNotFoundError(str(path))
+        return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "stat", racy_stat)
+    ledger._tighten_file_modes()
+    assert ledger.path.stat().st_mode & 0o777 == 0o600
+
+
+def test_mode_tightening_never_opens_sqlite_lock_bearing_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = ledger_at(tmp_path)
+    protected = {str(ledger.path), f"{ledger.path}-wal", f"{ledger.path}-shm"}
     real_open = os.open
 
-    def racy_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
-        if str(path).endswith("-wal"):
-            raise FileNotFoundError(str(path))
+    def guarded_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if str(path) in protected:
+            raise AssertionError("mode tightening must not open SQLite lock-bearing files")
         return real_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(os, "open", racy_open)
+    monkeypatch.setattr(os, "open", guarded_open)
     ledger._tighten_file_modes()
     assert ledger.path.stat().st_mode & 0o777 == 0o600
 
