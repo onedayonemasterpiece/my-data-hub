@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -492,6 +493,47 @@ def test_unified_bootstrap_master_can_claim_its_gate_checkpoint(tmp_path: Path) 
         "operation_id": operation_id,
         "canonical_revision": 7,
     }
+
+
+def test_checkpoint_recovery_is_not_blocked_by_master_provider_polling(tmp_path: Path) -> None:
+    """A slow provider run poll must not starve a ready checkpoint publication."""
+
+    ledger = ControlLedger(tmp_path / "independent-checkpoint-recovery.sqlite3")
+    broker_called = threading.Event()
+    master_finished = threading.Event()
+
+    class BlockingMasterRuntime:
+        def __init__(self, control: ControlLedger) -> None:
+            self.ledger = control
+            self.coordinator = None
+
+        def reconcile_requested_once(self) -> None:
+            assert broker_called.wait(timeout=2), "checkpoint recovery was starved by master polling"
+            master_finished.set()
+
+    class RecoveryBroker:
+        def reconcile_pending_once(self) -> list[dict[str, object]]:
+            broker_called.set()
+            return []
+
+    app = create_app(
+        ControlPlaneSettings(
+            ledger_path=ledger.path,
+            master_runtime=object(),  # type: ignore[arg-type]
+            provider_gateway_enabled=True,
+            unified_bootstrap_mode=True,
+        ),
+        ledger=ledger,
+        master_runtime=BlockingMasterRuntime(ledger),  # type: ignore[arg-type]
+        checkpoint_upload_broker=RecoveryBroker(),  # type: ignore[arg-type]
+        provider_gateway=object(),  # type: ignore[arg-type]
+        provider_gateway_token=b"g" * 32,
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/health/ready").status_code == 200
+        assert broker_called.wait(timeout=2)
+        assert master_finished.wait(timeout=2)
 
 
 def test_second_verified_candidate_preserves_current_as_previous(tmp_path: Path) -> None:

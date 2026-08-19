@@ -559,6 +559,7 @@ def create_app(
     async def lifespan(_app: FastAPI):
         stopped = asyncio.Event()
         task: asyncio.Task[None] | None = None
+        checkpoint_reconcile_task: asyncio.Task[None] | None = None
         upload_reaper_task: asyncio.Task[None] | None = None
 
         async def reconcile_upload_expiry() -> None:
@@ -587,11 +588,6 @@ def create_app(
                         reconcile_status_cleanup = getattr(master_runtime, "reconcile_status_cleanup_once", None)
                         if reconcile_status_cleanup is not None:
                             await asyncio.to_thread(reconcile_status_cleanup)
-                if checkpoint_upload_broker is not None:
-                    with suppress(Exception):
-                        await asyncio.to_thread(checkpoint_upload_broker.reconcile_pending_once)
-                        # The durable request remains PENDING; provider details
-                        # never enter logs/responses and bounded retry resumes.
                 if app.state.embedding_direct_plane_launcher is None and provider_adapter is not None:
                     settings = runtime.master_runtime
                     claim = _exact_master_asset_claim(settings)
@@ -639,8 +635,31 @@ def create_app(
                 except TimeoutError:
                     continue
 
+        async def reconcile_checkpoint_publications() -> None:
+            """Resume durable checkpoint effects independently of master polling.
+
+            Provider run reconciliation may remain blocked for its bounded polling
+            window.  A ready checkpoint must not wait behind that call because its
+            runtime can already be draining and its upload lease can expire while
+            the central authority is idle.
+            """
+
+            broker = checkpoint_upload_broker
+            assert broker is not None
+            while not stopped.is_set():
+                with suppress(Exception):
+                    await asyncio.to_thread(broker.reconcile_pending_once)
+                    # Provider details never enter logs/responses; durable state
+                    # supplies the exact identity for bounded recovery.
+                try:
+                    await asyncio.wait_for(stopped.wait(), timeout=5.0)
+                except TimeoutError:
+                    continue
+
         if master_runtime is not None:
             task = asyncio.create_task(reconcile_requests())
+        if checkpoint_upload_broker is not None:
+            checkpoint_reconcile_task = asyncio.create_task(reconcile_checkpoint_publications())
         if provider_gateway is not None and getattr(provider_gateway, "uploads", None) is not None:
             upload_reaper_task = asyncio.create_task(reconcile_upload_expiry())
         try:
@@ -649,6 +668,8 @@ def create_app(
             stopped.set()
             if task is not None:
                 await task
+            if checkpoint_reconcile_task is not None:
+                await checkpoint_reconcile_task
             if upload_reaper_task is not None:
                 await upload_reaper_task
 
