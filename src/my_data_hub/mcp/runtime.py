@@ -30,6 +30,7 @@ from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.contracts import MasterSnapshot, MasterState, WriteGate, WritePermit
 from my_data_hub.mcp.control_gateway import (
     AuthenticatedProviderControlClient,
+    RemoteRegionTalkPipelineController,
     SplitControlPlaneReader,
 )
 from my_data_hub.mcp.oauth import (
@@ -281,6 +282,17 @@ def build_remote_runtime(
         if runtime_settings.mcp_write_enabled and provider_control is not None
         else local_control
     )
+    region_talk_enabled_value = os.getenv(
+        "MY_DATA_HUB_REGION_TALK_PIPELINE_ENABLED", "false"
+    ).strip().lower()
+    if region_talk_enabled_value not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
+        raise ConfigurationError("Region Talk pipeline enablement must be boolean")
+    region_talk_enabled = region_talk_enabled_value in {"1", "true", "yes", "on"}
+    region_talk_controller = (
+        RemoteRegionTalkPipelineController(provider_control)  # type: ignore[arg-type]
+        if region_talk_enabled and provider_control is not None
+        else None
+    )
     dependencies = MCPDependencies(
         resolver=LedgerMasterResolver(control_ledger),
         broker=PostgresMasterSessionBroker(
@@ -301,6 +313,8 @@ def build_remote_runtime(
             or runtime_settings.mcp_provider_profile_enabled
             or runtime_settings.mcp_unified_bootstrap_profile_enabled
         ),
+        region_talk_controller=region_talk_controller,
+        region_talk_pipeline_run_enabled=region_talk_controller is not None,
     )
     app = create_streamable_http_app(
         runtime_settings,

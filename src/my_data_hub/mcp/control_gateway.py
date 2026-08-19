@@ -69,8 +69,22 @@ _REMOTE_PROVIDER_TOOLS = frozenset(
         "provider.acceptance.claim.cleanup",
         "acceptance.scenario.request",
         "acceptance.scenario.status",
+        "region_talk.pipeline.status",
+        "region_talk.pipeline.run",
     }
 )
+
+
+class RemoteRegionTalkPipelineController:
+    """Operator facade over the authenticated internal control gateway."""
+
+    def __init__(self, client: AuthenticatedProviderControlClient) -> None:
+        self.client = client
+
+    async def request_supervised_run(self, *, request: Any, principal: AccessIdentity) -> Mapping[str, Any]:
+        return await self.client.invoke_control(
+            "region_talk.pipeline.run", request.model_dump(mode="json"), principal
+        )
 
 
 class AuthenticatedProviderControlClient(ControlPlaneReader):

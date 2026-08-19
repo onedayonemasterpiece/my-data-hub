@@ -112,6 +112,7 @@ ledger_dir="${MY_DATA_HUB_CONTROL_LEDGER_DIR:-$runtime_root/control-ledger}"
 provider_upload_dir="${MY_DATA_HUB_PROVIDER_UPLOAD_DIR:-$runtime_root/provider-uploads}"
 session_dir="${MY_DATA_HUB_MASTER_SESSION_DIR:-$runtime_root/master-sessions}"
 embedding_credential_dir="${MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR:-$runtime_root/embedding-credentials}"
+region_talk_capability_dir="${MY_DATA_HUB_REGION_TALK_CAPABILITY_DIR:-$runtime_root/region-talk-private}"
 asset_dir="${MY_DATA_HUB_MASTER_ASSET_DIR:-$runtime_root/master-assets}"
 asset_history_dir="${MY_DATA_HUB_MASTER_ASSET_HISTORY_DIR:-$runtime_root/master-assets-history}"
 tls_dir="${MY_DATA_HUB_MASTER_TLS_DIR:-$runtime_root/master-tls}"
@@ -180,9 +181,9 @@ if [[ "$provider_only" == true || "$operator_profile" == true || "$unified_boots
   private_dirs+=("$provider_upload_dir")
 fi
 if [[ "$provider_only" != true ]]; then
-  mkdir -p "$session_dir" "$embedding_credential_dir" "$tls_dir"
-  chmod 700 "$embedding_credential_dir"
-  private_dirs+=("$session_dir" "$tls_dir")
+  mkdir -p "$session_dir" "$embedding_credential_dir" "$region_talk_capability_dir" "$tls_dir"
+  chmod 700 "$embedding_credential_dir" "$region_talk_capability_dir"
+  private_dirs+=("$session_dir" "$region_talk_capability_dir" "$tls_dir")
 fi
 for private_dir in "${private_dirs[@]}"; do
   [[ ! -L "$private_dir" ]] || { echo "private runtime directories may not be symbolic links" >&2; exit 2; }
@@ -605,7 +606,7 @@ except json.JSONDecodeError as exc:
 required_scopes = {
     "openid", "offline_access", "platform:read", "master:read", "operation:read",
     "checkpoint:read", "embedding:read", "provider:read", "provider:write",
-    "bloggers:read",
+    "bloggers:read", "region-talk:read",
 }
 eligible = []
 if isinstance(clients, list) and 1 <= len(clients) <= 4:
@@ -675,14 +676,14 @@ services:
       MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL: http://127.0.0.1:8080/internal/mcp-provider/invoke
       MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE: /run/secrets/mcp-control-gateway.token
       MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE: /run/secrets/mcp-write-gate.key
-      MY_DATA_HUB_MCP_SCOPES: platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,provider:write
+      MY_DATA_HUB_MCP_SCOPES: platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,region-talk:read,provider:write
     volumes:
       - "${MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE:?write gate key is required}:/run/secrets/mcp-write-gate.key:ro"
       - "${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:?provider gateway token is required}:/run/secrets/mcp-control-gateway.token:ro"
   oauth-server:
     environment:
       MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED: "true"
-      MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access,platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,provider:write
+      MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access,platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,region-talk:read,provider:write
 YAML
   chmod 600 "$unified_bootstrap_override"
   unified_bootstrap_compose_arg=" -f $unified_bootstrap_override"
@@ -732,14 +733,14 @@ services:
       MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE: /run/secrets/mcp-write-gate.key
       MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL: http://127.0.0.1:8080/internal/mcp-provider/invoke
       MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE: /run/secrets/mcp-control-gateway.token
-      MY_DATA_HUB_MCP_SCOPES: platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,data:write,bloggers:write,provider:write
+      MY_DATA_HUB_MCP_SCOPES: platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,region-talk:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,data:write,bloggers:write,region-talk:operate,provider:write
     volumes:
       - "${MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE:?write gate key is required}:/run/secrets/mcp-write-gate.key:ro"
       - "${MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE:?provider control gateway token is required}:/run/secrets/mcp-control-gateway.token:ro"
   oauth-server:
     environment:
       MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED: "true"
-      MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access,platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,data:write,bloggers:write,provider:write
+      MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access,platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,region-talk:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,data:write,bloggers:write,region-talk:operate,provider:write
 YAML
   chmod 600 "$operator_override"
   operator_compose_arg=" -f $operator_override"
@@ -780,10 +781,10 @@ services:
   remote-mcp:
     environment:
       MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "true"
-      MY_DATA_HUB_MCP_SCOPES: platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,acceptance:operate,data:write,bloggers:write,provider:write
+      MY_DATA_HUB_MCP_SCOPES: platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,region-talk:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,acceptance:operate,data:write,bloggers:write,region-talk:operate,provider:write
   oauth-server:
     environment:
-      MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access,platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,acceptance:operate,data:write,bloggers:write,provider:write
+      MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access,platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,region-talk:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,acceptance:operate,data:write,bloggers:write,region-talk:operate,provider:write
 YAML
   chmod 600 "$acceptance_scenarios_override"
   acceptance_scenarios_compose_arg=" -f $acceptance_scenarios_override"
@@ -844,6 +845,13 @@ MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE=$control_gateway_token
 MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE=$checkpoint_upload_broker_key
 MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR=$embedding_credential_dir
 MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED=${MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED:-false}
+MY_DATA_HUB_REGION_TALK_CAPABILITY_DIR=$region_talk_capability_dir
+MY_DATA_HUB_REGION_TALK_PIPELINE_ENABLED=${MY_DATA_HUB_REGION_TALK_PIPELINE_ENABLED:-false}
+MY_DATA_HUB_REGION_TALK_SCHEDULE_ENABLED=${MY_DATA_HUB_REGION_TALK_SCHEDULE_ENABLED:-false}
+MY_DATA_HUB_REGION_TALK_RUNTIME_IMAGE_IDENTITY=${MY_DATA_HUB_REGION_TALK_RUNTIME_IMAGE_IDENTITY:-}
+MY_DATA_HUB_REGION_TALK_RUNTIME_SOURCE_COMMIT=${MY_DATA_HUB_REGION_TALK_RUNTIME_SOURCE_COMMIT:-}
+MY_DATA_HUB_REGION_TALK_WHEEL_RELATIVE_PATH=${MY_DATA_HUB_REGION_TALK_WHEEL_RELATIVE_PATH:-}
+MY_DATA_HUB_REGION_TALK_WHEEL_SHA256=${MY_DATA_HUB_REGION_TALK_WHEEL_SHA256:-}
 ENV
 chmod 600 "$compose_env"
 
