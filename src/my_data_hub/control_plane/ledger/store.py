@@ -6064,6 +6064,178 @@ class ControlLedger:
             assert row is not None
             return dict(row)
 
+    def checkpoint_dataset_incarnation_retirement(
+        self,
+        replacement_checkpoint_id: str,
+    ) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM checkpoint_dataset_incarnation_retirements "
+                "WHERE replacement_checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def prepare_missing_checkpoint_dataset_incarnation(
+        self,
+        replacement_checkpoint_id: str,
+        *,
+        dataset_ref: str,
+        source_head_checkpoint_id: str,
+        source_head_generation: int,
+    ) -> dict[str, Any]:
+        """Persist an exact reset intent before recreating an absent Dataset.
+
+        This is a disaster-recovery boundary for a provider Dataset that is
+        independently absent while the ledger still has a durable HEAD.  The
+        append-only intent retains every historical binding before the
+        provider effect, so response-loss replay cannot confuse this recovery
+        with the ordinary first checkpoint (which also starts at version 1).
+        """
+
+        if not dataset_ref or len(dataset_ref) > 300 or source_head_generation < 1:
+            raise ValueError("checkpoint Dataset incarnation identity is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM checkpoint_dataset_incarnation_retirements "
+                "WHERE replacement_checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["dataset_ref"] != dataset_ref
+                    or existing["source_head_checkpoint_id"] != source_head_checkpoint_id
+                    or int(existing["source_head_generation"]) != source_head_generation
+                ):
+                    raise StaleRuntimeEvent("checkpoint Dataset incarnation retirement replay differs")
+                return dict(existing)
+
+            head = connection.execute(
+                "SELECT generation,current_checkpoint_id FROM checkpoint_heads "
+                "WHERE service_kind='postgres-master'",
+            ).fetchone()
+            replacement = connection.execute(
+                "SELECT dataset_ref,source_checkpoint_id,source_head_generation,status "
+                "FROM checkpoint_candidates WHERE checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+            publication = connection.execute(
+                "SELECT state,expected_provider_version FROM "
+                "checkpoint_blob_publications WHERE checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+            if (
+                head is None
+                or int(head["generation"]) != source_head_generation
+                or head["current_checkpoint_id"] != source_head_checkpoint_id
+                or replacement is None
+                or replacement["dataset_ref"] != dataset_ref
+                or replacement["source_checkpoint_id"] != source_head_checkpoint_id
+                or int(replacement["source_head_generation"]) != source_head_generation
+                or replacement["status"] != "CANDIDATE"
+                or publication is None
+                or publication["state"] not in {"READY_TO_FINALIZE", "FINALIZING"}
+                or (
+                    publication["expected_provider_version"] is not None
+                    and int(publication["expected_provider_version"]) != 1
+                )
+            ):
+                raise StaleRuntimeEvent("checkpoint Dataset reset intent is not exact")
+            rows = connection.execute(
+                "SELECT checkpoint_id,version_ref FROM checkpoint_candidates "
+                "WHERE dataset_ref=? AND version_ref IS NOT NULL ORDER BY checkpoint_id",
+                (dataset_ref,),
+            ).fetchall()
+            retired = [
+                {"checkpoint_id": str(row["checkpoint_id"]), "version_ref": str(row["version_ref"])}
+                for row in rows
+            ]
+            if not retired or not any(
+                item["checkpoint_id"] == source_head_checkpoint_id for item in retired
+            ):
+                raise StaleRuntimeEvent("checkpoint Dataset retirement lacks the durable HEAD binding")
+            retired_json = _safe_json(retired)
+            retired_sha256 = hashlib.sha256(retired_json.encode()).hexdigest()
+            connection.execute(
+                "INSERT INTO checkpoint_dataset_incarnation_retirements("
+                "replacement_checkpoint_id,dataset_ref,source_head_checkpoint_id,"
+                "source_head_generation,retired_versions_json,retired_versions_sha256,"
+                "observed_absent_at) VALUES (?,?,?,?,?,?,?)",
+                (
+                    replacement_checkpoint_id,
+                    dataset_ref,
+                    source_head_checkpoint_id,
+                    source_head_generation,
+                    retired_json,
+                    retired_sha256,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM checkpoint_dataset_incarnation_retirements "
+                "WHERE replacement_checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+            assert row is not None
+            return dict(row)
+
+    def retire_missing_checkpoint_dataset_incarnation(
+        self,
+        replacement_checkpoint_id: str,
+        *,
+        dataset_ref: str,
+        source_head_checkpoint_id: str,
+        source_head_generation: int,
+    ) -> dict[str, Any]:
+        """Release old exact refs after the replacement resolves as version 1."""
+
+        with self._transaction() as connection:
+            retirement = connection.execute(
+                "SELECT * FROM checkpoint_dataset_incarnation_retirements "
+                "WHERE replacement_checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+            head = connection.execute(
+                "SELECT generation,current_checkpoint_id FROM checkpoint_heads "
+                "WHERE service_kind='postgres-master'",
+            ).fetchone()
+            replacement = connection.execute(
+                "SELECT dataset_ref,source_checkpoint_id,source_head_generation,status "
+                "FROM checkpoint_candidates WHERE checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+            publication = connection.execute(
+                "SELECT state,exact_version_ref,expected_provider_version FROM "
+                "checkpoint_blob_publications WHERE checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+            if (
+                retirement is None
+                or retirement["dataset_ref"] != dataset_ref
+                or retirement["source_head_checkpoint_id"] != source_head_checkpoint_id
+                or int(retirement["source_head_generation"]) != source_head_generation
+                or head is None
+                or int(head["generation"]) != source_head_generation
+                or head["current_checkpoint_id"] != source_head_checkpoint_id
+                or replacement is None
+                or replacement["dataset_ref"] != dataset_ref
+                or replacement["source_checkpoint_id"] != source_head_checkpoint_id
+                or int(replacement["source_head_generation"]) != source_head_generation
+                or replacement["status"] != "CANDIDATE"
+                or publication is None
+                or publication["state"] != "DATASET_RESOLVED"
+                or publication["exact_version_ref"] != f"{dataset_ref}/1"
+                or int(publication["expected_provider_version"] or 0) != 1
+            ):
+                raise StaleRuntimeEvent("checkpoint Dataset replacement is not exact and resolved")
+            connection.execute(
+                "UPDATE checkpoint_candidates SET version_ref=NULL "
+                "WHERE dataset_ref=? AND version_ref IS NOT NULL AND checkpoint_id<>?",
+                (dataset_ref, replacement_checkpoint_id),
+            )
+            return dict(retirement)
+
     def record_checkpoint_package_sha256(self, checkpoint_id: str, package_sha256: str) -> None:
         if len(package_sha256) != 64 or any(char not in "0123456789abcdef" for char in package_sha256):
             raise ValueError("checkpoint package hash is invalid")

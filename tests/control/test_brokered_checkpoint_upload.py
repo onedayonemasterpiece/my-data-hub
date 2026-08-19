@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -592,6 +593,96 @@ def test_second_verified_candidate_preserves_current_as_previous(tmp_path: Path)
     assert head.previous_checkpoint_id == str(CHECKPOINT)
     assert adapter.finalized == 2
     assert _verifier.calls == 2
+
+
+def test_complete_child_recreates_externally_missing_checkpoint_dataset(tmp_path: Path) -> None:
+    ledger, package, manifest, adapter, verifier, service, authority = _fixture(tmp_path)
+    _upload_all(package, manifest, service, authority)
+    service.finalize(CHECKPOINT, authority)
+
+    next_checkpoint = UUID("77777777-7777-4777-8777-777777777778")
+    package_2 = tmp_path / "replacement-package"
+    values = {
+        "physical/base.tar.gz": b"replacement-base",
+        "physical/backup_manifest": b"replacement-native-manifest",
+        "physical/pg_wal.tar.gz": b"replacement-wal",
+        "logical/hub.dump": b"replacement-logical",
+        "receipts/verification.json": b'{"ok":true,"replacement":true}',
+    }
+    for relative, content in values.items():
+        target = package_2 / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    manifest_2 = build_manifest(
+        package_directory=package_2,
+        checkpoint_id=next_checkpoint,
+        master_instance_id=MASTER,
+        epoch=1,
+        parent_checkpoint_id=CHECKPOINT,
+        postgres_version="18.4",
+        pgvector_version="0.8.6",
+        schema_version=18,
+        canonical_revision=8,
+        source_run_id=str(RUN),
+        source_identity="owner/master/17",
+        created_at=NOW,
+        checkpoint_lsn="0/16B6C61",
+        file_kinds={
+            "physical/base.tar.gz": "physical",
+            "physical/backup_manifest": "postgres_backup_manifest",
+            "physical/pg_wal.tar.gz": "physical",
+            "logical/hub.dump": "logical",
+            "receipts/verification.json": "verification_receipt",
+        },
+        restore_probe=RestoreProbe(18, 8, "e" * 64, {"hub.canonical_state": 1}),
+    )
+    ControlLedgerCheckpointRegistry(
+        ledger,
+        operation_id=str(OPERATION),
+        dataset_ref="owner/checkpoints",
+    ).add_candidate(manifest_2)
+    _upload_all(package_2, manifest_2, service, authority)
+
+    # Exact provider inventory proves the durable Dataset vanished externally.
+    adapter.current_version = None
+    original_retire = service.control.retire_missing_checkpoint_dataset_incarnation
+
+    def process_lost_before_retirement(*_args: object, **_kwargs: object) -> object:
+        raise SimulatedProcessLoss("process lost after replacement Dataset resolution")
+
+    service.control.retire_missing_checkpoint_dataset_incarnation = (  # type: ignore[method-assign]
+        process_lost_before_retirement
+    )
+    with pytest.raises(SimulatedProcessLoss):
+        service.finalize(next_checkpoint, authority)
+
+    retirement = ledger.checkpoint_dataset_incarnation_retirement(str(next_checkpoint))
+    assert retirement is not None
+    assert json.loads(str(retirement["retired_versions_json"])) == [
+        {"checkpoint_id": str(CHECKPOINT), "version_ref": "owner/checkpoints/1"}
+    ]
+    assert service.status(next_checkpoint)["state"] == "DATASET_RESOLVED"
+    assert ledger.checkpoint_candidate(str(CHECKPOINT))["version_ref"] == "owner/checkpoints/1"  # type: ignore[index]
+
+    service.control.retire_missing_checkpoint_dataset_incarnation = original_retire  # type: ignore[method-assign]
+    restarted_ledger, restarted = _restarted_service(ledger, adapter, verifier)
+    receipt = restarted.finalize(next_checkpoint, authority)
+
+    assert receipt["exact_version_ref"] == "owner/checkpoints/1"
+    publication = service.ledger.publication(str(next_checkpoint))
+    assert publication is not None
+    assert publication["expected_provider_version"] == 1
+    assert publication["finalize_attempts"] == 1
+    assert restarted_ledger.checkpoint_candidate(str(CHECKPOINT))["version_ref"] is None  # type: ignore[index]
+    assert restarted_ledger.checkpoint_candidate(str(next_checkpoint))["version_ref"] == (  # type: ignore[index]
+        "owner/checkpoints/1"
+    )
+    head = restarted_ledger.checkpoint_head("postgres-master")
+    assert head is not None and head.generation == 2
+    assert head.current_checkpoint_id == str(next_checkpoint)
+    assert head.previous_checkpoint_id == str(CHECKPOINT)
+    assert adapter.finalized == 2
+    assert verifier.calls == 2
 
 
 def test_invalid_prepare_is_rejected_and_exact_ready_claim_replays(tmp_path: Path) -> None:

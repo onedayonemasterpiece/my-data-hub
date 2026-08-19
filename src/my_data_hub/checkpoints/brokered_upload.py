@@ -746,7 +746,15 @@ class BrokeredCheckpointUploadService:
             claims=claims,
         )
         persisted_expected = publication.get("expected_provider_version")
-        if persisted_expected is not None:
+        reset = self.control.checkpoint_dataset_incarnation_retirement(str(checkpoint_id))
+        dataset_incarnation_reset = reset is not None
+        source_head_checkpoint_id = (
+            str(reset["source_head_checkpoint_id"]) if reset is not None else None
+        )
+        if reset is not None:
+            expected_version = 1
+            expected_previous_version = None
+        elif persisted_expected is not None:
             expected_version = int(persisted_expected)
             expected_previous_version = expected_version - 1 or None
         else:
@@ -764,10 +772,30 @@ class BrokeredCheckpointUploadService:
                 current_ref, version_text = str(current["version_ref"]).rsplit("/", 1)
                 if current_ref != publication["dataset_ref"] or not version_text.isdigit():
                     raise BrokeredCheckpointError("current checkpoint Dataset identity is invalid")
-                expected_previous_version = int(version_text)
-                if current_version != expected_previous_version:
+                durable_previous_version = int(version_text)
+                if current_version is None:
+                    # The provider Dataset may have been externally removed even
+                    # though the control ledger still retains its exact HEAD.
+                    # A fully uploaded child checkpoint is a complete replacement
+                    # snapshot, so recreate the same private slug from version 1.
+                    # ``begin_finalize`` persists this reset as expected version 1
+                    # before the provider effect; interrupted replay therefore
+                    # never guesses whether create already happened.
+                    expected_previous_version = None
+                    expected_version = 1
+                    dataset_incarnation_reset = True
+                    source_head_checkpoint_id = head.current_checkpoint_id
+                    self.control.prepare_missing_checkpoint_dataset_incarnation(
+                        str(checkpoint_id),
+                        dataset_ref=str(publication["dataset_ref"]),
+                        source_head_checkpoint_id=source_head_checkpoint_id,
+                        source_head_generation=int(publication["source_head_generation"]),
+                    )
+                elif current_version != durable_previous_version:
                     raise BrokeredCheckpointQuarantined("checkpoint Dataset advanced beyond the exact current HEAD")
-                expected_version = expected_previous_version + 1
+                else:
+                    expected_previous_version = durable_previous_version
+                    expected_version = expected_previous_version + 1
 
         original_state = str(publication["state"])
         publication = self.ledger.begin_finalize(str(checkpoint_id), expected_provider_version=expected_version)
@@ -812,6 +840,16 @@ class BrokeredCheckpointUploadService:
                     )
                 raise BrokeredCheckpointError("interrupted checkpoint Dataset finalization is not yet reconciled")
             publication = self.ledger.resolve_dataset(str(checkpoint_id), exact_version_ref=exact_ref)
+
+        if dataset_incarnation_reset:
+            if source_head_checkpoint_id is None:
+                raise BrokeredCheckpointError("checkpoint Dataset reset lacks its source HEAD")
+            self.control.retire_missing_checkpoint_dataset_incarnation(
+                str(checkpoint_id),
+                dataset_ref=str(publication["dataset_ref"]),
+                source_head_checkpoint_id=source_head_checkpoint_id,
+                source_head_generation=int(publication["source_head_generation"]),
+            )
 
         registry = ControlLedgerCheckpointRegistry(
             self.control,
