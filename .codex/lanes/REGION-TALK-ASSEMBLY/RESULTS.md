@@ -40,10 +40,15 @@
 - `src/my_data_hub/workloads/region_talk/direct_pipeline.py`
 - `src/my_data_hub/workloads/region_talk/production_assembly.py`
 - `tests/region_talk/test_direct_pipeline.py`
+- `tests/test_control_plane_deployment.py`
 - `.codex/lanes/REGION-TALK-ASSEMBLY/RESULTS.md`
 
 ## Shared concurrent files explicitly not owned/committed
 
 - `src/my_data_hub/workloads/region_talk/direct_snapshot.py`
+- `src/my_data_hub/workloads/region_talk/reader.py`
+- `docs/migrations/region-talk/direct-snapshot-v2.md`
+- `docs/migrations/region-talk/mapping.md`
 - `sql/migrations/0024_region_talk_snapshot_integrity_and_canonicalize.sql`
+- `tests/region_talk/test_reader.py`
 - `tests/region_talk/test_snapshot_integrity_v3.py`
