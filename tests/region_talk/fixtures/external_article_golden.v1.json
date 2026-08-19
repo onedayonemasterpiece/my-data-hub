@@ -1,0 +1,78 @@
+{
+  "fixture_version": "region-talk-transform-golden.v1",
+  "provenance": {
+    "repository": "onedayonemasterpiece/events-bot-new",
+    "commit": "5bbdb681623d5e4e0bff2133e487a6663c1a838a",
+    "source_path": "tests/test_region_talk_external_publication_import.py",
+    "source_blob": "a9b9bc82c059e716f79f87359ff2258f4c118760",
+    "source_sha256": "5f4b09e2d9e5e1ce0059b6a7c2770040927ba45be002fea8ed3d1fb79b920e28",
+    "sanitization": "Structural synthetic example.org fixture; no production row or credential."
+  },
+  "input": {
+    "schema_version": "region-talk.external-article.v1",
+    "canonical_url": "http://www.example.org/articles//kaliningrad/?utm_source=test&b=2&a=1#top",
+    "doi": "https://doi.org/10.1234/ABC.9",
+    "title": " Исследование  побережья Калининградской области ",
+    "authors": [" И. Автор "],
+    "source_name": "Synthetic Research Review",
+    "published_at": "2026-07-31",
+    "date_basis": "doi",
+    "access_status": "full_text",
+    "source_scope": "external",
+    "centrality": "central",
+    "track": "scholarly",
+    "research_decision": "candidate",
+    "downstream_readiness": "candidate_report",
+    "research_match": true,
+    "product_policy_match": true,
+    "language_policy_match": true,
+    "newsiness": "non_news",
+    "commerciality": "independent",
+    "hard_exclusion_codes": [],
+    "quality_tier": "strong",
+    "quality_scores": {
+      "source_authority": 4,
+      "evidence_depth": 4,
+      "editorial_independence": 4,
+      "originality": 3,
+      "kaliningrad_centrality": 4,
+      "public_interest": 3,
+      "accessibility": 3
+    },
+    "peer_reviewed": true,
+    "correction_status": "none_found",
+    "original_reporting_or_analysis": null,
+    "source_externality_evidence_refs": ["ev-source"],
+    "copy_support_evidence_refs": ["ev-copy"],
+    "evidence": [
+      {
+        "evidence_id": "ev-source",
+        "url": "https://example.org/about?utm_campaign=x",
+        "paraphrase": "Synthetic external publisher evidence.",
+        "quote_short": ""
+      },
+      {
+        "evidence_id": "ev-copy",
+        "url": "https://example.org/articles/kaliningrad#section",
+        "paraphrase": "Synthetic grounded article evidence.",
+        "quote_short": ""
+      }
+    ],
+    "media_candidate_urls": ["https://example.org/media/coast.jpg?utm_source=x"],
+    "rights_policy": "score_only",
+    "media_reuse_allowed": false,
+    "run_window_start": "2026-07-01",
+    "run_window_end": "2026-08-02"
+  },
+  "expected": {
+    "canonical_url": "http://www.example.org/articles/kaliningrad?a=1&b=2",
+    "canonical_url_identity": "https://example.org/articles/kaliningrad?a=1&b=2",
+    "doi": "10.1234/abc.9",
+    "normalized_title": "исследование побережья калининградской области",
+    "normalized_authors": ["и. автор"],
+    "content_origin_type": "academic_publication",
+    "normalized_quality_score": 0.893,
+    "import_status": "ready_for_region_talk_scoring",
+    "media_use_policy": "score_only_no_reuse"
+  }
+}

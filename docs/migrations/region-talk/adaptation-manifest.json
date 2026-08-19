@@ -1,18 +1,179 @@
 {
   "schema_version": "my-data-hub-adaptation-manifest.v1",
-  "status": "pending_authenticated_source_review",
-  "generated_at": null,
+  "status": "in_progress",
+  "generated_at": "2026-08-19T22:50:52Z",
   "sources": [
     {
       "repository": "onedayonemasterpiece/region-talk",
       "source_commit": null,
-      "role": "current Region Talk product, pipeline, migration and operational donor"
+      "role": "current Region Talk product, pipeline, migration and operational donor; authenticated review still pending"
     },
     {
       "repository": "onedayonemasterpiece/events-bot-new",
-      "source_commit": null,
-      "role": "historical Region Talk implementation and proven MCP/Kaggle lifecycle donor"
+      "source_commit": "5bbdb681623d5e4e0bff2133e487a6663c1a838a",
+      "role": "pinned historical donor for the pure queue-formation transformation slice"
     }
   ],
-  "adaptations": []
+  "adaptations": [
+    {
+      "source_repository": "onedayonemasterpiece/events-bot-new",
+      "source_commit": "5bbdb681623d5e4e0bff2133e487a6663c1a838a",
+      "source_path": "scripts/region_talk_external_publication_import.py",
+      "source_sha256": "8259e342408192d2cf5eb191bc56dc400a09cc3bb57fabdca77208058ece868b",
+      "destination_path": "src/my_data_hub/workloads/region_talk/transforms/_canonical.py",
+      "destination_sha256": "a97a22b03280eb2149fd895343c3d16082011884eb925effcf93af902404a62a",
+      "classification": "adapted",
+      "architectural_changes": [
+        "Removed filesystem/schema loading and retained only pure canonicalization."
+      ],
+      "verification": [
+        "pytest -q tests/region_talk",
+        "ruff check src/my_data_hub/workloads/region_talk/transforms tests/region_talk"
+      ]
+    },
+    {
+      "source_repository": "onedayonemasterpiece/events-bot-new",
+      "source_commit": "5bbdb681623d5e4e0bff2133e487a6663c1a838a",
+      "source_path": "scripts/region_talk_external_publication_import.py",
+      "source_sha256": "8259e342408192d2cf5eb191bc56dc400a09cc3bb57fabdca77208058ece868b",
+      "destination_path": "src/my_data_hub/workloads/region_talk/transforms/models.py",
+      "destination_sha256": "c1345ce5b2906bbe64801239c22296b98c92b1d7b8e187be85ee6276e4aa4e2c",
+      "classification": "adapted",
+      "architectural_changes": [
+        "Replaced loose donor dictionaries with frozen Pydantic contracts."
+      ],
+      "verification": [
+        "pytest -q tests/region_talk",
+        "ruff check src/my_data_hub/workloads/region_talk/transforms tests/region_talk"
+      ]
+    },
+    {
+      "source_repository": "onedayonemasterpiece/events-bot-new",
+      "source_commit": "5bbdb681623d5e4e0bff2133e487a6663c1a838a",
+      "source_path": "scripts/region_talk_external_publication_import.py",
+      "source_sha256": "8259e342408192d2cf5eb191bc56dc400a09cc3bb57fabdca77208058ece868b",
+      "destination_path": "src/my_data_hub/workloads/region_talk/transforms/normalization.py",
+      "destination_sha256": "600dc6d7f790fde16947ec445a953bb084a58d98a89bed9d9a237aab3e9fda49",
+      "classification": "adapted",
+      "architectural_changes": [
+        "Removed YDB writes and batch registry side effects; emits typed master-apply values."
+      ],
+      "verification": [
+        "pytest -q tests/region_talk",
+        "ruff check src/my_data_hub/workloads/region_talk/transforms tests/region_talk"
+      ]
+    },
+    {
+      "source_repository": "onedayonemasterpiece/events-bot-new",
+      "source_commit": "5bbdb681623d5e4e0bff2133e487a6663c1a838a",
+      "source_path": "kaggle/RegionTalkCandidateReport/region_talk_candidate_report.py",
+      "source_sha256": "f24a954f2213286ff7cf3ffe3d23706a4cee2d8b94f1421939c4a2f1e12f26c8",
+      "destination_path": "src/my_data_hub/workloads/region_talk/transforms/evidence.py",
+      "destination_sha256": "a7d40af4b934d57190677ba52d5a9a43f98b5c7bdee337c5fb268fddf59f1ebf",
+      "classification": "adapted",
+      "architectural_changes": [
+        "Requires both exact current fingerprints and performs no model loading."
+      ],
+      "verification": [
+        "pytest -q tests/region_talk",
+        "ruff check src/my_data_hub/workloads/region_talk/transforms tests/region_talk"
+      ]
+    },
+    {
+      "source_repository": "onedayonemasterpiece/events-bot-new",
+      "source_commit": "5bbdb681623d5e4e0bff2133e487a6663c1a838a",
+      "source_path": "kaggle/RegionTalkCandidateReport/region_talk_candidate_report.py",
+      "source_sha256": "f24a954f2213286ff7cf3ffe3d23706a4cee2d8b94f1421939c4a2f1e12f26c8",
+      "destination_path": "src/my_data_hub/workloads/region_talk/transforms/eligibility.py",
+      "destination_sha256": "94836531f6da99dd0bc9cee66450fe538d80433bafde552bd9022fb37035d472",
+      "classification": "adapted",
+      "architectural_changes": [
+        "Split heavy image/final-verifier/writer work into typed pending gates."
+      ],
+      "verification": [
+        "pytest -q tests/region_talk",
+        "ruff check src/my_data_hub/workloads/region_talk/transforms tests/region_talk"
+      ]
+    },
+    {
+      "source_repository": "onedayonemasterpiece/events-bot-new",
+      "source_commit": "5bbdb681623d5e4e0bff2133e487a6663c1a838a",
+      "source_path": "scripts/region_talk_publication_finalizer.py",
+      "source_sha256": "1cf78a6ff6b2df21475587a83de1b4c4790080f55b84491939f96e9e8ab901fe",
+      "destination_path": "src/my_data_hub/workloads/region_talk/transforms/candidates.py",
+      "destination_sha256": "6fc75b9b0d88a82b3e936af487b8ec8d4bb04df6723f5040f8395dfcff0490ed",
+      "classification": "adapted",
+      "architectural_changes": [
+        "Emits immutable memory/revision values without storage writes or LLM calls."
+      ],
+      "verification": [
+        "pytest -q tests/region_talk",
+        "ruff check src/my_data_hub/workloads/region_talk/transforms tests/region_talk"
+      ]
+    },
+    {
+      "source_repository": "onedayonemasterpiece/events-bot-new",
+      "source_commit": "5bbdb681623d5e4e0bff2133e487a6663c1a838a",
+      "source_path": "scripts/region_talk_publisher_profile.py",
+      "source_sha256": "3d35075594fd554f5e127ad6d12cc34ce4c5ab5e249e0efbeb13c8f01f82b975",
+      "destination_path": "src/my_data_hub/workloads/region_talk/transforms/merge.py",
+      "destination_sha256": "9a4a8bcf16a83847fbe5bfc19a7426ba772a14cbabbe6e00dc72ba2cf5fe1cbb",
+      "classification": "adapted",
+      "architectural_changes": [
+        "Unified source and publisher monotonic merges; conflicts fail closed."
+      ],
+      "verification": [
+        "pytest -q tests/region_talk",
+        "ruff check src/my_data_hub/workloads/region_talk/transforms tests/region_talk"
+      ]
+    },
+    {
+      "source_repository": "onedayonemasterpiece/events-bot-new",
+      "source_commit": "5bbdb681623d5e4e0bff2133e487a6663c1a838a",
+      "source_path": "scripts/region_talk_review_queue.py",
+      "source_sha256": "b350bc6c8c74581a443523d5cf4a8bf927d06cad4a7625434a50368ea89acbf1",
+      "destination_path": "src/my_data_hub/workloads/region_talk/transforms/ranking.py",
+      "destination_sha256": "0012d4beb503c94713b810085da68296721bb782f42373fc5f1aee2ff9e4e8f2",
+      "classification": "adapted",
+      "architectural_changes": [
+        "Uses typed vectors rather than donor base64/YDB rows; fallback remains disclosed."
+      ],
+      "verification": [
+        "pytest -q tests/region_talk",
+        "ruff check src/my_data_hub/workloads/region_talk/transforms tests/region_talk"
+      ]
+    },
+    {
+      "source_repository": "onedayonemasterpiece/events-bot-new",
+      "source_commit": "5bbdb681623d5e4e0bff2133e487a6663c1a838a",
+      "source_path": "scripts/region_talk_publication_plan.py",
+      "source_sha256": "73e801fe380cb9b850df7980366263e783359fcc2d6a85be930bcf035d87a2e4",
+      "destination_path": "src/my_data_hub/workloads/region_talk/transforms/planning.py",
+      "destination_sha256": "b3bbae6d0283e7112290517477527f3fed472d224551544347a442634706d3b3",
+      "classification": "adapted",
+      "architectural_changes": [
+        "Requires a single unambiguous time and hard-disables publication effects."
+      ],
+      "verification": [
+        "pytest -q tests/region_talk",
+        "ruff check src/my_data_hub/workloads/region_talk/transforms tests/region_talk"
+      ]
+    },
+    {
+      "source_repository": "onedayonemasterpiece/events-bot-new",
+      "source_commit": "5bbdb681623d5e4e0bff2133e487a6663c1a838a",
+      "source_path": "tests/test_region_talk_external_publication_import.py",
+      "source_sha256": "5f4b09e2d9e5e1ce0059b6a7c2770040927ba45be002fea8ed3d1fb79b920e28",
+      "destination_path": "tests/region_talk/fixtures/external_article_golden.v1.json",
+      "destination_sha256": "4751f74ac2abe4a48ede5a98ff694b7e2f751ecde6da335472b3e92774da8bf9",
+      "classification": "adapted",
+      "architectural_changes": [
+        "Sanitized structurally to example.org; contains no production row or credential."
+      ],
+      "verification": [
+        "pytest -q tests/region_talk",
+        "ruff check src/my_data_hub/workloads/region_talk/transforms tests/region_talk"
+      ]
+    }
+  ]
 }
