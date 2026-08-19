@@ -6,6 +6,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import secrets
 import tempfile
 from collections.abc import Callable, Mapping
@@ -1094,18 +1095,26 @@ class ProductionRuntimeBuild:
     checkpoint_broker: BrokeredCheckpointUploadService | None = None
 
 
-def _checkpoint_verifier_assets_from_verified_master_claim(
+def _verified_master_asset_claim(
     ledger: ControlLedger,
-    assets: KaggleMasterLaunchAssets,
     *,
-    timeout_seconds: int,
-) -> KaggleCheckpointVerifierAssets:
-    """Project a verifier runtime only from the exact durable master asset effect."""
-
-    claim = ledger.latest_provider_resource_claim(
-        provider_ref=assets.dataset_ref,
-        resource_kind=ProviderKind.DATASET.value,
-        control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
+    provider_ref: str,
+    dataset_files: Mapping[str, bytes],
+    task_id: UUID | None = None,
+) -> tuple[dict[str, Any], int]:
+    claim = (
+        ledger.provider_resource_claim_for_task(
+            task_id=str(task_id),
+            resource_kind=ProviderKind.DATASET.value,
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
+            disposable=False,
+        )
+        if task_id is not None
+        else ledger.latest_provider_resource_claim(
+            provider_ref=provider_ref,
+            resource_kind=ProviderKind.DATASET.value,
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
+        )
     )
     if claim is None:
         raise MasterProviderUnavailable("exact master asset Dataset claim is unavailable")
@@ -1115,7 +1124,7 @@ def _checkpoint_verifier_assets_from_verified_master_claim(
     expected_key = f"{authority['operation_id']}:ensure_dataset" if authority is not None else ""
     expected_arguments_sha256 = sha256_value(
         {
-            "content_tree_sha256": KaggleMasterRuntimeProvider._mapping_sha(assets.dataset_files),
+            "content_tree_sha256": KaggleMasterRuntimeProvider._mapping_sha(dataset_files),
             "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
             "disposable": False,
         }
@@ -1123,7 +1132,8 @@ def _checkpoint_verifier_assets_from_verified_master_claim(
     if (
         authority is None
         or authority.get("action") != "create_dataset"
-        or authority.get("provider_ref") != assets.dataset_ref
+        or authority.get("provider_ref") != provider_ref
+        or claim.get("provider_ref") != provider_ref
         or ledger.provider_effect_idempotency_key(effect_id) != expected_key
         or str(uuid5(NAMESPACE_URL, expected_key)) != effect_id
         or ledger.provider_effect_arguments_sha256(effect_id) != expected_arguments_sha256
@@ -1140,31 +1150,51 @@ def _checkpoint_verifier_assets_from_verified_master_claim(
         version = int(claim["provider_version"])
     except (KeyError, TypeError, ValueError) as exc:
         raise MasterProviderUnavailable("master asset Dataset claim has no exact numeric version") from exc
-    try:
-        wheel, wheel_bytes = assets.project_wheel()
-    except MasterLaunchContractError as exc:
-        raise MasterProviderUnavailable("verified master assets lack one exact verifier wheel") from exc
     if version < 1:
         raise MasterProviderUnavailable("master asset Dataset claim has no exact numeric version")
+    return claim, version
+
+
+def _project_checkpoint_verifier_assets(
+    *,
+    provider_ref: str,
+    version: int,
+    timeout_seconds: int,
+    notebook_ref: str,
+    notebook_source: bytes,
+    runtime_image_identity: str,
+    runtime_image_source_commit: str,
+    runtime_python_series: str,
+    dataset_files: Mapping[str, bytes],
+) -> KaggleCheckpointVerifierAssets:
     try:
-        verifier_source = assets.dataset_files[assets.checkpoint_verifier_source_file]
-        archive = assets.dataset_files[POSTGRES_RUNTIME_ARCHIVE_NAME]
-        runtime_manifest = assets.dataset_files[POSTGRES_RUNTIME_MANIFEST_NAME]
+        archive = dataset_files[POSTGRES_RUNTIME_ARCHIVE_NAME]
+        runtime_manifest = dataset_files[POSTGRES_RUNTIME_MANIFEST_NAME]
     except KeyError as exc:
         raise MasterProviderUnavailable("verified master assets lack checkpoint verifier runtime files") from exc
-    python_dependencies = {
-        str(item["distribution"]): item for item in assets.master_python_dependencies()
-    }
-    psycopg = python_dependencies["psycopg"]
-    psycopg_binary = python_dependencies["psycopg-binary"]
+    wheel_candidates = sorted(name for name in dataset_files if name.endswith(".whl") and "/" not in name)
+    if len(wheel_candidates) != 1:
+        raise MasterProviderUnavailable("verified master assets lack one exact verifier wheel")
+    wheel = wheel_candidates[0]
+    wheel_bytes = dataset_files[wheel]
+    try:
+        dependencies = json.loads(dataset_files["embedding-worker-dependencies.json"])
+        python_dependencies = {str(item["distribution"]): item for item in dependencies["wheels"]}
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise MasterProviderUnavailable("verified master dependency manifest is invalid") from exc
+    try:
+        psycopg = python_dependencies["psycopg"]
+        psycopg_binary = python_dependencies["psycopg-binary"]
+    except KeyError as exc:
+        raise MasterProviderUnavailable("verified master dependencies lack psycopg runtime wheels") from exc
     return KaggleCheckpointVerifierAssets(
-        notebook_ref=assets.checkpoint_verifier_ref,
-        notebook_source=verifier_source,
+        notebook_ref=notebook_ref,
+        notebook_source=notebook_source,
         timeout_seconds=timeout_seconds,
-        runtime_dataset_exact_ref=f"{assets.dataset_ref}/{version}",
-        runtime_image_identity=assets.runtime_image_identity,
-        runtime_image_source_commit=assets.runtime_image_source_commit,
-        runtime_python_series=assets.runtime_python_series,
+        runtime_dataset_exact_ref=f"{provider_ref}/{version}",
+        runtime_image_identity=runtime_image_identity,
+        runtime_image_source_commit=runtime_image_source_commit,
+        runtime_python_series=runtime_python_series,
         wheel_relative_path=wheel,
         wheel_sha256=hashlib.sha256(wheel_bytes).hexdigest(),
         postgres_runtime_archive_relative_path=POSTGRES_RUNTIME_ARCHIVE_NAME,
@@ -1177,6 +1207,135 @@ def _checkpoint_verifier_assets_from_verified_master_claim(
             f"embedding-worker-wheelhouse/{psycopg_binary['filename']}"
         ),
         psycopg_binary_wheel_sha256=str(psycopg_binary["sha256"]),
+    )
+
+
+def _checkpoint_verifier_assets_from_verified_master_claim(
+    ledger: ControlLedger,
+    assets: KaggleMasterLaunchAssets,
+    *,
+    timeout_seconds: int,
+    task_id: UUID | None = None,
+) -> KaggleCheckpointVerifierAssets:
+    """Project a verifier runtime only from the exact durable current asset effect."""
+
+    _claim, version = _verified_master_asset_claim(
+        ledger,
+        provider_ref=assets.dataset_ref,
+        dataset_files=assets.dataset_files,
+        task_id=task_id,
+    )
+    try:
+        verifier_source = assets.dataset_files[assets.checkpoint_verifier_source_file]
+        assets.project_wheel()
+        assets.master_python_dependencies()
+    except (KeyError, MasterLaunchContractError) as exc:
+        raise MasterProviderUnavailable("verified master assets lack exact verifier files") from exc
+    return _project_checkpoint_verifier_assets(
+        provider_ref=assets.dataset_ref,
+        version=version,
+        timeout_seconds=timeout_seconds,
+        notebook_ref=assets.checkpoint_verifier_ref,
+        notebook_source=verifier_source,
+        runtime_image_identity=assets.runtime_image_identity,
+        runtime_image_source_commit=assets.runtime_image_source_commit,
+        runtime_python_series=assets.runtime_python_series,
+        dataset_files=assets.dataset_files,
+    )
+
+
+def _historical_checkpoint_verifier_assets(
+    ledger: ControlLedger,
+    *,
+    task_id: UUID,
+    history_root: Path,
+    timeout_seconds: int,
+) -> KaggleCheckpointVerifierAssets:
+    """Resolve a task's immutable launch assets after the control release has advanced."""
+
+    claim = ledger.provider_resource_claim_for_task(
+        task_id=str(task_id),
+        resource_kind=ProviderKind.DATASET.value,
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
+        disposable=False,
+    )
+    if claim is None:
+        raise MasterProviderUnavailable("task has no exact master asset Dataset claim")
+    provider_ref = str(claim.get("provider_ref", ""))
+    if history_root.is_symlink() or not history_root.is_dir():
+        raise MasterProviderUnavailable("master asset history is unavailable")
+    matches: list[tuple[dict[str, Any], dict[str, bytes]]] = []
+    for directory in sorted(history_root.iterdir()):
+        if directory.is_symlink():
+            raise MasterProviderUnavailable("master asset history contains a symlink")
+        if not directory.is_dir():
+            continue
+        manifest_path = directory / "master-asset-bundle.json"
+        if not manifest_path.is_file() or manifest_path.is_symlink():
+            continue
+        try:
+            manifest = json.loads(_bounded_file(manifest_path, max_bytes=256 * 1024))
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(manifest, dict) or manifest.get("launch_dataset_ref") != provider_ref:
+            continue
+        dataset_root = directory / "dataset"
+        try:
+            files = _bounded_files(dataset_root)
+        except ValueError as exc:
+            raise MasterProviderUnavailable("historical master asset Dataset files are invalid") from exc
+        declared: dict[str, Mapping[str, Any]] = {}
+        for item in manifest.get("assets", {}).values():
+            if isinstance(item, dict) and str(item.get("path", "")).startswith("dataset/"):
+                declared[str(item["path"])[8:]] = item
+        for item in manifest.get("embedding_dependency_wheels", []):
+            if isinstance(item, dict) and str(item.get("path", "")).startswith("dataset/"):
+                declared[str(item["path"])[8:]] = item
+        if set(declared) != set(files):
+            raise MasterProviderUnavailable("historical master asset inventory differs from its manifest")
+        if any(
+            int(declared[name].get("byte_size", -1)) != len(body)
+            or declared[name].get("sha256") != hashlib.sha256(body).hexdigest()
+            for name, body in files.items()
+        ):
+            raise MasterProviderUnavailable("historical master asset bytes differ from their manifest")
+        matches.append((manifest, files))
+    if len(matches) != 1:
+        raise MasterProviderUnavailable("task master asset history is missing or ambiguous")
+    manifest, files = matches[0]
+    source_commit = str(manifest.get("source_commit", ""))
+    worker_runtime = manifest.get("worker_runtime")
+    assets_manifest = manifest.get("assets")
+    if (
+        not re.fullmatch(r"[a-f0-9]{40}", source_commit)
+        or manifest.get("source_identity") != f"git:{source_commit}"
+        or manifest.get("source_version") != source_commit
+        or not isinstance(worker_runtime, dict)
+        or not isinstance(assets_manifest, dict)
+    ):
+        raise MasterProviderUnavailable("historical master asset provenance is invalid")
+    _claim, version = _verified_master_asset_claim(
+        ledger,
+        provider_ref=provider_ref,
+        dataset_files=files,
+        task_id=task_id,
+    )
+    verifier_entry = assets_manifest.get("checkpoint_verifier")
+    if not isinstance(verifier_entry, dict):
+        raise MasterProviderUnavailable("historical checkpoint verifier source is absent")
+    verifier_path = str(verifier_entry.get("path", ""))
+    if not verifier_path.startswith("dataset/") or verifier_path[8:] not in files:
+        raise MasterProviderUnavailable("historical checkpoint verifier source path is invalid")
+    return _project_checkpoint_verifier_assets(
+        provider_ref=provider_ref,
+        version=version,
+        timeout_seconds=timeout_seconds,
+        notebook_ref=str(manifest.get("checkpoint_verifier_ref", "")),
+        notebook_source=files[verifier_path[8:]],
+        runtime_image_identity=str(worker_runtime.get("image_identity", "")),
+        runtime_image_source_commit=str(worker_runtime.get("source_commit", "")),
+        runtime_python_series=str(worker_runtime.get("python_series", "")),
+        dataset_files=files,
     )
 
 
@@ -1232,11 +1391,34 @@ def build_production_runtime(
         receipt_root.chmod(0o700)
 
         def verifier_factory(operation_id: UUID, task_id: UUID) -> KaggleCheckpointRestoreVerifier:
+            task_claim = ledger.provider_resource_claim_for_task(
+                task_id=str(task_id),
+                resource_kind=ProviderKind.DATASET.value,
+                control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
+                disposable=False,
+            )
+            if task_claim is None:
+                raise MasterProviderUnavailable("checkpoint source task has no master asset claim")
+            if task_claim.get("provider_ref") == settings.assets.dataset_ref:
+                verifier_assets = _checkpoint_verifier_assets_from_verified_master_claim(
+                    ledger,
+                    settings.assets,
+                    timeout_seconds=1800,
+                    task_id=task_id,
+                )
+            else:
+                history_value = os.getenv(
+                    "MY_DATA_HUB_MASTER_ASSET_HISTORY_DIR", "/master-assets-history"
+                ).strip()
+                verifier_assets = _historical_checkpoint_verifier_assets(
+                    ledger,
+                    task_id=task_id,
+                    history_root=Path(history_value),
+                    timeout_seconds=1800,
+                )
             return KaggleCheckpointRestoreVerifier(
                 adapter,
-                _checkpoint_verifier_assets_from_verified_master_claim(
-                    ledger, settings.assets, timeout_seconds=1800
-                ),
+                verifier_assets,
                 output_directory=receipt_root,
                 operation_id=operation_id,
                 authorization_task_id=task_id,

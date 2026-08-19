@@ -3314,6 +3314,32 @@ class ControlLedger:
             ).fetchone()
         return json.loads(str(row["claim_json"])) if row else None
 
+    def provider_resource_claim_for_task(
+        self,
+        *,
+        task_id: str,
+        resource_kind: str,
+        control_class: str,
+        disposable: bool,
+    ) -> dict[str, Any] | None:
+        """Resolve one exact task-owned resource claim without guessing a latest version."""
+
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT claim_json FROM provider_resource_claims WHERE task_id=? "
+                "AND resource_kind=? AND control_class=? AND disposable=? "
+                "ORDER BY provider_version,claim_sha256",
+                (task_id, resource_kind, control_class, int(disposable)),
+            ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise IdempotencyConflict("task has more than one matching provider resource claim")
+        payload = json.loads(str(rows[0]["claim_json"]))
+        if not isinstance(payload, dict):
+            raise IdempotencyConflict("task provider resource claim is not an object")
+        return payload
+
     def provider_resource_claim(self, claim_sha256: str) -> dict[str, Any] | None:
         if len(claim_sha256) != 64:
             return None

@@ -944,6 +944,42 @@ def test_new_verifier_revision_recovers_exact_failed_dataset_without_reupload(tm
     assert ledger.checkpoint_head("postgres-master").current_checkpoint_id == str(CHECKPOINT)  # type: ignore[union-attr]
 
 
+def test_provider_unavailable_before_verifier_start_is_retryable_without_reupload(tmp_path: Path) -> None:
+    ledger, package, manifest, adapter, _verifier, _service, authority = _fixture(tmp_path)
+    failed = BrokeredCheckpointUploadService(
+        ledger,
+        adapter,
+        CheckpointUploadSecretBox(b"k" * 32),
+        RevisionedFailingRestoreVerifier("a" * 64),
+    )
+    _upload_all(package, manifest, failed, authority)
+    with pytest.raises(CheckpointRuntimeError):
+        failed.finalize(CHECKPOINT, authority)
+    with ledger._transaction() as connection:
+        connection.execute(
+            "UPDATE checkpoint_blob_publications SET failure_code='MasterProviderUnavailable',"
+            "verifier_revision_sha256=NULL,verifier_attempts=0 WHERE checkpoint_id=?",
+            (str(CHECKPOINT),),
+        )
+        connection.execute(
+            "UPDATE checkpoint_candidates SET failure_code='MasterProviderUnavailable' WHERE checkpoint_id=?",
+            (str(CHECKPOINT),),
+        )
+
+    fixed_verifier = RevisionedRestoreVerifier("b" * 64)
+    recovered = BrokeredCheckpointUploadService(
+        ledger,
+        adapter,
+        CheckpointUploadSecretBox(b"k" * 32),
+        fixed_verifier,
+    )
+    receipts = recovered.reconcile_pending_once()
+
+    assert len(receipts) == 1 and receipts[0]["state"] == "PROMOTED"
+    assert adapter.finalized == 1
+    assert fixed_verifier.calls == 1
+
+
 def test_incompatible_historical_verifier_does_not_block_new_ready_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

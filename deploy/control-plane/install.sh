@@ -113,6 +113,7 @@ provider_upload_dir="${MY_DATA_HUB_PROVIDER_UPLOAD_DIR:-$runtime_root/provider-u
 session_dir="${MY_DATA_HUB_MASTER_SESSION_DIR:-$runtime_root/master-sessions}"
 embedding_credential_dir="${MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR:-$runtime_root/embedding-credentials}"
 asset_dir="${MY_DATA_HUB_MASTER_ASSET_DIR:-$runtime_root/master-assets}"
+asset_history_dir="${MY_DATA_HUB_MASTER_ASSET_HISTORY_DIR:-$runtime_root/master-assets-history}"
 tls_dir="${MY_DATA_HUB_MASTER_TLS_DIR:-$runtime_root/master-tls}"
 tls_ca_file="$tls_dir/ca.pem"
 provider_env="${MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE:-$env_root/provider.env}"
@@ -314,6 +315,24 @@ if [[ "$provider_only" != true ]]; then
   [[ -d "$asset_dir" && ! -L "$asset_dir" ]] || { echo "master asset directory is required" >&2; exit 2; }
   python3 "$release/scripts/provider/verify_master_assets.py" \
     --bundle "$asset_dir" --expected-commit "$commit" >/dev/null
+  if [[ -L "$asset_history_dir" ]]; then
+    echo "master asset history must not be a symlink" >&2
+    exit 2
+  fi
+  install -d -m 700 "$asset_history_dir"
+  archived_assets="$asset_history_dir/$commit"
+  if [[ ! -e "$archived_assets" ]]; then
+    archive_stage="$asset_history_dir/.${commit}.tmp.$$"
+    rm -rf "$archive_stage"
+    cp -a "$asset_dir" "$archive_stage"
+    mv "$archive_stage" "$archived_assets"
+  fi
+  [[ -d "$archived_assets" && ! -L "$archived_assets" ]] || {
+    echo "immutable master asset history entry is invalid" >&2
+    exit 2
+  }
+  python3 "$release/scripts/provider/verify_master_assets.py" \
+    --bundle "$archived_assets" --expected-commit "$commit" >/dev/null
 fi
 for env_file in "$provider_env" "$mcp_env" "$oauth_env"; do
   reject_data_plane_environment "$env_file" "$(basename "$env_file")"
@@ -809,6 +828,7 @@ MY_DATA_HUB_CONTROL_LEDGER_DIR=$ledger_dir
 MY_DATA_HUB_PROVIDER_UPLOAD_DIR=$provider_upload_dir
 MY_DATA_HUB_MASTER_SESSION_DIR=$session_dir
 MY_DATA_HUB_MASTER_ASSET_DIR=$asset_dir
+MY_DATA_HUB_MASTER_ASSET_HISTORY_DIR=$asset_history_dir
 MY_DATA_HUB_MASTER_TLS_DIR=$tls_dir
 MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE=$provider_env
 MY_DATA_HUB_MCP_ENV_FILE=$mcp_env

@@ -260,7 +260,8 @@ class CheckpointUploadLedger:
             rows = connection.execute(
                 "SELECT checkpoint_id FROM checkpoint_blob_publications "
                 "WHERE authority_kind='master' AND state='FAILED' "
-                "AND failure_code='CheckpointRuntimeError' AND exact_version_ref IS NOT NULL "
+                "AND failure_code IN ('CheckpointRuntimeError','MasterProviderUnavailable') "
+                "AND exact_version_ref IS NOT NULL "
                 "AND (verifier_attempts<3 OR verifier_recovery_attempts<2 OR "
                 "(SELECT count(*) FROM checkpoint_verifier_extended_recovery_attempts x "
                 "WHERE x.checkpoint_id=checkpoint_blob_publications.checkpoint_id)<3) "
@@ -708,7 +709,11 @@ class CheckpointUploadLedger:
             ).fetchone()
             if publication is None:
                 raise KeyError(checkpoint_id)
-            if publication["state"] != "FAILED" or publication["failure_code"] != "CheckpointRuntimeError":
+            recovered_failure = str(publication["failure_code"] or "")
+            if publication["state"] != "FAILED" or recovered_failure not in {
+                "CheckpointRuntimeError",
+                "MasterProviderUnavailable",
+            }:
                 return None
             if publication["verifier_revision_sha256"] == verifier_revision_sha256:
                 return None
@@ -745,7 +750,7 @@ class CheckpointUploadLedger:
             if (
                 candidate is None
                 or candidate["status"] != "FAILED"
-                or candidate["failure_code"] != "CheckpointRuntimeError"
+                or candidate["failure_code"] != recovered_failure
                 or candidate["version_ref"] != publication["exact_version_ref"]
                 or candidate["operation_id"] != publication["operation_id"]
                 or candidate["master_instance_id"] != publication["master_instance_id"]
@@ -761,8 +766,8 @@ class CheckpointUploadLedger:
                 raise IdempotencyConflict("failed verifier publication no longer has exact retry authority")
             connection.execute(
                 "UPDATE checkpoint_candidates SET status='UPLOADED',failure_code=NULL "
-                "WHERE checkpoint_id=? AND status='FAILED' AND failure_code='CheckpointRuntimeError'",
-                (checkpoint_id,),
+                "WHERE checkpoint_id=? AND status='FAILED' AND failure_code=?",
+                (checkpoint_id, recovered_failure),
             )
             if normal_exhausted and recovery_exhausted:
                 exists = connection.execute(
@@ -780,7 +785,7 @@ class CheckpointUploadLedger:
                         checkpoint_id,
                         verifier_revision_sha256,
                         extended_count + 1,
-                        "CheckpointRuntimeError",
+                        recovered_failure,
                         now,
                     ),
                 )
@@ -791,8 +796,8 @@ class CheckpointUploadLedger:
                 "verifier_recovery_attempts=verifier_recovery_attempts+"
                 "CASE WHEN verifier_attempts>=3 AND verifier_recovery_attempts<2 THEN 1 ELSE 0 END,"
                 "verifier_run_ref=NULL,verifier_receipt_sha256=NULL,verifier_evidence_json=NULL,updated_at=? "
-                "WHERE checkpoint_id=? AND state='FAILED' AND failure_code='CheckpointRuntimeError'",
-                (verifier_revision_sha256, now, checkpoint_id),
+                "WHERE checkpoint_id=? AND state='FAILED' AND failure_code=?",
+                (verifier_revision_sha256, now, checkpoint_id, recovered_failure),
             ).rowcount
             if changed != 1:
                 raise IdempotencyConflict("failed verifier publication retry lost its CAS")
@@ -813,7 +818,7 @@ class CheckpointUploadLedger:
                     "extended_recovery_attempt": extended_count + 1
                     if normal_exhausted and recovery_exhausted
                     else 0,
-                    "recovered_failure": "CheckpointRuntimeError",
+                    "recovered_failure": recovered_failure,
                 },
                 now,
             )

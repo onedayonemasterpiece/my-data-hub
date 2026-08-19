@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -25,6 +26,7 @@ from my_data_hub.control_plane.runtime import (
     MasterRuntimeSettings,
     ProductionRuntimeBuild,
     TunnelCertificate,
+    _historical_checkpoint_verifier_assets,
     build_production_runtime,
 )
 from my_data_hub.embeddings.production import EmbeddingProductionRequest
@@ -360,12 +362,142 @@ def test_checkpoint_verifier_factory_uses_exact_verified_master_asset_claim(
         adapter_factory=lambda _journal: adapter,  # type: ignore[arg-type,return-value]
     )
     assert built.checkpoint_broker is not None
-    verifier = built.checkpoint_broker.restore_verifier_factory(uuid4(), uuid4())  # type: ignore[misc]
+    verifier = built.checkpoint_broker.restore_verifier_factory(uuid4(), task_id)  # type: ignore[misc]
     contract = verifier.assets.execution_contract()
     assert contract["runtime_dataset_exact_ref"] == "owner/master-launch/7"
     assert contract["runtime_image_identity"] == launch.runtime_image_identity
     assert contract["wheel_relative_path"] == wheel_name
     assert contract["wheel_sha256"] == hashlib.sha256(b"exact-wheel").hexdigest()
+
+
+def test_checkpoint_verifier_recovers_task_bound_historical_asset_bundle(tmp_path: Path) -> None:
+    base = assets()
+    provider_ref = "owner/master-assets-0123456789abcdef0123456789abcdef"
+    task_id = uuid4()
+    operation_id = uuid4()
+    wheel = b"historical-project-wheel"
+    psycopg = b"historical-psycopg"
+    psycopg_binary = b"historical-psycopg-binary"
+    dependency_manifest = {
+        "wheels": [
+            {
+                "distribution": "psycopg",
+                "filename": "psycopg-3.3.4-py3-none-any.whl",
+                "sha256": hashlib.sha256(psycopg).hexdigest(),
+            },
+            {
+                "distribution": "psycopg-binary",
+                "filename": "psycopg_binary-3.3.4-cp312.whl",
+                "sha256": hashlib.sha256(psycopg_binary).hexdigest(),
+            },
+        ]
+    }
+    files = {
+        **base.dataset_files,
+        "my_data_hub-0.1.0-py3-none-any.whl": wheel,
+        "embedding-worker-dependencies.json": canonical_json_bytes(dependency_manifest),
+        "embedding-worker-wheelhouse/psycopg-3.3.4-py3-none-any.whl": psycopg,
+        "embedding-worker-wheelhouse/psycopg_binary-3.3.4-cp312.whl": psycopg_binary,
+    }
+    history = tmp_path / "history"
+    bundle_root = history / ("1" * 40)
+    dataset_root = bundle_root / "dataset"
+    dataset_root.mkdir(parents=True)
+    for relative, body in files.items():
+        target = dataset_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(body)
+    plain_assets = {}
+    dependency_wheels = []
+    for index, (relative, body) in enumerate(sorted(files.items())):
+        item = {
+            "path": f"dataset/{relative}",
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "byte_size": len(body),
+        }
+        if relative.startswith("embedding-worker-wheelhouse/"):
+            dependency_wheels.append(item)
+        else:
+            plain_assets[f"asset_{index}"] = item
+    plain_assets["checkpoint_verifier"] = plain_assets.pop(
+        next(key for key, item in plain_assets.items() if item["path"] == "dataset/checkpoint-verifier.ipynb")
+    )
+    manifest = {
+        "schema_version": "my-data-hub-master-asset-bundle.v1",
+        "source_commit": "1" * 40,
+        "source_identity": f"git:{'1' * 40}",
+        "source_version": "1" * 40,
+        "launch_dataset_ref": provider_ref,
+        "checkpoint_verifier_ref": "owner/checkpoint-verifier",
+        "worker_runtime": {
+            "image_identity": base.runtime_image_identity,
+            "source_commit": base.runtime_image_source_commit,
+            "python_series": base.runtime_python_series,
+        },
+        "assets": plain_assets,
+        "embedding_dependency_wheels": dependency_wheels,
+    }
+    (bundle_root / "master-asset-bundle.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    ledger = ControlLedger(tmp_path / "historical.sqlite3")
+    journal = ControlLedgerKaggleJournal(ledger)
+    effect_key = f"{operation_id}:ensure_dataset"
+    effect_id = uuid5(NAMESPACE_URL, effect_key)
+    fingerprint = ProviderFingerprint(value="b" * 64)
+    journal.persist_intent(
+        ProviderEffectIntent.create(
+            operation_id=operation_id,
+            effect_id=effect_id,
+            idempotency_key=effect_key,
+            task_id=task_id,
+            action=MutationAction.CREATE_DATASET,
+            provider_ref=provider_ref,
+            arguments={
+                "content_tree_sha256": KaggleMasterRuntimeProvider._mapping_sha(files),
+                "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
+                "disposable": False,
+            },
+            requested_at=datetime(2026, 8, 12, tzinfo=UTC),
+        )
+    )
+    journal.persist_receipt(
+        ProviderEffectReceipt(
+            operation_id=operation_id,
+            effect_id=effect_id,
+            action=MutationAction.CREATE_DATASET,
+            provider_ref=provider_ref,
+            outcome=EffectOutcome.APPLIED,
+            attempts=1,
+            observed_fingerprint=fingerprint,
+            provider_version=3,
+            observed_at=datetime(2026, 8, 12, tzinfo=UTC),
+            detail_code="dataset_created_private",
+        )
+    )
+    journal.persist_resource_claim(
+        TaskResourceClaim.create(
+            task_id=task_id,
+            effect_id=effect_id,
+            provider_ref=provider_ref,
+            kind=ProviderKind.DATASET,
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+            disposable=False,
+            fingerprint=fingerprint,
+            provider_version=3,
+            registered_at=datetime(2026, 8, 12, tzinfo=UTC),
+        )
+    )
+
+    recovered = _historical_checkpoint_verifier_assets(
+        ledger,
+        task_id=task_id,
+        history_root=history,
+        timeout_seconds=1800,
+    )
+    contract = recovered.execution_contract()
+    assert contract["runtime_dataset_exact_ref"] == f"{provider_ref}/3"
+    assert recovered.notebook_source == files["checkpoint-verifier.ipynb"]
+    assert contract["wheel_sha256"] == hashlib.sha256(wheel).hexdigest()
 
 
 def test_production_builder_accepts_central_legacy_kaggle_credentials(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
