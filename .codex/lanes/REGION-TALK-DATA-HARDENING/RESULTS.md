@@ -4,7 +4,8 @@
 
 - Lane: `REGION-TALK-DATA-HARDENING`
 - Assigned integrated base: `2dcd7797a9600c412e6d7a4b6040aba025466433`
-- Implementation head: `10d4710a4dc8d3bf2a94efbc1dcb955f1b1ef796`
+- Implementation head: `10d4710955fa2298c8827f748b9a431b758d87d5`
+- Evidence-document head before this SHA correction: `70d6f544e95298f3a08447d36bd7a1442e85cbe5`
 - Integration branch at implementation start had already advanced to assembly head `132891fcf49922e209b9440ae7059c8779fdb947`; no assembly/shared MCP/control/deploy/provider/master/tunnel/launcher file was staged by this lane.
 
 ## Requirements closed
