@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/region-talk-direct-snapshot-receipt.v2.schema.json",
+  "title": "Region Talk direct snapshot receipt v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "export_batch_id", "task_run_id", "status",
+    "expected_row_count", "landed_row_count", "dispositioned_row_count",
+    "quarantined_row_count", "logical_sha256", "publication_effects_enabled",
+    "completed_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "region-talk-direct-snapshot-receipt.v2"},
+    "export_batch_id": {"type": "string", "format": "uuid"},
+    "task_run_id": {"type": "string", "format": "uuid"},
+    "status": {"enum": ["complete", "complete_with_quarantine", "failed"]},
+    "expected_row_count": {"type": "integer", "minimum": 0},
+    "landed_row_count": {"type": "integer", "minimum": 0},
+    "dispositioned_row_count": {"type": "integer", "minimum": 0},
+    "quarantined_row_count": {"type": "integer", "minimum": 0},
+    "logical_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "publication_effects_enabled": {"const": false},
+    "completed_at": {"type": "string", "format": "date-time"}
+  }
+}

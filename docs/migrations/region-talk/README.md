@@ -2,6 +2,10 @@
 
 Status: **implementation-ready migration design; live export not yet executed**
 
+The current production transfer design is the no-row-file
+[direct snapshot v2](direct-snapshot-v2.md). The JSONL bundle steps below are retained
+as historical design evidence and are not the autonomous pipeline's live data path.
+
 ## Objective
 
 Move Region Talk's accumulated state and operating pipeline into `my-data-hub`

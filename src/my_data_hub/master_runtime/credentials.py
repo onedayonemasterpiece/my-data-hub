@@ -24,6 +24,7 @@ ALLOWED_GROUPS = frozenset(
         "mdh_checkpoint",
         "mdh_embedding_worker",
         "mdh_blogger_materializer",
+        "mdh_region_talk_pipeline",
     }
 )
 _PRINCIPAL = re.compile(r"^mdh_e[1-9][0-9]*_[a-z][a-z0-9_]{0,40}_[a-f0-9]{8}$")
@@ -74,7 +75,11 @@ class CredentialProvisioner:
     ) -> str:
         from psycopg import sql
 
-        policy = policy or LoginPolicy()
+        policy = policy or (
+            LoginPolicy(statement_timeout_ms=300_000, lock_timeout_ms=10_000)
+            if group == "mdh_region_talk_pipeline"
+            else LoginPolicy()
+        )
         policy.validate()
         expiry = require_utc(expires_at, "expires_at")
         observed = require_utc(now, "now")
