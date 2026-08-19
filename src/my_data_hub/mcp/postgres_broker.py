@@ -52,6 +52,20 @@ GROUP BY model.model_key,model.provider_model_id,model.exact_revision,model.dime
 ORDER BY model.model_key
 """
 
+_REGION_TALK_READ_TOOLS = frozenset(
+    {
+        "region_talk.inventory",
+        "region_talk.articles.list",
+        "region_talk.articles.get",
+        "region_talk.articles.search",
+        "region_talk.posts.list",
+        "region_talk.posts.get",
+        "region_talk.posts.search",
+        "region_talk.queue.list",
+        "region_talk.queue.summary",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class EpochDatabaseCredential:
@@ -661,6 +675,8 @@ class PostgresMasterSession(MasterSession):
     def _dispatch(self, cursor: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         tool = self.request.tool
         limit = self.request.limits.max_rows
+        if tool in _REGION_TALK_READ_TOOLS:
+            return self._dispatch_region_talk_read(cursor, arguments)
         if tool == "runtime.stale_epoch.probe":
             cursor.execute("SELECT current_epoch FROM master_control.epoch_state WHERE singleton=true")
             row = cursor.fetchone()
@@ -813,6 +829,62 @@ class PostgresMasterSession(MasterSession):
             truncated = len(rows) > limit
             return {"columns": columns, "rows": rows[:limit], "truncated": truncated}
         raise SessionBrokerError("tool is not implemented by the read-only PostgreSQL broker")
+
+    def _dispatch_region_talk_read(
+        self,
+        cursor: Any,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Dispatch only fixed Region Talk reader methods; never accept SQL."""
+
+        from uuid import UUID
+
+        from my_data_hub.mcp.region_talk_schemas import (
+            region_talk_page,
+            region_talk_reader_request,
+            validate_region_talk_arguments,
+        )
+        from my_data_hub.workloads.region_talk.reader import RegionTalkReader
+
+        tool = self.request.tool
+        validated = validate_region_talk_arguments(tool, arguments)
+        request = region_talk_reader_request(validated)
+        if tool == "region_talk.inventory":
+            result = RegionTalkReader.inventory(cursor)
+            if not isinstance(result, Mapping):
+                raise SessionBrokerError("Region Talk inventory reader returned an invalid result")
+            return dict(result)
+        if tool == "region_talk.queue.summary":
+            result = RegionTalkReader.queue_summary(cursor)
+            if not isinstance(result, Mapping):
+                raise SessionBrokerError("Region Talk queue summary reader returned an invalid result")
+            return dict(result)
+        if tool == "region_talk.articles.get":
+            result = RegionTalkReader.get_article(cursor, UUID(str(validated["item_id"])))
+            if result is not None and not isinstance(result, Mapping):
+                raise SessionBrokerError("Region Talk article reader returned an invalid result")
+            return {"found": result is not None, "article": dict(result) if result else None}
+        if tool == "region_talk.posts.get":
+            result = RegionTalkReader.get_post(cursor, UUID(str(validated["item_id"])))
+            if result is not None and not isinstance(result, Mapping):
+                raise SessionBrokerError("Region Talk post reader returned an invalid result")
+            return {"found": result is not None, "post": dict(result) if result else None}
+        reader_names = {
+            "region_talk.articles.list": "list_articles",
+            "region_talk.articles.search": "search_articles",
+            "region_talk.posts.list": "list_posts",
+            "region_talk.posts.search": "search_posts",
+            "region_talk.queue.list": "list_queue",
+        }
+        reader_name = reader_names.get(tool)
+        if reader_name is None:  # pragma: no cover - guarded by the exact tool set above
+            raise SessionBrokerError("Region Talk reader tool is not implemented")
+        reader = getattr(RegionTalkReader, reader_name)
+        result = reader(cursor, request)
+        try:
+            return region_talk_page(result, arguments=validated)
+        except ValueError as exc:
+            raise SessionBrokerError(str(exc)) from exc
 
 
 def _jsonable(value: Any) -> Any:

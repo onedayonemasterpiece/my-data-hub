@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass
 from typing import Any, Literal
+from uuid import UUID
 
 from my_data_hub.auth.context import current_identity
 from my_data_hub.auth.control import OAuthAuditEvent
@@ -29,6 +30,17 @@ from my_data_hub.mcp.provider_schemas import (
     ProviderUploadStartPayload,
     ProviderVersionPayload,
 )
+from my_data_hub.mcp.region_talk_schemas import (
+    RegionTalkCursor,
+    RegionTalkFilter,
+    RegionTalkIdempotencyKey,
+    RegionTalkLimit,
+    RegionTalkMaxBytes,
+    RegionTalkPipelineController,
+    RegionTalkQuery,
+    RegionTalkSourceRevision,
+    validate_region_talk_arguments,
+)
 from my_data_hub.mcp.service import HubService
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
 from my_data_hub.mcp.transport import ToolSecurityMetadataMiddleware
@@ -50,6 +62,16 @@ READER_PROFILE_TOOLS = frozenset(
         "bloggers.get",
         "bloggers.search",
         "bloggers.statistics",
+        "region_talk.inventory",
+        "region_talk.articles.list",
+        "region_talk.articles.get",
+        "region_talk.articles.search",
+        "region_talk.posts.list",
+        "region_talk.posts.get",
+        "region_talk.posts.search",
+        "region_talk.queue.list",
+        "region_talk.queue.summary",
+        "region_talk.pipeline.status",
     }
 )
 
@@ -98,6 +120,8 @@ class MCPDependencies:
     provider_only_profile_enabled: bool = False
     unified_bootstrap_profile_enabled: bool = False
     reader_profile_enabled: bool = False
+    region_talk_controller: RegionTalkPipelineController | None = None
+    region_talk_pipeline_run_enabled: bool = False
 
 
 def _local_identity(settings: Settings) -> AccessIdentity | None:
@@ -136,6 +160,11 @@ def _profile_tool_names(dependencies: MCPDependencies) -> set[str]:
     names = set(TOOL_CONTRACTS)
     if not dependencies.acceptance_scenarios_enabled:
         names -= {"acceptance.scenario.request", "acceptance.scenario.status"}
+    if (
+        dependencies.region_talk_controller is None
+        or not dependencies.region_talk_pipeline_run_enabled
+    ):
+        names.discard("region_talk.pipeline.run")
     if dependencies.provider_only_profile_enabled:
         names &= PROVIDER_ONLY_TOOLS
     if dependencies.unified_bootstrap_profile_enabled:
@@ -189,7 +218,11 @@ def create_server(
         async def list_tools(self):  # type: ignore[no-untyped-def]
             tools = await super().list_tools()
             allowed = visible_tools(self._identity()) & profile_tools
-            return [tool for tool in tools if tool.name in allowed]
+            visible = [tool for tool in tools if tool.name in allowed]
+            for tool in visible:
+                if tool.name.startswith("region_talk."):
+                    tool.input_schema["additionalProperties"] = False
+            return visible
 
         async def call_tool(self, name, arguments, context=None):  # type: ignore[no-untyped-def]
             identity = self._identity()
@@ -216,6 +249,8 @@ def create_server(
                     if inspect.isawaitable(recorded):
                         await recorded
                 return _auth_error(metadata_url, insufficient_scope=identity is not None)
+            if str(name).startswith("region_talk."):
+                validate_region_talk_arguments(str(name), arguments or {})
             return await super().call_tool(name, arguments, context)
 
     service = HubService(
@@ -225,6 +260,7 @@ def create_server(
         write_gate=deps.write_gate,
         audit=deps.audit,
         sql_policy=deps.sql_policy,
+        region_talk_controller=deps.region_talk_controller,
         fallback_identity=fallback,
     )
     mcp = IdentityAwareMCPServer(
@@ -391,6 +427,86 @@ def create_server(
     async def bloggers_migration_accounting(export_batch_id: str) -> dict[str, Any]:
         return await service.invoke(
             "bloggers.migration.accounting", {"export_batch_id": export_batch_id}
+        )
+
+    async def region_talk_inventory() -> dict[str, Any]:
+        return await service.invoke("region_talk.inventory", {})
+
+    async def region_talk_articles_list(
+        cursor: RegionTalkCursor | None = None,
+        limit: RegionTalkLimit = 50,
+        status: RegionTalkFilter | None = None,
+        category: RegionTalkFilter | None = None,
+        max_bytes: RegionTalkMaxBytes = 262_144,
+    ) -> dict[str, Any]:
+        return await service.invoke("region_talk.articles.list", locals())
+
+    async def region_talk_articles_get(
+        item_id: UUID,
+        max_bytes: RegionTalkMaxBytes = 262_144,
+    ) -> dict[str, Any]:
+        return await service.invoke("region_talk.articles.get", locals())
+
+    async def region_talk_articles_search(
+        query: RegionTalkQuery,
+        cursor: RegionTalkCursor | None = None,
+        limit: RegionTalkLimit = 50,
+        status: RegionTalkFilter | None = None,
+        category: RegionTalkFilter | None = None,
+        max_bytes: RegionTalkMaxBytes = 262_144,
+    ) -> dict[str, Any]:
+        return await service.invoke("region_talk.articles.search", locals())
+
+    async def region_talk_posts_list(
+        cursor: RegionTalkCursor | None = None,
+        limit: RegionTalkLimit = 50,
+        status: RegionTalkFilter | None = None,
+        platform: RegionTalkFilter | None = None,
+        max_bytes: RegionTalkMaxBytes = 262_144,
+    ) -> dict[str, Any]:
+        return await service.invoke("region_talk.posts.list", locals())
+
+    async def region_talk_posts_get(
+        item_id: UUID,
+        max_bytes: RegionTalkMaxBytes = 262_144,
+    ) -> dict[str, Any]:
+        return await service.invoke("region_talk.posts.get", locals())
+
+    async def region_talk_posts_search(
+        query: RegionTalkQuery,
+        cursor: RegionTalkCursor | None = None,
+        limit: RegionTalkLimit = 50,
+        status: RegionTalkFilter | None = None,
+        platform: RegionTalkFilter | None = None,
+        max_bytes: RegionTalkMaxBytes = 262_144,
+    ) -> dict[str, Any]:
+        return await service.invoke("region_talk.posts.search", locals())
+
+    async def region_talk_queue_list(
+        cursor: RegionTalkCursor | None = None,
+        limit: RegionTalkLimit = 50,
+        status: RegionTalkFilter | None = None,
+        category: RegionTalkFilter | None = None,
+        max_bytes: RegionTalkMaxBytes = 262_144,
+    ) -> dict[str, Any]:
+        return await service.invoke("region_talk.queue.list", locals())
+
+    async def region_talk_queue_summary() -> dict[str, Any]:
+        return await service.invoke("region_talk.queue.summary", {})
+
+    async def region_talk_pipeline_status() -> dict[str, Any]:
+        return await service.invoke("region_talk.pipeline.status", {})
+
+    async def region_talk_pipeline_run(
+        source_revision: RegionTalkSourceRevision,
+        idempotency_key: RegionTalkIdempotencyKey,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "region_talk.pipeline.run",
+            {
+                "source_revision": source_revision,
+                "idempotency_key": idempotency_key,
+            },
         )
 
     async def data_query(
@@ -655,6 +771,17 @@ def create_server(
         "bloggers.provenance": bloggers_provenance,
         "bloggers.statistics": bloggers_statistics,
         "bloggers.migration.accounting": bloggers_migration_accounting,
+        "region_talk.inventory": region_talk_inventory,
+        "region_talk.articles.list": region_talk_articles_list,
+        "region_talk.articles.get": region_talk_articles_get,
+        "region_talk.articles.search": region_talk_articles_search,
+        "region_talk.posts.list": region_talk_posts_list,
+        "region_talk.posts.get": region_talk_posts_get,
+        "region_talk.posts.search": region_talk_posts_search,
+        "region_talk.queue.list": region_talk_queue_list,
+        "region_talk.queue.summary": region_talk_queue_summary,
+        "region_talk.pipeline.status": region_talk_pipeline_status,
+        "region_talk.pipeline.run": region_talk_pipeline_run,
         "data.query": data_query,
         "data.change.preview": data_change_preview,
         "data.change.apply": data_change_apply,

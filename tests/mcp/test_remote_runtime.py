@@ -39,6 +39,7 @@ READER_SCOPES = frozenset(
         "embedding:read",
         "provider:read",
         "bloggers:read",
+        "region-talk:read",
     }
 )
 OAUTH_PROTOCOL_SCOPES = frozenset({"openid", "offline_access"})
