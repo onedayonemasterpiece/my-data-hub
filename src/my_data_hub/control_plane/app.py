@@ -2270,8 +2270,15 @@ def create_app(
         # request queue as connector commits.  The queue consumer is the
         # master notebook itself, so it must remain available for the explicit
         # operator profile even when the optional connector-intake service is
-        # disabled.  Unified/provider-only profiles still cannot open it.
-        if not (runtime.connector_runtime_enabled or operator_credential_enabled):
+        # disabled.  Unified bootstrap also needs this task-bound queue to
+        # create the verified checkpoint that authorizes the subsequent
+        # operator cutover; it still exposes no public canonical write tools.
+        # Provider-only remains unable to open the queue.
+        if not (
+            runtime.connector_runtime_enabled
+            or operator_credential_enabled
+            or runtime.unified_bootstrap_mode
+        ):
             raise HTTPException(status_code=404, detail={"code": "connector_runtime_disabled"})
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=401, detail={"code": "runtime_token_required"})

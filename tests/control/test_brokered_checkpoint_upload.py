@@ -441,6 +441,59 @@ def test_connector_request_restarts_through_real_broker_verified_head(tmp_path: 
     }
 
 
+def test_unified_bootstrap_master_can_claim_its_gate_checkpoint(tmp_path: Path) -> None:
+    ledger, _package, _manifest, _adapter, _verifier, _service, _authority = _fixture(tmp_path)
+    coordinator = ControlLedgerVerifiedCheckpointCoordinator(ledger)
+    idempotency_key = "b" * 64
+    operation_id = f"connector-checkpoint:{idempotency_key}"
+    coordinator.request_verified_checkpoint(
+        operation_id=operation_id,
+        canonical_revision=7,
+        idempotency_key=idempotency_key,
+    )
+    token = "u" * 64
+    ledger.store_runtime_token_hash(str(RUN), str(ATTEMPT), token)
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "ledger": ledger,
+            "coordinator": None,
+            "reconcile_requested_once": lambda self: None,
+        },
+    )()
+    client = TestClient(
+        create_app(
+            ControlPlaneSettings(
+                ledger_path=ledger.path,
+                master_runtime=object(),  # type: ignore[arg-type]
+                provider_gateway_enabled=True,
+                unified_bootstrap_mode=True,
+            ),
+            ledger=ledger,
+            master_runtime=runtime,  # type: ignore[arg-type]
+            provider_gateway=object(),  # type: ignore[arg-type]
+            provider_gateway_token=b"g" * 32,
+        )
+    )
+
+    claim = client.get(
+        f"/internal/runtime/connector-checkpoint/{RUN}/{ATTEMPT}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-MDH-Master-Instance-ID": str(MASTER),
+            "X-MDH-Epoch": "1",
+        },
+    )
+
+    assert claim.status_code == 200
+    assert claim.json() == {
+        "available": True,
+        "operation_id": operation_id,
+        "canonical_revision": 7,
+    }
+
+
 def test_second_verified_candidate_preserves_current_as_previous(tmp_path: Path) -> None:
     ledger, package, manifest, adapter, _verifier, service, authority = _fixture(tmp_path)
     _upload_all(package, manifest, service, authority)
