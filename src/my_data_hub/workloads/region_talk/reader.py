@@ -94,7 +94,9 @@ class RegionTalkReader:
     @staticmethod
     def list_queue(cursor: Any, request: Mapping[str, Any]) -> dict[str, Any]:
         limit, offset = _bounded_page(request)
-        family = _filter(request, "queue_family")
+        # The public closed MCP schema names this filter ``category``.  Keep
+        # the database vocabulary private instead of silently dropping it.
+        family = _filter(request, "category")
         status = _filter(request, "status")
         result = cursor.execute(
             """
@@ -115,6 +117,41 @@ class RegionTalkReader:
             SELECT queue_family,status,item_count,oldest_imported_at,latest_source_update
               FROM region_talk.queue_summary_v2
              ORDER BY queue_family,status NULLS FIRST
+            """
+        )
+        items = _rows(cursor, result)
+        return {"items": items, "total_items": sum(int(item["item_count"]) for item in items)}
+
+    @staticmethod
+    def list_publication_queue(cursor: Any, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Read the executable canonical queue, never the raw landing tables."""
+
+        limit, offset = _bounded_page(request)
+        status = _filter(request, "status")
+        channel = _filter(request, "channel")
+        result = cursor.execute(
+            """
+            SELECT candidate_id,candidate_status,current_revision,content_id,content_type,
+                   title,summary,canonical_url,publication_plan_id,channel,plan_status,
+                   scheduled_for,legacy_status,canonical_revision,updated_at
+              FROM region_talk.publication_queue_v3
+             WHERE (%s IS NULL OR candidate_status=%s OR plan_status=%s)
+               AND (%s IS NULL OR channel=%s)
+             ORDER BY coalesce(scheduled_for,updated_at) DESC,candidate_id
+             LIMIT %s OFFSET %s
+            """,
+            (status, status, status, channel, channel, limit, offset),
+        )
+        return {"items": _rows(cursor, result)}
+
+    @staticmethod
+    def publication_queue_summary(cursor: Any) -> dict[str, Any]:
+        result = cursor.execute(
+            """
+            SELECT candidate_status,plan_status,channel,item_count,
+                   earliest_scheduled_for,latest_update
+              FROM region_talk.publication_queue_summary_v3
+             ORDER BY candidate_status,plan_status NULLS FIRST,channel NULLS FIRST
             """
         )
         items = _rows(cursor, result)

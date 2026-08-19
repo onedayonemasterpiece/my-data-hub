@@ -107,16 +107,42 @@ def _row_kind(spec: DirectSourceTable, payload: Mapping[str, Any]) -> str:
     return "malformed_compact_kind"
 
 
-def _row_logical_value(row: DirectSnapshotRow) -> dict[str, Any]:
-    return {
-        "source_table": row.source_table,
-        "source_pk": row.source_pk,
-        "row_kind": row.row_kind,
-        "source_updated_at": row.source_updated_at.isoformat().replace("+00:00", "Z")
-        if row.source_updated_at
-        else None,
-        "payload_sha256": row.payload_sha256,
-    }
+def _logical_component(value: str | None) -> bytes:
+    """Encode one logical-hash field without separator ambiguity.
+
+    PostgreSQL migration 0024 implements the same UTF-8 byte-length framing.
+    Keeping this deliberately simpler than JSON avoids depending on PostgreSQL
+    ``jsonb`` rendering rules while still binding every required source field.
+    """
+
+    if value is None:
+        return b"-1:"
+    encoded = value.encode("utf-8")
+    return str(len(encoded)).encode("ascii") + b":" + encoded
+
+
+def _logical_timestamp(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    observed = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return observed.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _row_logical_bytes(row: DirectSnapshotRow) -> bytes:
+    return b"".join(
+        _logical_component(value)
+        for value in (
+            row.source_table,
+            row.source_pk,
+            row.row_kind,
+            _logical_timestamp(row.source_updated_at),
+            row.payload_sha256,
+        )
+    )
+
+
+def _row_logical_sha256(row: DirectSnapshotRow) -> str:
+    return hashlib.sha256(_row_logical_bytes(row)).hexdigest()
 
 
 def source_row(
@@ -146,7 +172,7 @@ def source_row(
         payload_sha256=payload_sha256,
         logical_sha256="0" * 64,
     )
-    return row.model_copy(update={"logical_sha256": sha256_value(_row_logical_value(row))})
+    return row.model_copy(update={"logical_sha256": _row_logical_sha256(row)})
 
 
 @dataclass(slots=True)
@@ -172,7 +198,7 @@ class _Accumulator:
         self.count += 1
         assert self.kinds is not None
         self.kinds[row.row_kind] += 1
-        self.digest.update(canonical_json_bytes(_row_logical_value(row)) + b"\n")
+        self.digest.update(row.logical_sha256.encode("ascii") + b"\n")
 
     def receipt(self) -> DirectSnapshotTableReceipt:
         return DirectSnapshotTableReceipt(
@@ -183,7 +209,12 @@ class _Accumulator:
 
 
 def _snapshot_logical_sha256(tables: Sequence[DirectSnapshotTableReceipt]) -> str:
-    return sha256_value([item.model_dump(mode="json") for item in tables])
+    digest = hashlib.sha256()
+    for item in tables:
+        digest.update(_logical_component(item.source_table))
+        digest.update(_logical_component(str(item.row_count)))
+        digest.update(_logical_component(item.logical_sha256))
+    return digest.hexdigest()
 
 
 class DirectSnapshotRunner:
@@ -224,7 +255,7 @@ class DirectSnapshotRunner:
             page_digest = hashlib.sha256()
             for row in rows:
                 accumulator.add(row)
-                page_digest.update(canonical_json_bytes(_row_logical_value(row)) + b"\n")
+                page_digest.update(row.logical_sha256.encode("ascii") + b"\n")
             page_number += 1
             if land_batch_id is not None:
                 if task_run_id is None:  # pragma: no cover - internal invariant

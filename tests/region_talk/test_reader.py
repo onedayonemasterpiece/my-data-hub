@@ -71,6 +71,32 @@ def test_queue_summary_is_typed_and_aggregated() -> None:
     assert result["items"][0]["queue_family"] == "source_frontier"
 
 
+def test_public_category_filter_reaches_private_queue_family_column() -> None:
+    cursor = Cursor([], ["item_id"])
+    RegionTalkReader.list_queue(
+        cursor, {"category": "publication_schedule", "status": "planned"}
+    )
+    assert cursor.params[:4] == (
+        "publication_schedule",
+        "publication_schedule",
+        "planned",
+        "planned",
+    )
+
+
+def test_publication_queue_reader_uses_only_fixed_canonical_view() -> None:
+    cursor = Cursor(
+        [(UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), "ready", 1)],
+        ["candidate_id", "candidate_status", "current_revision"],
+    )
+    result = RegionTalkReader.list_publication_queue(
+        cursor, {"status": "ready", "channel": "region-talk-new-channel"}
+    )
+    assert result["items"][0]["candidate_status"] == "ready"
+    assert "region_talk.publication_queue_v3" in cursor.statement
+    assert "migration.raw_record" not in cursor.statement
+
+
 @pytest.mark.parametrize("page", [{"limit": 0}, {"limit": 101}, {"offset": -1}, {"offset": 10001}])
 def test_reader_rejects_unbounded_pages(page: dict[str, int]) -> None:
     with pytest.raises(ValueError, match="bounded contract"):

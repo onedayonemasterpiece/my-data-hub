@@ -38,32 +38,63 @@ Pass B scans the same source again and sends pages of at most 500 rows directly 
 - exact epoch-bound pipeline login and task identity;
 - contiguous pages and strictly increasing primary keys;
 - bounded JSON/page sizes and server-recomputed payload hashes;
+- the row logical hash reconstructed from the exact UTF-8 byte-length framing of
+  `source_table`, `source_pk`, `row_kind`, the fixed-microsecond UTC source timestamp,
+  and `payload_sha256`;
+- the page hash reconstructed from those row hashes, rather than the caller's page
+  receipt;
 - exact replay or explicit idempotency conflict;
 - table/kind membership in Pass A;
 - raw row and terminal-disposition accounting.
 
-Finalization compares Pass A, Pass B, and landed PostgreSQL counts per table. Drift,
-an expired/fenced epoch, a missing disposition, or an identity conflict fails closed.
+Finalization recomputes every payload, row, page, table, and final snapshot digest from
+the persisted raw and integrity relations, then compares that evidence independently
+with Pass A and Pass B. A same-count payload mutation or a forged row/page/Pass-B hash
+therefore fails closed. Drift, an expired/fenced epoch, a missing disposition, or an
+identity conflict also fails closed.
 Valid unknown kinds remain `retained_raw`; malformed rows are `quarantined`. Nothing
 is silently dropped.
 
 ## Typed projections
 
-The mapper creates fixed projections for articles, posts, publication candidates,
-discovery opportunities/runs/surfaces, the source frontier, schedule/review/cursor
-state, and LLM request/budget idempotency. Valid kinds without an approved semantic
-mapper remain losslessly raw and terminally accounted until a later append-only
-mapping release.
+The v3 landing mapper creates fixed projections only for the core rows that the same
+release can canonicalize: articles, posts, publication candidates, discovery
+opportunities/surfaces, source registry/frontier, schedules, and reviews. Historical
+run snapshots, metrics, cursor/feedback/delivery history, image/model diagnostics, and
+LLM request/budget records remain losslessly `retained_raw` and terminally accounted;
+the older shadow tables are not treated as canonical support for those kinds.
+
+Migration 0024 adds the canonical apply boundary. Only an integrity-verified,
+non-quarantined `complete` snapshot belonging to the same task credential and ACTIVE
+epoch may enter it. The apply transaction projects supported core rows into
+`hub.content_item`, content identities/project membership, `region_talk.source`,
+source candidates/status/edges, `orchestration.work_item`, publication candidates and
+immutable revisions, review decisions, and publication plans. It advances the global
+canonical revision exactly once and writes the semantic outbox item and immutable
+apply receipt in that same transaction. Exact replay returns that receipt; a replay
+whose batch, task, request, epoch, Pass-B table/count/hash contract, or verified hash
+differs is rejected before the stored receipt can be returned.
+
+Legacy values that do not fit a current constrained lifecycle enum are not presented as
+model conclusions. Their exact value remains in provenance/evidence while the new
+workflow receives a documented neutral import state (`pending`, `draft`, `planned`, or
+`unknown`) needed to make the queue executable. Review decisions are created only for
+an exact recognized approve/reject/revise/revoke value. No publication attempt is
+created and publication dispatch remains off.
 
 The full snapshot does not create blogger actors. Blogger evidence rows reuse the
 dedicated identity map/profile when present and otherwise remain raw pending that
 reviewed path. This preserves the 266-to-263 decision instead of duplicating it.
 
 MCP readers are restricted to `snapshot_inventory_v2`, `articles_v2`, `posts_v2`,
-`queue_v2`, and `queue_summary_v2`. They receive neither `migration.raw_record` nor a
+`queue_v2`, `queue_summary_v2`, and the canonical publication queue views. Typed rows
+are selected only from the latest integrity-verified, canonical-applied `complete`
+snapshot whose export batch is `accepted`; failed, landing, quarantined, older, and
+duplicate source identities are excluded deterministically. Readers receive neither `migration.raw_record` nor a
 generic SQL capability. Article/post list and search omit bodies; exact get returns
-the typed body field. Publication attempts/outbox effects are not created by this
-migration and stay disabled until an explicit later activation gate.
+the typed body field. The only outbox row is the internal canonical-commit signal;
+publication outbox effects and publication attempts are not created and stay disabled
+until an explicit later activation gate.
 
 ## Honest readiness
 

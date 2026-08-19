@@ -78,3 +78,29 @@ history/receipts are imported as events where available. New PostgreSQL operatio
 append-audited from cutover onward. Imported current state is written under an exact
 namespaced Region Talk scope and mapped to a normalized cross-pipeline class; it is not
 collapsed into `orchestration.work_item.status` or a platform policy decision.
+
+## Direct canonical apply v3 coverage
+
+The append-only 0024 mapper makes the business-critical subset executable after the
+snapshot integrity gate:
+
+| Legacy family | Canonical v3 effect |
+|---|---|
+| external articles and live/processed posts | exact-URL/source-identity dedupe into `hub.content_item`, `hub.content_identity`, Region Talk project membership, provenance, external-publication/post intake |
+| source candidates/status/edges/frontier | canonical `region_talk.source` identity, candidate/status/edge evidence, plus paused-but-executable `orchestration.work_item` and `source_work_projection` rows |
+| publication candidates | one candidate per canonical content/project and an immutable revision keyed by candidate plus exact payload hash |
+| publication schedule | `region_talk.publication_plan` for the Region Talk new-channel target, with `publication_dispatch=false` and no attempt |
+| review state/events | `review_decision` only when the exact legacy decision is approve/reject/revise/revoke; unrecognized values remain evidence and are not guessed |
+
+The field aliases accepted by this mapper include `canonical_url`,
+`source_queue_status`/`queue_status`, `image_queue_status`, and
+`publication_status`; the original payload is still the authoritative evidence.
+Statuses outside a target table's enum are preserved verbatim in JSON evidence and use
+an explicitly neutral import lifecycle state. This neutral state is not a reconstructed
+model verdict or a claim that missing legacy history occurred.
+
+Metric snapshots, heartbeats, model request/budget records, embeddings, image diagnostic
+history, and other unsupported historical kinds remain terminally `retained_raw` (or
+`quarantined` when malformed). They are losslessly migrated and accounted, but are not
+claimed as canonical executable semantics in v3. A later append-only mapper with a proven
+target contract is required to promote them.
