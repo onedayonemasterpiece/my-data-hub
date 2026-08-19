@@ -5,7 +5,7 @@
 - Lane: `REGION-TALK-MCP`
 - Requirement: `R06`
 - Base SHA: `1068d103ec261a37dd31e1f6d11265e1e238c168`
-- Head SHA: `96ec927358a9ad25313d7b7ef30ea6f0b1fa9f1e` (content commit; amended metadata commit follows)
+- Head SHA (implementation commit): `252380539cfb392944ca2a3e3f1d1df8586eaf68`; the branch tip adds only this finalized receipt
 
 ## Delivered
 
