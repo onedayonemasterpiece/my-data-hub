@@ -23,6 +23,7 @@ ALLOWED_GROUPS = frozenset(
         "mdh_monitoring",
         "mdh_checkpoint",
         "mdh_embedding_worker",
+        "mdh_region_talk_pipeline",
         "mdh_blogger_materializer",
         "mdh_region_talk_pipeline",
     }

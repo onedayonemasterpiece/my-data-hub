@@ -13,6 +13,7 @@ from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator, MasterIntent, MasterState
 from my_data_hub.tunnel_broker import (
     DEFAULT_ACCOUNT,
+    DEFAULT_REGION_TALK_WORKER_ACCOUNT,
     TunnelBroker,
     TunnelBrokerError,
     render_sshd_config,
@@ -310,7 +311,11 @@ def test_expiry_reconcile_and_corrupt_authority_fail_closed(tmp_path: Path) -> N
     assert ca_query.returncode != 0
     assert "REVOKED" in f"{ca_query.stdout}\n{ca_query.stderr}"
     assert broker.principals_path.read_bytes() == b""
-    assert terminated[-2:] == [DEFAULT_ACCOUNT, "mdh-embedding-worker"]
+    assert terminated[-3:] == [
+        DEFAULT_ACCOUNT,
+        "mdh-embedding-worker",
+        DEFAULT_REGION_TALK_WORKER_ACCOUNT,
+    ]
 
 
 def test_stale_epoch_wrong_identity_and_overlong_certificate_are_denied(tmp_path: Path) -> None:
@@ -526,6 +531,9 @@ def test_root_installer_is_explicitly_gated_and_does_not_add_listener_or_vpn(tmp
         'install -d -o root -g root -m 0711 "$state_root"',
         "systemctl is-active --quiet my-data-hub-master-tunnel-broker.service",
         "stat.S_ISSOCK",
+        "mdh-region-talk-worker",
+        "authorized_region_talk_worker_principals",
+        "MY_DATA_HUB_REGION_TALK_TUNNEL_ACCOUNT",
     ):
         assert required in source
     assert "ExecStartPre=/usr/bin/install -d" not in source
@@ -755,7 +763,7 @@ def test_worker_revoke_and_epoch_fence_remove_local_forward_authority(tmp_path: 
             valid_before=NOW + timedelta(minutes=4),
             now=NOW,
         )
-    assert terminated[-1] == "mdh-embedding-worker"
+    assert terminated == [DEFAULT_ACCOUNT]
 
 
 def test_sshd_config_separates_master_remote_and_worker_local_forward_policy() -> None:
@@ -827,3 +835,235 @@ def test_worker_ipc_dispatch_is_exact_public_metadata_only(tmp_path: Path) -> No
     assert revoked == {"revoked": True}
     with pytest.raises(TunnelBrokerError, match="fields"):
         _dispatch(broker, {"action": "issue_worker_public_key", "payload": {**payload, "private_key": "forbidden"}})
+
+
+def test_task_worker_certificates_are_kind_generation_and_hash_bound_with_isolated_revocation(
+    tmp_path: Path,
+) -> None:
+    broker, terminated, _ca = _broker(tmp_path)
+    now = datetime.now(UTC)
+    broker.activate(
+        master_instance_id=INSTANCE,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        epoch=9,
+        lease_until=now + timedelta(minutes=5),
+        listen_port=25432,
+        now=now,
+    )
+    embedding = broker.issue_task_worker_public_key(
+        master_instance_id=INSTANCE,
+        epoch=9,
+        worker_kind="embedding",
+        task_run_id="11111111-1111-4111-8111-111111111111",
+        credential_id="22222222-2222-4222-8222-222222222222",
+        generation=3,
+        binding_sha256="a" * 64,
+        public_key=_key(tmp_path / "embedding-task", "embedding task").read_text(),
+        valid_before=now + timedelta(minutes=4),
+        now=now,
+    )
+    region = broker.issue_task_worker_public_key(
+        master_instance_id=INSTANCE,
+        epoch=9,
+        worker_kind="region_talk",
+        task_run_id="33333333-3333-4333-8333-333333333333",
+        credential_id="44444444-4444-4444-8444-444444444444",
+        generation=5,
+        binding_sha256="b" * 64,
+        public_key=_key(tmp_path / "region-task", "region task").read_text(),
+        valid_before=now + timedelta(minutes=4),
+        now=now,
+    )
+
+    assert embedding.account == "mdh-embedding-worker"
+    assert region.account == DEFAULT_REGION_TALK_WORKER_ACCOUNT
+    assert embedding.worker_kind == "embedding" and embedding.generation == 3
+    assert region.worker_kind == "region_talk" and region.binding_sha256 == "b" * 64
+    assert embedding.principal in broker.worker_principals_path.read_text()
+    assert region.principal in broker.region_talk_worker_principals_path.read_text()
+    with pytest.raises(TunnelBrokerError, match="validity"):
+        broker.issue_task_worker_public_key(
+            master_instance_id=INSTANCE,
+            epoch=9,
+            worker_kind="region_talk",
+            task_run_id="55555555-5555-4555-8555-555555555555",
+            credential_id="66666666-6666-4666-8666-666666666666",
+            generation=1,
+            binding_sha256="e" * 64,
+            public_key=_key(tmp_path / "overlong-task", "overlong task").read_text(),
+            valid_before=now + timedelta(minutes=5, seconds=1),
+            now=now,
+        )
+
+    broker.revoke_task_worker_certificate(
+        master_instance_id=INSTANCE,
+        epoch=9,
+        worker_kind="region_talk",
+        task_run_id=region.task_run_id,
+        credential_id=region.credential_id,
+        generation=region.generation,
+        binding_sha256=region.binding_sha256,
+        serial=region.serial,
+        reason="task_terminal",
+    )
+    assert broker.region_talk_worker_principals_path.read_bytes() == b""
+    assert embedding.principal in broker.worker_principals_path.read_text()
+    # Exact-certificate revocation is enforced through the KRL.  It must not
+    # account-wide pkill either the unrelated kind or sibling sessions.
+    assert terminated == [DEFAULT_ACCOUNT]
+
+    for field, value in (
+        ("worker_kind", "embedding"),
+        ("task_run_id", "55555555-5555-4555-8555-555555555555"),
+        ("generation", 4),
+        ("binding_sha256", "c" * 64),
+    ):
+        request = {
+            "master_instance_id": INSTANCE,
+            "epoch": 9,
+            "worker_kind": "region_talk",
+            "task_run_id": region.task_run_id,
+            "credential_id": region.credential_id,
+            "generation": region.generation,
+            "binding_sha256": region.binding_sha256,
+            "serial": region.serial,
+            "reason": "task_terminal",
+        }
+        request[field] = value
+        with pytest.raises(TunnelBrokerError, match="not bound"):
+            broker.revoke_task_worker_certificate(**request)
+
+
+def test_task_worker_ipc_and_sshd_config_are_worker_kind_aware(tmp_path: Path) -> None:
+    broker, _terminated, _ca = _broker(tmp_path)
+    now = datetime.now(UTC)
+    broker.activate(
+        master_instance_id=INSTANCE,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        epoch=10,
+        lease_until=now + timedelta(minutes=5),
+        listen_port=25432,
+        now=now,
+    )
+    payload = {
+        "master_instance_id": INSTANCE,
+        "epoch": 10,
+        "worker_kind": "region_talk",
+        "task_run_id": "11111111-1111-4111-8111-111111111111",
+        "credential_id": "22222222-2222-4222-8222-222222222222",
+        "generation": 2,
+        "binding_sha256": "d" * 64,
+        "public_key": _key(tmp_path / "ipc-region", "ipc region").read_text(),
+        "valid_before": (now + timedelta(minutes=4)).isoformat(),
+    }
+    issued = _dispatch(broker, {"action": "issue_task_worker_public_key", "payload": payload})
+    assert issued["worker_kind"] == "region_talk"
+    assert issued["generation"] == 2
+    assert issued["binding_sha256"] == "d" * 64
+    assert issued["account"] == DEFAULT_REGION_TALK_WORKER_ACCOUNT
+    _dispatch(
+        broker,
+        {
+            "action": "revoke_task_worker_certificate",
+            "payload": {
+                key: issued[key]
+                for key in (
+                    "master_instance_id",
+                    "epoch",
+                    "worker_kind",
+                    "task_run_id",
+                    "credential_id",
+                    "generation",
+                    "binding_sha256",
+                    "serial",
+                )
+            }
+            | {"reason": "task_terminal"},
+        },
+    )
+    with pytest.raises(TunnelBrokerError, match="fields"):
+        _dispatch(
+            broker,
+            {
+                "action": "issue_task_worker_public_key",
+                "payload": {**payload, "database_url": "forbidden"},
+            },
+        )
+
+    config = render_sshd_config(
+        account=DEFAULT_ACCOUNT,
+        worker_account="mdh-embedding-worker",
+        region_talk_worker_account=DEFAULT_REGION_TALK_WORKER_ACCOUNT,
+        ca_public_key=Path("/etc/my-data-hub/tunnel-user-ca.pub"),
+        principals_file=Path("/var/lib/my-data-hub/tunnel-broker/authorized_principals"),
+        revoked_keys_file=Path("/var/lib/my-data-hub/tunnel-broker/revoked.krl"),
+        listen_port=25432,
+    )
+    assert f"Match User {DEFAULT_REGION_TALK_WORKER_ACCOUNT}" in config
+    assert config.count("PermitOpen 127.0.0.1:25432") == 2
+    assert config.count("AllowTcpForwarding local") == 2
+
+
+def test_v2_embedding_certificate_state_upgrades_idempotently_without_identity_loss(
+    tmp_path: Path,
+) -> None:
+    broker, _terminated, ca = _broker(tmp_path)
+    now = datetime.now(UTC)
+    broker.activate(
+        master_instance_id=INSTANCE,
+        run_id=RUN_ID,
+        attempt_id=ATTEMPT_ID,
+        epoch=11,
+        lease_until=now + timedelta(minutes=5),
+        listen_port=25432,
+        now=now,
+    )
+    task = "11111111-1111-4111-8111-111111111111"
+    credential = "22222222-2222-4222-8222-222222222222"
+    issued = broker.issue_worker_public_key(
+        master_instance_id=INSTANCE,
+        epoch=11,
+        task_run_id=task,
+        credential_id=credential,
+        public_key=_key(tmp_path / "legacy-worker", "legacy worker").read_text(),
+        valid_before=now + timedelta(minutes=4),
+        now=now,
+    )
+    state = json.loads(broker.state_path.read_text())
+    worker = state["worker_issued"][0]
+    for field in (
+        "worker_kind",
+        "generation",
+        "binding_sha256",
+        "account",
+        "principal_version",
+    ):
+        worker.pop(field)
+    worker["principal"] = (
+        f"mdh-worker-e11-{INSTANCE.replace('-', '')}-{task.replace('-', '')}-"
+        f"{credential.replace('-', '')}"
+    )
+    worker["key_id"] = f"mdh-worker:{INSTANCE}:11:{task}:{credential}:{issued.serial}"
+    state["schema_version"] = "my-data-hub-master-tunnel-broker.v2"
+    broker.state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+    os.chmod(broker.state_path, 0o600)
+
+    broker.revoke_worker_certificate(
+        master_instance_id=INSTANCE,
+        epoch=11,
+        task_run_id=task,
+        credential_id=credential,
+        serial=issued.serial,
+        reason="task_terminal",
+    )
+    upgraded = json.loads(broker.state_path.read_text())
+    assert upgraded["schema_version"] == "my-data-hub-master-tunnel-broker.v3"
+    assert upgraded["worker_issued"][0]["principal_version"] == "legacy"
+    reloaded = TunnelBroker(
+        broker.root,
+        ca_private_key=ca,
+        session_terminator=lambda _account: None,
+    )
+    assert reloaded.reconcile(now=now + timedelta(seconds=1)) is True

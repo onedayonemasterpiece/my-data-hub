@@ -24,13 +24,16 @@ from pathlib import Path
 from typing import Any, NoReturn, cast
 from uuid import UUID
 
-SCHEMA_VERSION = "my-data-hub-master-tunnel-broker.v2"
+SCHEMA_VERSION = "my-data-hub-master-tunnel-broker.v3"
+PREVIOUS_SCHEMA_VERSION = "my-data-hub-master-tunnel-broker.v2"
 LEGACY_SCHEMA_VERSION = "my-data-hub-master-tunnel-broker.v1"
 DEFAULT_ACCOUNT = "mdh-master-tunnel"
 DEFAULT_WORKER_ACCOUNT = "mdh-embedding-worker"
+DEFAULT_REGION_TALK_WORKER_ACCOUNT = "mdh-region-talk-worker"
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 25432
 MAX_LEASE = timedelta(minutes=10)
+MAX_TASK_WORKER_LEASE = timedelta(minutes=5)
 MIN_CERTIFICATE_LIFETIME = timedelta(seconds=15)
 MAX_ISSUED_CERTIFICATES = 4096
 MAX_BROKER_REQUEST_BYTES = 32 * 1024
@@ -38,6 +41,8 @@ _ACCOUNT = re.compile(r"^[a-z_][a-z0-9_-]{0,30}$")
 _REASON = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _RUNTIME_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _PUBLIC_KEY_TYPES = frozenset({"ssh-ed25519"})
+_WORKER_KINDS = frozenset({"embedding", "region_talk"})
+_SHA256 = re.compile(r"^[a-f0-9]{64}$")
 
 
 class TunnelBrokerError(RuntimeError):
@@ -90,8 +95,38 @@ def _principal(instance_id: str, epoch: int, run_id: str, attempt_id: str) -> st
     return f"mdh-master-e{epoch}-{compact}-{_runtime_digest(run_id, attempt_id)}"
 
 
-def _worker_principal(instance_id: str, epoch: int, task_run_id: str, credential_id: str) -> str:
+def _legacy_worker_principal(instance_id: str, epoch: int, task_run_id: str, credential_id: str) -> str:
     return f"mdh-worker-e{epoch}-{UUID(instance_id).hex}-{UUID(task_run_id).hex}-{UUID(credential_id).hex}"
+
+
+def _legacy_worker_binding(
+    instance_id: str, epoch: int, task_run_id: str, credential_id: str
+) -> str:
+    return hashlib.sha256(
+        f"embedding\0{instance_id}\0{epoch}\0{task_run_id}\0{credential_id}".encode()
+    ).hexdigest()
+
+
+def _worker_principal(
+    instance_id: str,
+    epoch: int,
+    worker_kind: str,
+    task_run_id: str,
+    credential_id: str,
+    generation: int,
+    binding_sha256: str,
+) -> str:
+    if worker_kind not in _WORKER_KINDS:
+        raise TunnelBrokerError("worker kind is not allowlisted")
+    if isinstance(generation, bool) or generation < 1:
+        raise TunnelBrokerError("worker credential generation must be positive")
+    if not _SHA256.fullmatch(binding_sha256):
+        raise TunnelBrokerError("worker credential binding hash is invalid")
+    label = "embed" if worker_kind == "embedding" else "region"
+    return (
+        f"mdh-{label}-e{epoch}-g{generation}-{UUID(instance_id).hex[:12]}-"
+        f"{UUID(task_run_id).hex[:12]}-{UUID(credential_id).hex[:12]}-{binding_sha256[:12]}"
+    )
 
 
 def _uuid(value: str, label: str) -> str:
@@ -265,6 +300,42 @@ class WorkerTunnelCertificate:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class TaskWorkerTunnelCertificate:
+    certificate: str
+    serial: int
+    principal: str
+    valid_before: datetime
+    master_instance_id: str
+    epoch: int
+    worker_kind: str
+    task_run_id: str
+    credential_id: str
+    generation: int
+    binding_sha256: str
+    connect_host: str = DEFAULT_LISTEN_HOST
+    connect_port: int = DEFAULT_LISTEN_PORT
+    account: str = DEFAULT_WORKER_ACCOUNT
+
+    def public_response(self) -> dict[str, object]:
+        return {
+            "certificate": self.certificate,
+            "serial": self.serial,
+            "principal": self.principal,
+            "valid_before": _format_time(self.valid_before),
+            "master_instance_id": self.master_instance_id,
+            "epoch": self.epoch,
+            "worker_kind": self.worker_kind,
+            "task_run_id": self.task_run_id,
+            "credential_id": self.credential_id,
+            "generation": self.generation,
+            "binding_sha256": self.binding_sha256,
+            "connect_host": self.connect_host,
+            "connect_port": self.connect_port,
+            "account": self.account,
+        }
+
+
 @dataclass(slots=True)
 class BrokerState:
     highest_epoch: int
@@ -297,10 +368,12 @@ class BrokerState:
         }
         if not isinstance(value, dict) or value.get("schema_version") not in {
             SCHEMA_VERSION,
+            PREVIOUS_SCHEMA_VERSION,
             LEGACY_SCHEMA_VERSION,
         }:
             raise TunnelBrokerError("tunnel broker state fields differ from the contract")
-        legacy = value.get("schema_version") == LEGACY_SCHEMA_VERSION
+        version = value.get("schema_version")
+        legacy = version == LEGACY_SCHEMA_VERSION
         required = common if legacy else common | {"worker_issued"}
         if set(value) != required:
             raise TunnelBrokerError("tunnel broker state fields differ from the contract")
@@ -370,7 +443,7 @@ class BrokerState:
             seen_serials.add(serial)
             parsed_issued.append(dict(item))
         parsed_workers: list[dict[str, object]] = []
-        worker_required = {
+        legacy_worker_required = {
             "serial",
             "master_instance_id",
             "epoch",
@@ -382,9 +455,36 @@ class BrokerState:
             "public_key_sha256",
             "certificate",
         }
+        worker_required = legacy_worker_required | {
+            "worker_kind",
+            "generation",
+            "binding_sha256",
+            "account",
+            "principal_version",
+        }
         for item in worker_issued:
-            if not isinstance(item, dict) or set(item) != worker_required:
+            required_worker_fields = (
+                worker_required if version == SCHEMA_VERSION else legacy_worker_required
+            )
+            if not isinstance(item, dict) or set(item) != required_worker_fields:
                 raise TunnelBrokerError("worker certificate metadata differs from the contract")
+            normalized_item = dict(item)
+            if version != SCHEMA_VERSION:
+                normalized_item.update(
+                    {
+                        "worker_kind": "embedding",
+                        "generation": 1,
+                        "binding_sha256": _legacy_worker_binding(
+                            str(item["master_instance_id"]),
+                            int(cast(int, item["epoch"])),
+                            str(item["task_run_id"]),
+                            str(item["credential_id"]),
+                        ),
+                        "account": DEFAULT_WORKER_ACCOUNT,
+                        "principal_version": "legacy",
+                    }
+                )
+            item = normalized_item
             serial = item["serial"]
             if (
                 not isinstance(serial, int)
@@ -403,15 +503,40 @@ class BrokerState:
                 or not re.fullmatch(r"[a-f0-9]{64}", str(item["public_key_sha256"]))
                 or not isinstance(item["certificate"], str)
                 or (item["certificate"] and not item["certificate"].startswith("ssh-ed25519-cert-v01@openssh.com "))
+                or item["worker_kind"] not in _WORKER_KINDS
+                or not isinstance(item["generation"], int)
+                or isinstance(item["generation"], bool)
+                or cast(int, item["generation"]) < 1
+                or not isinstance(item["binding_sha256"], str)
+                or not _SHA256.fullmatch(str(item["binding_sha256"]))
+                or not isinstance(item["account"], str)
+                or not _ACCOUNT.fullmatch(str(item["account"]))
+                or item["principal_version"] not in {"legacy", "task"}
             ):
                 raise TunnelBrokerError("worker certificate metadata is invalid")
             instance, epoch = _validate_identity(item["master_instance_id"], item["epoch"])
             task_run_id = _uuid(item["task_run_id"], "task_run_id")
             credential_id = _uuid(item["credential_id"], "credential_id")
-            principal = _worker_principal(instance, epoch, task_run_id, credential_id)
+            if item["principal_version"] == "task":
+                principal = _worker_principal(
+                    instance,
+                    epoch,
+                    str(item["worker_kind"]),
+                    task_run_id,
+                    credential_id,
+                    cast(int, item["generation"]),
+                    str(item["binding_sha256"]),
+                )
+                key_id = (
+                    f"mdh-task-worker:{item['worker_kind']}:{instance}:{epoch}:{task_run_id}:"
+                    f"{credential_id}:{item['generation']}:{item['binding_sha256']}:{serial}"
+                )
+            else:
+                principal = _legacy_worker_principal(instance, epoch, task_run_id, credential_id)
+                key_id = f"mdh-worker:{instance}:{epoch}:{task_run_id}:{credential_id}:{serial}"
             if (
                 item["principal"] != principal
-                or item["key_id"] != f"mdh-worker:{instance}:{epoch}:{task_run_id}:{credential_id}:{serial}"
+                or item["key_id"] != key_id
             ):
                 raise TunnelBrokerError("worker certificate identity is invalid")
             _parse_time(item["valid_before"], "valid_before")
@@ -449,23 +574,27 @@ class TunnelBroker:
         ca_private_key: Path,
         account: str = DEFAULT_ACCOUNT,
         worker_account: str = DEFAULT_WORKER_ACCOUNT,
+        region_talk_worker_account: str = DEFAULT_REGION_TALK_WORKER_ACCOUNT,
         command_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         session_terminator: Callable[[str], None] | None = None,
     ) -> None:
         if not root.is_absolute() or root.is_symlink():
             raise TunnelBrokerError("broker root must be an absolute non-symlink path")
-        if not _ACCOUNT.fullmatch(account) or not _ACCOUNT.fullmatch(worker_account) or account == worker_account:
+        accounts = (account, worker_account, region_talk_worker_account)
+        if any(not _ACCOUNT.fullmatch(item) for item in accounts) or len(set(accounts)) != len(accounts):
             raise TunnelBrokerError("tunnel account name is invalid")
         self.root = root
         self.ca_private_key = ca_private_key
         self.ca_public_key = Path(f"{ca_private_key}.pub")
         self.account = account
         self.worker_account = worker_account
+        self.region_talk_worker_account = region_talk_worker_account
         self.command_runner = command_runner
         self.session_terminator = session_terminator or terminate_account_sessions
         self.state_path = root / "state.json"
         self.principals_path = root / "authorized_principals"
         self.worker_principals_path = root / "authorized_worker_principals"
+        self.region_talk_worker_principals_path = root / "authorized_region_talk_worker_principals"
         self.krl_path = root / "revoked.krl"
         self.lock_path = root / "broker.lock"
 
@@ -512,26 +641,31 @@ class TunnelBroker:
     def _write_worker_principals(self, state: BrokerState, *, now: datetime | None = None) -> None:
         observed = _utc(now or datetime.now(UTC), "now")
         active = state.active
-        principals = []
-        if active is not None and active.lease_until > observed:
-            principals = [
-                str(item["principal"])
-                for item in state.worker_issued
-                if item["master_instance_id"] == active.master_instance_id
-                and item["epoch"] == active.epoch
-                and cast(int, item["serial"]) not in state.revoked_serials
-                and bool(item["certificate"])
-                and _parse_time(str(item["valid_before"]), "valid_before") > observed
-            ]
-        content = (
-            "".join(
-                f'restrict,port-forwarding,permitopen="{DEFAULT_LISTEN_HOST}:{active.listen_port}" {principal}\n'
-                for principal in sorted(principals)
+        for worker_kind, path in (
+            ("embedding", self.worker_principals_path),
+            ("region_talk", self.region_talk_worker_principals_path),
+        ):
+            principals: list[str] = []
+            if active is not None and active.lease_until > observed:
+                principals = [
+                    str(item["principal"])
+                    for item in state.worker_issued
+                    if item["master_instance_id"] == active.master_instance_id
+                    and item["epoch"] == active.epoch
+                    and item["worker_kind"] == worker_kind
+                    and cast(int, item["serial"]) not in state.revoked_serials
+                    and bool(item["certificate"])
+                    and _parse_time(str(item["valid_before"]), "valid_before") > observed
+                ]
+            content = (
+                "".join(
+                    f'restrict,port-forwarding,permitopen="{DEFAULT_LISTEN_HOST}:{active.listen_port}" {principal}\n'
+                    for principal in sorted(principals)
+                )
+                if active is not None
+                else ""
             )
-            if active is not None
-            else ""
-        )
-        _atomic_write(self.worker_principals_path, content.encode("ascii"), 0o644)
+            _atomic_write(path, content.encode("ascii"), 0o644)
 
     def _write_krl(self, revoked_serials: Sequence[int], *, revoke_ca: bool = False) -> None:
         _regular_file(self.ca_public_key, "tunnel CA public key")
@@ -566,8 +700,11 @@ class TunnelBroker:
         ]
 
     def _terminate_workers_if_issued(self, state: BrokerState) -> None:
-        if state.worker_issued:
+        kinds = {str(item["worker_kind"]) for item in state.worker_issued}
+        if "embedding" in kinds:
             self.session_terminator(self.worker_account)
+        if "region_talk" in kinds:
+            self.session_terminator(self.region_talk_worker_account)
 
     def _fail_closed(self, state: BrokerState | None = None) -> None:
         first_failure: Exception | None = None
@@ -577,6 +714,10 @@ class TunnelBroker:
             first_failure = exc
         try:
             _atomic_write(self.worker_principals_path, b"", 0o644)
+        except Exception as exc:
+            first_failure = first_failure or exc
+        try:
+            _atomic_write(self.region_talk_worker_principals_path, b"", 0o644)
         except Exception as exc:
             first_failure = first_failure or exc
         if state is not None:
@@ -604,6 +745,10 @@ class TunnelBroker:
             self.session_terminator(self.worker_account)
         except Exception as exc:
             first_failure = first_failure or exc
+        try:
+            self.session_terminator(self.region_talk_worker_account)
+        except Exception as exc:
+            first_failure = first_failure or exc
         if first_failure is not None:
             raise TunnelBrokerError("one or more fail-closed tunnel denial actions failed") from first_failure
 
@@ -622,6 +767,7 @@ class TunnelBroker:
                 self.state_path.exists()
                 or self.principals_path.exists()
                 or self.worker_principals_path.exists()
+                or self.region_talk_worker_principals_path.exists()
                 or self.krl_path.exists()
             ):
                 raise TunnelBrokerError("refusing to replace existing tunnel broker state")
@@ -1058,22 +1204,36 @@ class TunnelBroker:
                 self._fail_closed(state)
                 raise
 
-    def issue_worker_public_key(
+    def issue_task_worker_public_key(
         self,
         *,
         master_instance_id: str,
         epoch: int,
+        worker_kind: str,
         task_run_id: str,
         credential_id: str,
+        generation: int,
+        binding_sha256: str,
         public_key: str,
         valid_before: datetime,
         now: datetime,
-    ) -> WorkerTunnelCertificate:
+    ) -> TaskWorkerTunnelCertificate:
         """Sign one task credential for local forwarding to the ACTIVE tunnel only."""
 
         instance, epoch = _validate_identity(master_instance_id, epoch)
+        if worker_kind not in _WORKER_KINDS:
+            raise TunnelBrokerError("worker kind is not allowlisted")
         task_run_id = _uuid(task_run_id, "task_run_id")
         credential_id = _uuid(credential_id, "credential_id")
+        if isinstance(generation, bool) or generation < 1:
+            raise TunnelBrokerError("worker credential generation must be positive")
+        if not _SHA256.fullmatch(binding_sha256):
+            raise TunnelBrokerError("worker credential binding hash is invalid")
+        worker_account = (
+            self.worker_account
+            if worker_kind == "embedding"
+            else self.region_talk_worker_account
+        )
         observed = _utc(now, "now")
         expiry = _utc(valid_before, "valid_before")
         _regular_file(self.ca_private_key, "tunnel CA private key", private=True)
@@ -1102,7 +1262,7 @@ class TunnelBroker:
             if (
                 expiry - observed < MIN_CERTIFICATE_LIFETIME
                 or expiry > active.lease_until
-                or expiry - observed > MAX_LEASE
+                or expiry - observed > MAX_TASK_WORKER_LEASE
             ):
                 raise TunnelBrokerError("worker certificate validity must be within the active lease")
             replays = [
@@ -1115,6 +1275,10 @@ class TunnelBroker:
                 if (
                     item["master_instance_id"] != instance
                     or item["epoch"] != epoch
+                    or item["worker_kind"] != worker_kind
+                    or item["generation"] != generation
+                    or item["binding_sha256"] != binding_sha256
+                    or item["account"] != worker_account
                     or item["valid_before"] != _format_time(expiry)
                     or item["public_key_sha256"] != digest
                     or cast(int, item["serial"]) in state.revoked_serials
@@ -1122,28 +1286,49 @@ class TunnelBroker:
                 ):
                     raise TunnelBrokerError("worker certificate identity conflicts with its exact replay")
                 self._write_worker_principals(state, now=observed)
-                return WorkerTunnelCertificate(
+                return TaskWorkerTunnelCertificate(
                     certificate=str(item["certificate"]),
                     serial=cast(int, item["serial"]),
                     principal=str(item["principal"]),
                     valid_before=expiry,
+                    master_instance_id=instance,
+                    epoch=epoch,
+                    worker_kind=worker_kind,
                     task_run_id=task_run_id,
                     credential_id=credential_id,
+                    generation=generation,
+                    binding_sha256=binding_sha256,
                     connect_port=active.listen_port,
-                    account=self.worker_account,
+                    account=worker_account,
                 )
             if len(state.issued) + len(state.worker_issued) >= MAX_ISSUED_CERTIFICATES:
                 raise TunnelBrokerError("tunnel certificate metadata limit reached")
             serial = state.next_serial
             state.next_serial += 1
-            principal = _worker_principal(instance, epoch, task_run_id, credential_id)
-            key_id = f"mdh-worker:{instance}:{epoch}:{task_run_id}:{credential_id}:{serial}"
+            principal = _worker_principal(
+                instance,
+                epoch,
+                worker_kind,
+                task_run_id,
+                credential_id,
+                generation,
+                binding_sha256,
+            )
+            key_id = (
+                f"mdh-task-worker:{worker_kind}:{instance}:{epoch}:{task_run_id}:"
+                f"{credential_id}:{generation}:{binding_sha256}:{serial}"
+            )
             metadata: dict[str, object] = {
                 "serial": serial,
                 "master_instance_id": instance,
                 "epoch": epoch,
                 "task_run_id": task_run_id,
                 "credential_id": credential_id,
+                "worker_kind": worker_kind,
+                "generation": generation,
+                "binding_sha256": binding_sha256,
+                "account": worker_account,
+                "principal_version": "task",
                 "key_id": key_id,
                 "principal": principal,
                 "valid_before": _format_time(expiry),
@@ -1187,16 +1372,118 @@ class TunnelBroker:
                 self._save(state)
                 self._write_krl(state.revoked_serials)
                 self._write_worker_principals(state, now=observed)
-                return WorkerTunnelCertificate(
+                return TaskWorkerTunnelCertificate(
                     certificate=certificate,
                     serial=serial,
                     principal=principal,
                     valid_before=expiry,
+                    master_instance_id=instance,
+                    epoch=epoch,
+                    worker_kind=worker_kind,
                     task_run_id=task_run_id,
                     credential_id=credential_id,
+                    generation=generation,
+                    binding_sha256=binding_sha256,
                     connect_port=active.listen_port,
-                    account=self.worker_account,
+                    account=worker_account,
                 )
+            except Exception:
+                self._fail_closed(state)
+                raise
+
+    def issue_worker_public_key(
+        self,
+        *,
+        master_instance_id: str,
+        epoch: int,
+        task_run_id: str,
+        credential_id: str,
+        public_key: str,
+        valid_before: datetime,
+        now: datetime,
+    ) -> WorkerTunnelCertificate:
+        """Backward-compatible embedding worker certificate API."""
+
+        instance, normalized_epoch = _validate_identity(master_instance_id, epoch)
+        task = _uuid(task_run_id, "task_run_id")
+        credential = _uuid(credential_id, "credential_id")
+        issued = self.issue_task_worker_public_key(
+            master_instance_id=instance,
+            epoch=normalized_epoch,
+            worker_kind="embedding",
+            task_run_id=task,
+            credential_id=credential,
+            generation=1,
+            binding_sha256=_legacy_worker_binding(
+                instance, normalized_epoch, task, credential
+            ),
+            public_key=public_key,
+            valid_before=valid_before,
+            now=now,
+        )
+        return WorkerTunnelCertificate(
+            certificate=issued.certificate,
+            serial=issued.serial,
+            principal=issued.principal,
+            valid_before=issued.valid_before,
+            task_run_id=issued.task_run_id,
+            credential_id=issued.credential_id,
+            connect_host=issued.connect_host,
+            connect_port=issued.connect_port,
+            account=issued.account,
+        )
+
+    def revoke_task_worker_certificate(
+        self,
+        *,
+        master_instance_id: str,
+        epoch: int,
+        worker_kind: str,
+        task_run_id: str,
+        credential_id: str,
+        generation: int,
+        binding_sha256: str,
+        serial: int,
+        reason: str,
+    ) -> None:
+        instance, epoch = _validate_identity(master_instance_id, epoch)
+        if worker_kind not in _WORKER_KINDS:
+            raise TunnelBrokerError("worker kind is not allowlisted")
+        task_run_id = _uuid(task_run_id, "task_run_id")
+        credential_id = _uuid(credential_id, "credential_id")
+        if (
+            isinstance(generation, bool)
+            or generation < 1
+            or not _SHA256.fullmatch(binding_sha256)
+            or isinstance(serial, bool)
+            or serial < 1
+            or not _REASON.fullmatch(reason)
+        ):
+            raise TunnelBrokerError("worker revocation identity is invalid")
+        with self._lock():
+            state = self._load_or_fail_closed()
+            match = next(
+                (
+                    item
+                    for item in state.worker_issued
+                    if item["serial"] == serial
+                    and item["master_instance_id"] == instance
+                    and item["epoch"] == epoch
+                    and item["worker_kind"] == worker_kind
+                    and item["task_run_id"] == task_run_id
+                    and item["credential_id"] == credential_id
+                    and item["generation"] == generation
+                    and item["binding_sha256"] == binding_sha256
+                ),
+                None,
+            )
+            if match is None:
+                raise TunnelBrokerError("worker certificate is not bound to the requested task")
+            try:
+                state.revoked_serials = sorted({*state.revoked_serials, serial})
+                self._write_krl(state.revoked_serials)
+                self._save(state)
+                self._write_worker_principals(state)
             except Exception:
                 self._fail_closed(state)
                 raise
@@ -1211,36 +1498,24 @@ class TunnelBroker:
         serial: int,
         reason: str,
     ) -> None:
-        instance, epoch = _validate_identity(master_instance_id, epoch)
-        task_run_id = _uuid(task_run_id, "task_run_id")
-        credential_id = _uuid(credential_id, "credential_id")
-        if isinstance(serial, bool) or serial < 1 or not _REASON.fullmatch(reason):
-            raise TunnelBrokerError("worker revocation identity is invalid")
-        with self._lock():
-            state = self._load_or_fail_closed()
-            match = next(
-                (
-                    item
-                    for item in state.worker_issued
-                    if item["serial"] == serial
-                    and item["master_instance_id"] == instance
-                    and item["epoch"] == epoch
-                    and item["task_run_id"] == task_run_id
-                    and item["credential_id"] == credential_id
-                ),
-                None,
-            )
-            if match is None:
-                raise TunnelBrokerError("worker certificate is not bound to the requested task")
-            try:
-                state.revoked_serials = sorted({*state.revoked_serials, serial})
-                self._write_krl(state.revoked_serials)
-                self._save(state)
-                self._write_worker_principals(state)
-                self._terminate_workers_if_issued(state)
-            except Exception:
-                self._fail_closed(state)
-                raise
+        """Backward-compatible exact embedding worker certificate revocation."""
+
+        instance, normalized_epoch = _validate_identity(master_instance_id, epoch)
+        task = _uuid(task_run_id, "task_run_id")
+        credential = _uuid(credential_id, "credential_id")
+        self.revoke_task_worker_certificate(
+            master_instance_id=instance,
+            epoch=normalized_epoch,
+            worker_kind="embedding",
+            task_run_id=task,
+            credential_id=credential,
+            generation=1,
+            binding_sha256=_legacy_worker_binding(
+                instance, normalized_epoch, task, credential
+            ),
+            serial=serial,
+            reason=reason,
+        )
 
     def revoke(
         self,
@@ -1402,12 +1677,14 @@ def render_sshd_config(
     *,
     account: str,
     worker_account: str = DEFAULT_WORKER_ACCOUNT,
+    region_talk_worker_account: str = DEFAULT_REGION_TALK_WORKER_ACCOUNT,
     ca_public_key: Path,
     principals_file: Path,
     revoked_keys_file: Path,
     listen_port: int,
 ) -> str:
-    if not _ACCOUNT.fullmatch(account) or not _ACCOUNT.fullmatch(worker_account) or account == worker_account:
+    accounts = (account, worker_account, region_talk_worker_account)
+    if any(not _ACCOUNT.fullmatch(item) for item in accounts) or len(set(accounts)) != len(accounts):
         raise TunnelBrokerError("tunnel account name is invalid")
     if isinstance(listen_port, bool) or not 1024 <= listen_port <= 65535:
         raise TunnelBrokerError("master tunnel listen port must be within 1024..65535")
@@ -1460,6 +1737,29 @@ Match User {worker_account}
     PermitUserRC no
     MaxSessions 0
 Match all
+
+Match User {region_talk_worker_account}
+    AuthenticationMethods publickey
+    PubkeyAuthentication yes
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    GSSAPIAuthentication no
+    HostbasedAuthentication no
+    AuthorizedKeysFile none
+    TrustedUserCAKeys {ca_public_key}
+    AuthorizedPrincipalsFile {principals_file.parent / "authorized_region_talk_worker_principals"}
+    RevokedKeys {revoked_keys_file}
+    AllowTcpForwarding local
+    PermitListen none
+    PermitOpen {DEFAULT_LISTEN_HOST}:{listen_port}
+    GatewayPorts no
+    PermitTTY no
+    X11Forwarding no
+    AllowAgentForwarding no
+    PermitTunnel no
+    PermitUserRC no
+    MaxSessions 0
+Match all
 """
 
 
@@ -1469,6 +1769,7 @@ def _broker(arguments: argparse.Namespace) -> TunnelBroker:
         ca_private_key=Path(arguments.ca_private_key),
         account=arguments.account,
         worker_account=arguments.worker_account,
+        region_talk_worker_account=arguments.region_talk_worker_account,
     )
 
 
@@ -1482,6 +1783,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--ca-private-key", required=True)
     parser.add_argument("--account", default=DEFAULT_ACCOUNT)
     parser.add_argument("--worker-account", default=DEFAULT_WORKER_ACCOUNT)
+    parser.add_argument(
+        "--region-talk-worker-account", default=DEFAULT_REGION_TALK_WORKER_ACCOUNT
+    )
     subparsers = parser.add_subparsers(dest="action", required=True)
     subparsers.add_parser("initialize")
 
@@ -1578,6 +1882,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             rendered = render_sshd_config(
                 account=arguments.account,
                 worker_account=arguments.worker_account,
+                region_talk_worker_account=arguments.region_talk_worker_account,
                 ca_public_key=broker.ca_public_key,
                 principals_file=broker.principals_path,
                 revoked_keys_file=broker.krl_path,

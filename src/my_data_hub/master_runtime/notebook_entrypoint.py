@@ -66,6 +66,11 @@ from .contracts import BootSource, MasterIdentity, MasterPaths
 from .credentials import CredentialProvisioner, LoginPolicy
 from .database_gate import DatabaseGate
 from .postgres import PostgresBinaries, PostgresConfig, PostgresSupervisor, SubprocessRunner
+from .task_credentials import (
+    HttpTaskCredentialClient,
+    TaskCredentialPoller,
+    TaskCredentialReconciler,
+)
 from .tunnel import ReverseTunnelSpec, TunnelSupervisor
 
 MASTER_TERMINAL_OUTPUT_NAME = "my-data-hub-master-terminal.json"
@@ -369,6 +374,10 @@ class EmbeddingReceiptDeliveryError(RuntimeError):
 
 class EmbeddingStageExecutionError(RuntimeError):
     """Gate K failed before an acknowledged complete stage receipt."""
+
+
+class TaskCredentialAuthorityError(RuntimeError):
+    """Continuous task credential reconciliation failed closed."""
 
 
 class CallbackLeaseClosingError(TimeoutError):
@@ -1342,6 +1351,13 @@ def _embedding_credential_url(callback_url: str, run_id: str, attempt_id: str) -
     return f"{callback_url.removesuffix(suffix)}/internal/runtime/embedding-worker-credentials/{run_id}/{attempt_id}"
 
 
+def _task_credential_url(callback_url: str, run_id: str, attempt_id: str) -> str:
+    suffix = "/internal/runtime/events"
+    if callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
+        raise ValueError("callback URL does not match the owner-pinned HTTPS runtime endpoint")
+    return f"{callback_url.removesuffix(suffix)}/internal/runtime/task-worker-credentials/{run_id}/{attempt_id}"
+
+
 def _reconcile_embedding_worker_credentials(
     *, connection: Any, gate: DatabaseGate, config: NotebookMasterConfig,
     callback_url: str, run_secret: str, lease_until: datetime,
@@ -2018,12 +2034,60 @@ def run_master(
             boot_source=config.boot_source.value,
         )
     current_lease = ready.lease_until
+    task_credential_client = HttpTaskCredentialClient(
+        base_url=_task_credential_url(
+            callback_url, config.run_id, config.attempt_id
+        ),
+        run_secret=run_secret,
+    )
+    task_credential_reconciler = TaskCredentialReconciler(
+        identity=identity,
+        local_postgres_port=config.tunnel_remote_port,
+    )
+
+    def poll_task_worker_credentials() -> None:
+        # A dedicated connection keeps the continuously running credential
+        # authority independent from foreground master stages.  The control
+        # mailbox carries command hashes only; generated secrets are handed
+        # directly to the private worker-status publisher.
+        batch = task_credential_client.fetch()
+        if not batch.commands and not batch.revocations:
+            return
+        task_connection = psycopg.connect(database_url)
+        try:
+            task_gate = DatabaseGate(task_connection)
+            task_credential_reconciler.reconcile(
+                batch=batch,
+                provisioner=CredentialProvisioner(task_connection, task_gate),
+                gate=task_gate,
+                lease_until=current_lease,
+                register=task_credential_client.register,
+                now=datetime.now(UTC),
+            )
+        finally:
+            task_connection.close()
+
+    task_credential_poller = TaskCredentialPoller(
+        poll=poll_task_worker_credentials,
+        interval_seconds=min(10.0, max(1.0, config.lease_seconds / 4)),
+        # Let activation-bound synchronous setup finish before the first
+        # independent mailbox read; thereafter polling is continuous through
+        # every foreground stage.
+        initial_delay_seconds=1.0,
+    )
     blogger_receipt: BloggerImportStageReceipt | None = None
     embedding_receipt: EmbeddingProductionStageReceipt | None = None
     active_error: BaseException | None = None
     soak_ports: dict[UUID, object] = {}
+    task_credential_poller.start()
     try:
         while True:
+            try:
+                task_credential_poller.check()
+            except BaseException as exc:
+                raise TaskCredentialAuthorityError(
+                    "task credential authority failed during the ACTIVE epoch"
+                ) from exc
             remaining_active = active_deadline - time.monotonic()
             if remaining_active <= 0:
                 break
@@ -2260,6 +2324,17 @@ def run_master(
                     raise CallbackLeaseClosingError("callback unavailable; write lease is closing")
     except BaseException as exc:
         active_error = exc
+    finally:
+        try:
+            task_credential_poller.stop()
+            task_credential_poller.check()
+        except BaseException as exc:
+            wrapped = TaskCredentialAuthorityError(
+                "task credential authority failed while stopping"
+            )
+            wrapped.__cause__ = exc
+            active_error = wrapped
+        issued_principals.update(task_credential_reconciler.principal_names())
 
     try:
         _cleanup_epoch_principals(
@@ -2287,6 +2362,13 @@ def run_master(
 
     if isinstance(active_error, (EmbeddingReceiptDeliveryError, EmbeddingStageExecutionError)):
         gate.fence(identity, "embedding_stage_receipt_unacknowledged")
+        tunnel.stop()
+        supervisor.stop(immediate=True)
+        gate_connection.close()
+        raise active_error
+
+    if isinstance(active_error, TaskCredentialAuthorityError):
+        gate.fence(identity, "task_credential_authority_failed")
         tunnel.stop()
         supervisor.stop(immediate=True)
         gate_connection.close()
