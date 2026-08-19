@@ -5,7 +5,7 @@
 - Lane: `REGION-TALK-DATA`
 - Requirements: `R01` full Region Talk direct transfer contract; `R02` typed articles/posts/candidates/frontier/schedule/review/cursor/LLM projections.
 - Base SHA: `1068d103ec261a37dd31e1f6d11265e1e238c168`
-- Reviewed implementation SHA: `5a787d58ddff0f0b0b74567fcaf3673d2aa5e2a9`
+- Reviewed implementation SHA: `5a787d595cfaae66d888598d22ea7dc998337e1d`
 - Execution mode: serial writable lane in isolated worktree; no shared-scope files edited.
 
 ## Requirement result
