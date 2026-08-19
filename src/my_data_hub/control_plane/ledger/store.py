@@ -3397,6 +3397,47 @@ class ControlLedger:
             raise IdempotencyConflict("task provider resource claim is not an object")
         return payload
 
+    def provider_resource_claim_exact(
+        self,
+        *,
+        provider_ref: str,
+        provider_version: int,
+        resource_kind: str,
+        control_class: str,
+        disposable: bool,
+    ) -> dict[str, Any] | None:
+        """Resolve one immutable provider version without falling back to latest.
+
+        Release-scoped master assets may be reused by a later task.  Such a
+        task must not be credited with creating the Dataset, but its durable
+        orchestration receipt can still bind the exact original claim by
+        provider ref and numeric version.
+        """
+
+        if provider_version < 1:
+            return None
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT claim_json FROM provider_resource_claims WHERE provider_ref=? "
+                "AND provider_version=? AND resource_kind=? AND control_class=? AND disposable=? "
+                "ORDER BY claim_sha256",
+                (
+                    provider_ref,
+                    provider_version,
+                    resource_kind,
+                    control_class,
+                    int(disposable),
+                ),
+            ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise IdempotencyConflict("provider version has more than one durable resource claim")
+        payload = json.loads(str(rows[0]["claim_json"]))
+        if not isinstance(payload, dict):
+            raise IdempotencyConflict("provider resource claim is not an object")
+        return payload
+
     def provider_resource_claim(self, claim_sha256: str) -> dict[str, Any] | None:
         if len(claim_sha256) != 64:
             return None

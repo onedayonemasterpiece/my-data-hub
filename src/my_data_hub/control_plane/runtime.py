@@ -1101,8 +1101,9 @@ def _verified_master_asset_claim(
     provider_ref: str,
     dataset_files: Mapping[str, bytes],
     task_id: UUID | None = None,
+    exact_claim: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], int]:
-    claim = (
+    claim = dict(exact_claim) if exact_claim is not None else (
         ledger.provider_resource_claim_for_task(
             task_id=str(task_id),
             resource_kind=ProviderKind.DATASET.value,
@@ -1153,6 +1154,60 @@ def _verified_master_asset_claim(
     if version < 1:
         raise MasterProviderUnavailable("master asset Dataset claim has no exact numeric version")
     return claim, version
+
+
+def _master_asset_claim_for_checkpoint_source(
+    ledger: ControlLedger,
+    *,
+    operation_id: UUID,
+    task_id: UUID,
+) -> dict[str, Any]:
+    """Bind a checkpoint source to its task-created or exactly reused assets."""
+
+    task_claim = ledger.provider_resource_claim_for_task(
+        task_id=str(task_id),
+        resource_kind=ProviderKind.DATASET.value,
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
+        disposable=False,
+    )
+    if task_claim is not None:
+        return task_claim
+
+    effect = ledger.get_effect_by_idempotency_key(f"{operation_id}:ensure_dataset")
+    receipt = effect.receipt if effect is not None else None
+    exact_identity = receipt.get("exact_identity") if isinstance(receipt, Mapping) else None
+    planned = effect.exact_identity if effect is not None else None
+    try:
+        provider_ref = str(exact_identity["provider_ref"])
+        provider_version = int(exact_identity["provider_version"])
+        package_sha256 = str(exact_identity["package_sha256"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MasterProviderUnavailable("checkpoint source has no exact master asset receipt") from exc
+    if (
+        effect is None
+        or effect.effect_kind != "ensure_dataset"
+        or effect.state.value != "APPLIED"
+        or not isinstance(planned, Mapping)
+        or planned.get("operation_id") != str(operation_id)
+        or planned.get("run_id") != str(task_id)
+        or planned.get("exact_ref") != provider_ref
+        or receipt.get("provider") != "kaggle"
+        or receipt.get("effect_kind") != "ensure_dataset"
+        or receipt.get("exact_ref") != provider_ref
+        or provider_version < 1
+        or not re.fullmatch(r"[a-f0-9]{64}", package_sha256)
+    ):
+        raise MasterProviderUnavailable("checkpoint source master asset receipt is invalid")
+    claim = ledger.provider_resource_claim_exact(
+        provider_ref=provider_ref,
+        provider_version=provider_version,
+        resource_kind=ProviderKind.DATASET.value,
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
+        disposable=False,
+    )
+    if claim is None:
+        raise MasterProviderUnavailable("reused master asset Dataset has no exact durable claim")
+    return claim
 
 
 def _project_checkpoint_verifier_assets(
@@ -1216,6 +1271,7 @@ def _checkpoint_verifier_assets_from_verified_master_claim(
     *,
     timeout_seconds: int,
     task_id: UUID | None = None,
+    exact_claim: Mapping[str, Any] | None = None,
 ) -> KaggleCheckpointVerifierAssets:
     """Project a verifier runtime only from the exact durable current asset effect."""
 
@@ -1224,6 +1280,7 @@ def _checkpoint_verifier_assets_from_verified_master_claim(
         provider_ref=assets.dataset_ref,
         dataset_files=assets.dataset_files,
         task_id=task_id,
+        exact_claim=exact_claim,
     )
     try:
         verifier_source = assets.dataset_files[assets.checkpoint_verifier_source_file]
@@ -1247,17 +1304,26 @@ def _checkpoint_verifier_assets_from_verified_master_claim(
 def _historical_checkpoint_verifier_assets(
     ledger: ControlLedger,
     *,
+    operation_id: UUID | None = None,
     task_id: UUID,
     history_root: Path,
     timeout_seconds: int,
 ) -> KaggleCheckpointVerifierAssets:
     """Resolve a task's immutable launch assets after the control release has advanced."""
 
-    claim = ledger.provider_resource_claim_for_task(
-        task_id=str(task_id),
-        resource_kind=ProviderKind.DATASET.value,
-        control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
-        disposable=False,
+    claim = (
+        _master_asset_claim_for_checkpoint_source(
+            ledger,
+            operation_id=operation_id,
+            task_id=task_id,
+        )
+        if operation_id is not None
+        else ledger.provider_resource_claim_for_task(
+            task_id=str(task_id),
+            resource_kind=ProviderKind.DATASET.value,
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
+            disposable=False,
+        )
     )
     if claim is None:
         raise MasterProviderUnavailable("task has no exact master asset Dataset claim")
@@ -1318,7 +1384,7 @@ def _historical_checkpoint_verifier_assets(
         ledger,
         provider_ref=provider_ref,
         dataset_files=files,
-        task_id=task_id,
+        exact_claim=claim,
     )
     verifier_entry = assets_manifest.get("checkpoint_verifier")
     if not isinstance(verifier_entry, dict):
@@ -1391,20 +1457,17 @@ def build_production_runtime(
         receipt_root.chmod(0o700)
 
         def verifier_factory(operation_id: UUID, task_id: UUID) -> KaggleCheckpointRestoreVerifier:
-            task_claim = ledger.provider_resource_claim_for_task(
-                task_id=str(task_id),
-                resource_kind=ProviderKind.DATASET.value,
-                control_class=ControlClass.ORCHESTRATOR_PROTECTED.value,
-                disposable=False,
+            task_claim = _master_asset_claim_for_checkpoint_source(
+                ledger,
+                operation_id=operation_id,
+                task_id=task_id,
             )
-            if task_claim is None:
-                raise MasterProviderUnavailable("checkpoint source task has no master asset claim")
             if task_claim.get("provider_ref") == settings.assets.dataset_ref:
                 verifier_assets = _checkpoint_verifier_assets_from_verified_master_claim(
                     ledger,
                     settings.assets,
                     timeout_seconds=1800,
-                    task_id=task_id,
+                    exact_claim=task_claim,
                 )
             else:
                 history_value = os.getenv(
@@ -1412,6 +1475,7 @@ def build_production_runtime(
                 ).strip()
                 verifier_assets = _historical_checkpoint_verifier_assets(
                     ledger,
+                    operation_id=operation_id,
                     task_id=task_id,
                     history_root=Path(history_value),
                     timeout_seconds=1800,

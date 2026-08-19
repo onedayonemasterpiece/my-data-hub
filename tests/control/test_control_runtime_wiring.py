@@ -370,11 +370,13 @@ def test_checkpoint_verifier_factory_uses_exact_verified_master_asset_claim(
     assert contract["wheel_sha256"] == hashlib.sha256(b"exact-wheel").hexdigest()
 
 
-def test_checkpoint_verifier_recovers_task_bound_historical_asset_bundle(tmp_path: Path) -> None:
+def test_checkpoint_verifier_recovers_reused_historical_asset_bundle(tmp_path: Path) -> None:
     base = assets()
     provider_ref = "owner/master-assets-0123456789abcdef0123456789abcdef"
     task_id = uuid4()
     operation_id = uuid4()
+    creator_task_id = uuid4()
+    creator_operation_id = uuid4()
     wheel = b"historical-project-wheel"
     psycopg = b"historical-psycopg"
     psycopg_binary = b"historical-psycopg-binary"
@@ -441,15 +443,15 @@ def test_checkpoint_verifier_recovers_task_bound_historical_asset_bundle(tmp_pat
 
     ledger = ControlLedger(tmp_path / "historical.sqlite3")
     journal = ControlLedgerKaggleJournal(ledger)
-    effect_key = f"{operation_id}:ensure_dataset"
+    effect_key = f"{creator_operation_id}:ensure_dataset"
     effect_id = uuid5(NAMESPACE_URL, effect_key)
     fingerprint = ProviderFingerprint(value="b" * 64)
     journal.persist_intent(
         ProviderEffectIntent.create(
-            operation_id=operation_id,
+            operation_id=creator_operation_id,
             effect_id=effect_id,
             idempotency_key=effect_key,
-            task_id=task_id,
+            task_id=creator_task_id,
             action=MutationAction.CREATE_DATASET,
             provider_ref=provider_ref,
             arguments={
@@ -462,7 +464,7 @@ def test_checkpoint_verifier_recovers_task_bound_historical_asset_bundle(tmp_pat
     )
     journal.persist_receipt(
         ProviderEffectReceipt(
-            operation_id=operation_id,
+            operation_id=creator_operation_id,
             effect_id=effect_id,
             action=MutationAction.CREATE_DATASET,
             provider_ref=provider_ref,
@@ -476,7 +478,7 @@ def test_checkpoint_verifier_recovers_task_bound_historical_asset_bundle(tmp_pat
     )
     journal.persist_resource_claim(
         TaskResourceClaim.create(
-            task_id=task_id,
+            task_id=creator_task_id,
             effect_id=effect_id,
             provider_ref=provider_ref,
             kind=ProviderKind.DATASET,
@@ -488,8 +490,53 @@ def test_checkpoint_verifier_recovers_task_bound_historical_asset_bundle(tmp_pat
         )
     )
 
+    # A release-scoped immutable asset Dataset is created once and reused by
+    # later cold master operations.  The later task therefore has an exact
+    # APPLIED ensure_dataset receipt, but correctly has no false
+    # "task-created" resource claim of its own.
+    ledger.ensure_operation(
+        operation_id=str(operation_id),
+        idempotency_key=f"master:{operation_id}",
+        operation_kind="ensure_master",
+        intent={"source_version": "1" * 40},
+        initial_state="ACTIVE",
+        identity={"run_id": str(task_id), "epoch": 2},
+    )
+    reused_effect_id = uuid5(NAMESPACE_URL, f"{operation_id}:ensure_dataset")
+    exact_identity = {
+        "provider_ref": provider_ref,
+        "provider_version": 3,
+        "package_sha256": "c" * 64,
+    }
+    ledger.plan_effect(
+        effect_id=str(reused_effect_id),
+        operation_id=str(operation_id),
+        idempotency_key=f"{operation_id}:ensure_dataset",
+        effect_kind="ensure_dataset",
+        exact_identity={
+            "operation_id": str(operation_id),
+            "run_id": str(task_id),
+            "exact_ref": provider_ref,
+            "source_identity": f"git:{'1' * 40}",
+            "source_version": "1" * 40,
+        },
+    )
+    ledger.claim_effect(str(reused_effect_id))
+    ledger.complete_effect(
+        str(reused_effect_id),
+        {
+            "provider": "kaggle",
+            "effect_kind": "ensure_dataset",
+            "exact_ref": provider_ref,
+            "source_identity": f"git:{'1' * 40}",
+            "source_version": "1" * 40,
+            "exact_identity": exact_identity,
+        },
+    )
+
     recovered = _historical_checkpoint_verifier_assets(
         ledger,
+        operation_id=operation_id,
         task_id=task_id,
         history_root=history,
         timeout_seconds=1800,
