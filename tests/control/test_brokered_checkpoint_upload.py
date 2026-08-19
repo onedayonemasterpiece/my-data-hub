@@ -944,6 +944,39 @@ def test_new_verifier_revision_recovers_exact_failed_dataset_without_reupload(tm
     assert ledger.checkpoint_head("postgres-master").current_checkpoint_id == str(CHECKPOINT)  # type: ignore[union-attr]
 
 
+def test_incompatible_historical_verifier_does_not_block_new_ready_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ledger, package, manifest, adapter, _verifier, service, authority = _fixture(tmp_path)
+    _upload_all(package, manifest, service, authority)
+    real_publication = service.ledger.publication
+
+    monkeypatch.setattr(service.ledger, "failed_verifier_publications", lambda: ["legacy-failed"])
+    monkeypatch.setattr(
+        service.ledger,
+        "publication",
+        lambda checkpoint_id: (
+            {"checkpoint_id": "legacy-failed"}
+            if checkpoint_id == "legacy-failed"
+            else real_publication(checkpoint_id)
+        ),
+    )
+
+    def incompatible_factory(_operation_id: UUID, _task_id: UUID) -> FakeRestoreVerifier:
+        raise RuntimeError("historical verifier assets are unavailable")
+
+    service.restore_verifier = None
+    service.restore_verifier_factory = incompatible_factory
+
+    with pytest.raises(RuntimeError, match="historical verifier assets"):
+        service.reconcile_pending_once()
+    publication = real_publication(str(CHECKPOINT))
+    assert publication is not None and publication["state"] == "FAILED"
+    assert publication["exact_version_ref"] == "owner/checkpoints/1"
+    assert adapter.finalized == 1
+
+
 def test_failed_second_candidate_preserves_exact_current_and_previous_head(tmp_path: Path) -> None:
     ledger, package, manifest, adapter, verifier, service, authority = _fixture(tmp_path)
     _upload_all(package, manifest, service, authority)

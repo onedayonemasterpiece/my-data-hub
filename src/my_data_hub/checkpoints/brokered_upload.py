@@ -1156,7 +1156,12 @@ class BrokeredCheckpointUploadService:
                     checkpoint_value,
                     verifier_revision_sha256=self._verifier_revision(verifier),
                 )
-            except (BrokeredCheckpointError, IdempotencyConflict):
+            except Exception:
+                # A historical failed verifier may depend on assets that are
+                # no longer present in the current release.  It must not block
+                # a newer fully uploaded checkpoint from reaching its durable
+                # provider/HEAD reconciliation.  Each failed publication is
+                # independently retryable on a later compatible release.
                 continue
             if reopened is None:
                 continue
