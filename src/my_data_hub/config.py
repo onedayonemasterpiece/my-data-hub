@@ -153,7 +153,7 @@ class Settings:
                     os.getenv(
                         "MY_DATA_HUB_MCP_SCOPES",
                         "platform:read,master:read,operation:read,checkpoint:read,"
-                        "embedding:read,provider:read,bloggers:read,data:read",
+                        "embedding:read,provider:read,bloggers:read,region-talk:read,data:read",
                     )
                 )
             ),
@@ -286,6 +286,7 @@ class Settings:
                 "provider:read",
                 "provider:write",
                 "bloggers:read",
+                "region-talk:read",
             }
         )
         if self.mcp_unified_bootstrap_profile_enabled and (
@@ -327,6 +328,7 @@ class Settings:
             "data:write",
             "migration:operate",
             "bloggers:write",
+            "region-talk:operate",
             "provider:write",
         }
         if self.mcp_remote_enabled and (
@@ -427,6 +429,7 @@ class Settings:
             "data:write",
             "migration:operate",
             "bloggers:write",
+            "region-talk:operate",
             "provider:write",
         }.intersection(self.mcp_scopes):
             raise ConfigurationError("MCP write mode requires an explicit write scope")

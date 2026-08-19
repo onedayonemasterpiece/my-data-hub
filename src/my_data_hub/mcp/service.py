@@ -27,6 +27,11 @@ from my_data_hub.mcp.contracts import (
 )
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.mcp.postgres_broker import SessionBrokerError
+from my_data_hub.mcp.region_talk_schemas import (
+    RegionTalkPipelineController,
+    RegionTalkPipelineRunRequest,
+    validate_region_talk_arguments,
+)
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
 from my_data_hub.workloads.bloggers.discovery import validate_submit_discovery_batch
 
@@ -65,6 +70,7 @@ _CONTROL_TOOLS = frozenset(
         "acceptance.scenario.status",
         "data.change.status",
         "bloggers.import.status",
+        "region_talk.pipeline.status",
     }
 )
 _PROVIDER_WRITES = frozenset(
@@ -114,6 +120,7 @@ class HubService:
         write_gate: WriteGate | None = None,
         audit: MCPAuditSink | None = None,
         sql_policy: BoundedSQLPolicy | None = None,
+        region_talk_controller: RegionTalkPipelineController | None = None,
         identity_provider: Callable[[], AccessIdentity | None] = current_identity,
         fallback_identity: AccessIdentity | None = None,
         scopes: frozenset[str] | None = None,
@@ -128,6 +135,7 @@ class HubService:
         self.write_gate = write_gate
         self.audit = audit
         self.sql_policy = sql_policy or BoundedSQLPolicy()
+        self.region_talk_controller = region_talk_controller
         self.identity_provider = identity_provider
         self.fallback_identity = fallback_identity
         self.scopes = scopes or frozenset()
@@ -172,6 +180,8 @@ class HubService:
                 else 256 * 1024
             ),
         )
+        if tool.startswith("region_talk."):
+            bounded_arguments = validate_region_talk_arguments(tool, bounded_arguments)
         try:
             if tool == "platform.status":
                 result = await self._platform_status(identity)
@@ -183,6 +193,8 @@ class HubService:
                 result = await self._stale_epoch_probe(bounded_arguments, identity)
             elif tool in _CONTROL_TOOLS:
                 result = await self._control(tool, bounded_arguments, identity)
+            elif tool == "region_talk.pipeline.run":
+                result = await self._region_talk_pipeline_run(bounded_arguments, identity)
             elif tool in _PROVIDER_WRITES:
                 result = await self._provider_write(tool, bounded_arguments, identity)
             elif tool == "submit_discovery_batch":
@@ -303,6 +315,41 @@ class HubService:
                         "canonical_receipt_found": False,
                     }
         return dict(result)
+
+    async def _region_talk_pipeline_run(
+        self,
+        arguments: Mapping[str, Any],
+        identity: AccessIdentity,
+    ) -> dict[str, Any]:
+        """Request one metadata-only supervised run; never dispatch publication."""
+
+        if self.region_talk_controller is None:
+            raise HubPermissionError("Region Talk pipeline operation is not enabled")
+        request = RegionTalkPipelineRunRequest.model_validate(arguments)
+        result = await _await(
+            self.region_talk_controller.request_supervised_run(
+                request=request,
+                principal=identity,
+            )
+        )
+        if not isinstance(result, Mapping):
+            raise RuntimeError("Region Talk pipeline controller returned an invalid receipt")
+        operation_id = result.get("operation_id")
+        duplicate = result.get("duplicate")
+        if not isinstance(operation_id, str) or not operation_id or not isinstance(duplicate, bool):
+            raise RuntimeError("Region Talk pipeline receipt lacks idempotent operation metadata")
+        if result.get("idempotency_key") not in {None, request.idempotency_key}:
+            raise RuntimeError("Region Talk pipeline receipt changed the idempotency key")
+        if result.get("publication_dispatch") not in {None, False}:
+            raise RuntimeError("Region Talk pipeline controller attempted publication dispatch")
+        return {
+            **dict(result),
+            "idempotency_key": request.idempotency_key,
+            "project_slug": request.project_slug,
+            "mode": request.mode,
+            "source_revision": request.source_revision,
+            "publication_dispatch": False,
+        }
 
     async def _submit_discovery_batch(
         self, arguments: Mapping[str, Any], identity: AccessIdentity
