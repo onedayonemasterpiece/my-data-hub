@@ -443,6 +443,93 @@ def test_connector_request_restarts_through_real_broker_verified_head(tmp_path: 
     }
 
 
+def _promote_verified_descendant(ledger: ControlLedger) -> UUID:
+    descendant = UUID("77777777-7777-4777-8777-777777777777")
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=str(descendant),
+        operation_id=str(OPERATION),
+        dataset_ref="owner/checkpoints",
+        version_ref=None,
+        manifest_sha256="d" * 64,
+        source_checkpoint_id=str(CHECKPOINT),
+        source_head_generation=1,
+        master_instance_id=str(MASTER),
+        epoch=1,
+        manifest_payload={"canonical_revision": 8},
+    )
+    ledger.mark_checkpoint_uploaded(str(descendant), "owner/checkpoints/2")
+    ledger.mark_checkpoint_readback_verified(str(descendant))
+    ledger.mark_checkpoint_restore_verified(str(descendant))
+    ledger.promote_checkpoint(
+        "postgres-master",
+        str(descendant),
+        expected_generation=1,
+        expected_parent_checkpoint_id=str(CHECKPOINT),
+    )
+    return descendant
+
+
+def test_completed_connector_checkpoint_remains_durable_after_head_advances(
+    tmp_path: Path,
+) -> None:
+    ledger, package, manifest, _adapter, _verifier, service, authority = _fixture(tmp_path)
+    coordinator = ControlLedgerVerifiedCheckpointCoordinator(ledger)
+    idempotency_key = "c" * 64
+    operation_id = f"connector-checkpoint:{idempotency_key}"
+    coordinator.request_verified_checkpoint(
+        operation_id=operation_id,
+        canonical_revision=7,
+        idempotency_key=idempotency_key,
+    )
+    ledger.claim_connector_checkpoint_request(
+        run_id=str(RUN),
+        attempt_id=str(ATTEMPT),
+        master_instance_id=str(MASTER),
+        epoch=1,
+    )
+    _upload_all(package, manifest, service, authority)
+    service.finalize(CHECKPOINT, authority)
+    completed = coordinator.checkpoint_status(operation_id)
+    assert completed["state"] == "DURABLE_COMPLETE"
+
+    descendant = _promote_verified_descendant(ledger)
+    head = ledger.checkpoint_head("postgres-master")
+    assert head is not None and head.current_checkpoint_id == str(descendant)
+
+    assert coordinator.checkpoint_status(operation_id) == completed
+
+
+def test_completed_connector_checkpoint_rejects_broken_head_ancestry(tmp_path: Path) -> None:
+    ledger, package, manifest, _adapter, _verifier, service, authority = _fixture(tmp_path)
+    coordinator = ControlLedgerVerifiedCheckpointCoordinator(ledger)
+    idempotency_key = "d" * 64
+    operation_id = f"connector-checkpoint:{idempotency_key}"
+    coordinator.request_verified_checkpoint(
+        operation_id=operation_id,
+        canonical_revision=7,
+        idempotency_key=idempotency_key,
+    )
+    ledger.claim_connector_checkpoint_request(
+        run_id=str(RUN),
+        attempt_id=str(ATTEMPT),
+        master_instance_id=str(MASTER),
+        epoch=1,
+    )
+    _upload_all(package, manifest, service, authority)
+    service.finalize(CHECKPOINT, authority)
+    assert coordinator.checkpoint_status(operation_id)["state"] == "DURABLE_COMPLETE"
+
+    descendant = _promote_verified_descendant(ledger)
+    with ledger._transaction() as connection:
+        connection.execute(
+            "UPDATE checkpoint_candidates SET source_checkpoint_id=NULL WHERE checkpoint_id=?",
+            (str(descendant),),
+        )
+
+    with pytest.raises(RuntimeError, match="verified checkpoint ancestry"):
+        coordinator.checkpoint_status(operation_id)
+
+
 def test_unified_bootstrap_master_can_claim_its_gate_checkpoint(tmp_path: Path) -> None:
     ledger, _package, _manifest, _adapter, _verifier, _service, _authority = _fixture(tmp_path)
     coordinator = ControlLedgerVerifiedCheckpointCoordinator(ledger)
