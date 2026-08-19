@@ -2877,34 +2877,91 @@ class ControlLedger:
                 "blogger checkpoint lacks its exact request-bound VERIFIED HEAD authority"
             )
 
-    @staticmethod
     def _require_blogger_checkpoint_authority(
+        self,
         connection: sqlite3.Connection,
         *,
         checkpoint_id: str,
         master_instance_id: str,
         epoch: int,
     ) -> None:
-        """Require the exact pre-change VERIFIED HEAD for the preview epoch."""
+        """Require the exact VERIFIED HEAD restored by the write epoch.
+
+        A normal cold start restores a checkpoint produced by the preceding
+        draining epoch.  The producer identity therefore cannot be required
+        to equal the successor that is about to write.  For that normal case,
+        bind the successor through its ACTIVE service operation and the
+        immutable ``boot_checkpoint`` recorded before its provider launch.
+        The same-epoch branch is retained for a master that checkpoints and
+        resumes without a replacement.
+        """
 
         checkpoint = connection.execute(
             "SELECT candidate.status,candidate.master_instance_id,candidate.epoch,"
-            "candidate.service_kind,head.current_checkpoint_id "
+            "candidate.service_kind,candidate.version_ref,candidate.manifest_sha256,"
+            "head.current_checkpoint_id,head.generation "
             "FROM checkpoint_candidates candidate "
             "LEFT JOIN checkpoint_heads head ON head.service_kind=candidate.service_kind "
             "WHERE candidate.checkpoint_id=?",
             (checkpoint_id,),
         ).fetchone()
-        if (
-            checkpoint is None
-            or checkpoint["status"] != "VERIFIED"
-            or checkpoint["service_kind"] != "postgres-master"
-            or checkpoint["master_instance_id"] != master_instance_id
-            or int(checkpoint["epoch"]) != epoch
-            or checkpoint["current_checkpoint_id"] != checkpoint_id
-        ):
+        exact_head = (
+            checkpoint is not None
+            and checkpoint["status"] == "VERIFIED"
+            and checkpoint["service_kind"] == "postgres-master"
+            and checkpoint["current_checkpoint_id"] == checkpoint_id
+            and isinstance(checkpoint["version_ref"], str)
+            and bool(checkpoint["version_ref"])
+        )
+        if not exact_head:
             raise StaleRuntimeEvent(
                 "blogger checkpoint is not the exact verified PostgreSQL HEAD for its epoch"
+            )
+        assert checkpoint is not None
+        if (
+            checkpoint["master_instance_id"] == master_instance_id
+            and int(checkpoint["epoch"]) == epoch
+        ):
+            return
+
+        successor = connection.execute(
+            "SELECT operation.operation_id,operation.state AS operation_state,"
+            "service.state AS service_state,service.lease_until,"
+            "authority.state AS authority_state,authority.status_dataset_json,"
+            "service_epoch.current_epoch "
+            "FROM services service "
+            "JOIN service_epochs service_epoch ON service_epoch.service_kind=service.service_kind "
+            "JOIN run_attempts attempt ON attempt.run_id=service.run_id "
+            "AND attempt.attempt_id=service.attempt_id "
+            "JOIN operations operation ON operation.operation_id=attempt.operation_id "
+            "JOIN master_status_dataset_authorities authority "
+            "ON authority.operation_id=operation.operation_id "
+            "WHERE service.service_kind='postgres-master' "
+            "AND service.master_instance_id=? AND service.epoch=?",
+            (master_instance_id, epoch),
+        ).fetchone()
+        boot_checkpoint: object = None
+        if successor is not None and successor["status_dataset_json"] is not None:
+            with suppress(json.JSONDecodeError, TypeError):
+                status_dataset = json.loads(str(successor["status_dataset_json"]))
+                if isinstance(status_dataset, dict):
+                    boot_checkpoint = status_dataset.get("boot_checkpoint")
+        if (
+            successor is None
+            or successor["operation_state"] != "ACTIVE"
+            or successor["service_state"] != "ACTIVE"
+            or int(successor["current_epoch"]) != epoch
+            or _parse_time(str(successor["lease_until"])) <= self.clock.now()
+            or successor["authority_state"] != "READY"
+            or not isinstance(boot_checkpoint, dict)
+            or boot_checkpoint.get("kind") != "VERIFIED"
+            or boot_checkpoint.get("checkpoint_id") != checkpoint_id
+            or boot_checkpoint.get("generation") != int(checkpoint["generation"])
+            or boot_checkpoint.get("exact_version_ref") != checkpoint["version_ref"]
+            or boot_checkpoint.get("manifest_sha256") != checkpoint["manifest_sha256"]
+        ):
+            raise StaleRuntimeEvent(
+                "blogger checkpoint is not the exact verified PostgreSQL HEAD restored by the ACTIVE epoch"
             )
 
     def _transition_blogger_import(

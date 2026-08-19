@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -376,6 +377,99 @@ def test_pre_change_checkpoint_requires_verified_matching_current_head(tmp_path:
             epoch=7,
             pre_change_checkpoint_id=candidate_id,
         )
+
+
+def test_pre_change_checkpoint_accepts_exact_successor_boot_checkpoint(tmp_path: Path) -> None:
+    """A restored ACTIVE epoch must write against the checkpoint it booted from.
+
+    Checkpoints are produced by the preceding draining epoch.  Requiring the
+    candidate's producer identity to equal the restored successor identity
+    makes every cold-started operator write impossible.
+    """
+
+    ledger, checkpoint_id = _ledger_with_checkpoint(tmp_path)
+    head = ledger.checkpoint_head("postgres-master")
+    candidate = ledger.checkpoint_candidate(checkpoint_id)
+    assert head is not None and candidate is not None
+
+    successor_operation = "successor-operation"
+    successor_identity = {
+        "run_id": "run-8",
+        "attempt_id": "attempt-8",
+        "service_instance_id": "postgres-8",
+        "master_instance_id": "master-2",
+        "epoch": 8,
+    }
+    ledger.ensure_operation(
+        operation_id=successor_operation,
+        idempotency_key="successor-restores-current-head",
+        operation_kind="ensure_master",
+        intent={"source": "test"},
+        initial_state="ACTIVE",
+        identity=successor_identity,
+    )
+    ledger.record_attempt(
+        attempt_id="attempt-8",
+        run_id="run-8",
+        operation_id=successor_operation,
+        source_identity="git:" + "a" * 40,
+        source_version="a" * 40,
+        service_instance_id="postgres-8",
+        master_instance_id="master-2",
+        epoch=8,
+        state="REGISTERING",
+    )
+    _record_service_authority(
+        ledger,
+        master_instance_id="master-2",
+        epoch=8,
+        state="ACTIVE",
+    )
+    ledger.ensure_master_status_dataset_authority(
+        operation_id=successor_operation,
+        run_id="run-8",
+        attempt_id="attempt-8",
+        token="t" * 64,
+        creator_claim_until=datetime.now(UTC) + timedelta(minutes=5),
+        expected_content_tree_sha256="e" * 64,
+        resource_lease={"lease_id": "successor-status-lease"},
+    )
+    ledger.record_master_status_dataset(
+        operation_id=successor_operation,
+        status_dataset={
+            "provider_ref": "owner/status",
+            "exact_version_ref": "owner/status/1",
+            "boot_checkpoint": {
+                "kind": "VERIFIED",
+                "generation": head.generation,
+                "checkpoint_id": checkpoint_id,
+                "exact_version_ref": candidate["version_ref"],
+                "manifest_sha256": candidate["manifest_sha256"],
+            },
+        },
+    )
+
+    cold = {
+        **_identity(checkpoint_id),
+        "operation_id": "8" * 64,
+        "batch_id": "88888888-8888-4888-8888-888888888888",
+        "idempotency_key": "successor-boot-checkpoint",
+        "master_instance_id": None,
+        "epoch": None,
+        "pre_change_checkpoint_id": None,
+    }
+    ledger.ensure_blogger_import_operation(**cold)  # type: ignore[arg-type]
+
+    bound = ledger.bind_blogger_import_active_master(
+        str(cold["operation_id"]),
+        master_instance_id="master-2",
+        epoch=8,
+        pre_change_checkpoint_id=checkpoint_id,
+    )
+
+    assert bound["master_instance_id"] == "master-2"
+    assert bound["epoch"] == 8
+    assert bound["pre_change_checkpoint_id"] == checkpoint_id
 
 
 def test_checkpoint_identity_cannot_swap_between_verified_and_durable(tmp_path: Path) -> None:
