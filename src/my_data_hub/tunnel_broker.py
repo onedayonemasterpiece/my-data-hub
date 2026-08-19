@@ -478,10 +478,14 @@ class TunnelBroker:
         return completed
 
     def _lock(self) -> Any:
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # sshd opens AuthorizedPrincipalsFile after temporarily switching to
+        # the dedicated tunnel UID.  Keep the root-owned directory
+        # non-listable/non-writable but searchable so those public 0644 files
+        # are reachable; state.json, locks and CA material remain 0600.
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o711)
         if self.root.is_symlink() or not self.root.is_dir():
             raise TunnelBrokerError("broker root must remain a non-symlink directory")
-        os.chmod(self.root, 0o700)
+        os.chmod(self.root, 0o711)
         stream = self.lock_path.open("a+b")
         os.chmod(self.lock_path, 0o600)
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
@@ -1293,9 +1297,19 @@ class TunnelBroker:
         with self._lock():
             state = self._load_or_fail_closed()
             active = state.active
+            if active is None:
+                # A provider run may fail before the Notebook ever activates
+                # its tunnel. Deactivation is idempotent in that exact
+                # fail-closed state; the epoch high-water mark still prevents
+                # an old certificate from becoming active later.
+                self._write_principal(None)
+                self._write_worker_principals(state)
+                self._write_krl(state.revoked_serials)
+                self.session_terminator(self.account)
+                self._terminate_workers_if_issued(state)
+                return
             if (
-                active is None
-                or active.master_instance_id != instance
+                active.master_instance_id != instance
                 or active.run_id != run_id
                 or active.attempt_id != attempt_id
                 or active.epoch != epoch

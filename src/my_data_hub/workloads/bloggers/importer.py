@@ -317,6 +317,32 @@ def _observe(raw: Any, ordinal: int) -> _Observation:
     )
 
 
+def _accumulate_terminal_evidence(
+    batch_id: UUID,
+    snapshot_at: datetime,
+    terminal: Iterable[tuple[_Observation, BloggerDisposition, str]],
+) -> BloggerExportAccumulator:
+    """Rebuild source evidence in the original ordered-scan sequence.
+
+    Duplicate resolution deliberately writes canonical rows in actor order so
+    the canonical side is deterministic.  Source evidence, however, is bound
+    to YDB's ``ORDER BY record_id`` stream and must not inherit that different
+    write order.  The scan ordinal is immutable within the already-materialized
+    bounded snapshot, so sorting by it restores the exact source hash without
+    retaining another copy of any business row.
+    """
+
+    accumulator = BloggerExportAccumulator(batch_id, snapshot_at)
+    for item, disposition, _reason in sorted(terminal, key=lambda value: value[0].ordinal):
+        accumulator.add_evidence(
+            record_id=item.logical_id,
+            canonical_bytes=item.payload_bytes,
+            disposition=disposition,
+            source_file_sha256=item.row.source_file_sha256 if item.row else None,
+        )
+    return accumulator
+
+
 def _blocked_hash(items: list[tuple[_Observation, BloggerDisposition, str]]) -> str:
     value = [
         {
@@ -384,6 +410,30 @@ def _build_resolution_plan(
             if prior_target != resolution.canonical_actor_id:
                 raise DuplicateResolutionConflict("connected duplicate groups select different actors")
     return _ResolutionPlan(targets, canonical_records, tuple(supplied[key] for key in sorted(supplied)))
+
+
+def _should_apply_duplicate_resolutions(
+    *,
+    has_duplicate_groups: bool,
+    all_new: bool,
+    all_replay: bool,
+    prior_status: str,
+    supplied_resolutions: tuple[object, ...],
+) -> bool:
+    """Return whether an explicit owner resolution may be validated now.
+
+    A reviewed replay can enter a newly restored master where the source rows
+    have not yet been quarantined locally.  Requiring a prior rejected row in
+    that *same* PostgreSQL instance made the authorization unusable after every
+    epoch change.  The resolution itself still has to pass the exact duplicate
+    group/member/actor validation performed by ``_build_resolution_plan``.
+    """
+
+    return bool(
+        has_duplicate_groups
+        and supplied_resolutions
+        and (all_new or (all_replay and prior_status == "rejected"))
+    )
 
 
 class BloggerSnapshotImporter:
@@ -506,14 +556,16 @@ class BloggerSnapshotImporter:
                                 ),
                                 existing_actor_id=existing_account[0] if existing_account else None,
                             )
+                fresh_duplicate_snapshot = bool(duplicate_groups and all_new)
                 if duplicate_groups and all_new:
                     all_new = False
 
-                resolving_replay = bool(
-                    duplicate_groups
-                    and all_replay
-                    and prior_status == "rejected"
-                    and supplied_resolutions
+                resolving_replay = _should_apply_duplicate_resolutions(
+                    has_duplicate_groups=bool(duplicate_groups),
+                    all_new=fresh_duplicate_snapshot,
+                    all_replay=all_replay,
+                    prior_status=prior_status,
+                    supplied_resolutions=supplied_resolutions,
                 )
                 if resolving_replay:
                     try:
@@ -552,6 +604,72 @@ class BloggerSnapshotImporter:
                 )
                 if can_commit:
                     if resolution_plan is not None:
+                        if fresh_duplicate_snapshot:
+                            for item in typed:
+                                assert item.row is not None
+                                self.writer.retain_observation(
+                                    cursor,
+                                    export_batch_id=batch_id,
+                                    source_pk=item.source_pk,
+                                    payload=item.payload,
+                                    payload_sha256=item.payload_sha256,
+                                    disposition=BloggerDisposition.QUARANTINED,
+                                    reason_code="duplicate_account_reviewed_in_prior_epoch",
+                                    source_updated_at=item.row.updated_at,
+                                )
+                            for identity_hash, claim in duplicate_groups.items():
+                                group_id = uuid5(
+                                    _DUPLICATE_NAMESPACE,
+                                    f"{batch_id}:{identity_hash}",
+                                )
+                                cursor.execute(
+                                    """
+                                    INSERT INTO migration.duplicate_group(
+                                        duplicate_group_id,export_batch_id,identity_kind,
+                                        identity_hash,decision_status,reason,decided_by,decided_at
+                                    ) VALUES (%s,%s,'account_url',%s,'quarantined',
+                                              'reviewed duplicate evidence restored into this epoch',
+                                              'region-talk-bloggers.v1',clock_timestamp())
+                                    ON CONFLICT (duplicate_group_id) DO NOTHING
+                                    """,
+                                    (group_id, batch_id, identity_hash),
+                                )
+                                for member in claim.members:
+                                    state = self.writer.raw_state(
+                                        cursor,
+                                        export_batch_id=batch_id,
+                                        source_pk=member.source_pk,
+                                    )
+                                    if state is None:
+                                        raise DuplicateResolutionConflict(
+                                            "reviewed duplicate raw evidence is absent"
+                                        )
+                                    assert member.projection is not None
+                                    cursor.execute(
+                                        """
+                                        INSERT INTO migration.duplicate_group_member(
+                                            duplicate_group_id,raw_record_id,actor_id,evidence
+                                        ) VALUES (%s,%s,NULL,%s) ON CONFLICT DO NOTHING
+                                        """,
+                                        (
+                                            group_id,
+                                            state[0],
+                                            Jsonb(
+                                                {
+                                                    "identity_sha256": identity_hash,
+                                                    "projected_actor_id": str(
+                                                        member.projection.actor_id
+                                                    ),
+                                                    "source_pk": member.source_pk,
+                                                    "existing_actor_id": (
+                                                        str(claim.existing_actor_id)
+                                                        if claim.existing_actor_id
+                                                        else None
+                                                    ),
+                                                }
+                                            ),
+                                        ),
+                                    )
                         by_id = {item.logical_id: item for item in typed}
                         target_by_record = {
                             item.logical_id: resolution_plan.targets.get(
@@ -941,14 +1059,7 @@ class BloggerSnapshotImporter:
                     # the same receipt/no-op.
                     replayed_count = 0
 
-                accumulator = BloggerExportAccumulator(batch_id, snapshot_at)
-                for item, disposition, _reason in terminal:
-                    accumulator.add_evidence(
-                        record_id=item.logical_id,
-                        canonical_bytes=item.payload_bytes,
-                        disposition=disposition,
-                        source_file_sha256=item.row.source_file_sha256 if item.row else None,
-                    )
+                accumulator = _accumulate_terminal_evidence(batch_id, snapshot_at, terminal)
                 export = accumulator.finish(
                     expected_row_count=expected_row_count, allow_incomplete=not can_commit
                 )

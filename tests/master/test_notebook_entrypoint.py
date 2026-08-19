@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from my_data_hub.master_runtime.notebook_entrypoint import (
     CheckpointShutdownError,
     NotebookMasterConfig,
     _activation_url,
+    _bootstrap_owner,
     _checkpoint_before_stop,
     _checkpoint_until_deadline,
     _cleanup_epoch_principals,
@@ -85,6 +87,48 @@ def _payload() -> dict[str, object]:
     }
 
 
+def test_bootstrap_superuser_executes_the_reviewed_password_free_role_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+
+    class Cursor:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def execute(self, statement):  # type: ignore[no-untyped-def]
+            statements.append(" ".join(str(statement).split()))
+            return self
+
+    class Connection:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        @staticmethod
+        def cursor() -> Cursor:
+            return Cursor()
+
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint.psycopg.connect",
+        lambda database_url, *, autocommit: Connection(),
+    )
+
+    bootstrap_sql = (Path(__file__).parents[2] / "sql/admin/bootstrap_roles.sql").read_text()
+    _bootstrap_owner("postgresql:///postgres", bootstrap_sql)
+
+    assert statements == [" ".join(bootstrap_sql.split())]
+    assert "CREATE EXTENSION IF NOT EXISTS vector" in statements[0]
+    assert "mdh_master_controller" in statements[0]
+    assert "mdh_blogger_materializer" in statements[0]
+    assert "PASSWORD" not in statements[0]
+
+
 def test_master_notebook_config_requires_exact_fields_and_source_binding(tmp_path: Path) -> None:
     path = tmp_path / "master.json"
     path.write_text(json.dumps(_payload()))
@@ -139,6 +183,38 @@ def test_relocated_postgres_preflight_uses_exact_library_path_and_real_tools(
     monkeypatch.setenv("LD_LIBRARY_PATH", "/attacker")
     with pytest.raises(RuntimeError, match="exact relocated"):
         validate_relocated_postgres_runtime(config)
+
+
+def test_relocated_postgres_preflight_runs_as_the_restricted_postgres_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "master.json"
+    payload = _payload()
+    postgres_bin = tmp_path / "pgsql/bin"
+    postgres_bin.mkdir(parents=True)
+    payload["postgres_bin"] = str(postgres_bin)
+    config_path.write_text(json.dumps(payload))
+    config = NotebookMasterConfig.load(config_path)
+    for name in ("initdb", "pg_ctl", "psql"):
+        tool = postgres_bin / name
+        tool.write_text("fixture")
+        tool.chmod(0o700)
+    observed: list[tuple[str, ...]] = []
+
+    def run(_self, arguments, *, timeout_seconds, environment=None):  # type: ignore[no-untyped-def]
+        observed.append(tuple(arguments))
+        return subprocess.CompletedProcess(arguments, 0, f"{Path(arguments[0]).name} (PostgreSQL) 18.4\n", "")
+
+    monkeypatch.setenv("LD_LIBRARY_PATH", POSTGRES_RUNTIME_LIBRARY_PATH)
+    monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.SubprocessRunner.run", run)
+
+    validate_relocated_postgres_runtime(config)
+
+    assert observed == [
+        (str(postgres_bin / "initdb"), "--version"),
+        (str(postgres_bin / "pg_ctl"), "--version"),
+        (str(postgres_bin / "psql"), "--version"),
+    ]
 
 
 def test_fm10_observed_directive_stays_suspended_when_ack_response_is_lost(
@@ -1246,6 +1322,10 @@ def test_run_master_suppresses_only_callback_lease_closure_after_exact_terminal_
         lambda **kwargs: None,
     )
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint._checkpoint_until_deadline", checkpoint_until)
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._record_master_security_evidence",
+        lambda **kwargs: events.append("security.evidence"),
+    )
     monkeypatch.setattr("my_data_hub.master_runtime.notebook_entrypoint.time.sleep", lambda _seconds: None)
 
     started_at = time.monotonic()
@@ -1435,6 +1515,10 @@ def test_run_master_never_checkpoints_unacknowledged_blogger_import_receipt(
     monkeypatch.setattr(
         "my_data_hub.master_runtime.notebook_entrypoint._checkpoint_until_deadline",
         lambda **kwargs: pytest.fail("unacknowledged blogger receipt must never be checkpointed"),
+    )
+    monkeypatch.setattr(
+        "my_data_hub.master_runtime.notebook_entrypoint._record_master_security_evidence",
+        lambda **kwargs: events.append("security.evidence"),
     )
 
     with pytest.raises(BloggerReceiptDeliveryError, match="persistent receipt outage"):

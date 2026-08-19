@@ -8,7 +8,7 @@ from my_data_hub.auth.context import current_identity
 from my_data_hub.auth.control import OAuthAuditEvent
 from my_data_hub.auth.metadata import ProtectedResourceMetadata, protected_resource_metadata_url
 from my_data_hub.config import ConfigurationError, Settings
-from my_data_hub.mcp.catalog import DEFAULT_SECURITY_SCHEMES, TOOL_CONTRACTS, visible_tools
+from my_data_hub.mcp.catalog import TOOL_CONTRACTS, visible_tools
 from my_data_hub.mcp.contracts import (
     ControlPlaneReader,
     MasterResolver,
@@ -24,11 +24,34 @@ from my_data_hub.mcp.provider_schemas import (
     ProviderListPayload,
     ProviderReadPayload,
     ProviderRunPayload,
+    ProviderUploadChunkPayload,
+    ProviderUploadReferencePayload,
+    ProviderUploadStartPayload,
     ProviderVersionPayload,
 )
 from my_data_hub.mcp.service import HubService
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
 from my_data_hub.mcp.transport import ToolSecurityMetadataMiddleware
+from my_data_hub.workloads.bloggers.discovery import (
+    SubmitDiscoveryBatch,
+    validate_submit_discovery_batch,
+)
+
+READER_PROFILE_TOOLS = frozenset(
+    {
+        "platform.status",
+        "master.status",
+        "operation.get",
+        "checkpoint.status",
+        "embedding.coverage",
+        "embedding.production.capabilities",
+        "provider.resources.status",
+        "bloggers.list",
+        "bloggers.get",
+        "bloggers.search",
+        "bloggers.statistics",
+    }
+)
 
 PROVIDER_ONLY_TOOLS = frozenset(
     {
@@ -42,10 +65,16 @@ PROVIDER_ONLY_TOOLS = frozenset(
         "provider.resources.download",
         "provider.inventory.live",
         "provider.resources.delete",
+        "provider.upload.start",
+        "provider.upload.put_chunk",
+        "provider.upload.status",
+        "provider.upload.finalize",
+        "provider.upload.abort",
         "provider.acceptance.claim.get",
         "provider.acceptance.claim.cleanup",
     }
 )
+UNIFIED_BOOTSTRAP_TOOLS = PROVIDER_ONLY_TOOLS | READER_PROFILE_TOOLS
 
 
 def oauth_resource_metadata_url(resource: str) -> str:
@@ -67,6 +96,8 @@ class MCPDependencies:
     sql_policy: BoundedSQLPolicy | None = None
     acceptance_scenarios_enabled: bool = False
     provider_only_profile_enabled: bool = False
+    unified_bootstrap_profile_enabled: bool = False
+    reader_profile_enabled: bool = False
 
 
 def _local_identity(settings: Settings) -> AccessIdentity | None:
@@ -101,6 +132,32 @@ def _auth_error(resource_metadata_url: str, *, insufficient_scope: bool = True):
     )
 
 
+def _profile_tool_names(dependencies: MCPDependencies) -> set[str]:
+    names = set(TOOL_CONTRACTS)
+    if not dependencies.acceptance_scenarios_enabled:
+        names -= {"acceptance.scenario.request", "acceptance.scenario.status"}
+    if dependencies.provider_only_profile_enabled:
+        names &= PROVIDER_ONLY_TOOLS
+    if dependencies.unified_bootstrap_profile_enabled:
+        names &= UNIFIED_BOOTSTRAP_TOOLS
+    if dependencies.reader_profile_enabled:
+        names &= READER_PROFILE_TOOLS
+    return names
+
+
+def _configured_security_schemes(
+    settings: Settings, dependencies: MCPDependencies
+) -> list[dict[str, Any]]:
+    scopes = sorted(
+        {
+            TOOL_CONTRACTS[name].scope
+            for name in _profile_tool_names(dependencies)
+            if TOOL_CONTRACTS[name].scope in settings.mcp_scopes
+        }
+    )
+    return [{"type": "oauth2", "scopes": scopes}]
+
+
 def create_server(
     settings: Settings,
     *,
@@ -114,6 +171,8 @@ def create_server(
         raise RuntimeError("install my-data-hub to run the MCP server") from exc
 
     deps = dependencies or MCPDependencies()
+    profile_tools = _profile_tool_names(deps)
+    server_security_schemes = _configured_security_schemes(settings, deps)
     fallback = default_identity or _local_identity(settings)
     metadata_url = (
         oauth_resource_metadata_url(settings.mcp_oauth_resource)
@@ -122,36 +181,25 @@ def create_server(
     )
 
     class IdentityAwareMCPServer(MCPServer):  # type: ignore[misc]
-        security_schemes = DEFAULT_SECURITY_SCHEMES
+        security_schemes = server_security_schemes
 
         def _identity(self) -> AccessIdentity | None:
             return current_identity() or fallback
 
         async def list_tools(self):  # type: ignore[no-untyped-def]
             tools = await super().list_tools()
-            allowed = visible_tools(self._identity())
-            if not deps.acceptance_scenarios_enabled:
-                allowed -= {"acceptance.scenario.request", "acceptance.scenario.status"}
-            if deps.provider_only_profile_enabled:
-                allowed &= PROVIDER_ONLY_TOOLS
+            allowed = visible_tools(self._identity()) & profile_tools
             return [tool for tool in tools if tool.name in allowed]
 
         async def call_tool(self, name, arguments, context=None):  # type: ignore[no-untyped-def]
             identity = self._identity()
             contract = TOOL_CONTRACTS.get(name)
-            acceptance_disabled = (
-                str(name).startswith("acceptance.scenario.")
-                and not deps.acceptance_scenarios_enabled
-            )
-            provider_only_denied = (
-                deps.provider_only_profile_enabled and str(name) not in PROVIDER_ONLY_TOOLS
-            )
+            profile_denied = str(name) not in profile_tools
             if (
                 contract is None
                 or identity is None
                 or contract.scope not in identity.scopes
-                or acceptance_disabled
-                or provider_only_denied
+                or profile_denied
             ):
                 if identity is not None and deps.audit is not None:
                     recorded = deps.audit.record_mcp_audit(
@@ -312,37 +360,33 @@ def create_server(
     ) -> dict[str, Any]:
         return await service.invoke("provider.acceptance.claim.cleanup", locals())
 
-    async def bloggers_list(cursor: str | None = None, limit: int = 50) -> dict[str, Any]:
-        return await service.invoke("bloggers.list", {"cursor": cursor, "limit": limit})
+    async def bloggers_list(
+        project_slug: str,
+        after_name: str | None = None,
+        after_blogger_id: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return await service.invoke("bloggers.list", locals())
 
-    async def bloggers_get(blogger_id: str) -> dict[str, Any]:
-        return await service.invoke("bloggers.get", {"blogger_id": blogger_id})
+    async def bloggers_get(project_slug: str, blogger_id: str) -> dict[str, Any]:
+        return await service.invoke("bloggers.get", locals())
 
     async def bloggers_search(
-        query: str,
-        cursor: str | None = None,
+        project_slug: str,
+        query: str | None = None,
+        after_name: str | None = None,
+        after_blogger_id: str | None = None,
         limit: int = 20,
-        e5_query_vector: list[float] | None = None,
-        bge_m3_query_vector: list[float] | None = None,
     ) -> dict[str, Any]:
-        return await service.invoke(
-            "bloggers.search",
-            {
-                "query": query,
-                "cursor": cursor,
-                "limit": limit,
-                "e5_query_vector": e5_query_vector,
-                "bge_m3_query_vector": bge_m3_query_vector,
-            },
-        )
+        return await service.invoke("bloggers.search", locals())
 
     async def bloggers_provenance(blogger_id: str, limit: int = 50) -> dict[str, Any]:
         return await service.invoke(
             "bloggers.provenance", {"blogger_id": blogger_id, "limit": limit}
         )
 
-    async def bloggers_statistics() -> dict[str, Any]:
-        return await service.invoke("bloggers.statistics", {})
+    async def bloggers_statistics(project_slug: str) -> dict[str, Any]:
+        return await service.invoke("bloggers.statistics", locals())
 
     async def bloggers_migration_accounting(export_batch_id: str) -> dict[str, Any]:
         return await service.invoke(
@@ -399,6 +443,21 @@ def create_server(
     ) -> dict[str, Any]:
         return await service.invoke("bloggers.import.apply", locals())
 
+    async def bloggers_import_status(operation_id: str) -> dict[str, Any]:
+        return await service.invoke("bloggers.import.status", locals())
+
+    async def submit_discovery_batch(payload: SubmitDiscoveryBatch) -> dict[str, Any]:
+        # The MCP SDK advertises the closed structural model.  Revalidate the
+        # received JSON through the official two-stage validator before any
+        # ACTIVE-master or connector action.
+        validated = validate_submit_discovery_batch(
+            payload.model_dump(mode="json", exclude_none=True)
+        )
+        return await service.invoke(
+            "submit_discovery_batch",
+            {"payload": validated.model_dump(mode="json", exclude_none=True)},
+        )
+
     def provider_arguments(
         resource_ref: str,
         control_class: str,
@@ -409,7 +468,10 @@ def create_server(
         | ProviderReadPayload
         | ProviderListPayload
         | ProviderDownloadPayload
-        | ProviderDeletePayload,
+        | ProviderDeletePayload
+        | ProviderUploadStartPayload
+        | ProviderUploadChunkPayload
+        | ProviderUploadReferencePayload,
     ) -> dict[str, Any]:
         return {
             "resource_ref": resource_ref,
@@ -487,6 +549,61 @@ def create_server(
     async def provider_inventory_live(limit: int = 100) -> dict[str, Any]:
         return await service.invoke("provider.inventory.live", {"limit": limit})
 
+    async def provider_upload_start(
+        resource_ref: str,
+        control_class: Literal["mcp_managed"],
+        private: Literal[True],
+        payload: ProviderUploadStartPayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.upload.start",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
+    async def provider_upload_put_chunk(
+        resource_ref: str,
+        control_class: Literal["mcp_managed"],
+        private: Literal[True],
+        payload: ProviderUploadChunkPayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.upload.put_chunk",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
+    async def provider_upload_status(
+        resource_ref: str,
+        control_class: Literal["mcp_managed"],
+        private: Literal[True],
+        payload: ProviderUploadReferencePayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.upload.status",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
+    async def provider_upload_finalize(
+        resource_ref: str,
+        control_class: Literal["mcp_managed"],
+        private: Literal[True],
+        payload: ProviderUploadReferencePayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.upload.finalize",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
+    async def provider_upload_abort(
+        resource_ref: str,
+        control_class: Literal["mcp_managed"],
+        private: Literal[True],
+        payload: ProviderUploadReferencePayload,
+    ) -> dict[str, Any]:
+        return await service.invoke(
+            "provider.upload.abort",
+            provider_arguments(resource_ref, control_class, private, payload),
+        )
+
     async def provider_resources_delete(
         resource_ref: str,
         control_class: Literal["mcp_managed", "mcp_exchange"],
@@ -527,6 +644,11 @@ def create_server(
         "provider.resources.download": provider_resources_download,
         "provider.inventory.live": provider_inventory_live,
         "provider.resources.delete": provider_resources_delete,
+        "provider.upload.start": provider_upload_start,
+        "provider.upload.put_chunk": provider_upload_put_chunk,
+        "provider.upload.status": provider_upload_status,
+        "provider.upload.finalize": provider_upload_finalize,
+        "provider.upload.abort": provider_upload_abort,
         "bloggers.list": bloggers_list,
         "bloggers.get": bloggers_get,
         "bloggers.search": bloggers_search,
@@ -539,6 +661,8 @@ def create_server(
         "data.change.status": data_change_status,
         "bloggers.import.preview": bloggers_import_preview,
         "bloggers.import.apply": bloggers_import_apply,
+        "bloggers.import.status": bloggers_import_status,
+        "submit_discovery_batch": submit_discovery_batch,
     }
     for tool_name in TOOL_CONTRACTS:
         register(tool_name, functions[tool_name])
@@ -575,14 +699,15 @@ def create_streamable_http_app(
             allowed_origins=list(settings.mcp_allowed_origins),
         ),
     )
-    metadata_tools = (
-        PROVIDER_ONLY_TOOLS if dependencies.provider_only_profile_enabled else TOOL_CONTRACTS
-    )
+    metadata_tools = _profile_tool_names(dependencies)
+    configured_security_schemes = _configured_security_schemes(settings, dependencies)
     resource_metadata = ProtectedResourceMetadata(
         resource=settings.mcp_oauth_resource,
         authorization_servers=(settings.mcp_oauth_issuer,),
         scopes_supported=frozenset(
-            TOOL_CONTRACTS[name].scope for name in metadata_tools if name in TOOL_CONTRACTS
+            TOOL_CONTRACTS[name].scope
+            for name in metadata_tools
+            if name in TOOL_CONTRACTS and TOOL_CONTRACTS[name].scope in settings.mcp_scopes
         ),
     )
     metadata_url = oauth_resource_metadata_url(settings.mcp_oauth_resource)
@@ -599,7 +724,12 @@ def create_streamable_http_app(
     mounted = Starlette(
         routes=[
             Route(metadata_path, metadata, methods=["GET"]),
-            Mount("/", app=ToolSecurityMetadataMiddleware(mcp_app)),
+            Mount(
+                "/",
+                app=ToolSecurityMetadataMiddleware(
+                    mcp_app, security_schemes=configured_security_schemes
+                ),
+            ),
         ],
         lifespan=lifespan,
     )

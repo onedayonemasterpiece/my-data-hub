@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,7 +22,9 @@ from my_data_hub.checkpoints.brokered_upload import (
     CheckpointUploadSecretBox,
     RuntimeUploadAuthority,
 )
+from my_data_hub.checkpoints.kaggle_runtime import CheckpointRuntimeError
 from my_data_hub.checkpoints.manifest import RestoreProbe, build_manifest, canonical_json, write_manifest
+from my_data_hub.checkpoints.provider_storage import checkpoint_provider_file_name
 from my_data_hub.checkpoints.registry import ControlLedgerCheckpointRegistry
 from my_data_hub.connectors.checkpoint_control import (
     ControlLedgerVerifiedCheckpointCoordinator,
@@ -117,6 +121,18 @@ class FailingRestoreVerifier:
     def verify_restore(self, **kwargs: object) -> dict[str, object]:
         del kwargs
         raise self.failure
+
+
+class RevisionedRestoreVerifier(FakeRestoreVerifier):
+    def __init__(self, revision: str) -> None:
+        self.revision_sha256 = revision
+        self.calls = 0
+
+
+class RevisionedFailingRestoreVerifier(FailingRestoreVerifier):
+    def __init__(self, revision: str) -> None:
+        super().__init__(CheckpointRuntimeError("missing exact runtime dependency"))
+        self.revision_sha256 = revision
 
 
 def _fixture(tmp_path: Path):  # type: ignore[no-untyped-def]
@@ -427,6 +443,187 @@ def test_connector_request_restarts_through_real_broker_verified_head(tmp_path: 
     }
 
 
+def _promote_verified_descendant(ledger: ControlLedger) -> UUID:
+    descendant = UUID("77777777-7777-4777-8777-777777777777")
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=str(descendant),
+        operation_id=str(OPERATION),
+        dataset_ref="owner/checkpoints",
+        version_ref=None,
+        manifest_sha256="d" * 64,
+        source_checkpoint_id=str(CHECKPOINT),
+        source_head_generation=1,
+        master_instance_id=str(MASTER),
+        epoch=1,
+        manifest_payload={"canonical_revision": 8},
+    )
+    ledger.mark_checkpoint_uploaded(str(descendant), "owner/checkpoints/2")
+    ledger.mark_checkpoint_readback_verified(str(descendant))
+    ledger.mark_checkpoint_restore_verified(str(descendant))
+    ledger.promote_checkpoint(
+        "postgres-master",
+        str(descendant),
+        expected_generation=1,
+        expected_parent_checkpoint_id=str(CHECKPOINT),
+    )
+    return descendant
+
+
+def test_completed_connector_checkpoint_remains_durable_after_head_advances(
+    tmp_path: Path,
+) -> None:
+    ledger, package, manifest, _adapter, _verifier, service, authority = _fixture(tmp_path)
+    coordinator = ControlLedgerVerifiedCheckpointCoordinator(ledger)
+    idempotency_key = "c" * 64
+    operation_id = f"connector-checkpoint:{idempotency_key}"
+    coordinator.request_verified_checkpoint(
+        operation_id=operation_id,
+        canonical_revision=7,
+        idempotency_key=idempotency_key,
+    )
+    ledger.claim_connector_checkpoint_request(
+        run_id=str(RUN),
+        attempt_id=str(ATTEMPT),
+        master_instance_id=str(MASTER),
+        epoch=1,
+    )
+    _upload_all(package, manifest, service, authority)
+    service.finalize(CHECKPOINT, authority)
+    completed = coordinator.checkpoint_status(operation_id)
+    assert completed["state"] == "DURABLE_COMPLETE"
+
+    descendant = _promote_verified_descendant(ledger)
+    head = ledger.checkpoint_head("postgres-master")
+    assert head is not None and head.current_checkpoint_id == str(descendant)
+
+    assert coordinator.checkpoint_status(operation_id) == completed
+
+
+def test_completed_connector_checkpoint_rejects_broken_head_ancestry(tmp_path: Path) -> None:
+    ledger, package, manifest, _adapter, _verifier, service, authority = _fixture(tmp_path)
+    coordinator = ControlLedgerVerifiedCheckpointCoordinator(ledger)
+    idempotency_key = "d" * 64
+    operation_id = f"connector-checkpoint:{idempotency_key}"
+    coordinator.request_verified_checkpoint(
+        operation_id=operation_id,
+        canonical_revision=7,
+        idempotency_key=idempotency_key,
+    )
+    ledger.claim_connector_checkpoint_request(
+        run_id=str(RUN),
+        attempt_id=str(ATTEMPT),
+        master_instance_id=str(MASTER),
+        epoch=1,
+    )
+    _upload_all(package, manifest, service, authority)
+    service.finalize(CHECKPOINT, authority)
+    assert coordinator.checkpoint_status(operation_id)["state"] == "DURABLE_COMPLETE"
+
+    descendant = _promote_verified_descendant(ledger)
+    with ledger._transaction() as connection:
+        connection.execute(
+            "UPDATE checkpoint_candidates SET source_checkpoint_id=NULL WHERE checkpoint_id=?",
+            (str(descendant),),
+        )
+
+    with pytest.raises(RuntimeError, match="verified checkpoint ancestry"):
+        coordinator.checkpoint_status(operation_id)
+
+
+def test_unified_bootstrap_master_can_claim_its_gate_checkpoint(tmp_path: Path) -> None:
+    ledger, _package, _manifest, _adapter, _verifier, _service, _authority = _fixture(tmp_path)
+    coordinator = ControlLedgerVerifiedCheckpointCoordinator(ledger)
+    idempotency_key = "b" * 64
+    operation_id = f"connector-checkpoint:{idempotency_key}"
+    coordinator.request_verified_checkpoint(
+        operation_id=operation_id,
+        canonical_revision=7,
+        idempotency_key=idempotency_key,
+    )
+    token = "u" * 64
+    ledger.store_runtime_token_hash(str(RUN), str(ATTEMPT), token)
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "ledger": ledger,
+            "coordinator": None,
+            "reconcile_requested_once": lambda self: None,
+        },
+    )()
+    client = TestClient(
+        create_app(
+            ControlPlaneSettings(
+                ledger_path=ledger.path,
+                master_runtime=object(),  # type: ignore[arg-type]
+                provider_gateway_enabled=True,
+                unified_bootstrap_mode=True,
+            ),
+            ledger=ledger,
+            master_runtime=runtime,  # type: ignore[arg-type]
+            provider_gateway=object(),  # type: ignore[arg-type]
+            provider_gateway_token=b"g" * 32,
+        )
+    )
+
+    claim = client.get(
+        f"/internal/runtime/connector-checkpoint/{RUN}/{ATTEMPT}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-MDH-Master-Instance-ID": str(MASTER),
+            "X-MDH-Epoch": "1",
+        },
+    )
+
+    assert claim.status_code == 200
+    assert claim.json() == {
+        "available": True,
+        "operation_id": operation_id,
+        "canonical_revision": 7,
+    }
+
+
+def test_checkpoint_recovery_is_not_blocked_by_master_provider_polling(tmp_path: Path) -> None:
+    """A slow provider run poll must not starve a ready checkpoint publication."""
+
+    ledger = ControlLedger(tmp_path / "independent-checkpoint-recovery.sqlite3")
+    broker_called = threading.Event()
+    master_finished = threading.Event()
+
+    class BlockingMasterRuntime:
+        def __init__(self, control: ControlLedger) -> None:
+            self.ledger = control
+            self.coordinator = None
+
+        def reconcile_requested_once(self) -> None:
+            assert broker_called.wait(timeout=2), "checkpoint recovery was starved by master polling"
+            master_finished.set()
+
+    class RecoveryBroker:
+        def reconcile_pending_once(self) -> list[dict[str, object]]:
+            broker_called.set()
+            return []
+
+    app = create_app(
+        ControlPlaneSettings(
+            ledger_path=ledger.path,
+            master_runtime=object(),  # type: ignore[arg-type]
+            provider_gateway_enabled=True,
+            unified_bootstrap_mode=True,
+        ),
+        ledger=ledger,
+        master_runtime=BlockingMasterRuntime(ledger),  # type: ignore[arg-type]
+        checkpoint_upload_broker=RecoveryBroker(),  # type: ignore[arg-type]
+        provider_gateway=object(),  # type: ignore[arg-type]
+        provider_gateway_token=b"g" * 32,
+    )
+
+    with TestClient(app) as client:
+        assert client.get("/health/ready").status_code == 200
+        assert broker_called.wait(timeout=2)
+        assert master_finished.wait(timeout=2)
+
+
 def test_second_verified_candidate_preserves_current_as_previous(tmp_path: Path) -> None:
     ledger, package, manifest, adapter, _verifier, service, authority = _fixture(tmp_path)
     _upload_all(package, manifest, service, authority)
@@ -483,6 +680,96 @@ def test_second_verified_candidate_preserves_current_as_previous(tmp_path: Path)
     assert head.previous_checkpoint_id == str(CHECKPOINT)
     assert adapter.finalized == 2
     assert _verifier.calls == 2
+
+
+def test_complete_child_recreates_externally_missing_checkpoint_dataset(tmp_path: Path) -> None:
+    ledger, package, manifest, adapter, verifier, service, authority = _fixture(tmp_path)
+    _upload_all(package, manifest, service, authority)
+    service.finalize(CHECKPOINT, authority)
+
+    next_checkpoint = UUID("77777777-7777-4777-8777-777777777778")
+    package_2 = tmp_path / "replacement-package"
+    values = {
+        "physical/base.tar.gz": b"replacement-base",
+        "physical/backup_manifest": b"replacement-native-manifest",
+        "physical/pg_wal.tar.gz": b"replacement-wal",
+        "logical/hub.dump": b"replacement-logical",
+        "receipts/verification.json": b'{"ok":true,"replacement":true}',
+    }
+    for relative, content in values.items():
+        target = package_2 / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    manifest_2 = build_manifest(
+        package_directory=package_2,
+        checkpoint_id=next_checkpoint,
+        master_instance_id=MASTER,
+        epoch=1,
+        parent_checkpoint_id=CHECKPOINT,
+        postgres_version="18.4",
+        pgvector_version="0.8.6",
+        schema_version=18,
+        canonical_revision=8,
+        source_run_id=str(RUN),
+        source_identity="owner/master/17",
+        created_at=NOW,
+        checkpoint_lsn="0/16B6C61",
+        file_kinds={
+            "physical/base.tar.gz": "physical",
+            "physical/backup_manifest": "postgres_backup_manifest",
+            "physical/pg_wal.tar.gz": "physical",
+            "logical/hub.dump": "logical",
+            "receipts/verification.json": "verification_receipt",
+        },
+        restore_probe=RestoreProbe(18, 8, "e" * 64, {"hub.canonical_state": 1}),
+    )
+    ControlLedgerCheckpointRegistry(
+        ledger,
+        operation_id=str(OPERATION),
+        dataset_ref="owner/checkpoints",
+    ).add_candidate(manifest_2)
+    _upload_all(package_2, manifest_2, service, authority)
+
+    # Exact provider inventory proves the durable Dataset vanished externally.
+    adapter.current_version = None
+    original_retire = service.control.retire_missing_checkpoint_dataset_incarnation
+
+    def process_lost_before_retirement(*_args: object, **_kwargs: object) -> object:
+        raise SimulatedProcessLoss("process lost after replacement Dataset resolution")
+
+    service.control.retire_missing_checkpoint_dataset_incarnation = (  # type: ignore[method-assign]
+        process_lost_before_retirement
+    )
+    with pytest.raises(SimulatedProcessLoss):
+        service.finalize(next_checkpoint, authority)
+
+    retirement = ledger.checkpoint_dataset_incarnation_retirement(str(next_checkpoint))
+    assert retirement is not None
+    assert json.loads(str(retirement["retired_versions_json"])) == [
+        {"checkpoint_id": str(CHECKPOINT), "version_ref": "owner/checkpoints/1"}
+    ]
+    assert service.status(next_checkpoint)["state"] == "DATASET_RESOLVED"
+    assert ledger.checkpoint_candidate(str(CHECKPOINT))["version_ref"] == "owner/checkpoints/1"  # type: ignore[index]
+
+    service.control.retire_missing_checkpoint_dataset_incarnation = original_retire  # type: ignore[method-assign]
+    restarted_ledger, restarted = _restarted_service(ledger, adapter, verifier)
+    receipt = restarted.finalize(next_checkpoint, authority)
+
+    assert receipt["exact_version_ref"] == "owner/checkpoints/1"
+    publication = service.ledger.publication(str(next_checkpoint))
+    assert publication is not None
+    assert publication["expected_provider_version"] == 1
+    assert publication["finalize_attempts"] == 1
+    assert restarted_ledger.checkpoint_candidate(str(CHECKPOINT))["version_ref"] is None  # type: ignore[index]
+    assert restarted_ledger.checkpoint_candidate(str(next_checkpoint))["version_ref"] == (  # type: ignore[index]
+        "owner/checkpoints/1"
+    )
+    head = restarted_ledger.checkpoint_head("postgres-master")
+    assert head is not None and head.generation == 2
+    assert head.current_checkpoint_id == str(next_checkpoint)
+    assert head.previous_checkpoint_id == str(CHECKPOINT)
+    assert adapter.finalized == 2
+    assert verifier.calls == 2
 
 
 def test_invalid_prepare_is_rejected_and_exact_ready_claim_replays(tmp_path: Path) -> None:
@@ -707,6 +994,112 @@ def test_verifier_failure_preserves_head_and_fails_candidate(tmp_path: Path, fai
     assert service.status(CHECKPOINT)["state"] == "FAILED"
 
 
+def test_new_verifier_revision_recovers_exact_failed_dataset_without_reupload(tmp_path: Path) -> None:
+    ledger, package, manifest, adapter, _verifier, _service, authority = _fixture(tmp_path)
+    old = RevisionedFailingRestoreVerifier("a" * 64)
+    failed = BrokeredCheckpointUploadService(
+        ledger,
+        adapter,
+        CheckpointUploadSecretBox(b"k" * 32),
+        old,
+    )
+    _upload_all(package, manifest, failed, authority)
+    with pytest.raises(CheckpointRuntimeError, match="runtime dependency"):
+        failed.finalize(CHECKPOINT, authority)
+
+    first = failed.status(CHECKPOINT)
+    assert first["state"] == "FAILED"
+    assert failed.reconcile_pending_once() == []
+    assert adapter.finalized == 1
+
+    fixed_verifier = RevisionedRestoreVerifier("b" * 64)
+    recovered = BrokeredCheckpointUploadService(
+        ledger,
+        adapter,
+        CheckpointUploadSecretBox(b"k" * 32),
+        fixed_verifier,
+    )
+    receipts = recovered.reconcile_pending_once()
+
+    assert len(receipts) == 1 and receipts[0]["state"] == "PROMOTED"
+    assert adapter.finalized == 1
+    assert fixed_verifier.calls == 1
+    publication = recovered.ledger.publication(str(CHECKPOINT))
+    assert publication is not None
+    assert publication["verifier_attempts"] == 2
+    assert publication["verifier_revision_sha256"] == "b" * 64
+    assert ledger.checkpoint_head("postgres-master").current_checkpoint_id == str(CHECKPOINT)  # type: ignore[union-attr]
+
+
+def test_provider_unavailable_before_verifier_start_is_retryable_without_reupload(tmp_path: Path) -> None:
+    ledger, package, manifest, adapter, _verifier, _service, authority = _fixture(tmp_path)
+    failed = BrokeredCheckpointUploadService(
+        ledger,
+        adapter,
+        CheckpointUploadSecretBox(b"k" * 32),
+        RevisionedFailingRestoreVerifier("a" * 64),
+    )
+    _upload_all(package, manifest, failed, authority)
+    with pytest.raises(CheckpointRuntimeError):
+        failed.finalize(CHECKPOINT, authority)
+    with ledger._transaction() as connection:
+        connection.execute(
+            "UPDATE checkpoint_blob_publications SET failure_code='MasterProviderUnavailable',"
+            "verifier_revision_sha256=NULL,verifier_attempts=0 WHERE checkpoint_id=?",
+            (str(CHECKPOINT),),
+        )
+        connection.execute(
+            "UPDATE checkpoint_candidates SET failure_code='MasterProviderUnavailable' WHERE checkpoint_id=?",
+            (str(CHECKPOINT),),
+        )
+
+    fixed_verifier = RevisionedRestoreVerifier("b" * 64)
+    recovered = BrokeredCheckpointUploadService(
+        ledger,
+        adapter,
+        CheckpointUploadSecretBox(b"k" * 32),
+        fixed_verifier,
+    )
+    receipts = recovered.reconcile_pending_once()
+
+    assert len(receipts) == 1 and receipts[0]["state"] == "PROMOTED"
+    assert adapter.finalized == 1
+    assert fixed_verifier.calls == 1
+
+
+def test_incompatible_historical_verifier_does_not_block_new_ready_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ledger, package, manifest, adapter, _verifier, service, authority = _fixture(tmp_path)
+    _upload_all(package, manifest, service, authority)
+    real_publication = service.ledger.publication
+
+    monkeypatch.setattr(service.ledger, "failed_verifier_publications", lambda: ["legacy-failed"])
+    monkeypatch.setattr(
+        service.ledger,
+        "publication",
+        lambda checkpoint_id: (
+            {"checkpoint_id": "legacy-failed"}
+            if checkpoint_id == "legacy-failed"
+            else real_publication(checkpoint_id)
+        ),
+    )
+
+    def incompatible_factory(_operation_id: UUID, _task_id: UUID) -> FakeRestoreVerifier:
+        raise RuntimeError("historical verifier assets are unavailable")
+
+    service.restore_verifier = None
+    service.restore_verifier_factory = incompatible_factory
+
+    with pytest.raises(RuntimeError, match="historical verifier assets"):
+        service.reconcile_pending_once()
+    publication = real_publication(str(CHECKPOINT))
+    assert publication is not None and publication["state"] == "FAILED"
+    assert publication["exact_version_ref"] == "owner/checkpoints/1"
+    assert adapter.finalized == 1
+
+
 def test_failed_second_candidate_preserves_exact_current_and_previous_head(tmp_path: Path) -> None:
     ledger, package, manifest, adapter, verifier, service, authority = _fixture(tmp_path)
     _upload_all(package, manifest, service, authority)
@@ -778,11 +1171,110 @@ def test_partial_upload_and_expired_authority_cannot_promote(tmp_path: Path) -> 
         service.finalize(CHECKPOINT, authority)
     assert adapter.finalized == 0
     assert ledger.checkpoint_head("postgres-master") is None
-
     ledger.clock.advance(delta=timedelta(minutes=11))  # type: ignore[attr-defined]
     with pytest.raises(LeaseRejected):
         service.prepare(_specs(package, manifest)[1], authority)
     assert ledger.checkpoint_head("postgres-master") is None
+
+
+def test_complete_publication_reconciles_after_runtime_lease_expires(tmp_path: Path) -> None:
+    ledger, package, manifest, adapter, verifier, service, authority = _fixture(tmp_path)
+    _upload_all(package, manifest, service, authority)
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="ACTIVE",
+        operation_state="DRAINING",
+        service_state="DRAINING",
+        event_id="runtime-draining",
+    )
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="DRAINING",
+        operation_state="CHECKPOINTING",
+        service_state="DRAINING",
+        event_id="checkpoint-started",
+    )
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="CHECKPOINTING",
+        operation_state="CHECKPOINT_FAILED",
+        service_state="DRAINING",
+        event_id="checkpoint-client-timeout",
+    )
+    ledger.clock.advance(delta=timedelta(minutes=11))  # type: ignore[attr-defined]
+
+    with pytest.raises(LeaseRejected):
+        service.finalize(CHECKPOINT, authority)
+
+    recovered = service.reconcile_pending_once()
+
+    assert recovered == [service.status(CHECKPOINT)]
+    assert recovered[0]["state"] == "PROMOTED"
+    assert adapter.finalized == 1
+    assert verifier.calls == 1
+    head = ledger.checkpoint_head("postgres-master")
+    assert head is not None and head.current_checkpoint_id == str(CHECKPOINT)
+
+
+def test_terminal_failed_checkpoint_can_be_explicitly_fenced_for_replacement(tmp_path: Path) -> None:
+    ledger, package, manifest, _adapter, _verifier, service, authority = _fixture(tmp_path)
+    ledger.store_runtime_token_hash(str(RUN), str(ATTEMPT), "runtime-token")
+    _upload_all(package, manifest, service, authority)
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="ACTIVE",
+        operation_state="DRAINING",
+        service_state="DRAINING",
+        event_id="runtime-draining",
+    )
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="DRAINING",
+        operation_state="CHECKPOINTING",
+        service_state="DRAINING",
+        event_id="checkpoint-started",
+    )
+    service._fail(CHECKPOINT, "RUNTIME_AUTHORITY_EXPIRED", quarantine=False)
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="CHECKPOINTING",
+        operation_state="CHECKPOINT_FAILED",
+        service_state="DRAINING",
+        event_id="checkpoint-failed",
+    )
+
+    ledger.fence_checkpoint_failed_master(
+        operation_id=str(OPERATION),
+        run_id=str(RUN),
+        attempt_id=str(ATTEMPT),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        event_id="operator-checkpoint-failure-recovery",
+    )
+    # Exact replay is idempotent and all runtime admission is retired.
+    ledger.fence_checkpoint_failed_master(
+        operation_id=str(OPERATION),
+        run_id=str(RUN),
+        attempt_id=str(ATTEMPT),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        event_id="operator-checkpoint-failure-recovery",
+    )
+    assert ledger.get_operation(str(OPERATION)).state == "FENCED"  # type: ignore[union-attr]
+    assert ledger.resolve_service("postgres-master") is None
+    assert not ledger.runtime_token_valid(str(RUN), str(ATTEMPT), "runtime-token")
 
 
 class _RuntimeMetadataClient:
@@ -946,9 +1438,10 @@ def test_fresh_runtime_process_skips_durable_completed_put_without_capability_le
     receipt = restarted_provider.publish(package=package, manifest_path=manifest_path)
 
     expected_files = {item.path for item in manifest.files} | {"checkpoint-manifest.json"}
+    expected_provider_files = {checkpoint_provider_file_name(name) for name in expected_files}
     assert receipt.exact_version_ref == "owner/checkpoints/1"
     assert set(puts) == expected_files and len(puts) == len(expected_files)
-    assert set(adapter.started) == expected_files and len(adapter.started) == len(expected_files)
+    assert set(adapter.started) == expected_provider_files and len(adapter.started) == len(expected_files)
     assert adapter.finalized == 1 and verifier.calls == 1
 
 

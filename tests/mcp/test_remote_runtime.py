@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from collections.abc import AsyncIterator
@@ -18,8 +19,13 @@ from my_data_hub.control_plane.app import DATABASE_ENVIRONMENT_NAMES
 from my_data_hub.mcp.catalog import ALL_SCOPES, TOOL_CONTRACTS
 from my_data_hub.mcp.contracts import MasterSnapshot, MasterState
 from my_data_hub.mcp.oauth import AccessIdentity, TokenValidationError
-from my_data_hub.mcp.runtime import ProviderOnlyWriteGate, build_remote_runtime
-from my_data_hub.mcp.server import PROVIDER_ONLY_TOOLS, MCPDependencies, create_server
+from my_data_hub.mcp.runtime import ProviderOnlyWriteGate, UnifiedBootstrapWriteGate, build_remote_runtime
+from my_data_hub.mcp.server import (
+    PROVIDER_ONLY_TOOLS,
+    UNIFIED_BOOTSTRAP_TOOLS,
+    MCPDependencies,
+    create_server,
+)
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
 
 RESOURCE = "https://mcp-datahub.kenigevents.ru/mcp"
@@ -33,10 +39,10 @@ READER_SCOPES = frozenset(
         "embedding:read",
         "provider:read",
         "bloggers:read",
-        "data:read",
     }
 )
 OAUTH_PROTOCOL_SCOPES = frozenset({"openid", "offline_access"})
+UNIFIED_SCOPES = READER_SCOPES | {"provider:write"}
 
 
 def _configure(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
@@ -100,6 +106,27 @@ async def _lifespan(app: Any) -> AsyncIterator[None]:
         shutdown = await send_queue.get()
         assert shutdown["type"] == "lifespan.shutdown.complete"
         await task
+
+
+def _capturing_app(app: Any, payloads: list[dict[str, object]]):  # type: ignore[no-untyped-def]
+    async def capture_http(scope, receive, send):  # type: ignore[no-untyped-def]
+        bodies: list[bytes] = []
+
+        async def capture_send(message):  # type: ignore[no-untyped-def]
+            if message.get("type") == "http.response.body":
+                bodies.append(message.get("body", b""))
+            await send(message)
+
+        await app(scope, receive, capture_send)
+        if bodies:
+            try:
+                value = json.loads(b"".join(bodies))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return
+            if isinstance(value, dict):
+                payloads.append(value)
+
+    return capture_http
 
 
 @pytest.mark.asyncio
@@ -201,8 +228,10 @@ async def test_standard_mcp_client_lists_reader_catalog_and_reads_absent_status(
         allowed_scopes=READER_SCOPES,
         profile_kind="reader",
     )
+    http_payloads: list[dict[str, object]] = []
+
     client = httpx2.AsyncClient(
-        transport=httpx2.ASGITransport(app=runtime.app),
+        transport=httpx2.ASGITransport(app=_capturing_app(runtime.app, http_payloads)),
         headers={
             "Authorization": "Bearer signed-reader-token",
             "Host": "mcp-datahub.kenigevents.ru",
@@ -223,9 +252,20 @@ async def test_standard_mcp_client_lists_reader_catalog_and_reads_absent_status(
         result = await session.call_tool("platform.status", {})
     names = {tool.name for tool in tools.tools}
     assert "bloggers.search" in names
+    assert "data.query" not in names
+    assert "submit_discovery_batch" not in names
     assert "data.change.apply" not in names
     assert result.is_error is False
     assert result.structured_content["master_state"] == "ABSENT"
+    tools_payload = next(
+        payload
+        for payload in http_payloads
+        if isinstance(payload.get("result"), dict)
+        and isinstance(payload["result"].get("tools"), list)  # type: ignore[union-attr]
+    )
+    assert tools_payload["result"]["securitySchemes"] == [  # type: ignore[index]
+        {"type": "oauth2", "scopes": sorted(READER_SCOPES)}
+    ]
 
 
 def test_remote_runtime_rejects_any_database_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -377,6 +417,171 @@ def test_provider_only_write_gate_is_canonical_independent_and_private() -> None
     assert permit.canonical_revision == 0
     assert permit.checkpoint_lifecycle_bound is False
     assert permit.pre_change_checkpoint_verified is False
+
+
+def test_unified_bootstrap_profile_has_exact_bounded_catalog_and_provider_only_writes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_UNIFIED_BOOTSTRAP_PROFILE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_SCOPES", ",".join(sorted(UNIFIED_SCOPES)))
+    gate = tmp_path / "unified-write-gate.key"
+    gate.write_text("u" * 32, encoding="ascii")
+    gate.chmod(0o600)
+    gateway = tmp_path / "gateway.token"
+    gateway.write_text("g" * 32, encoding="ascii")
+    gateway.chmod(0o600)
+    monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE", str(gate))
+    monkeypatch.setenv(
+        "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL",
+        "http://control-plane:8080/internal/mcp-provider/invoke",
+    )
+    monkeypatch.setenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE", str(gateway))
+    runtime = build_remote_runtime(
+        decoder=lambda _token: _claims(scopes=sorted(UNIFIED_SCOPES)),
+        provider_control=object(),
+    )
+
+    assert runtime.settings.mcp_unified_bootstrap_profile_enabled is True
+    assert runtime.settings.mcp_operator_profile_enabled is False
+    assert runtime.settings.mcp_provider_profile_enabled is False
+    assert isinstance(runtime.app, object)
+
+    identity = AccessIdentity(
+        subject="unified-owner",
+        client_id="opencode-my-data-hub",
+        scopes=frozenset(UNIFIED_SCOPES),
+        audience=RESOURCE,
+        token_id="unified-jti",
+        expires_at=2**31,
+        issuer=ISSUER,
+        issued_at=1,
+        resource=RESOURCE,
+    )
+    server = create_server(
+        runtime.settings,
+        dependencies=MCPDependencies(unified_bootstrap_profile_enabled=True),
+        default_identity=identity,
+    )
+    catalog = {tool.name for tool in asyncio.run(server.list_tools())}
+    assert catalog == UNIFIED_BOOTSTRAP_TOOLS & TOOL_CONTRACTS.keys()
+    assert "bloggers.search" in catalog
+    assert "provider.resources.create" in catalog
+    assert "data.change.apply" not in catalog
+    assert "master.ensure" not in catalog
+    assert "acceptance.scenario.request" not in catalog
+    assert "provider.acceptance.dataset.lifecycle" not in catalog
+    assert "provider.acceptance.notebook.lifecycle" not in catalog
+
+    async def metadata() -> dict[str, object]:
+        transport = httpx.ASGITransport(app=runtime.app)  # type: ignore[arg-type]
+        async with httpx.AsyncClient(
+            transport=transport, base_url="https://mcp-datahub.kenigevents.ru"
+        ) as client:
+            response = await client.get(
+                "/.well-known/oauth-protected-resource/mcp",
+                headers={"Host": "mcp-datahub.kenigevents.ru"},
+            )
+        return response.json()  # type: ignore[no-any-return]
+
+    assert set(asyncio.run(metadata())["scopes_supported"]) == UNIFIED_SCOPES
+
+    runtime.ledger.register_oauth_client(
+        issuer=ISSUER,
+        client_id="chatgpt-reader",
+        principal_id="datahub-reader",
+        allowed_scopes=UNIFIED_SCOPES,
+        profile_kind="reader",
+    )
+
+    async def http_catalog() -> dict[str, object]:
+        payloads: list[dict[str, object]] = []
+        client = httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=_capturing_app(runtime.app, payloads)),
+            headers={
+                "Authorization": "Bearer unified-token",
+                "Host": "mcp-datahub.kenigevents.ru",
+                "Origin": "https://chatgpt.com",
+            },
+        )
+        async with (
+            _lifespan(runtime.app),
+            client,
+            streamable_http_client(
+                "https://mcp-datahub.kenigevents.ru/mcp", http_client=client
+            ) as (read_stream, write_stream),
+            ClientSession(read_stream, write_stream) as session,
+        ):
+            await session.initialize()
+            await session.list_tools()
+        return next(
+            payload
+            for payload in payloads
+            if isinstance(payload.get("result"), dict)
+            and isinstance(payload["result"].get("tools"), list)  # type: ignore[union-attr]
+        )
+
+    actual_catalog = asyncio.run(http_catalog())
+    assert actual_catalog["result"]["securitySchemes"] == [  # type: ignore[index]
+        {"type": "oauth2", "scopes": sorted(UNIFIED_SCOPES)}
+    ]
+    assert {
+        tool["name"] for tool in actual_catalog["result"]["tools"]  # type: ignore[index]
+    } == UNIFIED_BOOTSTRAP_TOOLS & TOOL_CONTRACTS.keys()
+
+
+def test_unified_bootstrap_gate_allows_provider_effect_during_active_master_only() -> None:
+    identity = AccessIdentity(
+        subject="provider-owner",
+        client_id="unified-client",
+        scopes=frozenset({"provider:write"}),
+        audience=RESOURCE,
+        token_id="write-jti",
+        expires_at=2**31,
+        issuer=ISSUER,
+        issued_at=1,
+        resource=RESOURCE,
+    )
+    gate = UnifiedBootstrapWriteGate(b"u" * 32, clock=lambda: 1000)
+    permit = gate.authorize_write(
+        principal=identity,
+        tool="provider.resources.create",
+        arguments={"control_class": "mcp_managed", "private": True},
+        master=MasterSnapshot(MasterState.ACTIVE, instance_id="master", epoch=9),
+    )
+    assert permit.canonical_data_independent is True
+    with pytest.raises(PermissionError, match="unified bootstrap"):
+        gate.authorize_write(
+            principal=identity,
+            tool="data.change.apply",
+            arguments={},
+            master=MasterSnapshot(MasterState.ACTIVE, instance_id="master", epoch=9),
+        )
+
+
+@pytest.mark.parametrize(
+    "scopes",
+    [UNIFIED_SCOPES - {"bloggers:read"}, UNIFIED_SCOPES | {"data:read"}],
+)
+def test_unified_bootstrap_profile_rejects_nonexact_scope_catalog(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scopes: frozenset[str]
+) -> None:
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_UNIFIED_BOOTSTRAP_PROFILE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_SCOPES", ",".join(sorted(scopes)))
+    gateway = tmp_path / "gateway.token"
+    gateway.write_text("g" * 32, encoding="ascii")
+    gateway.chmod(0o600)
+    monkeypatch.setenv(
+        "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL",
+        "http://control-plane:8080/internal/mcp-provider/invoke",
+    )
+    monkeypatch.setenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE", str(gateway))
+
+    with pytest.raises(Exception, match="unified bootstrap"):
+        build_remote_runtime(decoder=lambda _token: _claims(scopes=sorted(scopes)))
 
 
 @pytest.mark.parametrize(

@@ -435,7 +435,30 @@ That action additionally requires all of the following before Compose is evaluat
 - a separate mode-private internal provider-gateway token shared only by the control
   process and remote MCP process.
 
-`scripts/operator_profile_gate.py` issues and verifies the bounded receipt. Activation
+Every ACTIVE master now runs the complete positive-role and adversarial ACL probe set
+inside its own PostgreSQL process before any short-lived client credential is issued.
+The probe transaction is rolled back. Only exact probe counts and hashes are posted to
+the devstand control ledger; SQL error bodies, database credentials and canonical rows
+never leave the Notebook. The append-only evidence is bound to the release commit,
+master instance, epoch, schema revision and canonical revision.
+
+After that same epoch has produced the current VERIFIED checkpoint, issue the gate from
+ledger authority rather than copying UUIDs or hashes by hand:
+
+```bash
+RUNTIME_ROOT="${MY_DATA_HUB_RUNTIME_ROOT:-/home/dev/.local/state/my-data-hub-control-plane}"
+python3 scripts/operator_profile_gate.py issue-from-ledger \
+  --commit "$(git rev-parse HEAD)" \
+  --control-ledger "$RUNTIME_ROOT/control-ledger/control.sqlite3" \
+  --expires-at "<UTC time no more than 24 hours ahead>" \
+  --signing-key-file "$RUNTIME_ROOT/secrets/mcp-write-gate.key" \
+  --output "$RUNTIME_ROOT/operator-security-gate.json"
+```
+
+`scripts/operator_profile_gate.py` issues and verifies the bounded receipt. The
+production installer additionally re-reads the private ledger and rejects a signed
+receipt if the referenced checkpoint or either probe hash differs from the current
+ledger authority. Activation
 uses a generated, release-specific Compose override outside the repository. It enables
 operator credential issuance and the sole Kaggle adapter/policy/journal authority in the
 control process. The remote MCP process receives no Kaggle environment or adapter; it

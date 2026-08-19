@@ -18,6 +18,7 @@ from my_data_hub.control_plane.ledger import (
     EffectState,
     EventDisposition,
     EventRejected,
+    IdempotencyConflict,
     MasterAdmissionRejected,
     StaleRuntimeEvent,
     discover_control_migrations,
@@ -166,7 +167,7 @@ def test_sqlite_pragmas_permissions_and_append_only_logs(tmp_path: Path) -> None
         .execute("SELECT version FROM control_schema_migrations ORDER BY version")
         .fetchall()
     )
-    assert migrations == [(version,) for version in range(1, 28)]
+    assert migrations == [(version,) for version in range(1, 35)]
 
     operation, _ = ledger.ensure_operation(
         operation_id=str(uuid4()),
@@ -237,14 +238,34 @@ def test_embedding_request_is_durable_exactly_once_and_epoch_bound(tmp_path: Pat
 
 def test_mode_tightening_tolerates_a_wal_unlinked_during_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ledger = ledger_at(tmp_path)
+    real_stat = os.stat
+    wal_missing = False
+
+    def racy_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        nonlocal wal_missing
+        if str(path).endswith("-wal") and not wal_missing:
+            wal_missing = True
+            raise FileNotFoundError(str(path))
+        return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "stat", racy_stat)
+    ledger._tighten_file_modes()
+    assert ledger.path.stat().st_mode & 0o777 == 0o600
+
+
+def test_mode_tightening_never_opens_sqlite_lock_bearing_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = ledger_at(tmp_path)
+    protected = {str(ledger.path), f"{ledger.path}-wal", f"{ledger.path}-shm"}
     real_open = os.open
 
-    def racy_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
-        if str(path).endswith("-wal"):
-            raise FileNotFoundError(str(path))
+    def guarded_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if str(path) in protected:
+            raise AssertionError("mode tightening must not open SQLite lock-bearing files")
         return real_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(os, "open", racy_open)
+    monkeypatch.setattr(os, "open", guarded_open)
     ledger._tighten_file_modes()
     assert ledger.path.stat().st_mode & 0o777 == 0o600
 
@@ -254,6 +275,32 @@ def test_packaged_and_repository_control_migrations_are_identical() -> None:
     repository = discover_control_migrations(root / "control_migrations")
     packaged = discover_control_migrations(Path(control_migration_module.__file__).with_name("sql"))
     assert [(item.version, item.sha256) for item in repository] == [(item.version, item.sha256) for item in packaged]
+
+
+def test_master_security_evidence_is_exact_append_only_active_authority(tmp_path: Path) -> None:
+    ledger, operation_id, _checkpoint_id = active_admission_ledger(tmp_path)
+    evidence = {
+        "contract": "my-data-hub-master-security-evidence.v1",
+        "source_commit": "a" * 40,
+        "master_instance_id": "33333333-3333-4333-8333-333333333333",
+        "epoch": 1,
+        "schema_version": 21,
+        "canonical_revision": 12,
+        "outcome": "PASSED",
+        "role_probe_count": 16,
+        "security_probe_count": 61,
+        "role_verification_sha256": "b" * 64,
+        "security_test_receipt_sha256": "c" * 64,
+        "observed_at": "2026-08-11T12:00:00Z",
+    }
+    stored = ledger.record_master_security_evidence(operation_id=operation_id, evidence=evidence)
+    assert stored["role_probe_count"] == 16
+    assert ledger.record_master_security_evidence(operation_id=operation_id, evidence=evidence) == stored
+    assert ledger.latest_master_security_evidence(source_commit="a" * 40) == stored
+
+    conflict = dict(evidence, security_probe_count=60)
+    with pytest.raises(IdempotencyConflict):
+        ledger.record_master_security_evidence(operation_id=operation_id, evidence=conflict)
 
 
 def test_atomic_data_admission_rejects_drain_without_stranding_requests(tmp_path: Path) -> None:
@@ -321,6 +368,36 @@ def test_atomic_data_admission_rejects_drain_without_stranding_requests(tmp_path
             canonical_revision=12,
             checkpoint_id=checkpoint_id,
         )
+
+
+def test_blogger_admission_allows_only_canonical_authorization_identifier_metadata(tmp_path: Path) -> None:
+    ledger, operation_id, _ = active_admission_ledger(tmp_path)
+    authorization_id = "44444444-4444-4444-8444-444444444444"
+
+    admitted, created = ledger.admit_blogger_migration_request(
+        request_id="blogger-replay-request",
+        operation_id=operation_id,
+        request_sha256="4" * 64,
+        request={
+            "schema_version": "blogger-replay-test",
+            "duplicate_resolution": {"authorization_id": authorization_id},
+        },
+    )
+
+    assert created is True
+    assert admitted["request"]["duplicate_resolution"]["authorization_id"] == authorization_id
+    for field, value in (
+        ("authorization_id", "Bearer secret-value"),
+        ("authorization", authorization_id),
+        ("authorization_header", authorization_id),
+    ):
+        with pytest.raises(EventRejected, match="secret-bearing field"):
+            ledger.admit_blogger_migration_request(
+                request_id=f"rejected-{field}",
+                operation_id=operation_id,
+                request_sha256="5" * 64,
+                request={"schema_version": "blogger-replay-test", field: value},
+            )
 
 
 def test_quarantine_receipt_is_idempotent_and_cannot_be_altered(tmp_path: Path) -> None:
@@ -1266,6 +1343,165 @@ def test_lost_terminal_response_replays_exact_duplicate_and_empties_spool(tmp_pa
         coordinator.accept_runtime_event(
             json.dumps(altered, sort_keys=True, separators=(",", ":")).encode(), header_token=SECRET
         )
+
+
+def test_deleted_failed_checkpoint_version_is_retired_before_provider_version_reuse(tmp_path: Path) -> None:
+    ledger = ledger_at(tmp_path)
+    operation, _ = ledger.ensure_operation(
+        operation_id=str(uuid4()),
+        idempotency_key="failed-checkpoint-version-retirement",
+        operation_kind="checkpoint",
+        intent={"service_kind": "postgres-master"},
+        initial_state="CHECKPOINT_FAILED",
+        identity={"epoch": 1},
+    )
+    checkpoint_id = str(uuid4())
+    version_ref = "owner/checkpoints/1"
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=checkpoint_id,
+        operation_id=operation.operation_id,
+        dataset_ref="owner/checkpoints",
+        version_ref=version_ref,
+        manifest_sha256="a" * 64,
+        source_checkpoint_id=None,
+        source_head_generation=0,
+        master_instance_id=str(uuid4()),
+        epoch=1,
+    )
+    ledger.fail_checkpoint(checkpoint_id, "TEST_FAILURE")
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute(
+            "INSERT INTO checkpoint_blob_publications("
+            "checkpoint_id,operation_id,run_id,attempt_id,master_instance_id,service_instance_id,"
+            "master_run_ref,epoch,dataset_ref,manifest_sha256,source_head_generation,"
+            "expected_file_count,expected_total_bytes,state,exact_version_ref,expected_provider_version,"
+            "finalize_attempts,failure_code,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'FAILED',?,1,1,'TEST_FAILURE',?,?)",
+            (
+                checkpoint_id,
+                operation.operation_id,
+                str(uuid4()),
+                str(uuid4()),
+                str(uuid4()),
+                str(uuid4()),
+                "owner/master/1",
+                1,
+                "owner/checkpoints",
+                "a" * 64,
+                0,
+                1,
+                1,
+                version_ref,
+                "2026-08-18T00:00:00.000000Z",
+                "2026-08-18T00:00:00.000000Z",
+            ),
+        )
+
+    effect_id = str(uuid4())
+    ledger.persist_provider_effect_intent(
+        {
+            "effect_id": effect_id,
+            "operation_id": operation.operation_id,
+            "idempotency_key": "delete-failed-checkpoint-version",
+            "task_id": str(uuid4()),
+            "action": "delete_dataset",
+            "provider_ref": "owner/checkpoints",
+            "request_sha256": "b" * 64,
+        }
+    )
+    ledger.persist_provider_effect_receipt(
+        effect_id,
+        {
+            "effect_id": effect_id,
+            "action": "delete_dataset",
+            "provider_ref": "owner/checkpoints",
+            "outcome": "applied",
+            "detail_code": "failed_checkpoint_dataset_absent",
+        },
+    )
+    with sqlite3.connect(ledger.path) as connection:
+        receipt_sha256 = str(
+            connection.execute(
+                "SELECT receipt_sha256 FROM provider_effect_receipts WHERE effect_id=?", (effect_id,)
+            ).fetchone()[0]
+        )
+
+    retired = ledger.retire_failed_checkpoint_version(
+        checkpoint_id,
+        version_ref=version_ref,
+        deletion_effect_id=effect_id,
+        deletion_receipt_sha256=receipt_sha256,
+    )
+    assert retired["version_ref"] == version_ref
+    assert ledger.checkpoint_candidate(checkpoint_id)["version_ref"] is None
+    assert (
+        ledger.retire_failed_checkpoint_version(
+            checkpoint_id,
+            version_ref=version_ref,
+            deletion_effect_id=effect_id,
+            deletion_receipt_sha256=receipt_sha256,
+        )["deletion_receipt_sha256"]
+        == receipt_sha256
+    )
+
+    replacement_id = str(uuid4())
+    ledger.add_checkpoint_candidate(
+        checkpoint_id=replacement_id,
+        operation_id=operation.operation_id,
+        dataset_ref="owner/checkpoints",
+        version_ref=version_ref,
+        manifest_sha256="c" * 64,
+        source_checkpoint_id=None,
+        source_head_generation=0,
+        master_instance_id=str(uuid4()),
+        epoch=2,
+    )
+    assert ledger.checkpoint_candidate(replacement_id)["version_ref"] == version_ref
+
+
+def test_successful_provider_receipt_survives_later_uncertain_observation(tmp_path: Path) -> None:
+    ledger = ControlLedger(tmp_path / "control.sqlite3")
+    operation = ledger.ensure_operation(
+        operation_id=str(uuid4()),
+        idempotency_key="provider-receipt-order",
+        operation_kind="ensure_master",
+        intent={"source": "test"},
+        initial_state="REQUESTED",
+        identity={"epoch": 1},
+    )[0]
+    effect_id = str(uuid4())
+    ledger.persist_provider_effect_intent(
+        {
+            "effect_id": effect_id,
+            "operation_id": operation.operation_id,
+            "idempotency_key": "provider-receipt-order:effect",
+            "task_id": str(uuid4()),
+            "action": "create_dataset",
+            "provider_ref": "owner/assets",
+            "request_sha256": "b" * 64,
+        }
+    )
+    applied = {
+        "effect_id": effect_id,
+        "action": "create_dataset",
+        "provider_ref": "owner/assets",
+        "outcome": "applied",
+        "provider_version": 1,
+        "observed_fingerprint": {"algorithm": "sha256", "value": "c" * 64},
+    }
+    ledger.persist_provider_effect_receipt(effect_id, applied)
+    uncertain = {
+        "effect_id": effect_id,
+        "action": "create_dataset",
+        "provider_ref": "owner/assets",
+        "outcome": "uncertain",
+        "provider_version": None,
+        "observed_fingerprint": None,
+    }
+    ledger.persist_provider_effect_receipt(effect_id, uncertain)
+
+    assert ledger.latest_provider_effect_receipt(effect_id) == uncertain
+    assert ledger.latest_successful_provider_effect_receipt(effect_id) == applied
 
 
 def test_checkpoint_promotion_keeps_previous_and_failed_candidate_cannot_advance(tmp_path: Path) -> None:

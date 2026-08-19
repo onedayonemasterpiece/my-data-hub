@@ -22,6 +22,7 @@ from my_data_hub.mcp.contracts import (
 )
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.mcp.postgres_broker import SessionBrokerError
+from my_data_hub.mcp.runtime import UnifiedBootstrapWriteGate
 from my_data_hub.mcp.server import create_server
 from my_data_hub.mcp.service import HubPermissionError, HubService
 
@@ -236,6 +237,51 @@ async def test_active_read_uses_actual_identity_and_epoch_bound_reader_session()
     assert broker.requests[0].epoch == 7
     assert broker.session.closed
     assert audit.events[0].subject == "reader"
+
+
+@pytest.mark.asyncio
+async def test_cold_read_returns_durable_waiting_continuation() -> None:
+    resolver = Resolver(MasterSnapshot(MasterState.ABSENT))
+    service = HubService(resolver, fallback_identity=READER)
+
+    result = await service.invoke("bloggers.search", {"query": "kaliningrad"})
+
+    assert result["outcome"] == "WAITING_FOR_MASTER"
+    assert result["retryable"] is True
+    assert result["continuation"] == {
+        "operation_id": "op-cold-start-01",
+        "status_tool": "operation.get",
+        "retry_original_request_when": "state=ACTIVE",
+    }
+    assert resolver.ensures == [("reader", "mcp-read:bloggers.search")]
+
+
+@pytest.mark.asyncio
+async def test_unified_provider_create_is_master_independent_and_does_not_ensure() -> None:
+    resolver = Resolver(MasterSnapshot(MasterState.ABSENT))
+    control = Control()
+    owner = identity("provider:write", "provider:read", "platform:read")
+    service = HubService(
+        resolver,
+        control=control,
+        write_gate=UnifiedBootstrapWriteGate(b"u" * 32, clock=lambda: NOW),
+        fallback_identity=owner,
+        clock=lambda: NOW,
+    )
+    arguments = {
+        "resource_ref": "owner/private-dataset",
+        "control_class": "mcp_managed",
+        "private": True,
+        "payload": {"kind": "dataset", "files": {"tiny.txt": "ok"}},
+    }
+
+    result = await service.invoke("provider.resources.create", arguments)
+
+    assert result["tool"] == "provider.resources.create"
+    assert resolver.ensures == []
+    assert control.calls[0][0] == "provider.resources.create"
+    assert control.calls[0][1]["_write_permit"]["master_epoch"] == 0
+    assert control.calls[0][1]["_write_permit"]["canonical_revision"] == 0
 
 
 @pytest.mark.asyncio

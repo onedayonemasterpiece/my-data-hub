@@ -49,6 +49,21 @@ def _broker(tmp_path: Path) -> tuple[TunnelBroker, list[str], Path]:
     return broker, terminated, ca
 
 
+def test_authorized_principals_parent_is_traversable_without_exposing_private_state(
+    tmp_path: Path,
+) -> None:
+    broker, _terminated, _ca = _broker(tmp_path)
+
+    # OpenSSH reads AuthorizedPrincipalsFile after temporarily switching to
+    # the target tunnel UID.  The root-owned parent must therefore be
+    # searchable, while durable broker state and locks remain private.
+    assert broker.root.stat().st_mode & 0o777 == 0o711
+    assert broker.principals_path.stat().st_mode & 0o777 == 0o644
+    assert broker.worker_principals_path.stat().st_mode & 0o777 == 0o644
+    assert broker.state_path.stat().st_mode & 0o777 == 0o600
+    assert broker.lock_path.stat().st_mode & 0o777 == 0o600
+
+
 def test_sshd_match_is_certificate_only_remote_forward_to_one_loopback_port() -> None:
     config = render_sshd_config(
         account=DEFAULT_ACCOUNT,
@@ -193,6 +208,24 @@ def test_deactivate_revokes_certificate_blanks_principal_and_terminates_account(
             valid_before=NOW + timedelta(minutes=4),
             now=NOW + timedelta(seconds=10),
         )
+
+
+def test_deactivate_is_idempotent_before_tunnel_activation(tmp_path: Path) -> None:
+    broker, terminated, _ca = _broker(tmp_path)
+
+    for _ in range(2):
+        broker.deactivate(
+            master_instance_id=INSTANCE,
+            run_id=RUN_ID,
+            attempt_id=ATTEMPT_ID,
+            epoch=1,
+            reason="provider_terminal_failed",
+        )
+
+    state = json.loads(broker.state_path.read_text(encoding="utf-8"))
+    assert state["active"] is None
+    assert broker.principals_path.read_text(encoding="ascii") == ""
+    assert terminated == [DEFAULT_ACCOUNT, DEFAULT_ACCOUNT]
 
 
 def test_exact_serial_revocation_is_immediate_and_wrong_serial_is_only_denied(tmp_path: Path) -> None:
@@ -488,8 +521,14 @@ def test_root_installer_is_explicitly_gated_and_does_not_add_listener_or_vpn(tmp
         "control.sock",
         "OnUnitActiveSec=5s",
         "systemctl reload ssh.service",
+        "RuntimeDirectory=$broker_runtime_directory",
+        "RuntimeDirectoryMode=0750",
+        'install -d -o root -g root -m 0711 "$state_root"',
+        "systemctl is-active --quiet my-data-hub-master-tunnel-broker.service",
+        "stat.S_ISSOCK",
     ):
         assert required in source
+    assert "ExecStartPre=/usr/bin/install -d" not in source
     lowered = source.casefold()
     assert "listenaddress" not in lowered
     assert "vpn" not in lowered

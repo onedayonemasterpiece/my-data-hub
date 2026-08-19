@@ -161,6 +161,67 @@ def test_write_gate_persists_preview_apply_and_exact_post_checkpoint(tmp_path: P
     assert status["pre_change_checkpoint_id"] != status["post_change_checkpoint_id"]
 
 
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "provider.resources.create",
+        "provider.resources.version",
+        "provider.resources.run",
+        "provider.resources.delete",
+        "provider.upload.start",
+        "provider.upload.put_chunk",
+        "provider.upload.finalize",
+        "provider.upload.abort",
+    ],
+)
+@pytest.mark.parametrize(
+    "master",
+    [
+        MasterSnapshot(MasterState.ABSENT),
+        MasterSnapshot(MasterState.ACTIVE, instance_id="master", epoch=7, canonical_revision=41),
+    ],
+)
+def test_operator_write_gate_keeps_private_provider_mutations_master_independent(
+    tmp_path: Path, tool: str, master: MasterSnapshot
+) -> None:
+    gate = LedgerWriteGate(ControlLedger(tmp_path / "control.sqlite3"), signing_secret=b"s" * 32)
+
+    permit = gate.authorize_write(
+        principal=principal(),
+        tool=tool,
+        arguments={"control_class": "mcp_managed", "private": True},
+        master=master,
+    )
+
+    assert permit.tool == tool
+    assert permit.canonical_data_independent is True
+    assert permit.master_epoch == 0
+    assert permit.canonical_revision == 0
+    assert permit.checkpoint_lifecycle_bound is False
+    assert permit.pre_change_checkpoint_verified is False
+    assert permit.allowed_resource_class == "mcp_managed"
+    assert permit.private_resource_only is True
+
+
+def test_operator_write_gate_rejects_unscoped_or_public_provider_mutation(tmp_path: Path) -> None:
+    gate = LedgerWriteGate(ControlLedger(tmp_path / "control.sqlite3"), signing_secret=b"s" * 32)
+    absent = MasterSnapshot(MasterState.ABSENT)
+    with pytest.raises(PermissionError, match="provider:write"):
+        gate.authorize_write(
+            principal=replace(principal(), scopes=frozenset({"data:write"})),
+            tool="provider.upload.start",
+            arguments={"control_class": "mcp_managed", "private": True},
+            master=absent,
+        )
+    with pytest.raises(PermissionError, match="private"):
+        gate.authorize_write(
+            principal=principal(),
+            tool="provider.upload.start",
+            arguments={"control_class": "mcp_managed", "private": False},
+            master=absent,
+        )
+
+
 @pytest.mark.asyncio
 async def test_postgres_receipt_reconciles_applying_without_reexecuting_dml(tmp_path: Path) -> None:
     clock = DeterministicClock(datetime(2026, 8, 11, tzinfo=UTC))
@@ -349,6 +410,22 @@ class FakeAdapter:
         result = self._dataset_result(intent, control_class, disposable, 1)
         self.dataset_files[(intent.provider_ref, 1)] = dict(files)
         return result
+
+    def create_private_dataset_from_directory(  # type: ignore[no-untyped-def]
+        self, *, intent, source_directory, title, control_class, disposable
+    ):
+        files = {
+            path.relative_to(source_directory).as_posix(): path.read_bytes()
+            for path in source_directory.rglob("*")
+            if path.is_file()
+        }
+        return self.create_private_dataset(
+            intent=intent,
+            files=files,
+            title=title,
+            control_class=control_class,
+            disposable=disposable,
+        )
 
     def create_private_dataset_version(self, *, intent, claim, files, version_notes):  # type: ignore[no-untyped-def]
         assert files and version_notes
@@ -557,6 +634,40 @@ async def test_live_inventory_uses_only_injected_control_adapter_and_operator_sc
         )
 
 
+def test_ledger_control_reader_routes_every_chunked_upload_tool_to_provider_gateway(
+    tmp_path: Path,
+) -> None:
+    ledger = ControlLedger(tmp_path / "production-dispatch.sqlite3")
+
+    class RecordingGateway:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object], str]] = []
+
+        def invoke(self, tool, arguments, caller):  # type: ignore[no-untyped-def]
+            self.calls.append((tool, dict(arguments), caller.subject))
+            return {"routed_tool": tool}
+
+    gateway = RecordingGateway()
+    control = LedgerControlReader(ledger, provider_gateway=gateway)  # type: ignore[arg-type]
+    tools = (
+        "provider.upload.start",
+        "provider.upload.put_chunk",
+        "provider.upload.status",
+        "provider.upload.finalize",
+        "provider.upload.abort",
+    )
+
+    for tool in tools:
+        arguments = {"dispatch_marker": tool}
+        assert control.invoke_control(tool, arguments, principal()) == {
+            "routed_tool": tool
+        }
+
+    assert gateway.calls == [
+        (tool, {"dispatch_marker": tool}, "owner") for tool in tools
+    ]
+
+
 def _run_request(
     *,
     task_id: object,
@@ -675,6 +786,88 @@ def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_
         principal(),
     )
     assert deleted["outcome"] == "applied"
+
+
+def test_chunked_upload_finalize_uses_single_adapter_and_durable_manifest(tmp_path: Path) -> None:
+    ledger = ControlLedger(tmp_path / "chunked.sqlite3")
+    adapter = FakeAdapter(ledger)
+    gateway = KaggleMCPProviderGateway(
+        ledger,
+        adapter,  # type: ignore[arg-type]
+        upload_root=tmp_path / "provider-uploads",
+    )
+    task_id = uuid4()
+    upload_id = uuid4()
+    content = b"private-provider-bytes" * 20_000
+    common = {
+        "resource_ref": "owner/chunked-data",
+        "control_class": "mcp_managed",
+        "private": True,
+    }
+    start = {
+        **common,
+        "payload": {
+            "kind": "dataset",
+            "upload_id": str(upload_id),
+            "task_id": str(task_id),
+            "effect_id": str(uuid4()),
+            "idempotency_key": "provider-chunked-create-1",
+            "title": "MCP chunked private dataset",
+            "disposable": True,
+            "files": [
+                {
+                    "path": "nested/payload.bin",
+                    "byte_size": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+            ],
+            "ttl_seconds": 3600,
+        },
+    }
+    assert gateway.invoke("provider.upload.start", start, principal())["state"] == "OPEN"
+    for offset in range(0, len(content), 24 * 1024):
+        chunk = content[offset : offset + 24 * 1024]
+        gateway.invoke(
+            "provider.upload.put_chunk",
+            {
+                **common,
+                "payload": {
+                    "upload_id": str(upload_id),
+                    "task_id": str(task_id),
+                    "path": "nested/payload.bin",
+                    "offset": offset,
+                    "encoding": "base64",
+                    "content_base64": b64encode(chunk).decode("ascii"),
+                    "byte_size": len(chunk),
+                    "sha256": hashlib.sha256(chunk).hexdigest(),
+                },
+            },
+            principal(),
+        )
+    finalized = gateway.invoke(
+        "provider.upload.finalize",
+        {
+            **common,
+            "payload": {"upload_id": str(upload_id), "task_id": str(task_id)},
+        },
+        principal(),
+    )
+    assert finalized["state"] == "FINALIZED"
+    result = finalized["result"]
+    assert result["provider_ref"] == "owner/chunked-data"
+    assert adapter.create_calls == 1
+    assert adapter.dataset_files[("owner/chunked-data", 1)] == {"nested/payload.bin": content}
+    projection = ledger.provider_resource("owner/chunked-data", "1")
+    assert projection is not None
+    assert projection["metadata"]["content_manifest"] == [
+        {
+            "path": "nested/payload.bin",
+            "byte_size": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    ]
+    assert content not in ledger.path.read_bytes()
+    assert not any((tmp_path / "provider-uploads" / "uploads").iterdir())
 
 
 def test_binary_batch_round_trip_is_claim_bound_chunked_and_json_safe(tmp_path: Path) -> None:

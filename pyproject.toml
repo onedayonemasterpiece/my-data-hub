@@ -45,7 +45,9 @@ packages = ["src/my_data_hub"]
 
 [tool.hatch.build.force-include]
 "sql/migrations" = "my_data_hub/master_runtime/sql/migrations"
+"sql/admin/bootstrap_roles.sql" = "my_data_hub/master_runtime/sql/admin/bootstrap_roles.sql"
 "sql/admin/role_contract.sql" = "my_data_hub/master_runtime/sql/admin/role_contract.sql"
+"schemas/blogger-discovery-batch.v1.schema.json" = "my_data_hub/schemas/blogger-discovery-batch.v1.schema.json"
 
 [tool.pytest.ini_options]
 addopts = "-q"

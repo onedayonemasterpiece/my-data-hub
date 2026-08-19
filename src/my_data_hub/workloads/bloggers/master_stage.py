@@ -24,6 +24,7 @@ from my_data_hub.master_runtime.credentials import CredentialProvisioner, LoginP
 from .importer import (
     BloggerSnapshotImporter,
     DuplicateResolution,
+    DuplicateResolutionConflict,
     DuplicateReviewGroup,
     ImportReceipt,
     batch_identity,
@@ -356,6 +357,40 @@ class BloggerMigrationQuarantined(RuntimeError):
             "canonical completion and checkpoint publication are blocked"
         )
         self.receipt = receipt
+
+
+def blogger_failure_code(error: BaseException) -> str:
+    """Return a bounded, data-free code for a failed live import.
+
+    Arbitrary exception text is never sent to the control plane because a
+    driver error can contain source values.  The importer's own invariant
+    messages are fixed, so map them to stable operational codes instead of
+    collapsing every actionable failure to ``ValueError``.
+    """
+
+    message = str(error)
+    exact = {
+        "blogger stage requires the in-master local PostgreSQL socket":
+            "BLOGGER_LOCAL_DATABASE_URL_INVALID",
+        "export batch idempotency conflict": "BLOGGER_EXPORT_BATCH_IDEMPOTENCY_CONFLICT",
+        "batch is partially replayed; exact all-or-nothing import required":
+            "BLOGGER_PARTIAL_REPLAY",
+        "replayed batch lacks canonical revision receipt":
+            "BLOGGER_REPLAY_RECEIPT_MISSING",
+        "streamed ACTIVE-master YDB scan differs before transaction commit":
+            "BLOGGER_STREAMED_SOURCE_EVIDENCE_MISMATCH",
+        "duplicate decision accounting remains pending":
+            "BLOGGER_DUPLICATE_ACCOUNTING_PENDING",
+        "existing raw row lacks terminal disposition":
+            "BLOGGER_EXISTING_RAW_DISPOSITION_MISSING",
+    }
+    if message in exact:
+        return exact[message]
+    if message.startswith("canonical accounting failed:"):
+        return "BLOGGER_CANONICAL_ACCOUNTING_INCOMPLETE"
+    if isinstance(error, DuplicateResolutionConflict):
+        return "BLOGGER_DUPLICATE_RESOLUTION_CONFLICT"
+    return type(error).__name__[:100]
 
 
 def resolution_matches_quarantine(

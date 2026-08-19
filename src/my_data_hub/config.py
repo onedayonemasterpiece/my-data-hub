@@ -92,6 +92,7 @@ class Settings:
     mcp_token_max_lifetime_seconds: int = 3600
     mcp_operator_profile_enabled: bool = False
     mcp_provider_profile_enabled: bool = False
+    mcp_unified_bootstrap_profile_enabled: bool = False
     mcp_acceptance_scenarios_enabled: bool = False
     mcp_control_gateway_url: str = ""
     mcp_control_gateway_token_file: Path | None = None
@@ -180,6 +181,9 @@ class Settings:
             ),
             mcp_provider_profile_enabled=_bool(
                 "MY_DATA_HUB_MCP_PROVIDER_PROFILE_ENABLED", False
+            ),
+            mcp_unified_bootstrap_profile_enabled=_bool(
+                "MY_DATA_HUB_MCP_UNIFIED_BOOTSTRAP_PROFILE_ENABLED", False
             ),
             mcp_acceptance_scenarios_enabled=_bool(
                 "MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED", False
@@ -272,6 +276,31 @@ class Settings:
                 "provider-only MCP requires its exclusive profile and exactly "
                 "platform:read, provider:read and provider:write through the single control gateway"
             )
+        unified_bootstrap_scopes = frozenset(
+            {
+                "platform:read",
+                "master:read",
+                "operation:read",
+                "checkpoint:read",
+                "embedding:read",
+                "provider:read",
+                "provider:write",
+                "bloggers:read",
+            }
+        )
+        if self.mcp_unified_bootstrap_profile_enabled and (
+            self.mcp_operator_profile_enabled
+            or self.mcp_provider_profile_enabled
+            or not self.mcp_write_enabled
+            or self.mcp_scopes != unified_bootstrap_scopes
+            or self.mcp_acceptance_scenarios_enabled
+            or not self.mcp_control_gateway_url
+            or self.mcp_control_gateway_token_file is None
+        ):
+            raise ConfigurationError(
+                "unified bootstrap MCP requires its exclusive profile, the exact bounded-read "
+                "plus provider scopes, and the single control gateway"
+            )
         remote_read_scopes = {
             "platform:read",
             "master:read",
@@ -294,8 +323,10 @@ class Settings:
             "master:rotate",
             "recovery:request",
             "acceptance:probe",
+            "acceptance:operate",
             "data:write",
             "migration:operate",
+            "bloggers:write",
             "provider:write",
         }
         if self.mcp_remote_enabled and (
@@ -395,6 +426,7 @@ class Settings:
         if self.mcp_write_enabled and not {
             "data:write",
             "migration:operate",
+            "bloggers:write",
             "provider:write",
         }.intersection(self.mcp_scopes):
             raise ConfigurationError("MCP write mode requires an explicit write scope")

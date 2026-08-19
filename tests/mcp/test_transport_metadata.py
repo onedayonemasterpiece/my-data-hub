@@ -46,11 +46,14 @@ async def test_tools_list_has_top_level_and_per_tool_security_schemes() -> None:
     async def send(message: dict[str, Any]) -> None:
         response.append(message)
 
-    await ToolSecurityMetadataMiddleware(app)(
+    await ToolSecurityMetadataMiddleware(
+        app, security_schemes=[{"type": "oauth2", "scopes": ["bloggers:read"]}]
+    )(
         {"type": "http", "method": "POST", "path": "/mcp"}, receive, send
     )
     payload = json.loads(response[1]["body"])
     assert payload["result"]["securitySchemes"][0]["type"] == "oauth2"
+    assert payload["result"]["securitySchemes"][0]["scopes"] == ["bloggers:read"]
     tool = payload["result"]["tools"][0]
     assert tool["securitySchemes"] == [{"type": "oauth2", "scopes": ["bloggers:read"]}]
     assert tool["_meta"]["securitySchemes"] == tool["securitySchemes"]

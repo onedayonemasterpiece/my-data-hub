@@ -9,7 +9,7 @@ BEGIN
         'mdh_connector_intake', 'mdh_mcp_reader', 'mdh_mcp_editor',
         'mdh_migration_operator', 'mdh_canonical_committer', 'mdh_backup',
         'mdh_monitoring', 'mdh_authenticator', 'mdh_master_controller',
-        'mdh_checkpoint', 'mdh_embedding_worker'
+        'mdh_checkpoint', 'mdh_embedding_worker', 'mdh_blogger_materializer'
     ] LOOP
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
             EXECUTE format(

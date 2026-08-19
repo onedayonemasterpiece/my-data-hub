@@ -84,7 +84,8 @@ class OperatorConnection:
     def execute(self, query: str):  # type: ignore[no-untyped-def]
         self.queries.append(query)
         if "FROM pg_roles" in query:
-            return Result((False, False, False, False, False, True, False, False))
+            assert "mdh_role_admin" not in query
+            return Result((False, False, False, False, False, True, False))
         if "lease_until>clock_timestamp" in query:
             binding = self.exact_command.binding
             return Result((binding.epoch, str(binding.master_instance_id), "open", True, 59))
@@ -127,7 +128,8 @@ class ObserverConnection:
     def execute(self, query: str):  # type: ignore[no-untyped-def]
         self.queries.append(query)
         if "FROM pg_roles" in query:
-            return Result((False, False, False, False, False, True, False, False))
+            assert "mdh_role_admin" not in query
+            return Result((False, False, False, False, False, True, False))
         if "FROM hub.canonical_state" in query:
             return Result(self.states.pop(0))
         raise AssertionError(f"unexpected observer query: {query}")

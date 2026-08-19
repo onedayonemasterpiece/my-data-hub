@@ -60,7 +60,11 @@ services:
     user: "${MY_DATA_HUB_CONTROL_UID:-1000}:${MY_DATA_HUB_CONTROL_GID:-1000}"
     read_only: true
     tmpfs:
-      - /tmp:size=64m,mode=1777
+      # Master asset creation keeps the staged tree while the central adapter
+      # downloads an exact zip+tree readback.  The verified bundle is already
+      # larger than 20 MiB, so 64 MiB cannot hold both representations plus
+      # SDK scratch space and leaves the durable ensure operation stuck.
+      - /tmp:size=256m,mode=1777
     env_file:
       - path: "${MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE:-./.state/control-plane/provider.env}"
         required: true
@@ -89,12 +93,14 @@ services:
       MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED: "${MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED:-false}"
       MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR: /embedding-credentials
       MY_DATA_HUB_MASTER_TUNNEL_KNOWN_HOSTS_PATH: /master-assets/dataset/tunnel-known-hosts
+      MY_DATA_HUB_MASTER_ASSET_HISTORY_DIR: /master-assets-history
     ports:
       - "127.0.0.1:${MY_DATA_HUB_CONTROL_PORT:-8080}:8080"
     volumes:
       - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:-./.state/control-ledger}:/ledger"
       - "${MY_DATA_HUB_MASTER_SESSION_DIR:-./.state/master-sessions}:/sessions"
       - "${MY_DATA_HUB_MASTER_ASSET_DIR:-./.state/master-assets}:/master-assets:ro"
+      - "${MY_DATA_HUB_MASTER_ASSET_HISTORY_DIR:-./.state/master-assets-history}:/master-assets-history:ro"
       - "${MY_DATA_HUB_MASTER_TLS_DIR:-./.state/master-tls}:/state/master-tls"
       - "${MY_DATA_HUB_TUNNEL_BROKER_SOCKET_DIR:-/run/my-data-hub/tunnel-broker}:/run/mdh-tunnel"
       - "${MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE:-./.state/control-plane/checkpoint-upload-broker.key}:/run/secrets/checkpoint-upload-broker.key:ro"
@@ -107,6 +113,17 @@ services:
 
   remote-mcp:
     profiles: ["remote-mcp"]
+    # The ACTIVE PostgreSQL primary is reached through an SSH reverse tunnel
+    # that is intentionally bound to the devstand loopback interface.  Host
+    # networking lets this unprivileged process reach that loopback without
+    # exposing the tunnel on a Docker bridge or a public interface.
+    network_mode: host
+    # Connector/committer credentials intentionally use the stable tunnel
+    # alias because the optional connector service runs on a Docker bridge.
+    # This process uses host networking, where that same tunnel is the host
+    # loopback socket; bind the alias locally instead of relying on DNS.
+    extra_hosts:
+      - "master-tunnel.internal:127.0.0.1"
     image: my-data-hub-control-plane:${MY_DATA_HUB_IMAGE_TAG:-architecture-reset}
     build:
       context: .
@@ -134,12 +151,10 @@ services:
       MY_DATA_HUB_MCP_REMOTE_ENABLED: "true"
       MY_DATA_HUB_MCP_WRITE_ENABLED: "false"
       MY_DATA_HUB_MCP_AUTH_MODE: oauth
-      MY_DATA_HUB_MCP_HOST: 0.0.0.0
+      MY_DATA_HUB_MCP_HOST: 127.0.0.1
       MY_DATA_HUB_MCP_PORT: 8765
       MY_DATA_HUB_DEPLOY_COMMIT: "${MY_DATA_HUB_IMAGE_TAG:-architecture-reset}"
       MY_DATA_HUB_MASTER_SESSION_DIRECTORY: /sessions
-    ports:
-      - "127.0.0.1:${MY_DATA_HUB_MCP_PORT:-8765}:8765"
     volumes:
       - "${MY_DATA_HUB_CONTROL_LEDGER_DIR:-./.state/control-ledger}:/ledger"
       - "${MY_DATA_HUB_MASTER_SESSION_DIR:-./.state/master-sessions}:/sessions:ro"

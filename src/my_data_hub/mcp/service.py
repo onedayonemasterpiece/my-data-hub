@@ -28,6 +28,7 @@ from my_data_hub.mcp.contracts import (
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.mcp.postgres_broker import SessionBrokerError
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
+from my_data_hub.workloads.bloggers.discovery import validate_submit_discovery_batch
 
 
 class SemanticCommandError(RuntimeError):
@@ -57,11 +58,13 @@ _CONTROL_TOOLS = frozenset(
         "provider.resources.list",
         "provider.resources.download",
         "provider.inventory.live",
+        "provider.upload.status",
         "provider.acceptance.claim.get",
         "runtime.events.history",
         "acceptance.scenario.request",
         "acceptance.scenario.status",
         "data.change.status",
+        "bloggers.import.status",
     }
 )
 _PROVIDER_WRITES = frozenset(
@@ -70,6 +73,10 @@ _PROVIDER_WRITES = frozenset(
         "provider.resources.version",
         "provider.resources.run",
         "provider.resources.delete",
+        "provider.upload.start",
+        "provider.upload.put_chunk",
+        "provider.upload.finalize",
+        "provider.upload.abort",
         "provider.acceptance.dataset.lifecycle",
         "provider.acceptance.notebook.lifecycle",
         "provider.acceptance.claim.cleanup",
@@ -158,8 +165,10 @@ class HubService:
         bounded_arguments = self._bounded_arguments(
             arguments,
             max_bytes=(
-                512 * 1024
-                if tool in {"provider.resources.create", "provider.resources.version"}
+                1_000_000
+                if tool == "submit_discovery_batch"
+                else 512 * 1024
+                if tool in {"provider.resources.create", "provider.resources.version", "provider.upload.start"}
                 else 256 * 1024
             ),
         )
@@ -176,6 +185,8 @@ class HubService:
                 result = await self._control(tool, bounded_arguments, identity)
             elif tool in _PROVIDER_WRITES:
                 result = await self._provider_write(tool, bounded_arguments, identity)
+            elif tool == "submit_discovery_batch":
+                result = await self._submit_discovery_batch(bounded_arguments, identity)
             elif not contract.read_only:
                 result = await self._write(tool, bounded_arguments, identity)
             else:
@@ -226,7 +237,7 @@ class HubService:
         if snapshot.state is MasterState.ABSENT:
             return (await self._ensure(identity, intent=intent)).public()
         if snapshot.operation_id:
-            return {
+            result = {
                 **snapshot.public(),
                 "terminal": snapshot.state
                 in {
@@ -236,6 +247,17 @@ class HubService:
                     MasterState.ORPHANED,
                 },
             }
+            if not result["terminal"]:
+                result.update(
+                    outcome="WAITING_FOR_MASTER",
+                    retryable=True,
+                    continuation={
+                        "operation_id": snapshot.operation_id,
+                        "status_tool": "operation.get",
+                        "retry_original_request_when": "state=ACTIVE",
+                    },
+                )
+            return result
         raise MasterUnavailableError("non-ACTIVE master state has no durable operation_id")
 
     async def _control(
@@ -262,7 +284,53 @@ class HubService:
                         "reconciliation_required": True,
                         "canonical_receipt_found": False,
                     }
+        if tool == "bloggers.import.status" and result.get("state") == "APPLYING":
+            snapshot = await self._resolve(identity)
+            if snapshot.state is MasterState.ACTIVE:
+                reconciled = await self._reconcile_pending_blogger_import(
+                    identity=identity,
+                    master=snapshot,
+                    operation_id=str(arguments.get("operation_id", "")),
+                    deny_if_absent=False,
+                )
+                if reconciled is not None and reconciled.get("found") is not False:
+                    result = await _await(self.control.invoke_control(tool, arguments, identity))
+                elif reconciled is not None:
+                    result = {
+                        **result,
+                        "retry_allowed": False,
+                        "reconciliation_required": True,
+                        "canonical_receipt_found": False,
+                    }
         return dict(result)
+
+    async def _submit_discovery_batch(
+        self, arguments: Mapping[str, Any], identity: AccessIdentity
+    ) -> dict[str, Any]:
+        raw = arguments.get("payload")
+        if not isinstance(raw, Mapping):
+            raise ValueError("submit_discovery_batch requires one closed payload object")
+        request = validate_submit_discovery_batch(raw)
+        active = await self._active_or_operation(
+            identity, intent=f"mcp-blogger-intake:{request.batch_id}"
+        )
+        if isinstance(active, dict):
+            return {
+                **active,
+                "batch_id": str(request.batch_id),
+                "request_sha256": request.request_sha256,
+                "continuation": {
+                    **dict(active.get("continuation", {})),
+                    "retry_tool": "submit_discovery_batch",
+                },
+            }
+        return await self._execute_session(
+            "submit_discovery_batch",
+            {"payload": request.model_dump(mode="json", exclude_none=True)},
+            identity,
+            active,
+            role="connector",
+        )
 
     async def _stale_epoch_probe(
         self, arguments: Mapping[str, Any], identity: AccessIdentity
@@ -372,9 +440,50 @@ class HubService:
                 str(arguments.get("sql", "")), self._parameters(arguments)
             )
             self._require_write_contract(arguments, apply=tool.endswith(".apply"))
+        if tool == "bloggers.import.apply":
+            replay_reader = getattr(self.write_gate, "blogger_apply_replay", None)
+            if replay_reader is None:
+                raise HubPermissionError("blogger apply replay gate is not configured")
+            replay = await _await(replay_reader(principal=identity, arguments=arguments))
+            if replay is not None:
+                self._require_durable_operation(replay)
+                return dict(replay)
+        prepared: Mapping[str, Any] | None = None
+        if tool == "bloggers.import.preview":
+            prepare = getattr(self.write_gate, "prepare_blogger_import", None)
+            if prepare is None:
+                raise HubPermissionError("blogger import lifecycle gate is not configured")
+            prepared = await _await(prepare(principal=identity, arguments=arguments))
         active = await self._active_or_operation(identity, intent=f"mcp-write:{tool}")
         if isinstance(active, dict):
+            if prepared is not None:
+                marker = getattr(self.write_gate, "mark_blogger_import_waiting_master", None)
+                if marker is None:
+                    raise HubPermissionError("blogger cold-start continuation gate is not configured")
+                record = await _await(marker(operation_id=str(prepared["operation_id"])))
+                return {
+                    **active,
+                    "operation_id": str(record["operation_id"]),
+                    "master_operation_id": active.get("operation_id"),
+                    "status": str(record["state"]),
+                    "request_sha256": str(record["request_sha256"]),
+                    "continuation": {
+                        "operation_id": str(record["operation_id"]),
+                        "status_tool": "bloggers.import.status",
+                        "retry_original_request_when": "master_state=ACTIVE",
+                    },
+                }
             return active
+        if tool == "bloggers.import.apply":
+            reconciled = await self._reconcile_pending_blogger_import(
+                identity=identity,
+                master=active,
+                arguments=arguments,
+                deny_if_absent=True,
+            )
+            if reconciled is not None:
+                self._require_durable_operation(reconciled)
+                return reconciled
         if tool == "data.change.apply":
             reconciled = await self._reconcile_pending_write(
                 identity=identity,
@@ -386,7 +495,13 @@ class HubService:
                 self._require_durable_operation(reconciled)
                 return reconciled
         permit = await self._permit(tool, arguments, identity, active)
-        enriched = {**arguments, "_write_permit": self._permit_public(permit)}
+        if tool.startswith("bloggers.import."):
+            builder = getattr(self.write_gate, "blogger_broker_arguments", None)
+            if builder is None:
+                raise HubPermissionError("blogger import broker binding is not configured")
+            enriched = dict(await _await(builder(permit=permit, arguments=arguments)))
+        else:
+            enriched = {**arguments, "_write_permit": self._permit_public(permit)}
         result = await self._execute_session(
             tool,
             enriched,
@@ -401,6 +516,48 @@ class HubService:
         if tool.endswith(".apply"):
             self._require_durable_operation(result)
         return result
+
+    async def _reconcile_pending_blogger_import(
+        self,
+        *,
+        identity: AccessIdentity,
+        master: MasterSnapshot,
+        operation_id: str | None = None,
+        arguments: Mapping[str, Any] | None = None,
+        deny_if_absent: bool,
+    ) -> dict[str, Any] | None:
+        request_builder = getattr(self.write_gate, "blogger_reconciliation_request", None)
+        recorder = getattr(self.write_gate, "record_reconciled_blogger_import", None)
+        if request_builder is None or recorder is None:
+            return None
+        request = await _await(
+            request_builder(
+                principal=identity,
+                master=master,
+                operation_id=operation_id,
+                arguments=arguments,
+            )
+        )
+        if request is None:
+            return None
+        receipt = await self._execute_session(
+            "bloggers.import.reconcile",
+            request,
+            identity,
+            master,
+            role="canonical_committer",
+        )
+        if receipt.get("found") is not True:
+            if deny_if_absent:
+                raise HubPermissionError(
+                    "blogger apply retry remains denied until the exact canonical receipt is reconciled"
+                )
+            return {"found": False}
+        return dict(
+            await _await(
+                recorder(operation_id=str(request["operation_id"]), receipt=receipt)
+            )
+        )
 
     async def _reconcile_pending_write(
         self,
@@ -487,8 +644,6 @@ class HubService:
         provider_only = (
             permit.canonical_data_independent
             and tool in _PROVIDER_WRITES
-            and master.state is MasterState.ABSENT
-            and master.epoch is None
             and permit.master_epoch == 0
             and permit.canonical_revision == 0
             and not permit.checkpoint_lifecycle_bound
@@ -498,7 +653,7 @@ class HubService:
             permit.tool != tool
             or permit.principal != identity.subject
             or permit.client_id != identity.client_id
-            or permit.master_epoch != (master.epoch or 0)
+            or (not provider_only and permit.master_epoch != (master.epoch or 0))
             or permit.expires_at <= int(self.clock())
             or (not provider_only and not permit.checkpoint_lifecycle_bound)
         ):
@@ -538,6 +693,7 @@ class HubService:
                     role=role,
                     tool=tool,
                     limits=limits,
+                    canonical_revision=master.canonical_revision,
                 )
             )
         )

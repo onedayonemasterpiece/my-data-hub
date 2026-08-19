@@ -101,8 +101,15 @@ def _client(payload: object, *, client_id: str, allowed_scopes: frozenset[str]) 
 
     methods = payload.get("token_endpoint_auth_methods_supported")
     singular_method = payload.get("token_endpoint_auth_method")
-    if singular_method is not None and singular_method != "none":
-        raise ClientMetadataError("ChatGPT CIMD token method must be none")
+    # ChatGPT's CIMD currently names ``private_key_jwt`` as its preferred
+    # method and separately publishes the methods it can negotiate, including
+    # ``none``.  This authorization server advertises only ``none`` and uses
+    # PKCE plus an exact ChatGPT callback, so accept the document when the
+    # bounded supported-method set contains that common public-client method.
+    # The preferred private method is not silently accepted at /token: the
+    # token endpoint continues to reject every client assertion/header.
+    if singular_method is not None and singular_method not in {"none", "private_key_jwt"}:
+        raise ClientMetadataError("ChatGPT CIMD preferred token method is not bounded")
     if methods is not None and (
         not isinstance(methods, list)
         or not methods

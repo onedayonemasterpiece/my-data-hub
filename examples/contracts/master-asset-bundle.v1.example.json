@@ -67,6 +67,16 @@
       "path": "dataset/embedding-dependency-smoke.py",
       "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "byte_size": 8192
+    },
+    "master_ydb_dependency_manifest": {
+      "path": "dataset/master-ydb-dependency.json",
+      "sha256": "1212121212121212121212121212121212121212121212121212121212121212",
+      "byte_size": 512
+    },
+    "master_ydb_wheel": {
+      "path": "dataset/master-python-wheelhouse/ydb-3.31.2-py3-none-any.whl",
+      "sha256": "043b91af7dab122e9ee24cb1948576f324dc9b6dbb45952d2e7c58d99e2c5ddb",
+      "byte_size": 1513106
     }
   },
   "embedding_dependency_wheels": [
