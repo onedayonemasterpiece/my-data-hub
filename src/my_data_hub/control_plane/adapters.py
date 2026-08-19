@@ -99,39 +99,57 @@ class LedgerWriteGate(WriteGate):
         arguments: Mapping[str, Any],
         master: MasterSnapshot,
     ) -> WritePermit:
+        provider_mutations = {
+            "provider.resources.create",
+            "provider.resources.version",
+            "provider.resources.run",
+            "provider.resources.delete",
+            "provider.upload.start",
+            "provider.upload.put_chunk",
+            "provider.upload.finalize",
+            "provider.upload.abort",
+            "provider.acceptance.dataset.lifecycle",
+            "provider.acceptance.notebook.lifecycle",
+            "provider.acceptance.claim.cleanup",
+        }
+        if tool in provider_mutations:
+            if "provider:write" not in principal.scopes:
+                raise PermissionError("provider mutation requires provider:write")
+            acceptance_tool = tool.startswith("provider.acceptance.")
+            resource_class = (
+                "mcp_managed" if acceptance_tool else str(arguments.get("control_class", ""))
+            )
+            if resource_class not in {"mcp_managed", "mcp_exchange"}:
+                raise PermissionError("provider resource class is not MCP-controlled")
+            if not acceptance_tool and arguments.get("private") is not True:
+                raise PermissionError("provider mutations require a private resource")
+            return WritePermit(
+                permit_id=self._digest(
+                    {
+                        "tool": tool,
+                        "principal": principal.subject,
+                        "client_id": principal.client_id,
+                        "arguments": dict(arguments),
+                    }
+                ),
+                tool=tool,
+                principal=principal.subject,
+                client_id=principal.client_id,
+                master_epoch=0,
+                canonical_revision=0,
+                expires_at=int(self.clock()) + self.permit_ttl_seconds,
+                preview_bound=True,
+                checkpoint_lifecycle_bound=False,
+                pre_change_checkpoint_verified=False,
+                allowed_resource_class=resource_class,
+                private_resource_only=True,
+                canonical_data_independent=True,
+            )
         if master.state is not MasterState.ACTIVE or not master.instance_id or not master.epoch:
             raise PermissionError("operator writes require an exact ACTIVE master epoch")
         if master.canonical_revision is None:
             raise PermissionError("operator writes require an observed canonical revision")
         checkpoint = self._verified_checkpoint(master.canonical_revision)
-        if tool.startswith("provider.resources.") or tool in {
-            "provider.acceptance.dataset.lifecycle",
-            "provider.acceptance.notebook.lifecycle",
-            "provider.acceptance.claim.cleanup",
-        }:
-            resource_class = (
-                "mcp_managed"
-                if tool.startswith("provider.acceptance.")
-                else str(arguments.get("control_class", ""))
-            )
-            if resource_class not in {"mcp_managed", "mcp_exchange"}:
-                raise PermissionError("provider resource class is not MCP-controlled")
-            return WritePermit(
-                permit_id=self._digest(
-                    {"tool": tool, "principal": principal.subject, "arguments": dict(arguments), "epoch": master.epoch}
-                ),
-                tool=tool,
-                principal=principal.subject,
-                client_id=principal.client_id,
-                master_epoch=master.epoch,
-                canonical_revision=master.canonical_revision,
-                expires_at=int(self.clock()) + self.permit_ttl_seconds,
-                preview_bound=True,
-                checkpoint_lifecycle_bound=True,
-                pre_change_checkpoint_verified=True,
-                allowed_resource_class=resource_class,
-                private_resource_only=True,
-            )
         if tool in {"bloggers.import.preview", "bloggers.import.apply"}:
             return self._authorize_blogger_import(
                 principal=principal,

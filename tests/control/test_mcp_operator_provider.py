@@ -161,6 +161,67 @@ def test_write_gate_persists_preview_apply_and_exact_post_checkpoint(tmp_path: P
     assert status["pre_change_checkpoint_id"] != status["post_change_checkpoint_id"]
 
 
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "provider.resources.create",
+        "provider.resources.version",
+        "provider.resources.run",
+        "provider.resources.delete",
+        "provider.upload.start",
+        "provider.upload.put_chunk",
+        "provider.upload.finalize",
+        "provider.upload.abort",
+    ],
+)
+@pytest.mark.parametrize(
+    "master",
+    [
+        MasterSnapshot(MasterState.ABSENT),
+        MasterSnapshot(MasterState.ACTIVE, instance_id="master", epoch=7, canonical_revision=41),
+    ],
+)
+def test_operator_write_gate_keeps_private_provider_mutations_master_independent(
+    tmp_path: Path, tool: str, master: MasterSnapshot
+) -> None:
+    gate = LedgerWriteGate(ControlLedger(tmp_path / "control.sqlite3"), signing_secret=b"s" * 32)
+
+    permit = gate.authorize_write(
+        principal=principal(),
+        tool=tool,
+        arguments={"control_class": "mcp_managed", "private": True},
+        master=master,
+    )
+
+    assert permit.tool == tool
+    assert permit.canonical_data_independent is True
+    assert permit.master_epoch == 0
+    assert permit.canonical_revision == 0
+    assert permit.checkpoint_lifecycle_bound is False
+    assert permit.pre_change_checkpoint_verified is False
+    assert permit.allowed_resource_class == "mcp_managed"
+    assert permit.private_resource_only is True
+
+
+def test_operator_write_gate_rejects_unscoped_or_public_provider_mutation(tmp_path: Path) -> None:
+    gate = LedgerWriteGate(ControlLedger(tmp_path / "control.sqlite3"), signing_secret=b"s" * 32)
+    absent = MasterSnapshot(MasterState.ABSENT)
+    with pytest.raises(PermissionError, match="provider:write"):
+        gate.authorize_write(
+            principal=replace(principal(), scopes=frozenset({"data:write"})),
+            tool="provider.upload.start",
+            arguments={"control_class": "mcp_managed", "private": True},
+            master=absent,
+        )
+    with pytest.raises(PermissionError, match="private"):
+        gate.authorize_write(
+            principal=principal(),
+            tool="provider.upload.start",
+            arguments={"control_class": "mcp_managed", "private": False},
+            master=absent,
+        )
+
+
 @pytest.mark.asyncio
 async def test_postgres_receipt_reconciles_applying_without_reexecuting_dml(tmp_path: Path) -> None:
     clock = DeterministicClock(datetime(2026, 8, 11, tzinfo=UTC))
