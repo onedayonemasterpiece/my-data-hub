@@ -53,3 +53,70 @@ All commands ran from `/home/dev/.codex/worktrees/my-data-hub/operational-mvp` a
 - No production Kaggle/YDB/PostgreSQL action was run, so this is not live readiness or data-integrity evidence.
 - Before enablement, an owner must provision the exact private `<owner>/mdh-region-talk-supervisor` Notebook, attach the reviewed viewer-only Kaggle User Secret, and supply observed production YDB endpoint/database pins. Missing or changed provider identity fails closed.
 - The integration owner must invoke the sibling `RegionTalkPostImportSupervisor.execute_after_import()` seam immediately after a successful direct snapshot and require its typed receipt before terminal success; this lane intentionally did not edit the sibling-owned stage implementation or add a competing call.
+
+---
+
+# Follow-up audit A — offline closure, terminal revocation, database snapshots
+
+## Scope and revisions
+
+- Follow-up requested base SHA: `91e22ce`
+- Concurrent stage-dispatch integration parent observed before commit: `d6f9ed5`
+- Follow-up implementation SHA: `588438bfb4c11a0cad852bed0072cde23b74faf5`
+- Results receipt SHA: recorded by the following commit
+- Live mutation/deployment: **not performed**
+- Publication dispatch: remains hard-pinned to `false`
+
+## Requirement evidence
+
+| ID | Result | Evidence |
+|---|---|---|
+| A1 | Done | Replaced the root-only YDB lock with canonical v2 containing the exact 14-wheel CPython 3.12/manylinux closure for `ydb==3.31.2`. Builder and independent verifier reject missing, extra, symlinked, malformed, or SHA-mismatched files, bind the manifest SHA into deployment environment and Region Talk launch metadata, and retain the exact root wheel assertion. Both generated master bootstrap paths SHA-locate every wheel in the same private Dataset, install each with `--no-index --no-deps` before application/YDB import, and attest installed versions. Local evidence verified all 14 committed hashes against the resolver-produced wheelhouse. No runtime index/image fallback is used. |
+| A2 | Done | Terminal revocation now treats the durable mailbox as intent/delivery state, never as proof of the broker KRL/certificate effect. Each generation is broker-revoked idempotently before a terminal completion marker is atomically persisted. Crash tests prove exact replay both after mailbox persistence and after broker commit but before task persistence. |
+| A3 | Done | `DirectYdbReader.run_snapshot_pass()` owns one `QuerySnapshotReadOnly` transaction for all five tables in Pass A and a second transaction for all five in Pass B. Table/page cursors remain bounded inside that pass. A mutation introduced between table reads is invisible to Pass A and visible to Pass B; the test asserts exactly two database transactions. |
+
+## Validation
+
+Commands ran from `/home/dev/.codex/worktrees/my-data-hub/operational-mvp`.
+
+- `.venv/bin/python -m pytest -q tests/provider/test_build_master_assets.py tests/provider/test_master_runtime_bridge.py tests/region_talk/test_direct_pipeline.py tests/region_talk/test_direct_snapshot.py tests/region_talk/test_long_run_authority.py tests/region_talk/test_pipeline_core.py tests/region_talk/test_production_assembly_response_loss.py tests/test_control_plane.py -x` — PASS.
+- `.venv/bin/python -m pytest -q tests/region_talk/test_snapshot_integrity_postgres.py -x` — expected skip without disposable PostgreSQL URL.
+- `.venv/bin/python -m pytest -q tests/test_control_plane_deployment.py tests/control/test_control_runtime_wiring.py -x` — PASS (47 tests).
+- `.venv/bin/python -m pytest -q tests/region_talk/test_long_run_authority.py -k 'terminal_revocation_crash'` — PASS (2 tests).
+- `.venv/bin/python -m pytest -q tests/region_talk/test_direct_pipeline.py tests/region_talk/test_direct_snapshot.py -x` — PASS (10 tests).
+- `.venv/bin/ruff check <all changed Python files>` — PASS.
+- `.venv/bin/python -m compileall -q src tests scripts` — PASS.
+- `.venv/bin/python scripts/create_notebooks.py --check` — PASS, `drift: []`.
+- `.venv/bin/python scripts/validate_repository.py` — PASS, 5,100 checks, zero errors/notes.
+- Local lock-to-wheelhouse SHA check — PASS, 14/14 exact files.
+- `git diff --cached --check` — PASS before implementation commit.
+
+A broader `pytest -q tests/region_talk -x` reached the concurrent stage-dispatch lane and
+failed in `test_stage_dispatch.py::test_launch_restart_reconciles_one_effect_and_submits_exact_result`
+because that lane's synthetic claim receipt hash was invalid before adapter execution. Root confirmed
+that failure is C-owned. Per root's disk/concurrency direction, this lane did not run the final full
+suite; root will run it after C settles.
+
+## Changed files
+
+- `.env.example`
+- `compose.control-plane.yaml`
+- `docs/operations/{master-asset-bundle.md,region-talk-supervised-runtime.md}`
+- `examples/contracts/master-asset-bundle.v1.example.json`
+- `schemas/master-asset-bundle.v1.schema.json`
+- `scripts/provider/assets/master-ydb-wheel-lock.v1.json` (removed)
+- `scripts/provider/assets/master-ydb-wheel-lock.v2.json` (added)
+- `scripts/provider/{build_master_assets.py,verify_master_assets.py}`
+- `src/my_data_hub/control_plane/app.py`
+- `src/my_data_hub/providers/kaggle/master_runtime.py`
+- `src/my_data_hub/workloads/region_talk/{central_launcher.py,direct_pipeline.py,direct_snapshot.py,pipeline_contracts.py,pipeline_runtime.py,production_assembly.py}`
+- `tests/provider/{test_build_master_assets.py,test_master_runtime_bridge.py}`
+- `tests/region_talk/{test_direct_pipeline.py,test_direct_snapshot.py,test_long_run_authority.py,test_pipeline_core.py,test_production_assembly_response_loss.py,test_snapshot_integrity_postgres.py}`
+- `tests/test_control_plane.py`
+
+## Remaining risks
+
+- No production Kaggle/YDB/PostgreSQL action was performed; this is code/contract evidence only.
+- The exact closure is pinned to the reviewed CPython 3.12/manylinux artifacts. Changing the runtime
+  image ABI/platform requires a new lock and review rather than compatibility guessing.
+- Final full-suite evidence is delegated to root after the concurrent stage-dispatch fixture is fixed.
