@@ -53,6 +53,7 @@ from .pipeline_contracts import (
     TaskWorkerCredentialRevocation,
 )
 from .pipeline_runtime import LaunchObservation, LaunchObservationKind
+from .stage_dispatch import StageWorkerCredentialStatus, StageWorkMetadataClaimReceipt
 
 _MAX_SECRET_BYTES = 1024 * 1024
 
@@ -154,6 +155,60 @@ class DirectoryRegionTalkTaskAuthority:
         _atomic(path, encoded)
         return command
 
+    def prepare_stage_worker(
+        self,
+        claim: StageWorkMetadataClaimReceipt,
+        *,
+        task_token: str,
+        source_sha256: str,
+        image_identity: str,
+        image_source_commit: str,
+        generation: int = 1,
+    ) -> TaskWorkerCredentialCommand:
+        """Publish a child command while persisting only bounded claim metadata."""
+
+        path = self._task_path(claim.worker_task_run_id)
+        if path.exists():
+            existing = self._read(path)
+            if (
+                existing.get("schema_version") != "region-talk-private-stage-command.v1"
+                or existing.get("master_instance_id") != str(claim.master_instance_id)
+                or existing.get("epoch") != claim.epoch
+                or existing.get("source_sha256") != source_sha256
+                or existing.get("image_identity") != image_identity
+                or existing.get("image_source_commit") != image_source_commit
+                or existing.get("claim") != claim.model_dump(mode="json")
+            ):
+                raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_COMMAND_CONFLICT")
+            return TaskWorkerCredentialCommand.model_validate(existing.get("command"))
+        token_sha = hashlib.sha256(task_token.encode()).hexdigest()
+        command = TaskWorkerCredentialCommand.create(
+            task_run_id=claim.worker_task_run_id,
+            epoch=claim.epoch,
+            generation=generation,
+            task_token_sha256=token_sha,
+        )
+        payload = {
+            "schema_version": "region-talk-private-stage-command.v1",
+            "master_instance_id": str(claim.master_instance_id),
+            "epoch": claim.epoch,
+            "source_sha256": source_sha256,
+            "image_identity": image_identity,
+            "image_source_commit": image_source_commit,
+            "claim": claim.model_dump(mode="json"),
+            "command": command.model_dump(mode="json"),
+            "activated_generation": generation,
+            "bindings": {},
+            "revoked_generations": [],
+            "terminal_revoked_generations": [],
+            "expired_generations": [],
+            "terminal": False,
+            "task_token": task_token,
+            "created_at": self.clock().astimezone(UTC).isoformat(),
+        }
+        _atomic(path, canonical_json_bytes(payload))
+        return command
+
     def batch(self, *, master_instance_id: UUID, epoch: int) -> TaskWorkerCredentialBatch:
         self._reap_expired_sidecars()
         commands: list[TaskWorkerCredentialCommand] = []
@@ -220,13 +275,59 @@ class DirectoryRegionTalkTaskAuthority:
     def await_access(
         self, metadata: RegionTalkLaunchMetadata, command: TaskWorkerCredentialCommand
     ) -> RegionTalkDirectMasterAccess:
-        access_path = self._access_path(metadata.task_run_id, command.generation)
+        return self._await_access_identity(
+            task_run_id=metadata.task_run_id,
+            master_instance_id=metadata.master.master_instance_id,
+            epoch=metadata.master.epoch,
+            command=command,
+        )
+
+    def await_stage_worker_access(
+        self,
+        claim: StageWorkMetadataClaimReceipt,
+        command: TaskWorkerCredentialCommand,
+    ) -> RegionTalkDirectMasterAccess:
+        return self._await_access_identity(
+            task_run_id=claim.worker_task_run_id,
+            master_instance_id=claim.master_instance_id,
+            epoch=claim.epoch,
+            command=command,
+        )
+
+    def stage_worker_registration(
+        self,
+        claim: StageWorkMetadataClaimReceipt,
+        command: TaskWorkerCredentialCommand,
+    ) -> TaskWorkerCredentialRegistration | None:
+        path = self._registration_path(claim.worker_task_run_id, command.generation)
+        ack_path = self._registration_ack_path(claim.worker_task_run_id, command.generation)
+        if not path.is_file() or not ack_path.is_file():
+            return None
+        registration = TaskWorkerCredentialRegistration.model_validate(self._read(path))
+        if (
+            registration.task_run_id != claim.worker_task_run_id
+            or registration.master_instance_id != claim.master_instance_id
+            or registration.epoch != claim.epoch
+            or registration.command_sha256 != command.command_sha256
+            or registration.task_token_sha256 != command.task_token_sha256
+            or registration.expires_at <= self.clock().astimezone(UTC) + timedelta(seconds=60)
+        ):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_CREDENTIAL_BINDING_INVALID")
+        return registration
+
+    def _await_access_identity(
+        self,
+        *,
+        task_run_id: UUID,
+        master_instance_id: UUID,
+        epoch: int,
+        command: TaskWorkerCredentialCommand,
+    ) -> RegionTalkDirectMasterAccess:
+        access_path = self._access_path(task_run_id, command.generation)
         if access_path.exists():
             return RegionTalkDirectMasterAccess.model_validate(self._read(access_path))
-        path = self._registration_path(metadata.task_run_id, command.generation)
-        ack_path = self._registration_ack_path(
-            metadata.task_run_id, command.generation
-        )
+        path = self._registration_path(task_run_id, command.generation)
+        ack_path = self._registration_ack_path(task_run_id, command.generation)
         deadline = time.monotonic() + self.wait_seconds
         while (not path.is_file() or not ack_path.is_file()) and time.monotonic() < deadline:
             time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
@@ -234,9 +335,9 @@ class DirectoryRegionTalkTaskAuthority:
             raise RegionTalkAssemblyUnavailable("REGION_TALK_TASK_CREDENTIAL_PENDING")
         registration = TaskWorkerCredentialRegistration.model_validate(self._read(path))
         if (
-            registration.task_run_id != metadata.task_run_id
-            or registration.master_instance_id != metadata.master.master_instance_id
-            or registration.epoch != metadata.master.epoch
+            registration.task_run_id != task_run_id
+            or registration.master_instance_id != master_instance_id
+            or registration.epoch != epoch
             or registration.command_sha256 != command.command_sha256
             or registration.expires_at
             <= self.clock().astimezone(UTC) + timedelta(seconds=60)
@@ -776,6 +877,49 @@ class DirectoryRegionTalkTaskAuthority:
 
 
 @dataclass(slots=True)
+class CentralRegionTalkStageCredentialBroker:
+    """Nonblocking child-credential handshake for one metadata-only claim."""
+
+    authority: DirectoryRegionTalkTaskAuthority
+    image_identity: str
+    image_source_commit: str
+    source_sha256_by_stage: Mapping[str, str]
+
+    def prepare(
+        self, claim_value: Mapping[str, Any] | StageWorkMetadataClaimReceipt
+    ) -> StageWorkerCredentialStatus:
+        claim = (
+            claim_value
+            if isinstance(claim_value, StageWorkMetadataClaimReceipt)
+            else StageWorkMetadataClaimReceipt.model_validate(claim_value)
+        )
+        try:
+            source_sha256 = self.source_sha256_by_stage[claim.stage]
+        except KeyError as exc:
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_STAGE_NOTEBOOK_SOURCE_UNAVAILABLE"
+            ) from exc
+        command = self.authority.prepare_stage_worker(
+            claim,
+            task_token=secrets.token_urlsafe(36),
+            source_sha256=source_sha256,
+            image_identity=self.image_identity,
+            image_source_commit=self.image_source_commit,
+        )
+        registration = self.authority.stage_worker_registration(claim, command)
+        return StageWorkerCredentialStatus(
+            status="READY" if registration is not None else "PENDING",
+            dispatch_id=claim.dispatch_id,
+            effect_id=claim.effect_id,
+            worker_task_run_id=claim.worker_task_run_id,
+            worker_credential_id=(registration.credential_id if registration else None),
+            worker_generation=(registration.generation if registration else None),
+            worker_command_sha256=command.command_sha256,
+            worker_task_token_sha256=command.task_token_sha256,
+        )
+
+
+@dataclass(slots=True)
 class CentralRegionTalkNotebookAdapter:
     """Deterministic private Dataset/Notebook launcher and cleanup adapter."""
 
@@ -1284,6 +1428,7 @@ class RegionTalkAssemblySettings:
 
 __all__ = [
     "CentralRegionTalkNotebookAdapter",
+    "CentralRegionTalkStageCredentialBroker",
     "DirectoryRegionTalkTaskAuthority",
     "RegionTalkAssemblySettings",
     "RegionTalkAssemblyUnavailable",

@@ -24,9 +24,17 @@ from my_data_hub.workloads.region_talk.pipeline_contracts import (
     TaskWorkerCredentialRegistration,
 )
 from my_data_hub.workloads.region_talk.production_assembly import (
+    CentralRegionTalkStageCredentialBroker,
     DirectoryRegionTalkTaskAuthority,
     RegionTalkAssemblyUnavailable,
 )
+from my_data_hub.workloads.region_talk.stage_dispatch import (
+    StageWorkMetadataClaimReceipt,
+    stage_dispatch_id,
+    stage_effect_id,
+    stage_worker_task_run_id,
+)
+from my_data_hub.workloads.region_talk.stage_execution import stage_run_id, work_item_id
 
 NOW = datetime(2026, 8, 19, 12, tzinfo=UTC)
 MASTER = ActiveMasterBinding(
@@ -128,6 +136,99 @@ def _register(
     if acknowledge:
         authority.acknowledge_registrations((receipt,))
     return receipt
+
+
+def _stage_claim() -> StageWorkMetadataClaimReceipt:
+    batch = UUID("88888888-8888-4888-8888-888888888888")
+    subject = UUID("99999999-9999-4999-8999-999999999999")
+    fingerprint = hashlib.sha256(b"stage-input").hexdigest()
+    run = stage_run_id(_metadata().task_run_id, batch)
+    work = work_item_id(
+        run_id=run,
+        candidate_id=subject,
+        revision=1,
+        stage="e5_embedding",
+        input_fingerprint=fingerprint,
+    )
+    effect = stage_effect_id(work_item_id=work, attempt=1, input_fingerprint=fingerprint)
+    worker = stage_worker_task_run_id(
+        supervisor_task_run_id=_metadata().task_run_id,
+        work_item_id=work,
+        attempt=1,
+    )
+    dispatch = stage_dispatch_id(
+        supervisor_task_run_id=_metadata().task_run_id,
+        work_item_id=work,
+        attempt=1,
+        input_fingerprint=fingerprint,
+    )
+    body = {
+        "schema_version": "region-talk-stage-work-metadata-claim-receipt.v2",
+        "status": "CLAIMED",
+        "master_instance_id": str(MASTER.master_instance_id),
+        "epoch": MASTER.epoch,
+        "supervisor_task_run_id": str(_metadata().task_run_id),
+        "export_batch_id": str(batch),
+        "stage_run_id": str(run),
+        "work_item_id": str(work),
+        "effect_id": str(effect),
+        "dispatch_id": str(dispatch),
+        "worker_task_run_id": str(worker),
+        "stage": "e5_embedding",
+        "contract_version": "e5_semantic_bank_scores_v1",
+        "subject_type": "region_talk.candidate",
+        "subject_id": str(subject),
+        "input_fingerprint": fingerprint,
+        "attempt": 1,
+        "max_attempts": 3,
+        "timeout_seconds": 900,
+        "lease_expires_at": (NOW + timedelta(minutes=15)).isoformat(),
+        "lease_token_sha256": "a" * 64,
+        "lease_capability_sha256": "b" * 64,
+        "claim_receipt_sha256": "c" * 64,
+        "publication_dispatch": False,
+        "notification_dispatch": False,
+    }
+    body["receipt_sha256"] = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
+    return StageWorkMetadataClaimReceipt.model_validate(body)
+
+
+def test_stage_child_credential_handshake_is_metadata_only_and_replay_safe(
+    tmp_path: Path,
+) -> None:
+    authority, _broker = _authority(tmp_path)
+    claim = _stage_claim()
+    broker = CentralRegionTalkStageCredentialBroker(
+        authority=authority,
+        image_identity="runtime@sha256:" + "d" * 64,
+        image_source_commit="e" * 40,
+        source_sha256_by_stage={"e5_embedding": "f" * 64},
+    )
+    pending = broker.prepare(claim)
+    assert pending.status == "PENDING"
+    commands = authority.batch(
+        master_instance_id=MASTER.master_instance_id,
+        epoch=MASTER.epoch,
+    ).commands
+    assert len(commands) == 1 and commands[0].task_run_id == claim.worker_task_run_id
+    receipt = _register(
+        authority,
+        commands[0],
+        credential_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        acknowledge=False,
+    )
+    assert broker.prepare(claim).status == "PENDING"
+    authority.acknowledge_registrations((receipt,))
+    ready = broker.prepare(claim)
+    assert ready.status == "READY"
+    assert ready.worker_credential_id == receipt.credential_id
+    assert ready.worker_command_sha256 == commands[0].command_sha256
+    assert ready.worker_task_token_sha256 == commands[0].task_token_sha256
+    replay = broker.prepare(claim)
+    assert replay == ready
+    command_bytes = authority._task_path(claim.worker_task_run_id).read_bytes()
+    for forbidden in (b'"payload"', b'"input_data"', b'"text"', b'"lease_token"', b'"database_url"'):
+        assert forbidden not in command_bytes
 
 
 def test_generation_refresh_replays_and_revokes_only_after_activation_ack(

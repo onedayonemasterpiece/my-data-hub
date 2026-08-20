@@ -583,6 +583,31 @@ class StageWorkerBindRequest(StrictModel):
     notification_dispatch: Literal[False] = False
 
 
+class StageWorkerCredentialStatus(StrictModel):
+    """Metadata-only control response while a child credential is registered."""
+
+    schema_version: Literal["region-talk-stage-worker-credential-status.v1"] = (
+        "region-talk-stage-worker-credential-status.v1"
+    )
+    status: Literal["PENDING", "READY"]
+    dispatch_id: UUID
+    effect_id: UUID
+    worker_task_run_id: UUID
+    worker_credential_id: UUID | None = None
+    worker_generation: int | None = Field(default=None, ge=1)
+    worker_command_sha256: str = Field(pattern=SHA256_PATTERN)
+    worker_task_token_sha256: str = Field(pattern=SHA256_PATTERN)
+    publication_dispatch: Literal[False] = False
+    notification_dispatch: Literal[False] = False
+
+    @model_validator(mode="after")
+    def complete_ready_identity(self) -> StageWorkerCredentialStatus:
+        ready = self.status == "READY"
+        if ready != (self.worker_credential_id is not None and self.worker_generation is not None):
+            raise ValueError("worker credential status is incomplete")
+        return self
+
+
 class StageWorkerPayloadFetchRequest(StrictModel):
     schema_version: Literal["region-talk-stage-work-payload-fetch.v1"] = (
         "region-talk-stage-work-payload-fetch.v1"
