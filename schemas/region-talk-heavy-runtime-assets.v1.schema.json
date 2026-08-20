@@ -1,0 +1,297 @@
+{
+  "$defs": {
+    "ModelFileAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_size": {
+          "anyOf": [
+            {
+              "maximum": 10000000000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Byte Size"
+        },
+        "filename": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Filename",
+          "type": "string"
+        },
+        "logical_name": {
+          "pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+          "title": "Logical Name",
+          "type": "string"
+        },
+        "provider_ref": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Provider Ref",
+          "type": "string"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        },
+        "status": {
+          "enum": [
+            "provider_available_unverified",
+            "resolved",
+            "unresolved"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "logical_name",
+        "provider_ref",
+        "filename",
+        "status"
+      ],
+      "title": "ModelFileAsset",
+      "type": "object"
+    },
+    "PythonDistributionAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "distribution": {
+          "pattern": "^[A-Za-z0-9_.-]{1,100}$",
+          "title": "Distribution",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "resolved",
+            "unresolved"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "maxLength": 100,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        },
+        "wheel_filename": {
+          "anyOf": [
+            {
+              "maxLength": 300,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Wheel Filename"
+        },
+        "wheel_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Wheel Sha256"
+        }
+      },
+      "required": [
+        "distribution",
+        "status"
+      ],
+      "title": "PythonDistributionAsset",
+      "type": "object"
+    },
+    "RemoteModelAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "immutable_revision": {
+          "anyOf": [
+            {
+              "maxLength": 300,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Immutable Revision"
+        },
+        "logical_name": {
+          "pattern": "^[a-z][a-z0-9_.-]{0,99}$",
+          "title": "Logical Name",
+          "type": "string"
+        },
+        "model_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Model Id",
+          "type": "string"
+        },
+        "provider": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        },
+        "request_contract_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Request Contract Sha256",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "resolved",
+            "unresolved"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "logical_name",
+        "provider",
+        "model_id",
+        "request_contract_sha256",
+        "status"
+      ],
+      "title": "RemoteModelAsset",
+      "type": "object"
+    }
+  },
+  "$id": "https://my-data-hub.invalid/schemas/region-talk-heavy-runtime-assets.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "distributions": {
+      "items": {
+        "$ref": "#/$defs/PythonDistributionAsset"
+      },
+      "maxItems": 100,
+      "minItems": 1,
+      "title": "Distributions",
+      "type": "array"
+    },
+    "manifest_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "models": {
+      "items": {
+        "$ref": "#/$defs/ModelFileAsset"
+      },
+      "maxItems": 100,
+      "minItems": 1,
+      "title": "Models",
+      "type": "array"
+    },
+    "network_install_allowed": {
+      "const": false,
+      "title": "Network Install Allowed",
+      "type": "boolean"
+    },
+    "network_model_download_allowed": {
+      "const": false,
+      "title": "Network Model Download Allowed",
+      "type": "boolean"
+    },
+    "production_ready": {
+      "title": "Production Ready",
+      "type": "boolean"
+    },
+    "remote_models": {
+      "items": {
+        "$ref": "#/$defs/RemoteModelAsset"
+      },
+      "maxItems": 20,
+      "minItems": 1,
+      "title": "Remote Models",
+      "type": "array"
+    },
+    "runtime_image_identity": {
+      "maxLength": 500,
+      "minLength": 1,
+      "title": "Runtime Image Identity",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "region-talk-heavy-runtime-assets.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "shadow_fixture_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Shadow Fixture Sha256"
+    },
+    "smoke_receipt_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Smoke Receipt Sha256"
+    },
+    "source_revision": {
+      "pattern": "^[a-f0-9]{40}$",
+      "title": "Source Revision",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "source_revision",
+    "runtime_image_identity",
+    "network_install_allowed",
+    "network_model_download_allowed",
+    "production_ready",
+    "distributions",
+    "models",
+    "remote_models",
+    "manifest_sha256"
+  ],
+  "title": "Region Talk offline heavy-runtime asset manifest",
+  "type": "object"
+}

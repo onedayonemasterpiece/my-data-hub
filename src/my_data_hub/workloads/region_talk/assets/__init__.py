@@ -1,1 +1,1 @@
-"""Reviewed Region Talk runtime-asset registry data."""
+"""Reviewed offline runtime-asset manifests for Region Talk stages."""
