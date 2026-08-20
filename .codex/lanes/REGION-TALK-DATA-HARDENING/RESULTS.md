@@ -48,3 +48,16 @@
 - Blogger evidence continues to reuse the dedicated reviewed 266-to-263 path; this snapshot mapper does not create duplicate blogger actors.
 - This proves schema and disposable semantics, not the supervised production YDB cutover, live 58,554-row reconciliation or checkpoint publication. Those remain integration/operations gates outside this lane.
 - Publication dispatch is intentionally disabled; the canonical publication queue is readable/executable state but no external publication side effect is enabled.
+
+## Reviewer follow-up: task authority/current state/canonical MCP queue
+
+- Follow-up implementation head: `c637e07fda577225b7c08bdc1a26d75756ea04c7`.
+- Append-only migration `0025_region_talk_task_binding_and_current_state.sql` supersedes first-use task binding. The master must register the exact live credential/principal, `worker_kind=region_talk`, task UUID, generation, master instance/epoch, command hash and task-token hash before worker handoff. Begin/page/finalize/fail/canonical apply resolve that immutable registration for `session_user`; an invented or different task UUID is denied.
+- Exact registration replay returns the same ten-field receipt. Conflicting task registration for the same credential fails with an immutable-binding conflict. The registration function is executable only by `mdh_owner`/`mdh_master_controller`.
+- Canonical current state now has an explicit mutable head plus append-only observation evidence. Newer changed payloads for source candidate/status, source work item, publication plan and review update the existing canonical objects according to source timestamp, payload hash and canonical revision. Source status, work transitions and review decisions append history; stale observations cannot overwrite newer state.
+- `region_talk.queue.list/summary` now dispatch to the canonical publication queue rather than raw legacy work-family projections. The public filter is `channel` (plus `status`), and list rows include candidate revision, plan/channel/schedule and latest immutable review evidence.
+- Disposable PG regression proves: unregistered/different task rejection; exact/conflicting registration; two accepted snapshots where the second changes the same source PKs; current candidate/status/work/plan/review updates; immutable observations=10; no duplicate candidate revision/plan; changed review/status histories append; latest publication queue returns updated channel/status/review.
+- `MDH_RUN_DISPOSABLE_POSTGRES=1 ... tests/region_talk/test_snapshot_integrity_postgres.py` — PASS.
+- `MDH_RUN_DISPOSABLE_POSTGRES=1 ... tests/master/test_live_postgres.py` — PASS, including role security probes after migrations 1..25.
+- Focused Region Talk/MCP/master credential/migration suite — PASS.
+- Full `PYTHONDONTWRITEBYTECODE=1 .venv/bin/pytest -q -p no:cacheprovider` — PASS (`4 skipped`; only existing jsonschema deprecation warnings).
