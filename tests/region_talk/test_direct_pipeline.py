@@ -337,6 +337,10 @@ def test_cycle_requires_typed_post_import_receipt_before_success(monkeypatch) ->
         return refreshed_connection
 
     executor.set_transport_refresher(refresh)
+    reconciled: list[str] = []
+    executor.set_stage_work_reconciler(
+        SimpleNamespace(reconcile_next=lambda: reconciled.append("claim"))
+    )
     result = executor.execute_cycle(
         RegionTalkCycleRequest(
             task_run_id=task_run_id,
@@ -350,6 +354,7 @@ def test_cycle_requires_typed_post_import_receipt_before_success(monkeypatch) ->
     assert result.rows_observed == 58_554
     assert result.rows_changed == 58_563
     assert result.queue_revision == 17
+    assert reconciled == ["claim"]
     assert calls == [
         "inventory",
         "snapshot",
@@ -368,6 +373,7 @@ def test_cycle_requires_typed_post_import_receipt_before_success(monkeypatch) ->
         )
     )
     assert completed.disposition is RegionTalkCycleDisposition.COMPLETE
+    assert reconciled == ["claim"]
     assert calls.count("snapshot") == 1
     assert calls[-1] == (
         "stages",

@@ -124,6 +124,18 @@ class DirectStageWorkerFunctions(Protocol):
     ) -> StageWorkerDirectResultReceipt: ...
 
 
+class DirectStageCredentialCheckpoint(Protocol):
+    """Private Notebook rotation hook; no capability crosses control journals."""
+
+    def __call__(
+        self,
+        functions: DirectStageWorkerFunctions,
+        request: StageWorkerPayloadFetchRequest,
+        *,
+        phase: str,
+    ) -> tuple[DirectStageWorkerFunctions, StageWorkerPayloadFetchRequest]: ...
+
+
 def attached_stage_runtime_from_env(stage: str) -> AttachedStageRuntime | None:
     """Load one explicitly attached, execution-pin-owned runtime factory.
 
@@ -364,10 +376,17 @@ def execute_direct_region_talk_stage_worker(
     request: StageWorkerPayloadFetchRequest,
     *,
     runtime: AttachedStageRuntime | None = None,
+    credential_checkpoint: DirectStageCredentialCheckpoint | None = None,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> StageWorkerDirectResultReceipt:
     """Fetch, execute and land one task-bound stage result without central data transit."""
 
+    if credential_checkpoint is not None:
+        functions, request = credential_checkpoint(
+            functions,
+            request,
+            phase="before_fetch",
+        )
     fetched = functions.fetch_payload(
         worker_task_run_id=request.worker_task_run_id,
         effect_id=request.effect_id,
@@ -416,11 +435,24 @@ def execute_direct_region_talk_stage_worker(
     metadata_sha256 = hashlib.sha256(
         canonical_json_bytes(result_metadata.model_dump(mode="json"))
     ).hexdigest()
+    if credential_checkpoint is not None:
+        functions, current_request = credential_checkpoint(
+            functions,
+            request,
+            phase="before_submit",
+        )
+        if (
+            current_request.worker_task_run_id != fetched.worker_task_run_id
+            or current_request.dispatch_id != fetched.dispatch_id
+            or current_request.effect_id != fetched.effect_id
+        ):
+            raise ValueError("rotated worker checkpoint changed fixed work identity")
+        request = current_request
     submission = StageWorkerDirectResultRequest(
         worker_task_run_id=fetched.worker_task_run_id,
         dispatch_id=fetched.dispatch_id,
         effect_id=fetched.effect_id,
-        worker_binding_sha256=fetched.worker_binding_sha256,
+        worker_binding_sha256=request.worker_binding_sha256,
         work_item_id=fetched.work_item_id,
         attempt=fetched.attempt,
         result_status=status,
@@ -462,6 +494,7 @@ def _failure_metadata(
 
 __all__ = [
     "AttachedStageRuntime",
+    "DirectStageCredentialCheckpoint",
     "DirectStageWorkerFunctions",
     "RegionTalkStageRuntimeUnavailable",
     "StageNotebookPayload",

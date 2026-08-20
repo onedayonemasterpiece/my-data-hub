@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -583,6 +584,64 @@ class StageWorkerBindRequest(StrictModel):
     notification_dispatch: Literal[False] = False
 
 
+class StageWorkerRotateRequest(StrictModel):
+    schema_version: Literal["region-talk-stage-worker-rotate.v1"] = (
+        "region-talk-stage-worker-rotate.v1"
+    )
+    dispatch_id: UUID
+    effect_id: UUID
+    work_item_id: UUID
+    worker_task_run_id: UUID
+    prior_worker_generation: int = Field(ge=1)
+    prior_worker_binding_sha256: str = Field(pattern=SHA256_PATTERN)
+    new_worker_credential_id: UUID
+    new_worker_generation: int = Field(ge=2)
+    new_worker_command_sha256: str = Field(pattern=SHA256_PATTERN)
+    new_worker_task_token_sha256: str = Field(pattern=SHA256_PATTERN)
+    requested_at: datetime
+    publication_dispatch: Literal[False] = False
+    notification_dispatch: Literal[False] = False
+
+    @model_validator(mode="after")
+    def successive_generation(self) -> StageWorkerRotateRequest:
+        if self.new_worker_generation != self.prior_worker_generation + 1:
+            raise ValueError("stage worker rotation must advance exactly one generation")
+        return self
+
+
+class StageWorkerRotateReceipt(StrictModel):
+    schema_version: Literal["region-talk-stage-worker-rotate-receipt.v1"]
+    rotated: Literal[True]
+    master_instance_id: UUID
+    epoch: int = Field(ge=1)
+    supervisor_task_run_id: UUID
+    export_batch_id: UUID
+    stage_run_id: UUID
+    dispatch_id: UUID
+    work_item_id: UUID
+    effect_id: UUID
+    worker_task_run_id: UUID
+    prior_worker_generation: int = Field(ge=1)
+    prior_worker_binding_sha256: str = Field(pattern=SHA256_PATTERN)
+    worker_credential_id: UUID
+    worker_generation: int = Field(ge=2)
+    worker_binding_sha256: str = Field(pattern=SHA256_PATTERN)
+    publication_dispatch: Literal[False] = False
+    notification_dispatch: Literal[False] = False
+    receipt_sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @model_validator(mode="before")
+    @classmethod
+    def exact_receipt_hash(cls, value: Any) -> Any:
+        return _verify_raw_receipt(value, "worker rotation")
+
+    @model_validator(mode="after")
+    def successive_generation(self) -> StageWorkerRotateReceipt:
+        if self.worker_generation != self.prior_worker_generation + 1:
+            raise ValueError("stage worker rotation receipt skips a generation")
+        return self
+
+
 class StageWorkerCredentialStatus(StrictModel):
     """Metadata-only control response while a child credential is registered."""
 
@@ -850,6 +909,7 @@ class PostgresStageSupervisorFunctions:
         "migration.claim_region_talk_stage_work_metadata",
         "migration.bind_region_talk_stage_worker",
         "migration.region_talk_stage_supervisor_status",
+        "migration.rotate_region_talk_stage_worker_credential",
     })
 
     def __init__(self, connection: Any) -> None:
@@ -926,6 +986,22 @@ class PostgresStageSupervisorFunctions:
         return StageSupervisorStatusReceipt.model_validate(
             self._call(
                 "migration.region_talk_stage_supervisor_status",
+                supervisor_task_run_id,
+                export_batch_id,
+                request,
+            )
+        )
+
+    def rotate_worker(
+        self,
+        *,
+        supervisor_task_run_id: UUID,
+        export_batch_id: UUID,
+        request: StageWorkerRotateRequest,
+    ) -> StageWorkerRotateReceipt:
+        return StageWorkerRotateReceipt.model_validate(
+            self._call(
+                "migration.rotate_region_talk_stage_worker_credential",
                 supervisor_task_run_id,
                 export_batch_id,
                 request,
@@ -1064,6 +1140,82 @@ class RegionTalkStageNotebookAdapter(Protocol):
     def launch(self, launch: StageWorkerLaunch) -> StageProviderLaunchReceipt: ...
 
 
+class RegionTalkStageControlBridge(Protocol):
+    """Metadata-only supervisor-to-central handshake."""
+
+    def prepare_worker(
+        self, claim: StageWorkMetadataClaimReceipt
+    ) -> StageWorkerCredentialStatus: ...
+
+    def dispatch_bound(
+        self,
+        claim: StageWorkMetadataClaimReceipt,
+        binding: StageWorkerBindingReceipt,
+    ) -> StageProviderObservation: ...
+
+
+@dataclass(slots=True)
+class PrivateSupervisorStageCoordinator:
+    """One bounded master-side claim/bind/dispatch step; never sees provider secrets."""
+
+    functions: PostgresStageSupervisorFunctions
+    bridge: RegionTalkStageControlBridge
+    supervisor_task_run_id: UUID
+    export_batch_id: UUID
+    lease_owner: str
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC)
+    _claim_sequence: int = 0
+
+    def reconcile_next(
+        self,
+    ) -> StageWorkMetadataClaimReceipt | StageWorkMetadataEmptyReceipt:
+        claim_request_id = uuid5(
+            STAGE_EFFECT_NAMESPACE,
+            "region-talk-stage-metadata-claim:"
+            f"{self.supervisor_task_run_id}:{self.export_batch_id}:{self._claim_sequence}",
+        )
+        claimed = self.functions.claim_metadata(
+            supervisor_task_run_id=self.supervisor_task_run_id,
+            export_batch_id=self.export_batch_id,
+            request=StageMetadataClaimRequest(
+                claim_request_id=claim_request_id,
+                lease_owner=self.lease_owner,
+                requested_at=self.clock().astimezone(UTC),
+            ),
+        )
+        if isinstance(claimed, StageWorkMetadataEmptyReceipt):
+            return claimed
+        credential = self.bridge.prepare_worker(claimed)
+        if credential.status == "PENDING":
+            return claimed
+        assert credential.worker_credential_id is not None
+        assert credential.worker_generation is not None
+        if (
+            credential.dispatch_id != claimed.dispatch_id
+            or credential.effect_id != claimed.effect_id
+            or credential.worker_task_run_id != claimed.worker_task_run_id
+        ):
+            raise ValueError("child credential metadata differs from stage claim")
+        binding = self.functions.bind_worker(
+            supervisor_task_run_id=self.supervisor_task_run_id,
+            export_batch_id=self.export_batch_id,
+            request=StageWorkerBindRequest(
+                dispatch_id=claimed.dispatch_id,
+                effect_id=claimed.effect_id,
+                claim_receipt_sha256=claimed.claim_receipt_sha256,
+                worker_task_run_id=claimed.worker_task_run_id,
+                worker_credential_id=credential.worker_credential_id,
+                worker_generation=credential.worker_generation,
+                worker_command_sha256=credential.worker_command_sha256,
+                worker_task_token_sha256=credential.worker_task_token_sha256,
+                requested_at=self.clock().astimezone(UTC),
+            ),
+        )
+        self.bridge.dispatch_bound(claimed, binding)
+        self._claim_sequence += 1
+        return claimed
+
+
 STAGE_NOTEBOOK_SLUGS: dict[str, str] = {
     "e5_embedding": "20-region-talk-e5-enrichment",
     "bge_m3_embedding": "30-region-talk-bge-m3-enrichment",
@@ -1131,11 +1283,19 @@ class RegionTalkStageDispatcher:
 
     def dispatch_bound(
         self,
-        claim_value: dict[str, Any],
-        binding_value: dict[str, Any],
+        claim_value: dict[str, Any] | StageWorkMetadataClaimReceipt,
+        binding_value: dict[str, Any] | StageWorkerBindingReceipt,
     ) -> StageProviderObservation:
-        claim = StageWorkMetadataClaimReceipt.model_validate(claim_value)
-        binding = StageWorkerBindingReceipt.model_validate(binding_value)
+        claim = (
+            claim_value
+            if isinstance(claim_value, StageWorkMetadataClaimReceipt)
+            else StageWorkMetadataClaimReceipt.model_validate(claim_value)
+        )
+        binding = (
+            binding_value
+            if isinstance(binding_value, StageWorkerBindingReceipt)
+            else StageWorkerBindingReceipt.model_validate(binding_value)
+        )
         if (
             binding.supervisor_task_run_id != claim.supervisor_task_run_id
             or binding.export_batch_id != claim.export_batch_id
@@ -1207,6 +1367,7 @@ __all__ = [
     "PostgresStageSupervisorFunctions",
     "PostgresStageWorkFunctions",
     "PostgresStageWorkerFunctions",
+    "PrivateSupervisorStageCoordinator",
     "ProviderObservationKind",
     "RegionTalkStageDispatcher",
     "RegionTalkStageNotebookAdapter",
@@ -1225,11 +1386,14 @@ __all__ = [
     "StageWorkPayloadReceipt",
     "StageWorkerBindRequest",
     "StageWorkerBindingReceipt",
+    "StageWorkerCredentialStatus",
     "StageWorkerDirectResultReceipt",
     "StageWorkerDirectResultRequest",
     "StageWorkerLaunch",
     "StageWorkerPayloadFetchRequest",
     "StageWorkerResult",
+    "StageWorkerRotateReceipt",
+    "StageWorkerRotateRequest",
     "StageWorkerStatus",
     "reconcile_notebook_result",
     "stage_dispatch_id",

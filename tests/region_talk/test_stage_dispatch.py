@@ -17,14 +17,17 @@ from my_data_hub.workloads.region_talk.notebook_stages import (
 from my_data_hub.workloads.region_talk.stage_dispatch import (
     PostgresStageSupervisorFunctions,
     PostgresStageWorkerFunctions,
+    PrivateSupervisorStageCoordinator,
     ProviderObservationKind,
     RegionTalkStageDispatcher,
     StageMetadataClaimRequest,
     StageProviderLaunchReceipt,
     StageProviderObservation,
     StageWorkerBindingReceipt,
+    StageWorkerCredentialStatus,
     StageWorkerDirectResultReceipt,
     StageWorkerPayloadFetchRequest,
+    StageWorkerRotateRequest,
     StageWorkMetadataClaimReceipt,
     StageWorkPayloadReceipt,
     stage_dispatch_id,
@@ -320,7 +323,7 @@ class _DirectFunctions:
             "result_status": request.result_status.value,
             "metadata_sha256": request.metadata_sha256,
             "result_sha256": request.result_sha256,
-            "worker_binding_sha256": self.fetched.worker_binding_sha256,
+            "worker_binding_sha256": request.worker_binding_sha256,
             "publication_dispatch": False,
             "notification_dispatch": False,
         }
@@ -370,6 +373,36 @@ def test_private_worker_attached_runtime_lands_exact_success() -> None:
     submission = functions.submissions[0]
     assert submission.result_sha256 == submission.metadata_sha256
     assert submission.result_metadata.metrics["verified"] is True
+
+
+def test_private_worker_rotates_at_bounded_checkpoint_before_submit() -> None:
+    functions = _DirectFunctions()
+    fetched = functions.fetched
+    initial = StageWorkerPayloadFetchRequest(
+        worker_task_run_id=fetched.worker_task_run_id,
+        dispatch_id=fetched.dispatch_id,
+        effect_id=fetched.effect_id,
+        worker_binding_sha256=fetched.worker_binding_sha256,
+        requested_at=NOW,
+    )
+    phases: list[str] = []
+
+    def checkpoint(current_functions, request, *, phase):  # type: ignore[no-untyped-def]
+        phases.append(phase)
+        if phase == "before_submit":
+            request = request.model_copy(update={"worker_binding_sha256": "9" * 64})
+        return current_functions, request
+
+    receipt = execute_direct_region_talk_stage_worker(
+        functions,
+        initial,
+        runtime=_AttachedRuntime(),
+        credential_checkpoint=checkpoint,
+        clock=lambda: NOW,
+    )
+    assert phases == ["before_fetch", "before_submit"]
+    assert receipt.worker_binding_sha256 == "9" * 64
+    assert functions.submissions[0].worker_binding_sha256 == "9" * 64
 
 
 class _Cursor:
@@ -445,3 +478,117 @@ def test_fixed_0028_ports_set_pipeline_role_before_exact_functions() -> None:
     assert worker_connection.value.calls[1][0] == (
         "SELECT migration.fetch_region_talk_stage_work_payload(%s,%s,%s::jsonb)"
     )
+
+
+def test_fixed_0029_rotation_port_rejects_generation_skip_and_calls_exact_function() -> None:
+    claim = _metadata_claim()
+    body = {
+        "schema_version": "region-talk-stage-worker-rotate-receipt.v1",
+        "rotated": True,
+        "master_instance_id": claim["master_instance_id"],
+        "epoch": claim["epoch"],
+        "supervisor_task_run_id": claim["supervisor_task_run_id"],
+        "export_batch_id": claim["export_batch_id"],
+        "stage_run_id": claim["stage_run_id"],
+        "dispatch_id": claim["dispatch_id"],
+        "work_item_id": claim["work_item_id"],
+        "effect_id": claim["effect_id"],
+        "worker_task_run_id": claim["worker_task_run_id"],
+        "prior_worker_generation": 1,
+        "prior_worker_binding_sha256": "c" * 64,
+        "worker_credential_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "worker_generation": 2,
+        "worker_binding_sha256": "d" * 64,
+        "publication_dispatch": False,
+        "notification_dispatch": False,
+    }
+    connection = _Connection({**body, "receipt_sha256": _sha(body)})
+    supervisor = PostgresStageSupervisorFunctions(connection)
+    request = StageWorkerRotateRequest(
+        dispatch_id=UUID(claim["dispatch_id"]),
+        effect_id=UUID(claim["effect_id"]),
+        work_item_id=UUID(claim["work_item_id"]),
+        worker_task_run_id=UUID(claim["worker_task_run_id"]),
+        prior_worker_generation=1,
+        prior_worker_binding_sha256="c" * 64,
+        new_worker_credential_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        new_worker_generation=2,
+        new_worker_command_sha256="e" * 64,
+        new_worker_task_token_sha256="f" * 64,
+        requested_at=NOW,
+    )
+    receipt = supervisor.rotate_worker(
+        supervisor_task_run_id=SUPERVISOR,
+        export_batch_id=BATCH,
+        request=request,
+    )
+    assert receipt.worker_generation == 2
+    assert connection.value.calls[1][0] == (
+        "SELECT migration.rotate_region_talk_stage_worker_credential(%s,%s,%s::jsonb)"
+    )
+    with pytest.raises(ValueError, match="advance exactly one"):
+        StageWorkerRotateRequest.model_validate(
+            {**request.model_dump(mode="json"), "new_worker_generation": 3}
+        )
+
+
+def test_private_supervisor_replays_claim_until_child_is_bound_then_advances() -> None:
+    claim = StageWorkMetadataClaimReceipt.model_validate(_metadata_claim())
+    binding = StageWorkerBindingReceipt.model_validate(_binding(_metadata_claim()))
+
+    class Functions:
+        def __init__(self) -> None:
+            self.requests = []
+            self.binds = []
+
+        def claim_metadata(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.requests.append(kwargs["request"])
+            return claim
+
+        def bind_worker(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.binds.append(kwargs["request"])
+            return binding
+
+    class Bridge:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.dispatched = []
+
+        def prepare_worker(self, current):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            return StageWorkerCredentialStatus(
+                status="PENDING" if self.calls == 1 else "READY",
+                dispatch_id=current.dispatch_id,
+                effect_id=current.effect_id,
+                worker_task_run_id=current.worker_task_run_id,
+                worker_credential_id=(
+                    None
+                    if self.calls == 1
+                    else UUID("66666666-6666-4666-8666-666666666666")
+                ),
+                worker_generation=None if self.calls == 1 else 1,
+                worker_command_sha256="d" * 64,
+                worker_task_token_sha256="e" * 64,
+            )
+
+        def dispatch_bound(self, current, exact_binding):  # type: ignore[no-untyped-def]
+            self.dispatched.append((current, exact_binding))
+            return StageProviderObservation(kind=ProviderObservationKind.RUNNING)
+
+    functions = Functions()
+    bridge = Bridge()
+    coordinator = PrivateSupervisorStageCoordinator(
+        functions=functions,  # type: ignore[arg-type]
+        bridge=bridge,
+        supervisor_task_run_id=SUPERVISOR,
+        export_batch_id=BATCH,
+        lease_owner="private-supervisor",
+        clock=lambda: NOW,
+    )
+    coordinator.reconcile_next()
+    coordinator.reconcile_next()
+    assert len(functions.requests) == 2
+    assert functions.requests[0].claim_request_id == functions.requests[1].claim_request_id
+    assert len(functions.binds) == 1
+    assert functions.binds[0].claim_receipt_sha256 == claim.claim_receipt_sha256
+    assert bridge.dispatched == [(claim, binding)]

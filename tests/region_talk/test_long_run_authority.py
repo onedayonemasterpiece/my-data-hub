@@ -226,6 +226,23 @@ def test_stage_child_credential_handshake_is_metadata_only_and_replay_safe(
     assert ready.worker_task_token_sha256 == commands[0].task_token_sha256
     replay = broker.prepare(claim)
     assert replay == ready
+    rotation = broker.prepare_rotation(claim, prior_generation=1)
+    assert rotation.status == "PENDING"
+    assert rotation.worker_command_sha256 != ready.worker_command_sha256
+    rotated_commands = authority.batch(
+        master_instance_id=MASTER.master_instance_id,
+        epoch=MASTER.epoch,
+    ).commands
+    assert len(rotated_commands) == 1 and rotated_commands[0].generation == 2
+    rotated_receipt = _register(
+        authority,
+        rotated_commands[0],
+        credential_id=UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+    )
+    rotated = broker.prepare_rotation(claim, prior_generation=1)
+    assert rotated.status == "READY"
+    assert rotated.worker_generation == 2
+    assert rotated.worker_credential_id == rotated_receipt.credential_id
     command_bytes = authority._task_path(claim.worker_task_run_id).read_bytes()
     for forbidden in (b'"payload"', b'"input_data"', b'"text"', b'"lease_token"', b'"database_url"'):
         assert forbidden not in command_bytes

@@ -209,6 +209,40 @@ class DirectoryRegionTalkTaskAuthority:
         _atomic(path, canonical_json_bytes(payload))
         return command
 
+    def prepare_stage_worker_rotation(
+        self,
+        claim: StageWorkMetadataClaimReceipt,
+        *,
+        prior_generation: int,
+    ) -> TaskWorkerCredentialCommand:
+        """Publish exactly generation N+1 for the same stage task/effect."""
+
+        path = self._task_path(claim.worker_task_run_id)
+        task = self._read(path)
+        if (
+            task.get("schema_version") != "region-talk-private-stage-command.v1"
+            or task.get("master_instance_id") != str(claim.master_instance_id)
+            or task.get("epoch") != claim.epoch
+            or task.get("claim") != claim.model_dump(mode="json")
+            or bool(task.get("terminal"))
+        ):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_COMMAND_CONFLICT")
+        command = TaskWorkerCredentialCommand.model_validate(task.get("command"))
+        if command.generation == prior_generation:
+            command = TaskWorkerCredentialCommand.create(
+                task_run_id=claim.worker_task_run_id,
+                epoch=claim.epoch,
+                generation=prior_generation + 1,
+                task_token_sha256=command.task_token_sha256,
+            )
+            task["command"] = command.model_dump(mode="json")
+            _atomic(path, canonical_json_bytes(task))
+        elif command.generation != prior_generation + 1:
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_STAGE_CREDENTIAL_GENERATION_CONFLICT"
+            )
+        return command
+
     def batch(self, *, master_instance_id: UUID, epoch: int) -> TaskWorkerCredentialBatch:
         self._reap_expired_sidecars()
         commands: list[TaskWorkerCredentialCommand] = []
@@ -905,6 +939,33 @@ class CentralRegionTalkStageCredentialBroker:
             source_sha256=source_sha256,
             image_identity=self.image_identity,
             image_source_commit=self.image_source_commit,
+        )
+        registration = self.authority.stage_worker_registration(claim, command)
+        return StageWorkerCredentialStatus(
+            status="READY" if registration is not None else "PENDING",
+            dispatch_id=claim.dispatch_id,
+            effect_id=claim.effect_id,
+            worker_task_run_id=claim.worker_task_run_id,
+            worker_credential_id=(registration.credential_id if registration else None),
+            worker_generation=(registration.generation if registration else None),
+            worker_command_sha256=command.command_sha256,
+            worker_task_token_sha256=command.task_token_sha256,
+        )
+
+    def prepare_rotation(
+        self,
+        claim_value: Mapping[str, Any] | StageWorkMetadataClaimReceipt,
+        *,
+        prior_generation: int,
+    ) -> StageWorkerCredentialStatus:
+        claim = (
+            claim_value
+            if isinstance(claim_value, StageWorkMetadataClaimReceipt)
+            else StageWorkMetadataClaimReceipt.model_validate(claim_value)
+        )
+        command = self.authority.prepare_stage_worker_rotation(
+            claim,
+            prior_generation=prior_generation,
         )
         registration = self.authority.stage_worker_registration(claim, command)
         return StageWorkerCredentialStatus(

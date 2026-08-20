@@ -197,12 +197,20 @@ class DirectRegionTalkCycleExecutor:
         self._snapshot_rows_observed = 0
         self._snapshot_rows_changed = 0
         self._stage_poll_count = 0
+        self._stage_work_reconciler: Any | None = None
         self._transport_refresher: Callable[..., Any] | None = None
 
     def set_transport_refresher(self, refresher: Callable[..., Any]) -> None:
         """Install the Notebook-owned tunnel/DB rotation hook."""
 
         self._transport_refresher = refresher
+
+    def set_stage_work_reconciler(self, reconciler: Any) -> None:
+        """Attach the private supervisor's metadata-only claim/bind bridge."""
+
+        if not callable(getattr(reconciler, "reconcile_next", None)):
+            raise DirectPipelineConfigurationError("stage work reconciler is invalid")
+        self._stage_work_reconciler = reconciler
 
     def execute_cycle(self, request: RegionTalkCycleRequest) -> RegionTalkCycleResult:
         if request.publication_dispatch:
@@ -297,6 +305,11 @@ class DirectRegionTalkCycleExecutor:
         ).hexdigest()
         first_poll = self._stage_poll_count == 0
         self._stage_poll_count += 1
+        if (
+            stage_receipt.status is StageRunStatus.WAITING_WORK
+            and self._stage_work_reconciler is not None
+        ):
+            self._stage_work_reconciler.reconcile_next()
         self._receipt = RegionTalkCycleResult(
             disposition=(
                 RegionTalkCycleDisposition.COMPLETE
