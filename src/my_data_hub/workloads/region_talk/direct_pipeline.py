@@ -171,7 +171,7 @@ def _snapshot_mode() -> Any:
 
 
 class DirectRegionTalkCycleExecutor:
-    """One migration cycle followed by an idempotent COMPLETE result."""
+    """Import once, then poll post-import stages until explicit DB completion."""
 
     def __init__(
         self,
@@ -192,6 +192,11 @@ class DirectRegionTalkCycleExecutor:
         self.epoch = epoch
         self.source_revision = source_revision
         self._receipt: RegionTalkCycleResult | None = None
+        self._export_batch_id: UUID | None = None
+        self._snapshot_receipt_sha256: str | None = None
+        self._snapshot_rows_observed = 0
+        self._snapshot_rows_changed = 0
+        self._stage_poll_count = 0
         self._transport_refresher: Callable[..., Any] | None = None
 
     def set_transport_refresher(self, refresher: Callable[..., Any]) -> None:
@@ -208,10 +213,13 @@ class DirectRegionTalkCycleExecutor:
             or request.epoch != self.epoch
         ):
             raise DirectPipelineConfigurationError("cycle differs from the task/epoch binding")
-        if self._receipt is not None:
-            return self._receipt.model_copy(
-                update={"disposition": RegionTalkCycleDisposition.COMPLETE}
-            )
+        if (
+            self._receipt is not None
+            and self._receipt.disposition is RegionTalkCycleDisposition.COMPLETE
+        ):
+            return self._receipt
+        if self._export_batch_id is not None:
+            return self._execute_post_import_stages()
         export_batch_id = uuid5(
             NAMESPACE_URL, f"my-data-hub:region-talk:direct:{self.task_run_id}"
         )
@@ -244,6 +252,10 @@ class DirectRegionTalkCycleExecutor:
         snapshot_receipt_sha256 = hashlib.sha256(
             canonical_json_bytes(receipt.model_dump(mode="json"))
         ).hexdigest()
+        self._export_batch_id = receipt.export_batch_id
+        self._snapshot_receipt_sha256 = snapshot_receipt_sha256
+        self._snapshot_rows_observed = receipt.expected_row_count
+        self._snapshot_rows_changed = receipt.dispositioned_row_count
         if self._transport_refresher is not None:
             replacement = self._transport_refresher(
                 self.connection,
@@ -257,23 +269,24 @@ class DirectRegionTalkCycleExecutor:
                     "transport refresh returned no post-import connection"
                 )
             self.connection = replacement
+        return self._execute_post_import_stages()
+
+    def _execute_post_import_stages(self) -> RegionTalkCycleResult:
+        assert self._export_batch_id is not None
+        assert self._snapshot_receipt_sha256 is not None
         stage_receipt = RegionTalkPostImportSupervisor(
             PostgresPostImportStageFunction(self.connection)
         ).execute_after_import(
             task_run_id=self.task_run_id,
-            export_batch_id=receipt.export_batch_id,
+            export_batch_id=self._export_batch_id,
         )
-        if stage_receipt.status is StageRunStatus.FAILED:
-            raise DirectPipelineConfigurationError(
-                "post-import Region Talk stages failed terminally"
-            )
         receipt_sha256 = hashlib.sha256(
             canonical_json_bytes(
                 {
                     "schema_version": "region-talk-supervised-cycle-receipt.v1",
                     "task_run_id": str(self.task_run_id),
-                    "export_batch_id": str(receipt.export_batch_id),
-                    "snapshot_receipt_sha256": snapshot_receipt_sha256,
+                    "export_batch_id": str(self._export_batch_id),
+                    "snapshot_receipt_sha256": self._snapshot_receipt_sha256,
                     "stage_receipt_sha256": stage_receipt.receipt_sha256,
                     "stage_status": stage_receipt.status.value,
                     "queue_revision": stage_receipt.queue_revision,
@@ -282,10 +295,19 @@ class DirectRegionTalkCycleExecutor:
                 }
             )
         ).hexdigest()
+        first_poll = self._stage_poll_count == 0
+        self._stage_poll_count += 1
         self._receipt = RegionTalkCycleResult(
-            disposition=RegionTalkCycleDisposition.COMPLETE,
-            rows_observed=receipt.expected_row_count,
-            rows_changed=receipt.dispositioned_row_count + stage_receipt.rows_changed,
+            disposition=(
+                RegionTalkCycleDisposition.COMPLETE
+                if stage_receipt.status is StageRunStatus.COMPLETE
+                else RegionTalkCycleDisposition.FAILED
+                if stage_receipt.status is StageRunStatus.FAILED
+                else RegionTalkCycleDisposition.RETRYABLE
+            ),
+            rows_observed=self._snapshot_rows_observed if first_poll else 0,
+            rows_changed=(self._snapshot_rows_changed if first_poll else 0)
+            + stage_receipt.rows_changed,
             receipt_sha256=receipt_sha256,
             queue_revision=stage_receipt.queue_revision,
         )

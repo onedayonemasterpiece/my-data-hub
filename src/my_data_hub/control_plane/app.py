@@ -647,7 +647,10 @@ def create_app(
                 # attestation whenever provider scheduling consumed the
                 # launch-time credential.  The proved DB session itself owns
                 # the bounded long migration; publication remains disabled.
-                max_cycles=1,
+                # The first cycle imports once. Later cycles only re-PREPARE
+                # post-import stages while central private workers advance the
+                # DB-owned DAG; WAITING_WORK is never terminal success.
+                max_cycles=96,
                 max_runtime_seconds=7200,
             ),
             instance_id=f"control:{app.state.control_boot_id}",

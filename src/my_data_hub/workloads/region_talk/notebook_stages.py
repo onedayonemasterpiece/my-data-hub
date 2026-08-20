@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import importlib
 import os
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -30,7 +32,15 @@ from my_data_hub.workloads.region_talk.transforms.models import (
     VectorFusionRequest,
 )
 
-from .stage_dispatch import StageExecutionPayload, StageResultMetadata
+from .stage_dispatch import (
+    StageExecutionPayload,
+    StageResultMetadata,
+    StageWorkerDirectResultReceipt,
+    StageWorkerDirectResultRequest,
+    StageWorkerPayloadFetchRequest,
+    StageWorkerStatus,
+    StageWorkPayloadReceipt,
+)
 from .stage_execution import STAGE_BY_KEY, work_item_id
 
 
@@ -92,6 +102,26 @@ class AttachedStageRuntime(Protocol):
         input_fingerprint: str,
         payload: StageExecutionPayload,
     ) -> dict[str, Any]: ...
+
+
+class DirectStageWorkerFunctions(Protocol):
+    """Exact direct-master boundary available only inside a private worker."""
+
+    def fetch_payload(
+        self,
+        *,
+        worker_task_run_id: UUID,
+        effect_id: UUID,
+        request: StageWorkerPayloadFetchRequest,
+    ) -> StageWorkPayloadReceipt: ...
+
+    def submit_result(
+        self,
+        *,
+        worker_task_run_id: UUID,
+        effect_id: UUID,
+        request: StageWorkerDirectResultRequest,
+    ) -> StageWorkerDirectResultReceipt: ...
 
 
 def attached_stage_runtime_from_env(stage: str) -> AttachedStageRuntime | None:
@@ -329,12 +359,115 @@ def process_region_talk_stage_item(
     return metadata.model_dump(mode="json")
 
 
+def execute_direct_region_talk_stage_worker(
+    functions: DirectStageWorkerFunctions,
+    request: StageWorkerPayloadFetchRequest,
+    *,
+    runtime: AttachedStageRuntime | None = None,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> StageWorkerDirectResultReceipt:
+    """Fetch, execute and land one task-bound stage result without central data transit."""
+
+    fetched = functions.fetch_payload(
+        worker_task_run_id=request.worker_task_run_id,
+        effect_id=request.effect_id,
+        request=request,
+    )
+    if (
+        fetched.worker_task_run_id != request.worker_task_run_id
+        or fetched.dispatch_id != request.dispatch_id
+        or fetched.effect_id != request.effect_id
+        or fetched.worker_binding_sha256 != request.worker_binding_sha256
+    ):
+        raise ValueError("fetched payload differs from the exact worker request")
+    item = {
+        "work_item_id": str(fetched.work_item_id),
+        "subject_type": fetched.subject_type,
+        "subject_id": str(fetched.subject_id),
+        "input_fingerprint": fetched.input_fingerprint,
+        "payload": fetched.payload.model_dump(mode="json"),
+    }
+    try:
+        result_metadata = StageResultMetadata.model_validate(
+            process_region_talk_stage_item(
+                item,
+                stage=fetched.stage,
+                contract_version=fetched.contract_version,
+                runtime=runtime,
+            )
+        )
+        status = StageWorkerStatus.SUCCEEDED
+    except RegionTalkStageRuntimeUnavailable as exc:
+        status = StageWorkerStatus.FAILED_RETRYABLE
+        result_metadata = _failure_metadata(
+            fetched,
+            code=exc.code,
+            message=str(exc),
+            retryable=True,
+        )
+    except ValueError as exc:
+        status = StageWorkerStatus.FAILED_TERMINAL
+        result_metadata = _failure_metadata(
+            fetched,
+            code="INVALID_STAGE_INPUT",
+            message=str(exc),
+            retryable=False,
+        )
+    metadata_sha256 = hashlib.sha256(
+        canonical_json_bytes(result_metadata.model_dump(mode="json"))
+    ).hexdigest()
+    submission = StageWorkerDirectResultRequest(
+        worker_task_run_id=fetched.worker_task_run_id,
+        dispatch_id=fetched.dispatch_id,
+        effect_id=fetched.effect_id,
+        worker_binding_sha256=fetched.worker_binding_sha256,
+        work_item_id=fetched.work_item_id,
+        attempt=fetched.attempt,
+        result_status=status,
+        result_metadata=result_metadata,
+        metadata_sha256=metadata_sha256,
+        result_sha256=result_metadata.artifact_sha256 or metadata_sha256,
+        completed_at=clock().astimezone(UTC),
+    )
+    return functions.submit_result(
+        worker_task_run_id=fetched.worker_task_run_id,
+        effect_id=fetched.effect_id,
+        request=submission,
+    )
+
+
+def _failure_metadata(
+    fetched: StageWorkPayloadReceipt,
+    *,
+    code: str,
+    message: str,
+    retryable: bool,
+) -> StageResultMetadata:
+    return StageResultMetadata(
+        stage=fetched.stage,
+        contract_version=fetched.contract_version,
+        subject_type=fetched.subject_type,
+        subject_id=fetched.subject_id,
+        candidate_revision=fetched.payload.candidate_revision,
+        revision_fingerprint=fetched.payload.revision_fingerprint,
+        input_fingerprint=fetched.input_fingerprint,
+        producer_exact_id=f"my-data-hub:{fetched.stage}@{fetched.contract_version}",
+        metrics={
+            "failure_code": code,
+            "failure_message_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest(),
+            "retryable": retryable,
+        },
+    )
+
+
 __all__ = [
     "AttachedStageRuntime",
+    "DirectStageWorkerFunctions",
     "RegionTalkStageRuntimeUnavailable",
     "StageNotebookPayload",
     "StageNotebookWorkItem",
     "attached_stage_runtime_from_env",
+    "execute_direct_region_talk_stage_worker",
     "process_region_talk_stage_item",
     "stage_model_identity",
 ]

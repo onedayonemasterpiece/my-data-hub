@@ -298,13 +298,20 @@ def test_cycle_requires_typed_post_import_receipt_before_success(monkeypatch) ->
             assert supplied_connection is refreshed_connection
 
     class Supervisor:
+        calls = 0
+
         def __init__(self, _function):  # type: ignore[no-untyped-def]
             pass
 
         def execute_after_import(self, **identity):  # type: ignore[no-untyped-def]
+            type(self).calls += 1
             calls.append(("stages", identity))
             return SimpleNamespace(
-                status=StageRunStatus.WAITING_WORK,
+                status=(
+                    StageRunStatus.WAITING_WORK
+                    if type(self).calls == 1
+                    else StageRunStatus.COMPLETE
+                ),
                 receipt_sha256="a" * 64,
                 queue_revision=17,
                 rows_changed=9,
@@ -339,7 +346,7 @@ def test_cycle_requires_typed_post_import_receipt_before_success(monkeypatch) ->
         )
     )
 
-    assert result.disposition is RegionTalkCycleDisposition.COMPLETE
+    assert result.disposition is RegionTalkCycleDisposition.RETRYABLE
     assert result.rows_observed == 58_554
     assert result.rows_changed == 58_563
     assert result.queue_revision == 17
@@ -352,6 +359,20 @@ def test_cycle_requires_typed_post_import_receipt_before_success(monkeypatch) ->
             {"task_run_id": task_run_id, "export_batch_id": export_batch_id},
         ),
     ]
+    completed = executor.execute_cycle(
+        RegionTalkCycleRequest(
+            task_run_id=task_run_id,
+            master_instance_id=master_instance_id,
+            epoch=47,
+            cycle_number=2,
+        )
+    )
+    assert completed.disposition is RegionTalkCycleDisposition.COMPLETE
+    assert calls.count("snapshot") == 1
+    assert calls[-1] == (
+        "stages",
+        {"task_run_id": task_run_id, "export_batch_id": export_batch_id},
+    )
 
 
 def test_cycle_does_not_report_success_for_failed_post_import_stages(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -379,7 +400,12 @@ def test_cycle_does_not_report_success_for_failed_post_import_stages(monkeypatch
             pass
 
         def execute_after_import(self, **_identity):  # type: ignore[no-untyped-def]
-            return SimpleNamespace(status=StageRunStatus.FAILED)
+            return SimpleNamespace(
+                status=StageRunStatus.FAILED,
+                receipt_sha256="a" * 64,
+                queue_revision=0,
+                rows_changed=0,
+            )
 
     monkeypatch.setattr(direct_pipeline, "DirectSnapshotRunner", Runner)
     monkeypatch.setattr(direct_pipeline, "PostgresPostImportStageFunction", lambda _value: object())
@@ -394,15 +420,12 @@ def test_cycle_does_not_report_success_for_failed_post_import_stages(monkeypatch
         source_revision=None,
     )
 
-    with pytest.raises(
-        direct_pipeline.DirectPipelineConfigurationError,
-        match="stages failed terminally",
-    ):
-        executor.execute_cycle(
-            RegionTalkCycleRequest(
-                task_run_id=task_run_id,
-                master_instance_id=master_instance_id,
-                epoch=47,
-                cycle_number=1,
-            )
+    result = executor.execute_cycle(
+        RegionTalkCycleRequest(
+            task_run_id=task_run_id,
+            master_instance_id=master_instance_id,
+            epoch=47,
+            cycle_number=1,
         )
+    )
+    assert result.disposition is RegionTalkCycleDisposition.FAILED

@@ -12,13 +12,12 @@ import hashlib
 import json
 import os
 import tempfile
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal, Protocol
-from uuid import UUID, uuid4, uuid5
+from typing import Any, ClassVar, Literal, Protocol
+from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -461,14 +460,539 @@ class ProviderObservationKind(StrEnum):
     AMBIGUOUS = "AMBIGUOUS"
 
 
+class StageWorkMetadataClaimReceipt(StrictModel):
+    """Business-payload-free supervisor callback from migration 0028."""
+
+    schema_version: Literal["region-talk-stage-work-metadata-claim-receipt.v2"]
+    status: Literal["CLAIMED"]
+    supervisor_task_run_id: UUID
+    export_batch_id: UUID
+    stage_run_id: UUID
+    master_instance_id: UUID
+    epoch: int = Field(ge=1)
+    work_item_id: UUID
+    effect_id: UUID
+    dispatch_id: UUID
+    worker_task_run_id: UUID
+    stage: str
+    contract_version: str
+    subject_type: Literal["region_talk.candidate"]
+    subject_id: UUID
+    input_fingerprint: str = Field(pattern=SHA256_PATTERN)
+    attempt: int = Field(ge=1)
+    max_attempts: int = Field(ge=1, le=20)
+    timeout_seconds: int = Field(ge=1, le=10_800)
+    lease_expires_at: datetime
+    lease_token_sha256: str = Field(pattern=SHA256_PATTERN)
+    lease_capability_sha256: str = Field(pattern=SHA256_PATTERN)
+    claim_receipt_sha256: str = Field(pattern=SHA256_PATTERN)
+    publication_dispatch: Literal[False] = False
+    notification_dispatch: Literal[False] = False
+    receipt_sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @model_validator(mode="before")
+    @classmethod
+    def exact_receipt_hash(cls, value: Any) -> Any:
+        return _verify_raw_receipt(value, "metadata claim")
+
+    @model_validator(mode="after")
+    def deterministic_identities(self) -> StageWorkMetadataClaimReceipt:
+        if self.worker_task_run_id != stage_worker_task_run_id(
+            supervisor_task_run_id=self.supervisor_task_run_id,
+            work_item_id=self.work_item_id,
+            attempt=self.attempt,
+        ):
+            raise ValueError("worker task identity is not deterministic")
+        if self.dispatch_id != stage_dispatch_id(
+            supervisor_task_run_id=self.supervisor_task_run_id,
+            work_item_id=self.work_item_id,
+            attempt=self.attempt,
+            input_fingerprint=self.input_fingerprint,
+        ):
+            raise ValueError("stage dispatch identity is not deterministic")
+        if self.effect_id != stage_effect_id(
+            work_item_id=self.work_item_id,
+            attempt=self.attempt,
+            input_fingerprint=self.input_fingerprint,
+        ):
+            raise ValueError("stage effect identity is not deterministic")
+        definition = STAGE_BY_KEY.get(self.stage)
+        if (
+            definition is None
+            or self.stage not in HEAVY_STAGES
+            or definition.contract_version != self.contract_version
+            or definition.max_attempts != self.max_attempts
+            or definition.timeout_seconds != self.timeout_seconds
+        ):
+            raise ValueError("metadata claim differs from the fixed DAG")
+        return self
+
+
+class StageWorkMetadataEmptyReceipt(StrictModel):
+    schema_version: Literal["region-talk-stage-work-metadata-claim-receipt.v2"]
+    status: Literal["EMPTY", "WAITING_DEPENDENCY", "COMPLETE", "FAILED"]
+    master_instance_id: UUID
+    epoch: int = Field(ge=1)
+    supervisor_task_run_id: UUID
+    export_batch_id: UUID
+    stage_run_id: UUID
+    work_item_id: None = None
+    dispatch_id: None = None
+    worker_task_run_id: None = None
+    effect_id: None = None
+    publication_dispatch: Literal[False] = False
+    notification_dispatch: Literal[False] = False
+    receipt_sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @model_validator(mode="before")
+    @classmethod
+    def exact_receipt_hash(cls, value: Any) -> Any:
+        return _verify_raw_receipt(value, "metadata empty")
+
+
+class StageMetadataClaimRequest(StrictModel):
+    schema_version: Literal["region-talk-stage-work-metadata-claim.v2"] = (
+        "region-talk-stage-work-metadata-claim.v2"
+    )
+    claim_request_id: UUID
+    lease_owner: str = Field(min_length=1, max_length=200)
+    requested_at: datetime
+    publication_dispatch: Literal[False] = False
+    notification_dispatch: Literal[False] = False
+
+    @field_validator("requested_at")
+    @classmethod
+    def utc_requested_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("metadata claim requested_at must be timezone-aware")
+        return value.astimezone(UTC)
+
+
+class StageWorkerBindRequest(StrictModel):
+    schema_version: Literal["region-talk-stage-worker-bind.v1"] = "region-talk-stage-worker-bind.v1"
+    dispatch_id: UUID
+    effect_id: UUID
+    claim_receipt_sha256: str = Field(pattern=SHA256_PATTERN)
+    worker_task_run_id: UUID
+    worker_credential_id: UUID
+    worker_generation: int = Field(ge=1)
+    worker_command_sha256: str = Field(pattern=SHA256_PATTERN)
+    worker_task_token_sha256: str = Field(pattern=SHA256_PATTERN)
+    requested_at: datetime
+    publication_dispatch: Literal[False] = False
+    notification_dispatch: Literal[False] = False
+
+
+class StageWorkerPayloadFetchRequest(StrictModel):
+    schema_version: Literal["region-talk-stage-work-payload-fetch.v1"] = (
+        "region-talk-stage-work-payload-fetch.v1"
+    )
+    worker_task_run_id: UUID
+    dispatch_id: UUID
+    effect_id: UUID
+    worker_binding_sha256: str = Field(pattern=SHA256_PATTERN)
+    requested_at: datetime
+    publication_dispatch: Literal[False] = False
+    notification_dispatch: Literal[False] = False
+
+
+class StageSupervisorStatusRequest(StrictModel):
+    schema_version: Literal["region-talk-stage-supervisor-status-request.v1"] = (
+        "region-talk-stage-supervisor-status-request.v1"
+    )
+    requested_at: datetime
+
+
+class StageSupervisorStatusItem(StrictModel):
+    dispatch_id: UUID
+    work_item_id: UUID
+    effect_id: UUID
+    worker_task_run_id: UUID
+    stage: str
+    input_fingerprint: str = Field(pattern=SHA256_PATTERN)
+    attempt: int = Field(ge=1)
+    lease_expires_at: datetime
+    worker_binding_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    work_status: Literal[
+        "pending", "leased", "succeeded", "failed_retryable", "failed_terminal"
+    ]
+    result_ref: dict[str, Any] | None = None
+
+
+class StageSupervisorStatusReceipt(StrictModel):
+    schema_version: Literal["region-talk-stage-supervisor-status-receipt.v1"]
+    master_instance_id: UUID
+    epoch: int = Field(ge=1)
+    supervisor_task_run_id: UUID
+    export_batch_id: UUID
+    stage_run_id: UUID
+    status: Literal["WAITING_WORK", "COMPLETE", "FAILED"]
+    items: tuple[StageSupervisorStatusItem, ...] = Field(max_length=10_000)
+    publication_dispatch: Literal[False] = False
+    notification_dispatch: Literal[False] = False
+    receipt_sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @model_validator(mode="before")
+    @classmethod
+    def exact_receipt_hash(cls, value: Any) -> Any:
+        return _verify_raw_receipt(value, "supervisor status")
+
+
+def stage_worker_task_run_id(*, supervisor_task_run_id: UUID, work_item_id: UUID, attempt: int) -> UUID:
+    return uuid5(
+        STAGE_EFFECT_NAMESPACE,
+        f"region-talk-stage-worker:{supervisor_task_run_id}:{work_item_id}:{attempt}",
+    )
+
+
+def stage_dispatch_id(
+    *,
+    supervisor_task_run_id: UUID,
+    work_item_id: UUID,
+    attempt: int,
+    input_fingerprint: str,
+) -> UUID:
+    return uuid5(
+        STAGE_EFFECT_NAMESPACE,
+        f"region-talk-stage-dispatch:{supervisor_task_run_id}:{work_item_id}:{attempt}:{input_fingerprint}",
+    )
+
+
+class StageWorkerBindingReceipt(StrictModel):
+    schema_version: Literal["region-talk-stage-worker-bind-receipt.v1"]
+    bound: Literal[True]
+    supervisor_task_run_id: UUID
+    export_batch_id: UUID
+    stage_run_id: UUID
+    work_item_id: UUID
+    effect_id: UUID
+    dispatch_id: UUID
+    worker_task_run_id: UUID
+    master_instance_id: UUID
+    epoch: int = Field(ge=1)
+    worker_credential_id: UUID
+    worker_generation: int = Field(ge=1)
+    lease_capability_sha256: str = Field(pattern=SHA256_PATTERN)
+    worker_binding_sha256: str = Field(pattern=SHA256_PATTERN)
+    publication_dispatch: Literal[False] = False
+    notification_dispatch: Literal[False] = False
+    receipt_sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @model_validator(mode="before")
+    @classmethod
+    def exact_receipt_hash(cls, value: Any) -> Any:
+        return _verify_raw_receipt(value, "worker binding")
+
+
+class StageWorkPayloadReceipt(StrictModel):
+    """Private worker-only response; the raw lease and payload never go central."""
+
+    schema_version: Literal["region-talk-stage-work-payload-receipt.v1"]
+    master_instance_id: UUID
+    epoch: int = Field(ge=1)
+    supervisor_task_run_id: UUID
+    worker_task_run_id: UUID
+    export_batch_id: UUID
+    stage_run_id: UUID
+    dispatch_id: UUID
+    work_item_id: UUID
+    effect_id: UUID
+    stage: str
+    contract_version: str
+    subject_type: Literal["region_talk.candidate"]
+    subject_id: UUID
+    input_fingerprint: str = Field(pattern=SHA256_PATTERN)
+    attempt: int = Field(ge=1)
+    lease_token: UUID
+    lease_expires_at: datetime
+    worker_binding_sha256: str = Field(pattern=SHA256_PATTERN)
+    payload: StageExecutionPayload
+    publication_dispatch: Literal[False] = False
+    notification_dispatch: Literal[False] = False
+    receipt_sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @model_validator(mode="before")
+    @classmethod
+    def exact_receipt_hash(cls, value: Any) -> Any:
+        return _verify_raw_receipt(value, "worker payload")
+
+    @model_validator(mode="after")
+    def exact_identity(self) -> StageWorkPayloadReceipt:
+        if (
+            self.worker_task_run_id
+            != stage_worker_task_run_id(
+                supervisor_task_run_id=self.supervisor_task_run_id,
+                work_item_id=self.work_item_id,
+                attempt=self.attempt,
+            )
+            or self.effect_id
+            != stage_effect_id(
+                work_item_id=self.work_item_id,
+                attempt=self.attempt,
+                input_fingerprint=self.input_fingerprint,
+            )
+            or self.dispatch_id
+            != stage_dispatch_id(
+                supervisor_task_run_id=self.supervisor_task_run_id,
+                work_item_id=self.work_item_id,
+                attempt=self.attempt,
+                input_fingerprint=self.input_fingerprint,
+            )
+            or self.payload.stage_run_id != self.stage_run_id
+            or self.payload.candidate_id != self.subject_id
+            or self.payload.input_fingerprint != self.input_fingerprint
+        ):
+            raise ValueError("private worker payload differs from its exact binding")
+        definition = STAGE_BY_KEY.get(self.stage)
+        if (
+            definition is None
+            or self.stage not in HEAVY_STAGES
+            or definition.contract_version != self.contract_version
+        ):
+            raise ValueError("private worker payload differs from fixed stage DAG")
+        return self
+
+
+class StageWorkerDirectResultRequest(StrictModel):
+    schema_version: Literal["region-talk-stage-worker-direct-result.v1"] = (
+        "region-talk-stage-worker-direct-result.v1"
+    )
+    worker_task_run_id: UUID
+    dispatch_id: UUID
+    effect_id: UUID
+    worker_binding_sha256: str = Field(pattern=SHA256_PATTERN)
+    work_item_id: UUID
+    attempt: int = Field(ge=1)
+    result_status: StageWorkerStatus
+    result_metadata: StageResultMetadata
+    metadata_sha256: str = Field(pattern=SHA256_PATTERN)
+    result_sha256: str = Field(pattern=SHA256_PATTERN)
+    completed_at: datetime
+    publication_dispatch: Literal[False] = False
+    notification_dispatch: Literal[False] = False
+
+    @model_validator(mode="after")
+    def exact_result_hash(self) -> StageWorkerDirectResultRequest:
+        expected = hashlib.sha256(
+            canonical_json_bytes(self.result_metadata.model_dump(mode="json"))
+        ).hexdigest()
+        if self.metadata_sha256 != expected:
+            raise ValueError("direct worker metadata_sha256 differs")
+        if self.completed_at.tzinfo is None or self.completed_at.utcoffset() is None:
+            raise ValueError("direct worker completed_at must be timezone-aware")
+        if self.result_status is StageWorkerStatus.SUCCEEDED and self.result_sha256 not in {
+            expected,
+            self.result_metadata.artifact_sha256,
+        }:
+            raise ValueError("successful direct worker result has no verified output digest")
+        return self
+
+
+class StageWorkerDirectResultReceipt(StrictModel):
+    schema_version: Literal["region-talk-stage-worker-direct-result-receipt.v1"]
+    accepted: Literal[True]
+    master_instance_id: UUID
+    epoch: int = Field(ge=1)
+    supervisor_task_run_id: UUID
+    worker_task_run_id: UUID
+    export_batch_id: UUID
+    stage_run_id: UUID
+    dispatch_id: UUID
+    work_item_id: UUID
+    effect_id: UUID
+    stage: str
+    subject_id: UUID
+    input_fingerprint: str = Field(pattern=SHA256_PATTERN)
+    attempt: int = Field(ge=1)
+    result_status: StageWorkerStatus
+    metadata_sha256: str = Field(pattern=SHA256_PATTERN)
+    result_sha256: str = Field(pattern=SHA256_PATTERN)
+    worker_binding_sha256: str = Field(pattern=SHA256_PATTERN)
+    publication_dispatch: Literal[False] = False
+    notification_dispatch: Literal[False] = False
+    receipt_sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @model_validator(mode="before")
+    @classmethod
+    def exact_receipt_hash(cls, value: Any) -> Any:
+        return _verify_raw_receipt(value, "direct worker result")
+
+
+class PostgresStageSupervisorFunctions:
+    """Supervisor-only 0028 functions; responses never contain business payloads."""
+
+    _ALLOWED: ClassVar[frozenset[str]] = frozenset({
+        "migration.claim_region_talk_stage_work_metadata",
+        "migration.bind_region_talk_stage_worker",
+        "migration.region_talk_stage_supervisor_status",
+    })
+
+    def __init__(self, connection: Any) -> None:
+        self.connection = connection
+
+    def _call(
+        self,
+        function: str,
+        supervisor_task_run_id: UUID,
+        export_batch_id: UUID,
+        request: StrictModel,
+    ) -> dict[str, Any]:
+        if function not in self._ALLOWED:
+            raise ValueError("unapproved Region Talk supervisor function")
+        with self.connection.cursor() as cursor:
+            cursor.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            row = cursor.execute(
+                f"SELECT {function}(%s,%s,%s::jsonb)",
+                (
+                    supervisor_task_run_id,
+                    export_batch_id,
+                    json.dumps(request.model_dump(mode="json")),
+                ),
+            ).fetchone()
+        if row is None:
+            self.connection.rollback()
+            raise RuntimeError("master returned no Region Talk supervisor response")
+        self.connection.commit()
+        value = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        if not isinstance(value, dict):
+            raise RuntimeError("master returned a non-object supervisor response")
+        return value
+
+    def claim_metadata(
+        self,
+        *,
+        supervisor_task_run_id: UUID,
+        export_batch_id: UUID,
+        request: StageMetadataClaimRequest,
+    ) -> StageWorkMetadataClaimReceipt | StageWorkMetadataEmptyReceipt:
+        value = self._call(
+            "migration.claim_region_talk_stage_work_metadata",
+            supervisor_task_run_id,
+            export_batch_id,
+            request,
+        )
+        if value.get("status") == "CLAIMED":
+            return StageWorkMetadataClaimReceipt.model_validate(value)
+        return StageWorkMetadataEmptyReceipt.model_validate(value)
+
+    def bind_worker(
+        self,
+        *,
+        supervisor_task_run_id: UUID,
+        export_batch_id: UUID,
+        request: StageWorkerBindRequest,
+    ) -> StageWorkerBindingReceipt:
+        return StageWorkerBindingReceipt.model_validate(
+            self._call(
+                "migration.bind_region_talk_stage_worker",
+                supervisor_task_run_id,
+                export_batch_id,
+                request,
+            )
+        )
+
+    def status(
+        self,
+        *,
+        supervisor_task_run_id: UUID,
+        export_batch_id: UUID,
+        request: StageSupervisorStatusRequest,
+    ) -> StageSupervisorStatusReceipt:
+        return StageSupervisorStatusReceipt.model_validate(
+            self._call(
+                "migration.region_talk_stage_supervisor_status",
+                supervisor_task_run_id,
+                export_batch_id,
+                request,
+            )
+        )
+
+
+class PostgresStageWorkerFunctions:
+    """Private child-worker 0028 functions; never instantiate on devstand."""
+
+    _ALLOWED: ClassVar[frozenset[str]] = frozenset({
+        "migration.fetch_region_talk_stage_work_payload",
+        "migration.submit_region_talk_stage_worker_result",
+    })
+
+    def __init__(self, connection: Any) -> None:
+        self.connection = connection
+
+    def _call(
+        self,
+        function: str,
+        worker_task_run_id: UUID,
+        effect_id: UUID,
+        request: StrictModel,
+    ) -> dict[str, Any]:
+        if function not in self._ALLOWED:
+            raise ValueError("unapproved Region Talk private worker function")
+        with self.connection.cursor() as cursor:
+            cursor.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            row = cursor.execute(
+                f"SELECT {function}(%s,%s,%s::jsonb)",
+                (
+                    worker_task_run_id,
+                    effect_id,
+                    json.dumps(request.model_dump(mode="json")),
+                ),
+            ).fetchone()
+        if row is None:
+            self.connection.rollback()
+            raise RuntimeError("master returned no Region Talk worker response")
+        self.connection.commit()
+        value = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+        if not isinstance(value, dict):
+            raise RuntimeError("master returned a non-object private worker response")
+        return value
+
+    def fetch_payload(
+        self,
+        *,
+        worker_task_run_id: UUID,
+        effect_id: UUID,
+        request: StageWorkerPayloadFetchRequest,
+    ) -> StageWorkPayloadReceipt:
+        return StageWorkPayloadReceipt.model_validate(
+            self._call(
+                "migration.fetch_region_talk_stage_work_payload",
+                worker_task_run_id,
+                effect_id,
+                request,
+            )
+        )
+
+    def submit_result(
+        self,
+        *,
+        worker_task_run_id: UUID,
+        effect_id: UUID,
+        request: StageWorkerDirectResultRequest,
+    ) -> StageWorkerDirectResultReceipt:
+        return StageWorkerDirectResultReceipt.model_validate(
+            self._call(
+                "migration.submit_region_talk_stage_worker_result",
+                worker_task_run_id,
+                effect_id,
+                request,
+            )
+        )
+
+
 class StageWorkerLaunch(StrictModel):
-    schema_version: Literal["region-talk-stage-worker-launch.v1"] = "region-talk-stage-worker-launch.v1"
-    task_run_id: UUID
+    """Metadata-only launch; content and DB capability stay adapter-private."""
+
+    schema_version: Literal["region-talk-stage-worker-launch.v2"] = "region-talk-stage-worker-launch.v2"
+    supervisor_task_run_id: UUID
+    export_batch_id: UUID
     master_instance_id: UUID
     epoch: int = Field(ge=1)
     stage_run_id: UUID
     work_item_id: UUID
     effect_id: UUID
+    dispatch_id: UUID
+    worker_task_run_id: UUID
     attempt: int = Field(ge=1)
     stage: str
     contract_version: str
@@ -476,7 +1000,8 @@ class StageWorkerLaunch(StrictModel):
     input_fingerprint: str = Field(pattern=SHA256_PATTERN)
     timeout_seconds: int = Field(ge=1, le=10_800)
     claim_receipt_sha256: str = Field(pattern=SHA256_PATTERN)
-    payload: StageExecutionPayload
+    worker_binding_sha256: str = Field(pattern=SHA256_PATTERN)
+    lease_capability_sha256: str = Field(pattern=SHA256_PATTERN)
     publication_dispatch: Literal[False] = False
     notification_dispatch: Literal[False] = False
 
@@ -486,6 +1011,8 @@ class StageProviderLaunchReceipt(StrictModel):
         "region-talk-stage-provider-launch-receipt.v1"
     )
     effect_id: UUID
+    dispatch_id: UUID
+    worker_task_run_id: UUID
     notebook_ref: str = Field(max_length=300)
     provider_run_ref: str = Field(min_length=3, max_length=500)
     source_sha256: str = Field(pattern=SHA256_PATTERN)
@@ -501,20 +1028,11 @@ class StageProviderLaunchReceipt(StrictModel):
 class StageProviderObservation(StrictModel):
     kind: ProviderObservationKind
     launch_receipt: StageProviderLaunchReceipt | None = None
-    result: StageWorkerResult | None = None
-
-    @model_validator(mode="after")
-    def exact_observation_shape(self) -> StageProviderObservation:
-        if self.kind is ProviderObservationKind.TERMINAL:
-            if self.launch_receipt is None or self.result is None:
-                raise ValueError("terminal observation requires launch and worker result")
-        elif self.result is not None:
-            raise ValueError("nonterminal observation cannot contain a worker result")
-        return self
+    result_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
 
 
 class RegionTalkStageNotebookAdapter(Protocol):
-    """The only provider boundary used by the stage dispatcher."""
+    """Only central provider boundary; it owns private capability sidecars."""
 
     def observe(self, launch: StageWorkerLaunch) -> StageProviderObservation: ...
 
@@ -531,31 +1049,6 @@ STAGE_NOTEBOOK_SLUGS: dict[str, str] = {
 }
 
 
-class DispatchDisposition(StrEnum):
-    WAITING_WORK = "WAITING_WORK"
-    RESULT_ACCEPTED = "RESULT_ACCEPTED"
-    COMPLETE = "COMPLETE"
-    FAILED = "FAILED"
-
-
-class StageDispatchReceipt(StrictModel):
-    schema_version: Literal["region-talk-stage-dispatch-receipt.v1"] = "region-talk-stage-dispatch-receipt.v1"
-    task_run_id: UUID
-    export_batch_id: UUID
-    stage_run_id: UUID
-    master_instance_id: UUID
-    epoch: int = Field(ge=1)
-    disposition: DispatchDisposition
-    work_item_id: UUID | None = None
-    effect_id: UUID | None = None
-    provider_run_ref: str | None = Field(default=None, max_length=500)
-    result_receipt_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
-    stage_receipt_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
-    publication_dispatch: Literal[False] = False
-    notification_dispatch: Literal[False] = False
-    receipt_sha256: str = Field(pattern=SHA256_PATTERN)
-
-
 @dataclass(slots=True)
 class _DispatchJournal:
     path: Path
@@ -566,13 +1059,13 @@ class _DispatchJournal:
 
     def read(self) -> dict[str, Any]:
         if not self.path.exists():
-            return {"schema_version": "region-talk-stage-dispatch-journal.v1", "entries": {}}
+            return {"schema_version": "region-talk-stage-dispatch-journal.v2", "entries": {}}
         if self.path.is_symlink() or self.path.stat().st_size > 1024 * 1024:
             raise ValueError("stage dispatch journal is unsafe or oversized")
         value = json.loads(self.path.read_bytes())
         if (
             not isinstance(value, dict)
-            or value.get("schema_version") != "region-talk-stage-dispatch-journal.v1"
+            or value.get("schema_version") != "region-talk-stage-dispatch-journal.v2"
             or not isinstance(value.get("entries"), dict)
         ):
             raise ValueError("stage dispatch journal contract differs")
@@ -580,6 +1073,9 @@ class _DispatchJournal:
 
     def write(self, value: dict[str, Any]) -> None:
         encoded = canonical_json_bytes(value) + b"\n"
+        forbidden = (b'"payload"', b'"input_data"', b'"text"', b'"lease_token"', b'"database_url"')
+        if any(token in encoded for token in forbidden):
+            raise ValueError("stage dispatch journal contains forbidden business/capability data")
         if len(encoded) > 1024 * 1024:
             raise ValueError("stage dispatch journal exceeds 1 MiB")
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -592,367 +1088,126 @@ class _DispatchJournal:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(raw, self.path)
-            directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
         finally:
             Path(raw).unlink(missing_ok=True)
 
 
 @dataclass(slots=True)
 class RegionTalkStageDispatcher:
-    functions: FixedStageWorkFunctions
+    """Central metadata-only launch/restart reconciler."""
+
     adapter: RegionTalkStageNotebookAdapter
     notebook_owner: str
-    lease_owner: str
     journal_path: Path
-    refresh_stages: Callable[[UUID, UUID], Any]
-    clock: Callable[[], datetime] = lambda: datetime.now(UTC)
-    uuid_factory: Callable[[], UUID] = uuid4
     _journal: _DispatchJournal = field(init=False)
 
     def __post_init__(self) -> None:
-        if not self.notebook_owner or any(
-            char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"
-            for char in self.notebook_owner
-        ):
-            raise ValueError("notebook_owner is not a Kaggle owner slug")
         self._journal = _DispatchJournal(self.journal_path)
 
-    def execute_one(
+    def dispatch_bound(
         self,
-        *,
-        task_run_id: UUID,
-        export_batch_id: UUID,
-        master_instance_id: UUID,
-        epoch: int,
-    ) -> StageDispatchReceipt:
-        journal = self._journal.read()
-        entry = self._unfinished_entry(
-            journal,
-            task_run_id=task_run_id,
-            export_batch_id=export_batch_id,
-            master_instance_id=master_instance_id,
-            epoch=epoch,
-        )
-        if entry is None:
-            now = self.clock().astimezone(UTC)
-            request = StageClaimRequest(
-                lease_token=self.uuid_factory(),
-                lease_owner=self.lease_owner,
-                requested_at=now,
-            )
-            raw = self.functions.claim(
-                task_run_id=task_run_id,
-                export_batch_id=export_batch_id,
-                request=request.model_dump(mode="json"),
-            )
-            if raw.get("status") != "CLAIMED":
-                empty = StageClaimEmptyReceipt.model_validate(raw)
-                self._assert_binding(
-                    empty.master_instance_id,
-                    empty.epoch,
-                    empty.task_run_id,
-                    empty.export_batch_id,
-                    master_instance_id,
-                    epoch,
-                    task_run_id,
-                    export_batch_id,
-                )
-                return self._receipt_for_empty(empty)
-            claim = StageWorkClaimReceipt.model_validate(raw)
-            self._assert_binding(
-                claim.master_instance_id,
-                claim.epoch,
-                claim.task_run_id,
-                claim.export_batch_id,
-                master_instance_id,
-                epoch,
-                task_run_id,
-                export_batch_id,
-            )
-            launch = self._launch_for(claim)
-            entry = {
-                "state": "CLAIMED",
-                # Preserve the database's exact timestamp strings because its
-                # receipt hash covers the raw JSON object.
-                "claim": raw,
-                "launch": launch.model_dump(mode="json"),
-                "provider_receipt": None,
-                "submission": None,
-                "result_receipt": None,
-            }
-            journal["entries"][str(claim.effect_id)] = entry
-            self._journal.write(journal)  # persist exact effect before provider mutation
-        claim = StageWorkClaimReceipt.model_validate(entry["claim"])
-        launch = StageWorkerLaunch.model_validate(entry["launch"])
-
-        if self.clock().astimezone(UTC) >= claim.lease_expires_at.astimezone(UTC):
-            # The database owns retry transition and the next attempt number.
-            # Never submit a late worker result under an expired lease and never
-            # reinterpret expiration as success/terminal completion.
-            entry["state"] = "LEASE_EXPIRED"
-            self._journal.write(journal)
-            return self._waiting_receipt(claim, entry)
-
-        if entry.get("submission") is not None:
-            submission = StageResultSubmission.model_validate(entry["submission"])
-            result_receipt = self._submit_exact(
-                journal,
-                entry,
-                claim,
-                submission,
-                task_run_id=task_run_id,
-                export_batch_id=export_batch_id,
-            )
-            return self._accepted_receipt(claim, entry, result_receipt)
-
-        observation = self.adapter.observe(launch)
-        if observation.kind is ProviderObservationKind.AMBIGUOUS:
-            raise RuntimeError("stage provider effect is ambiguous; refusing duplicate launch")
-        if observation.kind is ProviderObservationKind.ABSENT:
-            provider_receipt = self.adapter.launch(launch)
-            if provider_receipt.effect_id != launch.effect_id:
-                raise ValueError("provider launch receipt differs from deterministic effect")
-            entry["provider_receipt"] = provider_receipt.model_dump(mode="json")
-            entry["state"] = "LAUNCHED"
-            self._journal.write(journal)
-            observation = self.adapter.observe(launch)
-        if observation.launch_receipt is not None:
-            if observation.launch_receipt.effect_id != claim.effect_id:
-                raise ValueError("provider observation differs from exact effect")
-            entry["provider_receipt"] = observation.launch_receipt.model_dump(mode="json")
-        if observation.kind is not ProviderObservationKind.TERMINAL:
-            entry["state"] = "LAUNCHED"
-            self._journal.write(journal)
-            return self._waiting_receipt(claim, entry)
-
-        assert observation.result is not None
-        submission = StageResultSubmission.from_claim(claim, observation.result)
-        entry["submission"] = submission.model_dump(mode="json")
-        entry["state"] = "RESULT_READY"
-        self._journal.write(journal)  # response-loss replay owns exact result bytes
-        result_receipt = self._submit_exact(
-            journal,
-            entry,
-            claim,
-            submission,
-            task_run_id=task_run_id,
-            export_batch_id=export_batch_id,
-        )
-        return self._accepted_receipt(claim, entry, result_receipt)
-
-    def _submit_exact(
-        self,
-        journal: dict[str, Any],
-        entry: dict[str, Any],
-        claim: StageWorkClaimReceipt,
-        submission: StageResultSubmission,
-        *,
-        task_run_id: UUID,
-        export_batch_id: UUID,
-    ) -> StageResultReceipt:
-        raw = self.functions.submit(
-            task_run_id=task_run_id,
-            export_batch_id=export_batch_id,
-            request=submission.model_dump(mode="json"),
-        )
-        receipt = StageResultReceipt.model_validate(raw)
+        claim_value: dict[str, Any],
+        binding_value: dict[str, Any],
+    ) -> StageProviderObservation:
+        claim = StageWorkMetadataClaimReceipt.model_validate(claim_value)
+        binding = StageWorkerBindingReceipt.model_validate(binding_value)
         if (
-            receipt.master_instance_id != claim.master_instance_id
-            or receipt.epoch != claim.epoch
-            or receipt.task_run_id != claim.task_run_id
-            or receipt.export_batch_id != claim.export_batch_id
-            or receipt.stage_run_id != claim.stage_run_id
-            or receipt.work_item_id != claim.work_item_id
-            or receipt.effect_id != claim.effect_id
-            or receipt.attempt != claim.attempt
-            or receipt.stage != claim.stage
-            or receipt.subject_id != claim.subject_id
-            or receipt.input_fingerprint != claim.input_fingerprint
-            or receipt.result_status is not submission.result_status
-            or receipt.metadata_sha256 != submission.metadata_sha256
-            or receipt.result_sha256 != submission.result_sha256
+            binding.supervisor_task_run_id != claim.supervisor_task_run_id
+            or binding.export_batch_id != claim.export_batch_id
+            or binding.stage_run_id != claim.stage_run_id
+            or binding.work_item_id != claim.work_item_id
+            or binding.effect_id != claim.effect_id
+            or binding.dispatch_id != claim.dispatch_id
+            or binding.worker_task_run_id != claim.worker_task_run_id
+            or binding.master_instance_id != claim.master_instance_id
+            or binding.epoch != claim.epoch
+            or binding.lease_capability_sha256 != claim.lease_capability_sha256
         ):
-            raise ValueError("stage result receipt differs from exact submission")
-        entry["result_receipt"] = receipt.model_dump(mode="json")
-        entry["state"] = "RESULT_ACCEPTED"
-        self._journal.write(journal)
-        return receipt
-
-    def _accepted_receipt(
-        self,
-        claim: StageWorkClaimReceipt,
-        entry: dict[str, Any],
-        result_receipt: StageResultReceipt,
-    ) -> StageDispatchReceipt:
-        stage_receipt = self.refresh_stages(claim.task_run_id, claim.export_batch_id)
-        stage_status = str(getattr(stage_receipt, "status", "WAITING_WORK"))
-        stage_hash = getattr(stage_receipt, "receipt_sha256", None)
-        disposition = (
-            DispatchDisposition.COMPLETE
-            if stage_status in {"COMPLETE", "StageRunStatus.COMPLETE"}
-            else DispatchDisposition.FAILED
-            if stage_status in {"FAILED", "StageRunStatus.FAILED"}
-            else DispatchDisposition.RESULT_ACCEPTED
-        )
-        body = {
-            "schema_version": "region-talk-stage-dispatch-receipt.v1",
-            "task_run_id": str(claim.task_run_id),
-            "export_batch_id": str(claim.export_batch_id),
-            "stage_run_id": str(claim.stage_run_id),
-            "master_instance_id": str(claim.master_instance_id),
-            "epoch": claim.epoch,
-            "disposition": disposition.value,
-            "work_item_id": str(claim.work_item_id),
-            "effect_id": str(claim.effect_id),
-            "provider_run_ref": self._provider_ref(entry),
-            "result_receipt_sha256": result_receipt.receipt_sha256,
-            "stage_receipt_sha256": stage_hash,
-            "publication_dispatch": False,
-            "notification_dispatch": False,
-        }
-        return StageDispatchReceipt(**body, receipt_sha256=self._hash(body))
-
-    def _waiting_receipt(self, claim: StageWorkClaimReceipt, entry: dict[str, Any]) -> StageDispatchReceipt:
-        body = {
-            "schema_version": "region-talk-stage-dispatch-receipt.v1",
-            "task_run_id": str(claim.task_run_id),
-            "export_batch_id": str(claim.export_batch_id),
-            "stage_run_id": str(claim.stage_run_id),
-            "master_instance_id": str(claim.master_instance_id),
-            "epoch": claim.epoch,
-            "disposition": DispatchDisposition.WAITING_WORK.value,
-            "work_item_id": str(claim.work_item_id),
-            "effect_id": str(claim.effect_id),
-            "provider_run_ref": self._provider_ref(entry),
-            "result_receipt_sha256": None,
-            "stage_receipt_sha256": None,
-            "publication_dispatch": False,
-            "notification_dispatch": False,
-        }
-        return StageDispatchReceipt(**body, receipt_sha256=self._hash(body))
-
-    def _receipt_for_empty(self, empty: StageClaimEmptyReceipt) -> StageDispatchReceipt:
-        disposition = {
-            "COMPLETE": DispatchDisposition.COMPLETE,
-            "FAILED": DispatchDisposition.FAILED,
-            "EMPTY": DispatchDisposition.WAITING_WORK,
-            "WAITING_DEPENDENCY": DispatchDisposition.WAITING_WORK,
-        }[empty.status]
-        body = {
-            "schema_version": "region-talk-stage-dispatch-receipt.v1",
-            "task_run_id": str(empty.task_run_id),
-            "export_batch_id": str(empty.export_batch_id),
-            "stage_run_id": str(empty.stage_run_id),
-            "master_instance_id": str(empty.master_instance_id),
-            "epoch": empty.epoch,
-            "disposition": disposition.value,
-            "work_item_id": None,
-            "effect_id": None,
-            "provider_run_ref": None,
-            "result_receipt_sha256": None,
-            "stage_receipt_sha256": None,
-            "publication_dispatch": False,
-            "notification_dispatch": False,
-        }
-        return StageDispatchReceipt(**body, receipt_sha256=self._hash(body))
-
-    def _launch_for(self, claim: StageWorkClaimReceipt) -> StageWorkerLaunch:
-        slug = STAGE_NOTEBOOK_SLUGS[claim.stage]
-        return StageWorkerLaunch(
-            task_run_id=claim.task_run_id,
+            raise ValueError("worker binding differs from metadata claim")
+        launch = StageWorkerLaunch(
+            supervisor_task_run_id=claim.supervisor_task_run_id,
+            export_batch_id=claim.export_batch_id,
             master_instance_id=claim.master_instance_id,
             epoch=claim.epoch,
             stage_run_id=claim.stage_run_id,
             work_item_id=claim.work_item_id,
             effect_id=claim.effect_id,
+            dispatch_id=claim.dispatch_id,
+            worker_task_run_id=claim.worker_task_run_id,
             attempt=claim.attempt,
             stage=claim.stage,
             contract_version=claim.contract_version,
-            notebook_ref=f"{self.notebook_owner}/{slug}",
+            notebook_ref=f"{self.notebook_owner}/{STAGE_NOTEBOOK_SLUGS[claim.stage]}",
             input_fingerprint=claim.input_fingerprint,
             timeout_seconds=claim.timeout_seconds,
-            claim_receipt_sha256=claim.receipt_sha256,
-            payload=claim.payload,
+            claim_receipt_sha256=claim.claim_receipt_sha256,
+            worker_binding_sha256=binding.worker_binding_sha256,
+            lease_capability_sha256=claim.lease_capability_sha256,
         )
-
-    @staticmethod
-    def _unfinished_entry(
-        journal: dict[str, Any],
-        *,
-        task_run_id: UUID,
-        export_batch_id: UUID,
-        master_instance_id: UUID,
-        epoch: int,
-    ) -> dict[str, Any] | None:
-        matches: list[dict[str, Any]] = []
-        for value in journal["entries"].values():
-            if value.get("state") in {"RESULT_ACCEPTED", "LEASE_EXPIRED"}:
-                continue
-            claim = StageWorkClaimReceipt.model_validate(value.get("claim"))
+        journal = self._journal.read()
+        key = str(claim.dispatch_id)
+        entry = journal["entries"].get(key)
+        if entry is None:
+            entry = {
+                "state": "BOUND",
+                "launch": launch.model_dump(mode="json"),
+                "claim_receipt_sha256": claim.receipt_sha256,
+                "binding_receipt_sha256": binding.receipt_sha256,
+                "provider_receipt": None,
+            }
+            journal["entries"][key] = entry
+            self._journal.write(journal)
+        elif entry["launch"] != launch.model_dump(mode="json"):
+            raise ValueError("dispatch identity replay differs")
+        observation = self.adapter.observe(launch)
+        if observation.kind is ProviderObservationKind.AMBIGUOUS:
+            raise RuntimeError("stage provider effect is ambiguous")
+        if observation.kind is ProviderObservationKind.ABSENT:
+            receipt = self.adapter.launch(launch)
             if (
-                claim.task_run_id == task_run_id
-                and claim.export_batch_id == export_batch_id
-                and claim.master_instance_id == master_instance_id
-                and claim.epoch == epoch
+                receipt.effect_id != launch.effect_id
+                or receipt.dispatch_id != launch.dispatch_id
+                or receipt.worker_task_run_id != launch.worker_task_run_id
             ):
-                matches.append(value)
-        if len(matches) > 1:
-            raise ValueError("journal contains multiple in-flight effects for one task")
-        return matches[0] if matches else None
-
-    @staticmethod
-    def _assert_binding(
-        observed_master: UUID,
-        observed_epoch: int,
-        observed_task: UUID,
-        observed_batch: UUID,
-        expected_master: UUID,
-        expected_epoch: int,
-        expected_task: UUID,
-        expected_batch: UUID,
-    ) -> None:
-        if (
-            observed_master != expected_master
-            or observed_epoch != expected_epoch
-            or observed_task != expected_task
-            or observed_batch != expected_batch
-        ):
-            raise ValueError("stage-work response differs from task/master/epoch binding")
-
-    @staticmethod
-    def _provider_ref(entry: dict[str, Any]) -> str | None:
-        value = entry.get("provider_receipt")
-        return str(value["provider_run_ref"]) if isinstance(value, dict) else None
-
-    @staticmethod
-    def _hash(value: dict[str, Any]) -> str:
-        return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+                raise ValueError("provider launch receipt differs")
+            entry["provider_receipt"] = receipt.model_dump(mode="json")
+            entry["state"] = "LAUNCHED"
+            self._journal.write(journal)
+            return StageProviderObservation(kind=ProviderObservationKind.RUNNING, launch_receipt=receipt)
+        return observation
 
 
 __all__ = [
     "STAGE_NOTEBOOK_SLUGS",
-    "DispatchDisposition",
+    "PostgresStageSupervisorFunctions",
     "PostgresStageWorkFunctions",
+    "PostgresStageWorkerFunctions",
     "ProviderObservationKind",
     "RegionTalkStageDispatcher",
     "RegionTalkStageNotebookAdapter",
-    "StageClaimEmptyReceipt",
-    "StageClaimRequest",
-    "StageDispatchReceipt",
     "StageExecutionPayload",
+    "StageMetadataClaimRequest",
     "StageProviderLaunchReceipt",
     "StageProviderObservation",
     "StageResultMetadata",
     "StageResultReceipt",
     "StageResultSubmission",
+    "StageSupervisorStatusReceipt",
+    "StageSupervisorStatusRequest",
     "StageWorkClaimReceipt",
-    "StageWorkStatusRequest",
+    "StageWorkMetadataClaimReceipt",
+    "StageWorkMetadataEmptyReceipt",
+    "StageWorkPayloadReceipt",
+    "StageWorkerBindRequest",
+    "StageWorkerBindingReceipt",
+    "StageWorkerDirectResultReceipt",
+    "StageWorkerDirectResultRequest",
     "StageWorkerLaunch",
+    "StageWorkerPayloadFetchRequest",
     "StageWorkerResult",
     "StageWorkerStatus",
+    "reconcile_notebook_result",
+    "stage_dispatch_id",
     "stage_effect_id",
+    "stage_worker_task_run_id",
 ]

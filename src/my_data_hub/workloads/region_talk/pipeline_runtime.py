@@ -943,6 +943,7 @@ class RegionTalkCycleDisposition(StrEnum):
     IDLE = "IDLE"
     COMPLETE = "COMPLETE"
     RETRYABLE = "RETRYABLE"
+    FAILED = "FAILED"
 
 
 class RegionTalkCycleRequest(BaseModel):
@@ -1030,6 +1031,8 @@ def run_bounded_supervisor(
             queue_revision = result.queue_revision
         if result.disposition is RegionTalkCycleDisposition.COMPLETE:
             complete = True
+            break
+        if result.disposition is RegionTalkCycleDisposition.FAILED:
             break
         if result.disposition is RegionTalkCycleDisposition.IDLE:
             idle += 1
