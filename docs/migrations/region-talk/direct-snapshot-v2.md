@@ -148,3 +148,13 @@ current only when its immutable landing matches the exact stage, candidate revis
 revision fingerprint, input fingerprint, task, batch, master instance, and epoch. The
 canonical MCP publication queue includes the matching durable review queue without
 enabling publication or notification.
+
+## Migration 0028 private stage payload boundary
+
+Migration 0028 splits stage dispatch into a metadata-only supervisor claim and a direct
+worker data plane. Devstand callbacks and journals cannot receive article text, URLs,
+topics, upstream result contents, raw leases, database URLs, or task tokens. A separately
+registered deterministic worker task fetches the exact payload from the ACTIVE master
+using its own short-lived LOGIN, submits directly through a fixed function, and cannot
+reuse another worker's task, generation, epoch, effect, binding, attempt, or lease.
+Supervisor polling and PREPARE remain metadata-only and publication stays false.

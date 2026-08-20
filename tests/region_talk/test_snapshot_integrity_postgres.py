@@ -475,76 +475,196 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             assert stage_receipt["publication_dispatch"] is False
             assert stage_receipt["notification_dispatch"] is False
 
-            claim_request = {
-                "schema_version": "region-talk-stage-work-claim.v1",
-                "lease_token": "99999999-9999-4999-8999-999999999999",
-                "lease_owner": "disposable-postgres-proof",
+            metadata_claim_request = {
+                "schema_version": "region-talk-stage-work-metadata-claim.v2",
+                "claim_request_id": "89898989-8989-4989-8989-898989898989",
+                "lease_owner": "disposable-postgres-supervisor",
                 "requested_at": now.isoformat(),
                 "publication_dispatch": False,
                 "notification_dispatch": False,
             }
             connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
             claim = connection.execute(
-                "SELECT migration.claim_region_talk_stage_work(%s,%s,%s::jsonb)",
-                (manifest.task_run_id, manifest.export_batch_id, json.dumps(claim_request)),
+                "SELECT migration.claim_region_talk_stage_work_metadata(%s,%s,%s::jsonb)",
+                (
+                    manifest.task_run_id,
+                    manifest.export_batch_id,
+                    json.dumps(metadata_claim_request),
+                ),
             ).fetchone()[0]
             assert claim["status"] == "CLAIMED"
             assert claim["master_instance_id"] == str(IDENTITY.master_instance_id)
             assert claim["epoch"] == 1
-            assert claim["payload"]["input_fingerprint"] == claim["input_fingerprint"]
-            assert claim["payload"]["publication_dispatch"] is False
-            result_metadata = {
-                "schema_version": "region-talk-stage-result-metadata.v1",
-                "stage": claim["stage"],
-                "contract_version": claim["contract_version"],
-                "subject_type": claim["subject_type"],
-                "subject_id": claim["subject_id"],
-                "candidate_revision": claim["payload"]["candidate_revision"],
-                "revision_fingerprint": claim["payload"]["revision_fingerprint"],
-                "input_fingerprint": claim["input_fingerprint"],
-                "producer_exact_id": "disposable-proof.v1",
-                "metrics": {},
-                "artifact_sha256": None,
-            }
-            worker_result = {
-                "schema_version": "region-talk-stage-worker-result.v1",
-                "master_instance_id": claim["master_instance_id"],
-                "epoch": claim["epoch"],
-                "task_run_id": str(manifest.task_run_id),
-                "export_batch_id": str(manifest.export_batch_id),
-                "stage_run_id": claim["stage_run_id"],
-                "work_item_id": claim["work_item_id"],
-                "stage": claim["stage"],
-                "contract_version": claim["contract_version"],
-                "subject_type": claim["subject_type"],
-                "subject_id": claim["subject_id"],
-                "candidate_revision": claim["payload"]["candidate_revision"],
-                "revision_fingerprint": claim["payload"]["revision_fingerprint"],
-                "input_fingerprint": claim["input_fingerprint"],
-                "attempt": claim["attempt"],
+            serialized_claim = json.dumps(claim)
+            for forbidden in (
+                '"payload"',
+                '"lease_token"',
+                "canonical_url",
+                "canonical_source_key",
+                "input_data",
+                "upstream_results",
+            ):
+                assert forbidden not in serialized_claim
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            assert connection.execute(
+                "SELECT migration.claim_region_talk_stage_work_metadata(%s,%s,%s::jsonb)",
+                (
+                    manifest.task_run_id,
+                    manifest.export_batch_id,
+                    json.dumps(metadata_claim_request),
+                ),
+            ).fetchone()[0] == claim
+            connection.commit()
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                connection.execute(
+                    "SELECT migration.claim_region_talk_stage_work(%s,%s,%s::jsonb)",
+                    (manifest.task_run_id, manifest.export_batch_id, "{}"),
+                )
+            connection.rollback()
+
+            worker_principal = "mdh_e1_regiong9_abababab"
+            worker_password = "region-talk-worker-password-long-enough"
+            worker_credential = UUID("abababab-abab-4bab-8bab-abababababab")
+            worker_task = UUID(claim["worker_task_run_id"])
+            with psycopg.connect(admin_url) as worker_admin:
+                gate = DatabaseGate(worker_admin)
+                CredentialProvisioner(worker_admin, gate).create(
+                    principal=worker_principal,
+                    password=worker_password,
+                    group="mdh_region_talk_pipeline",
+                    identity=IDENTITY,
+                    credential_id=worker_credential,
+                    expires_at=now + timedelta(minutes=9),
+                    now=now,
+                )
+                worker_admin.execute(
+                    "SELECT master_control.register_task_credential_binding(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (
+                        worker_credential,
+                        worker_principal,
+                        "region_talk",
+                        worker_task,
+                        2,
+                        IDENTITY.master_instance_id,
+                        1,
+                        "7" * 64,
+                        "8" * 64,
+                    ),
+                )
+                worker_admin.commit()
+            bind_request = {
+                "schema_version": "region-talk-stage-worker-bind.v1",
+                "dispatch_id": claim["dispatch_id"],
                 "effect_id": claim["effect_id"],
-                "lease_token": claim["lease_token"],
-                "result_status": "SUCCEEDED",
-                "result_metadata": result_metadata,
-                "metadata_sha256": sha256_value(result_metadata),
-                "result_sha256": "a" * 64,
-                "completed_at": now.isoformat(),
+                "claim_receipt_sha256": claim["claim_receipt_sha256"],
+                "worker_task_run_id": str(worker_task),
+                "worker_credential_id": str(worker_credential),
+                "worker_generation": 2,
+                "worker_command_sha256": "7" * 64,
+                "worker_task_token_sha256": "8" * 64,
+                "requested_at": now.isoformat(),
                 "publication_dispatch": False,
                 "notification_dispatch": False,
             }
+            wrong_generation = {**bind_request, "worker_generation": 3}
             connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
-            result_receipt = connection.execute(
-                "SELECT migration.submit_region_talk_stage_result(%s,%s,%s::jsonb)",
-                (manifest.task_run_id, manifest.export_batch_id, json.dumps(worker_result)),
+            with pytest.raises(psycopg.errors.NoDataFound):
+                connection.execute(
+                    "SELECT migration.bind_region_talk_stage_worker(%s,%s,%s::jsonb)",
+                    (
+                        manifest.task_run_id,
+                        manifest.export_batch_id,
+                        json.dumps(wrong_generation),
+                    ),
+                )
+            connection.rollback()
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            binding = connection.execute(
+                "SELECT migration.bind_region_talk_stage_worker(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(bind_request)),
             ).fetchone()[0]
-            assert result_receipt["accepted"] is True
-            # Exact immutable result replay is idempotent.
-            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
-            assert connection.execute(
-                "SELECT migration.submit_region_talk_stage_result(%s,%s,%s::jsonb)",
-                (manifest.task_run_id, manifest.export_batch_id, json.dumps(worker_result)),
-            ).fetchone()[0] == result_receipt
             connection.commit()
+
+            fetch_request = {
+                "schema_version": "region-talk-stage-work-payload-fetch.v1",
+                "worker_task_run_id": str(worker_task),
+                "dispatch_id": claim["dispatch_id"],
+                "effect_id": claim["effect_id"],
+                "worker_binding_sha256": binding["worker_binding_sha256"],
+                "requested_at": now.isoformat(),
+                "publication_dispatch": False,
+                "notification_dispatch": False,
+            }
+            worker_url = (
+                f"postgresql://{worker_principal}:{worker_password}@127.0.0.1:{port}/postgres"
+            )
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            with pytest.raises(
+                psycopg.errors.InsufficientPrivilege,
+                match="not registered for exact task",
+            ):
+                connection.execute(
+                    "SELECT migration.fetch_region_talk_stage_work_payload(%s,%s,%s::jsonb)",
+                    (worker_task, UUID(claim["effect_id"]), json.dumps(fetch_request)),
+                )
+            connection.rollback()
+            with psycopg.connect(worker_url) as worker_connection:
+                wrong_binding = {**fetch_request, "worker_binding_sha256": "0" * 64}
+                worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                with pytest.raises(psycopg.errors.NoDataFound):
+                    worker_connection.execute(
+                        "SELECT migration.fetch_region_talk_stage_work_payload(%s,%s,%s::jsonb)",
+                        (worker_task, UUID(claim["effect_id"]), json.dumps(wrong_binding)),
+                    )
+                worker_connection.rollback()
+                worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                payload_receipt = worker_connection.execute(
+                    "SELECT migration.fetch_region_talk_stage_work_payload(%s,%s,%s::jsonb)",
+                    (worker_task, UUID(claim["effect_id"]), json.dumps(fetch_request)),
+                ).fetchone()[0]
+                payload = payload_receipt["payload"]
+                assert payload["input_fingerprint"] == claim["input_fingerprint"]
+                result_metadata = {
+                    "schema_version": "region-talk-stage-result-metadata.v1",
+                    "stage": claim["stage"],
+                    "contract_version": claim["contract_version"],
+                    "subject_type": claim["subject_type"],
+                    "subject_id": claim["subject_id"],
+                    "candidate_revision": payload["candidate_revision"],
+                    "revision_fingerprint": payload["revision_fingerprint"],
+                    "input_fingerprint": claim["input_fingerprint"],
+                    "producer_exact_id": "disposable-proof.v2",
+                    "metrics": {},
+                    "artifact_sha256": None,
+                }
+                worker_result = {
+                    "schema_version": "region-talk-stage-worker-direct-result.v1",
+                    "worker_task_run_id": str(worker_task),
+                    "dispatch_id": claim["dispatch_id"],
+                    "effect_id": claim["effect_id"],
+                    "worker_binding_sha256": binding["worker_binding_sha256"],
+                    "work_item_id": claim["work_item_id"],
+                    "attempt": claim["attempt"],
+                    "result_status": "SUCCEEDED",
+                    "result_metadata": result_metadata,
+                    "metadata_sha256": sha256_value(result_metadata),
+                    "result_sha256": "a" * 64,
+                    "completed_at": now.isoformat(),
+                    "publication_dispatch": False,
+                    "notification_dispatch": False,
+                }
+                worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                result_receipt = worker_connection.execute(
+                    "SELECT migration.submit_region_talk_stage_worker_result(%s,%s,%s::jsonb)",
+                    (worker_task, UUID(claim["effect_id"]), json.dumps(worker_result)),
+                ).fetchone()[0]
+                assert result_receipt["accepted"] is True
+                worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                assert worker_connection.execute(
+                    "SELECT migration.submit_region_talk_stage_worker_result(%s,%s,%s::jsonb)",
+                    (worker_task, UUID(claim["effect_id"]), json.dumps(worker_result)),
+                ).fetchone()[0] == result_receipt
+                worker_connection.commit()
 
             connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
             refreshed = connection.execute(
@@ -563,16 +683,17 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             ).fetchone()[0]
             assert cycle_receipt["status"] == "WAITING_WORK"
             status_request = {
-                "schema_version": "region-talk-stage-work-status-request.v1",
+                "schema_version": "region-talk-stage-supervisor-status-request.v1",
                 "requested_at": now.isoformat(),
             }
             connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
             stage_status = connection.execute(
-                "SELECT migration.region_talk_stage_work_status(%s,%s,%s::jsonb)",
+                "SELECT migration.region_talk_stage_supervisor_status(%s,%s,%s::jsonb)",
                 (manifest.task_run_id, manifest.export_batch_id, json.dumps(status_request)),
             ).fetchone()[0]
-            assert stage_status["scope"] == "STAGE_RUN"
             assert stage_status["status"] == "WAITING_WORK"
+            assert stage_status["items"][0]["dispatch_id"] == claim["dispatch_id"]
+            assert "payload" not in json.dumps(stage_status)
             connection.commit()
 
         with psycopg.connect(admin_url) as connection:

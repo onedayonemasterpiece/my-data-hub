@@ -151,3 +151,19 @@ notification are outside these functions.
 The canonical publication queue includes an exact-current publication plan or durable
 post-import review row once per candidate revision. Rows from stale batches/revisions
 are excluded and publication remains disabled.
+
+## Private worker payload split
+
+Migration 0028 removes business payloads and raw lease material from the supervised
+control path. The supervisor claims only an immutable metadata receipt containing task,
+batch, stage, work/effect/dispatch identities, policy, timestamps, and hashes. The full
+bounded execution payload and raw lease remain in PostgreSQL.
+
+The master registers a separate deterministic worker task and credential, then the
+supervisor binds that exact credential, generation, master instance, and epoch to one
+dispatch. Only that worker LOGIN can fetch the payload directly from PostgreSQL and land
+the exact result through the fixed direct-submit function. Wrong supervisor/worker task,
+credential, generation, epoch, effect, binding hash, attempt, or lease fails closed. The
+supervisor status receipt exposes only identities, counts/status, and result hashes.
+Legacy 0027 payload-returning claim/submit/status functions are revoked from the pipeline
+role; publication and notification remain disabled.
