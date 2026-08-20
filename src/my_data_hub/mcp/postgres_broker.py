@@ -855,7 +855,7 @@ class PostgresMasterSession(MasterSession):
                 raise SessionBrokerError("Region Talk inventory reader returned an invalid result")
             return dict(result)
         if tool == "region_talk.queue.summary":
-            result = RegionTalkReader.queue_summary(cursor)
+            result = RegionTalkReader.publication_queue_summary(cursor)
             if not isinstance(result, Mapping):
                 raise SessionBrokerError("Region Talk queue summary reader returned an invalid result")
             return dict(result)
@@ -874,7 +874,7 @@ class PostgresMasterSession(MasterSession):
             "region_talk.articles.search": "search_articles",
             "region_talk.posts.list": "list_posts",
             "region_talk.posts.search": "search_posts",
-            "region_talk.queue.list": "list_queue",
+            "region_talk.queue.list": "list_publication_queue",
         }
         reader_name = reader_names.get(tool)
         if reader_name is None:  # pragma: no cover - guarded by the exact tool set above

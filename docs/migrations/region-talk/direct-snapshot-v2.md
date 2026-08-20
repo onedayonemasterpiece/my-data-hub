@@ -8,6 +8,13 @@ master with a short-lived `mdh_region_talk_pipeline` credential. Source rows are
 never written to a devstand file, control-plane database, callback, Dataset, or MCP
 argument.
 
+Migration 0025 requires the master credential reconciler to register that LOGIN's
+exact `credential_id`, principal, `worker_kind=region_talk`, task UUID, generation,
+master instance/epoch, command hash, and task-token hash in an append-only PostgreSQL
+binding **before** the private credential is handed to the worker. The LOGIN cannot
+choose a new task UUID on first use: begin, page, finalize, failure and canonical apply
+all resolve the immutable registration for `session_user` and reject any other task.
+
 The closed source scope is:
 
 1. `acq_discovery_opportunities` (`dedupe_key`);
@@ -82,12 +89,23 @@ workflow receives a documented neutral import state (`pending`, `draft`, `planne
 an exact recognized approve/reject/revise/revoke value. No publication attempt is
 created and publication dispatch remains off.
 
+For repeated accepted snapshots, 0025 separates immutable observation history from an
+explicit current-state head. Source candidate/status, source work item, publication
+plan, and review state use `(source_table, source_pk)` identity plus source timestamp,
+payload hash, and canonical revision ordering. A newer changed payload updates the
+existing canonical current object and appends its status/work/review evidence; an exact
+payload replay is a no-op, and an older observed timestamp cannot overwrite the head.
+Raw snapshot rows and every applied/replay/stale decision remain append-only evidence.
+
 The full snapshot does not create blogger actors. Blogger evidence rows reuse the
 dedicated identity map/profile when present and otherwise remain raw pending that
 reviewed path. This preserves the 266-to-263 decision instead of duplicating it.
 
 MCP readers are restricted to `snapshot_inventory_v2`, `articles_v2`, `posts_v2`,
-`queue_v2`, `queue_summary_v2`, and the canonical publication queue views. Typed rows
+and the canonical publication queue views. `region_talk.queue.list/summary` read
+publication candidates/revisions/plans/reviews, with `status` and `channel` filters;
+the legacy raw work-family queue projections are not exposed under those product tool
+names. Typed rows
 are selected only from the latest integrity-verified, canonical-applied `complete`
 snapshot whose export batch is `accepted`; failed, landing, quarantined, older, and
 duplicate source identities are excluded deterministically. Readers receive neither `migration.raw_record` nor a

@@ -145,6 +145,9 @@ async def test_region_talk_tool_schemas_are_closed_bounded_and_accept_no_sql() -
     assert list_schema["limit"]["maximum"] == 100
     assert list_schema["max_bytes"]["maximum"] == 262_144
     assert list_schema["cursor"]["anyOf"][0]["pattern"].startswith("^v1:")
+    queue_schema = tools["region_talk.queue.list"].input_schema["properties"]
+    assert "channel" in queue_schema
+    assert "category" not in queue_schema
     run_schema = tools["region_talk.pipeline.run"].input_schema
     assert set(run_schema["properties"]) == {"source_revision", "idempotency_key"}
     assert "publication_dispatch" not in run_schema["properties"]
@@ -320,3 +323,56 @@ def test_postgres_broker_uses_fixed_reader_facade_and_opaque_cursor(
         "next_cursor": None,
         "complete": True,
     }
+
+
+def test_postgres_broker_queue_tools_use_canonical_publication_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, Any]] = []
+
+    class RegionTalkReader:
+        @staticmethod
+        def list_publication_queue(cursor, request):  # type: ignore[no-untyped-def]
+            calls.append(("list", request))
+            return {"items": [{"candidate_id": "11111111-1111-4111-8111-111111111111"}]}
+
+        @staticmethod
+        def publication_queue_summary(cursor):  # type: ignore[no-untyped-def]
+            calls.append(("summary", cursor))
+            return {"items": [{"candidate_status": "approved", "item_count": 1}], "total_items": 1}
+
+    fake_module = ModuleType("my_data_hub.workloads.region_talk.reader")
+    fake_module.RegionTalkReader = RegionTalkReader  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, fake_module.__name__, fake_module)
+    principal = identity("region-talk:read")
+    credential = EpochDatabaseCredential(
+        master_instance_id="22222222-2222-4222-8222-222222222222",
+        epoch=7,
+        role="reader",
+        database_url=(
+            "postgresql://reader:password@postgres-master.internal:15432/postgres"
+            "?sslmode=verify-full&sslrootcert=/state/master-tls/ca.pem&connect_timeout=5"
+        ),
+        expires_at=datetime.now(UTC) + timedelta(minutes=3),
+    )
+    list_request = SessionRequest(
+        principal=principal, master_instance_id=credential.master_instance_id,
+        epoch=7, role="reader", tool="region_talk.queue.list",
+        limits=ExecutionLimits(max_rows=25, max_bytes=65_536),
+    )
+    summary_request = SessionRequest(
+        principal=principal, master_instance_id=credential.master_instance_id,
+        epoch=7, role="reader", tool="region_talk.queue.summary",
+        limits=ExecutionLimits(max_rows=25, max_bytes=65_536),
+    )
+    cursor = object()
+    page = PostgresMasterSession(list_request, credential)._dispatch(
+        cursor, {"limit": 25, "status": "approved", "channel": "region-talk", "max_bytes": 65_536}
+    )
+    summary = PostgresMasterSession(summary_request, credential)._dispatch(cursor, {})
+    assert calls == [
+        ("list", {"limit": 25, "status": "approved", "channel": "region-talk", "offset": 0}),
+        ("summary", cursor),
+    ]
+    assert page["items"][0]["candidate_id"].startswith("11111111")
+    assert summary["total_items"] == 1

@@ -133,7 +133,8 @@ class RegionTalkReader:
             """
             SELECT candidate_id,candidate_status,current_revision,content_id,content_type,
                    title,summary,canonical_url,publication_plan_id,channel,plan_status,
-                   scheduled_for,legacy_status,canonical_revision,updated_at
+                   scheduled_for,legacy_status,canonical_revision,updated_at,
+                   review_decision,review_actor_ref,review_reason,review_occurred_at
               FROM region_talk.publication_queue_v3
              WHERE (%s IS NULL OR candidate_status=%s OR plan_status=%s)
                AND (%s IS NULL OR channel=%s)

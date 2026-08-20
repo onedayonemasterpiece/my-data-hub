@@ -74,7 +74,7 @@ class RegionTalkQueueListRequest(_ClosedModel):
     cursor: RegionTalkCursor | None = None
     limit: RegionTalkLimit = 50
     status: RegionTalkFilter | None = None
-    category: RegionTalkFilter | None = None
+    channel: RegionTalkFilter | None = None
     max_bytes: RegionTalkMaxBytes = 262_144
 
 
@@ -123,7 +123,7 @@ def region_talk_reader_request(arguments: Mapping[str, Any]) -> dict[str, Any]:
     request = {
         key: value
         for key, value in arguments.items()
-        if key in {"limit", "status", "category", "platform", "query"}
+        if key in {"limit", "status", "category", "channel", "platform", "query"}
     }
     request["offset"] = offset
     return request

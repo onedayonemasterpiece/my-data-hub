@@ -104,3 +104,19 @@ history, and other unsupported historical kinds remain terminally `retained_raw`
 `quarantined` when malformed). They are losslessly migrated and accounted, but are not
 claimed as canonical executable semantics in v3. A later append-only mapper with a proven
 target contract is required to promote them.
+
+## Ordered current state across accepted snapshots
+
+Migration 0025 retains `migration.raw_record` and an immutable canonical-state
+observation for every supported current-state source row. A separate explicit head is
+allowed to move only when the incoming source timestamp is not older and the accepted
+canonical revision advances; the exact payload hash makes replay and conflicting state
+observable. This updates existing source candidates, source status/history, work items
+and their events, publication plans, and review decisions rather than silently keeping
+the first snapshot forever. Source status and review/work transitions append history;
+mutable projection tables update in place while continuing to reference the immutable
+raw row and export batch.
+
+The database task authority is also no longer established by the first page. The master
+registers the generated credential against the exact task and generation before worker
+handoff, and every direct-snapshot procedure verifies that registration for the LOGIN.

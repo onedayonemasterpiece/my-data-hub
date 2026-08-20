@@ -486,7 +486,7 @@ def create_server(
         cursor: RegionTalkCursor | None = None,
         limit: RegionTalkLimit = 50,
         status: RegionTalkFilter | None = None,
-        category: RegionTalkFilter | None = None,
+        channel: RegionTalkFilter | None = None,
         max_bytes: RegionTalkMaxBytes = 262_144,
     ) -> dict[str, Any]:
         return await service.invoke("region_talk.queue.list", locals())

@@ -7,6 +7,7 @@ import shutil
 import socket
 import subprocess
 import time
+from copy import deepcopy
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -66,14 +67,14 @@ def _rows(now: datetime) -> dict[str, list[dict[str, Any]]]:
             {"external_id": "surface-1", "platform": "telegram", "status": "active", "url": "https://t.me/source"}
         ],
         "region_talk_compact_state_kv": [
-            {"pk": "article-1", "kind": "external_publication_intake_item", "payload_json": {"title": "Article", "canonical_url": "https://example.test/article", "publication_status": "accepted"}},
-            {"pk": "candidate-1", "kind": "publication_candidate_item", "payload_json": {"title": "Candidate", "canonical_url": "https://example.test/candidate", "publication_status": "ready", "body": "Ready text"}},
-            {"pk": "post-1", "kind": "processed_post_item", "payload_json": {"title": "Post", "canonical_url": "https://example.test/post", "platform": "telegram", "external_id": "42", "status": "evaluated"}},
-            {"pk": "review-1", "kind": "publication_review_event_item", "payload_json": {"title": "Candidate", "canonical_url": "https://example.test/candidate", "decision": "approve", "actor_ref": "owner-review"}},
-            {"pk": "schedule-1", "kind": "publication_schedule_item", "payload_json": {"title": "Candidate", "canonical_url": "https://example.test/candidate", "publication_status": "planned", "channel": "region-talk-new-channel"}},
-            {"pk": "source-candidate-1", "kind": "source_candidate_item", "payload_json": {"candidate_url": "https://t.me/candidate", "platform": "telegram", "status": "pending"}},
-            {"pk": "source-queue-1", "kind": "source_queue_item", "payload_json": {"source_ref": "https://t.me/candidate", "platform": "telegram", "source_queue_status": "pending", "priority": "10", "readiness_state": "scan_due"}},
-            {"pk": "source-status-1", "kind": "source_status_item", "payload_json": {"source_ref": "https://t.me/candidate", "platform": "telegram", "status": "active", "reason": "imported"}},
+            {"pk": "article-1", "kind": "external_publication_intake_item", "updated_at": now, "payload_json": {"title": "Article", "canonical_url": "https://example.test/article", "publication_status": "accepted"}},
+            {"pk": "candidate-1", "kind": "publication_candidate_item", "updated_at": now, "payload_json": {"title": "Candidate", "canonical_url": "https://example.test/candidate", "publication_status": "ready", "body": "Ready text"}},
+            {"pk": "post-1", "kind": "processed_post_item", "updated_at": now, "payload_json": {"title": "Post", "canonical_url": "https://example.test/post", "platform": "telegram", "external_id": "42", "status": "evaluated"}},
+            {"pk": "review-1", "kind": "publication_review_event_item", "updated_at": now, "payload_json": {"title": "Candidate", "canonical_url": "https://example.test/candidate", "decision": "approve", "actor_ref": "owner-review"}},
+            {"pk": "schedule-1", "kind": "publication_schedule_item", "updated_at": now, "payload_json": {"title": "Candidate", "canonical_url": "https://example.test/candidate", "publication_status": "planned", "channel": "region-talk-new-channel"}},
+            {"pk": "source-candidate-1", "kind": "source_candidate_item", "updated_at": now, "payload_json": {"candidate_url": "https://t.me/candidate", "platform": "telegram", "status": "pending"}},
+            {"pk": "source-queue-1", "kind": "source_queue_item", "updated_at": now, "payload_json": {"source_ref": "https://t.me/candidate", "platform": "telegram", "source_queue_status": "pending", "priority": "10", "readiness_state": "scan_due"}},
+            {"pk": "source-status-1", "kind": "source_status_item", "updated_at": now, "payload_json": {"source_ref": "https://t.me/candidate", "platform": "telegram", "status": "active", "reason": "imported"}},
         ],
         "region_talk_external_blogger_evidence": [
             {"record_id": "blogger-1", "blogger_name": "One", "updated_at": now}
@@ -139,10 +140,62 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 expires_at=now + timedelta(minutes=9),
                 now=now,
             )
+            registration = connection.execute(
+                "SELECT master_control.register_task_credential_binding(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"), PRINCIPAL,
+                    "region_talk", UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"), 1,
+                    IDENTITY.master_instance_id, 1, "5" * 64, "6" * 64,
+                ),
+            ).fetchone()[0]
+            connection.commit()
+            assert registration == {
+                "registered": True,
+                "credential_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                "principal": PRINCIPAL,
+                "worker_kind": "region_talk",
+                "task_run_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "generation": 1,
+                "master_instance_id": str(IDENTITY.master_instance_id),
+                "epoch": 1,
+                "command_sha256": "5" * 64,
+                "task_token_sha256": "6" * 64,
+            }
+            assert connection.execute(
+                "SELECT master_control.register_task_credential_binding(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"), PRINCIPAL,
+                    "region_talk", UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"), 1,
+                    IDENTITY.master_instance_id, 1, "5" * 64, "6" * 64,
+                ),
+            ).fetchone()[0] == registration
+            with pytest.raises(
+                psycopg.errors.UniqueViolation,
+                match="conflicts with immutable task binding",
+            ):
+                connection.execute(
+                    "SELECT master_control.register_task_credential_binding(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (
+                        UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"), PRINCIPAL,
+                        "region_talk", UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"), 1,
+                        IDENTITY.master_instance_id, 1, "5" * 64, "6" * 64,
+                    ),
+                )
+            connection.rollback()
 
         rows = _rows(now)
         with psycopg.connect(role_url) as connection:
             runner = DirectSnapshotRunner(MemoryReader(rows), connection, page_size=3)
+            invented = runner.inventory(
+                export_batch_id=UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+                task_run_id=UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+                master_instance_id=IDENTITY.master_instance_id,
+                master_epoch=1, source_database="fixture", request_sha256="7" * 64,
+                created_at=now,
+            )
+            with pytest.raises(psycopg.errors.InsufficientPrivilege, match="not registered for exact task"):
+                runner._begin(invented)
+            connection.rollback()
             manifest = runner.inventory(
                 export_batch_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
                 task_run_id=UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
@@ -176,17 +229,52 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             assert connection.execute("SELECT count(*) FROM region_talk.publication_plan").fetchone() == (1,)
             assert connection.execute("SELECT count(*) FROM region_talk.review_decision").fetchone() == (1,)
             assert connection.execute(
-                "SELECT channel,plan_status FROM region_talk.publication_queue_v3"
-            ).fetchone() == ("region-talk-new-channel", "planned")
+                "SELECT channel,plan_status,review_decision FROM region_talk.publication_queue_v3"
+            ).fetchone() == ("region-talk-new-channel", "planned", "approve")
 
-        # A distinct accepted snapshot of the same source identities advances
+        # A distinct accepted snapshot with changed current state advances
         # one revision, but does not duplicate immutable candidate/review/status
         # semantics. The latest accepted snapshot becomes the only typed source.
-        with psycopg.connect(role_url) as connection:
-            runner = DirectSnapshotRunner(MemoryReader(rows), connection, page_size=3)
+        second_rows = deepcopy(rows)
+        changed_at = now + timedelta(minutes=1)
+        compact = {row["pk"]: row for row in second_rows["region_talk_compact_state_kv"]}
+        for key in ("source-candidate-1", "source-status-1", "source-queue-1", "schedule-1", "review-1"):
+            compact[key]["updated_at"] = changed_at
+        compact["source-candidate-1"]["payload_json"].update(
+            {"candidate_url": "https://t.me/candidate-new", "status": "accepted"}
+        )
+        compact["source-status-1"]["payload_json"].update({"status": "paused", "reason": "operator_pause"})
+        compact["source-queue-1"]["payload_json"].update(
+            {"source_queue_status": "completed", "priority": "5", "readiness_state": "terminal"}
+        )
+        compact["schedule-1"]["payload_json"].update(
+            {"publication_status": "queued", "channel": "region-talk-updated-channel",
+             "scheduled_for": changed_at.isoformat()}
+        )
+        compact["review-1"]["payload_json"].update({"decision": "reject", "reason": "changed review"})
+        principal2 = "mdh_e1_regiong2_eeeeeeee"
+        password2 = "region-talk-second-password-long-enough"
+        credential2 = UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+        second_task = UUID("34343434-3434-4434-8434-343434343434")
+        with psycopg.connect(admin_url) as connection:
+            gate = DatabaseGate(connection)
+            CredentialProvisioner(connection, gate).create(
+                principal=principal2, password=password2, group="mdh_region_talk_pipeline",
+                identity=IDENTITY, credential_id=credential2,
+                expires_at=now + timedelta(minutes=9), now=now,
+            )
+            connection.execute(
+                "SELECT master_control.register_task_credential_binding(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (credential2, principal2, "region_talk", second_task, 1,
+                 IDENTITY.master_instance_id, 1, "8" * 64, "9" * 64),
+            )
+            connection.commit()
+        role_url2 = f"postgresql://{principal2}:{password2}@127.0.0.1:{port}/postgres"
+        with psycopg.connect(role_url2) as connection:
+            runner = DirectSnapshotRunner(MemoryReader(second_rows), connection, page_size=3)
             second_manifest = runner.inventory(
                 export_batch_id=UUID("12121212-1212-4212-8212-121212121212"),
-                task_run_id=UUID("34343434-3434-4434-8434-343434343434"),
+                task_run_id=second_task,
                 master_instance_id=IDENTITY.master_instance_id,
                 master_epoch=1,
                 source_database="fixture",
@@ -198,9 +286,34 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             assert connection.execute("SELECT canonical_revision FROM hub.canonical_state").fetchone() == (2,)
             assert connection.execute("SELECT count(*) FROM migration.region_talk_canonical_apply_receipt").fetchone() == (2,)
             assert connection.execute("SELECT count(*) FROM region_talk.candidate_revision").fetchone() == (1,)
-            assert connection.execute("SELECT count(*) FROM region_talk.source_status").fetchone() == (1,)
-            assert connection.execute("SELECT count(*) FROM region_talk.review_decision").fetchone() == (1,)
+            assert connection.execute("SELECT candidate_url,status FROM region_talk.source_candidate").fetchone() == (
+                "https://t.me/candidate-new", "accepted"
+            )
+            assert connection.execute(
+                "SELECT status,reason FROM region_talk.source_status ORDER BY occurred_at DESC LIMIT 1"
+            ).fetchone() == ("paused", "operator_pause")
+            assert connection.execute("SELECT count(*) FROM region_talk.source_status").fetchone() == (2,)
+            assert connection.execute("SELECT status,priority FROM orchestration.work_item").fetchone() == (
+                "succeeded", 5
+            )
+            assert connection.execute("SELECT count(*) FROM orchestration.work_item_event").fetchone() == (1,)
+            assert connection.execute("SELECT count(*) FROM region_talk.review_decision").fetchone() == (2,)
+            assert connection.execute(
+                "SELECT decision FROM region_talk.review_decision ORDER BY occurred_at DESC LIMIT 1"
+            ).fetchone() == ("reject",)
             assert connection.execute("SELECT count(*) FROM region_talk.publication_plan").fetchone() == (1,)
+            assert connection.execute("SELECT channel,status FROM region_talk.publication_plan").fetchone() == (
+                "region-talk-updated-channel", "queued"
+            )
+            assert connection.execute("SELECT status FROM region_talk.publication_candidate").fetchone() == (
+                "rejected",
+            )
+            assert connection.execute(
+                "SELECT channel,plan_status,review_decision FROM region_talk.publication_queue_v3"
+            ).fetchone() == ("region-talk-updated-channel", "queued", "reject")
+            assert connection.execute(
+                "SELECT count(*) FROM migration.region_talk_canonical_state_observation"
+            ).fetchone() == (10,)
             assert connection.execute(
                 "SELECT export_batch_id FROM region_talk.accepted_snapshot_v2"
             ).fetchone() == (second_manifest.export_batch_id,)
@@ -211,11 +324,29 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
         changed["region_talk_compact_state_kv"] = [
             {"pk": "mutation-1", "kind": "external_publication_intake_item", "payload_json": {"canonical_url": "https://example.test/original"}}
         ]
-        with psycopg.connect(role_url) as connection:
+        principal3 = "mdh_e1_regiong3_ffffffff"
+        password3 = "region-talk-third-password-long-enough"
+        credential3 = UUID("ffffffff-eeee-4eee-8eee-ffffffffffff")
+        third_task = UUID("99999999-9999-4999-8999-999999999999")
+        with psycopg.connect(admin_url) as connection:
+            gate = DatabaseGate(connection)
+            CredentialProvisioner(connection, gate).create(
+                principal=principal3, password=password3, group="mdh_region_talk_pipeline",
+                identity=IDENTITY, credential_id=credential3,
+                expires_at=now + timedelta(minutes=9), now=now,
+            )
+            connection.execute(
+                "SELECT master_control.register_task_credential_binding(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (credential3, principal3, "region_talk", third_task, 1,
+                 IDENTITY.master_instance_id, 1, "a" * 64, "b" * 64),
+            )
+            connection.commit()
+        role_url3 = f"postgresql://{principal3}:{password3}@127.0.0.1:{port}/postgres"
+        with psycopg.connect(role_url3) as connection:
             runner = DirectSnapshotRunner(MemoryReader(changed), connection, page_size=3)
             manifest = runner.inventory(
                 export_batch_id=UUID("ffffffff-ffff-4fff-8fff-ffffffffffff"),
-                task_run_id=UUID("99999999-9999-4999-8999-999999999999"),
+                task_run_id=third_task,
                 master_instance_id=IDENTITY.master_instance_id,
                 master_epoch=1,
                 source_database="fixture",
