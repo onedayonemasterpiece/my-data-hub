@@ -10,7 +10,7 @@
   "kernel_type": "notebook",
   "language": "python",
   "my_data_hub": {
-    "adapter_status": "pending",
+    "adapter_status": "contract_ready",
     "contracts": {
       "bge_m3_embedding": "bge_m3_flagembedding_dense_v1"
     },
