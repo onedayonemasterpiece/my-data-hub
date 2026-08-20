@@ -8,7 +8,6 @@ from pglast import parse_sql
 from my_data_hub.workloads.region_talk.constants import DIRECT_SOURCE_TABLES
 from my_data_hub.workloads.region_talk.direct_snapshot import source_row
 
-
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "sql/migrations/0024_region_talk_snapshot_integrity_and_canonicalize.sql"
 
@@ -54,9 +53,9 @@ def test_typed_views_are_latest_complete_canonical_and_deduplicated() -> None:
 
 def test_only_canonicalizable_core_is_promoted_and_unsupported_history_stays_raw() -> None:
     sql = MIGRATION.read_text()
-    normalize = sql.split(
-        "CREATE OR REPLACE FUNCTION migration.normalize_region_talk_direct_record", 1
-    )[1].split("CREATE OR REPLACE FUNCTION migration.land_region_talk_direct_page", 1)[0]
+    normalize = sql.split("CREATE OR REPLACE FUNCTION migration.normalize_region_talk_direct_record", 1)[1].split(
+        "CREATE OR REPLACE FUNCTION migration.land_region_talk_direct_page", 1
+    )[0]
     assert "'online_source_item','external_publication_source_item'" in normalize
     assert "'region_talk_llm_request_item'" not in normalize
     assert "INSERT INTO region_talk.imported_llm_request_v2" not in normalize

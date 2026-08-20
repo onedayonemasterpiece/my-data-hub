@@ -1,14 +1,14 @@
 """Disposable PostgreSQL proof for Region Talk snapshot integrity and apply semantics."""
+
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import socket
 import subprocess
 import time
-from copy import deepcopy
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -60,25 +60,112 @@ def _free_port() -> int:
 def _rows(now: datetime) -> dict[str, list[dict[str, Any]]]:
     return {
         "acq_discovery_opportunities": [
-            {"dedupe_key": "opp-1", "platform": "web", "payload_json": '{"status":"new","canonical_url":"https://example.test/opp"}'}
+            {
+                "dedupe_key": "opp-1",
+                "platform": "web",
+                "payload_json": '{"status":"new","canonical_url":"https://example.test/opp"}',
+            }
         ],
         "acq_discovery_runs": [{"run_uid": "run-1", "stats_json": "{}"}],
         "acq_discovery_surfaces": [
-            {"external_id": "surface-1", "platform": "telegram", "status": "active", "url": "https://t.me/source"}
+            {
+                "external_id": "surface-1",
+                "platform": "telegram",
+                "status": "active",
+                "url": "https://t.me/source",
+            }
         ],
         "region_talk_compact_state_kv": [
-            {"pk": "article-1", "kind": "external_publication_intake_item", "updated_at": now, "payload_json": {"title": "Article", "canonical_url": "https://example.test/article", "publication_status": "accepted"}},
-            {"pk": "candidate-1", "kind": "publication_candidate_item", "updated_at": now, "payload_json": {"title": "Candidate", "canonical_url": "https://example.test/candidate", "publication_status": "ready", "body": "Ready text"}},
-            {"pk": "post-1", "kind": "processed_post_item", "updated_at": now, "payload_json": {"title": "Post", "canonical_url": "https://example.test/post", "platform": "telegram", "external_id": "42", "status": "evaluated"}},
-            {"pk": "review-1", "kind": "publication_review_event_item", "updated_at": now, "payload_json": {"title": "Candidate", "canonical_url": "https://example.test/candidate", "decision": "approve", "actor_ref": "owner-review"}},
-            {"pk": "schedule-1", "kind": "publication_schedule_item", "updated_at": now, "payload_json": {"title": "Candidate", "canonical_url": "https://example.test/candidate", "publication_status": "planned", "channel": "region-talk-new-channel"}},
-            {"pk": "source-candidate-1", "kind": "source_candidate_item", "updated_at": now, "payload_json": {"candidate_url": "https://t.me/candidate", "platform": "telegram", "status": "pending"}},
-            {"pk": "source-queue-1", "kind": "source_queue_item", "updated_at": now, "payload_json": {"source_ref": "https://t.me/candidate", "platform": "telegram", "source_queue_status": "pending", "priority": "10", "readiness_state": "scan_due"}},
-            {"pk": "source-status-1", "kind": "source_status_item", "updated_at": now, "payload_json": {"source_ref": "https://t.me/candidate", "platform": "telegram", "status": "active", "reason": "imported"}},
+            {
+                "pk": "article-1",
+                "kind": "external_publication_intake_item",
+                "updated_at": now,
+                "payload_json": {
+                    "title": "Article",
+                    "canonical_url": "https://example.test/article",
+                    "publication_status": "accepted",
+                },
+            },
+            {
+                "pk": "candidate-1",
+                "kind": "publication_candidate_item",
+                "updated_at": now,
+                "payload_json": {
+                    "title": "Candidate",
+                    "canonical_url": "https://example.test/candidate",
+                    "publication_status": "ready",
+                    "body": "Ready text",
+                },
+            },
+            {
+                "pk": "post-1",
+                "kind": "processed_post_item",
+                "updated_at": now,
+                "payload_json": {
+                    "title": "Post",
+                    "canonical_url": "https://example.test/post",
+                    "platform": "telegram",
+                    "external_id": "42",
+                    "status": "evaluated",
+                },
+            },
+            {
+                "pk": "review-1",
+                "kind": "publication_review_event_item",
+                "updated_at": now,
+                "payload_json": {
+                    "title": "Candidate",
+                    "canonical_url": "https://example.test/candidate",
+                    "decision": "approve",
+                    "actor_ref": "owner-review",
+                },
+            },
+            {
+                "pk": "schedule-1",
+                "kind": "publication_schedule_item",
+                "updated_at": now,
+                "payload_json": {
+                    "title": "Candidate",
+                    "canonical_url": "https://example.test/candidate",
+                    "publication_status": "planned",
+                    "channel": "region-talk-new-channel",
+                },
+            },
+            {
+                "pk": "source-candidate-1",
+                "kind": "source_candidate_item",
+                "updated_at": now,
+                "payload_json": {
+                    "candidate_url": "https://t.me/candidate",
+                    "platform": "telegram",
+                    "status": "pending",
+                },
+            },
+            {
+                "pk": "source-queue-1",
+                "kind": "source_queue_item",
+                "updated_at": now,
+                "payload_json": {
+                    "source_ref": "https://t.me/candidate",
+                    "platform": "telegram",
+                    "source_queue_status": "pending",
+                    "priority": "10",
+                    "readiness_state": "scan_due",
+                },
+            },
+            {
+                "pk": "source-status-1",
+                "kind": "source_status_item",
+                "updated_at": now,
+                "payload_json": {
+                    "source_ref": "https://t.me/candidate",
+                    "platform": "telegram",
+                    "status": "active",
+                    "reason": "imported",
+                },
+            },
         ],
-        "region_talk_external_blogger_evidence": [
-            {"record_id": "blogger-1", "blogger_name": "One", "updated_at": now}
-        ],
+        "region_talk_external_blogger_evidence": [{"record_id": "blogger-1", "blogger_name": "One", "updated_at": now}],
     }
 
 
@@ -94,12 +181,23 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
     admin_password = "fixture-admin-password-not-a-secret"
     subprocess.run(
         [
-            "docker", "run", "--detach", "--rm", "--name", container,
-            "--tmpfs", "/var/lib/postgresql:rw,nosuid,nodev,size=768m",
-            "-e", f"POSTGRES_PASSWORD={admin_password}",
-            "-p", f"127.0.0.1:{port}:5432", IMAGE,
+            "docker",
+            "run",
+            "--detach",
+            "--rm",
+            "--name",
+            container,
+            "--tmpfs",
+            "/var/lib/postgresql:rw,nosuid,nodev,size=768m",
+            "-e",
+            f"POSTGRES_PASSWORD={admin_password}",
+            "-p",
+            f"127.0.0.1:{port}:5432",
+            IMAGE,
         ],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     )
     admin_url = f"postgresql://postgres:{admin_password}@127.0.0.1:{port}/postgres"
     role_url = f"postgresql://{PRINCIPAL}:{PASSWORD}@127.0.0.1:{port}/postgres"
@@ -143,9 +241,15 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             registration = connection.execute(
                 "SELECT master_control.register_task_credential_binding(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
-                    UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"), PRINCIPAL,
-                    "region_talk", UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"), 1,
-                    IDENTITY.master_instance_id, 1, "5" * 64, "6" * 64,
+                    UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+                    PRINCIPAL,
+                    "region_talk",
+                    UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+                    1,
+                    IDENTITY.master_instance_id,
+                    1,
+                    "5" * 64,
+                    "6" * 64,
                 ),
             ).fetchone()[0]
             connection.commit()
@@ -161,14 +265,23 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 "command_sha256": "5" * 64,
                 "task_token_sha256": "6" * 64,
             }
-            assert connection.execute(
-                "SELECT master_control.register_task_credential_binding(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (
-                    UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"), PRINCIPAL,
-                    "region_talk", UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"), 1,
-                    IDENTITY.master_instance_id, 1, "5" * 64, "6" * 64,
-                ),
-            ).fetchone()[0] == registration
+            assert (
+                connection.execute(
+                    "SELECT master_control.register_task_credential_binding(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (
+                        UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+                        PRINCIPAL,
+                        "region_talk",
+                        UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+                        1,
+                        IDENTITY.master_instance_id,
+                        1,
+                        "5" * 64,
+                        "6" * 64,
+                    ),
+                ).fetchone()[0]
+                == registration
+            )
             with pytest.raises(
                 psycopg.errors.UniqueViolation,
                 match="conflicts with immutable task binding",
@@ -176,9 +289,15 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 connection.execute(
                     "SELECT master_control.register_task_credential_binding(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (
-                        UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"), PRINCIPAL,
-                        "region_talk", UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"), 1,
-                        IDENTITY.master_instance_id, 1, "5" * 64, "6" * 64,
+                        UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+                        PRINCIPAL,
+                        "region_talk",
+                        UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+                        1,
+                        IDENTITY.master_instance_id,
+                        1,
+                        "5" * 64,
+                        "6" * 64,
                     ),
                 )
             connection.rollback()
@@ -190,7 +309,9 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 export_batch_id=UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
                 task_run_id=UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
                 master_instance_id=IDENTITY.master_instance_id,
-                master_epoch=1, source_database="fixture", request_sha256="7" * 64,
+                master_epoch=1,
+                source_database="fixture",
+                request_sha256="7" * 64,
                 created_at=now,
             )
             with pytest.raises(psycopg.errors.InsufficientPrivilege, match="not registered for exact task"):
@@ -208,9 +329,7 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             first = runner.run(manifest)
             replay = runner.run(manifest)
             conflicting_tables = list(manifest.tables)
-            conflicting_tables[0] = conflicting_tables[0].model_copy(
-                update={"logical_sha256": "0" * 64}
-            )
+            conflicting_tables[0] = conflicting_tables[0].model_copy(update={"logical_sha256": "0" * 64})
             with pytest.raises(
                 psycopg.errors.SerializationFailure,
                 match="replay conflicts with verified Pass B",
@@ -220,7 +339,9 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
 
         with psycopg.connect(admin_url) as connection:
             assert connection.execute("SELECT canonical_revision FROM hub.canonical_state").fetchone() == (1,)
-            assert connection.execute("SELECT count(*) FROM migration.region_talk_canonical_apply_receipt").fetchone() == (1,)
+            assert connection.execute(
+                "SELECT count(*) FROM migration.region_talk_canonical_apply_receipt"
+            ).fetchone() == (1,)
             assert connection.execute("SELECT count(*) FROM hub.content_item").fetchone()[0] >= 4
             assert connection.execute("SELECT count(*) FROM region_talk.source").fetchone()[0] >= 3
             assert connection.execute("SELECT count(*) FROM orchestration.work_item").fetchone()[0] >= 1
@@ -248,8 +369,11 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             {"source_queue_status": "completed", "priority": "5", "readiness_state": "terminal"}
         )
         compact["schedule-1"]["payload_json"].update(
-            {"publication_status": "queued", "channel": "region-talk-updated-channel",
-             "scheduled_for": changed_at.isoformat()}
+            {
+                "publication_status": "queued",
+                "channel": "region-talk-updated-channel",
+                "scheduled_for": changed_at.isoformat(),
+            }
         )
         compact["review-1"]["payload_json"].update({"decision": "reject", "reason": "changed review"})
         principal2 = "mdh_e1_regiong2_eeeeeeee"
@@ -259,14 +383,27 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
         with psycopg.connect(admin_url) as connection:
             gate = DatabaseGate(connection)
             CredentialProvisioner(connection, gate).create(
-                principal=principal2, password=password2, group="mdh_region_talk_pipeline",
-                identity=IDENTITY, credential_id=credential2,
-                expires_at=now + timedelta(minutes=9), now=now,
+                principal=principal2,
+                password=password2,
+                group="mdh_region_talk_pipeline",
+                identity=IDENTITY,
+                credential_id=credential2,
+                expires_at=now + timedelta(minutes=9),
+                now=now,
             )
             connection.execute(
                 "SELECT master_control.register_task_credential_binding(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (credential2, principal2, "region_talk", second_task, 1,
-                 IDENTITY.master_instance_id, 1, "8" * 64, "9" * 64),
+                (
+                    credential2,
+                    principal2,
+                    "region_talk",
+                    second_task,
+                    1,
+                    IDENTITY.master_instance_id,
+                    1,
+                    "8" * 64,
+                    "9" * 64,
+                ),
             )
             connection.commit()
         role_url2 = f"postgresql://{principal2}:{password2}@127.0.0.1:{port}/postgres"
@@ -284,17 +421,21 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             assert runner.run(second_manifest).status == "complete"
         with psycopg.connect(admin_url) as connection:
             assert connection.execute("SELECT canonical_revision FROM hub.canonical_state").fetchone() == (2,)
-            assert connection.execute("SELECT count(*) FROM migration.region_talk_canonical_apply_receipt").fetchone() == (2,)
+            assert connection.execute(
+                "SELECT count(*) FROM migration.region_talk_canonical_apply_receipt"
+            ).fetchone() == (2,)
             assert connection.execute("SELECT count(*) FROM region_talk.candidate_revision").fetchone() == (1,)
             assert connection.execute("SELECT candidate_url,status FROM region_talk.source_candidate").fetchone() == (
-                "https://t.me/candidate-new", "accepted"
+                "https://t.me/candidate-new",
+                "accepted",
             )
             assert connection.execute(
                 "SELECT status,reason FROM region_talk.source_status ORDER BY occurred_at DESC LIMIT 1"
             ).fetchone() == ("paused", "operator_pause")
             assert connection.execute("SELECT count(*) FROM region_talk.source_status").fetchone() == (2,)
             assert connection.execute("SELECT status,priority FROM orchestration.work_item").fetchone() == (
-                "succeeded", 5
+                "succeeded",
+                5,
             )
             assert connection.execute("SELECT count(*) FROM orchestration.work_item_event").fetchone() == (1,)
             assert connection.execute("SELECT count(*) FROM region_talk.review_decision").fetchone() == (2,)
@@ -303,7 +444,8 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             ).fetchone() == ("reject",)
             assert connection.execute("SELECT count(*) FROM region_talk.publication_plan").fetchone() == (1,)
             assert connection.execute("SELECT channel,status FROM region_talk.publication_plan").fetchone() == (
-                "region-talk-updated-channel", "queued"
+                "region-talk-updated-channel",
+                "queued",
             )
             assert connection.execute("SELECT status FROM region_talk.publication_candidate").fetchone() == (
                 "rejected",
@@ -314,15 +456,19 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             assert connection.execute(
                 "SELECT count(*) FROM migration.region_talk_canonical_state_observation"
             ).fetchone() == (10,)
-            assert connection.execute(
-                "SELECT export_batch_id FROM region_talk.accepted_snapshot_v2"
-            ).fetchone() == (second_manifest.export_batch_id,)
+            assert connection.execute("SELECT export_batch_id FROM region_talk.accepted_snapshot_v2").fetchone() == (
+                second_manifest.export_batch_id,
+            )
 
         # Same row count but changed payload lands with valid new row/page hashes;
         # finalization still rejects it against Pass A and persisted evidence.
         changed = {spec.name: [] for spec in DIRECT_SOURCE_TABLES}
         changed["region_talk_compact_state_kv"] = [
-            {"pk": "mutation-1", "kind": "external_publication_intake_item", "payload_json": {"canonical_url": "https://example.test/original"}}
+            {
+                "pk": "mutation-1",
+                "kind": "external_publication_intake_item",
+                "payload_json": {"canonical_url": "https://example.test/original"},
+            }
         ]
         principal3 = "mdh_e1_regiong3_ffffffff"
         password3 = "region-talk-third-password-long-enough"
@@ -331,14 +477,27 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
         with psycopg.connect(admin_url) as connection:
             gate = DatabaseGate(connection)
             CredentialProvisioner(connection, gate).create(
-                principal=principal3, password=password3, group="mdh_region_talk_pipeline",
-                identity=IDENTITY, credential_id=credential3,
-                expires_at=now + timedelta(minutes=9), now=now,
+                principal=principal3,
+                password=password3,
+                group="mdh_region_talk_pipeline",
+                identity=IDENTITY,
+                credential_id=credential3,
+                expires_at=now + timedelta(minutes=9),
+                now=now,
             )
             connection.execute(
                 "SELECT master_control.register_task_credential_binding(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (credential3, principal3, "region_talk", third_task, 1,
-                 IDENTITY.master_instance_id, 1, "a" * 64, "b" * 64),
+                (
+                    credential3,
+                    principal3,
+                    "region_talk",
+                    third_task,
+                    1,
+                    IDENTITY.master_instance_id,
+                    1,
+                    "a" * 64,
+                    "b" * 64,
+                ),
             )
             connection.commit()
         role_url3 = f"postgresql://{principal3}:{password3}@127.0.0.1:{port}/postgres"
