@@ -22,7 +22,9 @@ from my_data_hub.workloads.region_talk.text_runtimes import (
     VerifiedTextStageRuntime,
     build_text_runtime_asset_manifest,
     discover_attached_text_runtime,
+    read_e5_frozen_producer_authority,
     read_text_runtime_registry,
+    verified_text_runtime_kernel_source,
     verified_text_runtime_model_source,
     verify_text_runtime_asset_bundle,
 )
@@ -419,18 +421,22 @@ def test_unmanifested_symlink_is_denied(tmp_path: Path) -> None:
         )
 
 
-def test_committed_registry_approves_only_exact_bge_model_source_and_has_no_download_path(
+def test_committed_registry_approves_exact_provider_carrier_for_each_text_runtime(
     tmp_path: Path,
 ) -> None:
     registry = read_text_runtime_registry()
     assert [item.availability for item in registry.entries] == [
         "verified",
-        "external_assets_required",
+        "verified",
     ]
     assert verified_text_runtime_model_source("bge_m3_embedding") == (
         "yethukmutt/bge-m3/Transformers/m3/1"
     )
     assert verified_text_runtime_model_source("e5_embedding") is None
+    assert verified_text_runtime_kernel_source("e5_embedding") == (
+        "zigomaro/mdh-region-talk-e5-assets-v1"
+    )
+    assert verified_text_runtime_kernel_source("bge_m3_embedding") is None
     bge_manifest = TextRuntimeAssetManifest.model_validate_json(
         Path("src/my_data_hub/workloads/region_talk/assets/region-talk-bge-m3-assets.v1.json").read_bytes()
     )
@@ -445,9 +451,18 @@ def test_committed_registry_approves_only_exact_bge_model_source_and_has_no_down
     wrong["receipt_sha256"] = hashlib.sha256(canonical_json_bytes(unsigned)).hexdigest()
     with pytest.raises(ValueError, match="acquired-model contract differs"):
         TextRuntimeAssetManifest.model_validate(wrong)
-    assert discover_attached_text_runtime(
-        "e5_embedding", input_root=tmp_path
-    ) is None
+    e5_manifest = TextRuntimeAssetManifest.model_validate_json(
+        Path("src/my_data_hub/workloads/region_talk/assets/region-talk-e5-assets.v1.json").read_bytes()
+    )
+    authority = read_e5_frozen_producer_authority()
+    assert e5_manifest.provider_kernel_source == authority["provider_ref"]
+    assert e5_manifest.producer_authority_sha256 == authority["authority_sha256"]
+    assert e5_manifest.official_tree_receipt_sha256 == (
+        "a9bf9a773342bb1593801f34bdd8d230b44c4a934842deea0b444ad5371aae70"
+    )
+    assert len(e5_manifest.model_files) == 23
+    with pytest.raises(TextRuntimeAssetError, match="MODEL_DIRECTORY_ABSENT_OR_AMBIGUOUS"):
+        discover_attached_text_runtime("e5_embedding", input_root=tmp_path)
     source = Path(
         "src/my_data_hub/workloads/region_talk/text_runtimes.py"
     ).read_text()
@@ -534,3 +549,20 @@ def test_registry_is_packaged_as_canonical_runtime_data() -> None:
     assert TextRuntimeAssetManifest.model_validate_json(packaged_bge.read_bytes()).stage == (
         "bge_m3_embedding"
     )
+
+
+def test_e5_frozen_producer_authority_rejects_cross_binding_even_if_outer_hash_is_resigned(
+    tmp_path: Path,
+) -> None:
+    source = Path(
+        "src/my_data_hub/workloads/region_talk/assets/"
+        "region-talk-e5-frozen-producer-authority.v1.json"
+    )
+    value = json.loads(source.read_bytes())
+    value["source_commit"] = "0" * 40
+    unsigned = {key: item for key, item in value.items() if key != "authority_sha256"}
+    value["authority_sha256"] = hashlib.sha256(canonical_json_bytes(unsigned)).hexdigest()
+    tampered = tmp_path / source.name
+    tampered.write_bytes(canonical_json_bytes(value) + b"\n")
+    with pytest.raises(TextRuntimeAssetError, match="AUTHORITY_INVALID"):
+        read_e5_frozen_producer_authority(tampered)

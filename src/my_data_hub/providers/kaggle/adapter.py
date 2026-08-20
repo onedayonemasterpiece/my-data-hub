@@ -1000,6 +1000,57 @@ class KaggleProviderAdapter:
             raise KaggleIdentityError("current private notebook version is unavailable")
         return version
 
+    def assert_exact_model_source_available(self, model_source: str) -> str:
+        """Fail closed unless the exact numeric Kaggle Model version is readable.
+
+        This is a metadata-only prelaunch fence.  The consumer still verifies
+        every mounted model byte against its committed manifest before import;
+        this check prevents dispatch when the requested provider identity or
+        numeric version has disappeared or resolves to a different instance.
+        """
+
+        source = _normalized_model_source(model_source)
+        owner, model, framework, variation, version_text = source.split("/")
+        exact_instance = "/".join((owner, model, framework, variation))
+        wanted_version = int(version_text)
+        list_versions = getattr(self.api, "model_instance_versions_list", None)
+        if not callable(list_versions):
+            raise KaggleDependencyError("official Kaggle Model version readback is unavailable")
+        token: str | None = None
+        matches = 0
+        for _page in range(20):
+            response, _attempts = self.retry.call(
+                "model_instance_versions_list",
+                lambda page_token=token: list_versions(
+                    exact_instance, page_size=20, page_token=page_token
+                ),
+            )
+            version_list = _field(response, "version_list", "versionList")
+            for item in (_field(version_list, "versions") or ()):
+                observed_framework = str(_field(item, "framework") or "")
+                if observed_framework.startswith("MODEL_FRAMEWORK_"):
+                    observed_framework = observed_framework.removeprefix("MODEL_FRAMEWORK_")
+                if (
+                    str(_field(item, "owner_slug", "ownerSlug") or "") == owner
+                    and str(_field(item, "model_slug", "modelSlug") or "") == model
+                    and observed_framework.casefold() == framework.casefold()
+                    and str(_field(item, "variation_slug", "variationSlug") or "") == variation
+                    and _version(_field(item, "version_number", "versionNumber")) == wanted_version
+                    and str(_field(item, "url") or "") == f"/models/{source}"
+                ):
+                    matches += 1
+            next_token = str(_field(response, "next_page_token", "nextPageToken") or "").strip()
+            if not next_token:
+                break
+            if next_token == token:
+                raise KaggleIdentityError("Kaggle Model version pagination did not advance")
+            token = next_token
+        else:
+            raise KaggleIdentityError("Kaggle Model version readback exceeded its bounded pages")
+        if matches != 1:
+            raise KaggleIdentityError("exact Kaggle Model source/version is unavailable")
+        return source
+
     def reconcile_private_dataset_directory_mutation(
         self,
         *,
@@ -1821,6 +1872,7 @@ class KaggleProviderAdapter:
         self, provider_ref: str, *, expected_source_sha256: str | None,
         expected_docker_image: str | None = None,
         expected_kernel_sources: Sequence[str] | None = None,
+        expected_model_sources: Sequence[str] | None = None,
     ) -> tuple[KaggleKernelSourceIdentity, int]:
         """Read exact latest identity through the pinned official GetKernel API.
 
@@ -1866,6 +1918,14 @@ class KaggleProviderAdapter:
             )
             if observed_sources != wanted:
                 raise KaggleIdentityError("Kaggle kernel-source readback differs")
+        if expected_model_sources is not None:
+            wanted_models = tuple(_normalized_model_source(item) for item in expected_model_sources)
+            observed_models = tuple(
+                _normalized_model_source(item)
+                for item in (_field(metadata, "model_data_sources", "modelDataSources") or ())
+            )
+            if observed_models != wanted_models:
+                raise KaggleIdentityError("Kaggle model-source readback differs")
 
         metadata = _field(response, "metadata")
         blob = _field(response, "blob")
@@ -2121,6 +2181,7 @@ class KaggleProviderAdapter:
                 expected_source_sha256=expected_source_sha256,
                 expected_docker_image=docker_image,
                 expected_kernel_sources=normalized_kernel_sources,
+                expected_model_sources=normalized_model_sources,
             )
         except Exception as exc:
             raise KaggleAmbiguousMutation(

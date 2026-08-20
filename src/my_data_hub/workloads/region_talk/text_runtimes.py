@@ -44,7 +44,9 @@ MODEL_SOURCE_RE = (
     r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/"
     r"[A-Za-z0-9_.-]+/[1-9][0-9]*$"
 )
+KERNEL_SOURCE_RE = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
 REGISTRY_NAME = "text-runtime-assets.v1.json"
+E5_PRODUCER_AUTHORITY_NAME = "region-talk-e5-frozen-producer-authority.v1.json"
 TEXT_STAGES = frozenset({"e5_embedding", "bge_m3_embedding"})
 _MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 _MAX_SEMANTIC_BANK_BYTES = 1024 * 1024
@@ -157,6 +159,8 @@ class TextRuntimeAssetManifest(_StrictModel):
     runtime_source_sha256: str = Field(pattern=SHA256_RE)
     required_distributions: dict[str, str] = Field(min_length=2, max_length=20)
     provider_model_source: str | None = Field(default=None, pattern=MODEL_SOURCE_RE)
+    provider_kernel_source: str | None = Field(default=None, pattern=KERNEL_SOURCE_RE)
+    producer_authority_sha256: str | None = Field(default=None, pattern=SHA256_RE)
     official_tree_receipt_sha256: str | None = Field(default=None, pattern=SHA256_RE)
     excluded_nonruntime_paths: tuple[str, ...] = Field(default=(), max_length=20)
     receipt_sha256: str = Field(pattern=SHA256_RE)
@@ -196,12 +200,7 @@ class TextRuntimeAssetManifest(_StrictModel):
         expected_weight = "model.safetensors" if self.stage == "e5_embedding" else "pytorch_model.bin"
         if expected_weight not in names:
             raise ValueError("text-runtime snapshot lacks its exact model weights")
-        acquisition = (
-            self.provider_model_source,
-            self.official_tree_receipt_sha256,
-            self.excluded_nonruntime_paths,
-        )
-        if any(acquisition) and (
+        if self.provider_model_source is not None and (
             self.stage != "bge_m3_embedding"
             or self.provider_model_source != "yethukmutt/bge-m3/Transformers/m3/1"
             or self.official_tree_receipt_sha256
@@ -209,6 +208,18 @@ class TextRuntimeAssetManifest(_StrictModel):
             or self.excluded_nonruntime_paths != ("imgs/.DS_Store",)
         ):
             raise ValueError("text-runtime acquired-model contract differs")
+        e5_acquisition = (self.provider_kernel_source, self.producer_authority_sha256)
+        if any(e5_acquisition) and (
+            self.stage != "e5_embedding"
+            or self.provider_kernel_source != "zigomaro/mdh-region-talk-e5-assets-v1"
+            or self.producer_authority_sha256 is None
+            or self.official_tree_receipt_sha256
+            != "a9bf9a773342bb1593801f34bdd8d230b44c4a934842deea0b444ad5371aae70"
+            or self.excluded_nonruntime_paths
+        ):
+            raise ValueError("text-runtime frozen-producer contract differs")
+        if self.provider_model_source is not None and self.provider_kernel_source is not None:
+            raise ValueError("text runtime must use exactly one provider asset carrier")
         return self
 
 
@@ -218,13 +229,19 @@ class TextRuntimeRegistryEntry(_StrictModel):
     manifest_filename: str = Field(pattern=r"^region-talk-(?:e5|bge-m3)-assets\.v1\.json$")
     manifest_sha256: str | None = Field(default=None, pattern=SHA256_RE)
     model_source: str | None = Field(default=None, pattern=MODEL_SOURCE_RE)
+    kernel_source: str | None = Field(default=None, pattern=KERNEL_SOURCE_RE)
+    producer_authority_sha256: str | None = Field(default=None, pattern=SHA256_RE)
     model: TextRuntimeModelIdentity
 
     @model_validator(mode="after")
     def consistent_availability(self) -> TextRuntimeRegistryEntry:
+        carrier_count = int(self.model_source is not None) + int(self.kernel_source is not None)
         if (self.availability == "verified") != (
-            self.manifest_sha256 is not None and self.model_source is not None
-        ) or (self.availability == "external_assets_required" and self.model_source is not None):
+            self.manifest_sha256 is not None and carrier_count == 1
+        ) or (
+            self.availability == "external_assets_required"
+            and (carrier_count or self.producer_authority_sha256 is not None)
+        ) or ((self.kernel_source is not None) != (self.producer_authority_sha256 is not None)):
             raise ValueError("text-runtime registry availability/hash differ")
         expected, _contract = _stage_contract(self.stage)
         if self.model != TextRuntimeModelIdentity.from_model(expected):
@@ -415,6 +432,130 @@ def read_text_runtime_registry(path: Path | None = None) -> TextRuntimeRegistry:
         raise TextRuntimeAssetError("TEXT_RUNTIME_REGISTRY_INVALID") from exc
 
 
+def read_e5_frozen_producer_authority(path: Path | None = None) -> dict[str, Any]:
+    """Read the committed, metadata-only authority for the immutable producer."""
+
+    path = path or Path(__file__).with_name("assets") / E5_PRODUCER_AUTHORITY_NAME
+    value, body = _read_canonical_runtime_json(path)
+    unsigned = {key: item for key, item in value.items() if key != "authority_sha256"}
+    required = {
+        "schema_version",
+        "provider_ref",
+        "provider_version",
+        "provider_kernel_id",
+        "provider_run_ref",
+        "task_run_id",
+        "source_commit",
+        "source_sha256",
+        "image_identity",
+        "image_source_commit",
+        "claim",
+        "producer_receipt",
+        "publication_dispatch",
+        "notification_dispatch",
+        "authority_sha256",
+    }
+    if (
+        set(value) != required
+        or value.get("schema_version") != "region-talk-e5-frozen-producer-authority.v1"
+        or value.get("provider_ref") != "zigomaro/mdh-region-talk-e5-assets-v1"
+        or value.get("provider_version") != 1
+        or value.get("provider_run_ref") != f"{value.get('provider_ref')}/1"
+        or value.get("publication_dispatch") is not False
+        or value.get("notification_dispatch") is not False
+        or value.get("authority_sha256")
+        != hashlib.sha256(canonical_json_bytes(unsigned)).hexdigest()
+        or body != canonical_json_bytes(value) + b"\n"
+    ):
+        raise TextRuntimeAssetError("TEXT_RUNTIME_E5_PRODUCER_AUTHORITY_INVALID")
+    try:
+        from my_data_hub.providers.kaggle.contracts import TaskResourceClaim
+
+        claim = TaskResourceClaim.model_validate(value["claim"])
+    except Exception as exc:
+        raise TextRuntimeAssetError("TEXT_RUNTIME_E5_PRODUCER_AUTHORITY_INVALID") from exc
+    receipt = value.get("producer_receipt")
+    if not isinstance(receipt, dict):
+        raise TextRuntimeAssetError("TEXT_RUNTIME_E5_PRODUCER_AUTHORITY_INVALID")
+    receipt_unsigned = {key: item for key, item in receipt.items() if key != "receipt_sha256"}
+    official_path = Path(__file__).with_name("assets") / "text-model-official-trees.v1.json"
+    official, official_body = _read_canonical_runtime_json(official_path)
+    official_unsigned = {key: item for key, item in official.items() if key != "receipt_sha256"}
+    entries = official.get("entries")
+    e5_entries = (
+        [item for item in entries if isinstance(item, dict) and item.get("stage") == "e5_embedding"]
+        if isinstance(entries, list)
+        else []
+    )
+    receipt_files = receipt.get("files")
+    if len(e5_entries) != 1 or not isinstance(receipt_files, list):
+        raise TextRuntimeAssetError("TEXT_RUNTIME_E5_PRODUCER_AUTHORITY_INVALID")
+    official_e5 = e5_entries[0]
+    expected_files = official_e5.get("files")
+    if not isinstance(expected_files, list) or len(expected_files) != 23 or len(receipt_files) != 23:
+        raise TextRuntimeAssetError("TEXT_RUNTIME_E5_PRODUCER_AUTHORITY_INVALID")
+    expected_by_path = {item.get("path"): item for item in expected_files if isinstance(item, dict)}
+    observed_by_path = {item.get("path"): item for item in receipt_files if isinstance(item, dict)}
+    file_contract_valid = set(expected_by_path) == set(observed_by_path) and len(observed_by_path) == 23
+    for relative, expected in expected_by_path.items():
+        observed = observed_by_path.get(relative, {})
+        if (
+            set(observed) != {"path", "byte_size", "sha256", "git_blob_oid"}
+            or observed.get("byte_size") != expected.get("byte_size")
+            or (
+                expected.get("lfs_sha256") is not None
+                and observed.get("sha256") != expected.get("lfs_sha256")
+            )
+            or (
+                expected.get("lfs_sha256") is None
+                and observed.get("git_blob_oid") != expected.get("git_oid")
+            )
+        ):
+            file_contract_valid = False
+    if (
+        not file_contract_valid
+        or official_body != canonical_json_bytes(official) + b"\n"
+        or official.get("receipt_sha256")
+        != hashlib.sha256(canonical_json_bytes(official_unsigned)).hexdigest()
+        or receipt.get("schema_version") != "region-talk-e5-frozen-producer-receipt.v1"
+        or receipt.get("receipt_sha256")
+        != hashlib.sha256(canonical_json_bytes(receipt_unsigned)).hexdigest()
+        or receipt.get("inventory_sha256")
+        != hashlib.sha256(canonical_json_bytes(receipt_files)).hexdigest()
+        or receipt.get("model_id") != official_e5.get("model_id")
+        or receipt.get("model_revision") != official_e5.get("revision")
+        or receipt.get("official_tree_receipt_sha256") != official.get("receipt_sha256")
+        or receipt.get("semantic_bank_sha256")
+        != "4ec81e6ede79f3dae1bb366a06366e7197d960e1c04e124f77b3db12f2f1981f"
+        or receipt.get("notebook_kaggle_credentials") is not False
+        or receipt.get("publication_dispatch") is not False
+        or receipt.get("notification_dispatch") is not False
+        or receipt.get("task_run_id") != value.get("task_run_id")
+        or receipt.get("source_commit") != value.get("source_commit")
+        or str(claim.task_id) != value.get("task_run_id")
+        or claim.provider_ref != value.get("provider_ref")
+        or claim.provider_version != value.get("provider_version")
+        or claim.kind.value != "notebook"
+        or claim.control_class.value != "orchestrator_protected"
+        or claim.disposable
+    ):
+        raise TextRuntimeAssetError("TEXT_RUNTIME_E5_PRODUCER_AUTHORITY_INVALID")
+    return value
+
+
+def _read_canonical_runtime_json(path: Path) -> tuple[dict[str, Any], bytes]:
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > _MAX_MANIFEST_BYTES:
+        raise TextRuntimeAssetError("TEXT_RUNTIME_E5_PRODUCER_AUTHORITY_UNAVAILABLE")
+    body = path.read_bytes()
+    try:
+        value = json.loads(body)
+    except ValueError as exc:
+        raise TextRuntimeAssetError("TEXT_RUNTIME_E5_PRODUCER_AUTHORITY_INVALID") from exc
+    if not isinstance(value, dict):
+        raise TextRuntimeAssetError("TEXT_RUNTIME_E5_PRODUCER_AUTHORITY_INVALID")
+    return value, body
+
+
 def build_text_runtime_asset_manifest(
     *,
     stage: str,
@@ -476,6 +617,8 @@ def build_text_runtime_asset_manifest(
         "runtime_source_sha256": runtime_source_sha256(),
         "required_distributions": dict(sorted(required_distributions.items())),
         "provider_model_source": None,
+        "provider_kernel_source": None,
+        "producer_authority_sha256": None,
         "official_tree_receipt_sha256": None,
         "excluded_nonruntime_paths": [],
     }
@@ -858,7 +1001,11 @@ def discover_attached_text_runtime(
     ):
         raise TextRuntimeAssetError("TEXT_RUNTIME_MANIFEST_ABSENT_OR_AMBIGUOUS")
     manifest = TextRuntimeAssetManifest.model_validate_json(packaged_manifest.read_bytes())
-    if manifest.provider_model_source != entry.model_source:
+    if (
+        manifest.provider_model_source != entry.model_source
+        or manifest.provider_kernel_source != entry.kernel_source
+        or manifest.producer_authority_sha256 != entry.producer_authority_sha256
+    ):
         raise TextRuntimeAssetError("TEXT_RUNTIME_MANIFEST_BINDING_MISMATCH")
     weight_name = "model.safetensors" if stage == "e5_embedding" else "pytorch_model.bin"
     weight = next(item for item in manifest.model_files if Path(item.relative_path).name == weight_name)
@@ -870,7 +1017,20 @@ def discover_attached_text_runtime(
     if len(model_roots) != 1:
         raise TextRuntimeAssetError("TEXT_RUNTIME_MODEL_DIRECTORY_ABSENT_OR_AMBIGUOUS")
     model_root = next(iter(model_roots))
-    semantic_bank_path = manifest_base / manifest.semantic_bank_file.relative_path
+    if entry.kernel_source is None:
+        semantic_bank_path = manifest_base / manifest.semantic_bank_file.relative_path
+    else:
+        semantic_matches = [
+            path
+            for path in input_root.rglob(Path(manifest.semantic_bank_file.relative_path).name)
+            if path.is_file()
+            and not path.is_symlink()
+            and path.stat().st_size == manifest.semantic_bank_file.byte_size
+            and sha256_file(path) == manifest.semantic_bank_file.sha256
+        ]
+        if len(semantic_matches) != 1:
+            raise TextRuntimeAssetError("TEXT_RUNTIME_SEMANTIC_BANK_ABSENT_OR_AMBIGUOUS")
+        semantic_bank_path = semantic_matches[0]
     assets = verify_text_runtime_asset_bundle(
         bundle_root=manifest_base,
         manifest_path=packaged_manifest,
@@ -903,6 +1063,15 @@ def verified_text_runtime_model_source(stage: str) -> str | None:
     return entry.model_source if entry.availability == "verified" else None
 
 
+def verified_text_runtime_kernel_source(stage: str) -> str | None:
+    """Return the frozen producer slug only after registry verification."""
+
+    if stage not in TEXT_STAGES:
+        return None
+    entry = next(item for item in read_text_runtime_registry().entries if item.stage == stage)
+    return entry.kernel_source if entry.availability == "verified" else None
+
+
 __all__ = [
     "SemanticBankDocument",
     "SemanticBankEntry",
@@ -917,8 +1086,10 @@ __all__ = [
     "VerifiedTextStageRuntime",
     "build_text_runtime_asset_manifest",
     "discover_attached_text_runtime",
+    "read_e5_frozen_producer_authority",
     "read_text_runtime_registry",
     "runtime_source_sha256",
+    "verified_text_runtime_kernel_source",
     "verified_text_runtime_model_source",
     "verify_text_runtime_asset_bundle",
 ]

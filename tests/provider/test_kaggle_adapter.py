@@ -263,8 +263,30 @@ class FakeKaggleApi:
                 docker_image=self.kernel_metadata.get(ref, {}).get("docker_image"),
                 kernel_type=self.kernel_metadata.get(ref, {}).get("kernel_type"),
                 kernel_data_sources=self.kernel_metadata.get(ref, {}).get("kernel_sources", []),
+                model_data_sources=self.kernel_metadata.get(ref, {}).get("model_sources", []),
             ),
             blob=SimpleNamespace(source=self.kernels[ref][version].decode("utf-8")),
+        )
+
+    def model_instance_versions_list(
+        self, model_instance: str, page_size: int = 20, page_token: str | None = None
+    ) -> object:
+        assert page_size == 20 and page_token is None
+        owner, model, framework, variation = model_instance.split("/")
+        return SimpleNamespace(
+            version_list=SimpleNamespace(
+                versions=[
+                    SimpleNamespace(
+                        owner_slug=owner,
+                        model_slug=model,
+                        framework=f"MODEL_FRAMEWORK_{framework.upper()}",
+                        variation_slug=variation,
+                        version_number=7,
+                        url=f"/models/{model_instance}/7",
+                    )
+                ]
+            ),
+            next_page_token=None,
         )
 
     def kernels_pull(self, kernel: str, path: str, metadata: bool = False, quiet: bool = True) -> str:
@@ -870,6 +892,37 @@ def test_dependency_smoke_reconciles_model_sources_after_lost_push_response_with
     assert recovered.run.provider_run_ref == "owner/ambiguous-master/1"
     assert calls == 1
     assert journal.claims[recovered.claim.claim_sha256] == recovered.claim
+    api.kernel_metadata[recovered.run.provider_ref]["model_sources"] = [
+        "owner/model/Transformers/default/8"
+    ]
+    with pytest.raises(KaggleAmbiguousMutation, match="differs"):
+        client.reconcile_private_notebook_mutation(
+            intent=intent,
+            task_run_id=run_id,
+            expected_source_sha256=hashlib.sha256(source).hexdigest(),
+            dataset_sources=(),
+            model_sources=("owner/model/Transformers/default/7",),
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+            disposable=True,
+            docker_image=TEST_RUNTIME_IMAGE,
+            docker_image_pinning_type="original",
+        )
+
+
+def test_exact_model_source_prelaunch_fence_binds_numeric_version_and_url() -> None:
+    client, api, _journal = adapter()
+    source = "owner/model/Transformers/default/7"
+    assert client.assert_exact_model_source_available(source) == source
+    original = api.model_instance_versions_list
+
+    def drifted(model_instance: str, page_size: int = 20, page_token: str | None = None):
+        response = original(model_instance, page_size=page_size, page_token=page_token)
+        response.version_list.versions[0].url = "/models/owner/model/Transformers/default/8"
+        return response
+
+    api.model_instance_versions_list = drifted  # type: ignore[method-assign]
+    with pytest.raises(KaggleIdentityError, match="unavailable"):
+        client.assert_exact_model_source_available(source)
 
 
 def test_master_legacy_empty_push_response_uses_exact_latest_get_kernel() -> None:

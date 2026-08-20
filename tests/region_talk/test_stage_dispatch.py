@@ -82,12 +82,21 @@ def _sha(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
-def _metadata_claim() -> dict[str, Any]:
-    effect = stage_effect_id(work_item_id=WORK, attempt=1, input_fingerprint=INPUT)
-    worker = stage_worker_task_run_id(supervisor_task_run_id=SUPERVISOR, work_item_id=WORK, attempt=1)
+def _metadata_claim(
+    stage: str = "e5_embedding", contract_version: str = "e5_semantic_bank_scores_v1"
+) -> dict[str, Any]:
+    work = work_item_id(
+        run_id=RUN,
+        candidate_id=SUBJECT,
+        revision=1,
+        stage=stage,
+        input_fingerprint=INPUT,
+    )
+    effect = stage_effect_id(work_item_id=work, attempt=1, input_fingerprint=INPUT)
+    worker = stage_worker_task_run_id(supervisor_task_run_id=SUPERVISOR, work_item_id=work, attempt=1)
     dispatch = stage_dispatch_id(
         supervisor_task_run_id=SUPERVISOR,
-        work_item_id=WORK,
+        work_item_id=work,
         attempt=1,
         input_fingerprint=INPUT,
     )
@@ -99,19 +108,21 @@ def _metadata_claim() -> dict[str, Any]:
         "stage_run_id": str(RUN),
         "master_instance_id": str(MASTER),
         "epoch": 7,
-        "work_item_id": str(WORK),
+        "work_item_id": str(work),
         "effect_id": str(effect),
         "dispatch_id": str(dispatch),
         "worker_task_run_id": str(worker),
-        "stage": "e5_embedding",
-        "contract_version": "e5_semantic_bank_scores_v1",
+        "stage": stage,
+        "contract_version": contract_version,
         "subject_type": "region_talk.candidate",
         "subject_id": str(SUBJECT),
         "input_fingerprint": INPUT,
         "attempt": 1,
         "max_attempts": 3,
-        "timeout_seconds": 900,
-        "lease_expires_at": (NOW + timedelta(seconds=900)).isoformat(),
+        "timeout_seconds": 1_200 if stage == "bge_m3_embedding" else 900,
+        "lease_expires_at": (
+            NOW + timedelta(seconds=1_200 if stage == "bge_m3_embedding" else 900)
+        ).isoformat(),
         "lease_token_sha256": "a" * 64,
         "lease_capability_sha256": "b" * 64,
         "claim_receipt_sha256": "f" * 64,
@@ -264,6 +275,8 @@ class _LostStageProvider:
         self.run: KaggleKernelRunIdentity | None = None
         self.status_state = KernelState.RUNNING
         self.status_observed_at = NOW
+        self.producer_drift = False
+        self.last_notebook_kwargs: dict[str, Any] | None = None
 
     @staticmethod
     def claim(intent, kind):  # type: ignore[no-untyped-def]
@@ -309,6 +322,16 @@ class _LostStageProvider:
         )
 
     def reconcile_private_notebook_run(self, *, task_run_id, provider_ref, expected_source_sha256):  # type: ignore[no-untyped-def]
+        if provider_ref == "zigomaro/mdh-region-talk-e5-assets-v1":
+            return KaggleKernelRunIdentity(
+                task_run_id=task_run_id,
+                provider_ref=provider_ref,
+                source_version=2 if self.producer_drift else 1,
+                source_sha256=("0" * 64) if self.producer_drift else expected_source_sha256,
+                provider_kernel_id=131338451 if self.producer_drift else 131338450,
+                provider_run_ref=f"{provider_ref}/{2 if self.producer_drift else 1}",
+                started_at=NOW,
+            )
         if not self.notebook_present:
             return None
         self.run = self.run or KaggleKernelRunIdentity(
@@ -323,15 +346,26 @@ class _LostStageProvider:
         return self.run
 
     def read_run_status(self, run):  # type: ignore[no-untyped-def]
+        state = (
+            KernelState.COMPLETE
+            if run.provider_ref == "zigomaro/mdh-region-talk-e5-assets-v1"
+            else self.status_state
+        )
         return KaggleKernelStatus(
             run=run,
-            state=self.status_state,
-            provider_status=self.status_state.value,
+            state=state,
+            provider_status=state.value,
             observed_at=self.status_observed_at,
         )
 
+    def assert_exact_model_source_available(self, model_source: str) -> str:
+        if self.producer_drift:
+            raise RuntimeError("model source drifted")
+        return model_source
+
     def push_private_worker_notebook_pending_attestation(self, **_kwargs):  # type: ignore[no-untyped-def]
         self.notebook_pushes += 1
+        self.last_notebook_kwargs = dict(_kwargs)
         self.notebook_present = True
         raise KaggleAmbiguousMutation("lost notebook response")
 
@@ -400,6 +434,12 @@ def test_concrete_stage_adapter_reconciles_each_lost_effect_with_original_intent
     assert receipt.worker_task_run_id == claim.worker_task_run_id
     assert provider.dataset_creates == 1
     assert provider.notebook_pushes == 1
+    assert provider.last_notebook_kwargs is not None
+    assert provider.last_notebook_kwargs["kernel_sources"] == (
+        "zigomaro/mdh-region-talk-e5-assets-v1",
+    )
+    assert provider.last_notebook_kwargs["model_sources"] == ()
+    assert provider.last_notebook_kwargs["enable_internet"] is False
     encoded = journal_path.read_bytes()
     assert json.loads(encoded)["entries"][str(claim.dispatch_id)]["dataset_intent"][
         "requested_at"
@@ -446,6 +486,143 @@ def test_concrete_stage_adapter_reconciles_each_lost_effect_with_original_intent
     completed_adapter.complete(terminal)
     assert provider.deletes == 2
     assert authority.revoked == 1
+
+
+def test_bge_stage_launch_fences_and_attaches_exact_model_source_through_single_adapter(
+    tmp_path: Path,
+) -> None:
+    claim = StageWorkMetadataClaimReceipt.model_validate(
+        _metadata_claim("bge_m3_embedding", "bge_m3_flagembedding_dense_v1")
+    )
+    binding = StageWorkerBindingReceipt.model_validate(_binding(claim.model_dump(mode="json")))
+    launch = StageWorkerLaunch(
+        supervisor_task_run_id=claim.supervisor_task_run_id,
+        export_batch_id=claim.export_batch_id,
+        master_instance_id=claim.master_instance_id,
+        epoch=claim.epoch,
+        stage_run_id=claim.stage_run_id,
+        work_item_id=claim.work_item_id,
+        effect_id=claim.effect_id,
+        dispatch_id=claim.dispatch_id,
+        worker_task_run_id=claim.worker_task_run_id,
+        attempt=claim.attempt,
+        stage=claim.stage,
+        contract_version=claim.contract_version,
+        notebook_ref=f"owner/mdh-rt-run-{claim.dispatch_id.hex[:24]}",
+        input_fingerprint=claim.input_fingerprint,
+        timeout_seconds=claim.timeout_seconds,
+        claim_receipt_sha256=claim.claim_receipt_sha256,
+        worker_binding_sha256=binding.worker_binding_sha256,
+        lease_capability_sha256=claim.lease_capability_sha256,
+    )
+    root = (tmp_path / "private").absolute()
+    root.mkdir(mode=0o700)
+    authority = _StageAuthority(root, claim)
+    provider = _LostStageProvider()
+
+    def make() -> CentralRegionTalkStageNotebookAdapter:
+        value = CentralRegionTalkStageNotebookAdapter(
+            adapter=provider,
+            authority=authority,  # type: ignore[arg-type]
+            credential_broker=SimpleNamespace(),  # type: ignore[arg-type]
+            owner="owner",
+            callback_base_url="https://control.example",
+            runtime_dataset_exact_ref="owner/runtime/12",
+            runtime_image_identity="runtime@sha256:" + "d" * 64,
+            runtime_image_source_commit="e" * 40,
+            wheel_relative_path="dist/my_data_hub.whl",
+            wheel_sha256="f" * 64,
+            dependency_manifest_sha256="9" * 64,
+            clock=lambda: NOW,
+        )
+        authority.source_sha256 = hashlib.sha256(value.source_for_claim(claim)).hexdigest()
+        return value
+
+    with pytest.raises(KaggleAmbiguousMutation):
+        make().launch(launch)
+    with pytest.raises(KaggleAmbiguousMutation):
+        make().launch(launch)
+    make().launch(launch)
+    assert provider.notebook_pushes == 1
+    assert provider.last_notebook_kwargs is not None
+    assert provider.last_notebook_kwargs["model_sources"] == (
+        "yethukmutt/bge-m3/Transformers/m3/1",
+    )
+    assert provider.last_notebook_kwargs["kernel_sources"] == ()
+    assert provider.last_notebook_kwargs["enable_internet"] is False
+
+    provider.producer_drift = True
+    fresh = (tmp_path / "drift").absolute()
+    fresh.mkdir(mode=0o700)
+    drift_authority = _StageAuthority(fresh, claim)
+    drifted = CentralRegionTalkStageNotebookAdapter(
+        adapter=provider,
+        authority=drift_authority,  # type: ignore[arg-type]
+        credential_broker=SimpleNamespace(),  # type: ignore[arg-type]
+        owner="owner",
+        callback_base_url="https://control.example",
+        runtime_dataset_exact_ref="owner/runtime/12",
+        runtime_image_identity="runtime@sha256:" + "d" * 64,
+        runtime_image_source_commit="e" * 40,
+        wheel_relative_path="dist/my_data_hub.whl",
+        wheel_sha256="f" * 64,
+        dependency_manifest_sha256="9" * 64,
+        clock=lambda: NOW,
+    )
+    drift_authority.source_sha256 = hashlib.sha256(drifted.source_for_claim(claim)).hexdigest()
+    pushes_before = provider.notebook_pushes
+    with pytest.raises(Exception, match="BGE_ASSET_DRIFT_RETRYABLE"):
+        drifted.launch(launch)
+    assert provider.notebook_pushes == pushes_before
+
+
+def test_e5_producer_version_or_source_drift_denies_worker_launch(tmp_path: Path) -> None:
+    claim = StageWorkMetadataClaimReceipt.model_validate(_metadata_claim())
+    binding = StageWorkerBindingReceipt.model_validate(_binding(claim.model_dump(mode="json")))
+    launch = StageWorkerLaunch(
+        supervisor_task_run_id=claim.supervisor_task_run_id,
+        export_batch_id=claim.export_batch_id,
+        master_instance_id=claim.master_instance_id,
+        epoch=claim.epoch,
+        stage_run_id=claim.stage_run_id,
+        work_item_id=claim.work_item_id,
+        effect_id=claim.effect_id,
+        dispatch_id=claim.dispatch_id,
+        worker_task_run_id=claim.worker_task_run_id,
+        attempt=claim.attempt,
+        stage=claim.stage,
+        contract_version=claim.contract_version,
+        notebook_ref=f"owner/mdh-rt-run-{claim.dispatch_id.hex[:24]}",
+        input_fingerprint=claim.input_fingerprint,
+        timeout_seconds=claim.timeout_seconds,
+        claim_receipt_sha256=claim.claim_receipt_sha256,
+        worker_binding_sha256=binding.worker_binding_sha256,
+        lease_capability_sha256=claim.lease_capability_sha256,
+    )
+    root = (tmp_path / "private").absolute()
+    root.mkdir(mode=0o700)
+    authority = _StageAuthority(root, claim)
+    provider = _LostStageProvider()
+    provider.dataset_present = True
+    provider.producer_drift = True
+    adapter = CentralRegionTalkStageNotebookAdapter(
+        adapter=provider,
+        authority=authority,  # type: ignore[arg-type]
+        credential_broker=SimpleNamespace(),  # type: ignore[arg-type]
+        owner="owner",
+        callback_base_url="https://control.example",
+        runtime_dataset_exact_ref="owner/runtime/12",
+        runtime_image_identity="runtime@sha256:" + "d" * 64,
+        runtime_image_source_commit="e" * 40,
+        wheel_relative_path="dist/my_data_hub.whl",
+        wheel_sha256="f" * 64,
+        dependency_manifest_sha256="9" * 64,
+        clock=lambda: NOW,
+    )
+    authority.source_sha256 = hashlib.sha256(adapter.source_for_claim(claim)).hexdigest()
+    with pytest.raises(Exception, match="E5_ASSET_DRIFT_RETRYABLE"):
+        adapter.launch(launch)
+    assert provider.notebook_pushes == 0
 
 
 def test_generated_direct_stage_worker_is_offline_pinned_and_compiles() -> None:

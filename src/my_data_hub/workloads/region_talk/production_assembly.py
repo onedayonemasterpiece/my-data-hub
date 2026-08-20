@@ -75,6 +75,11 @@ from .stage_dispatch import (
     StageWorkerRotateRequest,
     StageWorkMetadataClaimReceipt,
 )
+from .text_runtimes import (
+    read_e5_frozen_producer_authority,
+    verified_text_runtime_kernel_source,
+    verified_text_runtime_model_source,
+)
 
 _MAX_SECRET_BYTES = 1024 * 1024
 
@@ -1202,6 +1207,61 @@ class CentralRegionTalkStageNotebookAdapter:
             model_inputs=stage_model_identity(claim.stage),
         )
 
+    def _verified_stage_asset_sources(
+        self, stage: str
+    ) -> tuple[tuple[str, ...], tuple[str, ...], str | None]:
+        model_source = verified_text_runtime_model_source(stage)
+        kernel_source = verified_text_runtime_kernel_source(stage)
+        if stage == "e5_embedding":
+            if kernel_source is None or model_source is not None:
+                raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_E5_ASSET_UNAVAILABLE")
+            authority = read_e5_frozen_producer_authority()
+            try:
+                claim = TaskResourceClaim.model_validate(authority["claim"])
+                recovered = self.adapter.reconcile_private_notebook_run(
+                    task_run_id=UUID(str(authority["task_run_id"])),
+                    provider_ref=str(authority["provider_ref"]),
+                    expected_source_sha256=str(authority["source_sha256"]),
+                )
+                if recovered is None:
+                    raise ValueError("producer source is absent")
+                status = self.adapter.read_run_status(recovered)
+            except Exception as exc:
+                raise RegionTalkAssemblyUnavailable(
+                    "REGION_TALK_STAGE_E5_ASSET_DRIFT_RETRYABLE"
+                ) from exc
+            if (
+                claim.provider_ref != kernel_source
+                or claim.control_class is not ControlClass.ORCHESTRATOR_PROTECTED
+                or claim.disposable
+                or claim.provider_version != authority["provider_version"]
+                or claim.fingerprint.value
+                != authority["claim"].get("fingerprint", {}).get("value")
+                or recovered.source_version != authority["provider_version"]
+                or recovered.provider_kernel_id != authority["provider_kernel_id"]
+                or recovered.provider_run_ref != authority["provider_run_ref"]
+                or status.state is not KernelState.COMPLETE
+            ):
+                raise RegionTalkAssemblyUnavailable(
+                    "REGION_TALK_STAGE_E5_ASSET_DRIFT_RETRYABLE"
+                )
+            return (kernel_source,), (), str(authority["authority_sha256"])
+        if stage == "bge_m3_embedding":
+            if model_source is None or kernel_source is not None:
+                raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_BGE_ASSET_UNAVAILABLE")
+            try:
+                fenced_source = self.adapter.assert_exact_model_source_available(model_source)
+            except Exception as exc:
+                raise RegionTalkAssemblyUnavailable(
+                    "REGION_TALK_STAGE_BGE_ASSET_DRIFT_RETRYABLE"
+                ) from exc
+            if fenced_source != model_source:
+                raise RegionTalkAssemblyUnavailable(
+                    "REGION_TALK_STAGE_BGE_ASSET_DRIFT_RETRYABLE"
+                )
+            return (), (fenced_source,), None
+        return (), (), None
+
     def _bound_claim(
         self, launch: StageWorkerLaunch
     ) -> tuple[StageWorkMetadataClaimReceipt, bytes, str]:
@@ -1398,6 +1458,9 @@ class CentralRegionTalkStageNotebookAdapter:
             self.runtime_dataset_exact_ref,
             f"{dataset_claim.provider_ref}/{dataset_claim.provider_version}",
         )
+        kernel_sources, model_sources, producer_authority_sha256 = (
+            self._verified_stage_asset_sources(claim.stage)
+        )
         push_arguments = {
             "task_run_id": str(claim.worker_task_run_id),
             "source_sha256": source_sha,
@@ -1407,6 +1470,18 @@ class CentralRegionTalkStageNotebookAdapter:
             "docker_image": self.runtime_image_identity,
             "docker_image_pinning_type": "original",
         }
+        if kernel_sources:
+            push_arguments["kernel_sources"] = kernel_sources
+        if model_sources:
+            push_arguments["model_sources"] = model_sources
+        if producer_authority_sha256 is not None:
+            if entry.get("e5_producer_authority_sha256") not in {
+                None,
+                producer_authority_sha256,
+            }:
+                raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_JOURNAL_CONFLICT")
+            entry["e5_producer_authority_sha256"] = producer_authority_sha256
+            self._save()
         if entry["notebook_intent"] is None:
             entry["notebook_intent"] = ProviderEffectIntent.create(
                 operation_id=operation_id,
@@ -1426,6 +1501,8 @@ class CentralRegionTalkStageNotebookAdapter:
                 task_run_id=claim.worker_task_run_id,
                 expected_source_sha256=source_sha,
                 dataset_sources=sources,
+                kernel_sources=kernel_sources,
+                model_sources=model_sources,
                 control_class=ControlClass.ORCHESTRATOR_PROTECTED,
                 disposable=True,
                 docker_image=self.runtime_image_identity,
@@ -1443,7 +1520,9 @@ class CentralRegionTalkStageNotebookAdapter:
                     control_class=ControlClass.ORCHESTRATOR_PROTECTED,
                     disposable=True,
                     dataset_sources=sources,
-                    enable_internet=True,
+                    kernel_sources=kernel_sources,
+                    model_sources=model_sources,
+                    enable_internet=not bool(kernel_sources or model_sources),
                     timeout_seconds=launch.timeout_seconds,
                     docker_image=self.runtime_image_identity,
                     docker_image_pinning_type="original",
