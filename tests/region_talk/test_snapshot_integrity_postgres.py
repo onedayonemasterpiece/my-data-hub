@@ -11,6 +11,7 @@ import time
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid5
@@ -548,12 +549,12 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                     "SELECT candidate_id,content_id,current_revision "
                     "FROM region_talk.publication_candidate"
                 ).fetchone()
-                owner.execute(
+                asset_id = owner.execute(
                     "INSERT INTO hub.content_asset(content_id,asset_type,source_url,normalized_url,"
                     "source_external_id,position,mime_type,byte_size,sha256,status,metadata) "
                     "VALUES(%s,'image','https://example.test/private-image.jpg',"
                     "'https://example.test/private-image.jpg','media-1',0,'image/jpeg',1234,%s,"
-                    "'available',%s::jsonb)",
+                    "'available',%s::jsonb) RETURNING asset_id",
                     (
                         content_id,
                         "4" * 64,
@@ -578,7 +579,7 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                             }
                         ),
                     ),
-                )
+                ).fetchone()[0]
                 for stage in POST_IMPORT_DAG:
                     if stage["stage"] not in {
                         "e5_embedding",
@@ -920,7 +921,7 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 ).fetchall() == [(2, "FENCED"), (3, "ACTIVE")]
                 assert worker_admin.execute(
                     "SELECT schema_revision FROM hub.canonical_state"
-                ).fetchone() == (30,)
+                ).fetchone() == (31,)
 
             # Generation one was valid before rotation and is now fenced.
             with psycopg.connect(worker_url) as worker_connection:
@@ -1027,6 +1028,84 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             assert current_candidate["evidence"][claim["stage"]]["status"] == "CURRENT"
             connection.commit()
 
+            # Superseding the active runtime pin changes the immutable stage
+            # input/work identity.  The generation-one success immediately
+            # becomes stale and cannot be replayed as a current success.
+            superseded_stage = claim["stage"]
+            prior_pin = pins[superseded_stage]
+            stage_contract = next(
+                stage for stage in POST_IMPORT_DAG if stage["stage"] == superseded_stage
+            )
+            replacement_request = {
+                **_runtime_pin_request(stage_contract, now + timedelta(seconds=2)),
+                "runtime_source_sha256": "9" * 64,
+                "asset_manifest_sha256": "a" * 64,
+                "prior_pin_receipt_sha256": prior_pin["receipt_sha256"],
+            }
+            with psycopg.connect(admin_url) as owner:
+                replacement_pin = owner.execute(
+                    "SELECT migration.register_region_talk_stage_runtime_pin(%s::jsonb)",
+                    (json.dumps(replacement_request),),
+                ).fetchone()[0]
+                replay_request = {
+                    **replacement_request,
+                    "requested_at": (now + timedelta(seconds=3)).isoformat(),
+                }
+                assert owner.execute(
+                    "SELECT migration.register_region_talk_stage_runtime_pin(%s::jsonb)",
+                    (json.dumps(replay_request),),
+                ).fetchone()[0] == replacement_pin
+                owner.commit()
+            assert replacement_pin["pin_generation"] == prior_pin["pin_generation"] + 1
+            pins[superseded_stage] = replacement_pin
+
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            superseded = connection.execute(
+                "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
+            ).fetchone()[0]
+            assert superseded["candidates"][0]["evidence"][superseded_stage]["status"] == (
+                "MISSING"
+            )
+            connection.commit()
+            with psycopg.connect(admin_url) as proof:
+                work_rows = proof.execute(
+                    "SELECT work_item_id,input_fingerprint,input_data->'runtime_pin' "
+                    "FROM migration.region_talk_stage_work_input_v9 WHERE stage=%s "
+                    "ORDER BY created_at",
+                    (superseded_stage,),
+                ).fetchall()
+                assert len(work_rows) == 2
+                assert len({row[0] for row in work_rows}) == 2
+                assert len({row[1] for row in work_rows}) == 2
+                assert work_rows[-1][2] == replacement_pin
+                assert proof.execute(
+                    "SELECT migration.region_talk_stage_result_valid_v9("
+                    "landed.stage,landed.contract_version,1,landed.master_instance_id,"
+                    "landed.epoch,input.input_data,input.upstream_results,landed.result_status,"
+                    "landed.result_metadata,landed.result_sha256) "
+                    "FROM migration.region_talk_stage_worker_result landed "
+                    "JOIN migration.region_talk_stage_work_input_v9 input USING(work_item_id) "
+                    "WHERE landed.work_item_id=%s",
+                    (UUID(claim["work_item_id"]),),
+                ).fetchone() == (False,)
+            with psycopg.connect(rotated_url) as stale_worker:
+                stale_worker.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                with pytest.raises(
+                    psycopg.errors.InvalidParameterValue,
+                    match="fails exact v9 stage validation",
+                ):
+                    stale_worker.execute(
+                        "SELECT migration.submit_region_talk_stage_worker_result(%s,%s,%s::jsonb)",
+                        (worker_task, UUID(claim["effect_id"]), json.dumps(worker_result)),
+                    )
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            assert connection.execute(
+                "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
+            ).fetchone()[0] == superseded
+            connection.commit()
+
             def land_exact_stage(stage: str) -> None:
                 with psycopg.connect(admin_url) as admin:
                     row = admin.execute(
@@ -1128,6 +1207,16 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             other_embedding = (
                 "e5_embedding" if claim["stage"] == "bge_m3_embedding" else "bge_m3_embedding"
             )
+            land_exact_stage(superseded_stage)
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            replacement_current = connection.execute(
+                "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
+            ).fetchone()[0]
+            assert replacement_current["candidates"][0]["evidence"][superseded_stage][
+                "status"
+            ] == "CURRENT"
+            connection.commit()
             land_exact_stage(other_embedding)
             connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
             vector_ready = connection.execute(
@@ -1155,6 +1244,80 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             )
             land_exact_stage("vector_fusion")
             connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            image_blocked = connection.execute(
+                "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
+            ).fetchone()[0]
+            connection.commit()
+            with psycopg.connect(admin_url) as proof:
+                # The mutable legacy metadata above is intentionally
+                # insufficient: no authoritative acquisition means no image
+                # execution row can be formed.
+                assert proof.execute(
+                    "SELECT count(*) FROM migration.region_talk_stage_work_input_v9 "
+                    "WHERE stage='image_scoring'"
+                ).fetchone() == (0,)
+            assert image_blocked["candidates"][0]["evidence"]["image_scoring"]["status"] == (
+                "MISSING"
+            )
+
+            acquisition_request = {
+                "schema_version": "region-talk-media-artifact-acquisition.v1",
+                "task_run_id": str(manifest.task_run_id),
+                "export_batch_id": str(manifest.export_batch_id),
+                "stage_run_id": str(stage_run_id),
+                "canonical_revision": 1,
+                "master_instance_id": str(IDENTITY.master_instance_id),
+                "epoch": 1,
+                "candidate_id": str(_candidate_id),
+                "candidate_revision": candidate_revision,
+                "candidate_revision_fingerprint": vector_ready["candidates"][0][
+                    "revision_fingerprint"
+                ],
+                "content_id": str(content_id),
+                "asset_id": str(asset_id),
+                "source_media_id": "media-1",
+                "normalized_source_url": "https://example.test/private-image.jpg",
+                "source_url_sha256": sha256(
+                    b"https://example.test/private-image.jpg"
+                ).hexdigest(),
+                "object_ref": "artifacts/media-1.jpg",
+                "artifact_sha256": "4" * 64,
+                "byte_size": 1234,
+                "content_type": "image/jpeg",
+                "width": None,
+                "height": None,
+                "acquisition_evidence_sha256": "5" * 64,
+                "requested_at": now.isoformat(),
+                "publication_dispatch": False,
+                "notification_dispatch": False,
+            }
+            with psycopg.connect(admin_url) as owner:
+                acquisition = owner.execute(
+                    "SELECT migration.register_region_talk_media_artifact_acquisition(%s::jsonb)",
+                    (json.dumps(acquisition_request),),
+                ).fetchone()[0]
+                acquisition_replay = {
+                    **acquisition_request,
+                    "requested_at": (now + timedelta(seconds=1)).isoformat(),
+                }
+                assert owner.execute(
+                    "SELECT migration.register_region_talk_media_artifact_acquisition(%s::jsonb)",
+                    (json.dumps(acquisition_replay),),
+                ).fetchone()[0] == acquisition
+                owner.commit()
+            assert acquisition["task_readable"] is True
+            assert acquisition["publication_dispatch"] is False
+            assert acquisition["notification_dispatch"] is False
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                connection.execute(
+                    "SELECT migration.register_region_talk_media_artifact_acquisition(%s::jsonb)",
+                    (json.dumps(acquisition_request),),
+                )
+            connection.rollback()
+
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
             image_ready = connection.execute(
                 "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
                 (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
@@ -1168,6 +1331,8 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 assert image_input["availability"] == "AVAILABLE"
                 assert image_input["artifact_sha256"] == "4" * 64
                 assert image_input["object_ref"] == "artifacts/media-1.jpg"
+                assert image_input["acquisition_receipt"] == acquisition
+                assert image_input["acquisition_receipt_sha256"] == acquisition["receipt_sha256"]
             assert image_ready["candidates"][0]["evidence"]["image_scoring"]["status"] == (
                 "MISSING"
             )
@@ -1204,7 +1369,7 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 assert proof.execute(
                     "SELECT count(*),count(DISTINCT work_item_id) "
                     "FROM migration.region_talk_stage_work_input_v9"
-                ).fetchone() == (6, 6)
+                ).fetchone() == (7, 7)
             connection.commit()
 
             refreshed = complete_preparation

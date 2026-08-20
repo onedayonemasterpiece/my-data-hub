@@ -185,3 +185,16 @@ epoch. Direct worker success must match the current pin and exact stage result s
 the database recomputes hashes before the immutable landing is accepted. Supervisor
 claims remain metadata-only, private workers retain task/epoch/lease fencing, and both
 publication and notification dispatch remain false.
+
+## Migration 0031 supersession and media authority
+
+Runtime-pin generation and receipt are part of the immutable E5/BGE input fingerprint. A pin
+supersession followed by PREPARE creates a new UUIDv5 work item exactly once, makes the predecessor
+result stale, recursively fences dependent evidence, and rejects reuse of the stale success.
+
+The image stage requires the fixed owner/master-only
+`register_region_talk_media_artifact_acquisition(jsonb)` contract. Its append-only receipt binds
+the accepted task and candidate revision to the ACTIVE master epoch and exact canonical asset plus
+private object claim. Mutable asset metadata and historical Region Talk image rows are not
+authority. The pipeline role cannot register a receipt or read the acquisition table, and no
+publication or notification effect is introduced.

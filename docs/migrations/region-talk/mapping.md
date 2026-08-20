@@ -204,3 +204,20 @@ and matches an append-only owner/master-registered runtime pin for the exact can
 revision and ACTIVE epoch. Runtime pin generations supersede only the exact current
 receipt; workers cannot register or choose pins. Arbitrary producers, empty generic
 success, forged result hashes, and stale pin/result combinations fail closed.
+
+## Supersession-safe identities and media acquisition authority
+
+Migration 0031 includes the complete private stage input (including the exact runtime-pin
+receipt and immutable upstream receipts) in the work fingerprint. Superseding an E5 or BGE
+runtime pin therefore creates one new deterministic work identity on the next PREPARE. Exact
+replay creates no additional row. Results made against the prior pin are no longer current,
+cannot satisfy a downstream dependency, and cannot be accepted again through direct submit.
+Pending stale-pin or stale-dependency work is fenced before claim.
+
+Image readiness no longer trusts the mutable `hub.content_asset.metadata` manifest. An owner or
+master-controller must register an append-only
+`region-talk-media-artifact-acquisition-receipt.v1` for the exact accepted task, batch, stage run,
+candidate revision, ACTIVE epoch, content asset, normalized source/media identity, private object
+reference, byte size/type, and artifact SHA. Registration and PREPARE both cross-check the current
+canonical asset columns. Without that receipt, even legacy metadata containing plausible hashes
+cannot materialize image work. Publication and notification remain false.

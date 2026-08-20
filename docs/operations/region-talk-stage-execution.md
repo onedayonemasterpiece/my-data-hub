@@ -137,3 +137,16 @@ database `COMPLETE` until the five missing runtime lanes have reviewed assets an
    produce retryable failures rather than current evidence.
 3. No live YDB/PostgreSQL/Kaggle run was performed here. The schedule remains off, and row counts,
    provider-run identities, checkpoint evidence, and operational readiness remain unclaimed.
+
+## Migration 0031 supersession and acquisition fencing
+
+Migration 0031 keeps reprepare live across runtime replacement: the complete runtime-pin receipt
+is hashed into each private work input, so generation N+1 creates a distinct deterministic work
+item while exact replay remains duplicate-free. Generation N results cease to be current and
+their dependent results are recursively revalidated before claim or evidence projection.
+
+Image work also requires an append-only owner/master acquisition receipt bound to the accepted
+task, stage run, candidate revision, ACTIVE epoch, canonical content asset, and private object
+claim. A caller cannot make image input executable by editing `hub.content_asset.metadata` or by
+reusing legacy image scores. The fixed registration function returns only typed hashes and
+identities; publication and notification remain disabled.
