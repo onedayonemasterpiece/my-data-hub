@@ -74,6 +74,7 @@ def _pins() -> RegionTalkRuntimePins:
         ydb_endpoint="grpcs://ydb.serverless.yandexcloud.net:2135",
         ydb_database="/ru-central1/example/region-talk",
         ydb_viewer_secret_label="REGION_TALK_YDB_VIEWER_SA_JSON",
+        ydb_dependency_manifest_sha256="9" * 64,
         max_cycles=4,
         max_runtime_seconds=600,
     )
@@ -508,6 +509,7 @@ def test_private_capability_is_separate_and_bootstrap_attests_before_database_ac
         ydb_endpoint=_pins().ydb_endpoint,
         ydb_database=_pins().ydb_database,
         ydb_viewer_secret_label=_pins().ydb_viewer_secret_label,
+        ydb_dependency_manifest_sha256=_pins().ydb_dependency_manifest_sha256,
         max_cycles=4,
         max_runtime_seconds=600,
     )
@@ -557,6 +559,11 @@ def test_private_capability_is_separate_and_bootstrap_attests_before_database_ac
     assert b"UserSecretsClient" in source
     assert b"YDB_SERVICE_ACCOUNT_KEY_FILE_CREDENTIALS" in source
     assert b"REGION_TALK_YDB_VIEWER_SA_JSON" in source
+    assert b"master-ydb-dependency.json" in source
+    assert b"my-data-hub-master-ydb-wheel-lock.v2" in source
+    assert b"--no-index" in source
+    assert b"--no-deps" in source
+    assert b'exact YDB dependency wheel is absent or ambiguous' in source
     assert b"post_metadata_with_replay(TERMINAL_PATH" in source
     assert b"set_transport_refresher" in source
     assert b"publication_dispatch=False" in source

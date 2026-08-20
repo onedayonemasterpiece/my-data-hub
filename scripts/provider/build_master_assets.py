@@ -27,7 +27,7 @@ TUNNEL_KNOWN_HOSTS_NAME = "tunnel-known-hosts"
 EMBEDDING_DEPENDENCY_MANIFEST_NAME = "embedding-worker-dependencies.json"
 EMBEDDING_WHEELHOUSE_NAME = "embedding-worker-wheelhouse"
 EMBEDDING_WHEEL_LOCK_PATH = "scripts/provider/assets/embedding-worker-wheel-lock.v1.json"
-MASTER_YDB_WHEEL_LOCK_PATH = "scripts/provider/assets/master-ydb-wheel-lock.v1.json"
+MASTER_YDB_WHEEL_LOCK_PATH = "scripts/provider/assets/master-ydb-wheel-lock.v2.json"
 MASTER_YDB_DEPENDENCY_MANIFEST_NAME = "master-ydb-dependency.json"
 MASTER_YDB_WHEELHOUSE_NAME = "master-python-wheelhouse"
 MASTER_YDB_VERSION = "3.31.2"
@@ -38,6 +38,22 @@ MASTER_YDB_WHEEL_SOURCE_URL = (
     "0822896487b379b3dfce9011428728c3e22dcf311a29eacf5e47d203e182/"
     "ydb-3.31.2-py3-none-any.whl"
 )
+MASTER_YDB_DISTRIBUTIONS = {
+    "aiohappyeyeballs",
+    "aiohttp",
+    "aiosignal",
+    "attrs",
+    "frozenlist",
+    "grpcio",
+    "idna",
+    "multidict",
+    "packaging",
+    "propcache",
+    "protobuf",
+    "typing-extensions",
+    "yarl",
+    "ydb",
+}
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 REJECTED_POSTGRES_RUNTIME_SHA256 = {
     # Built with pgvector's host-native OPTFLAGS and therefore not portable.
@@ -225,7 +241,9 @@ def _verify_wheelhouse(lock: dict[str, object], wheelhouse: Path) -> list[dict[s
     return verified
 
 
-def _load_master_ydb_wheel(lock_path: Path, wheel_path: Path) -> tuple[dict[str, object], bytes, bytes]:
+def _load_master_ydb_wheels(
+    lock_path: Path, wheelhouse: Path
+) -> tuple[dict[str, object], bytes, list[dict[str, object]]]:
     lock_body = _read_bounded(lock_path, maximum=16 * 1024)
     try:
         lock = json.loads(lock_body)
@@ -235,30 +253,88 @@ def _load_master_ydb_wheel(lock_path: Path, wheel_path: Path) -> tuple[dict[str,
         "schema_version",
         "index_url",
         "runtime",
-        "version",
-        "filename",
-        "sha256",
-        "source_url",
+        "root_requirement",
+        "install_order",
+        "wheels",
     }
     runtime = lock.get("runtime") if isinstance(lock, dict) else None
+    wheels = lock.get("wheels") if isinstance(lock, dict) else None
     if (
         not isinstance(lock, dict)
         or set(lock) != expected_keys
-        or lock.get("schema_version") != "my-data-hub-master-ydb-wheel-lock.v1"
+        or lock.get("schema_version") != "my-data-hub-master-ydb-wheel-lock.v2"
         or lock.get("index_url") != "https://pypi.org/simple"
         or runtime
-        != {"python_abi": "cp312", "source_commit": KAGGLE_CPU_IMAGE_SOURCE_COMMIT}
-        or lock.get("version") != MASTER_YDB_VERSION
-        or lock.get("filename") != MASTER_YDB_WHEEL_NAME
-        or lock.get("sha256") != MASTER_YDB_WHEEL_SHA256
-        or lock.get("source_url") != MASTER_YDB_WHEEL_SOURCE_URL
+        != {
+            "python_abi": "cp312",
+            "platform": "manylinux2014_x86_64",
+            "source_commit": KAGGLE_CPU_IMAGE_SOURCE_COMMIT,
+        }
+        or lock.get("root_requirement") != f"ydb=={MASTER_YDB_VERSION}"
+        or not isinstance(wheels, list)
+        or len(wheels) != len(MASTER_YDB_DISTRIBUTIONS)
+        or lock.get("install_order")
+        != [item.get("filename") for item in wheels if isinstance(item, dict)]
         or lock_body != canonical_json_bytes(lock)
     ):
         raise AssetBundleError("master YDB dependency lock differs from the reviewed artifact")
-    wheel = _read_bounded(wheel_path, maximum=16 * 1024 * 1024)
-    if wheel_path.name != lock["filename"] or _sha256(wheel) != lock["sha256"]:
-        raise AssetBundleError("master YDB dependency wheel differs from the exact lock")
-    return lock, lock_body, wheel
+    if wheelhouse.is_symlink() or not wheelhouse.is_dir():
+        raise AssetBundleError("master YDB wheelhouse must be a regular directory")
+    expected_names: set[str] = set()
+    seen: set[str] = set()
+    verified: list[dict[str, object]] = []
+    for raw in wheels:
+        if not isinstance(raw, dict) or set(raw) != {
+            "distribution",
+            "version",
+            "filename",
+            "sha256",
+            "source_url",
+        }:
+            raise AssetBundleError("master YDB dependency wheel lock entry is invalid")
+        distribution = raw.get("distribution")
+        version = raw.get("version")
+        filename = raw.get("filename")
+        digest = raw.get("sha256")
+        source_url = raw.get("source_url")
+        if (
+            not isinstance(distribution, str)
+            or distribution not in MASTER_YDB_DISTRIBUTIONS
+            or distribution in seen
+            or not isinstance(version, str)
+            or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", version)
+            or not isinstance(filename, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.+-]+\.whl", filename)
+            or not isinstance(digest, str)
+            or not SHA256.fullmatch(digest)
+            or not isinstance(source_url, str)
+            or not source_url.startswith("https://files.pythonhosted.org/packages/")
+            or not source_url.endswith("/" + filename)
+        ):
+            raise AssetBundleError("master YDB dependency wheel identity is invalid")
+        if distribution == "ydb" and (
+            version != MASTER_YDB_VERSION
+            or filename != MASTER_YDB_WHEEL_NAME
+            or digest != MASTER_YDB_WHEEL_SHA256
+            or source_url != MASTER_YDB_WHEEL_SOURCE_URL
+        ):
+            raise AssetBundleError("master YDB root wheel differs from the reviewed artifact")
+        path = wheelhouse / filename
+        body = _read_bounded(path, maximum=16 * 1024 * 1024)
+        if _sha256(body) != digest:
+            raise AssetBundleError(f"master YDB dependency wheel differs from lock: {filename}")
+        seen.add(distribution)
+        expected_names.add(filename)
+        verified.append({**raw, "byte_size": len(body)})
+    if seen != MASTER_YDB_DISTRIBUTIONS:
+        raise AssetBundleError("master YDB dependency lock is incomplete")
+    observed = {path.name for path in wheelhouse.iterdir() if path.is_file()}
+    if (
+        any(path.is_symlink() or not path.is_file() for path in wheelhouse.iterdir())
+        or observed != expected_names
+    ):
+        raise AssetBundleError("master YDB wheelhouse inventory differs from the exact lock")
+    return lock, lock_body, verified
 
 
 def _verify_embedding_worker_asset(body: bytes) -> None:
@@ -299,7 +375,7 @@ def build_bundle(
     tunnel_known_hosts: Path,
     embedding_wheelhouse: Path,
     embedding_dependency_lock: Path,
-    master_ydb_wheel: Path,
+    master_ydb_wheelhouse: Path,
     master_ydb_dependency_lock: Path,
     wheel_builder: Callable[[Path, Path], Path] = _build_wheel,
 ) -> dict[str, object]:
@@ -348,8 +424,8 @@ def build_bundle(
     _verify_embedding_worker_asset(bge_worker)
     dependency_lock, dependency_lock_body = _load_dependency_lock(embedding_dependency_lock)
     dependency_wheels = _verify_wheelhouse(dependency_lock, embedding_wheelhouse)
-    ydb_lock, ydb_lock_body, ydb_wheel = _load_master_ydb_wheel(
-        master_ydb_dependency_lock, master_ydb_wheel
+    _ydb_lock, ydb_lock_body, ydb_wheels = _load_master_ydb_wheels(
+        master_ydb_dependency_lock, master_ydb_wheelhouse
     )
     with tempfile.TemporaryDirectory(prefix="mdh-master-wheel-") as temporary:
         wheel_path = wheel_builder(root, Path(temporary))
@@ -423,8 +499,12 @@ def build_bundle(
         dataset_dir / EMBEDDING_DEPENDENCY_MANIFEST_NAME: dependency_manifest_body,
         dataset_dir / EMBEDDING_DEPENDENCY_SMOKE_RUNNER_NAME: smoke_runner,
         dataset_dir / MASTER_YDB_DEPENDENCY_MANIFEST_NAME: ydb_lock_body,
-        master_wheelhouse_dir / str(ydb_lock["filename"]): ydb_wheel,
     }
+    for item in ydb_wheels:
+        name = str(item["filename"])
+        files[master_wheelhouse_dir / name] = _read_bounded(
+            master_ydb_wheelhouse / name, maximum=16 * 1024 * 1024
+        )
     for item in dependency_wheels:
         name = str(item["filename"])
         files[embedded_wheelhouse_dir / name] = _read_bounded(
@@ -501,9 +581,13 @@ def build_bundle(
                 "byte_size": len(ydb_lock_body),
             },
             "master_ydb_wheel": {
-                "path": f"dataset/{MASTER_YDB_WHEELHOUSE_NAME}/{ydb_lock['filename']}",
-                "sha256": _sha256(ydb_wheel),
-                "byte_size": len(ydb_wheel),
+                "path": f"dataset/{MASTER_YDB_WHEELHOUSE_NAME}/{MASTER_YDB_WHEEL_NAME}",
+                "sha256": MASTER_YDB_WHEEL_SHA256,
+                "byte_size": next(
+                    int(item["byte_size"])
+                    for item in ydb_wheels
+                    if item["distribution"] == "ydb"
+                ),
             },
         },
         "embedding_dependency_wheels": [
@@ -513,6 +597,14 @@ def build_bundle(
                 "byte_size": item["byte_size"],
             }
             for item in dependency_wheels
+        ],
+        "master_ydb_dependency_wheels": [
+            {
+                "path": f"dataset/{MASTER_YDB_WHEELHOUSE_NAME}/{item['filename']}",
+                "sha256": item["sha256"],
+                "byte_size": item["byte_size"],
+            }
+            for item in ydb_wheels
         ],
     }
     manifest_body = canonical_json_bytes(manifest)
@@ -540,6 +632,7 @@ def build_bundle(
         "MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_SHA256": _sha256(dependency_manifest_body),
         "MY_DATA_HUB_EMBEDDING_WHEELHOUSE_RELATIVE_PATH": EMBEDDING_WHEELHOUSE_NAME,
         "MY_DATA_HUB_MASTER_TUNNEL_KNOWN_HOSTS_PATH": "/master-assets/dataset/tunnel-known-hosts",
+        "MY_DATA_HUB_MASTER_YDB_DEPENDENCY_MANIFEST_SHA256": _sha256(ydb_lock_body),
         "MY_DATA_HUB_EMBEDDING_RUNTIME_PYTHON_SERIES": KAGGLE_CPU_IMAGE_PYTHON_SERIES,
     }
     env_path = output / "master-assets.env"
@@ -564,7 +657,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--postgres-runtime-sha256", required=True)
     parser.add_argument("--tunnel-known-hosts", type=Path, required=True)
     parser.add_argument("--embedding-wheelhouse", type=Path, required=True)
-    parser.add_argument("--master-ydb-wheel", type=Path, required=True)
+    parser.add_argument("--master-ydb-wheelhouse", type=Path, required=True)
     return parser.parse_args()
 
 
@@ -597,7 +690,7 @@ def main() -> int:
         tunnel_known_hosts=args.tunnel_known_hosts.expanduser().resolve(),
         embedding_wheelhouse=args.embedding_wheelhouse.expanduser().resolve(),
         embedding_dependency_lock=root / EMBEDDING_WHEEL_LOCK_PATH,
-        master_ydb_wheel=args.master_ydb_wheel.expanduser().resolve(),
+        master_ydb_wheelhouse=args.master_ydb_wheelhouse.expanduser().resolve(),
         master_ydb_dependency_lock=root / MASTER_YDB_WHEEL_LOCK_PATH,
     )
     print(

@@ -17,7 +17,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from my_data_hub.hashing import canonical_json_bytes, sha256_value
@@ -38,6 +38,9 @@ class DirectSnapshotError(RuntimeError):
     """The source changed, violated its contract, or the master rejected it."""
 
 
+_PassResult = TypeVar("_PassResult")
+
+
 class DirectYdbReader(Protocol):
     """Read-only keyset pagination implemented by the Kaggle pipeline adapter."""
 
@@ -50,6 +53,11 @@ class DirectYdbReader(Protocol):
         limit: int,
     ) -> Sequence[Mapping[str, Any]]:
         """Return at most ``limit`` rows strictly after the supplied key."""
+
+    def run_snapshot_pass(
+        self, phase: str, callback: Callable[[], _PassResult]
+    ) -> _PassResult:
+        """Run all five table scans in one database-wide read snapshot."""
 
 
 def _json_value(value: Any) -> Any:
@@ -326,13 +334,17 @@ class DirectSnapshotRunner:
         request_sha256: str,
         created_at: datetime,
     ) -> DirectSnapshotManifest:
-        tables: list[DirectSnapshotTableReceipt] = []
-        kinds: Counter[str] = Counter()
-        for spec in DIRECT_SOURCE_TABLES:
-            accumulator = self._scan(spec, phase="pass_a")
-            tables.append(accumulator.receipt())
-            assert accumulator.kinds is not None
-            kinds.update(accumulator.kinds)
+        def scan_pass_a() -> tuple[list[DirectSnapshotTableReceipt], Counter[str]]:
+            tables: list[DirectSnapshotTableReceipt] = []
+            kinds: Counter[str] = Counter()
+            for spec in DIRECT_SOURCE_TABLES:
+                accumulator = self._scan(spec, phase="pass_a")
+                tables.append(accumulator.receipt())
+                assert accumulator.kinds is not None
+                kinds.update(accumulator.kinds)
+            return tables, kinds
+
+        tables, kinds = self.reader.run_snapshot_pass("pass_a", scan_pass_a)
         base = {
             "schema_version": "region-talk-direct-snapshot.v2",
             "export_batch_id": str(export_batch_id),
@@ -356,20 +368,26 @@ class DirectSnapshotRunner:
         self._refresh(phase="begin")
         self._begin(manifest)
         try:
-            pass_b: list[DirectSnapshotTableReceipt] = []
-            for expected, spec in zip(manifest.tables, DIRECT_SOURCE_TABLES, strict=True):
-                accumulator = self._scan(
-                    spec,
-                    phase="pass_b",
-                    land_batch_id=manifest.export_batch_id,
-                    task_run_id=manifest.task_run_id,
-                )
-                observed = accumulator.receipt()
-                if observed != expected:
-                    raise DirectSnapshotError(
-                        f"source changed between passes for {spec.name}"
+            def scan_pass_b() -> list[DirectSnapshotTableReceipt]:
+                pass_b: list[DirectSnapshotTableReceipt] = []
+                for expected, spec in zip(
+                    manifest.tables, DIRECT_SOURCE_TABLES, strict=True
+                ):
+                    accumulator = self._scan(
+                        spec,
+                        phase="pass_b",
+                        land_batch_id=manifest.export_batch_id,
+                        task_run_id=manifest.task_run_id,
                     )
-                pass_b.append(observed)
+                    observed = accumulator.receipt()
+                    if observed != expected:
+                        raise DirectSnapshotError(
+                            f"source changed between passes for {spec.name}"
+                        )
+                    pass_b.append(observed)
+                return pass_b
+
+            pass_b = self.reader.run_snapshot_pass("pass_b", scan_pass_b)
             if _snapshot_logical_sha256(pass_b) != manifest.logical_sha256:
                 raise DirectSnapshotError("source logical hash changed between passes")
             self._refresh(phase="finalize")

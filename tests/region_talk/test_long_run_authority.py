@@ -72,6 +72,7 @@ def _metadata() -> RegionTalkLaunchMetadata:
         ydb_endpoint="grpcs://ydb.serverless.yandexcloud.net:2135",
         ydb_database="/ru-central1/example/region-talk",
         ydb_viewer_secret_label="REGION_TALK_YDB_VIEWER_SA_JSON",
+        ydb_dependency_manifest_sha256="9" * 64,
         max_cycles=1,
         max_runtime_seconds=7200,
     )
@@ -347,6 +348,90 @@ def test_activation_crash_after_mailbox_is_exactly_replayable(
     authority.activate(activation)
     assert len(broker.revoked) == 1
     assert authority.active_binding(metadata.task_run_id).generation == 2
+
+
+def test_terminal_revocation_crash_after_mailbox_replays_broker_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    authority, broker = _authority(tmp_path)
+    metadata = _metadata()
+    command = authority.prepare(metadata, task_token="t" * 48, source_sha256="a" * 64)
+    _register(
+        authority,
+        command,
+        credential_id=UUID("66666666-6666-4666-8666-666666666666"),
+    )
+    access = authority.await_access(metadata, command)
+    run = SimpleNamespace(
+        task_run_id=metadata.task_run_id,
+        master=MASTER,
+        access=authority._binding(access),
+    )
+    original_revoke = DirectoryRegionTalkTaskAuthority._revoke_certificate_binding
+
+    def crash_after_mailbox(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("crash after terminal mailbox")
+
+    monkeypatch.setattr(
+        DirectoryRegionTalkTaskAuthority,
+        "_revoke_certificate_binding",
+        crash_after_mailbox,
+    )
+    with pytest.raises(RuntimeError, match="terminal mailbox"):
+        authority.request_revocation(run)
+    assert authority.batch(
+        master_instance_id=MASTER.master_instance_id, epoch=MASTER.epoch
+    ).revocations[0].generation == 1
+    assert broker.revoked == []
+
+    monkeypatch.setattr(
+        DirectoryRegionTalkTaskAuthority,
+        "_revoke_certificate_binding",
+        original_revoke,
+    )
+    authority.request_revocation(run)
+    authority.request_revocation(run)
+    assert len(broker.revoked) == 1
+    task = authority._read(authority._task_path(metadata.task_run_id))
+    assert task["terminal_revoked_generations"] == [1]
+
+
+def test_terminal_revocation_crash_after_broker_replays_exact_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    authority, broker = _authority(tmp_path)
+    metadata = _metadata()
+    command = authority.prepare(metadata, task_token="t" * 48, source_sha256="a" * 64)
+    _register(
+        authority,
+        command,
+        credential_id=UUID("66666666-6666-4666-8666-666666666666"),
+    )
+    access = authority.await_access(metadata, command)
+    run = SimpleNamespace(
+        task_run_id=metadata.task_run_id,
+        master=MASTER,
+        access=authority._binding(access),
+    )
+    original = broker.revoke_task_worker_certificate
+    crashed = False
+
+    def broker_commit_then_crash(**kwargs):  # type: ignore[no-untyped-def]
+        nonlocal crashed
+        original(**kwargs)
+        if not crashed:
+            crashed = True
+            raise RuntimeError("crash after broker revocation")
+
+    monkeypatch.setattr(broker, "revoke_task_worker_certificate", broker_commit_then_crash)
+    with pytest.raises(RuntimeError, match="broker revocation"):
+        authority.request_revocation(run)
+    authority.request_revocation(run)
+    authority.request_revocation(run)
+    assert len(broker.revoked) == 2
+    assert broker.revoked[0] == broker.revoked[1]
+    task = authority._read(authority._task_path(metadata.task_run_id))
+    assert task["terminal_revoked_generations"] == [1]
 
 
 def test_expired_unactivated_generation_is_purged_and_never_reissued(

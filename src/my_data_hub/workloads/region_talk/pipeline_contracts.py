@@ -163,6 +163,7 @@ class RegionTalkLaunchMetadata(BaseModel):
     ydb_endpoint: str = Field(min_length=12, max_length=500)
     ydb_database: str = Field(pattern=r"^/[A-Za-z0-9_./-]+$", max_length=500)
     ydb_viewer_secret_label: str = Field(pattern=r"^[A-Z][A-Z0-9_]{7,127}$")
+    ydb_dependency_manifest_sha256: str = Field(pattern=_SHA256_PATTERN)
     max_cycles: int = Field(ge=1, le=96)
     max_runtime_seconds: int = Field(ge=60, le=10_800)
     publication_dispatch: Literal[False] = False

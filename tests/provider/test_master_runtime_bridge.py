@@ -22,12 +22,10 @@ from my_data_hub.providers.kaggle import (
     KaggleMasterRuntimeProvider,
     MasterLaunchContractError,
 )
+from my_data_hub.providers.kaggle import master_runtime as master_runtime_module
 from my_data_hub.providers.kaggle.master_runtime import (
     MASTER_YDB_DEPENDENCY_MANIFEST_NAME,
-    MASTER_YDB_VERSION,
     MASTER_YDB_WHEEL_DIRECTORY,
-    MASTER_YDB_WHEEL_NAME,
-    MASTER_YDB_WHEEL_SOURCE_URL,
     _runtime_bootstrap,
 )
 from my_data_hub.providers.kaggle.source_attestation import executable_source_sha256
@@ -379,36 +377,36 @@ def _launch() -> KaggleMasterLaunchAssets:
     )
 
 
-def _launch_with_ydb_dependency() -> KaggleMasterLaunchAssets:
+def _launch_with_ydb_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> KaggleMasterLaunchAssets:
     launch = _launch()
-    wheel = b"exact-ydb-wheel"
-    manifest = {
-        "schema_version": "my-data-hub-master-ydb-wheel-lock.v1",
-        "index_url": "https://pypi.org/simple",
-        "runtime": {
-            "python_abi": "cp312",
-            "source_commit": launch.runtime_image_source_commit,
-        },
-        "version": MASTER_YDB_VERSION,
-        "filename": MASTER_YDB_WHEEL_NAME,
-        "sha256": hashlib.sha256(wheel).hexdigest(),
-        "source_url": MASTER_YDB_WHEEL_SOURCE_URL,
-    }
+    manifest = json.loads(
+        (Path(__file__).parents[2] / "scripts/provider/assets/master-ydb-wheel-lock.v2.json").read_text()
+    )
+    files = dict(launch.dataset_files)
+    root_digest = ""
+    for item in manifest["wheels"]:
+        body = f"exact-test-wheel:{item['distribution']}:{item['version']}".encode()
+        item["sha256"] = hashlib.sha256(body).hexdigest()
+        files[f"{MASTER_YDB_WHEEL_DIRECTORY}/{item['filename']}"] = body
+        if item["distribution"] == "ydb":
+            root_digest = item["sha256"]
+    monkeypatch.setattr(master_runtime_module, "MASTER_YDB_WHEEL_SHA256", root_digest)
+    files[MASTER_YDB_DEPENDENCY_MANIFEST_NAME] = canonical_json_bytes(manifest)
     return replace(
         launch,
-        dataset_files={
-            **launch.dataset_files,
-            MASTER_YDB_DEPENDENCY_MANIFEST_NAME: canonical_json_bytes(manifest),
-            f"{MASTER_YDB_WHEEL_DIRECTORY}/{MASTER_YDB_WHEEL_NAME}": wheel,
-        },
+        dataset_files=files,
         ydb_endpoint="grpcs://ydb.serverless.yandexcloud.net:2135",
         ydb_database="/ru-central1/b1ghfk15fpug7mn5439l/etnkibjidis0o6stn2cq",
         ydb_reader_service_account_id="ajeri3qs6jbijih0bs5d",
     )
 
 
-def test_master_status_delivers_bound_ydb_token_without_embedding_secret_in_source() -> None:
-    launch = _launch_with_ydb_dependency()
+def test_master_status_delivers_bound_ydb_token_without_embedding_secret_in_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launch = _launch_with_ydb_dependency(monkeypatch)
     provider = KaggleMasterRuntimeProvider(object(), launch, ydb_access_token=YDB_TOKEN)  # type: ignore[arg-type]
     identity = {
         "operation_id": str(uuid4()),
@@ -443,7 +441,9 @@ def test_master_status_delivers_bound_ydb_token_without_embedding_secret_in_sour
     assert "YDB_ACCESS_TOKEN_CREDENTIALS" in bootstrap
     assert "pip','install','--no-index','--no-deps" in bootstrap
     assert "__import__('ydb')" in bootstrap
-    assert json.loads(values["MY_DATA_HUB_MASTER_YDB_DEPENDENCY_JSON"])["version"] == "3.31.2"
+    dependencies = json.loads(values["MY_DATA_HUB_MASTER_YDB_DEPENDENCY_JSON"])
+    assert len(dependencies) == 14
+    assert next(item for item in dependencies if item["distribution"] == "ydb")["version"] == "3.31.2"
     assert values["MY_DATA_HUB_YDB_READER_SERVICE_ACCOUNT_ID"] == "ajeri3qs6jbijih0bs5d"
 
 

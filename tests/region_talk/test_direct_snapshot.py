@@ -20,6 +20,11 @@ class MemoryReader:
     def __init__(self, rows: Mapping[str, list[dict[str, Any]]]) -> None:
         self.rows = rows
         self.scans: defaultdict[str, int] = defaultdict(int)
+        self.pass_phases: list[str] = []
+
+    def run_snapshot_pass(self, phase, callback):  # type: ignore[no-untyped-def]
+        self.pass_phases.append(phase)
+        return callback()
 
     def scan_page(
         self,
@@ -155,6 +160,7 @@ def test_inventory_is_dynamic_exact_five_table_and_row_free() -> None:
     assert manifest.expected_row_count == sum(len(rows) for rows in fixture_rows().values())
     assert manifest.row_kind_counts["external_publication_intake_item"] == 1
     assert manifest.publication_effects_enabled is False
+    assert reader.pass_phases == ["pass_a"]
     assert connection.calls == []
 
 
@@ -182,6 +188,7 @@ def test_run_lands_only_bounded_pages_and_returns_typed_receipt() -> None:
     assert receipt.status == "complete"
     assert receipt.landed_row_count == manifest.expected_row_count
     assert connection.rollbacks == 0
+    assert reader.pass_phases == ["pass_a", "pass_b"]
 
 
 def test_transport_refreshes_between_pages_and_resumes_exact_cursor() -> None:

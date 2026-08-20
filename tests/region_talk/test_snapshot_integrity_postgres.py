@@ -94,6 +94,9 @@ class MemoryReader:
     def __init__(self, rows: dict[str, list[dict[str, Any]]]) -> None:
         self.rows = rows
 
+    def run_snapshot_pass(self, _phase, callback):  # type: ignore[no-untyped-def]
+        return callback()
+
     def scan_page(
         self,
         source_table: str,

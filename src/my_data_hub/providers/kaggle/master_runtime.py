@@ -73,6 +73,22 @@ MASTER_YDB_WHEEL_SOURCE_URL = (
     "0822896487b379b3dfce9011428728c3e22dcf311a29eacf5e47d203e182/"
     "ydb-3.31.2-py3-none-any.whl"
 )
+MASTER_YDB_DISTRIBUTIONS = {
+    "aiohappyeyeballs",
+    "aiohttp",
+    "aiosignal",
+    "attrs",
+    "frozenlist",
+    "grpcio",
+    "idna",
+    "multidict",
+    "packaging",
+    "propcache",
+    "protobuf",
+    "typing-extensions",
+    "yarl",
+    "ydb",
+}
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 POSTGRES_RUNTIME_RECIPE_SHA256 = "3fbcf52450dd44e3eb0eb7b826ebdb84a4293fbc54b713408083f10b44964d61"
 POSTGRESQL_SOURCE_URL = "https://ftp.postgresql.org/pub/source/v18.4/postgresql-18.4.tar.bz2"
@@ -357,8 +373,8 @@ class KaggleMasterLaunchAssets:
             )
         return tuple(selected)
 
-    def master_ydb_dependency(self) -> dict[str, str]:
-        """Return the exact offline YDB SDK wheel used by the ACTIVE master."""
+    def master_ydb_dependency(self) -> tuple[dict[str, str], ...]:
+        """Return the complete exact offline YDB SDK wheel closure."""
 
         try:
             body = self.dataset_files[MASTER_YDB_DEPENDENCY_MANIFEST_NAME]
@@ -372,35 +388,86 @@ class KaggleMasterLaunchAssets:
             "schema_version",
             "index_url",
             "runtime",
-            "version",
-            "filename",
-            "sha256",
-            "source_url",
+            "root_requirement",
+            "install_order",
+            "wheels",
         }
-        wheel_path = f"{MASTER_YDB_WHEEL_DIRECTORY}/{MASTER_YDB_WHEEL_NAME}"
+        wheels = manifest.get("wheels") if isinstance(manifest, dict) else None
         if (
             body != canonical_json_bytes(manifest)
             or not isinstance(manifest, dict)
             or set(manifest) != expected
-            or manifest.get("schema_version") != "my-data-hub-master-ydb-wheel-lock.v1"
+            or manifest.get("schema_version") != "my-data-hub-master-ydb-wheel-lock.v2"
             or manifest.get("index_url") != "https://pypi.org/simple"
             or manifest.get("runtime")
-            != {"python_abi": "cp312", "source_commit": self.runtime_image_source_commit}
-            or manifest.get("version") != MASTER_YDB_VERSION
-            or manifest.get("filename") != MASTER_YDB_WHEEL_NAME
-            or not isinstance(manifest.get("sha256"), str)
-            or not _SHA256.fullmatch(str(manifest.get("sha256")))
-            or manifest.get("source_url") != MASTER_YDB_WHEEL_SOURCE_URL
-            or wheel_path not in self.dataset_files
-            or hashlib.sha256(self.dataset_files[wheel_path]).hexdigest() != manifest.get("sha256")
+            != {
+                "python_abi": "cp312",
+                "platform": "manylinux2014_x86_64",
+                "source_commit": self.runtime_image_source_commit,
+            }
+            or manifest.get("root_requirement") != f"ydb=={MASTER_YDB_VERSION}"
+            or not isinstance(wheels, list)
+            or len(wheels) != len(MASTER_YDB_DISTRIBUTIONS)
+            or manifest.get("install_order")
+            != [item.get("filename") for item in wheels if isinstance(item, dict)]
         ):
             raise MasterLaunchContractError("master YDB dependency differs from the reviewed artifact")
-        return {
-            "distribution": "ydb",
-            "version": MASTER_YDB_VERSION,
-            "filename": MASTER_YDB_WHEEL_NAME,
-            "sha256": str(manifest["sha256"]),
-        }
+        selected: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in wheels:
+            if not isinstance(item, dict) or set(item) != {
+                "distribution",
+                "version",
+                "filename",
+                "sha256",
+                "source_url",
+            }:
+                raise MasterLaunchContractError("master YDB dependency wheel is invalid")
+            distribution = item.get("distribution")
+            version = item.get("version")
+            filename = item.get("filename")
+            digest = item.get("sha256")
+            source_url = item.get("source_url")
+            path = f"{MASTER_YDB_WHEEL_DIRECTORY}/{filename}"
+            if (
+                not isinstance(distribution, str)
+                or distribution not in MASTER_YDB_DISTRIBUTIONS
+                or distribution in seen
+                or not isinstance(version, str)
+                or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", version)
+                or not isinstance(filename, str)
+                or Path(filename).name != filename
+                or not filename.endswith(".whl")
+                or not isinstance(digest, str)
+                or not _SHA256.fullmatch(digest)
+                or not isinstance(source_url, str)
+                or not source_url.startswith("https://files.pythonhosted.org/packages/")
+                or not source_url.endswith("/" + filename)
+                or path not in self.dataset_files
+                or hashlib.sha256(self.dataset_files[path]).hexdigest() != digest
+            ):
+                raise MasterLaunchContractError(
+                    "master YDB dependency wheel differs from manifest"
+                )
+            if distribution == "ydb" and (
+                version != MASTER_YDB_VERSION
+                or filename != MASTER_YDB_WHEEL_NAME
+                or digest != MASTER_YDB_WHEEL_SHA256
+                or source_url != MASTER_YDB_WHEEL_SOURCE_URL
+            ):
+                raise MasterLaunchContractError("master YDB root wheel differs")
+            seen.add(distribution)
+            selected.append(
+                {
+                    "distribution": distribution,
+                    "version": version,
+                    "filename": filename,
+                    "sha256": digest,
+                }
+            )
+        if seen != MASTER_YDB_DISTRIBUTIONS:
+            raise MasterLaunchContractError("master YDB dependency closure is incomplete")
+        return tuple(selected)
 
     def project_wheel(self) -> tuple[str, bytes]:
         """Return the single top-level application wheel, excluding worker dependencies."""
@@ -603,7 +670,7 @@ def _runtime_bootstrap(
         "_mdh_dependency['sha256'],16777216)\n"
         "        _mdh_dependency_paths.append((_mdh_dependency,_mdh_dependency_path))\n"
         "        _mdh_asset_paths['dependency:'+_mdh_dependency['distribution']]=_mdh_dependency_path\n"
-        "_mdh_ydb_dependency_path=None\n"
+        "_mdh_ydb_dependency_paths=[]\n"
         "if 'MY_DATA_HUB_YDB_DEPENDENCY_MANIFEST' in _mdh_values:\n"
         "    _mdh_ydb_manifest_path=_mdh_asset_paths['MY_DATA_HUB_YDB_DEPENDENCY_MANIFEST']\n"
         "    _mdh_ydb_manifest_body=_mdh_ydb_manifest_path.read_bytes()\n"
@@ -612,18 +679,27 @@ def _runtime_bootstrap(
         "_mdh_values['MY_DATA_HUB_MASTER_YDB_DEPENDENCY_JSON'])\n"
         "    if (_mdh_ydb_manifest_body != __import__('json').dumps(_mdh_ydb_manifest,sort_keys=True,"
         "separators=(',',':'),ensure_ascii=False).encode() or "
-        "_mdh_ydb_manifest.get('schema_version') != 'my-data-hub-master-ydb-wheel-lock.v1' or "
-        "_mdh_ydb_manifest.get('runtime') != {'python_abi':'cp312','source_commit':"
+        "_mdh_ydb_manifest.get('schema_version') != 'my-data-hub-master-ydb-wheel-lock.v2' or "
+        "_mdh_ydb_manifest.get('index_url') != 'https://pypi.org/simple' or "
+        "_mdh_ydb_manifest.get('root_requirement') != 'ydb==3.31.2' or "
+        "_mdh_ydb_manifest.get('runtime') != {'python_abi':'cp312','platform':"
+        "'manylinux2014_x86_64','source_commit':"
         "_mdh_values['MY_DATA_HUB_KAGGLE_RUNTIME_SOURCE_COMMIT']} or "
-        "not isinstance(_mdh_ydb_dependency,dict) or set(_mdh_ydb_dependency) != "
-        "{'distribution','filename','sha256','version'} or "
-        "_mdh_ydb_dependency.get('distribution') != 'ydb' or "
-        "any(_mdh_ydb_manifest.get(_key) != _mdh_ydb_dependency.get(_key) "
-        "for _key in ('filename','sha256','version'))):\n"
+        "not isinstance(_mdh_ydb_manifest.get('wheels'),list) or "
+        "not isinstance(_mdh_ydb_dependency,list) or len(_mdh_ydb_dependency) != 14 or "
+        "_mdh_ydb_manifest.get('install_order') != "
+        "[_item.get('filename') for _item in _mdh_ydb_dependency if isinstance(_item,dict)]):\n"
         "        raise RuntimeError('master YDB dependency provenance differs')\n"
-        "    _mdh_ydb_dependency_path=_mdh_exact_file(_mdh_ydb_dependency['filename'],"
-        "_mdh_ydb_dependency['sha256'],16777216)\n"
-        "    _mdh_asset_paths['dependency:ydb']=_mdh_ydb_dependency_path\n"
+        "    for _mdh_item in _mdh_ydb_dependency:\n"
+        "        if not isinstance(_mdh_item,dict) or set(_mdh_item) != "
+        "{'distribution','filename','sha256','version'} or "
+        "sum(1 for _locked in _mdh_ydb_manifest['wheels'] if "
+        "isinstance(_locked,dict) and all(_locked.get(_key)==_mdh_item.get(_key) "
+        "for _key in _mdh_item)) != 1:\n"
+        "            raise RuntimeError('master YDB dependency selection differs')\n"
+        "        _mdh_path=_mdh_exact_file(_mdh_item['filename'],_mdh_item['sha256'],16777216)\n"
+        "        _mdh_ydb_dependency_paths.append((_mdh_item,_mdh_path))\n"
+        "        _mdh_asset_paths['dependency:ydb:'+_mdh_item['distribution']]=_mdh_path\n"
         "_mdh_asset_roots={_mdh_input_root/_path.relative_to(_mdh_input_root).parts[0] "
         "for _path in _mdh_asset_paths.values()}\n"
         "if len(_mdh_asset_roots) != 1:\n"
@@ -691,12 +767,12 @@ def _runtime_bootstrap(
         "import psycopg as _mdh_psycopg\n"
         "if getattr(_mdh_psycopg.pq,'__impl__',None) != 'binary':\n"
         "    raise RuntimeError('master psycopg binary implementation is unavailable')\n"
-        "if _mdh_ydb_dependency_path is not None:\n"
+        "for _mdh_dependency,_mdh_dependency_path in _mdh_ydb_dependency_paths:\n"
         "    _mdh_subprocess.run([_mdh_sys.executable,'-m','pip','install','--no-index','--no-deps',"
-        "'--disable-pip-version-check',str(_mdh_ydb_dependency_path)],check=True)\n"
-        "    if _mdh_metadata.version('ydb') != _mdh_ydb_dependency['version']:\n"
+        "'--force-reinstall','--disable-pip-version-check',str(_mdh_dependency_path)],check=True)\n"
+        "    if _mdh_metadata.version(_mdh_dependency['distribution']) != _mdh_dependency['version']:\n"
         "        raise RuntimeError('master YDB dependency version differs after offline install')\n"
-        "    __import__('ydb')\n"
+        "if _mdh_ydb_dependency_paths: __import__('ydb')\n"
         "_mdh_archive = _mdh_pathlib.Path(_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_ARCHIVE'])\n"
         "_mdh_manifest_path = _mdh_pathlib.Path(_mdh_values['MY_DATA_HUB_POSTGRES_RUNTIME_MANIFEST'])\n"
         "if _mdh_hashlib.sha256(_mdh_archive.read_bytes()).hexdigest() != "

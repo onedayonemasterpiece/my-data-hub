@@ -29,7 +29,12 @@ def test_repository_master_ydb_lock_is_canonical_and_exact() -> None:
     value = json.loads(body)
 
     assert body == json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    assert value["sha256"] == "043b91af7dab122e9ee24cb1948576f324dc9b6dbb45952d2e7c58d99e2c5ddb"
+    assert value["schema_version"] == "my-data-hub-master-ydb-wheel-lock.v2"
+    assert value["root_requirement"] == "ydb==3.31.2"
+    assert len(value["wheels"]) == 14
+    assert next(
+        item for item in value["wheels"] if item["distribution"] == "ydb"
+    )["sha256"] == "043b91af7dab122e9ee24cb1948576f324dc9b6dbb45952d2e7c58d99e2c5ddb"
 
 
 @pytest.fixture(autouse=True)
@@ -125,26 +130,26 @@ def _dependency_inputs(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _master_ydb_inputs(tmp_path: Path) -> tuple[Path, Path]:
-    wheel = tmp_path / build_module.MASTER_YDB_WHEEL_NAME
-    wheel.write_bytes(b"exact-test-ydb-wheel")
-    lock = {
-        "schema_version": "my-data-hub-master-ydb-wheel-lock.v1",
-        "index_url": "https://pypi.org/simple",
-        "runtime": {
-            "python_abi": "cp312",
-            "source_commit": build_module.KAGGLE_CPU_IMAGE_SOURCE_COMMIT,
-        },
-        "version": build_module.MASTER_YDB_VERSION,
-        "filename": build_module.MASTER_YDB_WHEEL_NAME,
-        "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
-        "source_url": build_module.MASTER_YDB_WHEEL_SOURCE_URL,
-    }
-    lock_path = tmp_path / "master-ydb-wheel-lock.v1.json"
+    wheelhouse = tmp_path / "master-ydb-wheelhouse"
+    wheelhouse.mkdir(parents=True)
+    source_lock = json.loads(
+        (Path(__file__).parents[2] / build_module.MASTER_YDB_WHEEL_LOCK_PATH).read_text()
+    )
+    lock = json.loads(json.dumps(source_lock))
+    for item in lock["wheels"]:
+        body = (
+            b"exact-test-ydb-wheel"
+            if item["distribution"] == "ydb"
+            else f"exact-test-wheel:{item['distribution']}".encode()
+        )
+        (wheelhouse / item["filename"]).write_bytes(body)
+        item["sha256"] = hashlib.sha256(body).hexdigest()
+    lock_path = tmp_path / "master-ydb-wheel-lock.v2.json"
     lock_path.write_text(json.dumps(lock, sort_keys=True, separators=(",", ":")))
-    return wheel, lock_path
+    return wheelhouse, lock_path
 
 
-def _build(tmp_path: Path) -> tuple[Path, dict[str, object], Path]:
+def _build(tmp_path: Path) -> tuple[Path, dict[str, object], Path, Path]:
     root = _root(tmp_path)
     output = tmp_path / "bundle"
     runtime = tmp_path / "postgresql-runtime.tar.gz"
@@ -152,7 +157,7 @@ def _build(tmp_path: Path) -> tuple[Path, dict[str, object], Path]:
     known_hosts = tmp_path / "known_hosts"
     known_hosts.write_bytes(b"|1|aaaa|bbbb ssh-ed25519 AAAA\n")
     wheelhouse, dependency_lock = _dependency_inputs(tmp_path)
-    ydb_wheel, ydb_lock = _master_ydb_inputs(tmp_path)
+    ydb_wheelhouse, ydb_lock = _master_ydb_inputs(tmp_path)
     manifest = build_bundle(
         root=root,
         output=output,
@@ -167,15 +172,15 @@ def _build(tmp_path: Path) -> tuple[Path, dict[str, object], Path]:
         tunnel_known_hosts=known_hosts,
         embedding_wheelhouse=wheelhouse,
         embedding_dependency_lock=dependency_lock,
-        master_ydb_wheel=ydb_wheel,
+        master_ydb_wheelhouse=ydb_wheelhouse,
         master_ydb_dependency_lock=ydb_lock,
         wheel_builder=_wheel_builder,
     )
-    return output, manifest, dependency_lock
+    return output, manifest, dependency_lock, ydb_lock
 
 
 def test_build_bundle_is_exact_secret_free_and_schema_valid(tmp_path: Path) -> None:
-    output, manifest, dependency_lock = _build(tmp_path)
+    output, manifest, dependency_lock, ydb_lock = _build(tmp_path)
     schema = json.loads((Path(__file__).parents[2] / "schemas/master-asset-bundle.v1.schema.json").read_text())
     Draft202012Validator(schema).validate(manifest)
 
@@ -198,11 +203,16 @@ def test_build_bundle_is_exact_secret_free_and_schema_valid(tmp_path: Path) -> N
     assert stat.S_IMODE(output.stat().st_mode) == 0o700
     assert stat.S_IMODE((output / "dataset").stat().st_mode) == 0o700
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in output.rglob("*") if path.is_file())
-    assert verify_bundle(bundle=output, expected_commit=COMMIT, dependency_lock=dependency_lock) == {
+    assert verify_bundle(
+        bundle=output,
+        expected_commit=COMMIT,
+        dependency_lock=dependency_lock,
+        ydb_dependency_lock=ydb_lock,
+    ) == {
         "schema_version": "my-data-hub-master-asset-bundle.v1",
         "source_commit": COMMIT,
         "manifest_sha256": hashlib.sha256((output / "master-asset-bundle.json").read_bytes()).hexdigest(),
-        "asset_count": 17,
+        "asset_count": 30,
         "verified": True,
     }
 
@@ -232,7 +242,7 @@ def test_build_bundle_rejects_ambiguous_identity(tmp_path: Path, field: str, val
         "wheel_builder": _wheel_builder,
     }
     arguments["embedding_wheelhouse"], arguments["embedding_dependency_lock"] = _dependency_inputs(tmp_path)
-    arguments["master_ydb_wheel"], arguments["master_ydb_dependency_lock"] = _master_ydb_inputs(tmp_path)
+    arguments["master_ydb_wheelhouse"], arguments["master_ydb_dependency_lock"] = _master_ydb_inputs(tmp_path)
     Path(arguments["postgres_runtime_archive"]).write_bytes(b"exact-postgresql-runtime")
     Path(arguments["tunnel_known_hosts"]).write_bytes(b"|1|aaaa|bbbb ssh-ed25519 AAAA\n")
     arguments[field] = value
@@ -256,7 +266,7 @@ def test_build_bundle_refuses_source_checkout_output_and_nonempty_output(tmp_pat
         "wheel_builder": _wheel_builder,
     }
     common["embedding_wheelhouse"], common["embedding_dependency_lock"] = _dependency_inputs(tmp_path)
-    common["master_ydb_wheel"], common["master_ydb_dependency_lock"] = _master_ydb_inputs(tmp_path)
+    common["master_ydb_wheelhouse"], common["master_ydb_dependency_lock"] = _master_ydb_inputs(tmp_path)
     Path(common["postgres_runtime_archive"]).write_bytes(b"exact-postgresql-runtime")
     Path(common["tunnel_known_hosts"]).write_bytes(b"|1|aaaa|bbbb ssh-ed25519 AAAA\n")
     with pytest.raises(AssetBundleError, match="outside"):
@@ -270,29 +280,49 @@ def test_build_bundle_refuses_source_checkout_output_and_nonempty_output(tmp_pat
 
 
 def test_verify_bundle_rejects_tampering_and_unexpected_files(tmp_path: Path) -> None:
-    output, _, dependency_lock = _build(tmp_path)
+    output, _, dependency_lock, ydb_lock = _build(tmp_path)
     wheel = next((output / "dataset").glob("*.whl"))
     wheel.write_bytes(b"tampered")
     wheel.chmod(0o600)
     with pytest.raises(AssetVerificationError, match="bytes"):
-        verify_bundle(bundle=output, expected_commit=COMMIT, dependency_lock=dependency_lock)
+        verify_bundle(
+            bundle=output,
+            expected_commit=COMMIT,
+            dependency_lock=dependency_lock,
+            ydb_dependency_lock=ydb_lock,
+        )
 
-    output, _, dependency_lock = _build(tmp_path / "second")
+    output, _, dependency_lock, ydb_lock = _build(tmp_path / "second")
     extra = output / "unexpected.txt"
     extra.write_text("not allowed")
     extra.chmod(0o600)
     with pytest.raises(AssetVerificationError, match="unexpected"):
-        verify_bundle(bundle=output, expected_commit=COMMIT, dependency_lock=dependency_lock)
+        verify_bundle(
+            bundle=output,
+            expected_commit=COMMIT,
+            dependency_lock=dependency_lock,
+            ydb_dependency_lock=ydb_lock,
+        )
 
 
 def test_verify_bundle_rejects_wrong_commit_and_unsafe_mode(tmp_path: Path) -> None:
-    output, _, dependency_lock = _build(tmp_path)
+    output, _, dependency_lock, ydb_lock = _build(tmp_path)
     with pytest.raises(AssetVerificationError, match="approved release"):
-        verify_bundle(bundle=output, expected_commit="2" * 40, dependency_lock=dependency_lock)
+        verify_bundle(
+            bundle=output,
+            expected_commit="2" * 40,
+            dependency_lock=dependency_lock,
+            ydb_dependency_lock=ydb_lock,
+        )
 
     (output / "master-assets.env").chmod(0o644)
     with pytest.raises(AssetVerificationError, match="0600"):
-        verify_bundle(bundle=output, expected_commit=COMMIT, dependency_lock=dependency_lock)
+        verify_bundle(
+            bundle=output,
+            expected_commit=COMMIT,
+            dependency_lock=dependency_lock,
+            ydb_dependency_lock=ydb_lock,
+        )
 
 
 def test_build_fails_closed_on_incomplete_or_tampered_embedding_wheelhouse(tmp_path: Path) -> None:
@@ -300,7 +330,7 @@ def test_build_fails_closed_on_incomplete_or_tampered_embedding_wheelhouse(tmp_p
     missing = next(wheelhouse.iterdir())
     missing.unlink()
     lock, _ = build_module._load_dependency_lock(dependency_lock)
-    with pytest.raises(AssetBundleError, match="inventory"):
+    with pytest.raises(AssetBundleError, match="regular file|inventory"):
         build_module._verify_wheelhouse(lock, wheelhouse)
 
     wheelhouse, dependency_lock = _dependency_inputs(tmp_path / "tampered")
@@ -310,6 +340,46 @@ def test_build_fails_closed_on_incomplete_or_tampered_embedding_wheelhouse(tmp_p
     with pytest.raises(AssetBundleError, match="differs from lock"):
         build_module._verify_wheelhouse(lock, wheelhouse)
 
+
+def test_build_fails_closed_on_incomplete_or_tampered_ydb_wheelhouse(tmp_path: Path) -> None:
+    wheelhouse, dependency_lock = _master_ydb_inputs(tmp_path)
+    next(wheelhouse.iterdir()).unlink()
+    with pytest.raises(AssetBundleError, match="regular file|inventory"):
+        build_module._load_master_ydb_wheels(dependency_lock, wheelhouse)
+
+    wheelhouse, dependency_lock = _master_ydb_inputs(tmp_path / "tampered-ydb")
+    next(wheelhouse.iterdir()).write_bytes(b"tampered")
+    with pytest.raises(AssetBundleError, match="differs from lock"):
+        build_module._load_master_ydb_wheels(dependency_lock, wheelhouse)
+
+
+def test_verify_bundle_fails_closed_on_missing_or_tampered_ydb_assets(tmp_path: Path) -> None:
+    output, manifest, dependency_lock, ydb_lock = _build(tmp_path)
+    ydb_assets = manifest["master_ydb_dependency_wheels"]
+    assert isinstance(ydb_assets, list)
+    missing = output / str(ydb_assets[0]["path"])
+    missing.unlink()
+    with pytest.raises(AssetVerificationError, match="missing bundle file"):
+        verify_bundle(
+            bundle=output,
+            expected_commit=COMMIT,
+            dependency_lock=dependency_lock,
+            ydb_dependency_lock=ydb_lock,
+        )
+
+    output, manifest, dependency_lock, ydb_lock = _build(tmp_path / "tampered-bundle")
+    ydb_assets = manifest["master_ydb_dependency_wheels"]
+    assert isinstance(ydb_assets, list)
+    tampered = output / str(ydb_assets[-1]["path"])
+    tampered.write_bytes(b"tampered")
+    tampered.chmod(0o600)
+    with pytest.raises(AssetVerificationError, match="bytes do not match"):
+        verify_bundle(
+            bundle=output,
+            expected_commit=COMMIT,
+            dependency_lock=dependency_lock,
+            ydb_dependency_lock=ydb_lock,
+        )
 
 def test_smoke_contracts_distinguish_observation_from_central_verified_receipt() -> None:
     root = Path(__file__).parents[2]

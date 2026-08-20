@@ -54,6 +54,7 @@ def _metadata() -> RegionTalkLaunchMetadata:
         ydb_endpoint="grpcs://ydb.serverless.yandexcloud.net:2135",
         ydb_database="/ru-central1/example/region-talk",
         ydb_viewer_secret_label="REGION_TALK_YDB_VIEWER_SA_JSON",
+        ydb_dependency_manifest_sha256="9" * 64,
         max_cycles=1,
         max_runtime_seconds=7200,
     )

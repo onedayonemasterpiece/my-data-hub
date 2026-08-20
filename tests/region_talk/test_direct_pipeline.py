@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from types import SimpleNamespace
 from uuid import uuid4
@@ -62,6 +63,45 @@ class _Pool:
         return callback(_Transaction(self.source))
 
 
+class _DatabaseTransaction:
+    def __init__(self, tables: dict[str, list[dict[str, object]]]) -> None:
+        self.tables = {
+            name: [dict(row) for row in rows] for name, rows in tables.items()
+        }
+
+    def execute(self, query, *, parameters=None):  # type: ignore[no-untyped-def]
+        table = re.search(r"FROM `([^`]+)`", query).group(1)
+        rows = self.tables[table]
+        primary_key = re.search(r"WHERE `([^`]+)`", query).group(1)
+        if "IS NULL" in query:
+            return _Results(
+                [{"null_pk_count": sum(row.get(primary_key) is None for row in rows)}]
+            )
+        assert parameters is not None
+        after = parameters["$after"]
+        limit = parameters["$limit"]
+        return _Results(
+            [row for row in rows if str(row[primary_key]) > after][:limit]
+        )
+
+
+class _DatabasePool:
+    def __init__(self, tables: dict[str, list[dict[str, object]]], calls: list[int]) -> None:
+        self.tables = tables
+        self.calls = calls
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+        return False
+
+    def retry_tx_sync(self, callback, *, tx_mode):  # type: ignore[no-untyped-def]
+        assert tx_mode == "snapshot-read-only"
+        self.calls.append(1)
+        return callback(_DatabaseTransaction(self.tables))
+
+
 def test_ydb_reader_keeps_cross_page_rows_in_one_snapshot(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     source = [
         {"pk": "a", "kind": "source_queue_item", "payload_json": "{}"},
@@ -77,29 +117,33 @@ def test_ydb_reader_keeps_cross_page_rows_in_one_snapshot(monkeypatch) -> None: 
     monkeypatch.setattr(direct_pipeline, "_snapshot_mode", lambda: "snapshot-read-only")
     reader = direct_pipeline.YdbDirectReader(object())
 
-    first = reader.scan_page(
-        "region_talk_compact_state_kv",
-        primary_key="pk",
-        after_primary_key=None,
-        limit=2,
-    )
-    # A live-source mutation between consumer pages must not appear in pass A.
-    source.insert(
-        2,
-        {"pk": "bb", "kind": "publication_candidate_item", "payload_json": "{}"}
-    )
-    second = reader.scan_page(
-        "region_talk_compact_state_kv",
-        primary_key="pk",
-        after_primary_key="b",
-        limit=2,
-    )
-    exhausted = reader.scan_page(
-        "region_talk_compact_state_kv",
-        primary_key="pk",
-        after_primary_key="c",
-        limit=2,
-    )
+    def pass_a():  # type: ignore[no-untyped-def]
+        first = reader.scan_page(
+            "region_talk_compact_state_kv",
+            primary_key="pk",
+            after_primary_key=None,
+            limit=2,
+        )
+        # A live-source mutation between consumer pages must not appear in pass A.
+        source.insert(
+            2,
+            {"pk": "bb", "kind": "publication_candidate_item", "payload_json": "{}"}
+        )
+        second = reader.scan_page(
+            "region_talk_compact_state_kv",
+            primary_key="pk",
+            after_primary_key="b",
+            limit=2,
+        )
+        exhausted = reader.scan_page(
+            "region_talk_compact_state_kv",
+            primary_key="pk",
+            after_primary_key="c",
+            limit=2,
+        )
+        return first, second, exhausted
+
+    first, second, exhausted = reader.run_snapshot_pass("pass_a", pass_a)
 
     assert [row["pk"] for row in first] == ["a", "b"]
     assert [row["pk"] for row in second] == ["c"]
@@ -108,11 +152,26 @@ def test_ydb_reader_keeps_cross_page_rows_in_one_snapshot(monkeypatch) -> None: 
 
     # Pass B begins a fresh independent SnapshotReadOnly transaction and sees
     # the change, allowing DirectSnapshotRunner to reject the changed source.
-    refreshed = reader.scan_page(
-        "region_talk_compact_state_kv",
-        primary_key="pk",
-        after_primary_key=None,
-        limit=10,
+    refreshed = reader.run_snapshot_pass(
+        "pass_b",
+        lambda: (
+            tuple(
+                reader.scan_page(
+                    "region_talk_compact_state_kv",
+                    primary_key="pk",
+                    after_primary_key=None,
+                    limit=10,
+                )
+            ),
+            tuple(
+                reader.scan_page(
+                    "region_talk_compact_state_kv",
+                    primary_key="pk",
+                    after_primary_key="c",
+                    limit=10,
+                )
+            ),
+        )[0],
     )
     assert [row["pk"] for row in refreshed] == ["a", "b", "bb", "c"]
     assert len(transactions) == 2
@@ -127,12 +186,82 @@ def test_ydb_reader_rejects_null_primary_key(monkeypatch) -> None:  # type: igno
     with pytest.raises(
         direct_pipeline.DirectPipelineConfigurationError, match="NULL primary key"
     ):
-        direct_pipeline.YdbDirectReader(object()).scan_page(
-            "region_talk_compact_state_kv",
-            primary_key="pk",
-            after_primary_key=None,
-            limit=2,
+        reader = direct_pipeline.YdbDirectReader(object())
+        reader.run_snapshot_pass(
+            "pass_a",
+            lambda: reader.scan_page(
+                "region_talk_compact_state_kv",
+                primary_key="pk",
+                after_primary_key=None,
+                limit=2,
+            ),
         )
+
+
+def test_ydb_reader_uses_one_database_snapshot_across_tables_per_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tables = {
+        "acq_discovery_opportunities": [{"dedupe_key": "opp-1"}],
+        "acq_discovery_runs": [{"run_uid": "run-1"}],
+    }
+    transactions: list[int] = []
+    monkeypatch.setattr(
+        direct_pipeline,
+        "_query_pool",
+        lambda _driver: _DatabasePool(tables, transactions),
+    )
+    monkeypatch.setattr(direct_pipeline, "_snapshot_mode", lambda: "snapshot-read-only")
+    reader = direct_pipeline.YdbDirectReader(object())
+
+    def pass_a() -> list[str]:
+        opportunities = reader.scan_page(
+            "acq_discovery_opportunities",
+            primary_key="dedupe_key",
+            after_primary_key=None,
+            limit=10,
+        )
+        reader.scan_page(
+            "acq_discovery_opportunities",
+            primary_key="dedupe_key",
+            after_primary_key="opp-1",
+            limit=10,
+        )
+        tables["acq_discovery_runs"].append({"run_uid": "run-2"})
+        runs = reader.scan_page(
+            "acq_discovery_runs",
+            primary_key="run_uid",
+            after_primary_key=None,
+            limit=10,
+        )
+        reader.scan_page(
+            "acq_discovery_runs",
+            primary_key="run_uid",
+            after_primary_key="run-1",
+            limit=10,
+        )
+        assert [row["dedupe_key"] for row in opportunities] == ["opp-1"]
+        return [str(row["run_uid"]) for row in runs]
+
+    assert reader.run_snapshot_pass("pass_a", pass_a) == ["run-1"]
+
+    def pass_b() -> list[str]:
+        runs = reader.scan_page(
+            "acq_discovery_runs",
+            primary_key="run_uid",
+            after_primary_key=None,
+            limit=10,
+        )
+        reader.scan_page(
+            "acq_discovery_runs",
+            primary_key="run_uid",
+            after_primary_key="run-2",
+            limit=10,
+        )
+        return [str(row["run_uid"]) for row in runs]
+
+    assert reader.run_snapshot_pass("pass_b", pass_b) == ["run-1", "run-2"]
+    assert len(transactions) == 2
 
 
 def test_cycle_requires_typed_post_import_receipt_before_success(monkeypatch) -> None:  # type: ignore[no-untyped-def]

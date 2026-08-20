@@ -11,7 +11,7 @@ import hashlib
 import os
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypeVar
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from my_data_hub.hashing import canonical_json_bytes
@@ -34,12 +34,39 @@ class DirectPipelineConfigurationError(RuntimeError):
     """The private runtime lacks an exact source or ACTIVE-master binding."""
 
 
+_PassResult = TypeVar("_PassResult")
+
+
 class YdbDirectReader(DirectYdbReader):
     """Closed-table, read-only keyset adapter over the official YDB SDK."""
 
     def __init__(self, driver: Any) -> None:
         self.driver = driver
         self._snapshots: dict[str, tuple[Mapping[str, Any], ...]] = {}
+        self._active_transaction: Any | None = None
+
+    def run_snapshot_pass(
+        self, phase: str, callback: Callable[[], _PassResult]
+    ) -> _PassResult:
+        if phase not in {"pass_a", "pass_b"} or self._active_transaction is not None:
+            raise DirectPipelineConfigurationError("YDB snapshot pass lifecycle is invalid")
+
+        def read(transaction: Any) -> _PassResult:
+            self._active_transaction = transaction
+            self._snapshots.clear()
+            try:
+                result = callback()
+                if self._snapshots:
+                    raise DirectPipelineConfigurationError(
+                        "YDB snapshot pass left a table scan incomplete"
+                    )
+                return result
+            finally:
+                self._snapshots.clear()
+                self._active_transaction = None
+
+        with _query_pool(self.driver) as pool:
+            return pool.retry_tx_sync(read, tx_mode=_snapshot_mode())
 
     def scan_page(
         self,
@@ -56,6 +83,10 @@ class YdbDirectReader(DirectYdbReader):
             raise DirectPipelineConfigurationError("YDB page limit is outside 1..500")
         snapshot = self._snapshots.get(source_table)
         if snapshot is None:
+            if self._active_transaction is None:
+                raise DirectPipelineConfigurationError(
+                    "YDB table scan requires a database-wide snapshot pass"
+                )
             if after_primary_key is not None:
                 raise DirectPipelineConfigurationError("YDB snapshot scan did not start at the first key")
             snapshot = self._read_table_snapshot(spec.name, spec.primary_key, limit)
@@ -119,8 +150,8 @@ class YdbDirectReader(DirectYdbReader):
                     break
             return tuple(rows)
 
-        with _query_pool(self.driver) as pool:
-            return pool.retry_tx_sync(read, tx_mode=_snapshot_mode())
+        assert self._active_transaction is not None
+        return read(self._active_transaction)
 
 
 def _ydb_module() -> Any:

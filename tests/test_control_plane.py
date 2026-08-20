@@ -76,6 +76,9 @@ def test_region_talk_enabled_but_unassembled_fails_readiness_with_exact_code(
         "REGION_TALK_YDB_VIEWER_SA_JSON",
     )
     monkeypatch.setenv(
+        "MY_DATA_HUB_MASTER_YDB_DEPENDENCY_MANIFEST_SHA256", "9" * 64
+    )
+    monkeypatch.setenv(
         "MY_DATA_HUB_REGION_TALK_CAPABILITY_DIR", str(tmp_path / "private")
     )
     response = TestClient(

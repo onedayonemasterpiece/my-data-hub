@@ -91,6 +91,7 @@ class RegionTalkRuntimePins:
     ydb_endpoint: str
     ydb_database: str
     ydb_viewer_secret_label: str
+    ydb_dependency_manifest_sha256: str
     max_cycles: int = 24
     max_runtime_seconds: int = 7_200
 
@@ -902,6 +903,7 @@ class RegionTalkPipelineCoordinator:
             ydb_endpoint=self.pins.ydb_endpoint,
             ydb_database=self.pins.ydb_database,
             ydb_viewer_secret_label=self.pins.ydb_viewer_secret_label,
+            ydb_dependency_manifest_sha256=self.pins.ydb_dependency_manifest_sha256,
             max_cycles=self.pins.max_cycles,
             max_runtime_seconds=self.pins.max_runtime_seconds,
         )

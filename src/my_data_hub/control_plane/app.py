@@ -640,6 +640,9 @@ def create_app(
                 ydb_endpoint=region_talk_settings.ydb_endpoint,
                 ydb_database=region_talk_settings.ydb_database,
                 ydb_viewer_secret_label=region_talk_settings.ydb_viewer_secret_label,
+                ydb_dependency_manifest_sha256=(
+                    region_talk_settings.ydb_dependency_manifest_sha256
+                ),
                 # The worker obtains a fresh <=4 minute generation after
                 # attestation whenever provider scheduling consumed the
                 # launch-time credential.  The proved DB session itself owns

@@ -13,6 +13,9 @@ Set these non-secret control-plane values before enabling the assembly:
 - `MY_DATA_HUB_REGION_TALK_YDB_DATABASE` — absolute YDB database path;
 - `MY_DATA_HUB_REGION_TALK_YDB_VIEWER_SECRET_LABEL` — label of the reviewed
   Kaggle User Secret containing the read-only service-account JSON.
+- `MY_DATA_HUB_MASTER_YDB_DEPENDENCY_MANIFEST_SHA256` — SHA-256 of the exact
+  canonical 14-wheel offline YDB dependency manifest from the reviewed master
+  asset bundle.
 
 An owner must pre-provision the private Notebook
 `<owner>/mdh-region-talk-supervisor` and attach that User Secret in its Kaggle
@@ -28,6 +31,13 @@ Notebook source, or log message. Only its label and the credential-free
 endpoint/database are launch pins. This matches the official Kaggle
 `UserSecretsClient` attached-secret contract and the YDB SDK's documented
 environment credential selection.
+
+The supervisor also requires the project wheel, dependency manifest, and all
+14 locked CPython 3.12/manylinux wheels to resolve unambiguously from the same
+private asset Dataset. It SHA-verifies every file, installs each wheel with
+`--no-index --no-deps`, and verifies installed versions plus `ydb==3.31.2`
+before importing the application. Missing or mismatched closure assets fail
+closed; neither Kaggle image preinstallation nor Internet access is a fallback.
 
 ## Response loss and restart
 

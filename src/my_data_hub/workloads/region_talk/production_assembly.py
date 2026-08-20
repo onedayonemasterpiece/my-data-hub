@@ -144,6 +144,7 @@ class DirectoryRegionTalkTaskAuthority:
             "activated_generation": generation,
             "bindings": {},
             "revoked_generations": [],
+            "terminal_revoked_generations": [],
             "expired_generations": [],
             "terminal": False,
             "task_token": task_token,
@@ -496,17 +497,31 @@ class DirectoryRegionTalkTaskAuthority:
         revoked_generations = {
             int(value) for value in task.get("revoked_generations", [])
         }
+        terminal_revoked_generations = {
+            int(value) for value in task.get("terminal_revoked_generations", [])
+        }
         for binding in bindings:
-            if binding.generation in revoked_generations:
-                continue
-            if self._revocation_path(run.task_run_id, binding.generation).exists():
-                continue
-            if self._write_revocation_binding(
-                task, binding, reason="region_talk_terminal"
+            if (
+                binding.generation in revoked_generations
+                or binding.generation in terminal_revoked_generations
             ):
-                self._revoke_certificate_binding(
-                    task, binding, reason="region_talk_terminal"
-                )
+                continue
+            # The mailbox is durable intent/delivery state, not proof that the
+            # broker committed its KRL/certificate revocation.  Replaying an
+            # existing exact mailbox must therefore repeat the idempotent
+            # broker effect until the per-generation completion marker is
+            # fsynced last.
+            self._write_revocation_binding(
+                task, binding, reason="region_talk_terminal"
+            )
+            self._revoke_certificate_binding(
+                task, binding, reason="region_talk_terminal"
+            )
+            terminal_revoked_generations.add(binding.generation)
+            task["terminal_revoked_generations"] = sorted(
+                terminal_revoked_generations
+            )
+            _atomic(task_path, canonical_json_bytes(task))
 
     def active_binding(self, task_run_id: UUID) -> RegionTalkAccessBinding:
         task = self._read(self._task_path(task_run_id))
@@ -835,6 +850,9 @@ class CentralRegionTalkNotebookAdapter:
                     "ydb_endpoint": metadata.ydb_endpoint,
                     "ydb_database": metadata.ydb_database,
                     "ydb_viewer_secret_label": metadata.ydb_viewer_secret_label,
+                    "ydb_dependency_manifest_sha256": (
+                        metadata.ydb_dependency_manifest_sha256
+                    ),
                     "publication_dispatch": False,
                     "privacy": "private",
                 }
@@ -1211,6 +1229,7 @@ class RegionTalkAssemblySettings:
     ydb_endpoint: str = ""
     ydb_database: str = ""
     ydb_viewer_secret_label: str = ""
+    ydb_dependency_manifest_sha256: str = ""
     capability_root: Path = Path("/nonexistent")
 
     @classmethod
@@ -1237,6 +1256,9 @@ class RegionTalkAssemblySettings:
             ydb_viewer_secret_label=os.getenv(
                 "MY_DATA_HUB_REGION_TALK_YDB_VIEWER_SECRET_LABEL", ""
             ).strip(),
+            ydb_dependency_manifest_sha256=os.getenv(
+                "MY_DATA_HUB_MASTER_YDB_DEPENDENCY_MANIFEST_SHA256", ""
+            ).strip(),
             capability_root=Path(
                 os.getenv("MY_DATA_HUB_REGION_TALK_CAPABILITY_DIR", "/state/region-talk-private")
             ),
@@ -1255,6 +1277,7 @@ class RegionTalkAssemblySettings:
             or not re.fullmatch(r"grpcs?://[A-Za-z0-9.-]+(?::[1-9][0-9]{0,4})?", self.ydb_endpoint)
             or not re.fullmatch(r"/[A-Za-z0-9_./-]+", self.ydb_database)
             or not re.fullmatch(r"[A-Z][A-Z0-9_]{7,127}", self.ydb_viewer_secret_label)
+            or not re.fullmatch(r"[a-f0-9]{64}", self.ydb_dependency_manifest_sha256)
         ):
             raise RegionTalkAssemblyUnavailable("REGION_TALK_ASSEMBLY_ENVIRONMENT_INCOMPLETE")
 
