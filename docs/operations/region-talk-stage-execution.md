@@ -39,22 +39,31 @@ revision, stage, and input fingerprint.
 
 ## Heavy-worker state
 
-Migration 0027 adds fixed task/ACTIVE-epoch-bound claim, result landing, and status functions.
-`RegionTalkStageDispatcher` is the separate lightweight controller for those functions. It:
+Migration 0028 splits the heavy-worker path so canonical content cannot enter the lightweight
+control plane:
 
-1. atomically claims only a dependency-ready work item from the accepted snapshot;
-2. verifies the database-derived UUIDv5 effect identity and fixed stage policy;
-3. persists the exact claim and launch metadata before the provider effect;
-4. observes before launching the stage's exact private Notebook through its one injected adapter;
-5. validates the generic Notebook result envelope, subject/input/output hashes, model/runtime
-   identity, and bounded result metadata;
-6. lands the result through `migration.submit_region_talk_stage_result`; and
-7. re-runs PREPARE/COMMIT so exact-current evidence advances the next dependency.
+1. the private supervisor claims only a bounded metadata receipt through
+   `claim_region_talk_stage_work_metadata`;
+2. central creates the deterministic child task credential from that receipt and may journal
+   only task/work/effect/dispatch identities, stage/input hashes, attempts, timeouts and provider
+   references;
+3. the supervisor binds the separately registered child credential through
+   `bind_region_talk_stage_worker`;
+4. `RegionTalkStageDispatcher` observes or launches the exact private stage Notebook through its
+   one injected adapter, with deterministic worker, dispatch and effect UUIDs;
+5. inside that private Notebook, `PostgresStageWorkerFunctions` calls
+   `fetch_region_talk_stage_work_payload` using the child task credential, executes the transform,
+   and lands the exact result through `submit_region_talk_stage_worker_result`; and
+6. the supervisor re-runs PREPARE/COMMIT so exact-current landed evidence advances dependencies.
 
-Response loss replays the byte-equivalent result submission. A restart observes the same effect
-instead of launching a duplicate. An expired lease remains `WAITING_WORK`; a late result is not
-submitted and the database owns the next bounded attempt. `EMPTY` and `WAITING_DEPENDENCY` are
-also nonterminal. Only an explicit database `COMPLETE` receipt can complete stage execution.
+The central launch model and mode-0600 dispatch journal contain no payload, input data, content
+text, raw lease, database URL or credential token. Receipt hashes and deterministic identities
+are validated before the provider boundary. Response-loss restart observes the same dispatch
+instead of launching a duplicate. Missing attached model/media/editorial runtime lands
+`FAILED_RETRYABLE`, never `SUCCEEDED`. An expired lease remains `WAITING_WORK`; the database owns
+the next bounded attempt. `EMPTY` and `WAITING_DEPENDENCY` are also nonterminal. Only an explicit
+database `COMPLETE` receipt can complete stage execution; database `FAILED` becomes terminal
+failure rather than success.
 
 The required E5, BGE-M3, vector-fusion, image, final-verifier, and writer notebooks contain no
 ambiguous `NotImplementedError` shells. They validate the exact execution payload. Vector fusion
@@ -77,8 +86,14 @@ notification remain disabled until a real private run supplies the required rece
 2. The semantic-bank runtime assets and the image/final-verifier/writer donor implementations,
    exact revisions, and shadow-equivalence receipts are not attached. Those workers therefore
    produce retryable failures rather than current evidence.
-3. The parent integration must inject the production Kaggle stage adapter and call the dispatcher
-   while a stage receipt is `WAITING_WORK`; it must not map that state to cycle `COMPLETE` or
-   terminal `SUCCEEDED`.
-4. No live YDB/PostgreSQL/Kaggle run was performed here. The schedule remains off, and row counts,
+3. The metadata-only dispatcher and child credential command/registration handshake are
+   implemented, but the concrete private Kaggle stage adapter, supervisor callbacks, and
+   successive credential-generation rotation are not yet assembled into the central lifespan.
+   Until those are complete the schedule must remain off and no heavy worker is production-ready.
+4. Migration 0029 now supplies exact successive-generation binding/fencing because a child
+   credential lasts at most four minutes while fixed stage timeouts range from five to twenty
+   minutes. The remaining adapter must checkpoint, bind generation N+1, prove the replacement
+   direct session, activate it, and only then revoke N; TTL relaxation or an expired-generation
+   success is forbidden.
+5. No live YDB/PostgreSQL/Kaggle run was performed here. The schedule remains off, and row counts,
    provider-run identities, checkpoint evidence, and operational readiness remain unclaimed.
