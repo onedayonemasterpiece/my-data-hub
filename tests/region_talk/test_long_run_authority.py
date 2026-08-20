@@ -29,6 +29,7 @@ from my_data_hub.workloads.region_talk.production_assembly import (
     RegionTalkAssemblyUnavailable,
 )
 from my_data_hub.workloads.region_talk.stage_dispatch import (
+    StageWorkerRotateReceipt,
     StageWorkMetadataClaimReceipt,
     stage_dispatch_id,
     stage_effect_id,
@@ -246,6 +247,70 @@ def test_stage_child_credential_handshake_is_metadata_only_and_replay_safe(
     command_bytes = authority._task_path(claim.worker_task_run_id).read_bytes()
     for forbidden in (b'"payload"', b'"input_data"', b'"text"', b'"lease_token"', b'"database_url"'):
         assert forbidden not in command_bytes
+
+
+def test_stage_generation_n_is_revoked_only_after_exact_n_plus_one_db_receipt(
+    tmp_path: Path,
+) -> None:
+    authority, certificate_broker = _authority(tmp_path)
+    claim = _stage_claim()
+    credentials = CentralRegionTalkStageCredentialBroker(
+        authority=authority,
+        image_identity="runtime@sha256:" + "d" * 64,
+        image_source_commit="e" * 40,
+        source_sha256_by_stage={"e5_embedding": "f" * 64},
+    )
+    credentials.prepare(claim)
+    first_command = authority.batch(
+        master_instance_id=MASTER.master_instance_id, epoch=MASTER.epoch
+    ).commands[0]
+    first_registration = _register(
+        authority,
+        first_command,
+        credential_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+    )
+    first = authority.await_stage_worker_access(claim, first_command)
+    credentials.prepare_rotation(claim, prior_generation=1)
+    second_command = authority.batch(
+        master_instance_id=MASTER.master_instance_id, epoch=MASTER.epoch
+    ).commands[0]
+    second_registration = _register(
+        authority,
+        second_command,
+        credential_id=UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+    )
+    second = authority.await_stage_worker_access(claim, second_command)
+    assert certificate_broker.revoked == []
+    assert authority.active_binding(claim.worker_task_run_id).generation == 1
+    base = {
+        "schema_version": "region-talk-stage-worker-rotate-receipt.v1",
+        "rotated": True,
+        "master_instance_id": str(claim.master_instance_id),
+        "epoch": claim.epoch,
+        "supervisor_task_run_id": str(claim.supervisor_task_run_id),
+        "export_batch_id": str(claim.export_batch_id),
+        "stage_run_id": str(claim.stage_run_id),
+        "dispatch_id": str(claim.dispatch_id),
+        "work_item_id": str(claim.work_item_id),
+        "effect_id": str(claim.effect_id),
+        "worker_task_run_id": str(claim.worker_task_run_id),
+        "prior_worker_generation": first.generation,
+        "prior_worker_binding_sha256": first.command_sha256,
+        "worker_credential_id": str(second_registration.credential_id),
+        "worker_generation": second.generation,
+        "worker_binding_sha256": second.command_sha256,
+        "publication_dispatch": False,
+        "notification_dispatch": False,
+    }
+    receipt = StageWorkerRotateReceipt(
+        **base,
+        receipt_sha256=hashlib.sha256(canonical_json_bytes(base)).hexdigest(),
+    )
+    authority.activate_stage_worker_rotation(claim, receipt)
+    authority.activate_stage_worker_rotation(claim, receipt)
+    assert authority.active_binding(claim.worker_task_run_id).generation == 2
+    assert [item["generation"] for item in certificate_broker.revoked] == [1]
+    assert first_registration.credential_id != second_registration.credential_id
 
 
 def test_generation_refresh_replays_and_revokes_only_after_activation_ack(

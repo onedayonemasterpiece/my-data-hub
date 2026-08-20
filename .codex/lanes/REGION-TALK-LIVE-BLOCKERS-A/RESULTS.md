@@ -120,3 +120,61 @@ suite; root will run it after C settles.
 - The exact closure is pinned to the reviewed CPython 3.12/manylinux artifacts. Changing the runtime
   image ABI/platform requires a new lock and review rather than compatibility guessing.
 - Final full-suite evidence is delegated to root after the concurrent stage-dispatch fixture is fixed.
+
+---
+
+# R15 provider assembly handoff
+
+## Scope and revisions
+
+- Requested integration base: `49a2348` / migration 0029.
+- Actual clean integration base at edit start: `f7d6ea74fcd63bbaeca08e86882f1aa5ac3f4aee`.
+- Implementation HEAD: recorded by the implementation commit containing this section.
+- Live deployment/provider/YDB/PostgreSQL mutation: **not performed**.
+- One provider adapter: the supervisor and stage assembly share the injected
+  `KaggleProviderAdapter`; no second client is constructed.
+- Schedule/publication/notification: remain `false`.
+
+## Requirement evidence
+
+| ID | Result | Evidence |
+|---|---|---|
+| R15-01 | Done | `create_app` assembles `CentralRegionTalkStageCredentialBroker`, `CentralRegionTalkStageNotebookAdapter`, and `RegionTalkStageDispatcher` from the same injected KPA and `DirectoryRegionTalkTaskAuthority`. |
+| R15-02 | Done | Every dispatch uses unique protected/disposable capability Dataset and worker Notebook refs. The stage provider journal fsyncs original Dataset, Notebook, and delete intents plus original `requested_at` and source SHA before effects. A three-restart lost-response test proves exactly one Dataset create and Notebook push with exact readback reconciliation. |
+| R15-03 | Done for transport; runtime matrix remains partial | Generated worker compiles, verifies source/image/commit/project wheel/canonical dependency manifest/every dependency wheel/model identity, installs offline with `--no-index --no-deps`, opens the task tunnel, and uses `PostgresStageWorkerFunctions` for direct migration 0028 fetch/submit. Rotation checkpoints use migration 0029. |
+| R15-04 | Done | Supervisor claim-ready/bound/rotation callbacks and child attestation/rotation/terminal callbacks use strict typed metadata. Provider and dispatch journals fail closed on payload, input data, text, lease, database URL, task token, or lease-token hash. Private rotated access is a no-store capability response, not a status callback. |
+| R15-05 | Done | App endpoints fence active master/epoch before stage capability dispatch. Exact claim/binding/source pins are revalidated before provider mutation. A focused authority test proves generation N remains active and unrevoked until the exact N+1 database receipt, then only N is revoked; exact replay is idempotent. |
+| R15-06 | Done | Exact terminal replay is retained. Child credential revocation works for stage `claim` mailboxes, and the two exact task-owned provider resources are deleted with persisted cleanup intents. Focused test proves two deletes, one revocation, and no repeated cleanup on terminal replay. |
+| R15-07 | Done | Unique resources are private, disposable and `ORCHESTRATOR_PROTECTED`; launch/callback models pin publication and notification false. Region Talk schedule remains disabled. |
+| R15-08 | Done | Existing direct-cycle contract maps database `WAITING_WORK` to nonterminal `RETRYABLE`, dispatches one bounded child reconciliation, and maps only database `COMPLETE` to terminal success. Focused direct-pipeline tests pass. |
+
+## Validation
+
+Commands ran from `/home/dev/.codex/worktrees/my-data-hub/operational-mvp`:
+
+- `.venv/bin/pytest -q tests/test_control_plane.py tests/region_talk/test_pipeline_core.py tests/region_talk/test_direct_pipeline.py tests/region_talk/test_stage_execution.py tests/region_talk/test_stage_dispatch.py tests/region_talk/test_long_run_authority.py tests/region_talk/test_private_stage_payload_v7.py tests/region_talk/test_stage_worker_rotation_v8.py tests/region_talk/test_production_assembly_response_loss.py` — PASS, 94 tests.
+- `.venv/bin/ruff check src/my_data_hub/control_plane/app.py src/my_data_hub/workloads/region_talk/{production_assembly.py,central_launcher.py,stage_dispatch.py} tests/test_control_plane.py tests/region_talk/{test_stage_dispatch.py,test_long_run_authority.py}` — PASS.
+- `.venv/bin/python -m compileall -q src tests` — PASS.
+- `.venv/bin/python scripts/validate_repository.py` — PASS, 5,108 checks, zero errors/notes.
+- `git diff --check` — PASS.
+- Final full `pytest` intentionally left to root per disk/concurrency direction.
+
+## Changed files
+
+- `src/my_data_hub/control_plane/app.py`
+- `src/my_data_hub/workloads/region_talk/{central_launcher.py,production_assembly.py,stage_dispatch.py}`
+- `tests/region_talk/{test_long_run_authority.py,test_stage_dispatch.py}`
+- `tests/test_control_plane.py`
+- `docs/operations/region-talk-stage-execution.md`
+- `.codex/lanes/REGION-TALK-LIVE-BLOCKERS-A/RESULTS.md`
+
+## Honest runtime blockers
+
+- `vector_fusion` is executable in-repository when exact current E5 and BGE receipts exist.
+- `e5_embedding` and `bge_m3_embedding` authenticate their reviewed model IDs/revisions, but the
+  Region Talk semantic-bank/model assets and attached runtime factories are not supplied by the
+  current runtime Dataset. They return `FAILED_RETRYABLE`, not success.
+- `image_scoring`, `final_verifier`, and `writer` likewise lack reviewed attached runtime/model
+  assets and return `FAILED_RETRYABLE`.
+- Consequently, the provider/credential/direct-DB assembly is implemented, but no claim of a live
+  end-to-end `COMPLETE`, model quality, row count, or production readiness is made.

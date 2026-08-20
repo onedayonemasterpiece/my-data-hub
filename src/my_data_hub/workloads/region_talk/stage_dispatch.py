@@ -1322,7 +1322,12 @@ class RegionTalkStageDispatcher:
             attempt=claim.attempt,
             stage=claim.stage,
             contract_version=claim.contract_version,
-            notebook_ref=f"{self.notebook_owner}/{STAGE_NOTEBOOK_SLUGS[claim.stage]}",
+            # A capability-bearing worker is unique per deterministic
+            # dispatch.  Response-loss replay therefore targets the same slug
+            # while no later task can overwrite its private Dataset binding.
+            notebook_ref=(
+                f"{self.notebook_owner}/mdh-rt-run-{claim.dispatch_id.hex[:24]}"
+            ),
             input_fingerprint=claim.input_fingerprint,
             timeout_seconds=claim.timeout_seconds,
             claim_receipt_sha256=claim.claim_receipt_sha256,

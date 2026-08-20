@@ -101,6 +101,14 @@ from my_data_hub.workloads.bloggers.master_stage import (
     BloggerQuarantineReceipt,
     resolution_matches_quarantine,
 )
+from my_data_hub.workloads.region_talk.central_launcher import (
+    RegionTalkStageDispatchCallback,
+    RegionTalkStageSupervisorRotationPoll,
+    RegionTalkStageWorkerAttestation,
+    RegionTalkStageWorkerRotationActivation,
+    RegionTalkStageWorkerRotationCheckpoint,
+    RegionTalkStageWorkerTerminal,
+)
 from my_data_hub.workloads.region_talk.pipeline_contracts import (
     ActiveMasterBinding,
     RegionTalkCredentialActivation,
@@ -118,10 +126,16 @@ from my_data_hub.workloads.region_talk.pipeline_runtime import (
 )
 from my_data_hub.workloads.region_talk.production_assembly import (
     CentralRegionTalkNotebookAdapter,
+    CentralRegionTalkStageCredentialBroker,
+    CentralRegionTalkStageNotebookAdapter,
     DirectoryRegionTalkTaskAuthority,
     RegionTalkAssemblySettings,
     RegionTalkAssemblyUnavailable,
     RegionTalkMCPController,
+)
+from my_data_hub.workloads.region_talk.stage_dispatch import (
+    RegionTalkStageDispatcher,
+    StageWorkMetadataClaimReceipt,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -627,6 +641,36 @@ def create_app(
             owner=region_talk_settings.owner,
             callback_base_url=region_talk_settings.callback_base_url,
         )
+        stage_credentials = CentralRegionTalkStageCredentialBroker(
+            authority=authority,
+            image_identity=region_talk_settings.runtime_image_identity,
+            image_source_commit=region_talk_settings.runtime_image_source_commit,
+            source_sha256_by_stage={},
+        )
+        stage_adapter = CentralRegionTalkStageNotebookAdapter(
+            adapter=provider_adapter,
+            authority=authority,
+            credential_broker=stage_credentials,
+            owner=region_talk_settings.owner,
+            callback_base_url=region_talk_settings.callback_base_url,
+            runtime_dataset_exact_ref=exact_runtime_ref,
+            runtime_image_identity=region_talk_settings.runtime_image_identity,
+            runtime_image_source_commit=(
+                region_talk_settings.runtime_image_source_commit
+            ),
+            wheel_relative_path=region_talk_settings.wheel_relative_path,
+            wheel_sha256=region_talk_settings.wheel_sha256,
+            dependency_manifest_sha256=(
+                region_talk_settings.worker_dependency_manifest_sha256
+            ),
+        )
+        stage_credentials.source_factory = stage_adapter.source_for_claim
+        stage_dispatcher = RegionTalkStageDispatcher(
+            adapter=stage_adapter,
+            notebook_owner=region_talk_settings.owner,
+            journal_path=region_talk_settings.capability_root
+            / "stage-dispatch-metadata.json",
+        )
         coordinator = RegionTalkPipelineCoordinator(
             store=RegionTalkPipelineStore(control_ledger.path),
             launcher=launch_adapter,
@@ -658,6 +702,9 @@ def create_app(
         region_talk_task_authority = authority
         region_talk_coordinator = coordinator
         app.state.region_talk_task_authority = authority
+        app.state.region_talk_stage_credentials = stage_credentials
+        app.state.region_talk_stage_adapter = stage_adapter
+        app.state.region_talk_stage_dispatcher = stage_dispatcher
         app.state.region_talk_coordinator = coordinator
         app.state.region_talk_mcp_controller = RegionTalkMCPController(coordinator)
         app.state.region_talk_readiness_code = "READY"
@@ -818,6 +865,9 @@ def create_app(
     app.state.embedding_launch_tasks = set()
     app.state.region_talk_coordinator = region_talk_coordinator
     app.state.region_talk_task_authority = region_talk_task_authority
+    app.state.region_talk_stage_credentials = None
+    app.state.region_talk_stage_adapter = None
+    app.state.region_talk_stage_dispatcher = None
     app.state.region_talk_mcp_controller = (
         RegionTalkMCPController(region_talk_coordinator)
         if region_talk_coordinator is not None
@@ -2616,6 +2666,201 @@ def create_app(
         except RegionTalkAssemblyUnavailable as exc:
             raise HTTPException(status_code=401, detail={"code": exc.code}) from exc
         return coordinator, task
+
+    def _assert_region_talk_stage_active(*, master_instance_id: UUID, epoch: int) -> None:
+        active = _active_region_talk_master()
+        if (
+            active is None
+            or active.master_instance_id != master_instance_id
+            or active.epoch != epoch
+        ):
+            raise HTTPException(status_code=409, detail={"code": "active_epoch_mismatch"})
+
+    @app.post("/internal/region-talk-pipeline/stage/prepare")
+    async def prepare_region_talk_stage_worker(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            claim = StageWorkMetadataClaimReceipt.model_validate(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_stage_claim_invalid"}) from exc
+        _region_talk_callback_authority(
+            task_run_id=claim.supervisor_task_run_id, authorization=authorization
+        )
+        _assert_region_talk_stage_active(
+            master_instance_id=claim.master_instance_id, epoch=claim.epoch
+        )
+        broker = app.state.region_talk_stage_credentials
+        if broker is None:
+            raise HTTPException(status_code=503, detail={"code": "region_talk_stage_unavailable"})
+        try:
+            result = broker.prepare(claim)
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        return result.model_dump(mode="json")
+
+    @app.post("/internal/region-talk-pipeline/stage/dispatch")
+    async def dispatch_region_talk_stage_worker(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            callback = RegionTalkStageDispatchCallback.model_validate(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_stage_dispatch_invalid"}) from exc
+        claim = callback.claim
+        _region_talk_callback_authority(
+            task_run_id=claim.supervisor_task_run_id, authorization=authorization
+        )
+        _assert_region_talk_stage_active(
+            master_instance_id=claim.master_instance_id, epoch=claim.epoch
+        )
+        dispatcher = app.state.region_talk_stage_dispatcher
+        if dispatcher is None:
+            raise HTTPException(status_code=503, detail={"code": "region_talk_stage_unavailable"})
+        try:
+            result = await asyncio.to_thread(
+                dispatcher.dispatch_bound, claim, callback.binding
+            )
+        except (ValueError, RuntimeError, RegionTalkAssemblyUnavailable) as exc:
+            code = exc.code if isinstance(exc, RegionTalkAssemblyUnavailable) else "REGION_TALK_STAGE_DISPATCH_REJECTED"
+            raise HTTPException(status_code=409, detail={"code": code}) from exc
+        return result.model_dump(mode="json")
+
+    @app.post("/internal/region-talk-pipeline/stage/attestation")
+    async def attest_region_talk_stage_worker(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            attestation = RegionTalkStageWorkerAttestation.model_validate(body)
+            worker = UUID(attestation.worker_task_run_id)
+            master = UUID(attestation.master_instance_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_stage_attestation_invalid"}) from exc
+        _region_talk_callback_authority(task_run_id=worker, authorization=authorization)
+        _assert_region_talk_stage_active(master_instance_id=master, epoch=attestation.epoch)
+        adapter = app.state.region_talk_stage_adapter
+        if adapter is None:
+            raise HTTPException(status_code=503, detail={"code": "region_talk_stage_unavailable"})
+        try:
+            adapter.record_attestation(attestation)
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        return {"accepted": True, "publication_dispatch": False, "notification_dispatch": False}
+
+    @app.post("/internal/region-talk-pipeline/stage/rotation/checkpoint")
+    async def checkpoint_region_talk_stage_rotation(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            checkpoint = RegionTalkStageWorkerRotationCheckpoint.model_validate(body)
+            worker = UUID(checkpoint.worker_task_run_id)
+            claim = app.state.region_talk_task_authority.stage_worker_claim(worker)
+        except (AttributeError, TypeError, ValueError, RegionTalkAssemblyUnavailable) as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_stage_rotation_invalid"}) from exc
+        _region_talk_callback_authority(task_run_id=worker, authorization=authorization)
+        _assert_region_talk_stage_active(
+            master_instance_id=claim.master_instance_id, epoch=claim.epoch
+        )
+        try:
+            return app.state.region_talk_stage_adapter.request_rotation(checkpoint)
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+
+    @app.post("/internal/region-talk-pipeline/stage/rotation/poll")
+    async def poll_region_talk_stage_rotations(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            poll = RegionTalkStageSupervisorRotationPoll.model_validate(body)
+            supervisor = UUID(poll.supervisor_task_run_id)
+            master = UUID(poll.master_instance_id)
+            export_batch = UUID(poll.export_batch_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_stage_rotation_poll_invalid"}) from exc
+        _region_talk_callback_authority(task_run_id=supervisor, authorization=authorization)
+        _assert_region_talk_stage_active(master_instance_id=master, epoch=poll.epoch)
+        requests = app.state.region_talk_stage_adapter.rotation_requests(
+            supervisor, export_batch
+        )
+        return {
+            "requests": [item.model_dump(mode="json") for item in requests],
+            "publication_dispatch": False,
+            "notification_dispatch": False,
+        }
+
+    @app.post("/internal/region-talk-pipeline/stage/rotation/activate")
+    async def activate_region_talk_stage_rotation(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            activation = RegionTalkStageWorkerRotationActivation.model_validate(body)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "region_talk_stage_rotation_activation_invalid"},
+            ) from exc
+        receipt = activation.receipt
+        _region_talk_callback_authority(
+            task_run_id=receipt.supervisor_task_run_id, authorization=authorization
+        )
+        _assert_region_talk_stage_active(
+            master_instance_id=receipt.master_instance_id, epoch=receipt.epoch
+        )
+        try:
+            app.state.region_talk_stage_adapter.activate_rotation(activation)
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        return {"activated": True, "publication_dispatch": False, "notification_dispatch": False}
+
+    @app.post("/internal/region-talk-pipeline/stage/rotation/access")
+    async def access_region_talk_stage_rotation(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> Response:
+        body = await _bounded_json(request)
+        try:
+            checkpoint = RegionTalkStageWorkerRotationCheckpoint.model_validate(body)
+            worker = UUID(checkpoint.worker_task_run_id)
+            claim = app.state.region_talk_task_authority.stage_worker_claim(worker)
+        except (AttributeError, TypeError, ValueError, RegionTalkAssemblyUnavailable) as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_stage_rotation_invalid"}) from exc
+        _region_talk_callback_authority(task_run_id=worker, authorization=authorization)
+        _assert_region_talk_stage_active(
+            master_instance_id=claim.master_instance_id, epoch=claim.epoch
+        )
+        try:
+            content = app.state.region_talk_stage_adapter.rotation_access(checkpoint)
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
+        )
+
+    @app.post("/internal/region-talk-pipeline/stage/terminal")
+    async def complete_region_talk_stage_worker(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            terminal = RegionTalkStageWorkerTerminal.model_validate(body)
+            worker = UUID(terminal.worker_task_run_id)
+            master = UUID(terminal.master_instance_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_stage_terminal_invalid"}) from exc
+        _region_talk_callback_authority(task_run_id=worker, authorization=authorization)
+        _assert_region_talk_stage_active(master_instance_id=master, epoch=terminal.epoch)
+        try:
+            await asyncio.to_thread(app.state.region_talk_stage_adapter.complete, terminal)
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        return {"accepted": True, "cleaned": True, "publication_dispatch": False, "notification_dispatch": False}
 
     @app.post("/internal/region-talk-pipeline/attest")
     async def attest_region_talk_pipeline(

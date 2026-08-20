@@ -1,18 +1,39 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
 import pytest
+from pydantic import SecretStr
 
 from my_data_hub.hashing import canonical_json_bytes
+from my_data_hub.providers.kaggle.contracts import (
+    KaggleAmbiguousMutation,
+    TaskResourceClaim,
+)
+from my_data_hub.providers.models import ControlClass, ProviderFingerprint, ProviderKind
+from my_data_hub.workloads.region_talk.central_launcher import (
+    RegionTalkStageWorkerAttestation,
+    RegionTalkStageWorkerTerminal,
+    render_region_talk_stage_worker_source,
+)
 from my_data_hub.workloads.region_talk.notebook_stages import (
     RegionTalkStageRuntimeUnavailable,
     execute_direct_region_talk_stage_worker,
     process_region_talk_stage_item,
+    stage_model_identity,
+)
+from my_data_hub.workloads.region_talk.pipeline_contracts import (
+    RegionTalkDirectMasterAccess,
+    TaskWorkerCredentialCommand,
+)
+from my_data_hub.workloads.region_talk.production_assembly import (
+    CentralRegionTalkStageNotebookAdapter,
 )
 from my_data_hub.workloads.region_talk.stage_dispatch import (
     PostgresStageSupervisorFunctions,
@@ -26,6 +47,7 @@ from my_data_hub.workloads.region_talk.stage_dispatch import (
     StageWorkerBindingReceipt,
     StageWorkerCredentialStatus,
     StageWorkerDirectResultReceipt,
+    StageWorkerLaunch,
     StageWorkerPayloadFetchRequest,
     StageWorkerRotateRequest,
     StageWorkMetadataClaimReceipt,
@@ -155,7 +177,8 @@ def test_metadata_dispatch_restarts_without_duplicate_or_business_journal(tmp_pa
     assert observed.kind is ProviderObservationKind.RUNNING
     assert len(adapter.launches) == 1
     launch = adapter.launches[0]
-    assert launch.notebook_ref == "owner/20-region-talk-e5-enrichment"
+    dispatch_id = UUID(claim["dispatch_id"])
+    assert launch.notebook_ref == f"owner/mdh-rt-run-{dispatch_id.hex[:24]}"
     assert not hasattr(launch, "payload")
 
     replay = RegionTalkStageDispatcher(adapter, "owner", path)
@@ -165,6 +188,249 @@ def test_metadata_dispatch_restarts_without_duplicate_or_business_journal(tmp_pa
     for forbidden in (b'"payload"', b'"input_data"', b'"text"', b'"lease_token"', b'"database_url"'):
         assert forbidden not in serialized
     assert b'"lease_token_sha256"' not in serialized
+
+
+class _StageAuthority:
+    def __init__(self, root: Path, claim: StageWorkMetadataClaimReceipt) -> None:
+        self.root = root
+        self.claim = claim
+        self.token = "stage-private-" + "x" * 40
+        self.command = TaskWorkerCredentialCommand.create(
+            task_run_id=claim.worker_task_run_id,
+            epoch=claim.epoch,
+            generation=1,
+            task_token_sha256=hashlib.sha256(self.token.encode()).hexdigest(),
+        )
+        self.source_sha256 = ""
+        self.revoked = 0
+        self.access = RegionTalkDirectMasterAccess(
+            credential_id=UUID("66666666-6666-4666-8666-666666666666"),
+            task_run_id=claim.worker_task_run_id,
+            master_instance_id=claim.master_instance_id,
+            epoch=claim.epoch,
+            generation=1,
+            command_sha256=self.command.command_sha256,
+            task_token_sha256=self.command.task_token_sha256,
+            database_url=SecretStr("postgresql://worker:private@tunnel:25432/hub"),
+            tls_ca_pem=SecretStr("ca"),
+            expires_at=NOW + timedelta(hours=8),
+            tunnel_endpoint="tunnel:25432",
+            ssh_private_key=SecretStr("key"),
+            ssh_certificate=SecretStr("cert"),
+            ssh_known_hosts=SecretStr("known"),
+            ssh_gateway_host="gateway.internal",
+            ssh_gateway_port=2222,
+            ssh_account="mdh-region-talk",
+            ssh_certificate_serial=88,
+        )
+
+    def stage_worker_claim(self, _task):  # type: ignore[no-untyped-def]
+        return self.claim
+
+    def stage_worker_command(self, _task):  # type: ignore[no-untyped-def]
+        return self.command
+
+    def stage_worker_active_access(self, _task):  # type: ignore[no-untyped-def]
+        return self.access
+
+    def task_token(self, _task):  # type: ignore[no-untyped-def]
+        return self.token
+
+    def validate_token(self, _task, supplied):  # type: ignore[no-untyped-def]
+        assert supplied == self.token
+        return {
+            "source_sha256": self.source_sha256,
+            "image_identity": "runtime@sha256:" + "d" * 64,
+            "image_source_commit": "e" * 40,
+            "terminal": False,
+        }
+
+    def request_stage_worker_revocation(self, _task):  # type: ignore[no-untyped-def]
+        self.revoked += 1
+
+
+class _LostStageProvider:
+    def __init__(self) -> None:
+        self.dataset_present = False
+        self.notebook_present = False
+        self.dataset_creates = 0
+        self.notebook_pushes = 0
+        self.deletes = 0
+
+    @staticmethod
+    def claim(intent, kind):  # type: ignore[no-untyped-def]
+        return TaskResourceClaim.create(
+            task_id=intent.task_id,
+            effect_id=intent.effect_id,
+            provider_ref=intent.provider_ref,
+            kind=kind,
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+            disposable=True,
+            fingerprint=ProviderFingerprint(value=("a" if kind is ProviderKind.DATASET else "b") * 64),
+            provider_version=1,
+            registered_at=intent.requested_at,
+        )
+
+    def current_private_dataset_version(self, **_kwargs):  # type: ignore[no-untyped-def]
+        return 1 if self.dataset_present else None
+
+    def create_private_dataset(self, **_kwargs):  # type: ignore[no-untyped-def]
+        self.dataset_creates += 1
+        self.dataset_present = True
+        raise KaggleAmbiguousMutation("lost dataset response")
+
+    def reconcile_private_dataset_directory_mutation(self, *, intent, **_kwargs):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(claim=self.claim(intent, ProviderKind.DATASET))
+
+    def reconcile_private_notebook_mutation(self, *, intent, **_kwargs):  # type: ignore[no-untyped-def]
+        if not self.notebook_present:
+            return None
+        claim = self.claim(intent, ProviderKind.NOTEBOOK)
+        return SimpleNamespace(
+            claim=claim,
+            run=SimpleNamespace(provider_run_ref=f"{claim.provider_ref}/1"),
+        )
+
+    def push_private_worker_notebook_pending_attestation(self, **_kwargs):  # type: ignore[no-untyped-def]
+        self.notebook_pushes += 1
+        self.notebook_present = True
+        raise KaggleAmbiguousMutation("lost notebook response")
+
+    def delete_task_created_resource(self, **_kwargs):  # type: ignore[no-untyped-def]
+        self.deletes += 1
+
+
+def test_concrete_stage_adapter_reconciles_each_lost_effect_with_original_intent(
+    tmp_path: Path,
+) -> None:
+    claim = StageWorkMetadataClaimReceipt.model_validate(_metadata_claim())
+    binding = StageWorkerBindingReceipt.model_validate(_binding(claim.model_dump(mode="json")))
+    launch = StageWorkerLaunch(
+        supervisor_task_run_id=claim.supervisor_task_run_id,
+        export_batch_id=claim.export_batch_id,
+        master_instance_id=claim.master_instance_id,
+        epoch=claim.epoch,
+        stage_run_id=claim.stage_run_id,
+        work_item_id=claim.work_item_id,
+        effect_id=claim.effect_id,
+        dispatch_id=claim.dispatch_id,
+        worker_task_run_id=claim.worker_task_run_id,
+        attempt=claim.attempt,
+        stage=claim.stage,
+        contract_version=claim.contract_version,
+        notebook_ref=f"owner/mdh-rt-run-{claim.dispatch_id.hex[:24]}",
+        input_fingerprint=claim.input_fingerprint,
+        timeout_seconds=claim.timeout_seconds,
+        claim_receipt_sha256=claim.claim_receipt_sha256,
+        worker_binding_sha256=binding.worker_binding_sha256,
+        lease_capability_sha256=claim.lease_capability_sha256,
+    )
+    root = (tmp_path / "private").absolute()
+    root.mkdir(mode=0o700)
+    authority = _StageAuthority(root, claim)
+    provider = _LostStageProvider()
+
+    def adapter(now: datetime) -> CentralRegionTalkStageNotebookAdapter:
+        value = CentralRegionTalkStageNotebookAdapter(
+            adapter=provider,
+            authority=authority,  # type: ignore[arg-type]
+            credential_broker=SimpleNamespace(),  # type: ignore[arg-type]
+            owner="owner",
+            callback_base_url="https://control.example",
+            runtime_dataset_exact_ref="owner/runtime/12",
+            runtime_image_identity="runtime@sha256:" + "d" * 64,
+            runtime_image_source_commit="e" * 40,
+            wheel_relative_path="dist/my_data_hub.whl",
+            wheel_sha256="f" * 64,
+            dependency_manifest_sha256="9" * 64,
+            clock=lambda: now,
+        )
+        authority.source_sha256 = hashlib.sha256(value.source_for_claim(claim)).hexdigest()
+        return value
+
+    with pytest.raises(KaggleAmbiguousMutation):
+        adapter(NOW).launch(launch)
+    journal_path = root / "stage-provider-metadata.json"
+    original = json.loads(journal_path.read_bytes())["entries"][str(claim.dispatch_id)][
+        "dataset_intent"
+    ]["requested_at"]
+    with pytest.raises(KaggleAmbiguousMutation):
+        adapter(NOW + timedelta(hours=1)).launch(launch)
+    completed_adapter = adapter(NOW + timedelta(hours=2))
+    receipt = completed_adapter.launch(launch)
+    assert receipt.worker_task_run_id == claim.worker_task_run_id
+    assert provider.dataset_creates == 1
+    assert provider.notebook_pushes == 1
+    encoded = journal_path.read_bytes()
+    assert json.loads(encoded)["entries"][str(claim.dispatch_id)]["dataset_intent"][
+        "requested_at"
+    ] == original
+    for forbidden in (
+        b'"payload"',
+        b'"input_data"',
+        b'"text"',
+        b'"lease_token"',
+        b'"database_url"',
+        b'"task_token"',
+    ):
+        assert forbidden not in encoded
+    model_sha = hashlib.sha256(
+        canonical_json_bytes(stage_model_identity(claim.stage))
+    ).hexdigest()
+    completed_adapter.record_attestation(
+        RegionTalkStageWorkerAttestation(
+            worker_task_run_id=str(claim.worker_task_run_id),
+            dispatch_id=str(claim.dispatch_id),
+            effect_id=str(claim.effect_id),
+            master_instance_id=str(claim.master_instance_id),
+            epoch=claim.epoch,
+            source_sha256=receipt.source_sha256,
+            image_identity="runtime@sha256:" + "d" * 64,
+            image_source_commit="e" * 40,
+            wheel_sha256="f" * 64,
+            dependency_manifest_sha256="9" * 64,
+            model_inputs_sha256=model_sha,
+            attested_at=NOW,
+        )
+    )
+    terminal = RegionTalkStageWorkerTerminal(
+        worker_task_run_id=str(claim.worker_task_run_id),
+        dispatch_id=str(claim.dispatch_id),
+        effect_id=str(claim.effect_id),
+        master_instance_id=str(claim.master_instance_id),
+        epoch=claim.epoch,
+        result_status="SUCCEEDED",
+        result_receipt_sha256="7" * 64,
+        completed_at=NOW,
+    )
+    completed_adapter.complete(terminal)
+    completed_adapter.complete(terminal)
+    assert provider.deletes == 2
+    assert authority.revoked == 1
+
+
+def test_generated_direct_stage_worker_is_offline_pinned_and_compiles() -> None:
+    claim = StageWorkMetadataClaimReceipt.model_validate(_metadata_claim())
+    source = render_region_talk_stage_worker_source(
+        claim,
+        runtime_image_identity="runtime@sha256:" + "d" * 64,
+        runtime_image_source_commit="e" * 40,
+        wheel_relative_path="dist/my_data_hub.whl",
+        wheel_sha256="f" * 64,
+        dependency_manifest_sha256="9" * 64,
+        model_inputs={"model_id": "exact", "model_revision": "abc"},
+    )
+    compile(source, "region_talk_stage_worker.py", "exec")
+    for required in (
+        b"--no-index",
+        b"--no-deps",
+        b"PostgresStageWorkerFunctions",
+        b"execute_direct_region_talk_stage_worker",
+        b"region-talk-stage-worker-rotation-checkpoint.v1",
+        b"publication_dispatch':False",
+        b"notification_dispatch':False",
+    ):
+        assert required in source
 
 
 def test_claim_and_binding_tamper_fail_before_launch(tmp_path: Path) -> None:

@@ -36,7 +36,17 @@ from my_data_hub.providers.kaggle.contracts import (
 )
 from my_data_hub.providers.models import ControlClass
 
-from .central_launcher import RegionTalkSupervisorCapability, render_region_talk_supervisor_source
+from .central_launcher import (
+    RegionTalkStageWorkerAttestation,
+    RegionTalkStageWorkerCapability,
+    RegionTalkStageWorkerRotationActivation,
+    RegionTalkStageWorkerRotationCheckpoint,
+    RegionTalkStageWorkerTerminal,
+    RegionTalkSupervisorCapability,
+    render_region_talk_stage_worker_source,
+    render_region_talk_supervisor_source,
+)
+from .notebook_stages import stage_model_identity
 from .pipeline_contracts import (
     RegionTalkAccessBinding,
     RegionTalkCleanupReceipt,
@@ -53,7 +63,16 @@ from .pipeline_contracts import (
     TaskWorkerCredentialRevocation,
 )
 from .pipeline_runtime import LaunchObservation, LaunchObservationKind
-from .stage_dispatch import StageWorkerCredentialStatus, StageWorkMetadataClaimReceipt
+from .stage_dispatch import (
+    ProviderObservationKind,
+    StageProviderLaunchReceipt,
+    StageProviderObservation,
+    StageWorkerCredentialStatus,
+    StageWorkerLaunch,
+    StageWorkerRotateReceipt,
+    StageWorkerRotateRequest,
+    StageWorkMetadataClaimReceipt,
+)
 
 _MAX_SECRET_BYTES = 1024 * 1024
 
@@ -348,6 +367,116 @@ class DirectoryRegionTalkTaskAuthority:
         ):
             raise RegionTalkAssemblyUnavailable("REGION_TALK_CREDENTIAL_BINDING_INVALID")
         return registration
+
+    def stage_worker_claim(self, worker_task_run_id: UUID) -> StageWorkMetadataClaimReceipt:
+        task = self._read(self._task_path(worker_task_run_id))
+        if task.get("schema_version") != "region-talk-private-stage-command.v1":
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_COMMAND_CONFLICT")
+        claim = StageWorkMetadataClaimReceipt.model_validate(task.get("claim"))
+        if claim.worker_task_run_id != worker_task_run_id:
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_COMMAND_CONFLICT")
+        return claim
+
+    def stage_worker_command(self, worker_task_run_id: UUID) -> TaskWorkerCredentialCommand:
+        task = self._read(self._task_path(worker_task_run_id))
+        return TaskWorkerCredentialCommand.model_validate(task.get("command"))
+
+    def stage_worker_active_access(
+        self, worker_task_run_id: UUID
+    ) -> RegionTalkDirectMasterAccess:
+        task = self._read(self._task_path(worker_task_run_id))
+        generation = int(task.get("activated_generation", 0))
+        path = self._access_path(worker_task_run_id, generation)
+        access = RegionTalkDirectMasterAccess.model_validate(self._read(path))
+        if self._binding(access) != self._task_binding(task, generation):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_CREDENTIAL_BINDING_INVALID")
+        return access
+
+    def activate_stage_worker_rotation(
+        self,
+        claim: StageWorkMetadataClaimReceipt,
+        receipt: StageWorkerRotateReceipt,
+    ) -> None:
+        """Revoke N only after the supervisor returned exact 0029 DB proof for N+1."""
+
+        task_path = self._task_path(claim.worker_task_run_id)
+        task = self._read(task_path)
+        if (
+            task.get("schema_version") != "region-talk-private-stage-command.v1"
+            or task.get("claim") != claim.model_dump(mode="json")
+            or bool(task.get("terminal"))
+            or receipt.supervisor_task_run_id != claim.supervisor_task_run_id
+            or receipt.export_batch_id != claim.export_batch_id
+            or receipt.stage_run_id != claim.stage_run_id
+            or receipt.dispatch_id != claim.dispatch_id
+            or receipt.work_item_id != claim.work_item_id
+            or receipt.effect_id != claim.effect_id
+            or receipt.worker_task_run_id != claim.worker_task_run_id
+            or receipt.master_instance_id != claim.master_instance_id
+            or receipt.epoch != claim.epoch
+        ):
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_STAGE_ROTATION_ACTIVATION_CONFLICT"
+            )
+        activated = int(task.get("activated_generation", 0))
+        revoked = {int(value) for value in task.get("revoked_generations", [])}
+        if (
+            activated == receipt.worker_generation
+            and receipt.prior_worker_generation in revoked
+        ):
+            return
+        if activated != receipt.prior_worker_generation:
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_STAGE_ROTATION_ACTIVATION_CONFLICT"
+            )
+        previous = self._task_binding(task, receipt.prior_worker_generation)
+        replacement = self._task_binding(task, receipt.worker_generation)
+        if (
+            previous.generation != receipt.prior_worker_generation
+            or previous.command_sha256 != receipt.prior_worker_binding_sha256
+            or previous.command_sha256 == replacement.command_sha256
+            or replacement.credential_id != receipt.worker_credential_id
+            or replacement.generation != receipt.worker_generation
+            or replacement.command_sha256 != receipt.worker_binding_sha256
+            or replacement.command_sha256
+            != self.stage_worker_command(claim.worker_task_run_id).command_sha256
+        ):
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_STAGE_ROTATION_ACTIVATION_CONFLICT"
+            )
+        self._write_stage_revocation_binding(
+            task, claim, previous, reason="task_credential_rotated"
+        )
+        self._revoke_stage_certificate_binding(
+            claim, previous, reason="task_credential_rotated"
+        )
+        task["activated_generation"] = replacement.generation
+        task["revoked_generations"] = sorted({*revoked, previous.generation})
+        _atomic(task_path, canonical_json_bytes(task))
+
+    def request_stage_worker_revocation(self, worker_task_run_id: UUID) -> None:
+        task_path = self._task_path(worker_task_run_id)
+        task = self._read(task_path)
+        claim = self.stage_worker_claim(worker_task_run_id)
+        task["terminal"] = True
+        _atomic(task_path, canonical_json_bytes(task))
+        rotation_revoked = {int(value) for value in task.get("revoked_generations", [])}
+        terminal_revoked = {
+            int(value) for value in task.get("terminal_revoked_generations", [])
+        }
+        for value in dict(task.get("bindings", {})).values():
+            binding = RegionTalkAccessBinding.model_validate(value)
+            if binding.generation in rotation_revoked | terminal_revoked:
+                continue
+            self._write_stage_revocation_binding(
+                task, claim, binding, reason="region_talk_stage_terminal"
+            )
+            self._revoke_stage_certificate_binding(
+                claim, binding, reason="region_talk_stage_terminal"
+            )
+            terminal_revoked.add(binding.generation)
+            task["terminal_revoked_generations"] = sorted(terminal_revoked)
+            _atomic(task_path, canonical_json_bytes(task))
 
     def _await_access_identity(
         self,
@@ -838,6 +967,41 @@ class DirectoryRegionTalkTaskAuthority:
         _atomic(path, encoded)
         return True
 
+    def _write_stage_revocation_binding(
+        self,
+        task: Mapping[str, Any],
+        claim: StageWorkMetadataClaimReceipt,
+        binding: RegionTalkAccessBinding,
+        *,
+        reason: str,
+    ) -> bool:
+        """Persist the master-polled child revocation without parsing a parent launch."""
+
+        if (
+            task.get("claim") != claim.model_dump(mode="json")
+            or claim.worker_task_run_id
+            != TaskWorkerCredentialCommand.model_validate(task.get("command")).task_run_id
+        ):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_COMMAND_CONFLICT")
+        revoke = TaskWorkerCredentialRevocation(
+            worker_kind="region_talk",
+            task_run_id=claim.worker_task_run_id,
+            epoch=claim.epoch,
+            generation=binding.generation,
+            task_token_sha256=binding.task_token_sha256,
+            command_sha256=binding.command_sha256,
+            credential_id=binding.credential_id,
+            reason=reason,
+        )
+        path = self._revocation_path(claim.worker_task_run_id, binding.generation)
+        encoded = canonical_json_bytes(revoke.model_dump(mode="json"))
+        if path.exists() and path.read_bytes() != encoded:
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_REVOCATION_CONFLICT")
+        if path.exists():
+            return False
+        _atomic(path, encoded)
+        return True
+
     def _revoke_certificate_binding(
         self,
         task: Mapping[str, Any],
@@ -851,6 +1015,25 @@ class DirectoryRegionTalkTaskAuthority:
             epoch=metadata.master.epoch,
             worker_kind="region_talk",
             task_run_id=str(metadata.task_run_id),
+            credential_id=str(binding.credential_id),
+            generation=binding.generation,
+            binding_sha256=binding.command_sha256,
+            serial=binding.ssh_certificate_serial,
+            reason=reason,
+        )
+
+    def _revoke_stage_certificate_binding(
+        self,
+        claim: StageWorkMetadataClaimReceipt,
+        binding: RegionTalkAccessBinding,
+        *,
+        reason: str,
+    ) -> None:
+        self.broker.revoke_task_worker_certificate(
+            master_instance_id=str(claim.master_instance_id),
+            epoch=claim.epoch,
+            worker_kind="region_talk",
+            task_run_id=str(claim.worker_task_run_id),
             credential_id=str(binding.credential_id),
             generation=binding.generation,
             binding_sha256=binding.command_sha256,
@@ -918,6 +1101,7 @@ class CentralRegionTalkStageCredentialBroker:
     image_identity: str
     image_source_commit: str
     source_sha256_by_stage: Mapping[str, str]
+    source_factory: Callable[[StageWorkMetadataClaimReceipt], bytes] | None = None
 
     def prepare(
         self, claim_value: Mapping[str, Any] | StageWorkMetadataClaimReceipt
@@ -927,12 +1111,15 @@ class CentralRegionTalkStageCredentialBroker:
             if isinstance(claim_value, StageWorkMetadataClaimReceipt)
             else StageWorkMetadataClaimReceipt.model_validate(claim_value)
         )
-        try:
-            source_sha256 = self.source_sha256_by_stage[claim.stage]
-        except KeyError as exc:
-            raise RegionTalkAssemblyUnavailable(
-                "REGION_TALK_STAGE_NOTEBOOK_SOURCE_UNAVAILABLE"
-            ) from exc
+        if self.source_factory is not None:
+            source_sha256 = hashlib.sha256(self.source_factory(claim)).hexdigest()
+        else:
+            try:
+                source_sha256 = self.source_sha256_by_stage[claim.stage]
+            except KeyError as exc:
+                raise RegionTalkAssemblyUnavailable(
+                    "REGION_TALK_STAGE_NOTEBOOK_SOURCE_UNAVAILABLE"
+                ) from exc
         command = self.authority.prepare_stage_worker(
             claim,
             task_token=secrets.token_urlsafe(36),
@@ -978,6 +1165,523 @@ class CentralRegionTalkStageCredentialBroker:
             worker_command_sha256=command.command_sha256,
             worker_task_token_sha256=command.task_token_sha256,
         )
+
+
+@dataclass(slots=True)
+class CentralRegionTalkStageNotebookAdapter:
+    """One-KPA child launcher with persist-before-effect recovery and exact cleanup."""
+
+    adapter: Any
+    authority: DirectoryRegionTalkTaskAuthority
+    credential_broker: CentralRegionTalkStageCredentialBroker
+    owner: str
+    callback_base_url: str
+    runtime_dataset_exact_ref: str
+    runtime_image_identity: str
+    runtime_image_source_commit: str
+    wheel_relative_path: str
+    wheel_sha256: str
+    dependency_manifest_sha256: str
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC)
+    journal_path: Path | None = None
+    _entries: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.journal_path is None:
+            self.journal_path = self.authority.root / "stage-provider-metadata.json"
+        self._load()
+
+    def source_for_claim(self, claim: StageWorkMetadataClaimReceipt) -> bytes:
+        return render_region_talk_stage_worker_source(
+            claim,
+            runtime_image_identity=self.runtime_image_identity,
+            runtime_image_source_commit=self.runtime_image_source_commit,
+            wheel_relative_path=self.wheel_relative_path,
+            wheel_sha256=self.wheel_sha256,
+            dependency_manifest_sha256=self.dependency_manifest_sha256,
+            model_inputs=stage_model_identity(claim.stage),
+        )
+
+    def _bound_claim(
+        self, launch: StageWorkerLaunch
+    ) -> tuple[StageWorkMetadataClaimReceipt, bytes, str]:
+        claim = self.authority.stage_worker_claim(launch.worker_task_run_id)
+        if (
+            launch.supervisor_task_run_id != claim.supervisor_task_run_id
+            or launch.export_batch_id != claim.export_batch_id
+            or launch.master_instance_id != claim.master_instance_id
+            or launch.epoch != claim.epoch
+            or launch.stage_run_id != claim.stage_run_id
+            or launch.work_item_id != claim.work_item_id
+            or launch.effect_id != claim.effect_id
+            or launch.dispatch_id != claim.dispatch_id
+            or launch.worker_task_run_id != claim.worker_task_run_id
+            or launch.attempt != claim.attempt
+            or launch.stage != claim.stage
+            or launch.contract_version != claim.contract_version
+            or launch.input_fingerprint != claim.input_fingerprint
+            or launch.timeout_seconds != claim.timeout_seconds
+            or launch.claim_receipt_sha256 != claim.claim_receipt_sha256
+            or launch.lease_capability_sha256 != claim.lease_capability_sha256
+        ):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_LAUNCH_CONFLICT")
+        source = self.source_for_claim(claim)
+        source_sha = hashlib.sha256(source).hexdigest()
+        task = self.authority.validate_token(
+            claim.worker_task_run_id,
+            self.authority.task_token(claim.worker_task_run_id),
+        )
+        if (
+            task.get("source_sha256") != source_sha
+            or task.get("image_identity") != self.runtime_image_identity
+            or task.get("image_source_commit") != self.runtime_image_source_commit
+            or bool(task.get("terminal"))
+        ):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_LAUNCH_CONFLICT")
+        return claim, source, source_sha
+
+    def observe(self, launch: StageWorkerLaunch) -> StageProviderObservation:
+        _claim, _source, source_sha = self._bound_claim(launch)
+        entry = self._entries.get(str(launch.dispatch_id))
+        if entry is not None and entry.get("terminal") is not None:
+            return StageProviderObservation(
+                kind=ProviderObservationKind.TERMINAL,
+                launch_receipt=(
+                    StageProviderLaunchReceipt.model_validate(entry["receipt"])
+                    if entry.get("receipt") is not None
+                    else None
+                ),
+                result_sha256=str(entry["terminal"]["result_receipt_sha256"]),
+            )
+        if entry is not None and entry.get("receipt") is not None:
+            receipt = StageProviderLaunchReceipt.model_validate(entry["receipt"])
+            if receipt.source_sha256 != source_sha:
+                return StageProviderObservation(kind=ProviderObservationKind.AMBIGUOUS)
+            return StageProviderObservation(
+                kind=ProviderObservationKind.RUNNING, launch_receipt=receipt
+            )
+        # An intent without a local claim means the process may have died after
+        # Kaggle committed.  launch() performs exact readback before mutation.
+        return StageProviderObservation(kind=ProviderObservationKind.ABSENT)
+
+    def launch(self, launch: StageWorkerLaunch) -> StageProviderLaunchReceipt:
+        observed = self.observe(launch)
+        if observed.launch_receipt is not None:
+            return observed.launch_receipt
+        claim, source, source_sha = self._bound_claim(launch)
+        access = self.authority.stage_worker_active_access(claim.worker_task_run_id)
+        command = self.authority.stage_worker_command(claim.worker_task_run_id)
+        if (
+            access.command_sha256 != command.command_sha256
+            or access.generation != command.generation
+            or access.expires_at <= self.clock().astimezone(UTC) + timedelta(seconds=60)
+        ):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_CREDENTIAL_PENDING")
+        capability = RegionTalkStageWorkerCapability(
+            launch=launch,
+            direct_access=access,
+            callback_base_url=self.callback_base_url,
+            task_token=SecretStr(self.authority.task_token(claim.worker_task_run_id)),
+            task_token_sha256=command.task_token_sha256,
+            runtime_dataset_exact_ref=self.runtime_dataset_exact_ref,
+            runtime_image_identity=self.runtime_image_identity,
+            runtime_image_source_commit=self.runtime_image_source_commit,
+            wheel_relative_path=self.wheel_relative_path,
+            wheel_sha256=self.wheel_sha256,
+            dependency_manifest_sha256=self.dependency_manifest_sha256,
+            model_inputs=stage_model_identity(claim.stage),
+            model_inputs_sha256=hashlib.sha256(
+                canonical_json_bytes(stage_model_identity(claim.stage))
+            ).hexdigest(),
+        )
+        dataset_ref = f"{self.owner}/mdh-rt-cap-{claim.dispatch_id.hex[:24]}"
+        if launch.notebook_ref != f"{self.owner}/mdh-rt-run-{claim.dispatch_id.hex[:24]}":
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_NOTEBOOK_REF_INVALID")
+        files = {
+            "region-talk-stage-worker.json": capability.private_dataset_bytes(),
+            "execution-pins.json": canonical_json_bytes(
+                {
+                    "schema_version": "region-talk-stage-execution-pins.v1",
+                    "source_sha256": source_sha,
+                    "runtime_dataset_exact_ref": self.runtime_dataset_exact_ref,
+                    "runtime_image_identity": self.runtime_image_identity,
+                    "runtime_image_source_commit": self.runtime_image_source_commit,
+                    "wheel_sha256": self.wheel_sha256,
+                    "dependency_manifest_sha256": self.dependency_manifest_sha256,
+                    "model_inputs_sha256": capability.model_inputs_sha256,
+                    "publication_dispatch": False,
+                    "notification_dispatch": False,
+                }
+            ),
+        }
+        key = str(claim.dispatch_id)
+        entry = self._entries.setdefault(
+            key,
+            {
+                "worker_task_run_id": str(claim.worker_task_run_id),
+                "effect_id": str(claim.effect_id),
+                "master_instance_id": str(claim.master_instance_id),
+                "epoch": claim.epoch,
+                "source_sha256": source_sha,
+                "dataset_intent": None,
+                "dataset_claim": None,
+                "notebook_intent": None,
+                "notebook_claim": None,
+                "receipt": None,
+                "attestation": None,
+                "rotation": None,
+                "terminal": None,
+                "cleanup_intents": {},
+                "cleaned": False,
+            },
+        )
+        if (
+            entry["worker_task_run_id"] != str(claim.worker_task_run_id)
+            or entry["effect_id"] != str(claim.effect_id)
+            or entry["source_sha256"] != source_sha
+        ):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_JOURNAL_CONFLICT")
+        operation_id = uuid5(NAMESPACE_URL, f"region-talk-stage:{claim.dispatch_id}")
+        create_arguments = {
+            "content_tree_sha256": mapping_sha256(files),
+            "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
+            "disposable": True,
+        }
+        if entry["dataset_intent"] is None:
+            entry["dataset_intent"] = ProviderEffectIntent.create(
+                operation_id=operation_id,
+                effect_id=uuid5(NAMESPACE_URL, f"region-talk-stage-cap:{claim.dispatch_id}"),
+                idempotency_key=f"region-talk-stage-cap:{claim.dispatch_id}",
+                task_id=claim.worker_task_run_id,
+                action=MutationAction.CREATE_DATASET,
+                provider_ref=dataset_ref,
+                arguments=create_arguments,
+                requested_at=self.clock().astimezone(UTC),
+            ).model_dump(mode="json")
+            self._save()  # original requested_at and intent precede the effect
+        create = ProviderEffectIntent.model_validate(entry["dataset_intent"])
+        if entry["dataset_claim"] is None:
+            version = self.adapter.current_private_dataset_version(provider_ref=dataset_ref)
+            if version is None:
+                dataset = self.adapter.create_private_dataset(
+                    intent=create,
+                    files=files,
+                    title=dataset_ref.split("/", 1)[1],
+                    control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+                    disposable=True,
+                )
+            else:
+                with tempfile.TemporaryDirectory(prefix="mdh-stage-reconcile-") as raw:
+                    directory = Path(raw)
+                    for relative, content in files.items():
+                        target = directory / relative
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(content)
+                    dataset = self.adapter.reconcile_private_dataset_directory_mutation(
+                        intent=create,
+                        source_directory=directory,
+                        expected_version=1,
+                        arguments=create_arguments,
+                        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+                        disposable=True,
+                    )
+            entry["dataset_claim"] = dataset.claim.model_dump(mode="json")
+            self._save()
+        dataset_claim = TaskResourceClaim.model_validate(entry["dataset_claim"])
+        sources = (
+            self.runtime_dataset_exact_ref,
+            f"{dataset_claim.provider_ref}/{dataset_claim.provider_version}",
+        )
+        push_arguments = {
+            "task_run_id": str(claim.worker_task_run_id),
+            "source_sha256": source_sha,
+            "dataset_sources": sources,
+            "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
+            "disposable": True,
+            "docker_image": self.runtime_image_identity,
+            "docker_image_pinning_type": "original",
+        }
+        if entry["notebook_intent"] is None:
+            entry["notebook_intent"] = ProviderEffectIntent.create(
+                operation_id=operation_id,
+                effect_id=uuid5(NAMESPACE_URL, f"region-talk-stage-run:{claim.dispatch_id}"),
+                idempotency_key=f"region-talk-stage-run:{claim.dispatch_id}",
+                task_id=claim.worker_task_run_id,
+                action=MutationAction.PUSH_NOTEBOOK,
+                provider_ref=launch.notebook_ref,
+                arguments=push_arguments,
+                requested_at=self.clock().astimezone(UTC),
+            ).model_dump(mode="json")
+            self._save()
+        push = ProviderEffectIntent.model_validate(entry["notebook_intent"])
+        if entry["notebook_claim"] is None:
+            notebook = self.adapter.reconcile_private_notebook_mutation(
+                intent=push,
+                task_run_id=claim.worker_task_run_id,
+                expected_source_sha256=source_sha,
+                dataset_sources=sources,
+                control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+                disposable=True,
+                docker_image=self.runtime_image_identity,
+                docker_image_pinning_type="original",
+            )
+            if notebook is None:
+                notebook = self.adapter.push_private_worker_notebook_pending_attestation(
+                    intent=push,
+                    task_run_id=claim.worker_task_run_id,
+                    source=source,
+                    title=launch.notebook_ref.split("/", 1)[1],
+                    code_file="region_talk_stage_worker.py",
+                    kernel_type="script",
+                    language="python",
+                    control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+                    disposable=True,
+                    dataset_sources=sources,
+                    enable_internet=True,
+                    timeout_seconds=launch.timeout_seconds,
+                    docker_image=self.runtime_image_identity,
+                    docker_image_pinning_type="original",
+                )
+            entry["notebook_claim"] = notebook.claim.model_dump(mode="json")
+            run_ref = notebook.run.provider_run_ref
+        else:
+            notebook_claim = TaskResourceClaim.model_validate(entry["notebook_claim"])
+            run_ref = f"{notebook_claim.provider_ref}/{notebook_claim.provider_version}"
+        launched_at = self.clock().astimezone(UTC)
+        base = {
+            "schema_version": "region-talk-stage-provider-launch-receipt.v1",
+            "effect_id": str(claim.effect_id),
+            "dispatch_id": str(claim.dispatch_id),
+            "worker_task_run_id": str(claim.worker_task_run_id),
+            "notebook_ref": launch.notebook_ref,
+            "provider_run_ref": run_ref,
+            "source_sha256": source_sha,
+            "launched_at": launched_at.isoformat(),
+        }
+        receipt = StageProviderLaunchReceipt(
+            **base,
+            receipt_sha256=hashlib.sha256(canonical_json_bytes(base)).hexdigest(),
+        )
+        entry["receipt"] = receipt.model_dump(mode="json")
+        self._save()
+        return receipt
+
+    def record_attestation(self, value: RegionTalkStageWorkerAttestation) -> None:
+        entry = self._exact_entry(value.dispatch_id, value.worker_task_run_id, value.effect_id)
+        expected_model = hashlib.sha256(
+            canonical_json_bytes(stage_model_identity(self.authority.stage_worker_claim(UUID(value.worker_task_run_id)).stage))
+        ).hexdigest()
+        if (
+            value.master_instance_id != entry["master_instance_id"]
+            or value.epoch != entry["epoch"]
+            or value.source_sha256 != entry["source_sha256"]
+            or value.image_identity != self.runtime_image_identity
+            or value.image_source_commit != self.runtime_image_source_commit
+            or value.wheel_sha256 != self.wheel_sha256
+            or value.dependency_manifest_sha256 != self.dependency_manifest_sha256
+            or value.model_inputs_sha256 != expected_model
+        ):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_ATTESTATION_CONFLICT")
+        dumped = value.model_dump(mode="json")
+        if entry["attestation"] is not None and entry["attestation"] != dumped:
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_ATTESTATION_CONFLICT")
+        entry["attestation"] = dumped
+        self._save()
+
+    def request_rotation(
+        self, checkpoint: RegionTalkStageWorkerRotationCheckpoint
+    ) -> dict[str, Any]:
+        entry = self._exact_entry(
+            checkpoint.dispatch_id, checkpoint.worker_task_run_id, checkpoint.effect_id
+        )
+        claim = self.authority.stage_worker_claim(UUID(checkpoint.worker_task_run_id))
+        if (
+            checkpoint.supervisor_task_run_id != str(claim.supervisor_task_run_id)
+            or checkpoint.export_batch_id != str(claim.export_batch_id)
+            or checkpoint.work_item_id != str(claim.work_item_id)
+            or entry["attestation"] is None
+        ):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_ROTATION_CONFLICT")
+        active = self.authority.active_binding(claim.worker_task_run_id)
+        if (
+            checkpoint.prior_worker_generation != active.generation
+            or checkpoint.prior_worker_binding_sha256 != active.command_sha256
+        ):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_ROTATION_CONFLICT")
+        rotation = entry.get("rotation")
+        if rotation is not None and rotation.get("activated_receipt") is not None:
+            receipt = StageWorkerRotateReceipt.model_validate(rotation["activated_receipt"])
+            return {
+                "status": "ACTIVATED",
+                "worker_generation": receipt.worker_generation,
+                "worker_binding_sha256": receipt.worker_binding_sha256,
+                "publication_dispatch": False,
+                "notification_dispatch": False,
+            }
+        status = self.credential_broker.prepare_rotation(
+            claim, prior_generation=checkpoint.prior_worker_generation
+        )
+        rotation = rotation or {
+            "checkpoint": checkpoint.model_dump(mode="json"),
+            "request": None,
+            "activated_receipt": None,
+        }
+        if rotation["checkpoint"] != checkpoint.model_dump(mode="json"):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_ROTATION_CONFLICT")
+        if status.status == "READY":
+            assert status.worker_credential_id is not None
+            assert status.worker_generation is not None
+            rotation["request"] = StageWorkerRotateRequest(
+                dispatch_id=claim.dispatch_id,
+                effect_id=claim.effect_id,
+                work_item_id=claim.work_item_id,
+                worker_task_run_id=claim.worker_task_run_id,
+                prior_worker_generation=active.generation,
+                prior_worker_binding_sha256=active.command_sha256,
+                new_worker_credential_id=status.worker_credential_id,
+                new_worker_generation=status.worker_generation,
+                new_worker_command_sha256=status.worker_command_sha256,
+                new_worker_task_token_sha256=status.worker_task_token_sha256,
+                requested_at=checkpoint.requested_at,
+            ).model_dump(mode="json")
+        entry["rotation"] = rotation
+        self._save()
+        return {
+            "status": "READY" if rotation["request"] is not None else "PENDING",
+            "worker_generation": status.worker_generation,
+            "publication_dispatch": False,
+            "notification_dispatch": False,
+        }
+
+    def rotation_requests(
+        self, supervisor_task_run_id: UUID, export_batch_id: UUID
+    ) -> tuple[StageWorkerRotateRequest, ...]:
+        requests: list[StageWorkerRotateRequest] = []
+        for entry in self._entries.values():
+            rotation = entry.get("rotation")
+            if rotation is None or rotation.get("request") is None or rotation.get("activated_receipt") is not None:
+                continue
+            claim = self.authority.stage_worker_claim(UUID(entry["worker_task_run_id"]))
+            if (
+                claim.supervisor_task_run_id == supervisor_task_run_id
+                and claim.export_batch_id == export_batch_id
+            ):
+                requests.append(StageWorkerRotateRequest.model_validate(rotation["request"]))
+        return tuple(requests)
+
+    def activate_rotation(self, activation: RegionTalkStageWorkerRotationActivation) -> None:
+        receipt = activation.receipt
+        entry = self._exact_entry(
+            str(receipt.dispatch_id), str(receipt.worker_task_run_id), str(receipt.effect_id)
+        )
+        rotation = entry.get("rotation")
+        if rotation is None or rotation.get("request") is None:
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_ROTATION_CONFLICT")
+        request = StageWorkerRotateRequest.model_validate(rotation["request"])
+        if (
+            receipt.prior_worker_generation != request.prior_worker_generation
+            or receipt.prior_worker_binding_sha256 != request.prior_worker_binding_sha256
+            or receipt.worker_credential_id != request.new_worker_credential_id
+            or receipt.worker_generation != request.new_worker_generation
+        ):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_ROTATION_CONFLICT")
+        claim = self.authority.stage_worker_claim(receipt.worker_task_run_id)
+        self.authority.activate_stage_worker_rotation(claim, receipt)
+        rotation["activated_receipt"] = receipt.model_dump(mode="json")
+        self._save()
+
+    def rotation_access(self, checkpoint: RegionTalkStageWorkerRotationCheckpoint) -> bytes:
+        entry = self._exact_entry(
+            checkpoint.dispatch_id, checkpoint.worker_task_run_id, checkpoint.effect_id
+        )
+        if entry.get("rotation", {}).get("activated_receipt") is None:
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_ROTATION_PENDING")
+        return self.authority.private_access_bytes(
+            self.authority.stage_worker_active_access(UUID(checkpoint.worker_task_run_id))
+        )
+
+    def complete(self, terminal: RegionTalkStageWorkerTerminal) -> None:
+        entry = self._exact_entry(
+            terminal.dispatch_id, terminal.worker_task_run_id, terminal.effect_id
+        )
+        if entry["attestation"] is None:
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_TERMINAL_UNATTESTED")
+        dumped = terminal.model_dump(mode="json")
+        if entry["terminal"] is not None and entry["terminal"] != dumped:
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_TERMINAL_CONFLICT")
+        if entry["terminal"] == dumped and bool(entry.get("cleaned")):
+            return
+        entry["terminal"] = dumped
+        self._save()
+        self.authority.request_stage_worker_revocation(UUID(terminal.worker_task_run_id))
+        for label, action in (
+            ("notebook", MutationAction.DELETE_NOTEBOOK),
+            ("dataset", MutationAction.DELETE_DATASET),
+        ):
+            claim_value = entry[f"{label}_claim"]
+            if claim_value is None:
+                continue
+            resource = TaskResourceClaim.model_validate(claim_value)
+            intents = entry["cleanup_intents"]
+            if label not in intents:
+                intents[label] = ProviderEffectIntent.create(
+                    operation_id=uuid5(NAMESPACE_URL, f"region-talk-stage-clean:{terminal.dispatch_id}"),
+                    effect_id=uuid5(NAMESPACE_URL, f"region-talk-stage-clean:{label}:{terminal.dispatch_id}"),
+                    idempotency_key=f"region-talk-stage-clean:{label}:{terminal.dispatch_id}",
+                    task_id=UUID(terminal.worker_task_run_id),
+                    action=action,
+                    provider_ref=resource.provider_ref,
+                    expected_fingerprint=resource.fingerprint,
+                    arguments={
+                        "claim_sha256": resource.claim_sha256,
+                        "provider_version": resource.provider_version,
+                    },
+                    requested_at=self.clock().astimezone(UTC),
+                ).model_dump(mode="json")
+                self._save()
+            self.adapter.delete_task_created_resource(
+                intent=ProviderEffectIntent.model_validate(intents[label]), claim=resource
+            )
+        entry["cleaned"] = True
+        self._save()
+
+    def _exact_entry(self, dispatch: str, worker: str, effect: str) -> dict[str, Any]:
+        entry = self._entries.get(dispatch)
+        if (
+            entry is None
+            or entry.get("worker_task_run_id") != worker
+            or entry.get("effect_id") != effect
+        ):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_JOURNAL_CONFLICT")
+        return entry
+
+    def _save(self) -> None:
+        assert self.journal_path is not None
+        value = {
+            "schema_version": "region-talk-stage-provider-journal.v1",
+            "entries": self._entries,
+        }
+        encoded = canonical_json_bytes(value)
+        forbidden = (
+            b'"payload"', b'"input_data"', b'"text"', b'"lease_token"',
+            b'"database_url"', b'"task_token"', b'"lease_token_sha256"',
+        )
+        if any(item in encoded for item in forbidden) or len(encoded) > _MAX_SECRET_BYTES:
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_JOURNAL_FORBIDDEN")
+        _atomic(self.journal_path, encoded)
+
+    def _load(self) -> None:
+        assert self.journal_path is not None
+        if not self.journal_path.exists():
+            return
+        value = DirectoryRegionTalkTaskAuthority._read(self.journal_path)
+        if (
+            set(value) != {"schema_version", "entries"}
+            or value["schema_version"] != "region-talk-stage-provider-journal.v1"
+            or not isinstance(value["entries"], dict)
+        ):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_JOURNAL_INVALID")
+        self._entries = value["entries"]
 
 
 @dataclass(slots=True)
@@ -1431,6 +2135,7 @@ class RegionTalkAssemblySettings:
     runtime_image_source_commit: str = ""
     wheel_relative_path: str = ""
     wheel_sha256: str = ""
+    worker_dependency_manifest_sha256: str = ""
     ydb_endpoint: str = ""
     ydb_database: str = ""
     ydb_viewer_secret_label: str = ""
@@ -1456,6 +2161,9 @@ class RegionTalkAssemblySettings:
             runtime_image_source_commit=os.getenv("MY_DATA_HUB_REGION_TALK_RUNTIME_SOURCE_COMMIT", "").strip(),
             wheel_relative_path=os.getenv("MY_DATA_HUB_REGION_TALK_WHEEL_RELATIVE_PATH", "").strip(),
             wheel_sha256=os.getenv("MY_DATA_HUB_REGION_TALK_WHEEL_SHA256", "").strip(),
+            worker_dependency_manifest_sha256=os.getenv(
+                "MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_SHA256", ""
+            ).strip(),
             ydb_endpoint=os.getenv("MY_DATA_HUB_REGION_TALK_YDB_ENDPOINT", "").strip(),
             ydb_database=os.getenv("MY_DATA_HUB_REGION_TALK_YDB_DATABASE", "").strip(),
             ydb_viewer_secret_label=os.getenv(
@@ -1479,6 +2187,9 @@ class RegionTalkAssemblySettings:
             or not re.fullmatch(r"[a-f0-9]{40}", self.runtime_image_source_commit)
             or not self.wheel_relative_path
             or not re.fullmatch(r"[a-f0-9]{64}", self.wheel_sha256)
+            or not re.fullmatch(
+                r"[a-f0-9]{64}", self.worker_dependency_manifest_sha256
+            )
             or not re.fullmatch(r"grpcs?://[A-Za-z0-9.-]+(?::[1-9][0-9]{0,4})?", self.ydb_endpoint)
             or not re.fullmatch(r"/[A-Za-z0-9_./-]+", self.ydb_database)
             or not re.fullmatch(r"[A-Z][A-Z0-9_]{7,127}", self.ydb_viewer_secret_label)
@@ -1490,6 +2201,7 @@ class RegionTalkAssemblySettings:
 __all__ = [
     "CentralRegionTalkNotebookAdapter",
     "CentralRegionTalkStageCredentialBroker",
+    "CentralRegionTalkStageNotebookAdapter",
     "DirectoryRegionTalkTaskAuthority",
     "RegionTalkAssemblySettings",
     "RegionTalkAssemblyUnavailable",

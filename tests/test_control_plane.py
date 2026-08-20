@@ -65,6 +65,9 @@ def test_region_talk_enabled_but_unassembled_fails_readiness_with_exact_code(
     )
     monkeypatch.setenv("MY_DATA_HUB_REGION_TALK_WHEEL_SHA256", "f" * 64)
     monkeypatch.setenv(
+        "MY_DATA_HUB_EMBEDDING_DEPENDENCY_MANIFEST_SHA256", "8" * 64
+    )
+    monkeypatch.setenv(
         "MY_DATA_HUB_REGION_TALK_YDB_ENDPOINT",
         "grpcs://ydb.serverless.yandexcloud.net:2135",
     )

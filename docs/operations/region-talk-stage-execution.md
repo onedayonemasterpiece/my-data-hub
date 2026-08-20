@@ -78,6 +78,40 @@ runtime with an exact producer identity; without one they return the retryable
 All templates intentionally remain `production_ready=false`. Scheduling, publication, and
 notification remain disabled until a real private run supplies the required receipts.
 
+## Concrete central assembly
+
+The central lifespan now constructs the stage credential broker, dispatcher, and child launcher
+around the **same injected `KaggleProviderAdapter`** used by the supervisor; it does not create a
+second Kaggle client. Each deterministic dispatch owns a unique private, disposable,
+`ORCHESTRATOR_PROTECTED` capability Dataset and worker Notebook. The mode-0600 provider journal
+fsyncs the original Dataset/Notebook/delete `ProviderEffectIntent`, `requested_at`, and generated
+source hash before each effect. Restart first reconciles the exact Dataset package or Notebook
+source/version and never launches a second effect for a lost response.
+
+The generated child verifies its exact source, original image digest and source commit, project
+wheel, canonical offline dependency manifest and every dependency-wheel SHA before installing
+with `--no-index --no-deps`. It authenticates through its task token, attests only metadata,
+opens the task-bound tunnel, and calls the migration 0028 fetch/submit functions directly. A
+near-expiry checkpoint requests generation N+1; the supervisor invokes migration 0029, and
+central revokes N only after the exact database rotation receipt activates N+1. Terminal replay
+reuses the same receipt, revokes all child bindings, and deletes the two exact task-owned provider
+resources. Callback and journal validation reject raw payload/input data/text, lease, database
+URL, or task token. Publication, notification, and schedule gates remain false.
+
+Current executable matrix (code-level, not live evidence):
+
+| Stage | Current worker behavior |
+|---|---|
+| `e5_embedding` | Exact model identity is pinned, but no attached semantic-bank/model runtime asset is configured; returns `FAILED_RETRYABLE`. |
+| `bge_m3_embedding` | Exact model identity is pinned, but no attached semantic-bank/model runtime asset is configured; returns `FAILED_RETRYABLE`. |
+| `vector_fusion` | Executes the repository deterministic transform directly when both exact upstream receipts are current. |
+| `image_scoring` | No attached exact image runtime; returns `FAILED_RETRYABLE`. |
+| `final_verifier` | No attached exact verifier runtime; returns `FAILED_RETRYABLE`. |
+| `writer` | No attached exact writer runtime; returns `FAILED_RETRYABLE`. |
+
+Thus the concrete transport/provider assembly is available, but the end-to-end DAG cannot reach
+database `COMPLETE` until the five missing runtime lanes have reviewed assets and receipts.
+
 ## Residual blockers
 
 1. No real Region Talk semantic-bank E5/BGE, image diagnostic, final verifier, or writer result
@@ -86,14 +120,5 @@ notification remain disabled until a real private run supplies the required rece
 2. The semantic-bank runtime assets and the image/final-verifier/writer donor implementations,
    exact revisions, and shadow-equivalence receipts are not attached. Those workers therefore
    produce retryable failures rather than current evidence.
-3. The metadata-only dispatcher and child credential command/registration handshake are
-   implemented, but the concrete private Kaggle stage adapter, supervisor callbacks, and
-   successive credential-generation rotation are not yet assembled into the central lifespan.
-   Until those are complete the schedule must remain off and no heavy worker is production-ready.
-4. Migration 0029 now supplies exact successive-generation binding/fencing because a child
-   credential lasts at most four minutes while fixed stage timeouts range from five to twenty
-   minutes. The remaining adapter must checkpoint, bind generation N+1, prove the replacement
-   direct session, activate it, and only then revoke N; TTL relaxation or an expired-generation
-   success is forbidden.
-5. No live YDB/PostgreSQL/Kaggle run was performed here. The schedule remains off, and row counts,
+3. No live YDB/PostgreSQL/Kaggle run was performed here. The schedule remains off, and row counts,
    provider-run identities, checkpoint evidence, and operational readiness remain unclaimed.
