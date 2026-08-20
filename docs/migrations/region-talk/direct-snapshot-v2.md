@@ -158,3 +158,12 @@ registered deterministic worker task fetches the exact payload from the ACTIVE m
 using its own short-lived LOGIN, submits directly through a fixed function, and cannot
 reuse another worker's task, generation, epoch, effect, binding, attempt, or lease.
 Supervisor polling and PREPARE remain metadata-only and publication stays false.
+
+## Migration 0029 worker-generation rotation
+
+Long model timeouts can exceed one short-lived database LOGIN. Migration 0029 therefore
+adds append-only worker-generation authority: the supervisor binds only the exact next
+registered generation for the same deterministic worker task, master epoch, dispatch,
+effect, work item, attempt, input, and lease. Fetch and submit accept only the latest
+unexpired bound LOGIN; prior generations are fenced. Rotation and direct-result replay
+are idempotent, metadata-only on the control path, and cannot enable publication.

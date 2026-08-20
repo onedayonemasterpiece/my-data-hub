@@ -624,6 +624,144 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 ).fetchone()[0]
                 payload = payload_receipt["payload"]
                 assert payload["input_fingerprint"] == claim["input_fingerprint"]
+                worker_connection.commit()
+
+            rotated_principal = "mdh_e1_regiong8_acacacac"
+            rotated_password = "region-talk-rotated-password-long-enough"
+            rotated_credential = UUID("acacacac-acac-4cac-8cac-acacacacacac")
+            cross_principal = "mdh_e1_regiong7_adadadad"
+            cross_password = "region-talk-cross-worker-password-long-enough"
+            cross_credential = UUID("adadadad-adad-4dad-8dad-adadadadadad")
+            cross_task = UUID("aeaeaeae-aeae-4eae-8eae-aeaeaeaeaeae")
+            rotated_supervisor_principal = "mdh_e1_regiong6_afafafaf"
+            rotated_supervisor_password = "region-talk-supervisor-rotation-password"
+            rotated_supervisor_credential = UUID("afafafaf-afaf-4faf-8faf-afafafafafaf")
+            with psycopg.connect(admin_url) as worker_admin:
+                gate = DatabaseGate(worker_admin)
+                for principal, password, credential, registered_task, generation in (
+                    (rotated_principal, rotated_password, rotated_credential, worker_task, 3),
+                    (cross_principal, cross_password, cross_credential, cross_task, 1),
+                    (
+                        rotated_supervisor_principal,
+                        rotated_supervisor_password,
+                        rotated_supervisor_credential,
+                        manifest.task_run_id,
+                        2,
+                    ),
+                ):
+                    CredentialProvisioner(worker_admin, gate).create(
+                        principal=principal,
+                        password=password,
+                        group="mdh_region_talk_pipeline",
+                        identity=IDENTITY,
+                        credential_id=credential,
+                        expires_at=now + timedelta(minutes=9),
+                        now=now,
+                    )
+                    worker_admin.execute(
+                        "SELECT master_control.register_task_credential_binding("
+                        "%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (
+                            credential,
+                            principal,
+                            "region_talk",
+                            registered_task,
+                            generation,
+                            IDENTITY.master_instance_id,
+                            1,
+                            "9" * 64,
+                            "a" * 64,
+                        ),
+                    )
+                worker_admin.commit()
+            rotation_request = {
+                "schema_version": "region-talk-stage-worker-rotate.v1",
+                "dispatch_id": claim["dispatch_id"],
+                "effect_id": claim["effect_id"],
+                "work_item_id": claim["work_item_id"],
+                "worker_task_run_id": str(worker_task),
+                "prior_worker_generation": 2,
+                "prior_worker_binding_sha256": binding["worker_binding_sha256"],
+                "new_worker_credential_id": str(rotated_credential),
+                "new_worker_generation": 3,
+                "new_worker_command_sha256": "9" * 64,
+                "new_worker_task_token_sha256": "a" * 64,
+                "requested_at": now.isoformat(),
+                "publication_dispatch": False,
+                "notification_dispatch": False,
+            }
+            rotated_supervisor_url = (
+                f"postgresql://{rotated_supervisor_principal}:{rotated_supervisor_password}"
+                f"@127.0.0.1:{port}/postgres"
+            )
+            with psycopg.connect(rotated_supervisor_url) as rotated_supervisor:
+                rotated_supervisor.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                rotated = rotated_supervisor.execute(
+                    "SELECT migration.rotate_region_talk_stage_worker_credential(%s,%s,%s::jsonb)",
+                    (
+                        manifest.task_run_id,
+                        manifest.export_batch_id,
+                        json.dumps(rotation_request),
+                    ),
+                ).fetchone()[0]
+                assert rotated["worker_generation"] == 3
+                rotated_supervisor.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                assert rotated_supervisor.execute(
+                    "SELECT migration.rotate_region_talk_stage_worker_credential(%s,%s,%s::jsonb)",
+                    (
+                        manifest.task_run_id,
+                        manifest.export_batch_id,
+                        json.dumps(rotation_request),
+                    ),
+                ).fetchone()[0] == rotated
+                rotated_supervisor.commit()
+
+            with psycopg.connect(admin_url) as worker_admin:
+                assert worker_admin.execute(
+                    "SELECT worker_generation,binding_status "
+                    "FROM migration.region_talk_stage_worker_generation_status_v1 "
+                    "WHERE dispatch_id=%s ORDER BY worker_generation",
+                    (UUID(claim["dispatch_id"]),),
+                ).fetchall() == [(2, "FENCED"), (3, "ACTIVE")]
+                assert worker_admin.execute(
+                    "SELECT schema_revision FROM hub.canonical_state"
+                ).fetchone() == (29,)
+
+            # Generation one was valid before rotation and is now fenced.
+            with psycopg.connect(worker_url) as worker_connection:
+                worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                with pytest.raises(psycopg.errors.NoDataFound):
+                    worker_connection.execute(
+                        "SELECT migration.fetch_region_talk_stage_work_payload(%s,%s,%s::jsonb)",
+                        (worker_task, UUID(claim["effect_id"]), json.dumps(fetch_request)),
+                    )
+
+            rotated_url = (
+                f"postgresql://{rotated_principal}:{rotated_password}@127.0.0.1:{port}/postgres"
+            )
+            rotated_fetch = {
+                **fetch_request,
+                "worker_binding_sha256": rotated["worker_binding_sha256"],
+            }
+            cross_url = (
+                f"postgresql://{cross_principal}:{cross_password}@127.0.0.1:{port}/postgres"
+            )
+            cross_fetch = {**rotated_fetch, "worker_task_run_id": str(cross_task)}
+            with psycopg.connect(cross_url) as cross_connection:
+                cross_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                with pytest.raises(psycopg.errors.NoDataFound):
+                    cross_connection.execute(
+                        "SELECT migration.fetch_region_talk_stage_work_payload(%s,%s,%s::jsonb)",
+                        (cross_task, UUID(claim["effect_id"]), json.dumps(cross_fetch)),
+                    )
+
+            with psycopg.connect(rotated_url) as worker_connection:
+                worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                rotated_payload = worker_connection.execute(
+                    "SELECT migration.fetch_region_talk_stage_work_payload(%s,%s,%s::jsonb)",
+                    (worker_task, UUID(claim["effect_id"]), json.dumps(rotated_fetch)),
+                ).fetchone()[0]
+                assert rotated_payload["payload"] == payload
                 result_metadata = {
                     "schema_version": "region-talk-stage-result-metadata.v1",
                     "stage": claim["stage"],
@@ -633,7 +771,7 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                     "candidate_revision": payload["candidate_revision"],
                     "revision_fingerprint": payload["revision_fingerprint"],
                     "input_fingerprint": claim["input_fingerprint"],
-                    "producer_exact_id": "disposable-proof.v2",
+                    "producer_exact_id": "disposable-proof.v3",
                     "metrics": {},
                     "artifact_sha256": None,
                 }
@@ -642,7 +780,7 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                     "worker_task_run_id": str(worker_task),
                     "dispatch_id": claim["dispatch_id"],
                     "effect_id": claim["effect_id"],
-                    "worker_binding_sha256": binding["worker_binding_sha256"],
+                    "worker_binding_sha256": rotated["worker_binding_sha256"],
                     "work_item_id": claim["work_item_id"],
                     "attempt": claim["attempt"],
                     "result_status": "SUCCEEDED",
@@ -665,7 +803,6 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                     (worker_task, UUID(claim["effect_id"]), json.dumps(worker_result)),
                 ).fetchone()[0] == result_receipt
                 worker_connection.commit()
-
             connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
             refreshed = connection.execute(
                 "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",

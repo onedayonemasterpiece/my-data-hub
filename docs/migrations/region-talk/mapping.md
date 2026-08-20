@@ -167,3 +167,17 @@ credential, generation, epoch, effect, binding hash, attempt, or lease fails clo
 supervisor status receipt exposes only identities, counts/status, and result hashes.
 Legacy 0027 payload-returning claim/submit/status functions are revoked from the pipeline
 role; publication and notification remain disabled.
+
+## Long-running worker credential rotation
+
+Migration 0029 keeps the deterministic worker task, dispatch, effect, work item, attempt,
+input fingerprint, and database lease stable while allowing the supervisor to bind the
+next separately registered short-lived credential generation. Binding history is
+append-only; the highest exact generation is `ACTIVE` and every prior generation is
+`FENCED` by the fetch/submit functions.
+
+Rotation requires the current binding hash, exact next generation, current supervisor
+authority, a live child credential for the same worker task/master/epoch, and the original
+work/effect/dispatch identity. Exact response-loss replay returns the same rotation
+receipt. Prior or cross-worker LOGINs cannot fetch or submit after rotation. No payload,
+raw lease, task token, database URL, or publication effect enters the rotation receipt.
