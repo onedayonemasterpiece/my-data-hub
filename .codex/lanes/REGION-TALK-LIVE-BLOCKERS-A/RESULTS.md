@@ -129,7 +129,8 @@ suite; root will run it after C settles.
 
 - Requested integration base: `49a2348` / migration 0029.
 - Actual clean integration base at edit start: `f7d6ea74fcd63bbaeca08e86882f1aa5ac3f4aee`.
-- Implementation HEAD: recorded by the implementation commit containing this section.
+- Implementation HEAD: `a0e8c60`.
+- Results receipt HEAD: recorded by the following receipt commit.
 - Live deployment/provider/YDB/PostgreSQL mutation: **not performed**.
 - One provider adapter: the supervisor and stage assembly share the injected
   `KaggleProviderAdapter`; no second client is constructed.
