@@ -134,3 +134,20 @@ notification dispatch to `false`.
 The database task authority is also no longer established by the first page. The master
 registers the generated credential against the exact task and generation before worker
 handoff, and every direct-snapshot procedure verifies that registration for the LOGIN.
+
+## Verified stage dispatch and non-regressing replay
+
+Migration 0027 makes identical-payload replay an immutable observation only: it cannot
+move the current revision, batch, raw-record pointer, source clock, or projection.
+Changed stale observations remain denied.
+
+The database now selects eligible heavy-stage work through a fixed claim function and
+binds the lease and deterministic effect identity to the registered task and ACTIVE
+epoch. Only bounded, server-hash-verified metadata enters the immutable result landing;
+exact matching landed success is the sole source for `CURRENT` preparation evidence.
+Provider-specific launch state, arbitrary SQL, raw model artifacts, publication, and
+notification are outside these functions.
+
+The canonical publication queue includes an exact-current publication plan or durable
+post-import review row once per candidate revision. Rows from stale batches/revisions
+are excluded and publication remains disabled.

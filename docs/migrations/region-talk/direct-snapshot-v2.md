@@ -138,3 +138,13 @@ The code and schema define the transfer and reconciliation boundary. Operational
 cutover is not proven until a supervised Kaggle run produces a complete receipt on
 the current ACTIVE epoch, all dynamic source counts/hashes reconcile, typed readback
 passes, and the new canonical state is included in a verified checkpoint.
+
+## Migration 0027 dispatch boundary
+
+Migration 0027 makes identical payload replay observation-only, validates every
+post-import stage input/output/receipt digest on the server, and adds fixed
+task/epoch-bound claim, result-submit, and status functions. Successful evidence is
+current only when its immutable landing matches the exact stage, candidate revision,
+revision fingerprint, input fingerprint, task, batch, master instance, and epoch. The
+canonical MCP publication queue includes the matching durable review queue without
+enabling publication or notification.
