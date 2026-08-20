@@ -27,12 +27,14 @@ from .pipeline_contracts import (
     ActiveMasterBinding,
     RegionTalkAccessBinding,
     RegionTalkCleanupReceipt,
+    RegionTalkCredentialActivation,
     RegionTalkLaunchMetadata,
     RegionTalkLaunchReceipt,
     RegionTalkRunRequest,
     RegionTalkRunSnapshot,
     RegionTalkRunState,
     RegionTalkRuntimeAttestation,
+    RegionTalkSupervisorOutcome,
     RegionTalkTerminalReceipt,
     RegionTalkTerminalStatus,
     RegionTalkTrigger,
@@ -493,6 +495,83 @@ class RegionTalkPipelineStore:
         finally:
             connection.close()
 
+    def activate_access(
+        self, activation: RegionTalkCredentialActivation
+    ) -> RegionTalkRunSnapshot:
+        """Durably advance the exact non-secret access binding after authority activation.
+
+        The private authority performs the revoke/activate effect first.  This
+        projection is therefore exact-replay safe after an HTTP response or
+        process loss and makes later cleanup target the actual live generation.
+        """
+
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._bound_row(connection, activation.task_run_id)
+            snapshot = self._snapshot(row)
+            if (
+                snapshot.request.request_id != activation.request_id
+                or snapshot.master is None
+                or snapshot.master.master_instance_id != activation.master_instance_id
+                or snapshot.master.epoch != activation.epoch
+                or snapshot.source_sha256 != activation.source_sha256
+                or str(row["runtime_image_identity"]) != activation.image_identity
+                or str(row["runtime_image_source_commit"])
+                != activation.image_source_commit
+                or snapshot.state
+                not in {RegionTalkRunState.ATTESTED, RegionTalkRunState.RUNNING}
+            ):
+                raise RegionTalkEpochFenced(
+                    "credential activation differs from exact source/image/epoch binding"
+                )
+            if snapshot.access == activation.replacement:
+                connection.commit()
+                return snapshot
+            if snapshot.access != activation.previous:
+                raise RegionTalkPipelineError(
+                    "credential activation does not advance the durable current generation"
+                )
+            replacement = activation.replacement
+            connection.execute(
+                "UPDATE region_talk_pipeline_requests SET credential_id=?,"
+                "credential_generation=?,credential_command_sha256=?,"
+                "credential_task_token_sha256=?,credential_expires_at=?,"
+                "ssh_certificate_serial=?,updated_at=? WHERE task_run_id=?",
+                (
+                    str(replacement.credential_id),
+                    replacement.generation,
+                    replacement.command_sha256,
+                    replacement.task_token_sha256,
+                    _iso(replacement.expires_at),
+                    replacement.ssh_certificate_serial,
+                    _iso(activation.asserted_at),
+                    str(activation.task_run_id),
+                ),
+            )
+            self._event(
+                connection,
+                activation.request_id,
+                snapshot.state,
+                snapshot.state,
+                "TASK_CREDENTIAL_ACTIVATED",
+                activation.asserted_at,
+                {
+                    "credential_id": str(replacement.credential_id),
+                    "generation": replacement.generation,
+                    "command_sha256": replacement.command_sha256,
+                    "ssh_certificate_serial": replacement.ssh_certificate_serial,
+                },
+            )
+            result = self._bound_row(connection, activation.task_run_id)
+            connection.commit()
+            return self._snapshot(result)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def record_terminal(self, receipt: RegionTalkTerminalReceipt) -> RegionTalkRunSnapshot:
         connection = self._connect()
         try:
@@ -517,13 +596,29 @@ class RegionTalkPipelineStore:
                 raise RegionTalkPipelineError("terminal receipt is not expected in the current state")
             connection.execute(
                 "UPDATE region_talk_pipeline_requests SET state='TERMINAL',terminal_status=?,"
-                "terminal_receipt_sha256=?,updated_at=? WHERE task_run_id=?",
-                (status.value, receipt_sha, _iso(receipt.completed_at), str(receipt.task_run_id)),
+                "terminal_receipt_sha256=?,error_code=?,updated_at=? WHERE task_run_id=?",
+                (
+                    status.value,
+                    receipt_sha,
+                    (
+                        None
+                        if receipt.outcome is RegionTalkSupervisorOutcome.SUCCEEDED
+                        else receipt.outcome.value
+                    ),
+                    _iso(receipt.completed_at),
+                    str(receipt.task_run_id),
+                ),
             )
             self._event(
                 connection, receipt.request_id, snapshot.state, RegionTalkRunState.TERMINAL,
                 "RUNTIME_TERMINAL", receipt.completed_at,
-                {"status": status.value, "receipt_sha256": receipt_sha},
+                {
+                    "status": status.value,
+                    "outcome": receipt.outcome.value,
+                    "receipt_sha256": receipt_sha,
+                    "accepted_snapshot_receipt_sha256": receipt.accepted_snapshot_receipt_sha256,
+                    "stage_receipt_sha256": receipt.stage_receipt_sha256,
+                },
             )
             result = self._bound_row(connection, receipt.task_run_id)
             connection.commit()
@@ -651,7 +746,7 @@ class RegionTalkPipelineStore:
                 raise RegionTalkPipelineError("cleanup did not revoke the exact task credential")
             connection.execute(
                 "UPDATE region_talk_pipeline_requests SET state='CLEANED',cleanup_receipt_sha256=?,"
-                "lease_owner=NULL,lease_until=NULL,updated_at=?,error_code=NULL WHERE task_run_id=?",
+                "lease_owner=NULL,lease_until=NULL,updated_at=? WHERE task_run_id=?",
                 (receipt.receipt_sha256, _iso(receipt.cleaned_at), str(receipt.task_run_id)),
             )
             self._event(
@@ -946,6 +1041,9 @@ class RegionTalkCycleDisposition(StrEnum):
     FAILED = "FAILED"
 
 
+BoundedSupervisorOutcome = RegionTalkSupervisorOutcome
+
+
 class RegionTalkCycleRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -967,6 +1065,12 @@ class RegionTalkCycleResult(BaseModel):
     rows_observed: int = Field(ge=0)
     rows_changed: int = Field(ge=0)
     receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    accepted_snapshot_receipt_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
+    stage_receipt_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
     queue_revision: int | None = Field(default=None, ge=0)
 
 
@@ -982,8 +1086,11 @@ class BoundedSupervisorResult:
     rows_observed: int
     rows_changed: int
     completed: bool
+    outcome: BoundedSupervisorOutcome
     aggregate_receipt_sha256: str
     queue_revision: int | None = None
+    accepted_snapshot_receipt_sha256: str | None = None
+    stage_receipt_sha256: str | None = None
 
 
 def run_bounded_supervisor(
@@ -1010,7 +1117,9 @@ def run_bounded_supervisor(
     observed = changed = idle = completed_cycles = 0
     receipt_hashes: list[str] = []
     queue_revision: int | None = None
-    complete = False
+    outcome = BoundedSupervisorOutcome.RETRYABLE
+    accepted_snapshot_receipt_sha256: str | None = None
+    stage_receipt_sha256: str | None = None
     for cycle_number in range(1, max_cycles + 1):
         if monotonic() - started >= max_runtime_seconds:
             break
@@ -1027,21 +1136,30 @@ def run_bounded_supervisor(
         observed += result.rows_observed
         changed += result.rows_changed
         receipt_hashes.append(result.receipt_sha256)
+        if result.accepted_snapshot_receipt_sha256 is not None:
+            accepted_snapshot_receipt_sha256 = result.accepted_snapshot_receipt_sha256
+        if result.stage_receipt_sha256 is not None:
+            stage_receipt_sha256 = result.stage_receipt_sha256
         if result.queue_revision is not None:
             queue_revision = result.queue_revision
         if result.disposition is RegionTalkCycleDisposition.COMPLETE:
-            complete = True
+            outcome = BoundedSupervisorOutcome.SUCCEEDED
             break
         if result.disposition is RegionTalkCycleDisposition.FAILED:
+            outcome = BoundedSupervisorOutcome.IMPORT_FAILED
             break
         if result.disposition is RegionTalkCycleDisposition.IDLE:
             idle += 1
             if idle >= max_idle_cycles:
-                complete = True
                 break
         else:
             idle = 0
         if result.disposition is RegionTalkCycleDisposition.RETRYABLE:
+            if (
+                accepted_snapshot_receipt_sha256 is not None
+                and stage_receipt_sha256 is not None
+            ):
+                outcome = BoundedSupervisorOutcome.IMPORT_COMPLETE_WAITING_STAGES
             sleep(min(2**completed_cycles, 30))
     aggregate = hashlib.sha256(canonical_json_bytes({
         "task_run_id": str(task_run_id),
@@ -1051,6 +1169,9 @@ def run_bounded_supervisor(
         "rows_observed": observed,
         "rows_changed": changed,
         "cycle_receipts": receipt_hashes,
+        "outcome": outcome.value,
+        "accepted_snapshot_receipt_sha256": accepted_snapshot_receipt_sha256,
+        "stage_receipt_sha256": stage_receipt_sha256,
         "queue_revision": queue_revision,
         "publication_dispatch": False,
     })).hexdigest()
@@ -1058,7 +1179,10 @@ def run_bounded_supervisor(
         cycles_completed=completed_cycles,
         rows_observed=observed,
         rows_changed=changed,
-        completed=complete,
+        completed=outcome is BoundedSupervisorOutcome.SUCCEEDED,
+        outcome=outcome,
         aggregate_receipt_sha256=aggregate,
         queue_revision=queue_revision,
+        accepted_snapshot_receipt_sha256=accepted_snapshot_receipt_sha256,
+        stage_receipt_sha256=stage_receipt_sha256,
     )

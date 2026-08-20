@@ -21,6 +21,7 @@ from my_data_hub.workloads.region_talk.pipeline_contracts import (
     ActiveMasterBinding,
     RegionTalkAccessBinding,
     RegionTalkCleanupReceipt,
+    RegionTalkCredentialActivation,
     RegionTalkDirectMasterAccess,
     RegionTalkLaunchMetadata,
     RegionTalkLaunchReceipt,
@@ -36,6 +37,7 @@ from my_data_hub.workloads.region_talk.pipeline_contracts import (
     task_worker_credentials_endpoint,
 )
 from my_data_hub.workloads.region_talk.pipeline_runtime import (
+    BoundedSupervisorOutcome,
     LaunchObservation,
     LaunchObservationKind,
     RegionTalkCycleDisposition,
@@ -420,10 +422,13 @@ def test_terminal_then_cleanup_is_restart_safe_and_exactly_bound(tmp_path: Path)
             master_instance_id=MASTER.master_instance_id,
             epoch=MASTER.epoch,
             status="SUCCEEDED",
+            outcome="SUCCEEDED",
             cycles_completed=3,
             rows_observed=120,
             rows_changed=17,
             queue_revision=4,
+            accepted_snapshot_receipt_sha256="6" * 64,
+            stage_receipt_sha256="7" * 64,
             aggregate_receipt_sha256="8" * 64,
             completed_at=NOW + timedelta(seconds=3),
         )
@@ -433,6 +438,76 @@ def test_terminal_then_cleanup_is_restart_safe_and_exactly_bound(tmp_path: Path)
     cleaned = restarted.tick(MASTER)
     assert cleaned is not None and cleaned.state is RegionTalkRunState.CLEANED
     assert cleaned.cleanup_receipt_sha256 == "9" * 64
+    assert restarted.tick(MASTER) is None
+
+
+def test_rotated_supervisor_binding_survives_restart_and_cleanup_replay(tmp_path: Path) -> None:
+    path = (tmp_path / "control.sqlite3").absolute()
+    cleanup = _Cleanup()
+    coordinator = _coordinator(path, _Launcher(), cleanup)
+    coordinator.request_supervised(idempotency_key="supervised-region-talk-rotation-cleanup")
+    launched = coordinator.tick(MASTER)
+    assert launched is not None and launched.task_run_id is not None
+    assert launched.access is not None
+    replacement = launched.access.model_copy(
+        update={
+            "credential_id": UUID("77777777-7777-4777-8777-777777777777"),
+            "generation": 2,
+            "command_sha256": "8" * 64,
+            "expires_at": NOW + timedelta(minutes=20),
+            "ssh_certificate_serial": 7002,
+        }
+    )
+    activation = RegionTalkCredentialActivation(
+        request_id=launched.request.request_id,
+        task_run_id=launched.task_run_id,
+        master_instance_id=MASTER.master_instance_id,
+        epoch=MASTER.epoch,
+        source_sha256="1" * 64,
+        image_identity=_pins().runtime_image_identity,
+        image_source_commit=_pins().runtime_image_source_commit,
+        previous=launched.access,
+        replacement=replacement,
+        asserted_at=NOW + timedelta(seconds=2),
+    )
+    coordinator.store.attest(
+        RegionTalkRuntimeAttestation(
+            request_id=launched.request.request_id,
+            task_run_id=launched.task_run_id,
+            master_instance_id=MASTER.master_instance_id,
+            epoch=MASTER.epoch,
+            source_sha256="1" * 64,
+            image_identity=_pins().runtime_image_identity,
+            image_source_commit=_pins().runtime_image_source_commit,
+            attested_at=NOW + timedelta(seconds=1),
+        )
+    )
+    updated = coordinator.store.activate_access(activation)
+    assert updated.access == replacement
+    assert coordinator.store.activate_access(activation).access == replacement
+    terminal = coordinator.store.record_terminal(
+        RegionTalkTerminalReceipt(
+            request_id=launched.request.request_id,
+            task_run_id=launched.task_run_id,
+            master_instance_id=MASTER.master_instance_id,
+            epoch=MASTER.epoch,
+            status="FAILED",
+            outcome="IMPORT_COMPLETE_WAITING_STAGES",
+            cycles_completed=1,
+            rows_observed=1,
+            rows_changed=1,
+            accepted_snapshot_receipt_sha256="a" * 64,
+            stage_receipt_sha256="b" * 64,
+            aggregate_receipt_sha256="c" * 64,
+            completed_at=NOW + timedelta(seconds=4),
+        )
+    )
+    assert terminal.error_code == "IMPORT_COMPLETE_WAITING_STAGES"
+    restarted = _coordinator(path, _Launcher(), cleanup, instance="scheduler-b")
+    cleaned = restarted.tick(MASTER)
+    assert cleaned is not None and cleaned.state is RegionTalkRunState.CLEANED
+    assert cleaned.error_code == "IMPORT_COMPLETE_WAITING_STAGES"
+    assert cleanup.calls[-1].access == replacement
     assert restarted.tick(MASTER) is None
 
 
@@ -565,6 +640,9 @@ def test_private_capability_is_separate_and_bootstrap_attests_before_database_ac
     assert b"--no-deps" in source
     assert b'exact YDB dependency wheel is absent or ambiguous' in source
     assert b"post_metadata_with_replay(TERMINAL_PATH" in source
+    assert b'"outcome":result.outcome.value' in source
+    assert b'"accepted_snapshot_receipt_sha256"' in source
+    assert b'"stage_receipt_sha256"' in source
     assert b"set_transport_refresher" in source
     assert b"publication_dispatch=False" in source
     assert b"exact Region Talk capability input is absent or ambiguous" in source
@@ -598,9 +676,40 @@ def test_bounded_supervisor_stops_after_idle_and_never_dispatches() -> None:
         monotonic=lambda: next(ticks),
         sleep=lambda _seconds: None,
     )
-    assert result.completed is True and result.cycles_completed == 2
+    assert result.completed is False and result.cycles_completed == 2
+    assert result.outcome is BoundedSupervisorOutcome.RETRYABLE
     assert result.rows_observed == 2 and result.rows_changed == 0
     assert all(call.publication_dispatch is False for call in executor.calls)
+
+
+def test_bounded_supervisor_preserves_import_waiting_receipt_chain() -> None:
+    class Executor:
+        def execute_cycle(self, request):  # type: ignore[no-untyped-def]
+            return RegionTalkCycleResult(
+                disposition=RegionTalkCycleDisposition.RETRYABLE,
+                rows_observed=3,
+                rows_changed=2,
+                receipt_sha256="d" * 64,
+                accepted_snapshot_receipt_sha256="e" * 64,
+                stage_receipt_sha256="f" * 64,
+                queue_revision=9,
+            )
+
+    ticks = iter((0.0, 1.0, 2.0))
+    result = run_bounded_supervisor(
+        executor=Executor(),
+        task_run_id=UUID("55555555-5555-4555-8555-555555555555"),
+        master_instance_id=MASTER.master_instance_id,
+        epoch=MASTER.epoch,
+        max_cycles=1,
+        max_runtime_seconds=600,
+        monotonic=lambda: next(ticks),
+        sleep=lambda _seconds: None,
+    )
+    assert result.completed is False
+    assert result.outcome is BoundedSupervisorOutcome.IMPORT_COMPLETE_WAITING_STAGES
+    assert result.accepted_snapshot_receipt_sha256 == "e" * 64
+    assert result.stage_receipt_sha256 == "f" * 64
 
 
 def test_control_journal_contains_only_fixed_metadata_columns(tmp_path: Path) -> None:

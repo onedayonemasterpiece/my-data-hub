@@ -63,6 +63,15 @@ class RegionTalkTerminalStatus(StrEnum):
     EPOCH_FENCED = "EPOCH_FENCED"
 
 
+class RegionTalkSupervisorOutcome(StrEnum):
+    """Business-safe bounded outcome, separate from control-run cleanup state."""
+
+    SUCCEEDED = "SUCCEEDED"
+    IMPORT_COMPLETE_WAITING_STAGES = "IMPORT_COMPLETE_WAITING_STAGES"
+    RETRYABLE = "RETRYABLE"
+    IMPORT_FAILED = "IMPORT_FAILED"
+
+
 class ActiveMasterBinding(BaseModel):
     """Exact ACTIVE-master runtime identity used to fence a pipeline run."""
 
@@ -229,10 +238,17 @@ class RegionTalkTerminalReceipt(BaseModel):
     master_instance_id: UUID
     epoch: int = Field(ge=1)
     status: Literal["SUCCEEDED", "FAILED"]
+    outcome: RegionTalkSupervisorOutcome
     cycles_completed: int = Field(ge=0, le=96)
     rows_observed: int = Field(ge=0)
     rows_changed: int = Field(ge=0)
     queue_revision: int | None = Field(default=None, ge=0)
+    accepted_snapshot_receipt_sha256: str | None = Field(
+        default=None, pattern=_SHA256_PATTERN
+    )
+    stage_receipt_sha256: str | None = Field(
+        default=None, pattern=_SHA256_PATTERN
+    )
     aggregate_receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
     completed_at: datetime
     publication_dispatch: Literal[False] = False
@@ -241,6 +257,26 @@ class RegionTalkTerminalReceipt(BaseModel):
     @classmethod
     def completed_at_is_utc(cls, value: datetime) -> datetime:
         return _as_utc(value)
+
+    @model_validator(mode="after")
+    def outcome_matches_terminal_class(self) -> RegionTalkTerminalReceipt:
+        if (self.status == "SUCCEEDED") != (
+            self.outcome is RegionTalkSupervisorOutcome.SUCCEEDED
+        ):
+            raise ValueError("terminal status and bounded outcome differ")
+        receipt_ids = (
+            self.accepted_snapshot_receipt_sha256,
+            self.stage_receipt_sha256,
+        )
+        if (receipt_ids[0] is None) != (receipt_ids[1] is None):
+            raise ValueError("accepted snapshot and stage receipt IDs must be paired")
+        if self.outcome in {
+            RegionTalkSupervisorOutcome.SUCCEEDED,
+            RegionTalkSupervisorOutcome.IMPORT_COMPLETE_WAITING_STAGES,
+            RegionTalkSupervisorOutcome.IMPORT_FAILED,
+        } and receipt_ids[0] is None:
+            raise ValueError("import outcome requires accepted snapshot and stage receipt IDs")
+        return self
 
 
 class TaskWorkerCredentialCommand(BaseModel):

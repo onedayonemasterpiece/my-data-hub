@@ -14,6 +14,9 @@ from pydantic import SecretStr
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.providers.kaggle.contracts import (
     KaggleAmbiguousMutation,
+    KaggleKernelRunIdentity,
+    KaggleKernelStatus,
+    KernelState,
     TaskResourceClaim,
 )
 from my_data_hub.providers.models import ControlClass, ProviderFingerprint, ProviderKind
@@ -203,6 +206,7 @@ class _StageAuthority:
         )
         self.source_sha256 = ""
         self.revoked = 0
+        self.terminal = False
         self.access = RegionTalkDirectMasterAccess(
             credential_id=UUID("66666666-6666-4666-8666-666666666666"),
             task_run_id=claim.worker_task_run_id,
@@ -242,11 +246,12 @@ class _StageAuthority:
             "source_sha256": self.source_sha256,
             "image_identity": "runtime@sha256:" + "d" * 64,
             "image_source_commit": "e" * 40,
-            "terminal": False,
+            "terminal": self.terminal,
         }
 
     def request_stage_worker_revocation(self, _task):  # type: ignore[no-untyped-def]
         self.revoked += 1
+        self.terminal = True
 
 
 class _LostStageProvider:
@@ -256,6 +261,9 @@ class _LostStageProvider:
         self.dataset_creates = 0
         self.notebook_pushes = 0
         self.deletes = 0
+        self.run: KaggleKernelRunIdentity | None = None
+        self.status_state = KernelState.RUNNING
+        self.status_observed_at = NOW
 
     @staticmethod
     def claim(intent, kind):  # type: ignore[no-untyped-def]
@@ -286,9 +294,40 @@ class _LostStageProvider:
         if not self.notebook_present:
             return None
         claim = self.claim(intent, ProviderKind.NOTEBOOK)
+        self.run = self.run or KaggleKernelRunIdentity(
+            task_run_id=intent.task_id,
+            provider_ref=claim.provider_ref,
+            source_version=1,
+            source_sha256=_kwargs["expected_source_sha256"],
+            provider_kernel_id=81,
+            provider_run_ref=f"{claim.provider_ref}/1",
+            started_at=NOW,
+        )
         return SimpleNamespace(
             claim=claim,
-            run=SimpleNamespace(provider_run_ref=f"{claim.provider_ref}/1"),
+            run=self.run,
+        )
+
+    def reconcile_private_notebook_run(self, *, task_run_id, provider_ref, expected_source_sha256):  # type: ignore[no-untyped-def]
+        if not self.notebook_present:
+            return None
+        self.run = self.run or KaggleKernelRunIdentity(
+            task_run_id=task_run_id,
+            provider_ref=provider_ref,
+            source_version=1,
+            source_sha256=expected_source_sha256,
+            provider_kernel_id=81,
+            provider_run_ref=f"{provider_ref}/1",
+            started_at=NOW,
+        )
+        return self.run
+
+    def read_run_status(self, run):  # type: ignore[no-untyped-def]
+        return KaggleKernelStatus(
+            run=run,
+            state=self.status_state,
+            provider_status=self.status_state.value,
+            observed_at=self.status_observed_at,
         )
 
     def push_private_worker_notebook_pending_attestation(self, **_kwargs):  # type: ignore[no-untyped-def]
@@ -431,6 +470,98 @@ def test_generated_direct_stage_worker_is_offline_pinned_and_compiles() -> None:
         b"notification_dispatch':False",
     ):
         assert required in source
+    install_offset = source.index(b"pip','install")
+    attestation_offset = source.index(b"stage/attestation")
+    forced_rotation_offset = source.index(b"force=True")
+    access_offset = source.index(b"stage/rotation/access")
+    materialize_offset = source.index(
+        b"replacement_functions,replacement_tunnel,replacement_connection=materialize(replacement)"
+    )
+    worker_offset = source.index(b"execute_direct_region_talk_stage_worker")
+    assert install_offset < attestation_offset < forced_rotation_offset < worker_offset
+    assert access_offset < materialize_offset < forced_rotation_offset
+    assert b"materialize(access)" not in source
+    assert b"post_with_exact_replay('/internal/region-talk-pipeline/stage/terminal'" in source
+
+
+@pytest.mark.parametrize(
+    ("provider_state", "elapsed_seconds", "expected_status"),
+    (
+        (KernelState.FAILED, 10, "FAILED_RETRYABLE"),
+        (KernelState.RUNNING, 901, "FAILED_RETRYABLE"),
+        (KernelState.COMPLETE, 10, "SUCCEEDED"),
+    ),
+)
+def test_stage_provider_terminal_reaper_is_restart_safe_and_metadata_only(
+    tmp_path: Path,
+    provider_state: KernelState,
+    elapsed_seconds: int,
+    expected_status: str,
+) -> None:
+    claim = StageWorkMetadataClaimReceipt.model_validate(_metadata_claim())
+    binding = StageWorkerBindingReceipt.model_validate(_binding(claim.model_dump(mode="json")))
+    launch = StageWorkerLaunch(
+        supervisor_task_run_id=claim.supervisor_task_run_id,
+        export_batch_id=claim.export_batch_id,
+        master_instance_id=claim.master_instance_id,
+        epoch=claim.epoch,
+        stage_run_id=claim.stage_run_id,
+        work_item_id=claim.work_item_id,
+        effect_id=claim.effect_id,
+        dispatch_id=claim.dispatch_id,
+        worker_task_run_id=claim.worker_task_run_id,
+        attempt=claim.attempt,
+        stage=claim.stage,
+        contract_version=claim.contract_version,
+        notebook_ref=f"owner/mdh-rt-run-{claim.dispatch_id.hex[:24]}",
+        input_fingerprint=claim.input_fingerprint,
+        timeout_seconds=claim.timeout_seconds,
+        claim_receipt_sha256=claim.claim_receipt_sha256,
+        worker_binding_sha256=binding.worker_binding_sha256,
+        lease_capability_sha256=claim.lease_capability_sha256,
+    )
+    root = (tmp_path / "private").absolute()
+    root.mkdir(mode=0o700)
+    authority = _StageAuthority(root, claim)
+    provider = _LostStageProvider()
+    provider.dataset_present = True
+    provider.notebook_present = True
+
+    def make(now: datetime) -> CentralRegionTalkStageNotebookAdapter:
+        value = CentralRegionTalkStageNotebookAdapter(
+            adapter=provider,
+            authority=authority,  # type: ignore[arg-type]
+            credential_broker=SimpleNamespace(),  # type: ignore[arg-type]
+            owner="owner",
+            callback_base_url="https://control.example",
+            runtime_dataset_exact_ref="owner/runtime/12",
+            runtime_image_identity="runtime@sha256:" + "d" * 64,
+            runtime_image_source_commit="e" * 40,
+            wheel_relative_path="dist/my_data_hub.whl",
+            wheel_sha256="f" * 64,
+            dependency_manifest_sha256="9" * 64,
+            clock=lambda: now,
+        )
+        authority.source_sha256 = hashlib.sha256(value.source_for_claim(claim)).hexdigest()
+        return value
+
+    make(NOW).launch(launch)
+    provider.status_state = provider_state
+    provider.status_observed_at = NOW + timedelta(seconds=elapsed_seconds)
+    restarted = make(NOW + timedelta(seconds=elapsed_seconds))
+    assert restarted.reconcile_terminal_runs() == 1
+    assert restarted.reconcile_terminal_runs() == 0
+    assert restarted.observe(launch).kind is ProviderObservationKind.TERMINAL
+    entry = json.loads((root / "stage-provider-metadata.json").read_bytes())["entries"][
+        str(claim.dispatch_id)
+    ]
+    assert entry["terminal"]["result_status"] == expected_status
+    assert entry["cleaned"] is True
+    assert provider.deletes == 2
+    assert authority.revoked == 1
+    encoded = canonical_json_bytes(entry)
+    for forbidden in (b'"payload"', b'"text"', b'"task_token"', b'"database_url"'):
+        assert forbidden not in encoded
 
 
 def test_claim_and_binding_tamper_fail_before_launch(tmp_path: Path) -> None:

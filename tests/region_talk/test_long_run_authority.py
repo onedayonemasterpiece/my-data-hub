@@ -295,10 +295,10 @@ def test_stage_generation_n_is_revoked_only_after_exact_n_plus_one_db_receipt(
         "effect_id": str(claim.effect_id),
         "worker_task_run_id": str(claim.worker_task_run_id),
         "prior_worker_generation": first.generation,
-        "prior_worker_binding_sha256": first.command_sha256,
+        "prior_worker_binding_sha256": "c" * 64,
         "worker_credential_id": str(second_registration.credential_id),
         "worker_generation": second.generation,
-        "worker_binding_sha256": second.command_sha256,
+        "worker_binding_sha256": "d" * 64,
         "publication_dispatch": False,
         "notification_dispatch": False,
     }
@@ -746,6 +746,7 @@ def test_terminal_callback_resolves_current_active_epoch_and_fences_stale_run(
         def __init__(self) -> None:
             self.fenced = 0
             self.terminals = 0
+            self.activations: list[object] = []
 
         def expire_and_fence(self, **_kwargs):  # type: ignore[no-untyped-def]
             self.fenced += 1
@@ -754,6 +755,10 @@ def test_terminal_callback_resolves_current_active_epoch_and_fences_stale_run(
         def record_terminal(self, _receipt):  # type: ignore[no-untyped-def]
             self.terminals += 1
             raise AssertionError("stale terminal must not be recorded")
+
+        def activate_access(self, activation):  # type: ignore[no-untyped-def]
+            self.activations.append(activation)
+            return snapshot
 
     store = _Store()
     coordinator = SimpleNamespace(
@@ -786,10 +791,13 @@ def test_terminal_callback_resolves_current_active_epoch_and_fences_stale_run(
         "master_instance_id": str(MASTER.master_instance_id),
         "epoch": 2,
         "status": "SUCCEEDED",
+        "outcome": "SUCCEEDED",
         "cycles_completed": 1,
         "rows_observed": 10,
         "rows_changed": 10,
         "queue_revision": None,
+        "accepted_snapshot_receipt_sha256": "d" * 64,
+        "stage_receipt_sha256": "e" * 64,
         "aggregate_receipt_sha256": "c" * 64,
         "completed_at": (NOW + timedelta(minutes=1)).isoformat(),
         "publication_dispatch": False,
@@ -864,6 +872,7 @@ def test_terminal_callback_resolves_current_active_epoch_and_fences_stale_run(
     assert response.status_code == 200
     assert response.json()["generation"] == 2
     assert len(activations) == 1
+    assert store.activations == activations
 
 
 def test_exact_terminal_http_response_loss_replay_is_accepted(tmp_path: Path) -> None:
@@ -874,9 +883,12 @@ def test_exact_terminal_http_response_loss_replay_is_accepted(tmp_path: Path) ->
         master_instance_id=metadata.master.master_instance_id,
         epoch=metadata.master.epoch,
         status="SUCCEEDED",
+        outcome="SUCCEEDED",
         cycles_completed=1,
         rows_observed=10,
         rows_changed=10,
+        accepted_snapshot_receipt_sha256="d" * 64,
+        stage_receipt_sha256="e" * 64,
         aggregate_receipt_sha256="c" * 64,
         completed_at=NOW,
     )

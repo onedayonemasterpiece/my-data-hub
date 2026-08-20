@@ -322,6 +322,8 @@ class DirectRegionTalkCycleExecutor:
             rows_changed=(self._snapshot_rows_changed if first_poll else 0)
             + stage_receipt.rows_changed,
             receipt_sha256=receipt_sha256,
+            accepted_snapshot_receipt_sha256=self._snapshot_receipt_sha256,
+            stage_receipt_sha256=stage_receipt.receipt_sha256,
             queue_revision=stage_receipt.queue_revision,
         )
         return self._receipt

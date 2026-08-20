@@ -803,6 +803,10 @@ def create_app(
                 if launcher is not None:
                     with suppress(Exception):
                         await asyncio.to_thread(launcher.reconcile_timeouts)
+                stage_adapter = app.state.region_talk_stage_adapter
+                if stage_adapter is not None:
+                    with suppress(Exception):
+                        await asyncio.to_thread(stage_adapter.reconcile_terminal_runs)
                 coordinator = app.state.region_talk_coordinator
                 if coordinator is not None:
                     active = _active_region_talk_master()
@@ -3005,8 +3009,17 @@ def create_app(
         )
         try:
             app.state.region_talk_task_authority.activate(activation)
+            # Authority activation is the external effect.  Persist the new
+            # non-secret binding only afterwards; exact replay repairs the
+            # SQLite projection if the prior HTTP response was lost.
+            coordinator.store.activate_access(activation)
         except RegionTalkAssemblyUnavailable as exc:
             raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "region_talk_activation_projection_rejected"},
+            ) from exc
         return {
             "activated": True,
             "task_run_id": str(activation.task_run_id),

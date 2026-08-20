@@ -354,6 +354,8 @@ def test_cycle_requires_typed_post_import_receipt_before_success(monkeypatch) ->
     assert result.rows_observed == 58_554
     assert result.rows_changed == 58_563
     assert result.queue_revision == 17
+    assert result.accepted_snapshot_receipt_sha256 is not None
+    assert result.stage_receipt_sha256 == "a" * 64
     assert reconciled == ["claim"]
     assert calls == [
         "inventory",

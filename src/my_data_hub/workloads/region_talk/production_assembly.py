@@ -30,6 +30,8 @@ from pydantic import SecretStr
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.providers.kaggle.adapter import mapping_sha256
 from my_data_hub.providers.kaggle.contracts import (
+    KaggleKernelRunIdentity,
+    KernelState,
     MutationAction,
     ProviderEffectIntent,
     TaskResourceClaim,
@@ -433,11 +435,9 @@ class DirectoryRegionTalkTaskAuthority:
         replacement = self._task_binding(task, receipt.worker_generation)
         if (
             previous.generation != receipt.prior_worker_generation
-            or previous.command_sha256 != receipt.prior_worker_binding_sha256
             or previous.command_sha256 == replacement.command_sha256
             or replacement.credential_id != receipt.worker_credential_id
             or replacement.generation != receipt.worker_generation
-            or replacement.command_sha256 != receipt.worker_binding_sha256
             or replacement.command_sha256
             != self.stage_worker_command(claim.worker_task_run_id).command_sha256
         ):
@@ -1241,9 +1241,10 @@ class CentralRegionTalkStageNotebookAdapter:
         return claim, source, source_sha
 
     def observe(self, launch: StageWorkerLaunch) -> StageProviderObservation:
-        _claim, _source, source_sha = self._bound_claim(launch)
         entry = self._entries.get(str(launch.dispatch_id))
         if entry is not None and entry.get("terminal") is not None:
+            if entry.get("launch") != launch.model_dump(mode="json"):
+                return StageProviderObservation(kind=ProviderObservationKind.AMBIGUOUS)
             return StageProviderObservation(
                 kind=ProviderObservationKind.TERMINAL,
                 launch_receipt=(
@@ -1253,6 +1254,7 @@ class CentralRegionTalkStageNotebookAdapter:
                 ),
                 result_sha256=str(entry["terminal"]["result_receipt_sha256"]),
             )
+        _claim, _source, source_sha = self._bound_claim(launch)
         if entry is not None and entry.get("receipt") is not None:
             receipt = StageProviderLaunchReceipt.model_validate(entry["receipt"])
             if receipt.source_sha256 != source_sha:
@@ -1323,11 +1325,14 @@ class CentralRegionTalkStageNotebookAdapter:
                 "master_instance_id": str(claim.master_instance_id),
                 "epoch": claim.epoch,
                 "source_sha256": source_sha,
+                "launch": launch.model_dump(mode="json"),
                 "dataset_intent": None,
                 "dataset_claim": None,
                 "notebook_intent": None,
                 "notebook_claim": None,
+                "provider_run": None,
                 "receipt": None,
+                "current_worker_binding_sha256": launch.worker_binding_sha256,
                 "attestation": None,
                 "rotation": None,
                 "terminal": None,
@@ -1339,6 +1344,7 @@ class CentralRegionTalkStageNotebookAdapter:
             entry["worker_task_run_id"] != str(claim.worker_task_run_id)
             or entry["effect_id"] != str(claim.effect_id)
             or entry["source_sha256"] != source_sha
+            or entry.get("launch") != launch.model_dump(mode="json")
         ):
             raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_JOURNAL_CONFLICT")
         operation_id = uuid5(NAMESPACE_URL, f"region-talk-stage:{claim.dispatch_id}")
@@ -1443,11 +1449,26 @@ class CentralRegionTalkStageNotebookAdapter:
                     docker_image_pinning_type="original",
                 )
             entry["notebook_claim"] = notebook.claim.model_dump(mode="json")
-            run_ref = notebook.run.provider_run_ref
+            entry["provider_run"] = notebook.run.model_dump(mode="json")
+            self._save()
+            provider_run = notebook.run
         else:
             notebook_claim = TaskResourceClaim.model_validate(entry["notebook_claim"])
-            run_ref = f"{notebook_claim.provider_ref}/{notebook_claim.provider_version}"
-        launched_at = self.clock().astimezone(UTC)
+            if entry.get("provider_run") is None:
+                recovered = self.adapter.reconcile_private_notebook_run(
+                    task_run_id=claim.worker_task_run_id,
+                    provider_ref=notebook_claim.provider_ref,
+                    expected_source_sha256=source_sha,
+                )
+                if recovered is None:
+                    raise RegionTalkAssemblyUnavailable(
+                        "REGION_TALK_STAGE_RUN_IDENTITY_AMBIGUOUS"
+                    )
+                entry["provider_run"] = recovered.model_dump(mode="json")
+                self._save()
+            provider_run = KaggleKernelRunIdentity.model_validate(entry["provider_run"])
+        run_ref = provider_run.provider_run_ref
+        launched_at = provider_run.started_at.astimezone(UTC)
         base = {
             "schema_version": "region-talk-stage-provider-launch-receipt.v1",
             "effect_id": str(claim.effect_id),
@@ -1456,7 +1477,7 @@ class CentralRegionTalkStageNotebookAdapter:
             "notebook_ref": launch.notebook_ref,
             "provider_run_ref": run_ref,
             "source_sha256": source_sha,
-            "launched_at": launched_at.isoformat(),
+            "launched_at": launched_at.isoformat().replace("+00:00", "Z"),
         }
         receipt = StageProviderLaunchReceipt(
             **base,
@@ -1505,7 +1526,8 @@ class CentralRegionTalkStageNotebookAdapter:
         active = self.authority.active_binding(claim.worker_task_run_id)
         if (
             checkpoint.prior_worker_generation != active.generation
-            or checkpoint.prior_worker_binding_sha256 != active.command_sha256
+            or checkpoint.prior_worker_binding_sha256
+            != entry.get("current_worker_binding_sha256")
         ):
             raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_ROTATION_CONFLICT")
         rotation = entry.get("rotation")
@@ -1537,7 +1559,7 @@ class CentralRegionTalkStageNotebookAdapter:
                 work_item_id=claim.work_item_id,
                 worker_task_run_id=claim.worker_task_run_id,
                 prior_worker_generation=active.generation,
-                prior_worker_binding_sha256=active.command_sha256,
+                prior_worker_binding_sha256=checkpoint.prior_worker_binding_sha256,
                 new_worker_credential_id=status.worker_credential_id,
                 new_worker_generation=status.worker_generation,
                 new_worker_command_sha256=status.worker_command_sha256,
@@ -1588,6 +1610,7 @@ class CentralRegionTalkStageNotebookAdapter:
         claim = self.authority.stage_worker_claim(receipt.worker_task_run_id)
         self.authority.activate_stage_worker_rotation(claim, receipt)
         rotation["activated_receipt"] = receipt.model_dump(mode="json")
+        entry["current_worker_binding_sha256"] = receipt.worker_binding_sha256
         self._save()
 
     def rotation_access(self, checkpoint: RegionTalkStageWorkerRotationCheckpoint) -> bytes:
@@ -1601,10 +1624,18 @@ class CentralRegionTalkStageNotebookAdapter:
         )
 
     def complete(self, terminal: RegionTalkStageWorkerTerminal) -> None:
+        self._complete(terminal, require_attestation=True)
+
+    def _complete(
+        self,
+        terminal: RegionTalkStageWorkerTerminal,
+        *,
+        require_attestation: bool,
+    ) -> None:
         entry = self._exact_entry(
             terminal.dispatch_id, terminal.worker_task_run_id, terminal.effect_id
         )
-        if entry["attestation"] is None:
+        if require_attestation and entry["attestation"] is None:
             raise RegionTalkAssemblyUnavailable("REGION_TALK_STAGE_TERMINAL_UNATTESTED")
         dumped = terminal.model_dump(mode="json")
         if entry["terminal"] is not None and entry["terminal"] != dumped:
@@ -1644,6 +1675,89 @@ class CentralRegionTalkStageNotebookAdapter:
             )
         entry["cleaned"] = True
         self._save()
+
+    def reconcile_terminal_runs(self) -> int:
+        """Observe exact Kaggle runs and reap completed/failed/timed-out children.
+
+        The persisted synthetic terminal is metadata-only and precedes every
+        revocation/delete effect, so restart or response loss cannot launch a
+        second effect or change the result identity.
+        """
+
+        reconciled = 0
+        now = self.clock().astimezone(UTC)
+        for entry in tuple(self._entries.values()):
+            if entry.get("receipt") is None or bool(entry.get("cleaned")):
+                continue
+            if entry.get("terminal") is not None:
+                terminal = RegionTalkStageWorkerTerminal.model_validate(entry["terminal"])
+                self._complete(terminal, require_attestation=False)
+                reconciled += 1
+                continue
+            receipt = StageProviderLaunchReceipt.model_validate(entry["receipt"])
+            claim = self.authority.stage_worker_claim(UUID(entry["worker_task_run_id"]))
+            provider_run_value = entry.get("provider_run")
+            if provider_run_value is None:
+                recovered = self.adapter.reconcile_private_notebook_run(
+                    task_run_id=claim.worker_task_run_id,
+                    provider_ref=receipt.notebook_ref,
+                    expected_source_sha256=receipt.source_sha256,
+                )
+                if recovered is None:
+                    continue
+                entry["provider_run"] = recovered.model_dump(mode="json")
+                self._save()
+                provider_run = recovered
+            else:
+                provider_run = KaggleKernelRunIdentity.model_validate(provider_run_value)
+            status = self.adapter.read_run_status(provider_run)
+            deadline = receipt.launched_at.astimezone(UTC) + timedelta(
+                seconds=claim.timeout_seconds
+            )
+            result_status: str | None = None
+            reason_code: str | None = None
+            completed_at: datetime | None = None
+            if status.state is KernelState.COMPLETE:
+                result_status = "SUCCEEDED"
+                reason_code = "PROVIDER_COMPLETE_TERMINAL_CALLBACK_ABSENT"
+                completed_at = status.observed_at.astimezone(UTC)
+            elif status.state is KernelState.FAILED:
+                result_status = "FAILED_RETRYABLE"
+                reason_code = "PROVIDER_RUN_FAILED"
+                completed_at = status.observed_at.astimezone(UTC)
+            elif now >= deadline:
+                result_status = "FAILED_RETRYABLE"
+                reason_code = "PROVIDER_RUN_TIMEOUT"
+                completed_at = deadline
+            if result_status is None or reason_code is None or completed_at is None:
+                continue
+            proof = {
+                "schema_version": "region-talk-stage-provider-terminal-proof.v1",
+                "dispatch_id": str(claim.dispatch_id),
+                "effect_id": str(claim.effect_id),
+                "worker_task_run_id": str(claim.worker_task_run_id),
+                "provider_run_ref": receipt.provider_run_ref,
+                "source_sha256": receipt.source_sha256,
+                "reason_code": reason_code,
+                "completed_at": completed_at.isoformat(),
+                "publication_dispatch": False,
+                "notification_dispatch": False,
+            }
+            terminal = RegionTalkStageWorkerTerminal(
+                worker_task_run_id=str(claim.worker_task_run_id),
+                dispatch_id=str(claim.dispatch_id),
+                effect_id=str(claim.effect_id),
+                master_instance_id=str(claim.master_instance_id),
+                epoch=claim.epoch,
+                result_status=result_status,
+                result_receipt_sha256=hashlib.sha256(
+                    canonical_json_bytes(proof)
+                ).hexdigest(),
+                completed_at=completed_at,
+            )
+            self._complete(terminal, require_attestation=False)
+            reconciled += 1
+        return reconciled
 
     def _exact_entry(self, dispatch: str, worker: str, effect: str) -> dict[str, Any]:
         entry = self._entries.get(dispatch)
