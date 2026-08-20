@@ -4,24 +4,24 @@
 
 | Stage | Exact model | Runtime implementation | Reviewed model/bank bundle | Current result |
 |---|---|---|---|---|
-| `e5_embedding` | `intfloat/multilingual-e5-base@d128750597153bb5987e10b1c3493a34e5a4502a` | attached, local-files-only attention-mask mean pooling, L2 normalization | **model absent; bank verified** | `FAILED_RETRYABLE` (`HEAVY_RUNTIME_NOT_ATTACHED`) |
-| `bge_m3_embedding` | `BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181` | attached, local-path FlagEmbedding dense-only, L2 normalization | **verified exact logical model source + bank** | executable when exact model source and runtime pin are attached |
+| `e5_embedding` | `intfloat/multilingual-e5-base@d128750597153bb5987e10b1c3493a34e5a4502a` | attached, local-files-only attention-mask mean pooling, L2 normalization | **verified frozen producer output + bank** | executable when the fenced kernel source and runtime pin are attached |
+| `bge_m3_embedding` | `BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181` | attached, local-path FlagEmbedding dense-only, L2 normalization | **verified exact logical model source + bank** | executable when the exact model source and runtime pin are attached |
 
-The implementations are executable against deterministic fixture encoders, but neither
-production lifecycle is ready. The canonical `semantic_bank_v1` is now reconstructed and verified
+Both implementations are executable against deterministic fixture encoders and provider-mounted
+model bytes, but this does not by itself declare the entire Region Talk production lifecycle ready.
+The canonical `semantic_bank_v1` is reconstructed and verified
 at SHA-256 `4ec81e6ede79f3dae1bb366a06366e7197d960e1c04e124f77b3db12f2f1981f`,
-and BGE's complete logical model snapshot has passed the acquisition proof. E5 has not.
-The committed registry therefore marks both entries `external_assets_required`, has no
-manifest hash, and deliberately returns no attached runtime. This is an external asset
-acquisition blocker, not evidence of a successful model execution.
+and both complete logical runtime snapshots have passed their acquisition proofs. The committed
+registry marks both entries `verified` and binds each reviewed manifest hash and provider carrier.
 
 A central private Kaggle smoke has now rejected the exact-version public candidates. E5
-`tanviranjumapurbo/multilingual-e5-base/Transformers/default/1` has only 9 of the upstream
-revision's 23 files and differs in material runtime files. BGE-M3
+`tanviranjumapurbo/multilingual-e5-base/Transformers/default/1` still has only 9 of the upstream
+revision's 23 files and remains rejected. A separate frozen, protected E5 producer downloaded the
+exact public Hugging Face revision without Kaggle credentials, verified all 23 files provider-side,
+and exposed its content-addressed output through `kernel_sources`. BGE-M3
 `yethukmutt/bge-m3/Transformers/m3/1` matches 29 of 30 upstream files but omits
 `imgs/.DS_Store`. The committed BGE manifest explicitly classifies only that OS metadata as
-non-runtime and binds every remaining file; BGE is now verified. The E5 mismatch remains
-blocked. See `region-talk-text-asset-acquisition.md`.
+non-runtime and binds every remaining file. See `region-talk-text-asset-acquisition.md`.
 
 ## Offline asset contract
 
@@ -41,11 +41,14 @@ the encoder is imported. E5 uses `local_files_only=True` with both Hugging Face 
 BGE-M3 receives only the verified local model directory. There is no `snapshot_download`
 or runtime network acquisition path.
 
-To close the blocker, acquire each exact upstream snapshot in a reviewed central acquisition
-flow, assemble the complete offline dependency closure,
-build and independently verify each manifest, then commit the reviewed manifest SHA into
-`text-runtime-assets.v1.json`. Publish the bytes only as a private Kaggle input. Do not change
-an entry to `verified` until those exact bytes and hashes are reviewable.
+The one producer-only `snapshot_download` path is isolated in the frozen private builder and pins
+the exact 40-hex revision plus all official file paths. Before every E5 consumer launch, central
+control re-reads the producer's current source hash, numeric source version, kernel ID, run ref and
+terminal status. The worker then hashes the complete mount and semantic bank before importing the
+model. BGE similarly receives an exact five-part numeric `model_sources` identity; central control
+proves that provider version exists before launch, and response-loss reconciliation reads back the
+exact attached model source. Drift in either carrier fails retryably rather than launching against
+unreviewed bytes.
 
 ## Master runtime pin and private 0028 binding
 
@@ -68,5 +71,7 @@ database URL. Publication and notification remain false.
 For fixed typed text, semantic-bank bytes, model bytes, dependencies, runtime source and pin,
 the scores are rounded to six decimal places and the evidence fingerprint is canonical JSON
 SHA-256. Focused tests execute both stages twice with deterministic normalized fixture vectors
-and prove identical typed result metadata hashes. These tests validate orchestration and
-math contracts; they are not a substitute for a receipt from either absent production model.
+and prove identical typed result metadata hashes. A live disposable E5 consumer additionally
+verified all 23 mounted files (5,322,810,412 bytes), loaded the pinned model offline and emitted a
+768-dimensional fixed-output receipt. These proofs validate the runtime seam; final production
+readiness still depends on the separately integrated master/runtime-pin lifecycle gates.

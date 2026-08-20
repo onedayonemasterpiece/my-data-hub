@@ -2,16 +2,16 @@
 
 ## Decision
 
-The 2026-08-20 central Kaggle smoke rejected E5 and initially reported strict whole-tree
-`MISMATCH` for BGE-M3. A subsequent reviewed logical-model contract excludes exactly the
+The first 2026-08-20 central Kaggle smoke rejected the public E5 candidate and initially reported
+strict whole-tree `MISMATCH` for BGE-M3. A subsequent reviewed logical-model contract excludes exactly the
 upstream OS metadata file `imgs/.DS_Store`; all 29 model, tokenizer, configuration,
 documentation and image files delivered by the exact BGE model source match the pinned
-revision. BGE-M3 is therefore registered as `verified`; E5 remains
-`external_assets_required`.
+revision. BGE-M3 is registered as `verified`. E5 is now also `verified` through a separate
+frozen protected producer whose provider-side output matches the complete official 23-file tree.
 
 | Stage | Required upstream revision | Exact Kaggle model source observed | Central result |
 |---|---|---|---|
-| `e5_embedding` | `intfloat/multilingual-e5-base@d128750597153bb5987e10b1c3493a34e5a4502a` | `tanviranjumapurbo/multilingual-e5-base/Transformers/default/1` | **Mismatch**: 9 observed files versus 23 official-tree files, plus differing config, tokenizer and weights. |
+| `e5_embedding` | `intfloat/multilingual-e5-base@d128750597153bb5987e10b1c3493a34e5a4502a` | frozen producer `zigomaro/mdh-region-talk-e5-assets-v1/1` | **Verified**: exact 23/23 official files, exact canonical bank and live offline 768-dimensional consumer output. The earlier public model candidate remains rejected. |
 | `bge_m3_embedding` | `BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181` | `yethukmutt/bge-m3/Transformers/m3/1` | **Verified logical model**: 29/29 required files match; only non-runtime OS metadata `imgs/.DS_Store` is explicitly excluded. |
 
 The BGE candidate executed its 1024-dimensional normalized dense output and all 29 attached
@@ -20,6 +20,7 @@ logical-file contract, the exclusion, fixed provider source, official-tree recei
 bank, runtime source and dependency versions. Discovery hashes the complete attached model
 before constructing `BGEM3FlagModel`. This approves the asset, not the full stage lifecycle:
 the launcher must attach the exact model source and register the corresponding runtime pin.
+The concrete single-KPA launcher now does that and preflights the exact numeric Model version.
 
 ## Evidence and method
 
@@ -64,20 +65,30 @@ BGE dense formula; it performs no install or download.
 `4ec81e6ede79f3dae1bb366a06366e7197d960e1c04e124f77b3db12f2f1981f`.
 This closes semantic-bank provenance but does not override either failed model comparison.
 
-## E5 private-output fallback assessment
+## E5 frozen private-output producer
 
-The official Kaggle kernel metadata contract accepts `kernel_sources` only as
-`username/kernel-slug`; it has no numeric version field. Central output download can bind
-`username/kernel-slug/version`, but a consumer launch cannot name that immutable version.
-Consequently this lane did not create an E5 builder and did not extend KPA with a falsely exact
-numeric source contract.
+The official Kaggle kernel metadata contract still accepts `kernel_sources` only as
+`username/kernel-slug`; it has no numeric consumer version field. The safe fallback is therefore
+implemented as one permanent private `ORCHESTRATOR_PROTECTED` producer frozen at version 1.
+Before each consumer launch, central control reads the current source and verifies exact source
+SHA-256 `345cbeba4f1deb143a3af571594e92d19c536458d157078a071b62b7804861fa`,
+version `1`, kernel ID `131338450`, run ref and `COMPLETE` status against the committed metadata-only
+authority SHA-256 `c874531f044d31ef6953387f103dd34c6f4674ed569cafbaaf7f97856881d931`.
+Only then does the single KPA attach `zigomaro/mdh-region-talk-e5-assets-v1`.
 
-A safe later design is possible only as a coordinated launcher/runtime change: create a unique,
-orchestrator-protected builder frozen after version 1; centrally re-read its exact source and
-current version immediately before launch; attach the unversioned unique slug; and have the
-worker hash the complete mounted tree against the committed official manifest before importing
-the tokenizer/model or accepting a runtime pin. A producer update races only to fail closed;
-it must never be accepted as the named generation. That consumer attachment and admission seam
-is outside this asset-registry lane, so E5 remains blocked rather than pretending the provider
-offers numeric `kernel_sources`. Runtime downloads, unpinned references and devstand model-byte
-copies remain forbidden.
+The producer itself uses no provider or Hugging Face credential, pins the exact upstream commit,
+and verifies all official paths, sizes and Git/LFS identities before emitting output. Every worker
+locates one exact weight root, hashes the complete mounted 23-file tree and the semantic bank, and
+only then imports Transformers with offline/local-only flags. Producer source/version/content drift
+therefore yields `FAILED_RETRYABLE`; it cannot be accepted as the named generation.
+
+Live provider evidence:
+
+- frozen producer run `zigomaro/mdh-region-talk-e5-assets-v1/1`, source commit `258e166723a09da90d1d37cfc946d5f2d81476e3`, remains private and protected;
+- producer receipt SHA-256 `47427d3086012093eac5718355a69c53e2583291e7a3e46e2b465d08ea2a2573` and exact 23-file inventory SHA-256 `b27d94353f1b60ac9817b4d4aa10fd9a38129f4d2404be835a000202f64026f4`;
+- disposable consumer run `zigomaro/mdh-region-talk-e5-consumer-smoke/1`, source commit `a23cd63cdfc7ec82f787508e8ad40b074df3b35f`, receipt SHA-256 `d8248782d7c007e472a552e5a226d5c48b69eba46800494ae286619895a01d4f`;
+- consumer verified 23 files / 5,322,810,412 bytes, produced 768 dimensions with fixed-output SHA-256 `054317752ee2e2343dda3051120aa82290cc6144bf5c21e8c64fb332d8c720bb`, and was deleted with cleanup receipt SHA-256 `adc3256079857308b83980cf3dbd292fb209478ba547d9e53132229a0bff1395`;
+- post-cleanup readback found the consumer absent while the protected producer remained exact version 1 / kernel ID 131338450 / `COMPLETE`.
+
+No model bytes were downloaded to the devstand. Runtime downloads, unpinned references and
+provider credentials inside builder or worker remain forbidden.
