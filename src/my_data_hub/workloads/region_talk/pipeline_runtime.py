@@ -88,6 +88,9 @@ class RegionTalkRuntimePins:
     runtime_image_source_commit: str
     wheel_relative_path: str
     wheel_sha256: str
+    ydb_endpoint: str
+    ydb_database: str
+    ydb_viewer_secret_label: str
     max_cycles: int = 24
     max_runtime_seconds: int = 7_200
 
@@ -224,6 +227,28 @@ class RegionTalkPipelineStore:
                 "SELECT * FROM region_talk_pipeline_requests ORDER BY requested_at DESC, request_id DESC LIMIT 1"
             ).fetchone()
             return self._snapshot(row) if row is not None else None
+        finally:
+            connection.close()
+
+    @classmethod
+    def latest_read_only(cls, path: Path) -> RegionTalkRunSnapshot | None:
+        """Read status through SQLite `mode=ro` without applying migrations."""
+
+        if not path.is_absolute() or not path.is_file() or path.is_symlink():
+            raise ValueError("Region Talk control ledger must be an existing absolute file")
+        connection = sqlite3.connect(
+            f"{path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=30,
+            isolation_level=None,
+        )
+        connection.row_factory = sqlite3.Row
+        try:
+            row = connection.execute(
+                "SELECT * FROM region_talk_pipeline_requests "
+                "ORDER BY requested_at DESC, request_id DESC LIMIT 1"
+            ).fetchone()
+            return cls._snapshot(row) if row else None
         finally:
             connection.close()
 
@@ -874,6 +899,9 @@ class RegionTalkPipelineCoordinator:
             runtime_image_source_commit=self.pins.runtime_image_source_commit,
             wheel_relative_path=self.pins.wheel_relative_path,
             wheel_sha256=self.pins.wheel_sha256,
+            ydb_endpoint=self.pins.ydb_endpoint,
+            ydb_database=self.pins.ydb_database,
+            ydb_viewer_secret_label=self.pins.ydb_viewer_secret_label,
             max_cycles=self.pins.max_cycles,
             max_runtime_seconds=self.pins.max_runtime_seconds,
         )

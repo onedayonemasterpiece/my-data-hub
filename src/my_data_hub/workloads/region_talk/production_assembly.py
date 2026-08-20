@@ -30,7 +30,6 @@ from pydantic import SecretStr
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.providers.kaggle.adapter import mapping_sha256
 from my_data_hub.providers.kaggle.contracts import (
-    KaggleAmbiguousMutation,
     MutationAction,
     ProviderEffectIntent,
     TaskResourceClaim,
@@ -384,23 +383,30 @@ class DirectoryRegionTalkTaskAuthority:
                 "REGION_TALK_CREDENTIAL_ACTIVATION_CONFLICT"
             )
         revoked = {int(value) for value in task.get("revoked_generations", [])}
-        if activated == activation.previous.generation:
-            task["activated_generation"] = activation.replacement.generation
-        if activation.previous.generation not in revoked:
-            task["revoked_generations"] = sorted(
-                {*revoked, activation.previous.generation}
-            )
-            _atomic(task_path, canonical_json_bytes(task))
-            if self._write_revocation_binding(
-                task,
-                activation.previous,
-                reason="task_credential_rotated",
-            ):
-                self._revoke_certificate_binding(
-                    task,
-                    activation.previous,
-                    reason="task_credential_rotated",
-                )
+        if (
+            activated == activation.replacement.generation
+            and activation.previous.generation in revoked
+        ):
+            return
+        # Persist the master-polled revocation first.  If the process dies
+        # after this boundary, exact activation replay sees the mailbox and
+        # repeats only the idempotent certificate revocation.  The task state
+        # is advanced last, so it is the durable completion marker.
+        self._write_revocation_binding(
+            task,
+            activation.previous,
+            reason="task_credential_rotated",
+        )
+        self._revoke_certificate_binding(
+            task,
+            activation.previous,
+            reason="task_credential_rotated",
+        )
+        task["activated_generation"] = activation.replacement.generation
+        task["revoked_generations"] = sorted(
+            {*revoked, activation.previous.generation}
+        )
+        _atomic(task_path, canonical_json_bytes(task))
 
     def acknowledge_revocations(
         self, revocations: tuple[TaskWorkerCredentialRevocation, ...]
@@ -762,12 +768,24 @@ class CentralRegionTalkNotebookAdapter:
     authority: DirectoryRegionTalkTaskAuthority
     owner: str
     callback_base_url: str
+    notebook_ref: str | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     journal_path: Path | None = None
     _receipts: dict[UUID, RegionTalkLaunchReceipt] = field(default_factory=dict)
-    _claims: dict[UUID, tuple[TaskResourceClaim, TaskResourceClaim]] = field(default_factory=dict)
+    _claims: dict[UUID, dict[str, TaskResourceClaim]] = field(default_factory=dict)
+    _intents: dict[UUID, dict[str, ProviderEffectIntent]] = field(default_factory=dict)
+    _notebook_previous_versions: dict[UUID, int] = field(default_factory=dict)
+    _cleanup_receipts: dict[UUID, RegionTalkCleanupReceipt] = field(default_factory=dict)
+    _cleanup_bindings: dict[UUID, RegionTalkAccessBinding] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        expected_notebook = f"{self.owner}/mdh-region-talk-supervisor"
+        if self.notebook_ref is None:
+            self.notebook_ref = expected_notebook
+        if self.notebook_ref != expected_notebook:
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_SECRET_BOUND_NOTEBOOK_REF_INVALID"
+            )
         if self.journal_path is None:
             self.journal_path = self.authority.root / "launcher-metadata.json"
         self._load_journal()
@@ -783,7 +801,6 @@ class CentralRegionTalkNotebookAdapter:
         existing = self._receipts.get(metadata.task_run_id)
         if existing is not None:
             return existing
-        now = self.clock().astimezone(UTC)
         source = render_region_talk_supervisor_source(metadata)
         source_sha = hashlib.sha256(source).hexdigest()
         task_token = secrets.token_urlsafe(36)
@@ -802,7 +819,8 @@ class CentralRegionTalkNotebookAdapter:
             task_token_sha256=command.task_token_sha256,
         )
         status_ref = f"{self.owner}/mdh-region-talk-{metadata.task_run_id.hex[:20]}"
-        notebook_ref = f"{self.owner}/mdh-region-talk-run-{metadata.task_run_id.hex[:16]}"
+        assert self.notebook_ref is not None
+        notebook_ref = self.notebook_ref
         files = {
             "region-talk-supervisor.json": capability.private_dataset_bytes(),
             "execution-pins.json": canonical_json_bytes(
@@ -814,79 +832,152 @@ class CentralRegionTalkNotebookAdapter:
                     "runtime_image_source_commit": metadata.runtime_image_source_commit,
                     "wheel_relative_path": metadata.wheel_relative_path,
                     "wheel_sha256": metadata.wheel_sha256,
+                    "ydb_endpoint": metadata.ydb_endpoint,
+                    "ydb_database": metadata.ydb_database,
+                    "ydb_viewer_secret_label": metadata.ydb_viewer_secret_label,
                     "publication_dispatch": False,
                     "privacy": "private",
                 }
             ),
         }
         operation_id = uuid5(NAMESPACE_URL, f"region-talk-supervisor:{metadata.request_id}")
-        create = ProviderEffectIntent.create(
-            operation_id=operation_id,
-            effect_id=uuid5(NAMESPACE_URL, f"region-talk-status:{metadata.task_run_id}"),
-            idempotency_key=f"region-talk-status:{metadata.task_run_id}",
-            task_id=metadata.task_run_id,
-            action=MutationAction.CREATE_DATASET,
-            provider_ref=status_ref,
-            arguments={
-                "content_tree_sha256": mapping_sha256(files),
-                "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
-                "disposable": True,
-            },
-            requested_at=now,
-        )
-        dataset = self.adapter.create_private_dataset(
-            intent=create,
-            files=files,
-            title=status_ref.split("/", 1)[1],
-            control_class=ControlClass.ORCHESTRATOR_PROTECTED,
-            disposable=True,
-        )
-        exact_status = f"{status_ref}/{int(dataset.claim.provider_version)}"
+        intents = self._intents.setdefault(metadata.task_run_id, {})
+        claims = self._claims.setdefault(metadata.task_run_id, {})
+        create_arguments = {
+            "content_tree_sha256": mapping_sha256(files),
+            "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
+            "disposable": True,
+        }
+        create = intents.get("status")
+        if create is None:
+            create = ProviderEffectIntent.create(
+                operation_id=operation_id,
+                effect_id=uuid5(NAMESPACE_URL, f"region-talk-status:{metadata.task_run_id}"),
+                idempotency_key=f"region-talk-status:{metadata.task_run_id}",
+                task_id=metadata.task_run_id,
+                action=MutationAction.CREATE_DATASET,
+                provider_ref=status_ref,
+                arguments=create_arguments,
+                requested_at=self.clock().astimezone(UTC),
+            )
+            intents["status"] = create
+            self._save_journal()  # persist the original time/intent before the effect
+        elif create.provider_ref != status_ref:
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_LAUNCH_JOURNAL_CONFLICT")
+        status_claim = claims.get("status")
+        if status_claim is None:
+            version = self.adapter.current_private_dataset_version(provider_ref=status_ref)
+            if version is None:
+                dataset = self.adapter.create_private_dataset(
+                    intent=create,
+                    files=files,
+                    title=status_ref.split("/", 1)[1],
+                    control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+                    disposable=True,
+                )
+            else:
+                with tempfile.TemporaryDirectory(prefix="mdh-region-talk-reconcile-") as raw:
+                    directory = Path(raw)
+                    for relative, content in files.items():
+                        target = directory.joinpath(*relative.split("/"))
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(content)
+                    dataset = self.adapter.reconcile_private_dataset_directory_mutation(
+                        intent=create,
+                        source_directory=directory,
+                        expected_version=1,
+                        arguments=create_arguments,
+                        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+                        disposable=True,
+                    )
+            status_claim = dataset.claim
+            claims["status"] = status_claim
+            self._save_journal()
+        exact_status = f"{status_ref}/{int(status_claim.provider_version)}"
         sources = (metadata.runtime_dataset_exact_ref, exact_status)
-        push = ProviderEffectIntent.create(
-            operation_id=operation_id,
-            effect_id=uuid5(NAMESPACE_URL, f"region-talk-run:{metadata.task_run_id}"),
-            idempotency_key=f"region-talk-run:{metadata.task_run_id}",
-            task_id=metadata.task_run_id,
-            action=MutationAction.PUSH_NOTEBOOK,
-            provider_ref=notebook_ref,
-            arguments={
-                "task_run_id": str(metadata.task_run_id),
-                "source_sha256": source_sha,
-                "dataset_sources": sources,
-                "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
-                "disposable": True,
-                "docker_image": metadata.runtime_image_identity,
-                "docker_image_pinning_type": "original",
-            },
-            requested_at=now,
-        )
-        try:
-            launched = self.adapter.push_private_worker_notebook_pending_attestation(
+        previous_notebook_version = self._notebook_previous_versions.get(metadata.task_run_id)
+        push = intents.get("notebook")
+        if push is None:
+            previous_notebook_version = self.adapter.current_private_notebook_version(
+                provider_ref=notebook_ref
+            )
+            if previous_notebook_version is None:
+                raise RegionTalkAssemblyUnavailable(
+                    "REGION_TALK_SECRET_BOUND_NOTEBOOK_MISSING"
+                )
+            self._notebook_previous_versions[metadata.task_run_id] = previous_notebook_version
+        elif previous_notebook_version is None:
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_NOTEBOOK_PREVIOUS_VERSION_MISSING"
+            )
+        push_arguments = {
+            "task_run_id": str(metadata.task_run_id),
+            "source_sha256": source_sha,
+            "dataset_sources": sources,
+            "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
+            "disposable": False,
+            "docker_image": metadata.runtime_image_identity,
+            "docker_image_pinning_type": "original",
+            "expected_previous_version": previous_notebook_version,
+        }
+        if push is None:
+            push = ProviderEffectIntent.create(
+                operation_id=operation_id,
+                effect_id=uuid5(NAMESPACE_URL, f"region-talk-run:{metadata.task_run_id}"),
+                idempotency_key=f"region-talk-run:{metadata.task_run_id}",
+                task_id=metadata.task_run_id,
+                action=MutationAction.PUSH_NOTEBOOK,
+                provider_ref=notebook_ref,
+                arguments=push_arguments,
+                requested_at=self.clock().astimezone(UTC),
+            )
+            intents["notebook"] = push
+            self._save_journal()
+        elif push.provider_ref != notebook_ref:
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_LAUNCH_JOURNAL_CONFLICT")
+        notebook_claim = claims.get("notebook")
+        if notebook_claim is None:
+            launched = self.adapter.reconcile_private_notebook_mutation(
                 intent=push,
                 task_run_id=metadata.task_run_id,
-                source=source,
-                title=notebook_ref.split("/", 1)[1],
-                code_file="region_talk_supervisor.py",
-                kernel_type="script",
-                language="python",
+                expected_source_sha256=source_sha,
                 control_class=ControlClass.ORCHESTRATOR_PROTECTED,
-                disposable=True,
+                disposable=False,
                 dataset_sources=sources,
-                enable_internet=True,
-                timeout_seconds=metadata.max_runtime_seconds,
                 docker_image=metadata.runtime_image_identity,
                 docker_image_pinning_type="original",
+                expected_previous_version=previous_notebook_version,
             )
-        except KaggleAmbiguousMutation:
-            raise
+            if launched is None:
+                launched = self.adapter.push_private_notebook_pending_runtime_attestation(
+                    intent=push,
+                    task_run_id=metadata.task_run_id,
+                    source=source,
+                    title=notebook_ref.split("/", 1)[1],
+                    code_file="region_talk_supervisor.py",
+                    kernel_type="script",
+                    language="python",
+                    control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+                    disposable=False,
+                    dataset_sources=sources,
+                    enable_internet=True,
+                    timeout_seconds=metadata.max_runtime_seconds,
+                    docker_image=metadata.runtime_image_identity,
+                    docker_image_pinning_type="original",
+                    expected_previous_version=previous_notebook_version,
+                )
+            notebook_claim = launched.claim
+            claims["notebook"] = notebook_claim
+            self._save_journal()
         receipt = RegionTalkLaunchReceipt(
             task_run_id=metadata.task_run_id,
             master_instance_id=metadata.master.master_instance_id,
             epoch=metadata.master.epoch,
             source_sha256=source_sha,
             status_dataset_exact_ref=exact_status,
-            provider_run_ref=launched.run.provider_run_ref,
+            provider_run_ref=(
+                f"{notebook_claim.provider_ref}/{notebook_claim.provider_version}"
+            ),
             access=RegionTalkAccessBinding(
                 credential_id=access.credential_id,
                 generation=access.generation,
@@ -897,34 +988,54 @@ class CentralRegionTalkNotebookAdapter:
             ),
         )
         self._receipts[metadata.task_run_id] = receipt
-        self._claims[metadata.task_run_id] = (dataset.claim, launched.claim)
         self._save_journal()
         return receipt
 
     def cleanup(self, run: RegionTalkRunSnapshot) -> RegionTalkCleanupReceipt:
         if run.task_run_id is None or run.access is None:
             raise RegionTalkAssemblyUnavailable("REGION_TALK_CLEANUP_BINDING_MISSING")
+        replay = self._cleanup_receipts.get(run.task_run_id)
+        if replay is not None:
+            return replay
+        active_access = self._cleanup_bindings.get(run.task_run_id)
+        if active_access is None:
+            active_access = self.authority.active_binding(run.task_run_id)
+            self._cleanup_bindings[run.task_run_id] = active_access
+            self._save_journal()
         self.authority.request_revocation(run)
-        active_access = self.authority.active_binding(run.task_run_id)
-        claims = self._claims.get(run.task_run_id, ())
+        claims = self._claims.get(run.task_run_id, {})
+        intents = self._intents.setdefault(run.task_run_id, {})
         deleted = 0
         for label, claim, action in (
-            ("notebook", claims[1] if len(claims) == 2 else None, MutationAction.DELETE_NOTEBOOK),
-            ("status", claims[0] if len(claims) == 2 else None, MutationAction.DELETE_DATASET),
+            ("notebook", claims.get("notebook"), MutationAction.DELETE_NOTEBOOK),
+            ("status", claims.get("status"), MutationAction.DELETE_DATASET),
         ):
             if claim is None:
                 continue
-            intent = ProviderEffectIntent.create(
-                operation_id=uuid5(NAMESPACE_URL, f"region-talk-cleanup:{run.task_run_id}"),
-                effect_id=uuid5(NAMESPACE_URL, f"region-talk-cleanup:{label}:{run.task_run_id}"),
-                idempotency_key=f"region-talk-cleanup:{label}:{run.task_run_id}",
-                task_id=run.task_run_id,
-                action=action,
-                provider_ref=claim.provider_ref,
-                expected_fingerprint=claim.fingerprint,
-                arguments={"claim_sha256": claim.claim_sha256, "provider_version": claim.provider_version},
-                requested_at=self.clock(),
-            )
+            if not claim.disposable:
+                # The stable private Notebook retains its reviewed Kaggle User
+                # Secret attachment across task-bound source versions.  It is
+                # orchestrator-protected and never task-cleanup authority.
+                continue
+            intent_key = f"cleanup_{label}"
+            intent = intents.get(intent_key)
+            if intent is None:
+                intent = ProviderEffectIntent.create(
+                    operation_id=uuid5(NAMESPACE_URL, f"region-talk-cleanup:{run.task_run_id}"),
+                    effect_id=uuid5(NAMESPACE_URL, f"region-talk-cleanup:{label}:{run.task_run_id}"),
+                    idempotency_key=f"region-talk-cleanup:{label}:{run.task_run_id}",
+                    task_id=run.task_run_id,
+                    action=action,
+                    provider_ref=claim.provider_ref,
+                    expected_fingerprint=claim.fingerprint,
+                    arguments={
+                        "claim_sha256": claim.claim_sha256,
+                        "provider_version": claim.provider_version,
+                    },
+                    requested_at=self.clock().astimezone(UTC),
+                )
+                intents[intent_key] = intent
+                self._save_journal()
             self.adapter.delete_task_created_resource(intent=intent, claim=claim)
             deleted += 1
         cleaned_at = self.clock().astimezone(UTC)
@@ -942,6 +1053,7 @@ class CentralRegionTalkNotebookAdapter:
             **base,
             receipt_sha256=hashlib.sha256(canonical_json_bytes(base)).hexdigest(),
         )
+        self._cleanup_receipts[run.task_run_id] = receipt
         self._receipts.pop(run.task_run_id, None)
         self._claims.pop(run.task_run_id, None)
         self._save_journal()
@@ -953,14 +1065,42 @@ class CentralRegionTalkNotebookAdapter:
         if not self.journal_path.is_absolute() or self.journal_path.is_symlink():
             raise RegionTalkAssemblyUnavailable("REGION_TALK_LAUNCH_JOURNAL_UNSAFE")
         value = {
-            "schema_version": "region-talk-launch-journal.v1",
+            "schema_version": "region-talk-launch-journal.v3",
             "receipts": {
                 str(task): receipt.model_dump(mode="json")
                 for task, receipt in sorted(self._receipts.items(), key=lambda item: str(item[0]))
             },
             "claims": {
-                str(task): [claim.model_dump(mode="json") for claim in claims]
+                str(task): {
+                    label: claim.model_dump(mode="json")
+                    for label, claim in sorted(claims.items())
+                }
                 for task, claims in sorted(self._claims.items(), key=lambda item: str(item[0]))
+            },
+            "intents": {
+                str(task): {
+                    label: intent.model_dump(mode="json")
+                    for label, intent in sorted(intents.items())
+                }
+                for task, intents in sorted(self._intents.items(), key=lambda item: str(item[0]))
+            },
+            "notebook_previous_versions": {
+                str(task): version
+                for task, version in sorted(
+                    self._notebook_previous_versions.items(), key=lambda item: str(item[0])
+                )
+            },
+            "cleanup_receipts": {
+                str(task): receipt.model_dump(mode="json")
+                for task, receipt in sorted(
+                    self._cleanup_receipts.items(), key=lambda item: str(item[0])
+                )
+            },
+            "cleanup_bindings": {
+                str(task): binding.model_dump(mode="json")
+                for task, binding in sorted(
+                    self._cleanup_bindings.items(), key=lambda item: str(item[0])
+                )
             },
         }
         encoded = canonical_json_bytes(value)
@@ -973,9 +1113,34 @@ class CentralRegionTalkNotebookAdapter:
         if not self.journal_path.exists():
             return
         value = DirectoryRegionTalkTaskAuthority._read(self.journal_path)
-        if set(value) != {"schema_version", "receipts", "claims"} or value.get(
-            "schema_version"
-        ) != "region-talk-launch-journal.v1":
+        schema = value.get("schema_version")
+        expected_keys = (
+            {"schema_version", "receipts", "claims"}
+            if schema == "region-talk-launch-journal.v1"
+            else {
+                "schema_version",
+                "receipts",
+                "claims",
+                "intents",
+                "cleanup_receipts",
+                "cleanup_bindings",
+            }
+            if schema == "region-talk-launch-journal.v2"
+            else {
+                "schema_version",
+                "receipts",
+                "claims",
+                "intents",
+                "notebook_previous_versions",
+                "cleanup_receipts",
+                "cleanup_bindings",
+            }
+        )
+        if set(value) != expected_keys or schema not in {
+            "region-talk-launch-journal.v1",
+            "region-talk-launch-journal.v2",
+            "region-talk-launch-journal.v3",
+        }:
             raise RegionTalkAssemblyUnavailable("REGION_TALK_LAUNCH_JOURNAL_INVALID")
         receipts = value.get("receipts")
         claims = value.get("claims")
@@ -989,11 +1154,48 @@ class CentralRegionTalkNotebookAdapter:
             self._receipts[task_id] = parsed
         for task, values in claims.items():
             task_id = UUID(task)
-            if not isinstance(values, list) or len(values) != 2:
-                raise RegionTalkAssemblyUnavailable("REGION_TALK_LAUNCH_JOURNAL_INVALID")
-            self._claims[task_id] = tuple(
-                TaskResourceClaim.model_validate(item) for item in values
-            )  # type: ignore[assignment]
+            if schema == "region-talk-launch-journal.v1":
+                if not isinstance(values, list) or len(values) != 2:
+                    raise RegionTalkAssemblyUnavailable("REGION_TALK_LAUNCH_JOURNAL_INVALID")
+                self._claims[task_id] = {
+                    "status": TaskResourceClaim.model_validate(values[0]),
+                    "notebook": TaskResourceClaim.model_validate(values[1]),
+                }
+            else:
+                if not isinstance(values, dict) or not set(values) <= {"status", "notebook"}:
+                    raise RegionTalkAssemblyUnavailable("REGION_TALK_LAUNCH_JOURNAL_INVALID")
+                self._claims[task_id] = {
+                    label: TaskResourceClaim.model_validate(item)
+                    for label, item in values.items()
+                }
+        if schema in {"region-talk-launch-journal.v2", "region-talk-launch-journal.v3"}:
+            for task, values in value["intents"].items():
+                if not isinstance(values, dict):
+                    raise RegionTalkAssemblyUnavailable("REGION_TALK_LAUNCH_JOURNAL_INVALID")
+                self._intents[UUID(task)] = {
+                    label: ProviderEffectIntent.model_validate(item)
+                    for label, item in values.items()
+                }
+            self._cleanup_receipts = {
+                UUID(task): RegionTalkCleanupReceipt.model_validate(item)
+                for task, item in value["cleanup_receipts"].items()
+            }
+            self._cleanup_bindings = {
+                UUID(task): RegionTalkAccessBinding.model_validate(item)
+                for task, item in value["cleanup_bindings"].items()
+            }
+            if schema == "region-talk-launch-journal.v3":
+                previous_versions = value["notebook_previous_versions"]
+                if not isinstance(previous_versions, dict) or any(
+                    not isinstance(version, int) or version < 1
+                    for version in previous_versions.values()
+                ):
+                    raise RegionTalkAssemblyUnavailable(
+                        "REGION_TALK_LAUNCH_JOURNAL_INVALID"
+                    )
+                self._notebook_previous_versions = {
+                    UUID(task): version for task, version in previous_versions.items()
+                }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1006,6 +1208,9 @@ class RegionTalkAssemblySettings:
     runtime_image_source_commit: str = ""
     wheel_relative_path: str = ""
     wheel_sha256: str = ""
+    ydb_endpoint: str = ""
+    ydb_database: str = ""
+    ydb_viewer_secret_label: str = ""
     capability_root: Path = Path("/nonexistent")
 
     @classmethod
@@ -1027,6 +1232,11 @@ class RegionTalkAssemblySettings:
             runtime_image_source_commit=os.getenv("MY_DATA_HUB_REGION_TALK_RUNTIME_SOURCE_COMMIT", "").strip(),
             wheel_relative_path=os.getenv("MY_DATA_HUB_REGION_TALK_WHEEL_RELATIVE_PATH", "").strip(),
             wheel_sha256=os.getenv("MY_DATA_HUB_REGION_TALK_WHEEL_SHA256", "").strip(),
+            ydb_endpoint=os.getenv("MY_DATA_HUB_REGION_TALK_YDB_ENDPOINT", "").strip(),
+            ydb_database=os.getenv("MY_DATA_HUB_REGION_TALK_YDB_DATABASE", "").strip(),
+            ydb_viewer_secret_label=os.getenv(
+                "MY_DATA_HUB_REGION_TALK_YDB_VIEWER_SECRET_LABEL", ""
+            ).strip(),
             capability_root=Path(
                 os.getenv("MY_DATA_HUB_REGION_TALK_CAPABILITY_DIR", "/state/region-talk-private")
             ),
@@ -1042,6 +1252,9 @@ class RegionTalkAssemblySettings:
             or not re.fullmatch(r"[a-f0-9]{40}", self.runtime_image_source_commit)
             or not self.wheel_relative_path
             or not re.fullmatch(r"[a-f0-9]{64}", self.wheel_sha256)
+            or not re.fullmatch(r"grpcs?://[A-Za-z0-9.-]+(?::[1-9][0-9]{0,4})?", self.ydb_endpoint)
+            or not re.fullmatch(r"/[A-Za-z0-9_./-]+", self.ydb_database)
+            or not re.fullmatch(r"[A-Z][A-Z0-9_]{7,127}", self.ydb_viewer_secret_label)
         ):
             raise RegionTalkAssemblyUnavailable("REGION_TALK_ASSEMBLY_ENVIRONMENT_INCOMPLETE")
 

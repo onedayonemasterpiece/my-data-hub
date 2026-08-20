@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -12,12 +13,14 @@ from fastapi.testclient import TestClient
 
 from my_data_hub.control_plane.app import ControlPlaneSettings, create_app
 from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.workloads.region_talk.pipeline_contracts import (
     ActiveMasterBinding,
     RegionTalkCredentialActivation,
     RegionTalkCredentialRefreshRequest,
     RegionTalkLaunchMetadata,
     RegionTalkRunRequest,
+    RegionTalkTerminalReceipt,
     TaskWorkerCredentialRegistration,
 )
 from my_data_hub.workloads.region_talk.production_assembly import (
@@ -66,6 +69,9 @@ def _metadata() -> RegionTalkLaunchMetadata:
         runtime_image_source_commit="e" * 40,
         wheel_relative_path="dist/my_data_hub.whl",
         wheel_sha256="f" * 64,
+        ydb_endpoint="grpcs://ydb.serverless.yandexcloud.net:2135",
+        ydb_database="/ru-central1/example/region-talk",
+        ydb_viewer_secret_label="REGION_TALK_YDB_VIEWER_SA_JSON",
         max_cycles=1,
         max_runtime_seconds=7200,
     )
@@ -259,6 +265,88 @@ def test_generation_refresh_replays_and_revokes_only_after_activation_ack(
     authority.acknowledge_revocations(terminal_revocations)
     assert list(authority.root.iterdir()) == []
     assert authority.root.stat().st_mode & 0o077 == 0
+
+
+def test_activation_crash_after_mailbox_is_exactly_replayable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    authority, broker = _authority(tmp_path)
+    metadata = _metadata()
+    command = authority.prepare(metadata, task_token="t" * 48, source_sha256="a" * 64)
+    _register(
+        authority,
+        command,
+        credential_id=UUID("66666666-6666-4666-8666-666666666666"),
+    )
+    first = authority.await_access(metadata, command)
+    request = RegionTalkCredentialRefreshRequest(
+        request_id=metadata.request_id,
+        task_run_id=metadata.task_run_id,
+        master_instance_id=MASTER.master_instance_id,
+        epoch=MASTER.epoch,
+        source_sha256="a" * 64,
+        image_identity=metadata.runtime_image_identity,
+        image_source_commit=metadata.runtime_image_source_commit,
+        previous=authority._binding(first),
+        requested_at=NOW,
+    )
+    results: list[object] = []
+    thread = threading.Thread(target=lambda: results.append(authority.refresh(request)))
+    thread.start()
+    deadline = time.monotonic() + 1
+    replacement_command = None
+    while time.monotonic() < deadline:
+        batch = authority.batch(master_instance_id=MASTER.master_instance_id, epoch=MASTER.epoch)
+        if batch.commands and batch.commands[0].generation == 2:
+            replacement_command = batch.commands[0]
+            break
+        time.sleep(0.01)
+    assert replacement_command is not None
+    _register(
+        authority,
+        replacement_command,
+        credential_id=UUID("77777777-7777-4777-8777-777777777777"),
+    )
+    thread.join(timeout=2)
+    second = results[0]
+    activation = RegionTalkCredentialActivation(
+        request_id=metadata.request_id,
+        task_run_id=metadata.task_run_id,
+        master_instance_id=MASTER.master_instance_id,
+        epoch=MASTER.epoch,
+        source_sha256="a" * 64,
+        image_identity=metadata.runtime_image_identity,
+        image_source_commit=metadata.runtime_image_source_commit,
+        previous=authority._binding(first),
+        replacement=authority._binding(second),  # type: ignore[arg-type]
+        asserted_at=NOW,
+    )
+    original_revoke = DirectoryRegionTalkTaskAuthority._revoke_certificate_binding
+    failed = False
+
+    def crash_once(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("crash after durable revocation mailbox")
+        return original_revoke(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        DirectoryRegionTalkTaskAuthority,
+        "_revoke_certificate_binding",
+        crash_once,
+    )
+    with pytest.raises(RuntimeError, match="crash after durable"):
+        authority.activate(activation)
+    assert authority.batch(master_instance_id=MASTER.master_instance_id, epoch=MASTER.epoch).revocations
+    monkeypatch.setattr(
+        DirectoryRegionTalkTaskAuthority,
+        "_revoke_certificate_binding",
+        original_revoke,
+    )
+    authority.activate(activation)
+    assert len(broker.revoked) == 1
+    assert authority.active_binding(metadata.task_run_id).generation == 2
 
 
 def test_expired_unactivated_generation_is_purged_and_never_reissued(
@@ -508,3 +596,56 @@ def test_terminal_callback_resolves_current_active_epoch_and_fences_stale_run(
     assert response.status_code == 200
     assert response.json()["generation"] == 2
     assert len(activations) == 1
+
+
+def test_exact_terminal_http_response_loss_replay_is_accepted(tmp_path: Path) -> None:
+    metadata = _metadata()
+    receipt = RegionTalkTerminalReceipt(
+        request_id=metadata.request_id,
+        task_run_id=metadata.task_run_id,
+        master_instance_id=metadata.master.master_instance_id,
+        epoch=metadata.master.epoch,
+        status="SUCCEEDED",
+        cycles_completed=1,
+        rows_observed=10,
+        rows_changed=10,
+        aggregate_receipt_sha256="c" * 64,
+        completed_at=NOW,
+    )
+    receipt_sha = hashlib.sha256(
+        canonical_json_bytes(receipt.model_dump(mode="json"))
+    ).hexdigest()
+    snapshot = SimpleNamespace(
+        request=SimpleNamespace(request_id=metadata.request_id),
+        task_run_id=metadata.task_run_id,
+        master=metadata.master,
+        source_sha256="a" * 64,
+        state=SimpleNamespace(value="TERMINAL"),
+        terminal_status=SimpleNamespace(value="SUCCEEDED"),
+        terminal_receipt_sha256=receipt_sha,
+    )
+    coordinator = SimpleNamespace(status=lambda _request_id=None: snapshot)
+    authority = SimpleNamespace(
+        validate_token=lambda task_id, supplied: {
+            "request_id": str(metadata.request_id),
+            "source_sha256": "a" * 64,
+        }
+        if task_id == metadata.task_run_id and supplied == "private-token"
+        else (_ for _ in ()).throw(
+            RegionTalkAssemblyUnavailable("REGION_TALK_TASK_TOKEN_INVALID")
+        )
+    )
+    app = create_app(
+        ControlPlaneSettings(ledger_path=tmp_path / "control.sqlite3"),
+        region_talk_coordinator=coordinator,  # type: ignore[arg-type]
+        region_talk_task_authority=authority,  # type: ignore[arg-type]
+    )
+
+    response = TestClient(app).post(
+        "/internal/region-talk-pipeline/terminal",
+        json=receipt.model_dump(mode="json"),
+        headers={"Authorization": "Bearer private-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"accepted": True, "state": "TERMINAL"}

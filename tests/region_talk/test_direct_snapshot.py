@@ -184,6 +184,51 @@ def test_run_lands_only_bounded_pages_and_returns_typed_receipt() -> None:
     assert connection.rollbacks == 0
 
 
+def test_transport_refreshes_between_pages_and_resumes_exact_cursor() -> None:
+    batch_id = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    task_id = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    reader = MemoryReader(fixture_rows())
+    first = FakeConnection(batch_id, task_id)
+    second = FakeConnection(batch_id, task_id)
+    refresh_points: list[tuple[str, str, str | None, int]] = []
+
+    def refresh(connection, *, phase, source_table, after_primary_key, page_number):  # type: ignore[no-untyped-def]
+        refresh_points.append((phase, source_table, after_primary_key, page_number))
+        if (
+            phase == "pass_b"
+            and source_table == DIRECT_SOURCE_TABLES[0].name
+            and page_number == 2
+        ):
+            return second
+        return connection
+
+    runner = DirectSnapshotRunner(
+        reader,
+        first,
+        page_size=1,
+        transport_refresh=refresh,
+    )
+    manifest = runner.inventory(
+        export_batch_id=batch_id,
+        task_run_id=task_id,
+        master_instance_id=UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+        master_epoch=47,
+        source_database="db",
+        request_sha256="4" * 64,
+        created_at=datetime(2026, 8, 19, 22, tzinfo=UTC),
+    )
+    first.expected = second.expected = manifest.expected_row_count
+    first.logical_sha256 = second.logical_sha256 = manifest.logical_sha256
+    receipt = runner.run(manifest)
+
+    assert receipt.status == "complete"
+    assert ("pass_b", DIRECT_SOURCE_TABLES[0].name, "opp-1", 2) in refresh_points
+    # The page after the rotation resumes strictly after the already-landed PK;
+    # begin is on the original connection and finalization on the replacement.
+    assert any("begin_region_talk_direct_snapshot" in sql for sql, _ in first.calls)
+    assert any("finalize_region_talk_direct_snapshot" in sql for sql, _ in second.calls)
+
+
 def test_second_pass_drift_fails_closed_and_records_only_error_class() -> None:
     batch_id = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
     task_id = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")

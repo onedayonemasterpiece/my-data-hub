@@ -65,6 +65,17 @@ def test_region_talk_enabled_but_unassembled_fails_readiness_with_exact_code(
     )
     monkeypatch.setenv("MY_DATA_HUB_REGION_TALK_WHEEL_SHA256", "f" * 64)
     monkeypatch.setenv(
+        "MY_DATA_HUB_REGION_TALK_YDB_ENDPOINT",
+        "grpcs://ydb.serverless.yandexcloud.net:2135",
+    )
+    monkeypatch.setenv(
+        "MY_DATA_HUB_REGION_TALK_YDB_DATABASE", "/ru-central1/example/region-talk"
+    )
+    monkeypatch.setenv(
+        "MY_DATA_HUB_REGION_TALK_YDB_VIEWER_SECRET_LABEL",
+        "REGION_TALK_YDB_VIEWER_SA_JSON",
+    )
+    monkeypatch.setenv(
         "MY_DATA_HUB_REGION_TALK_CAPABILITY_DIR", str(tmp_path / "private")
     )
     response = TestClient(

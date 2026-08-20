@@ -71,6 +71,9 @@ def _pins() -> RegionTalkRuntimePins:
         runtime_image_source_commit="e" * 40,
         wheel_relative_path="dist/my_data_hub.whl",
         wheel_sha256="f" * 64,
+        ydb_endpoint="grpcs://ydb.serverless.yandexcloud.net:2135",
+        ydb_database="/ru-central1/example/region-talk",
+        ydb_viewer_secret_label="REGION_TALK_YDB_VIEWER_SA_JSON",
         max_cycles=4,
         max_runtime_seconds=600,
     )
@@ -502,6 +505,9 @@ def test_private_capability_is_separate_and_bootstrap_attests_before_database_ac
         runtime_image_source_commit=_pins().runtime_image_source_commit,
         wheel_relative_path=_pins().wheel_relative_path,
         wheel_sha256=_pins().wheel_sha256,
+        ydb_endpoint=_pins().ydb_endpoint,
+        ydb_database=_pins().ydb_database,
+        ydb_viewer_secret_label=_pins().ydb_viewer_secret_label,
         max_cycles=4,
         max_runtime_seconds=600,
     )
@@ -548,6 +554,11 @@ def test_private_capability_is_separate_and_bootstrap_attests_before_database_ac
     assert b"sslrootcert" in source
     assert b"region-talk-credential-refresh.v1" in source
     assert b"region-talk-credential-activation.v1" in source
+    assert b"UserSecretsClient" in source
+    assert b"YDB_SERVICE_ACCOUNT_KEY_FILE_CREDENTIALS" in source
+    assert b"REGION_TALK_YDB_VIEWER_SA_JSON" in source
+    assert b"post_metadata_with_replay(TERMINAL_PATH" in source
+    assert b"set_transport_refresher" in source
     assert b"publication_dispatch=False" in source
     assert b"exact Region Talk capability input is absent or ambiguous" in source
     assert b"postgresql://region_talk:secret" not in source

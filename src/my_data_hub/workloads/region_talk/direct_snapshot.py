@@ -13,7 +13,7 @@ import contextlib
 import hashlib
 import json
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -220,17 +220,47 @@ def _snapshot_logical_sha256(tables: Sequence[DirectSnapshotTableReceipt]) -> st
 class DirectSnapshotRunner:
     """Execute pass A, direct bounded landing, and exact pass-B reconciliation."""
 
-    def __init__(self, reader: DirectYdbReader, connection: Any, *, page_size: int = 250) -> None:
+    def __init__(
+        self,
+        reader: DirectYdbReader,
+        connection: Any,
+        *,
+        page_size: int = 250,
+        transport_refresh: Callable[..., Any] | None = None,
+    ) -> None:
         if not 1 <= page_size <= 500:
             raise ValueError("page_size must be between 1 and 500")
         self.reader = reader
         self.connection = connection
         self.page_size = page_size
+        self.transport_refresh = transport_refresh
+
+    def _refresh(
+        self,
+        *,
+        phase: str,
+        source_table: str = "",
+        after_primary_key: str | None = None,
+        page_number: int = 0,
+    ) -> None:
+        if self.transport_refresh is None:
+            return
+        replacement = self.transport_refresh(
+            self.connection,
+            phase=phase,
+            source_table=source_table,
+            after_primary_key=after_primary_key,
+            page_number=page_number,
+        )
+        if replacement is None:
+            raise DirectSnapshotError("transport refresh returned no database connection")
+        self.connection = replacement
 
     def _scan(
         self,
         spec: DirectSourceTable,
         *,
+        phase: str,
         land_batch_id: UUID | None = None,
         task_run_id: UUID | None = None,
     ) -> _Accumulator:
@@ -238,6 +268,12 @@ class DirectSnapshotRunner:
         after: str | None = None
         page_number = 0
         while True:
+            self._refresh(
+                phase=phase,
+                source_table=spec.name,
+                after_primary_key=after,
+                page_number=page_number + 1,
+            )
             values = self.reader.scan_page(
                 spec.name,
                 primary_key=spec.primary_key,
@@ -269,6 +305,12 @@ class DirectSnapshotRunner:
                     logical_sha256=page_digest.hexdigest(),
                     rows=rows,
                 )
+                self._refresh(
+                    phase="land_page",
+                    source_table=spec.name,
+                    after_primary_key=after,
+                    page_number=page_number,
+                )
                 self._land_page(land_batch_id, task_run_id, page)
             after = rows[-1].source_pk
         return accumulator
@@ -287,7 +329,7 @@ class DirectSnapshotRunner:
         tables: list[DirectSnapshotTableReceipt] = []
         kinds: Counter[str] = Counter()
         for spec in DIRECT_SOURCE_TABLES:
-            accumulator = self._scan(spec)
+            accumulator = self._scan(spec, phase="pass_a")
             tables.append(accumulator.receipt())
             assert accumulator.kinds is not None
             kinds.update(accumulator.kinds)
@@ -311,12 +353,14 @@ class DirectSnapshotRunner:
         )
 
     def run(self, manifest: DirectSnapshotManifest) -> DirectSnapshotReceipt:
+        self._refresh(phase="begin")
         self._begin(manifest)
         try:
             pass_b: list[DirectSnapshotTableReceipt] = []
             for expected, spec in zip(manifest.tables, DIRECT_SOURCE_TABLES, strict=True):
                 accumulator = self._scan(
                     spec,
+                    phase="pass_b",
                     land_batch_id=manifest.export_batch_id,
                     task_run_id=manifest.task_run_id,
                 )
@@ -328,6 +372,7 @@ class DirectSnapshotRunner:
                 pass_b.append(observed)
             if _snapshot_logical_sha256(pass_b) != manifest.logical_sha256:
                 raise DirectSnapshotError("source logical hash changed between passes")
+            self._refresh(phase="finalize")
             return self._finalize(manifest, pass_b)
         except Exception as exc:
             self.connection.rollback()

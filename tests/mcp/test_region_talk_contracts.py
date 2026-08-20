@@ -9,6 +9,8 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from my_data_hub.control_plane.adapters import LedgerControlReader
+from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.mcp.catalog import TOOL_CONTRACTS
 from my_data_hub.mcp.contracts import (
     EnsureMasterReceipt,
@@ -206,6 +208,30 @@ async def test_pipeline_status_is_control_only_and_preserves_distinct_oauth_clie
         "opencode-my-data-hub",
         "https://chatgpt.com/oauth/my-data-hub/client.json",
     ]
+
+
+@pytest.mark.asyncio
+async def test_reader_pipeline_status_uses_local_ledger_without_write_gateway_or_master(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    ledger = ControlLedger(tmp_path / "control.sqlite3")
+    resolver = Resolver(MasterSnapshot(MasterState.ABSENT))
+    service = HubService(
+        resolver,
+        control=LedgerControlReader(ledger),
+        fallback_identity=identity("region-talk:read"),
+    )
+
+    result = await service.invoke("region_talk.pipeline.status", {})
+
+    assert result == {
+        "ready": True,
+        "state": "IDLE",
+        "publication_dispatch": False,
+        "latest": None,
+    }
+    assert resolver.resolves == 0
+    assert resolver.ensures == []
 
 
 @pytest.mark.asyncio

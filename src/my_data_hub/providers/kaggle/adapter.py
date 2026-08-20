@@ -955,6 +955,21 @@ class KaggleProviderAdapter:
             raise KaggleIdentityError("current private dataset version is unavailable")
         return version
 
+    def current_private_notebook_version(self, *, provider_ref: str) -> int | None:
+        """Return the exact owned/private current notebook version without mutation."""
+
+        try:
+            observed, version, _provider_id = self._find_resource(
+                provider_ref, ProviderKind.NOTEBOOK
+            )
+        except KaggleNotFound:
+            return None
+        if observed.private is not True:
+            raise KagglePolicyError("notebook privacy was not explicitly proven private")
+        if version is None:
+            raise KaggleIdentityError("current private notebook version is unavailable")
+        return version
+
     def reconcile_private_dataset_directory_mutation(
         self,
         *,
@@ -1373,6 +1388,7 @@ class KaggleProviderAdapter:
         timeout_seconds: int | None = None,
         docker_image: str | None = None,
         docker_image_pinning_type: str | None = None,
+        expected_previous_version: int | None = None,
     ) -> NotebookMutationResult:
         """Persist an exact protected push pending authenticated runtime source proof.
 
@@ -1399,6 +1415,7 @@ class KaggleProviderAdapter:
             timeout_seconds=timeout_seconds,
             docker_image=docker_image,
             docker_image_pinning_type=docker_image_pinning_type,
+            expected_previous_version=expected_previous_version,
             pending_runtime_attestation=True,
         )
 
@@ -1419,6 +1436,7 @@ class KaggleProviderAdapter:
         timeout_seconds: int | None = None,
         docker_image: str | None = None,
         docker_image_pinning_type: str | None = None,
+        expected_previous_version: int | None = None,
     ) -> NotebookMutationResult:
         return self.push_private_notebook_pending_runtime_attestation(
             intent=intent,
@@ -1435,6 +1453,7 @@ class KaggleProviderAdapter:
             timeout_seconds=timeout_seconds,
             docker_image=docker_image,
             docker_image_pinning_type=docker_image_pinning_type,
+            expected_previous_version=expected_previous_version,
         )
 
     def push_private_worker_notebook_pending_attestation(self, **kwargs: Any) -> NotebookMutationResult:
@@ -1474,6 +1493,7 @@ class KaggleProviderAdapter:
         pending_runtime_attestation: bool,
         docker_image: str | None = None,
         docker_image_pinning_type: str | None = None,
+        expected_previous_version: int | None = None,
     ) -> NotebookMutationResult:
         if intent.action != MutationAction.PUSH_NOTEBOOK:
             raise KaggleContractError("effect intent action does not authorize notebook push/run")
@@ -1508,9 +1528,25 @@ class KaggleProviderAdapter:
                 "disposable": disposable,
         }
         if pending_runtime_attestation:
-            intent_arguments.update({"docker_image": docker_image,
-                                     "docker_image_pinning_type": docker_image_pinning_type})
+            intent_arguments.update(
+                {
+                    "docker_image": docker_image,
+                    "docker_image_pinning_type": docker_image_pinning_type,
+                }
+            )
+        if expected_previous_version is not None:
+            if expected_previous_version < 1:
+                raise KaggleContractError("expected previous notebook version must be positive")
+            intent_arguments["expected_previous_version"] = expected_previous_version
         self._validate_intent(intent, arguments=intent_arguments)
+        if expected_previous_version is not None:
+            current_version = self.current_private_notebook_version(
+                provider_ref=intent.provider_ref
+            )
+            if current_version != expected_previous_version:
+                raise KaggleAmbiguousMutation(
+                    "notebook version changed after the persisted effect intent"
+                )
         with tempfile.TemporaryDirectory(prefix="my-data-hub-kaggle-kernel-") as temporary:
             folder = Path(temporary)
             code_path = folder.joinpath(*code_file.split("/"))
@@ -1968,6 +2004,9 @@ class KaggleProviderAdapter:
         dataset_sources: Sequence[str],
         control_class: ControlClass,
         disposable: bool,
+        docker_image: str | None = None,
+        docker_image_pinning_type: str | None = None,
+        expected_previous_version: int | None = None,
     ) -> NotebookMutationResult | None:
         """Repair a pushed exact notebook's remote journal without another push."""
 
@@ -1979,15 +2018,59 @@ class KaggleProviderAdapter:
             "control_class": control_class.value,
             "disposable": disposable,
         }
+        if docker_image is not None or docker_image_pinning_type is not None:
+            if (
+                not isinstance(docker_image, str)
+                or not _IMMUTABLE_IMAGE.fullmatch(docker_image)
+                or docker_image_pinning_type != "original"
+            ):
+                raise KaggleContractError(
+                    "runtime-attested reconciliation requires an exact original image digest"
+                )
+            arguments.update(
+                {
+                    "docker_image": docker_image,
+                    "docker_image_pinning_type": docker_image_pinning_type,
+                }
+            )
+        if expected_previous_version is not None:
+            if expected_previous_version < 1:
+                raise KaggleContractError("expected previous notebook version must be positive")
+            arguments["expected_previous_version"] = expected_previous_version
         self._validate_control_class(control_class, kind=ProviderKind.NOTEBOOK)
         self._validate_intent(intent, arguments=arguments)
-        run = self.reconcile_private_notebook_run(
-            task_run_id=task_run_id,
-            provider_ref=intent.provider_ref,
-            expected_source_sha256=expected_source_sha256,
-        )
-        if run is None:
+        try:
+            _observed, current_version, _provider_id = self._find_resource(
+                intent.provider_ref, ProviderKind.NOTEBOOK
+            )
+        except KaggleNotFound:
             return None
+        if expected_previous_version is not None:
+            if current_version == expected_previous_version:
+                return None
+            if current_version != expected_previous_version + 1:
+                raise KaggleAmbiguousMutation(
+                    "current notebook version does not match the exact intended successor"
+                )
+        try:
+            recovered, provider_kernel_id = self._read_latest_private_notebook_identity(
+                intent.provider_ref,
+                expected_source_sha256=expected_source_sha256,
+                expected_docker_image=docker_image,
+            )
+        except Exception as exc:
+            raise KaggleAmbiguousMutation(
+                "current notebook differs from the exact reconciled mutation"
+            ) from exc
+        run = KaggleKernelRunIdentity(
+            task_run_id=task_run_id,
+            provider_ref=recovered.provider_ref,
+            source_version=recovered.source_version,
+            source_sha256=recovered.source_sha256,
+            provider_kernel_id=provider_kernel_id,
+            provider_run_ref=f"{recovered.provider_ref}/{recovered.source_version}",
+            started_at=self.clock(),
+        )
         source = self.read_private_notebook_source(
             provider_ref=run.provider_ref,
             source_version=run.source_version,

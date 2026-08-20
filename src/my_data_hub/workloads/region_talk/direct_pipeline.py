@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -156,6 +156,12 @@ class DirectRegionTalkCycleExecutor:
         self.epoch = epoch
         self.source_revision = source_revision
         self._receipt: RegionTalkCycleResult | None = None
+        self._transport_refresher: Callable[..., Any] | None = None
+
+    def set_transport_refresher(self, refresher: Callable[..., Any]) -> None:
+        """Install the Notebook-owned tunnel/DB rotation hook."""
+
+        self._transport_refresher = refresher
 
     def execute_cycle(self, request: RegionTalkCycleRequest) -> RegionTalkCycleResult:
         if request.publication_dispatch:
@@ -182,7 +188,12 @@ class DirectRegionTalkCycleExecutor:
             "publication_dispatch": False,
         }
         request_sha256 = hashlib.sha256(canonical_json_bytes(request_body)).hexdigest()
-        runner = DirectSnapshotRunner(self.reader, self.connection, page_size=250)
+        runner = DirectSnapshotRunner(
+            self.reader,
+            self.connection,
+            page_size=250,
+            transport_refresh=self._transport_refresher,
+        )
         manifest = runner.inventory(
             export_batch_id=export_batch_id,
             task_run_id=self.task_run_id,
@@ -193,6 +204,7 @@ class DirectRegionTalkCycleExecutor:
             created_at=datetime.now(UTC),
         )
         receipt = runner.run(manifest)
+        self.connection = runner.connection
         receipt_sha256 = hashlib.sha256(
             canonical_json_bytes(receipt.model_dump(mode="json"))
         ).hexdigest()

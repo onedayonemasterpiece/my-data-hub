@@ -848,6 +848,23 @@ def test_master_pending_attestation_reconciles_lost_push_response_without_retry(
     assert len(journal.receipts) >= 1
     assert len(journal.claims) == 0
 
+    # A fresh central launcher must reconcile the exact committed version and
+    # rebuild its receipt/claim without issuing a second non-idempotent push.
+    recovered = client.reconcile_private_notebook_mutation(
+        intent=intent,
+        task_run_id=run_id,
+        expected_source_sha256=hashlib.sha256(source).hexdigest(),
+        dataset_sources=(),
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=False,
+        docker_image=TEST_RUNTIME_IMAGE,
+        docker_image_pinning_type="original",
+    )
+    assert recovered is not None
+    assert recovered.run.provider_run_ref == "owner/ambiguous-master/1"
+    assert calls == 1
+    assert journal.claims[recovered.claim.claim_sha256] == recovered.claim
+
 
 def test_master_legacy_empty_push_response_uses_exact_latest_get_kernel() -> None:
     client, api, journal = adapter()

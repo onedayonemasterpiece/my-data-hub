@@ -2080,6 +2080,21 @@ class LedgerControlReader(ControlPlaneReader):
         self.acceptance_scenarios = acceptance_scenarios
 
     def invoke_control(self, tool: str, arguments: dict[str, Any], principal: AccessIdentity) -> dict[str, Any]:
+        if tool == "region_talk.pipeline.status":
+            if arguments:
+                raise ValueError("Region Talk pipeline status accepts no arguments")
+            from my_data_hub.workloads.region_talk.pipeline_runtime import (
+                RegionTalkPipelineStore,
+            )
+            from my_data_hub.workloads.region_talk.production_assembly import (
+                RegionTalkMCPController,
+            )
+
+            # This is a SQLite-only metadata read.  It neither resolves nor
+            # ensures an ACTIVE master and requires no provider/write gateway.
+            return RegionTalkMCPController._public(
+                RegionTalkPipelineStore.latest_read_only(self.ledger.path)
+            )
         if tool in {"acceptance.scenario.request", "acceptance.scenario.status"}:
             adapter = self.acceptance_scenarios
             if adapter is None:

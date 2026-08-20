@@ -637,6 +637,9 @@ def create_app(
                 runtime_image_source_commit=region_talk_settings.runtime_image_source_commit,
                 wheel_relative_path=region_talk_settings.wheel_relative_path,
                 wheel_sha256=region_talk_settings.wheel_sha256,
+                ydb_endpoint=region_talk_settings.ydb_endpoint,
+                ydb_database=region_talk_settings.ydb_database,
+                ydb_viewer_secret_label=region_talk_settings.ydb_viewer_secret_label,
                 # The worker obtains a fresh <=4 minute generation after
                 # attestation whenever provider scheduling consumed the
                 # launch-time credential.  The proved DB session itself owns
@@ -2771,6 +2774,25 @@ def create_app(
         coordinator, task = _region_talk_callback_authority(
             task_run_id=receipt.task_run_id, authorization=authorization
         )
+        existing = coordinator.status(receipt.request_id)
+        receipt_sha256 = hashlib.sha256(
+            canonical_json_bytes(receipt.model_dump(mode="json"))
+        ).hexdigest()
+        if existing is not None and existing.state.value in {
+            "TERMINAL",
+            "CLEANUP_PENDING",
+            "CLEANED",
+        }:
+            if (
+                existing.task_run_id == receipt.task_run_id
+                and existing.terminal_status is not None
+                and existing.terminal_status.value == receipt.status
+                and existing.terminal_receipt_sha256 == receipt_sha256
+            ):
+                return {"accepted": True, "state": existing.state.value}
+            raise HTTPException(
+                status_code=409, detail={"code": "region_talk_terminal_rejected"}
+            )
         _assert_region_talk_refresh_state(
             coordinator=coordinator,
             task=task,

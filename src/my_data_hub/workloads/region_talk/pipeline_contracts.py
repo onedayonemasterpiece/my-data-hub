@@ -13,6 +13,7 @@ import hashlib
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import (
@@ -159,6 +160,9 @@ class RegionTalkLaunchMetadata(BaseModel):
     runtime_image_source_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
     wheel_relative_path: str = Field(min_length=1, max_length=500)
     wheel_sha256: str = Field(pattern=_SHA256_PATTERN)
+    ydb_endpoint: str = Field(min_length=12, max_length=500)
+    ydb_database: str = Field(pattern=r"^/[A-Za-z0-9_./-]+$", max_length=500)
+    ydb_viewer_secret_label: str = Field(pattern=r"^[A-Z][A-Z0-9_]{7,127}$")
     max_cycles: int = Field(ge=1, le=96)
     max_runtime_seconds: int = Field(ge=60, le=10_800)
     publication_dispatch: Literal[False] = False
@@ -170,6 +174,22 @@ class RegionTalkLaunchMetadata(BaseModel):
         if normalized.startswith("/") or ".." in normalized.split("/"):
             raise ValueError("wheel_relative_path must be a safe relative path")
         return normalized
+
+    @field_validator("ydb_endpoint")
+    @classmethod
+    def credential_free_ydb_endpoint(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"grpc", "grpcs"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("ydb_endpoint must be a credential-free grpc(s) endpoint")
+        return value.rstrip("/")
 
 
 class RegionTalkRuntimeAttestation(BaseModel):
