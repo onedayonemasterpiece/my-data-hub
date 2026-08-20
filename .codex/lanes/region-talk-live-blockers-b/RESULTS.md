@@ -11,6 +11,7 @@ Done. No live or production state was mutated.
 - Final-audit follow-up base SHA: `91e22ce`
 - Migration 0027 implementation SHA: `d6f9ed5`
 - Dynamic proof/hardening SHA: `36f1037`
+- Three-digest tamper proof SHA: `1e614ae`
 - Results receipt SHA: recorded by the commit containing this file
 
 ## Delivered
