@@ -90,13 +90,27 @@ source/version and never launches a second effect for a lost response.
 
 The generated child verifies its exact source, original image digest and source commit, project
 wheel, canonical offline dependency manifest and every dependency-wheel SHA before installing
-with `--no-index --no-deps`. It authenticates through its task token, attests only metadata,
-opens the task-bound tunnel, and calls the migration 0028 fetch/submit functions directly. A
-near-expiry checkpoint requests generation N+1; the supervisor invokes migration 0029, and
-central revokes N only after the exact database rotation receipt activates N+1. Terminal replay
-reuses the same receipt, revokes all child bindings, and deletes the two exact task-owned provider
-resources. Callback and journal validation reject raw payload/input data/text, lease, database
-URL, or task token. Publication, notification, and schedule gates remain false.
+with `--no-index --no-deps`. It authenticates through its task token and attests only metadata.
+After scheduling and offline installation, but **before materializing any tunnel or PostgreSQL
+connection**, it always requests a fresh generation N+1 and waits for the exact migration 0029
+rotation receipt. Central activates N+1 only after that receipt, then revokes N. Later bounded
+checkpoints repeat this protocol near expiry.
+
+The stage worker posts one immutable terminal body with bounded exact retries. Independently, the
+central lifespan reads the exact persisted Kaggle run identity through the same injected adapter.
+A provider `COMPLETE` with a missing callback, provider `FAILED`, or the exact stage deadline
+creates one persisted metadata-only terminal proof before cleanup. Restart then replays the same
+authority revocation and protected Notebook/Dataset delete intents without a duplicate effect.
+No provider error body, business input, task token, raw lease, or database URL enters the control
+journal.
+
+Supervisor credential activation likewise updates the durable SQLite projection only after the
+private authority has activated the replacement. Exact HTTP replay repairs that projection, so
+terminal cleanup revokes the actual current generation rather than the launch generation. A
+bounded supervisor result distinguishes `IMPORT_COMPLETE_WAITING_STAGES` from an import failure
+or generic retry and retains both the accepted snapshot receipt hash and stage receipt hash.
+Waiting-stage exhaustion is never reported as success; the explicit outcome remains visible
+through cleanup. Publication, notification, and schedule gates remain false.
 
 Current executable matrix (code-level, not live evidence):
 
