@@ -12,6 +12,8 @@ Done. No live or production state was mutated.
 - Migration 0027 implementation SHA: `d6f9ed5`
 - Dynamic proof/hardening SHA: `36f1037`
 - Three-digest tamper proof SHA: `1e614ae`
+- Private stage payload split base SHA: `a550c2e`
+- Migration 0028 implementation/proof SHA: `ab470cc`
 - Results receipt SHA: recorded by the commit containing this file
 
 ## Delivered
@@ -51,6 +53,29 @@ Done. No live or production state was mutated.
 - Explicitly revoked the renamed unverified v1 function from the pipeline and PUBLIC;
   only the validating fixed seam is granted to `mdh_region_talk_pipeline`.
 
+### Architecture correction: migration 0028
+
+- Split the stage data plane so the supervisor receives only exact task/batch/stage/
+  work/effect/dispatch identities, attempt policy, timestamps, and hashes. The metadata
+  receipt contains no execution payload, text, URL, topics, upstream result contents,
+  raw lease, database URL, task token, or result metadata.
+- Stored the execution payload and raw lease only inside PostgreSQL. Revoked the 0027
+  payload-returning claim, submit, and status entry points from PUBLIC and
+  `mdh_region_talk_pipeline`; they remain internal implementation helpers only.
+- Added deterministic `dispatch_id` and child `worker_task_run_id` identities and an
+  append-only supervisor-to-worker binding. Binding verifies distinct credential IDs and
+  task IDs plus exact registered generation, command hash, task-token hash, master
+  instance, epoch, work item, effect, attempt, and claim hash.
+- Added fixed direct-worker payload fetch and result-submit functions. Only the separately
+  registered worker LOGIN can fetch the stored payload or submit; PostgreSQL infers the
+  stored lease and rejects the wrong task, credential, generation, epoch, effect, binding
+  hash, work item, attempt, input fingerprint, or expired lease.
+- Kept exact worker-result replay idempotent, including response replay after the original
+  lease expires, while new late results remain denied. Result evidence continues to be
+  attributed to the supervisor stage run/current accepted snapshot.
+- Added a metadata-only supervisor status receipt for polling before PREPARE/reprepare;
+  result references contain hashes only and all dispatch flags remain false.
+
 ## Evidence and commands
 
 - `.venv/bin/python -m pytest -q tests/region_talk/test_snapshot_current_state_v5.py tests/region_talk/test_snapshot_current_state_v4.py tests/region_talk/test_snapshot_integrity_v3.py tests/region_talk/test_direct_snapshot_sql.py tests/test_db_migrations.py` — 21 passed.
@@ -73,13 +98,23 @@ Follow-up verification on current integration:
 - Full pytest was intentionally not rerun in this follow-up because the integration owner
   reserved the constrained disk/full-suite slot for final integration validation.
 
+Migration 0028 verification:
+
+- `MDH_RUN_DISPOSABLE_POSTGRES=1 ./.venv/bin/pytest -q tests/region_talk/test_snapshot_integrity_postgres.py -x` — 1 passed on fresh tmpfs PostgreSQL 18. It proves metadata-only claim and exact replay; denial of the old payload-returning claim; separate deterministic worker registration/binding; wrong generation, wrong supervisor task, and wrong binding rejection; direct worker payload fetch and immutable submit replay; supervisor PREPARE `CURRENT`; metadata-only status; and schema revision 28.
+- `./.venv/bin/pytest -q tests/region_talk/test_private_stage_payload_v7.py tests/region_talk/test_snapshot_current_state_v6.py` — 11 passed.
+- `./.venv/bin/python scripts/validate_repository.py` — 5104 checks, 0 errors.
+- `./.venv/bin/python -m compileall -q src tests` — passed.
+- `./.venv/bin/ruff check tests/region_talk/test_private_stage_payload_v7.py tests/region_talk/test_snapshot_integrity_postgres.py` — passed.
+
 ## Changed files
 
 - `sql/migrations/0026_region_talk_bootstrap_and_current_state.sql`
 - `sql/migrations/0027_region_talk_stage_dispatch_and_queue.sql`
+- `sql/migrations/0028_region_talk_private_stage_payload.sql`
 - `sql/admin/role_contract.sql`
 - `tests/region_talk/test_snapshot_current_state_v5.py`
 - `tests/region_talk/test_snapshot_current_state_v6.py`
+- `tests/region_talk/test_private_stage_payload_v7.py`
 - `tests/region_talk/test_snapshot_integrity_postgres.py`
 - `docs/migrations/region-talk/mapping.md`
 - `docs/migrations/region-talk/direct-snapshot-v2.md`
@@ -90,6 +125,9 @@ Follow-up verification on current integration:
 - Migration 0027 supplies the durable dispatcher/result boundary but does not itself attach
   external model providers. Missing or unavailable stage inputs remain honest waiting or
   retryable work until the separately owned typed runtime lands verified evidence.
+- Migration 0028 requires the master/controller to register a distinct short-lived child
+  worker credential before binding and launch. The separately owned runtime/control lane
+  must preserve the committed metadata-only callback and journal contracts.
 - No live Kaggle, YDB, production PostgreSQL, publication, notification, or canonical
   business-data mutation was performed.
 - The shared integration worktree contains another lane's uncommitted results receipt;
