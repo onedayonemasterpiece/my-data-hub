@@ -964,6 +964,7 @@ class RegionTalkCycleResult(BaseModel):
     rows_observed: int = Field(ge=0)
     rows_changed: int = Field(ge=0)
     receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    queue_revision: int | None = Field(default=None, ge=0)
 
 
 class RegionTalkCycleExecutor(Protocol):
@@ -979,6 +980,7 @@ class BoundedSupervisorResult:
     rows_changed: int
     completed: bool
     aggregate_receipt_sha256: str
+    queue_revision: int | None = None
 
 
 def run_bounded_supervisor(
@@ -1004,6 +1006,7 @@ def run_bounded_supervisor(
     started = monotonic()
     observed = changed = idle = completed_cycles = 0
     receipt_hashes: list[str] = []
+    queue_revision: int | None = None
     complete = False
     for cycle_number in range(1, max_cycles + 1):
         if monotonic() - started >= max_runtime_seconds:
@@ -1021,6 +1024,8 @@ def run_bounded_supervisor(
         observed += result.rows_observed
         changed += result.rows_changed
         receipt_hashes.append(result.receipt_sha256)
+        if result.queue_revision is not None:
+            queue_revision = result.queue_revision
         if result.disposition is RegionTalkCycleDisposition.COMPLETE:
             complete = True
             break
@@ -1041,6 +1046,7 @@ def run_bounded_supervisor(
         "rows_observed": observed,
         "rows_changed": changed,
         "cycle_receipts": receipt_hashes,
+        "queue_revision": queue_revision,
         "publication_dispatch": False,
     })).hexdigest()
     return BoundedSupervisorResult(
@@ -1049,4 +1055,5 @@ def run_bounded_supervisor(
         rows_changed=changed,
         completed=complete,
         aggregate_receipt_sha256=aggregate,
+        queue_revision=queue_revision,
     )

@@ -366,7 +366,7 @@ def render_region_talk_supervisor_source(
         '    "task_run_id":launch["task_run_id"],"master_instance_id":launch["master"]["master_instance_id"],',
         '    "epoch":launch["master"]["epoch"],"status":"SUCCEEDED" if result.completed else "FAILED",',
         '    "cycles_completed":result.cycles_completed,"rows_observed":result.rows_observed,',
-        '    "rows_changed":result.rows_changed,"queue_revision":None,',
+        '    "rows_changed":result.rows_changed,"queue_revision":result.queue_revision,',
         '    "aggregate_receipt_sha256":result.aggregate_receipt_sha256,"completed_at":completed_at,',
         '    "publication_dispatch":False,',
         "})",

@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
 from my_data_hub.workloads.region_talk import direct_pipeline
+from my_data_hub.workloads.region_talk.pipeline_runtime import (
+    RegionTalkCycleDisposition,
+    RegionTalkCycleRequest,
+)
+from my_data_hub.workloads.region_talk.stage_execution import StageRunStatus
 
 
 @dataclass
@@ -125,4 +132,148 @@ def test_ydb_reader_rejects_null_primary_key(monkeypatch) -> None:  # type: igno
             primary_key="pk",
             after_primary_key=None,
             limit=2,
+        )
+
+
+def test_cycle_requires_typed_post_import_receipt_before_success(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    task_run_id = uuid4()
+    master_instance_id = uuid4()
+    export_batch_id = uuid4()
+    connection = object()
+    refreshed_connection = object()
+    calls: list[object] = []
+
+    class Runner:
+        def __init__(self, _reader, supplied_connection, **_kwargs):  # type: ignore[no-untyped-def]
+            assert supplied_connection is connection
+            self.connection = supplied_connection
+
+        def inventory(self, **_kwargs):  # type: ignore[no-untyped-def]
+            calls.append("inventory")
+            return object()
+
+        def run(self, _manifest):  # type: ignore[no-untyped-def]
+            calls.append("snapshot")
+            return SimpleNamespace(
+                export_batch_id=export_batch_id,
+                expected_row_count=58_554,
+                dispositioned_row_count=58_554,
+                model_dump=lambda **_kwargs: {
+                    "export_batch_id": str(export_batch_id),
+                    "expected_row_count": 58_554,
+                },
+            )
+
+    class Function:
+        def __init__(self, supplied_connection):  # type: ignore[no-untyped-def]
+            assert supplied_connection is refreshed_connection
+
+    class Supervisor:
+        def __init__(self, _function):  # type: ignore[no-untyped-def]
+            pass
+
+        def execute_after_import(self, **identity):  # type: ignore[no-untyped-def]
+            calls.append(("stages", identity))
+            return SimpleNamespace(
+                status=StageRunStatus.WAITING_WORK,
+                receipt_sha256="a" * 64,
+                queue_revision=17,
+                rows_changed=9,
+            )
+
+    monkeypatch.setattr(direct_pipeline, "DirectSnapshotRunner", Runner)
+    monkeypatch.setattr(direct_pipeline, "PostgresPostImportStageFunction", Function)
+    monkeypatch.setattr(direct_pipeline, "RegionTalkPostImportSupervisor", Supervisor)
+    executor = direct_pipeline.DirectRegionTalkCycleExecutor(
+        connection=connection,
+        reader=object(),
+        source_database="/ru-central1/example",
+        task_run_id=task_run_id,
+        master_instance_id=master_instance_id,
+        epoch=47,
+        source_revision="snapshot-1",
+    )
+
+    def refresh(supplied_connection, **position):  # type: ignore[no-untyped-def]
+        assert supplied_connection is connection
+        assert position["phase"] == "post_import_stages"
+        calls.append("refresh")
+        return refreshed_connection
+
+    executor.set_transport_refresher(refresh)
+    result = executor.execute_cycle(
+        RegionTalkCycleRequest(
+            task_run_id=task_run_id,
+            master_instance_id=master_instance_id,
+            epoch=47,
+            cycle_number=1,
+        )
+    )
+
+    assert result.disposition is RegionTalkCycleDisposition.COMPLETE
+    assert result.rows_observed == 58_554
+    assert result.rows_changed == 58_563
+    assert result.queue_revision == 17
+    assert calls == [
+        "inventory",
+        "snapshot",
+        "refresh",
+        (
+            "stages",
+            {"task_run_id": task_run_id, "export_batch_id": export_batch_id},
+        ),
+    ]
+
+
+def test_cycle_does_not_report_success_for_failed_post_import_stages(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    task_run_id = uuid4()
+    master_instance_id = uuid4()
+    export_batch_id = uuid4()
+
+    class Runner:
+        def __init__(self, _reader, supplied_connection, **_kwargs):  # type: ignore[no-untyped-def]
+            self.connection = supplied_connection
+
+        def inventory(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return object()
+
+        def run(self, _manifest):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                export_batch_id=export_batch_id,
+                expected_row_count=1,
+                dispositioned_row_count=1,
+                model_dump=lambda **_kwargs: {"export_batch_id": str(export_batch_id)},
+            )
+
+    class Supervisor:
+        def __init__(self, _function):  # type: ignore[no-untyped-def]
+            pass
+
+        def execute_after_import(self, **_identity):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(status=StageRunStatus.FAILED)
+
+    monkeypatch.setattr(direct_pipeline, "DirectSnapshotRunner", Runner)
+    monkeypatch.setattr(direct_pipeline, "PostgresPostImportStageFunction", lambda _value: object())
+    monkeypatch.setattr(direct_pipeline, "RegionTalkPostImportSupervisor", Supervisor)
+    executor = direct_pipeline.DirectRegionTalkCycleExecutor(
+        connection=object(),
+        reader=object(),
+        source_database="/ru-central1/example",
+        task_run_id=task_run_id,
+        master_instance_id=master_instance_id,
+        epoch=47,
+        source_revision=None,
+    )
+
+    with pytest.raises(
+        direct_pipeline.DirectPipelineConfigurationError,
+        match="stages failed terminally",
+    ):
+        executor.execute_cycle(
+            RegionTalkCycleRequest(
+                task_run_id=task_run_id,
+                master_instance_id=master_instance_id,
+                epoch=47,
+                cycle_number=1,
+            )
         )

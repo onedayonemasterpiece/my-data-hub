@@ -23,6 +23,11 @@ from .pipeline_runtime import (
     RegionTalkCycleRequest,
     RegionTalkCycleResult,
 )
+from .stage_execution import (
+    PostgresPostImportStageFunction,
+    RegionTalkPostImportSupervisor,
+    StageRunStatus,
+)
 
 
 class DirectPipelineConfigurationError(RuntimeError):
@@ -205,14 +210,53 @@ class DirectRegionTalkCycleExecutor:
         )
         receipt = runner.run(manifest)
         self.connection = runner.connection
-        receipt_sha256 = hashlib.sha256(
+        snapshot_receipt_sha256 = hashlib.sha256(
             canonical_json_bytes(receipt.model_dump(mode="json"))
+        ).hexdigest()
+        if self._transport_refresher is not None:
+            replacement = self._transport_refresher(
+                self.connection,
+                phase="post_import_stages",
+                source_table=None,
+                after_primary_key=None,
+                page_number=0,
+            )
+            if replacement is None:
+                raise DirectPipelineConfigurationError(
+                    "transport refresh returned no post-import connection"
+                )
+            self.connection = replacement
+        stage_receipt = RegionTalkPostImportSupervisor(
+            PostgresPostImportStageFunction(self.connection)
+        ).execute_after_import(
+            task_run_id=self.task_run_id,
+            export_batch_id=receipt.export_batch_id,
+        )
+        if stage_receipt.status is StageRunStatus.FAILED:
+            raise DirectPipelineConfigurationError(
+                "post-import Region Talk stages failed terminally"
+            )
+        receipt_sha256 = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "schema_version": "region-talk-supervised-cycle-receipt.v1",
+                    "task_run_id": str(self.task_run_id),
+                    "export_batch_id": str(receipt.export_batch_id),
+                    "snapshot_receipt_sha256": snapshot_receipt_sha256,
+                    "stage_receipt_sha256": stage_receipt.receipt_sha256,
+                    "stage_status": stage_receipt.status.value,
+                    "queue_revision": stage_receipt.queue_revision,
+                    "publication_dispatch": False,
+                    "notification_dispatch": False,
+                }
+            )
         ).hexdigest()
         self._receipt = RegionTalkCycleResult(
             disposition=RegionTalkCycleDisposition.COMPLETE,
             rows_observed=receipt.expected_row_count,
-            rows_changed=receipt.dispositioned_row_count,
+            rows_changed=receipt.dispositioned_row_count + stage_receipt.rows_changed,
             receipt_sha256=receipt_sha256,
+            queue_revision=stage_receipt.queue_revision,
         )
         return self._receipt
 
