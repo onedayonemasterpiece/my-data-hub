@@ -14,6 +14,7 @@ from my_data_hub.providers import BoundedInventory, ControlClass, ProviderKind, 
 from my_data_hub.providers.kaggle import (
     RUN_RECEIPT_NAME,
     EffectOutcome,
+    KaggleAmbiguousMutation,
     KaggleContractError,
     KaggleIdentityError,
     KaggleKernelRunIdentity,
@@ -261,6 +262,7 @@ class FakeKaggleApi:
                 is_private=True,
                 docker_image=self.kernel_metadata.get(ref, {}).get("docker_image"),
                 kernel_type=self.kernel_metadata.get(ref, {}).get("kernel_type"),
+                kernel_data_sources=self.kernel_metadata.get(ref, {}).get("kernel_sources", []),
             ),
             blob=SimpleNamespace(source=self.kernels[ref][version].decode("utf-8")),
         )
@@ -1604,6 +1606,70 @@ def test_notebook_model_source_must_be_exact_version(model_source: str) -> None:
             disposable=True,
             model_sources=(model_source,),
             enable_internet=False,
+            docker_image=TEST_RUNTIME_IMAGE,
+            docker_image_pinning_type="original",
+        )
+
+
+def test_worker_kernel_source_is_exactly_read_back_during_response_loss_reconciliation() -> None:
+    client, api, _journal = adapter()
+    run_id = uuid4()
+    source = f'TASK_RUN_ID = "{run_id}"\n'.encode()
+    kernel_source = "owner/frozen-e5-assets-v1"
+    arguments = {
+        "task_run_id": str(run_id),
+        "source_sha256": hashlib.sha256(source).hexdigest(),
+        "dataset_sources": (),
+        "kernel_sources": (kernel_source,),
+        "control_class": "orchestrator_protected",
+        "disposable": True,
+        "docker_image": TEST_RUNTIME_IMAGE,
+        "docker_image_pinning_type": "original",
+    }
+    intent = effect(
+        MutationAction.PUSH_NOTEBOOK,
+        "owner/kernel-source-worker",
+        task_id=run_id,
+        arguments=arguments,
+    )
+    pushed = client.push_private_worker_notebook_pending_attestation(
+        intent=intent,
+        task_run_id=run_id,
+        source=source,
+        title="kernel-source-worker",
+        code_file="worker.py",
+        kernel_type="script",
+        language="python",
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=True,
+        kernel_sources=(kernel_source,),
+        enable_internet=False,
+        docker_image=TEST_RUNTIME_IMAGE,
+        docker_image_pinning_type="original",
+    )
+    assert api.kernel_metadata[pushed.run.provider_ref]["kernel_sources"] == [kernel_source]
+    recovered = client.reconcile_private_notebook_mutation(
+        intent=intent,
+        task_run_id=run_id,
+        expected_source_sha256=hashlib.sha256(source).hexdigest(),
+        dataset_sources=(),
+        kernel_sources=(kernel_source,),
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=True,
+        docker_image=TEST_RUNTIME_IMAGE,
+        docker_image_pinning_type="original",
+    )
+    assert recovered is not None
+    api.kernel_metadata[pushed.run.provider_ref]["kernel_sources"] = ["owner/drifted"]
+    with pytest.raises(KaggleAmbiguousMutation, match="differs"):
+        client.reconcile_private_notebook_mutation(
+            intent=intent,
+            task_run_id=run_id,
+            expected_source_sha256=hashlib.sha256(source).hexdigest(),
+            dataset_sources=(),
+            kernel_sources=(kernel_source,),
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+            disposable=True,
             docker_image=TEST_RUNTIME_IMAGE,
             docker_image_pinning_type="original",
         )

@@ -154,6 +154,20 @@ def _normalized_model_source(value: object) -> str:
     return source
 
 
+def _normalized_kernel_source(value: object) -> str:
+    """Normalize the only kernel-source shape supported by Kaggle metadata.
+
+    Kaggle consumer metadata has no numeric source-version field.  Callers
+    that need immutable output must separately fence the producer's current
+    exact source/version and content-address the mounted files.
+    """
+
+    source = str(value or "").strip().removeprefix("/")
+    if source.count("/") != 1:
+        raise KaggleIdentityError("Kaggle kernel source must be exact owner/slug")
+    return _normalized_ref(source)
+
+
 def _version(value: object) -> int | None:
     if value in (None, ""):
         return None
@@ -1368,6 +1382,7 @@ class KaggleProviderAdapter:
         control_class: ControlClass,
         disposable: bool,
         dataset_sources: Sequence[str] = (),
+        kernel_sources: Sequence[str] = (),
         model_sources: Sequence[str] = (),
         enable_internet: bool = False,
         timeout_seconds: int | None = None,
@@ -1383,6 +1398,7 @@ class KaggleProviderAdapter:
             control_class=control_class,
             disposable=disposable,
             dataset_sources=dataset_sources,
+            kernel_sources=kernel_sources,
             model_sources=model_sources,
             enable_internet=enable_internet,
             timeout_seconds=timeout_seconds,
@@ -1402,6 +1418,7 @@ class KaggleProviderAdapter:
         control_class: ControlClass,
         disposable: bool,
         dataset_sources: Sequence[str] = (),
+        kernel_sources: Sequence[str] = (),
         model_sources: Sequence[str] = (),
         enable_internet: bool = False,
         timeout_seconds: int | None = None,
@@ -1430,6 +1447,7 @@ class KaggleProviderAdapter:
             control_class=control_class,
             disposable=disposable,
             dataset_sources=dataset_sources,
+            kernel_sources=kernel_sources,
             model_sources=model_sources,
             enable_internet=enable_internet,
             timeout_seconds=timeout_seconds,
@@ -1508,6 +1526,7 @@ class KaggleProviderAdapter:
         control_class: ControlClass,
         disposable: bool,
         dataset_sources: Sequence[str] = (),
+        kernel_sources: Sequence[str] = (),
         model_sources: Sequence[str] = (),
         enable_internet: bool = False,
         timeout_seconds: int | None = None,
@@ -1535,6 +1554,7 @@ class KaggleProviderAdapter:
             raise KaggleContractError("notebook source must embed the exact task_run_id")
         source_sha = executable_source_sha256(canonical_source, kernel_type=kernel_type)
         normalized_sources = tuple(_normalized_dataset_source(item) for item in dataset_sources)
+        normalized_kernel_sources = tuple(_normalized_kernel_source(item) for item in kernel_sources)
         normalized_model_sources = tuple(_normalized_model_source(item) for item in model_sources)
         if pending_runtime_attestation and (
             not isinstance(docker_image, str)
@@ -1551,6 +1571,8 @@ class KaggleProviderAdapter:
         }
         if normalized_model_sources:
             intent_arguments["model_sources"] = normalized_model_sources
+        if normalized_kernel_sources:
+            intent_arguments["kernel_sources"] = normalized_kernel_sources
         if pending_runtime_attestation:
             intent_arguments.update(
                 {
@@ -1587,7 +1609,7 @@ class KaggleProviderAdapter:
                 "enable_tpu": False,
                 "enable_internet": bool(enable_internet),
                 "dataset_sources": list(normalized_sources),
-                "kernel_sources": [],
+                "kernel_sources": list(normalized_kernel_sources),
                 "competition_sources": [],
                 "model_sources": list(normalized_model_sources),
             }
@@ -1798,6 +1820,7 @@ class KaggleProviderAdapter:
     def _read_latest_private_notebook_identity(
         self, provider_ref: str, *, expected_source_sha256: str | None,
         expected_docker_image: str | None = None,
+        expected_kernel_sources: Sequence[str] | None = None,
     ) -> tuple[KaggleKernelSourceIdentity, int]:
         """Read exact latest identity through the pinned official GetKernel API.
 
@@ -1835,6 +1858,14 @@ class KaggleProviderAdapter:
             observed_image = str(_field(metadata, "docker_image", "dockerImage") or "").strip()
             if observed_image != expected_docker_image:
                 raise KaggleIdentityError("Kaggle runtime image readback differs from the exact digest")
+        if expected_kernel_sources is not None:
+            wanted = tuple(_normalized_kernel_source(item) for item in expected_kernel_sources)
+            observed_sources = tuple(
+                _normalized_kernel_source(item)
+                for item in (_field(metadata, "kernel_data_sources", "kernelDataSources") or ())
+            )
+            if observed_sources != wanted:
+                raise KaggleIdentityError("Kaggle kernel-source readback differs")
 
         metadata = _field(response, "metadata")
         blob = _field(response, "blob")
@@ -2026,6 +2057,7 @@ class KaggleProviderAdapter:
         task_run_id: UUID,
         expected_source_sha256: str,
         dataset_sources: Sequence[str],
+        kernel_sources: Sequence[str] = (),
         model_sources: Sequence[str] = (),
         control_class: ControlClass,
         disposable: bool,
@@ -2036,6 +2068,7 @@ class KaggleProviderAdapter:
         """Repair a pushed exact notebook's remote journal without another push."""
 
         normalized_sources = tuple(_normalized_dataset_source(item) for item in dataset_sources)
+        normalized_kernel_sources = tuple(_normalized_kernel_source(item) for item in kernel_sources)
         normalized_model_sources = tuple(_normalized_model_source(item) for item in model_sources)
         arguments = {
             "task_run_id": str(task_run_id),
@@ -2046,6 +2079,8 @@ class KaggleProviderAdapter:
         }
         if normalized_model_sources:
             arguments["model_sources"] = normalized_model_sources
+        if normalized_kernel_sources:
+            arguments["kernel_sources"] = normalized_kernel_sources
         if docker_image is not None or docker_image_pinning_type is not None:
             if (
                 not isinstance(docker_image, str)
@@ -2085,6 +2120,7 @@ class KaggleProviderAdapter:
                 intent.provider_ref,
                 expected_source_sha256=expected_source_sha256,
                 expected_docker_image=docker_image,
+                expected_kernel_sources=normalized_kernel_sources,
             )
         except Exception as exc:
             raise KaggleAmbiguousMutation(
