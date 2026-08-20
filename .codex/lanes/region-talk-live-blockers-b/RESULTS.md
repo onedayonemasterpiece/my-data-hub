@@ -14,6 +14,8 @@ Done. No live or production state was mutated.
 - Three-digest tamper proof SHA: `1e614ae`
 - Private stage payload split base SHA: `a550c2e`
 - Migration 0028 implementation/proof SHA: `ab470cc`
+- Heavy-stage rotation base SHA: `a02b86d`
+- Migration 0029 implementation/proof SHA: `2983b22`
 - Results receipt SHA: recorded by the commit containing this file
 
 ## Delivered
@@ -76,6 +78,25 @@ Done. No live or production state was mutated.
 - Added a metadata-only supervisor status receipt for polling before PREPARE/reprepare;
   result references contain hashes only and all dispatch flags remain false.
 
+### Heavy-stage credential rotation: migration 0029
+
+- Added append-only worker-generation authority without changing the deterministic worker
+  task, dispatch, effect, work item, attempt, input fingerprint, or database lease.
+- Captured the initial 0028 binding as the first generation and exposed a typed status
+  view that marks only the greatest generation `ACTIVE`; every prior row is `FENCED`.
+- Added fixed `rotate_region_talk_stage_worker_credential` authorization. Rotation requires
+  the current binding hash, exact `N+1` registered worker generation, live credential,
+  same worker task/master/epoch, exact supervisor task, and current work/effect/lease.
+- Allowed a refreshed supervisor credential generation for the same supervisor task and
+  epoch to authorize rotation, so a four-minute supervisor LOGIN does not cap a
+  900–1800-second worker stage. Worker credentials still cannot rotate or poll supervisor
+  authority.
+- Replaced direct fetch and submit implementations so only the latest bound, unexpired
+  worker session generation succeeds. Exact rotation and current-generation submit replay
+  are idempotent; older generations and unrelated worker tasks fail closed.
+- Rotation receipts contain only opaque identities, generations, and hashes. They contain
+  no payload, raw lease, task token, command body/hash, database URL, or publication effect.
+
 ## Evidence and commands
 
 - `.venv/bin/python -m pytest -q tests/region_talk/test_snapshot_current_state_v5.py tests/region_talk/test_snapshot_current_state_v4.py tests/region_talk/test_snapshot_integrity_v3.py tests/region_talk/test_direct_snapshot_sql.py tests/test_db_migrations.py` — 21 passed.
@@ -106,15 +127,25 @@ Migration 0028 verification:
 - `./.venv/bin/python -m compileall -q src tests` — passed.
 - `./.venv/bin/ruff check tests/region_talk/test_private_stage_payload_v7.py tests/region_talk/test_snapshot_integrity_postgres.py` — passed.
 
+Migration 0029 verification:
+
+- `MDH_RUN_DISPOSABLE_POSTGRES=1 ./.venv/bin/pytest -q tests/region_talk/test_snapshot_integrity_postgres.py -x` — 1 passed on fresh tmpfs PostgreSQL 18. It proves generation-one fetch, supervisor-credential refresh, exact generation-two rotation/replay, prior-generation fencing, `FENCED`/`ACTIVE` readback, unrelated worker denial, current-generation fetch/direct submit/replay, and schema revision 29.
+- `./.venv/bin/pytest -q tests/region_talk/test_stage_worker_rotation_v8.py tests/region_talk/test_private_stage_payload_v7.py tests/region_talk/test_snapshot_current_state_v6.py` — 15 passed.
+- `./.venv/bin/python scripts/validate_repository.py` — 5108 checks, 0 errors.
+- `./.venv/bin/python -m compileall -q src tests` — passed.
+- `./.venv/bin/ruff check tests/region_talk/test_stage_worker_rotation_v8.py tests/region_talk/test_snapshot_integrity_postgres.py` — passed.
+
 ## Changed files
 
 - `sql/migrations/0026_region_talk_bootstrap_and_current_state.sql`
 - `sql/migrations/0027_region_talk_stage_dispatch_and_queue.sql`
 - `sql/migrations/0028_region_talk_private_stage_payload.sql`
+- `sql/migrations/0029_region_talk_stage_worker_rotation.sql`
 - `sql/admin/role_contract.sql`
 - `tests/region_talk/test_snapshot_current_state_v5.py`
 - `tests/region_talk/test_snapshot_current_state_v6.py`
 - `tests/region_talk/test_private_stage_payload_v7.py`
+- `tests/region_talk/test_stage_worker_rotation_v8.py`
 - `tests/region_talk/test_snapshot_integrity_postgres.py`
 - `docs/migrations/region-talk/mapping.md`
 - `docs/migrations/region-talk/direct-snapshot-v2.md`
@@ -128,6 +159,9 @@ Migration 0028 verification:
 - Migration 0028 requires the master/controller to register a distinct short-lived child
   worker credential before binding and launch. The separately owned runtime/control lane
   must preserve the committed metadata-only callback and journal contracts.
+- Migration 0029 supplies database rotation authority; the separately owned dispatcher
+  must invoke it before the current worker LOGIN expires and pass only its receipt hashes
+  through the control journal/callback.
 - No live Kaggle, YDB, production PostgreSQL, publication, notification, or canonical
   business-data mutation was performed.
 - The shared integration worktree contains another lane's uncommitted results receipt;
