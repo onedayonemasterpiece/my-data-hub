@@ -41,6 +41,8 @@ from .central_launcher import RegionTalkSupervisorCapability, render_region_talk
 from .pipeline_contracts import (
     RegionTalkAccessBinding,
     RegionTalkCleanupReceipt,
+    RegionTalkCredentialActivation,
+    RegionTalkCredentialRefreshRequest,
     RegionTalkDirectMasterAccess,
     RegionTalkLaunchMetadata,
     RegionTalkLaunchReceipt,
@@ -74,6 +76,11 @@ def _atomic(path: Path, body: bytes) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -105,8 +112,18 @@ class DirectoryRegionTalkTaskAuthority:
             raise RegionTalkAssemblyUnavailable("REGION_TALK_TUNNEL_ENDPOINT_INVALID")
 
     def prepare(
-        self, metadata: RegionTalkLaunchMetadata, *, task_token: str, generation: int = 1
+        self,
+        metadata: RegionTalkLaunchMetadata,
+        *,
+        task_token: str,
+        source_sha256: str,
+        generation: int = 1,
     ) -> TaskWorkerCredentialCommand:
+        path = self._task_path(metadata.task_run_id)
+        if path.exists():
+            existing = self._read(path)
+            self._validate_task_metadata(existing, metadata, source_sha256=source_sha256)
+            return TaskWorkerCredentialCommand.model_validate(existing.get("command"))
         token_sha = hashlib.sha256(task_token.encode()).hexdigest()
         command = TaskWorkerCredentialCommand.create(
             task_run_id=metadata.task_run_id,
@@ -120,21 +137,25 @@ class DirectoryRegionTalkTaskAuthority:
             "master_instance_id": str(metadata.master.master_instance_id),
             "master_run_id": str(metadata.master.run_id),
             "master_attempt_id": str(metadata.master.attempt_id),
+            "source_sha256": source_sha256,
+            "image_identity": metadata.runtime_image_identity,
+            "image_source_commit": metadata.runtime_image_source_commit,
+            "launch": metadata.model_dump(mode="json"),
             "command": command.model_dump(mode="json"),
+            "activated_generation": generation,
+            "bindings": {},
+            "revoked_generations": [],
+            "expired_generations": [],
+            "terminal": False,
             "task_token": task_token,
             "created_at": self.clock().astimezone(UTC).isoformat(),
         }
-        path = self._task_path(metadata.task_run_id)
         encoded = canonical_json_bytes(payload)
-        if path.exists():
-            existing = self._read(path)
-            if existing.get("command") != payload["command"]:
-                raise RegionTalkAssemblyUnavailable("REGION_TALK_TASK_COMMAND_CONFLICT")
-            return command
         _atomic(path, encoded)
         return command
 
     def batch(self, *, master_instance_id: UUID, epoch: int) -> TaskWorkerCredentialBatch:
+        self._reap_expired_sidecars()
         commands: list[TaskWorkerCredentialCommand] = []
         revocations: list[TaskWorkerCredentialRevocation] = []
         for path in sorted(self.root.glob("*.task.json")):
@@ -142,25 +163,26 @@ class DirectoryRegionTalkTaskAuthority:
             if value.get("master_instance_id") != str(master_instance_id):
                 continue
             command = TaskWorkerCredentialCommand.model_validate(value.get("command"))
-            if command.epoch == epoch and not self._registration_path(command.task_run_id).exists():
+            if (
+                command.epoch == epoch
+                and not bool(value.get("terminal"))
+                and command.generation
+                not in {int(item) for item in value.get("expired_generations", [])}
+                and not self._registration_ack_path(
+                    command.task_run_id, command.generation
+                ).exists()
+            ):
                 commands.append(command)
         for path in sorted(self.root.glob("*.revoke.json")):
             value = self._read(path)
             revoke = TaskWorkerCredentialRevocation.model_validate(value)
             if revoke.epoch == epoch:
                 revocations.append(revoke)
-        revoked_tasks = {item.task_run_id for item in revocations}
-        commands = [item for item in commands if item.task_run_id not in revoked_tasks]
-        batch = TaskWorkerCredentialBatch(commands=tuple(commands), revocations=tuple(revocations))
-        # The master protocol has no separate revocation-ack message.  The SSH
-        # certificate was already revoked synchronously and the DB LOGIN is
-        # short-lived; consume the command only after constructing the exact
-        # response to avoid poisoning every subsequent poll.
-        for revoke in revocations:
-            path = self.root / f"{revoke.task_run_id.hex}.{revoke.generation}.revoke.json"
-            path.unlink(missing_ok=True)
-            self._task_path(revoke.task_run_id).unlink(missing_ok=True)
-        return batch
+        # Revocations remain until the ACTIVE master explicitly acknowledges
+        # them.  A lost GET response therefore replays the same exact binding.
+        return TaskWorkerCredentialBatch(
+            commands=tuple(commands), revocations=tuple(revocations)
+        )
 
     def register(
         self, registration: TaskWorkerCredentialRegistration
@@ -178,7 +200,9 @@ class DirectoryRegionTalkTaskAuthority:
             or registration.expires_at <= self.clock().astimezone(UTC)
         ):
             raise RegionTalkAssemblyUnavailable("REGION_TALK_CREDENTIAL_BINDING_INVALID")
-        path = self._registration_path(registration.task_run_id)
+        path = self._registration_path(
+            registration.task_run_id, registration.generation
+        )
         registration_value = registration.model_dump(mode="json")
         registration_value["database_url"] = registration.database_url.get_secret_value()
         encoded = canonical_json_bytes(registration_value)
@@ -196,11 +220,17 @@ class DirectoryRegionTalkTaskAuthority:
     def await_access(
         self, metadata: RegionTalkLaunchMetadata, command: TaskWorkerCredentialCommand
     ) -> RegionTalkDirectMasterAccess:
-        path = self._registration_path(metadata.task_run_id)
+        access_path = self._access_path(metadata.task_run_id, command.generation)
+        if access_path.exists():
+            return RegionTalkDirectMasterAccess.model_validate(self._read(access_path))
+        path = self._registration_path(metadata.task_run_id, command.generation)
+        ack_path = self._registration_ack_path(
+            metadata.task_run_id, command.generation
+        )
         deadline = time.monotonic() + self.wait_seconds
-        while not path.is_file() and time.monotonic() < deadline:
+        while (not path.is_file() or not ack_path.is_file()) and time.monotonic() < deadline:
             time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
-        if not path.is_file():
+        if not path.is_file() or not ack_path.is_file():
             raise RegionTalkAssemblyUnavailable("REGION_TALK_TASK_CREDENTIAL_PENDING")
         registration = TaskWorkerCredentialRegistration.model_validate(self._read(path))
         if (
@@ -209,8 +239,7 @@ class DirectoryRegionTalkTaskAuthority:
             or registration.epoch != metadata.master.epoch
             or registration.command_sha256 != command.command_sha256
             or registration.expires_at
-            <= self.clock().astimezone(UTC)
-            + timedelta(seconds=metadata.max_runtime_seconds + 15)
+            <= self.clock().astimezone(UTC) + timedelta(seconds=60)
         ):
             raise RegionTalkAssemblyUnavailable("REGION_TALK_CREDENTIAL_BINDING_INVALID")
         key = Ed25519PrivateKey.generate()
@@ -234,7 +263,7 @@ class DirectoryRegionTalkTaskAuthority:
             valid_before=registration.expires_at,
             now=self.clock(),
         )
-        return RegionTalkDirectMasterAccess(
+        access = RegionTalkDirectMasterAccess(
             credential_id=registration.credential_id,
             task_run_id=registration.task_run_id,
             master_instance_id=registration.master_instance_id,
@@ -254,6 +283,10 @@ class DirectoryRegionTalkTaskAuthority:
             ssh_account=certificate.account,
             ssh_certificate_serial=certificate.serial,
         )
+        encoded = self.private_access_bytes(access)
+        _atomic(access_path, encoded)
+        self._record_binding(access)
+        return access
 
     def validate_token(self, task_run_id: UUID, supplied: str) -> Mapping[str, Any]:
         task = self._read(self._task_path(task_run_id))
@@ -268,47 +301,443 @@ class DirectoryRegionTalkTaskAuthority:
             raise RegionTalkAssemblyUnavailable("REGION_TALK_TASK_TOKEN_INVALID")
         return value
 
+    @staticmethod
+    def private_access_bytes(access: RegionTalkDirectMasterAccess) -> bytes:
+        value = access.model_dump(mode="json")
+        for field_name in (
+            "database_url",
+            "tls_ca_pem",
+            "ssh_private_key",
+            "ssh_certificate",
+            "ssh_known_hosts",
+        ):
+            value[field_name] = getattr(access, field_name).get_secret_value()
+        return canonical_json_bytes(value)
+
+    def refresh(
+        self,
+        request: RegionTalkCredentialRefreshRequest,
+    ) -> RegionTalkDirectMasterAccess:
+        """Return the exact next private generation, replaying response loss."""
+
+        task_path = self._task_path(request.task_run_id)
+        task = self._read(task_path)
+        self._validate_refresh_binding(task, request)
+        command = TaskWorkerCredentialCommand.model_validate(task.get("command"))
+        next_generation = request.previous.generation + 1
+        if command.generation == request.previous.generation:
+            command = TaskWorkerCredentialCommand.create(
+                task_run_id=request.task_run_id,
+                epoch=request.epoch,
+                generation=next_generation,
+                task_token_sha256=request.previous.task_token_sha256,
+            )
+            task["command"] = command.model_dump(mode="json")
+            _atomic(task_path, canonical_json_bytes(task))
+        elif command.generation != next_generation:
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_CREDENTIAL_GENERATION_CONFLICT"
+            )
+        if next_generation in {
+            int(value) for value in task.get("expired_generations", [])
+        }:
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_CREDENTIAL_REPLACEMENT_EXPIRED"
+            )
+        access_path = self._access_path(request.task_run_id, next_generation)
+        if access_path.exists():
+            access = RegionTalkDirectMasterAccess.model_validate(self._read(access_path))
+            if access.expires_at > self.clock().astimezone(UTC):
+                self._validate_replacement(request, access)
+                return access
+            # A generation is immutable in the authoritative PostgreSQL task
+            # binding table.  It cannot be reissued with a fresh credential
+            # after expiry.  Purge its secrets, retain a non-secret tombstone,
+            # and fail closed so a later supervised task gets a new identity.
+            self._expire_generation(access)
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_CREDENTIAL_REPLACEMENT_EXPIRED"
+            )
+        metadata = self._launch_metadata(task)
+        access = self.await_access(metadata, command)
+        self._validate_replacement(request, access)
+        return access
+
+    def activate(self, activation: RegionTalkCredentialActivation) -> None:
+        """Publish the previous exact revocation only after worker DB proof."""
+
+        task_path = self._task_path(activation.task_run_id)
+        task = self._read(task_path)
+        self._validate_activation_binding(task, activation)
+        if self._task_binding(task, activation.previous.generation) != activation.previous or self._task_binding(
+            task, activation.replacement.generation
+        ) != activation.replacement:
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_CREDENTIAL_ACTIVATION_CONFLICT"
+            )
+        activated = int(task.get("activated_generation", 0))
+        if activated not in {
+            activation.previous.generation,
+            activation.replacement.generation,
+        }:
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_CREDENTIAL_ACTIVATION_CONFLICT"
+            )
+        revoked = {int(value) for value in task.get("revoked_generations", [])}
+        if activated == activation.previous.generation:
+            task["activated_generation"] = activation.replacement.generation
+        if activation.previous.generation not in revoked:
+            task["revoked_generations"] = sorted(
+                {*revoked, activation.previous.generation}
+            )
+            _atomic(task_path, canonical_json_bytes(task))
+            if self._write_revocation_binding(
+                task,
+                activation.previous,
+                reason="task_credential_rotated",
+            ):
+                self._revoke_certificate_binding(
+                    task,
+                    activation.previous,
+                    reason="task_credential_rotated",
+                )
+
+    def acknowledge_revocations(
+        self, revocations: tuple[TaskWorkerCredentialRevocation, ...]
+    ) -> None:
+        """Delete only the exact mailbox entries acknowledged by ACTIVE master."""
+
+        touched: set[UUID] = set()
+        for revoke in revocations:
+            path = self._revocation_path(revoke.task_run_id, revoke.generation)
+            if not path.exists():
+                continue
+            persisted = TaskWorkerCredentialRevocation.model_validate(self._read(path))
+            if persisted != revoke:
+                raise RegionTalkAssemblyUnavailable(
+                    "REGION_TALK_REVOCATION_ACK_CONFLICT"
+                )
+            path.unlink()
+            if revoke.reason == "task_credential_rotated":
+                self._access_path(
+                    revoke.task_run_id, revoke.generation
+                ).unlink(missing_ok=True)
+                self._registration_path(
+                    revoke.task_run_id, revoke.generation
+                ).unlink(missing_ok=True)
+                self._registration_ack_path(
+                    revoke.task_run_id, revoke.generation
+                ).unlink(missing_ok=True)
+            touched.add(revoke.task_run_id)
+        for task_id in touched:
+            task_path = self._task_path(task_id)
+            if not task_path.exists():
+                continue
+            task = self._read(task_path)
+            if bool(task.get("terminal")) and not any(
+                self.root.glob(f"{task_id.hex}.*.revoke.json")
+            ):
+                self._purge_task_private_state(task_id)
+
+    def acknowledge_registrations(
+        self, receipts: tuple[TaskWorkerCredentialRegistrationResponse, ...]
+    ) -> None:
+        for receipt in receipts:
+            registration_path = self._registration_path(
+                receipt.task_run_id, receipt.generation
+            )
+            if not registration_path.exists():
+                raise RegionTalkAssemblyUnavailable(
+                    "REGION_TALK_REGISTRATION_ACK_CONFLICT"
+                )
+            registration = TaskWorkerCredentialRegistration.model_validate(
+                self._read(registration_path)
+            )
+            expected = TaskWorkerCredentialRegistrationResponse(
+                task_run_id=registration.task_run_id,
+                epoch=registration.epoch,
+                generation=registration.generation,
+                credential_id=registration.credential_id,
+                command_sha256=registration.command_sha256,
+            )
+            if expected != receipt:
+                raise RegionTalkAssemblyUnavailable(
+                    "REGION_TALK_REGISTRATION_ACK_CONFLICT"
+                )
+            path = self._registration_ack_path(
+                receipt.task_run_id, receipt.generation
+            )
+            encoded = canonical_json_bytes(receipt.model_dump(mode="json"))
+            if path.exists() and path.read_bytes() != encoded:
+                raise RegionTalkAssemblyUnavailable(
+                    "REGION_TALK_REGISTRATION_ACK_CONFLICT"
+                )
+            _atomic(path, encoded)
+
     def request_revocation(self, run: RegionTalkRunSnapshot) -> None:
         if run.task_run_id is None or run.master is None or run.access is None:
             raise RegionTalkAssemblyUnavailable("REGION_TALK_CLEANUP_BINDING_MISSING")
-        revoke = TaskWorkerCredentialRevocation(
-            worker_kind="region_talk",
-            task_run_id=run.task_run_id,
-            epoch=run.master.epoch,
-            generation=run.access.generation,
-            task_token_sha256=run.access.task_token_sha256,
-            command_sha256=run.access.command_sha256,
-            credential_id=run.access.credential_id,
-            reason="region_talk_terminal",
+        task_path = self._task_path(run.task_run_id)
+        task = self._read(task_path)
+        task["terminal"] = True
+        _atomic(task_path, canonical_json_bytes(task))
+        bindings = tuple(
+            RegionTalkAccessBinding.model_validate(value)
+            for value in dict(task.get("bindings", {})).values()
         )
-        _atomic(
-            self.root / f"{run.task_run_id.hex}.{run.access.generation}.revoke.json",
-            canonical_json_bytes(revoke.model_dump(mode="json")),
-        )
-        self.broker.revoke_task_worker_certificate(
-            master_instance_id=str(run.master.master_instance_id),
-            epoch=run.master.epoch,
-            worker_kind="region_talk",
-            task_run_id=str(run.task_run_id),
-            credential_id=str(run.access.credential_id),
-            generation=run.access.generation,
-            binding_sha256=run.access.command_sha256,
-            serial=run.access.ssh_certificate_serial,
-            reason="region_talk_terminal",
-        )
+        if not bindings:
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_CLEANUP_BINDING_MISSING")
+        revoked_generations = {
+            int(value) for value in task.get("revoked_generations", [])
+        }
+        for binding in bindings:
+            if binding.generation in revoked_generations:
+                continue
+            if self._revocation_path(run.task_run_id, binding.generation).exists():
+                continue
+            if self._write_revocation_binding(
+                task, binding, reason="region_talk_terminal"
+            ):
+                self._revoke_certificate_binding(
+                    task, binding, reason="region_talk_terminal"
+                )
+
+    def active_binding(self, task_run_id: UUID) -> RegionTalkAccessBinding:
+        task = self._read(self._task_path(task_run_id))
+        return self._task_binding(task, int(task.get("activated_generation", 0)))
 
     def purge(self, task_run_id: UUID) -> None:
-        # Revocation stays until the ACTIVE master consumes it.  Only the
-        # callback token and plaintext registration are removed here.
-        for path in (self._registration_path(task_run_id),):
-            if path.is_file() and not path.is_symlink():
-                path.unlink()
+        # Secret sidecars are removed after the ACTIVE master explicitly ACKs
+        # every terminal revocation.  Deleting here would recreate the former
+        # response-loss race and strand a live LOGIN.
+        if not any(self.root.glob(f"{task_run_id.hex}.*.revoke.json")):
+            self._purge_task_private_state(task_run_id)
 
     def _task_path(self, task_run_id: UUID) -> Path:
         return self.root / f"{task_run_id.hex}.task.json"
 
-    def _registration_path(self, task_run_id: UUID) -> Path:
-        return self.root / f"{task_run_id.hex}.registration.json"
+    def _registration_path(self, task_run_id: UUID, generation: int) -> Path:
+        return self.root / f"{task_run_id.hex}.{generation}.registration.json"
+
+    def _access_path(self, task_run_id: UUID, generation: int) -> Path:
+        return self.root / f"{task_run_id.hex}.{generation}.access.json"
+
+    def _registration_ack_path(self, task_run_id: UUID, generation: int) -> Path:
+        return self.root / f"{task_run_id.hex}.{generation}.registration-ack.json"
+
+    def _revocation_path(self, task_run_id: UUID, generation: int) -> Path:
+        return self.root / f"{task_run_id.hex}.{generation}.revoke.json"
+
+    @staticmethod
+    def _binding(access: RegionTalkDirectMasterAccess) -> RegionTalkAccessBinding:
+        return RegionTalkAccessBinding(
+            credential_id=access.credential_id,
+            generation=access.generation,
+            command_sha256=access.command_sha256,
+            task_token_sha256=access.task_token_sha256,
+            expires_at=access.expires_at,
+            ssh_certificate_serial=access.ssh_certificate_serial,
+        )
+
+    def _validate_task_metadata(
+        self,
+        task: Mapping[str, Any],
+        metadata: RegionTalkLaunchMetadata,
+        *,
+        source_sha256: str,
+    ) -> None:
+        if (
+            task.get("request_id") != str(metadata.request_id)
+            or task.get("master_instance_id")
+            != str(metadata.master.master_instance_id)
+            or task.get("master_run_id") != str(metadata.master.run_id)
+            or task.get("master_attempt_id") != str(metadata.master.attempt_id)
+            or task.get("source_sha256") != source_sha256
+            or task.get("image_identity") != metadata.runtime_image_identity
+            or task.get("image_source_commit")
+            != metadata.runtime_image_source_commit
+            or task.get("launch") != metadata.model_dump(mode="json")
+        ):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_TASK_COMMAND_CONFLICT")
+
+    @staticmethod
+    def _launch_metadata(task: Mapping[str, Any]) -> RegionTalkLaunchMetadata:
+        try:
+            return RegionTalkLaunchMetadata.model_validate(task.get("launch"))
+        except ValueError as exc:
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_PRIVATE_STATE_INVALID"
+            ) from exc
+
+    @staticmethod
+    def _validate_refresh_binding(
+        task: Mapping[str, Any], request: RegionTalkCredentialRefreshRequest
+    ) -> None:
+        launch = RegionTalkLaunchMetadata.model_validate(task.get("launch"))
+        if (
+            bool(task.get("terminal"))
+            or request.request_id != launch.request_id
+            or request.task_run_id != launch.task_run_id
+            or request.master_instance_id != launch.master.master_instance_id
+            or request.epoch != launch.master.epoch
+            or request.source_sha256 != task.get("source_sha256")
+            or request.image_identity != launch.runtime_image_identity
+            or request.image_source_commit != launch.runtime_image_source_commit
+            or request.previous.generation
+            != int(task.get("activated_generation", 0))
+        ):
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_CREDENTIAL_REFRESH_BINDING_INVALID"
+            )
+
+    @classmethod
+    def _validate_replacement(
+        cls,
+        request: RegionTalkCredentialRefreshRequest,
+        access: RegionTalkDirectMasterAccess,
+    ) -> None:
+        if (
+            access.task_run_id != request.task_run_id
+            or access.master_instance_id != request.master_instance_id
+            or access.epoch != request.epoch
+            or access.generation != request.previous.generation + 1
+            or access.task_token_sha256 != request.previous.task_token_sha256
+        ):
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_CREDENTIAL_REFRESH_BINDING_INVALID"
+            )
+
+    @staticmethod
+    def _validate_activation_binding(
+        task: Mapping[str, Any], activation: RegionTalkCredentialActivation
+    ) -> None:
+        launch = RegionTalkLaunchMetadata.model_validate(task.get("launch"))
+        if (
+            bool(task.get("terminal"))
+            or activation.request_id != launch.request_id
+            or activation.task_run_id != launch.task_run_id
+            or activation.master_instance_id != launch.master.master_instance_id
+            or activation.epoch != launch.master.epoch
+            or activation.source_sha256 != task.get("source_sha256")
+            or activation.image_identity != launch.runtime_image_identity
+            or activation.image_source_commit
+            != launch.runtime_image_source_commit
+        ):
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_CREDENTIAL_ACTIVATION_BINDING_INVALID"
+            )
+
+    def _record_binding(self, access: RegionTalkDirectMasterAccess) -> None:
+        task_path = self._task_path(access.task_run_id)
+        task = self._read(task_path)
+        bindings = dict(task.get("bindings", {}))
+        key = str(access.generation)
+        value = self._binding(access).model_dump(mode="json")
+        if key in bindings and bindings[key] != value:
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_CREDENTIAL_GENERATION_CONFLICT"
+            )
+        bindings[key] = value
+        task["bindings"] = bindings
+        _atomic(task_path, canonical_json_bytes(task))
+
+    @staticmethod
+    def _task_binding(
+        task: Mapping[str, Any], generation: int
+    ) -> RegionTalkAccessBinding:
+        try:
+            value = dict(task.get("bindings", {}))[str(generation)]
+            return RegionTalkAccessBinding.model_validate(value)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_CREDENTIAL_BINDING_INVALID"
+            ) from exc
+
+    def _write_revocation_binding(
+        self,
+        task: Mapping[str, Any],
+        binding: RegionTalkAccessBinding,
+        *,
+        reason: str,
+    ) -> bool:
+        metadata = self._launch_metadata(task)
+        revoke = TaskWorkerCredentialRevocation(
+            worker_kind="region_talk",
+            task_run_id=metadata.task_run_id,
+            epoch=metadata.master.epoch,
+            generation=binding.generation,
+            task_token_sha256=binding.task_token_sha256,
+            command_sha256=binding.command_sha256,
+            credential_id=binding.credential_id,
+            reason=reason,
+        )
+        path = self._revocation_path(metadata.task_run_id, binding.generation)
+        encoded = canonical_json_bytes(revoke.model_dump(mode="json"))
+        if path.exists() and path.read_bytes() != encoded:
+            raise RegionTalkAssemblyUnavailable(
+                "REGION_TALK_REVOCATION_CONFLICT"
+            )
+        if path.exists():
+            return False
+        _atomic(path, encoded)
+        return True
+
+    def _revoke_certificate_binding(
+        self,
+        task: Mapping[str, Any],
+        binding: RegionTalkAccessBinding,
+        *,
+        reason: str,
+    ) -> None:
+        metadata = self._launch_metadata(task)
+        self.broker.revoke_task_worker_certificate(
+            master_instance_id=str(metadata.master.master_instance_id),
+            epoch=metadata.master.epoch,
+            worker_kind="region_talk",
+            task_run_id=str(metadata.task_run_id),
+            credential_id=str(binding.credential_id),
+            generation=binding.generation,
+            binding_sha256=binding.command_sha256,
+            serial=binding.ssh_certificate_serial,
+            reason=reason,
+        )
+
+    def _purge_task_private_state(self, task_run_id: UUID) -> None:
+        for path in self.root.glob(f"{task_run_id.hex}.*.json"):
+            if path.is_file() and not path.is_symlink():
+                path.unlink()
+        task_path = self._task_path(task_run_id)
+        if task_path.is_file() and not task_path.is_symlink():
+            task_path.unlink()
+
+    def _reap_expired_sidecars(self) -> None:
+        observed = self.clock().astimezone(UTC)
+        for path in tuple(self.root.glob("*.access.json")):
+            try:
+                access = RegionTalkDirectMasterAccess.model_validate(self._read(path))
+            except (ValueError, RegionTalkAssemblyUnavailable) as exc:
+                raise RegionTalkAssemblyUnavailable(
+                    "REGION_TALK_PRIVATE_STATE_INVALID"
+                ) from exc
+            if access.expires_at <= observed:
+                self._expire_generation(access)
+
+    def _expire_generation(self, access: RegionTalkDirectMasterAccess) -> None:
+        task_path = self._task_path(access.task_run_id)
+        task = self._read(task_path)
+        expired = {int(value) for value in task.get("expired_generations", [])}
+        expired.add(access.generation)
+        task["expired_generations"] = sorted(expired)
+        _atomic(task_path, canonical_json_bytes(task))
+        self._access_path(access.task_run_id, access.generation).unlink(
+            missing_ok=True
+        )
+        self._registration_path(access.task_run_id, access.generation).unlink(
+            missing_ok=True
+        )
+        self._registration_ack_path(access.task_run_id, access.generation).unlink(
+            missing_ok=True
+        )
 
     @staticmethod
     def _read(path: Path) -> dict[str, Any]:
@@ -355,8 +784,14 @@ class CentralRegionTalkNotebookAdapter:
         if existing is not None:
             return existing
         now = self.clock().astimezone(UTC)
+        source = render_region_talk_supervisor_source(metadata)
+        source_sha = hashlib.sha256(source).hexdigest()
         task_token = secrets.token_urlsafe(36)
-        command = self.authority.prepare(metadata, task_token=task_token)
+        command = self.authority.prepare(
+            metadata,
+            task_token=task_token,
+            source_sha256=source_sha,
+        )
         task_token = self.authority.task_token(metadata.task_run_id)
         access = self.authority.await_access(metadata, command)
         capability = RegionTalkSupervisorCapability(
@@ -407,8 +842,6 @@ class CentralRegionTalkNotebookAdapter:
             disposable=True,
         )
         exact_status = f"{status_ref}/{int(dataset.claim.provider_version)}"
-        source = render_region_talk_supervisor_source(metadata)
-        source_sha = hashlib.sha256(source).hexdigest()
         sources = (metadata.runtime_dataset_exact_ref, exact_status)
         push = ProviderEffectIntent.create(
             operation_id=operation_id,
@@ -472,6 +905,7 @@ class CentralRegionTalkNotebookAdapter:
         if run.task_run_id is None or run.access is None:
             raise RegionTalkAssemblyUnavailable("REGION_TALK_CLEANUP_BINDING_MISSING")
         self.authority.request_revocation(run)
+        active_access = self.authority.active_binding(run.task_run_id)
         claims = self._claims.get(run.task_run_id, ())
         deleted = 0
         for label, claim, action in (
@@ -496,11 +930,11 @@ class CentralRegionTalkNotebookAdapter:
         cleaned_at = self.clock().astimezone(UTC)
         base = {
             "task_run_id": str(run.task_run_id),
-            "credential_id": str(run.access.credential_id),
-            "generation": run.access.generation,
-            "command_sha256": run.access.command_sha256,
-            "task_token_sha256": run.access.task_token_sha256,
-            "ssh_certificate_serial": run.access.ssh_certificate_serial,
+            "credential_id": str(active_access.credential_id),
+            "generation": active_access.generation,
+            "command_sha256": active_access.command_sha256,
+            "task_token_sha256": active_access.task_token_sha256,
+            "ssh_certificate_serial": active_access.ssh_certificate_serial,
             "resources_deleted": deleted,
             "cleaned_at": cleaned_at.isoformat(),
         }

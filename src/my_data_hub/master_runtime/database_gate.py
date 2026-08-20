@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -77,6 +78,43 @@ class DatabaseGate:
             "SELECT master_control.revoke_epoch_credential(%s, %s)",
             (credential_id, reason),
         )
+
+    def register_task_credential_binding(
+        self,
+        *,
+        credential_id: UUID,
+        principal: str,
+        worker_kind: str,
+        task_run_id: UUID,
+        generation: int,
+        identity: MasterIdentity,
+        command_sha256: str,
+        task_token_sha256: str,
+    ) -> Mapping[str, object]:
+        """Bind a Region Talk LOGIN to its exact task before publication."""
+
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT master_control.register_task_credential_binding("
+                "%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    credential_id,
+                    principal,
+                    worker_kind,
+                    task_run_id,
+                    generation,
+                    identity.master_instance_id,
+                    identity.epoch,
+                    command_sha256,
+                    task_token_sha256,
+                ),
+            )
+            row = cursor.fetchone()
+        if row is None or not isinstance(row[0], dict):
+            self.connection.rollback()
+            raise RuntimeError("task credential binding receipt is invalid")
+        self.connection.commit()
+        return row[0]
 
     def _call(self, statement: str, parameters: tuple[object, ...]) -> None:
         with self.connection.cursor() as cursor:

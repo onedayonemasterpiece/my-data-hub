@@ -2064,6 +2064,34 @@ def run_master(
                 register=task_credential_client.register,
                 now=datetime.now(UTC),
             )
+            registration_acks = (
+                task_credential_reconciler.registration_acknowledgements()
+            )
+            try:
+                task_credential_client.acknowledge_registrations(registration_acks)
+            except urllib.error.HTTPError:
+                raise
+            except (urllib.error.URLError, TimeoutError):
+                # Exact command/registration remain replayable until this
+                # delivery ACK reaches control.
+                pass
+            else:
+                task_credential_reconciler.mark_registration_acknowledged(
+                    registration_acks
+                )
+            # Revocations are replayed by control until this explicit exact
+            # ACK.  If this POST is lost, the reconciler's retired-binding set
+            # makes the next GET/ACK cycle idempotent.
+            try:
+                task_credential_client.acknowledge(batch)
+            except urllib.error.HTTPError:
+                raise
+            except (urllib.error.URLError, TimeoutError):
+                # The control mailbox is deliberately non-destructive until
+                # this ACK.  A transport-level response loss is therefore a
+                # safe retry on the next poll; contract/status failures remain
+                # fatal above.
+                pass
         finally:
             task_connection.close()
 

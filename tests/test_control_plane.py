@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -43,6 +44,46 @@ def test_control_plane_is_ready_while_master_is_absent(
             "provider_gateway_ready": False,
             "unified_bootstrap_mode": False,
         }
+
+
+def test_region_talk_enabled_but_unassembled_fails_readiness_with_exact_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("MY_DATA_HUB_REGION_TALK_PIPELINE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_REGION_TALK_SCHEDULE_ENABLED", "false")
+    monkeypatch.setenv("MY_DATA_HUB_KAGGLE_OWNER", "owner")
+    monkeypatch.setenv("MY_DATA_HUB_CALLBACK_URL", "https://control.example")
+    monkeypatch.setenv(
+        "MY_DATA_HUB_REGION_TALK_RUNTIME_IMAGE_IDENTITY",
+        "runtime@sha256:" + "d" * 64,
+    )
+    monkeypatch.setenv(
+        "MY_DATA_HUB_REGION_TALK_RUNTIME_SOURCE_COMMIT", "e" * 40
+    )
+    monkeypatch.setenv(
+        "MY_DATA_HUB_REGION_TALK_WHEEL_RELATIVE_PATH", "dist/my_data_hub.whl"
+    )
+    monkeypatch.setenv("MY_DATA_HUB_REGION_TALK_WHEEL_SHA256", "f" * 64)
+    monkeypatch.setenv(
+        "MY_DATA_HUB_REGION_TALK_CAPABILITY_DIR", str(tmp_path / "private")
+    )
+    response = TestClient(
+        create_app(
+            ControlPlaneSettings(
+                ledger_path=tmp_path / "control.sqlite3",
+                provider_gateway_enabled=True,
+                operator_credentials_enabled=True,
+            ),
+            provider_gateway=SimpleNamespace(uploads=None),
+            provider_gateway_token=b"g" * 48,
+        )
+    ).get("/health/ready")
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["code"] == "REGION_TALK_EXACT_RUNTIME_CLAIM_PENDING"
+    assert detail["region_talk_pipeline_enabled"] is True
+    assert detail["region_talk_pipeline_ready"] is False
+    assert detail["region_talk_schedule_enabled"] is False
 
 
 @pytest.mark.parametrize(

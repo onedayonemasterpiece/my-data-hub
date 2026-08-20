@@ -48,6 +48,12 @@ class TaskCredentialCommandClient(Protocol):
 
     def register(self, body: dict[str, object]) -> Mapping[str, object]: ...
 
+    def acknowledge(self, batch: TaskCredentialBatch) -> None: ...
+
+    def acknowledge_registrations(
+        self, receipts: tuple[Mapping[str, object], ...]
+    ) -> None: ...
+
 
 def task_command_sha256(value: Mapping[str, object]) -> str:
     """Hash the complete issue command except its self-authenticating field."""
@@ -174,6 +180,80 @@ class HttpTaskCredentialClient:
             raise TaskCredentialContractError("task credential receipt is not an object")
         return receipt
 
+    def acknowledge(self, batch: TaskCredentialBatch) -> None:
+        if not batch.revocations:
+            return
+        encoded = canonical_json_bytes(
+            {
+                "schema_version": "my-data-hub-task-credential-ack.v1",
+                "revocations": [
+                    item.model_dump(mode="json") for item in batch.revocations
+                ],
+            }
+        )
+        request = urllib.request.Request(
+            f"{self.base_url}/acknowledgements",
+            data=encoded,
+            headers={
+                "Authorization": self._authorization,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read(4097)
+        if len(raw) > 4096:
+            raise TaskCredentialContractError(
+                "task credential acknowledgement is oversized"
+            )
+        try:
+            receipt = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise TaskCredentialContractError(
+                "task credential acknowledgement is malformed"
+            ) from exc
+        if receipt != {"acknowledged": True, "count": len(batch.revocations)}:
+            raise TaskCredentialContractError(
+                "task credential acknowledgement was not exact"
+            )
+
+    def acknowledge_registrations(
+        self, receipts: tuple[Mapping[str, object], ...]
+    ) -> None:
+        if not receipts:
+            return
+        encoded = canonical_json_bytes(
+            {
+                "schema_version": "my-data-hub-task-registration-ack.v1",
+                "registrations": [dict(item) for item in receipts],
+            }
+        )
+        request = urllib.request.Request(
+            f"{self.base_url}/registration-acknowledgements",
+            data=encoded,
+            headers={
+                "Authorization": self._authorization,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read(4097)
+        if len(raw) > 4096:
+            raise TaskCredentialContractError(
+                "task registration acknowledgement is oversized"
+            )
+        try:
+            receipt = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise TaskCredentialContractError(
+                "task registration acknowledgement is malformed"
+            ) from exc
+        if receipt != {"acknowledged": True, "count": len(receipts)}:
+            raise TaskCredentialContractError(
+                "task registration acknowledgement was not exact"
+            )
+
 
 @dataclass(frozen=True, slots=True)
 class IssuedTaskCredential:
@@ -208,13 +288,29 @@ class TaskCredentialReconciler:
         identity: MasterIdentity,
         local_postgres_port: int,
         issued: dict[TaskCredentialKey, IssuedTaskCredential] | None = None,
+        pending: dict[TaskCredentialKey, IssuedTaskCredential] | None = None,
     ) -> None:
         if not 1024 <= local_postgres_port <= 65535:
             raise ValueError("task credential PostgreSQL port is invalid")
         self.identity = identity
         self.local_postgres_port = local_postgres_port
         self.issued = issued if issued is not None else {}
-        self._all_principals = {item.principal for item in self.issued.values()}
+        self.pending = pending if pending is not None else {}
+        self._all_principals = {
+            item.principal for item in (*self.issued.values(), *self.pending.values())
+        }
+        self._retired: set[
+            tuple[TaskWorkerKind, UUID, int, str, str, UUID]
+        ] = set()
+        # Master-memory only.  It retains the exact generated password across
+        # an HTTP response-loss retry; it is never serialized or logged.
+        self._registration_replays: dict[
+            TaskCredentialKey,
+            tuple[IssuedTaskCredential, dict[str, object], bool, bool],
+        ] = {}
+        self._registration_acknowledgements: dict[
+            TaskCredentialKey, dict[str, object]
+        ] = {}
 
     def _drop(
         self,
@@ -240,32 +336,96 @@ class TaskCredentialReconciler:
         observed = require_utc(now, "now")
         active_until = require_utc(lease_until, "lease_until")
 
+        # A replacement is allowed to overlap the current LOGIN only for its
+        # own short credential lifetime.  If the worker never proves the new
+        # tunnel/session, remove the unactivated replacement and retain the
+        # current exact binding for a later, higher generation decision.
+        for key, pending in tuple(self.pending.items()):
+            if pending.expires_at <= observed:
+                self._drop(
+                    pending,
+                    provisioner=provisioner,
+                    gate=gate,
+                    reason="task_credential_activation_expired",
+                )
+                self._retired.add(self._exact(pending))
+                self.pending.pop(key, None)
+        for key, (candidate, _body, _had_current, _database_bound) in tuple(
+            self._registration_replays.items()
+        ):
+            if candidate.expires_at <= observed:
+                self._drop(
+                    candidate,
+                    provisioner=provisioner,
+                    gate=gate,
+                    reason="task_credential_registration_expired",
+                )
+                self._retired.add(self._exact(candidate))
+                self._registration_replays.pop(key, None)
+
         for revoke in batch.revocations:
             key: TaskCredentialKey = (revoke.worker_kind, revoke.task_run_id)
             issued = self.issued.get(key)
-            if issued is None or (
-                issued.epoch,
-                issued.generation,
-                issued.task_token_sha256,
-                issued.command_sha256,
-                issued.credential_id,
-            ) != (
-                revoke.epoch,
-                revoke.generation,
-                revoke.task_token_sha256,
-                revoke.command_sha256,
-                revoke.credential_id,
-            ):
+            pending = self.pending.get(key)
+            requested = self._revocation_exact(revoke)
+            if requested in self._retired:
+                # The control mailbox intentionally replays an activation or
+                # terminal revocation until it can safely retire private
+                # metadata.  Exact replay must not target the promoted LOGIN.
+                continue
+            if issued is not None and self._exact(issued) == requested:
+                if revoke.reason == "task_credential_rotated":
+                    if (
+                        pending is None
+                        or pending.generation <= issued.generation
+                        or pending.epoch != issued.epoch
+                        or pending.task_token_sha256 != issued.task_token_sha256
+                    ):
+                        raise TaskCredentialContractError(
+                            "task credential activation has no exact pending replacement"
+                        )
+                    self._drop(
+                        issued,
+                        provisioner=provisioner,
+                        gate=gate,
+                        reason=revoke.reason,
+                    )
+                    self._retired.add(self._exact(issued))
+                    self.issued[key] = pending
+                    self.pending.pop(key, None)
+                    continue
+                self._drop(
+                    issued,
+                    provisioner=provisioner,
+                    gate=gate,
+                    reason=revoke.reason,
+                )
+                self._retired.add(self._exact(issued))
+                self.issued.pop(key, None)
+                if pending is not None:
+                    self._drop(
+                        pending,
+                        provisioner=provisioner,
+                        gate=gate,
+                        reason=revoke.reason,
+                    )
+                    self._retired.add(self._exact(pending))
+                    self.pending.pop(key, None)
+                continue
+            if pending is not None and self._exact(pending) == requested:
+                self._drop(
+                    pending,
+                    provisioner=provisioner,
+                    gate=gate,
+                    reason=revoke.reason,
+                )
+                self._retired.add(self._exact(pending))
+                self.pending.pop(key, None)
+                continue
+            else:
                 raise TaskCredentialContractError(
                     "task credential revocation is not bound to an issued credential"
                 )
-            self._drop(
-                issued,
-                provisioner=provisioner,
-                gate=gate,
-                reason=revoke.reason,
-            )
-            self.issued.pop(key, None)
 
         for command in batch.commands:
             if command.epoch != self.identity.epoch:
@@ -273,7 +433,99 @@ class TaskCredentialReconciler:
                     "task credential command targets a different master epoch"
                 )
             key = (command.worker_kind, command.task_run_id)
+            replay = self._registration_replays.get(key)
+            if replay is not None:
+                candidate, registration, had_current, database_bound = replay
+                if (
+                    command.generation != candidate.generation
+                    or command.command_sha256 != candidate.command_sha256
+                    or command.task_token_sha256 != candidate.task_token_sha256
+                ):
+                    raise TaskCredentialContractError(
+                        "task credential registration replay conflicts with its command"
+                    )
+                if not database_bound:
+                    try:
+                        self._bind_region_talk_credential(
+                            command=command,
+                            candidate=candidate,
+                            gate=gate,
+                        )
+                    except TaskCredentialContractError:
+                        self._registration_replays.pop(key, None)
+                        self._drop(
+                            candidate,
+                            provisioner=provisioner,
+                            gate=gate,
+                            reason="task_credential_binding_rejected",
+                        )
+                        raise
+                    except Exception:
+                        # The SECURITY DEFINER binding is exact-idempotent.
+                        # An uncertain database response must be replayed
+                        # before the credential can cross to the worker.
+                        continue
+                    database_bound = True
+                    self._registration_replays[key] = (
+                        candidate,
+                        registration,
+                        had_current,
+                        True,
+                    )
+                try:
+                    receipt = register(dict(registration))
+                except Exception:
+                    # Exact replay remains queued for the next bounded poll.
+                    continue
+                try:
+                    self._assert_registration_receipt(
+                        receipt=receipt,
+                        registration=registration,
+                    )
+                except TaskCredentialContractError:
+                    self._registration_replays.pop(key, None)
+                    self._drop(
+                        candidate,
+                        provisioner=provisioner,
+                        gate=gate,
+                        reason="task_credential_registration_rejected",
+                    )
+                    raise
+                self._registration_replays.pop(key, None)
+                if had_current and candidate.worker_kind == "region_talk":
+                    self.pending[key] = candidate
+                elif had_current:
+                    current = self.issued[key]
+                    self.issued[key] = candidate
+                    self._drop(
+                        current,
+                        provisioner=provisioner,
+                        gate=gate,
+                        reason="task_credential_rotated",
+                    )
+                else:
+                    self.issued[key] = candidate
+                self._registration_acknowledgements[key] = dict(receipt)
+                continue
             current = self.issued.get(key)
+            pending = self.pending.get(key)
+            if pending is not None:
+                if command.generation < pending.generation:
+                    raise TaskCredentialContractError(
+                        "stale task credential generation cannot replace the pending credential"
+                    )
+                if command.generation == pending.generation:
+                    if (
+                        command.command_sha256 != pending.command_sha256
+                        or command.task_token_sha256 != pending.task_token_sha256
+                    ):
+                        raise TaskCredentialContractError(
+                            "pending task credential generation conflicts with its exact binding"
+                        )
+                    continue
+                raise TaskCredentialContractError(
+                    "a newer task credential generation cannot bypass pending activation"
+                )
             if current is not None:
                 if command.generation < current.generation:
                     raise TaskCredentialContractError(
@@ -343,24 +595,6 @@ class TaskCredentialReconciler:
                 "task_token_sha256": command.task_token_sha256,
                 "command_sha256": command.command_sha256,
             }
-            try:
-                receipt = register(registration)
-                exact = {
-                    "registered": True,
-                    "worker_kind": command.worker_kind,
-                    "task_run_id": str(command.task_run_id),
-                    "epoch": self.identity.epoch,
-                    "generation": command.generation,
-                    "credential_id": str(credential_id),
-                    "command_sha256": command.command_sha256,
-                }
-                if dict(receipt) != exact:
-                    raise TaskCredentialContractError(
-                        "task credential registrar did not acknowledge the exact binding"
-                    )
-            except Exception:
-                provisioner.drop(principal)
-                raise
             replacement = IssuedTaskCredential(
                 worker_kind=command.worker_kind,
                 task_run_id=command.task_run_id,
@@ -372,14 +606,185 @@ class TaskCredentialReconciler:
                 principal=principal,
                 expires_at=expiry,
             )
-            self.issued[key] = replacement
-            if current is not None:
+            database_bound = command.worker_kind != "region_talk"
+            if not database_bound:
+                try:
+                    self._bind_region_talk_credential(
+                        command=command,
+                        candidate=replacement,
+                        gate=gate,
+                    )
+                except TaskCredentialContractError:
+                    self._drop(
+                        replacement,
+                        provisioner=provisioner,
+                        gate=gate,
+                        reason="task_credential_binding_rejected",
+                    )
+                    raise
+                except Exception:
+                    self._registration_replays[key] = (
+                        replacement,
+                        registration,
+                        current is not None,
+                        False,
+                    )
+                    continue
+                database_bound = True
+            try:
+                receipt = register(registration)
+            except Exception:
+                self._registration_replays[key] = (
+                    replacement,
+                    registration,
+                    current is not None,
+                    database_bound,
+                )
+                continue
+            try:
+                self._assert_registration_receipt(
+                    receipt=receipt,
+                    registration=registration,
+                )
+            except TaskCredentialContractError:
+                self._drop(
+                    replacement,
+                    provisioner=provisioner,
+                    gate=gate,
+                    reason="task_credential_registration_rejected",
+                )
+                raise
+            self._registration_acknowledgements[key] = dict(receipt)
+            if current is None:
+                self.issued[key] = replacement
+            elif command.worker_kind == "region_talk":
+                # Two-phase rotation: registration makes the new generation
+                # available to the private worker, but does not revoke the old
+                # LOGIN.  The worker tests its new SSH tunnel and executes the
+                # ACTIVE-epoch DB assertion before the control authority emits
+                # the old generation's exact `task_credential_rotated`
+                # revocation in a later poll.
+                self.pending[key] = replacement
+            else:
+                # Existing embedding workers retain the original immediate
+                # rotation contract; they do not implement Region Talk's
+                # private activation callback.
+                self.issued[key] = replacement
                 self._drop(
                     current,
                     provisioner=provisioner,
                     gate=gate,
                     reason="task_credential_rotated",
                 )
+
+    def _bind_region_talk_credential(
+        self,
+        *,
+        command: TaskCredentialCommand,
+        candidate: IssuedTaskCredential,
+        gate: Any,
+    ) -> None:
+        """Create the authoritative task binding before private publication."""
+
+        receipt = gate.register_task_credential_binding(
+            credential_id=candidate.credential_id,
+            principal=candidate.principal,
+            worker_kind=command.worker_kind,
+            task_run_id=command.task_run_id,
+            generation=command.generation,
+            identity=self.identity,
+            command_sha256=command.command_sha256,
+            task_token_sha256=command.task_token_sha256,
+        )
+        expected: dict[str, object] = {
+            "registered": True,
+            "credential_id": str(candidate.credential_id),
+            "principal": candidate.principal,
+            "worker_kind": command.worker_kind,
+            "task_run_id": str(command.task_run_id),
+            "generation": command.generation,
+            "master_instance_id": str(self.identity.master_instance_id),
+            "epoch": self.identity.epoch,
+            "command_sha256": command.command_sha256,
+            "task_token_sha256": command.task_token_sha256,
+        }
+        if not isinstance(receipt, Mapping) or dict(receipt) != expected:
+            raise TaskCredentialContractError(
+                "database task credential binding receipt is not exact"
+            )
+
+    def registration_acknowledgements(self) -> tuple[Mapping[str, object], ...]:
+        return tuple(
+            dict(value)
+            for _key, value in sorted(
+                self._registration_acknowledgements.items(),
+                key=lambda item: (item[0][0], str(item[0][1])),
+            )
+        )
+
+    def mark_registration_acknowledged(
+        self, receipts: tuple[Mapping[str, object], ...]
+    ) -> None:
+        for receipt in receipts:
+            try:
+                key: TaskCredentialKey = (
+                    str(receipt["worker_kind"]),  # type: ignore[assignment]
+                    UUID(str(receipt["task_run_id"])),
+                )
+            except (KeyError, ValueError) as exc:
+                raise TaskCredentialContractError(
+                    "task registration acknowledgement binding is invalid"
+                ) from exc
+            current = self._registration_acknowledgements.get(key)
+            if current is None or current != dict(receipt):
+                raise TaskCredentialContractError(
+                    "task registration acknowledgement binding is unknown"
+                )
+            self._registration_acknowledgements.pop(key, None)
+
+    @staticmethod
+    def _assert_registration_receipt(
+        *, receipt: Mapping[str, object], registration: Mapping[str, object]
+    ) -> None:
+        exact = {
+            "registered": True,
+            "worker_kind": registration["worker_kind"],
+            "task_run_id": registration["task_run_id"],
+            "epoch": registration["epoch"],
+            "generation": registration["generation"],
+            "credential_id": registration["credential_id"],
+            "command_sha256": registration["command_sha256"],
+        }
+        if dict(receipt) != exact:
+            raise TaskCredentialContractError(
+                "task credential registrar did not acknowledge the exact binding"
+            )
+
+    @staticmethod
+    def _exact(
+        value: IssuedTaskCredential,
+    ) -> tuple[TaskWorkerKind, UUID, int, str, str, UUID]:
+        return (
+            value.worker_kind,
+            value.task_run_id,
+            value.generation,
+            value.task_token_sha256,
+            value.command_sha256,
+            value.credential_id,
+        )
+
+    @staticmethod
+    def _revocation_exact(
+        value: TaskCredentialRevocation,
+    ) -> tuple[TaskWorkerKind, UUID, int, str, str, UUID]:
+        return (
+            value.worker_kind,
+            value.task_run_id,
+            value.generation,
+            value.task_token_sha256,
+            value.command_sha256,
+            value.credential_id,
+        )
 
     def principal_names(self) -> tuple[str, ...]:
         return tuple(sorted(self._all_principals))

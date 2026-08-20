@@ -405,6 +405,65 @@ class RegionTalkAccessBinding(BaseModel):
         return _as_utc(value)
 
 
+class RegionTalkCredentialRefreshRequest(BaseModel):
+    """Secret-free, task-bound request for the next short-lived generation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["region-talk-credential-refresh.v1"] = (
+        "region-talk-credential-refresh.v1"
+    )
+    request_id: UUID
+    task_run_id: UUID
+    master_instance_id: UUID
+    epoch: int = Field(ge=1)
+    source_sha256: str = Field(pattern=_SHA256_PATTERN)
+    image_identity: str = Field(min_length=3, max_length=500)
+    image_source_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+    previous: RegionTalkAccessBinding
+    requested_at: datetime
+    publication_dispatch: Literal[False] = False
+
+    @field_validator("requested_at")
+    @classmethod
+    def requested_at_is_utc(cls, value: datetime) -> datetime:
+        return _as_utc(value)
+
+
+class RegionTalkCredentialActivation(BaseModel):
+    """Worker proof that the replacement tunnel and epoch assertion succeeded."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["region-talk-credential-activation.v1"] = (
+        "region-talk-credential-activation.v1"
+    )
+    request_id: UUID
+    task_run_id: UUID
+    master_instance_id: UUID
+    epoch: int = Field(ge=1)
+    source_sha256: str = Field(pattern=_SHA256_PATTERN)
+    image_identity: str = Field(min_length=3, max_length=500)
+    image_source_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+    previous: RegionTalkAccessBinding
+    replacement: RegionTalkAccessBinding
+    asserted_at: datetime
+    publication_dispatch: Literal[False] = False
+
+    @field_validator("asserted_at")
+    @classmethod
+    def asserted_at_is_utc(cls, value: datetime) -> datetime:
+        return _as_utc(value)
+
+    @model_validator(mode="after")
+    def exact_next_generation(self) -> RegionTalkCredentialActivation:
+        if self.replacement.generation != self.previous.generation + 1:
+            raise ValueError("replacement must be the exact next generation")
+        if self.replacement.task_token_sha256 != self.previous.task_token_sha256:
+            raise ValueError("replacement differs from the task token binding")
+        return self
+
+
 class RegionTalkLaunchReceipt(BaseModel):
     """Secret-free central launch receipt persisted by the coordinator."""
 

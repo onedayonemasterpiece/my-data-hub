@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 
 from my_data_hub.acceptance.master_lifecycle import MasterAcceptanceReceipt
 from my_data_hub.checkpoints import CheckpointManifest, ControlLedgerCheckpointRegistry
@@ -103,9 +103,13 @@ from my_data_hub.workloads.bloggers.master_stage import (
 )
 from my_data_hub.workloads.region_talk.pipeline_contracts import (
     ActiveMasterBinding,
+    RegionTalkCredentialActivation,
+    RegionTalkCredentialRefreshRequest,
     RegionTalkRuntimeAttestation,
     RegionTalkTerminalReceipt,
     TaskWorkerCredentialRegistration,
+    TaskWorkerCredentialRegistrationResponse,
+    TaskWorkerCredentialRevocation,
 )
 from my_data_hub.workloads.region_talk.pipeline_runtime import (
     RegionTalkPipelineCoordinator,
@@ -633,11 +637,12 @@ def create_app(
                 runtime_image_source_commit=region_talk_settings.runtime_image_source_commit,
                 wheel_relative_path=region_talk_settings.wheel_relative_path,
                 wheel_sha256=region_talk_settings.wheel_sha256,
-                # A credential generation is four minutes.  The first
-                # supervised migration is deliberately finite and refresh can
-                # be admitted as a later generation between scheduled runs.
+                # The worker obtains a fresh <=4 minute generation after
+                # attestation whenever provider scheduling consumed the
+                # launch-time credential.  The proved DB session itself owns
+                # the bounded long migration; publication remains disabled.
                 max_cycles=1,
-                max_runtime_seconds=180,
+                max_runtime_seconds=7200,
             ),
             instance_id=f"control:{app.state.control_boot_id}",
         )
@@ -811,7 +816,10 @@ def create_app(
     )
     app.state.region_talk_readiness_code = (
         "READY"
-        if region_talk_coordinator is not None
+        if (
+            region_talk_coordinator is not None
+            and region_talk_task_authority is not None
+        )
         else "REGION_TALK_DISABLED"
         if not region_talk_settings.enabled
         else "REGION_TALK_EXACT_RUNTIME_CLAIM_PENDING"
@@ -1080,9 +1088,14 @@ def create_app(
             "unified_bootstrap_mode": runtime.unified_bootstrap_mode,
         }
         if region_talk_settings.enabled:
+            region_talk_ready = (
+                app.state.region_talk_coordinator is not None
+                and app.state.region_talk_task_authority is not None
+                and app.state.region_talk_mcp_controller is not None
+            )
             result.update(
                 region_talk_pipeline_enabled=True,
-                region_talk_pipeline_ready=app.state.region_talk_coordinator is not None,
+                region_talk_pipeline_ready=region_talk_ready,
                 region_talk_pipeline_readiness_code=app.state.region_talk_readiness_code,
                 region_talk_schedule_enabled=region_talk_settings.schedule_enabled,
                 region_talk_publication_dispatch=False,
@@ -1118,6 +1131,18 @@ def create_app(
 
     @app.get("/health/ready")
     def ready() -> dict[str, Any]:
+        if region_talk_settings.enabled and not (
+            app.state.region_talk_coordinator is not None
+            and app.state.region_talk_task_authority is not None
+            and app.state.region_talk_mcp_controller is not None
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": app.state.region_talk_readiness_code,
+                    **snapshot(),
+                },
+            )
         return {"ok": True, "control_boot_id": str(app.state.control_boot_id), **snapshot()}
 
     if runtime.provider_gateway_enabled:
@@ -2497,6 +2522,74 @@ def create_app(
         except RegionTalkAssemblyUnavailable as exc:
             raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
 
+    @app.post(
+        "/internal/runtime/task-worker-credentials/{run_id}/{attempt_id}/registration-acknowledgements"
+    )
+    async def acknowledge_task_worker_registrations(
+        run_id: str,
+        attempt_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _operation, authority = _task_credential_runtime(
+            run_id, attempt_id, authorization
+        )
+        body = await _bounded_json(request)
+        if set(body) != {"schema_version", "registrations"} or body.get(
+            "schema_version"
+        ) != "my-data-hub-task-registration-ack.v1" or not isinstance(
+            body.get("registrations"), list
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "task_registration_ack_invalid"},
+            )
+        try:
+            registrations = tuple(
+                TaskWorkerCredentialRegistrationResponse.model_validate(item)
+                for item in body["registrations"]
+            )
+            authority.acknowledge_registrations(registrations)
+        except (ValueError, RegionTalkAssemblyUnavailable) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "task_registration_ack_rejected"},
+            ) from exc
+        return {"acknowledged": True, "count": len(registrations)}
+
+    @app.post(
+        "/internal/runtime/task-worker-credentials/{run_id}/{attempt_id}/acknowledgements"
+    )
+    async def acknowledge_task_worker_revocations(
+        run_id: str,
+        attempt_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _operation, authority = _task_credential_runtime(
+            run_id, attempt_id, authorization
+        )
+        body = await _bounded_json(request)
+        if set(body) != {"schema_version", "revocations"} or body.get(
+            "schema_version"
+        ) != "my-data-hub-task-credential-ack.v1" or not isinstance(
+            body.get("revocations"), list
+        ):
+            raise HTTPException(
+                status_code=422, detail={"code": "task_credential_ack_invalid"}
+            )
+        try:
+            revocations = tuple(
+                TaskWorkerCredentialRevocation.model_validate(item)
+                for item in body["revocations"]
+            )
+            authority.acknowledge_revocations(revocations)
+        except (ValueError, RegionTalkAssemblyUnavailable) as exc:
+            raise HTTPException(
+                status_code=409, detail={"code": "task_credential_ack_rejected"}
+            ) from exc
+        return {"acknowledged": True, "count": len(revocations)}
+
     def _region_talk_callback_authority(
         *, task_run_id: UUID, authorization: str | None
     ) -> tuple[RegionTalkPipelineCoordinator, Mapping[str, Any]]:
@@ -2562,6 +2655,110 @@ def create_app(
             raise HTTPException(status_code=409, detail={"code": "region_talk_running_rejected"}) from exc
         return {"accepted": True, "state": snapshot.state.value}
 
+    def _assert_region_talk_refresh_state(
+        *,
+        coordinator: RegionTalkPipelineCoordinator,
+        task: Mapping[str, Any],
+        task_run_id: UUID,
+        request_id: UUID,
+        master_instance_id: UUID,
+        epoch: int,
+        source_sha256: str,
+    ) -> None:
+        active = _active_region_talk_master()
+        snapshot = coordinator.status(request_id)
+        if (
+            active is None
+            or active.master_instance_id != master_instance_id
+            or active.epoch != epoch
+            or snapshot is None
+            or snapshot.task_run_id != task_run_id
+            or snapshot.master != active
+            or snapshot.source_sha256 != source_sha256
+            or snapshot.state.value not in {"ATTESTED", "RUNNING"}
+            or str(task.get("request_id")) != str(request_id)
+        ):
+            coordinator.store.expire_and_fence(
+                now=datetime.now(UTC), active_master=active
+            )
+            raise HTTPException(
+                status_code=409, detail={"code": "active_epoch_mismatch"}
+            )
+
+    @app.post("/internal/region-talk-pipeline/access/refresh")
+    async def refresh_region_talk_pipeline_access(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> Response:
+        body = await _bounded_json(request)
+        try:
+            refresh = RegionTalkCredentialRefreshRequest.model_validate(body)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail={"code": "region_talk_refresh_invalid"}
+            ) from exc
+        coordinator, task = _region_talk_callback_authority(
+            task_run_id=refresh.task_run_id, authorization=authorization
+        )
+        _assert_region_talk_refresh_state(
+            coordinator=coordinator,
+            task=task,
+            task_run_id=refresh.task_run_id,
+            request_id=refresh.request_id,
+            master_instance_id=refresh.master_instance_id,
+            epoch=refresh.epoch,
+            source_sha256=refresh.source_sha256,
+        )
+        try:
+            access = await asyncio.to_thread(
+                app.state.region_talk_task_authority.refresh, refresh
+            )
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        # This is a private capability response, not a metadata callback.  It
+        # is never model-logged or cached and contains no business rows.
+        return Response(
+            content=app.state.region_talk_task_authority.private_access_bytes(access),
+            media_type="application/json",
+            headers={
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.post("/internal/region-talk-pipeline/access/activate")
+    async def activate_region_talk_pipeline_access(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            activation = RegionTalkCredentialActivation.model_validate(body)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail={"code": "region_talk_activation_invalid"}
+            ) from exc
+        coordinator, task = _region_talk_callback_authority(
+            task_run_id=activation.task_run_id, authorization=authorization
+        )
+        _assert_region_talk_refresh_state(
+            coordinator=coordinator,
+            task=task,
+            task_run_id=activation.task_run_id,
+            request_id=activation.request_id,
+            master_instance_id=activation.master_instance_id,
+            epoch=activation.epoch,
+            source_sha256=activation.source_sha256,
+        )
+        try:
+            app.state.region_talk_task_authority.activate(activation)
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        return {
+            "activated": True,
+            "task_run_id": str(activation.task_run_id),
+            "generation": activation.replacement.generation,
+        }
+
     @app.post("/internal/region-talk-pipeline/terminal")
     async def complete_region_talk_pipeline(
         request: Request, authorization: str | None = Header(default=None)
@@ -2571,8 +2768,17 @@ def create_app(
             receipt = RegionTalkTerminalReceipt.model_validate(body)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail={"code": "region_talk_terminal_invalid"}) from exc
-        coordinator, _task = _region_talk_callback_authority(
+        coordinator, task = _region_talk_callback_authority(
             task_run_id=receipt.task_run_id, authorization=authorization
+        )
+        _assert_region_talk_refresh_state(
+            coordinator=coordinator,
+            task=task,
+            task_run_id=receipt.task_run_id,
+            request_id=receipt.request_id,
+            master_instance_id=receipt.master_instance_id,
+            epoch=receipt.epoch,
+            source_sha256=str(task.get("source_sha256", "")),
         )
         try:
             snapshot = coordinator.store.record_terminal(receipt)

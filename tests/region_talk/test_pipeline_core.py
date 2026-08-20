@@ -541,9 +541,13 @@ def test_private_capability_is_separate_and_bootstrap_attests_before_database_ac
     )
     compile(source, "region-talk-supervisor.py", "exec")
     attest_offset = source.index(b"post_metadata(ATTESTATION_PATH")
-    db_offset = source.index(b'database_url=access["database_url"]')
-    factory_offset = source.index(b"executor=factory")
-    assert attest_offset < db_offset < factory_offset
+    refresh_offset = source.index(b"access=refresh_with_replay(previous_access)")
+    materialize_offset = source.index(b"executor,tunnel=materialize(access)")
+    activation_offset = source.index(b"activate_with_replay(previous_access,access)")
+    assert attest_offset < refresh_offset < materialize_offset < activation_offset
+    assert b"sslrootcert" in source
+    assert b"region-talk-credential-refresh.v1" in source
+    assert b"region-talk-credential-activation.v1" in source
     assert b"publication_dispatch=False" in source
     assert b"exact Region Talk capability input is absent or ambiguous" in source
     assert b"postgresql://region_talk:secret" not in source
