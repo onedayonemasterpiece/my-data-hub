@@ -351,7 +351,6 @@ def process_item(work_item: dict) -> dict:
     process_region_talk_stage_item,
 )
 
-
 attached_runtime = attached_stage_runtime_from_env(manifest.stage)
 
 

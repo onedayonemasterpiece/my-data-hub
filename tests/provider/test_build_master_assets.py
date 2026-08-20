@@ -330,7 +330,7 @@ def test_build_fails_closed_on_incomplete_or_tampered_embedding_wheelhouse(tmp_p
     missing = next(wheelhouse.iterdir())
     missing.unlink()
     lock, _ = build_module._load_dependency_lock(dependency_lock)
-    with pytest.raises(AssetBundleError, match="regular file|inventory"):
+    with pytest.raises(AssetBundleError, match=r"regular file|inventory"):
         build_module._verify_wheelhouse(lock, wheelhouse)
 
     wheelhouse, dependency_lock = _dependency_inputs(tmp_path / "tampered")
@@ -344,7 +344,7 @@ def test_build_fails_closed_on_incomplete_or_tampered_embedding_wheelhouse(tmp_p
 def test_build_fails_closed_on_incomplete_or_tampered_ydb_wheelhouse(tmp_path: Path) -> None:
     wheelhouse, dependency_lock = _master_ydb_inputs(tmp_path)
     next(wheelhouse.iterdir()).unlink()
-    with pytest.raises(AssetBundleError, match="regular file|inventory"):
+    with pytest.raises(AssetBundleError, match=r"regular file|inventory"):
         build_module._load_master_ydb_wheels(dependency_lock, wheelhouse)
 
     wheelhouse, dependency_lock = _master_ydb_inputs(tmp_path / "tampered-ydb")
