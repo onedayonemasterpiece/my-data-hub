@@ -450,18 +450,19 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             commit_request = form_stage_commit(
                 StagePreparation.model_validate(preparation), now=now
             ).model_dump(mode="json")
-            tampered = deepcopy(commit_request)
-            tampered["stage_receipts"][0]["input_sha256"] = "0" * 64
-            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
-            with pytest.raises(
-                psycopg.errors.InvalidParameterValue,
-                match="stage receipt hash verification failed",
-            ):
-                connection.execute(
-                    "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
-                    (manifest.task_run_id, manifest.export_batch_id, json.dumps(tampered)),
-                )
-            connection.rollback()
+            for digest_field in ("input_sha256", "output_sha256", "receipt_sha256"):
+                tampered = deepcopy(commit_request)
+                tampered["stage_receipts"][0][digest_field] = "0" * 64
+                connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                with pytest.raises(
+                    psycopg.errors.InvalidParameterValue,
+                    match="stage receipt hash verification failed",
+                ):
+                    connection.execute(
+                        "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                        (manifest.task_run_id, manifest.export_batch_id, json.dumps(tampered)),
+                    )
+                connection.rollback()
             connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
             stage_receipt = connection.execute(
                 "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
