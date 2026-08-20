@@ -126,6 +126,17 @@ def test_install_unit_reconciles_all_opted_in_processes_across_failure_and_reboo
         assert f"http://127.0.0.1:{port}" in source
 
 
+def test_region_talk_supervisor_inputs_survive_systemd_restart_via_compose_env() -> None:
+    source = installer_source()
+    for name in (
+        "MY_DATA_HUB_REGION_TALK_YDB_ENDPOINT",
+        "MY_DATA_HUB_REGION_TALK_YDB_DATABASE",
+        "MY_DATA_HUB_REGION_TALK_YDB_VIEWER_SECRET_LABEL",
+        "MY_DATA_HUB_MASTER_YDB_DEPENDENCY_MANIFEST_SHA256",
+    ):
+        assert f"{name}=${{{name}:-}}" in source
+
+
 def test_connector_runtime_install_is_explicit_default_off_and_restart_managed() -> None:
     source = installer_source()
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
