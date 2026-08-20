@@ -22,7 +22,7 @@
 3. **Done — terminal delivery and central reaping.** The child retries one immutable terminal
    callback. The central adapter persists the exact Kaggle run identity, observes provider
    COMPLETE/FAILED/deadline states through the single injected adapter, persists a bounded
-   metadata-only terminal proof before effects, and idempotently revokes authority plus deletes
+   metadata-only retryable terminal proof before effects (never provider-only success), and idempotently revokes authority plus deletes
    the exact protected Notebook and Dataset after callback loss, startup failure, or timeout.
 4. **Done — reviewer A16 status distinction.** `RegionTalkCycleResult` and the bounded supervisor
    retain accepted-snapshot and stage receipt hashes. `IMPORT_COMPLETE_WAITING_STAGES`,

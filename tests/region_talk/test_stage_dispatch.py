@@ -489,7 +489,7 @@ def test_generated_direct_stage_worker_is_offline_pinned_and_compiles() -> None:
     (
         (KernelState.FAILED, 10, "FAILED_RETRYABLE"),
         (KernelState.RUNNING, 901, "FAILED_RETRYABLE"),
-        (KernelState.COMPLETE, 10, "SUCCEEDED"),
+        (KernelState.COMPLETE, 10, "FAILED_RETRYABLE"),
     ),
 )
 def test_stage_provider_terminal_reaper_is_restart_safe_and_metadata_only(

@@ -1718,7 +1718,10 @@ class CentralRegionTalkStageNotebookAdapter:
             reason_code: str | None = None
             completed_at: datetime | None = None
             if status.state is KernelState.COMPLETE:
-                result_status = "SUCCEEDED"
+                # Provider completion cannot prove that the direct PostgreSQL
+                # result landed.  Only the worker's verified direct receipt
+                # may say SUCCEEDED; a missing callback remains retryable.
+                result_status = "FAILED_RETRYABLE"
                 reason_code = "PROVIDER_COMPLETE_TERMINAL_CALLBACK_ABSENT"
                 completed_at = status.observed_at.astimezone(UTC)
             elif status.state is KernelState.FAILED:

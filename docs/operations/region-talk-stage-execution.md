@@ -99,7 +99,8 @@ checkpoints repeat this protocol near expiry.
 The stage worker posts one immutable terminal body with bounded exact retries. Independently, the
 central lifespan reads the exact persisted Kaggle run identity through the same injected adapter.
 A provider `COMPLETE` with a missing callback, provider `FAILED`, or the exact stage deadline
-creates one persisted metadata-only terminal proof before cleanup. Restart then replays the same
+creates one persisted metadata-only **retryable** terminal proof before cleanup; provider state
+alone never fabricates a successful database result. Restart then replays the same
 authority revocation and protected Notebook/Dataset delete intents without a duplicate effect.
 No provider error body, business input, task token, raw lease, or database URL enters the control
 journal.
