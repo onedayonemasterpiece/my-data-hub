@@ -181,3 +181,26 @@ authority, a live child credential for the same worker task/master/epoch, and th
 work/effect/dispatch identity. Exact response-loss replay returns the same rotation
 receipt. Prior or cross-worker LOGINs cannot fetch or submit after rotation. No payload,
 raw lease, task token, database URL, or publication effect enters the rotation receipt.
+
+## Dependency-ready DAG materialization
+
+Migration 0030 makes every PREPARE/reprepare a deterministic database-side DAG
+reconciliation. E5 and BGE work appears only with an ACTIVE-revision runtime pin;
+vector fusion appears only after both exact score receipts validate; image, verifier,
+and writer work appears in order only after each exact predecessor is current. The
+private input row and work UUID are immutable and replaying PREPARE creates no duplicate.
+
+Vector input is `region-talk-vector-fusion-input.v1`; every sorted score row identifies
+its E5/BGE stage and immutable result SHA. Image work is not executable from historical
+queue/frame-score rows or a public URL. It requires a current candidate-associated
+`region-talk-media-artifact-manifest.v1` whose task-private object reference, media ID,
+normalized source URL, byte size, content type, artifact SHA, and acquisition receipt
+cross-check the accepted `hub.content_asset`. Missing verified media leaves image work
+unmaterialized rather than fabricating availability.
+
+Successful evidence is also stage-specific. The database recomputes the canonical
+result-metadata SHA, requires the output SHA to equal it, validates bounded typed metrics,
+and matches an append-only owner/master-registered runtime pin for the exact canonical
+revision and ACTIVE epoch. Runtime pin generations supersede only the exact current
+receipt; workers cannot register or choose pins. Arbitrary producers, empty generic
+success, forged result hashes, and stale pin/result combinations fail closed.

@@ -167,3 +167,21 @@ registered generation for the same deterministic worker task, master epoch, disp
 effect, work item, attempt, input, and lease. Fetch and submit accept only the latest
 unexpired bound LOGIN; prior generations are fenced. Rotation and direct-result replay
 are idempotent, metadata-only on the control path, and cannot enable publication.
+
+## Migration 0030 exact post-import DAG
+
+PREPARE now materializes only newly dependency-ready typed work and records each private
+input in an append-only relation. Exact replay returns the same preparation and work
+identities. E5/BGE verified score receipts form the exact vector-fusion score input;
+later stages bind immutable predecessor receipts. Image input is `AVAILABLE` only for a
+current accepted candidate with a task-readable, acquisition-verified private artifact
+manifest. Legacy media queue/evaluation rows remain historical evidence and cannot make
+the stage current.
+
+The owner/master runtime-pin registration contract binds stage/contract, exact model and
+40-character revision, encoder contract, semantic bank (for text stages), runtime and
+asset hashes, provider image/source commit, canonical revision, master instance, and
+epoch. Direct worker success must match the current pin and exact stage result schema;
+the database recomputes hashes before the immutable landing is accepted. Supervisor
+claims remain metadata-only, private workers retain task/epoch/lease fencing, and both
+publication and notification dispatch remain false.

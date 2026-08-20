@@ -25,6 +25,7 @@ from my_data_hub.master_runtime.database_gate import DatabaseGate
 from my_data_hub.workloads.region_talk.constants import DIRECT_SOURCE_TABLES
 from my_data_hub.workloads.region_talk.direct_snapshot import DirectSnapshotRunner
 from my_data_hub.workloads.region_talk.stage_execution import StagePreparation, form_stage_commit
+from my_data_hub.workloads.region_talk.transforms.evidence import SEMANTIC_BANK_HASH
 
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE = "pgvector/pgvector:0.8.6-pg18-bookworm"
@@ -32,6 +33,8 @@ IDENTITY = MasterIdentity(UUID("11111111-1111-4111-8111-111111111111"), "fixture
 PRINCIPAL = "mdh_e1_regiong1_deadbeef"
 PASSWORD = "region-talk-fixture-password-long-enough"
 STAGE_NAMESPACE = UUID("54a0dba7-1e4b-4d56-a143-173304989e85")
+RUNTIME_IMAGE = "region-talk-runtime@sha256:" + "8" * 64
+RUNTIME_COMMIT = "7" * 40
 POST_IMPORT_DAG = [
     {
         "stage": "canonical_import",
@@ -90,6 +93,132 @@ POST_IMPORT_DAG = [
         "timeout_seconds": 300,
     },
 ]
+
+
+def _runtime_pin_request(stage: Mapping[str, Any], now: datetime) -> dict[str, Any]:
+    is_text = stage["stage"] in {"e5_embedding", "bge_m3_embedding"}
+    return {
+        "schema_version": "region-talk-stage-runtime-pin.v1",
+        "stage": stage["stage"],
+        "contract_version": stage["contract_version"],
+        "model_id": "fixture/" + stage["stage"],
+        "model_revision": "1" * 40,
+        "encoder_contract": "fixture-exact.v1",
+        "semantic_bank_version": "semantic_bank_v1" if is_text else None,
+        "semantic_bank_sha256": SEMANTIC_BANK_HASH if is_text else None,
+        "runtime_source_sha256": "2" * 64,
+        "asset_manifest_sha256": "3" * 64,
+        "provider_image_identity": RUNTIME_IMAGE,
+        "provider_image_source_commit": RUNTIME_COMMIT,
+        "effective_canonical_revision": 1,
+        "master_instance_id": str(IDENTITY.master_instance_id),
+        "epoch": 1,
+        "prior_pin_receipt_sha256": None,
+        "requested_at": now.isoformat(),
+        "publication_dispatch": False,
+        "notification_dispatch": False,
+    }
+
+
+def _pinned_metrics(
+    stage: str,
+    contract: str,
+    pin: Mapping[str, Any],
+    input_data: Mapping[str, Any],
+) -> dict[str, Any]:
+    common = {
+        "model_id": pin["model_id"],
+        "model_revision": pin["model_revision"],
+        "encoder_contract": pin["encoder_contract"],
+        "asset_manifest_sha256": pin["asset_manifest_sha256"],
+        "runtime_source_sha256": pin["runtime_source_sha256"],
+        "provider_image_identity": pin["provider_image_identity"],
+        "provider_image_source_commit": pin["provider_image_source_commit"],
+        "pin_sha256": pin["pin_sha256"],
+    }
+    if stage in {"e5_embedding", "bge_m3_embedding"}:
+        scores = {"ko_visit_impression": 0.8, "news_report": 0.2}
+        evidence = sha256_value(
+            {
+                "contract_version": contract,
+                "model_id": pin["model_id"],
+                "text_hash": input_data["text_sha256"],
+                "semantic_bank_version": pin["semantic_bank_version"],
+                "semantic_bank_hash": pin["semantic_bank_sha256"],
+                "scores": scores,
+            }
+        )
+        return {
+            **common,
+            "text_sha256": input_data["text_sha256"],
+            "semantic_bank_version": pin["semantic_bank_version"],
+            "semantic_bank_hash": pin["semantic_bank_sha256"],
+            "evidence_fingerprint": evidence,
+            "scores": scores,
+        }
+    raise AssertionError(stage)
+
+
+def _later_stage_metrics(
+    stage: str, pin: Mapping[str, Any] | None, input_data: Mapping[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    if stage == "vector_fusion":
+        return "my-data-hub:vector_fusion@region-talk.vector-fusion.v1", {
+            "contract_version": "region-talk.vector-fusion.v1",
+            "status": "fused_e5_bge_m3",
+            "reasons": [],
+            "evidence_fingerprint": "6" * 64,
+            "scores_by_model": {
+                "fixture/e5_embedding": {"ko_visit_impression": 0.8, "news_report": 0.2},
+                "fixture/bge_m3_embedding": {"ko_visit_impression": 0.8, "news_report": 0.2},
+            },
+            "fused_scores": {"ko_visit_impression": 0.8, "news_report": 0.2},
+            "positive_class": "ko_visit_impression",
+            "positive_score": 0.8,
+            "negative_class": "news_report",
+            "negative_score": 0.2,
+            "margin": 0.6,
+        }
+    assert pin is not None
+    common = {
+        "model_id": pin["model_id"],
+        "model_revision": pin["model_revision"],
+        "encoder_contract": pin["encoder_contract"],
+        "asset_manifest_sha256": pin["asset_manifest_sha256"],
+        "runtime_source_sha256": pin["runtime_source_sha256"],
+        "provider_image_identity": pin["provider_image_identity"],
+        "provider_image_source_commit": pin["provider_image_source_commit"],
+        "pin_sha256": pin["pin_sha256"],
+    }
+    if stage == "image_scoring":
+        return pin["producer_exact_id"], {
+            **common,
+            "schema_version": "region-talk.image-diagnostic-result.v1",
+            "decision": "accept",
+            "actual_image": True,
+            "postcard_score": 0.9,
+            "input_artifact_sha256": input_data["artifact_sha256"],
+        }
+    if stage == "final_verifier":
+        return pin["producer_exact_id"], {
+            **common,
+            "schema_version": "region-talk.final-verifier-result.v1",
+            "decision": "PASS",
+            "reason_codes": [],
+            "vector_result_sha256": input_data["vector_result_sha256"],
+            "image_result_sha256": input_data["image_result_sha256"],
+        }
+    if stage == "writer":
+        return pin["producer_exact_id"], {
+            **common,
+            "schema_version": "region-talk.writer-result.v1",
+            "draft_sha256": "a" * 64,
+            "title_sha256": "b" * 64,
+            "body_sha256": "c" * 64,
+            "character_count": 400,
+            "final_result_sha256": input_data["final_result_sha256"],
+        }
+    raise AssertionError(stage)
 
 
 class MemoryReader:
@@ -409,7 +538,67 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 match="replay conflicts with verified Pass B",
             ):
                 runner._finalize(manifest, conflicting_tables)
-        assert first.status == replay.status == "complete"
+            assert first.status == replay.status == "complete"
+
+            # Owner/master registration freezes exact runtimes at the accepted
+            # canonical revision; workers cannot invent producer identities.
+            pins: dict[str, dict[str, Any]] = {}
+            with psycopg.connect(admin_url) as owner:
+                _candidate_id, content_id, candidate_revision = owner.execute(
+                    "SELECT candidate_id,content_id,current_revision "
+                    "FROM region_talk.publication_candidate"
+                ).fetchone()
+                owner.execute(
+                    "INSERT INTO hub.content_asset(content_id,asset_type,source_url,normalized_url,"
+                    "source_external_id,position,mime_type,byte_size,sha256,status,metadata) "
+                    "VALUES(%s,'image','https://example.test/private-image.jpg',"
+                    "'https://example.test/private-image.jpg','media-1',0,'image/jpeg',1234,%s,"
+                    "'available',%s::jsonb)",
+                    (
+                        content_id,
+                        "4" * 64,
+                        json.dumps(
+                            {
+                                "artifact_manifest": {
+                                    "schema_version": "region-talk-media-artifact-manifest.v1",
+                                    "candidate_revision": candidate_revision,
+                                    "normalized_source_url": (
+                                        "https://example.test/private-image.jpg"
+                                    ),
+                                    "source_media_id": "media-1",
+                                    "object_ref": "artifacts/media-1.jpg",
+                                    "artifact_sha256": "4" * 64,
+                                    "byte_size": 1234,
+                                    "content_type": "image/jpeg",
+                                    "acquisition_receipt_sha256": "5" * 64,
+                                    "task_readable": True,
+                                    "publication_dispatch": False,
+                                    "notification_dispatch": False,
+                                }
+                            }
+                        ),
+                    ),
+                )
+                for stage in POST_IMPORT_DAG:
+                    if stage["stage"] not in {
+                        "e5_embedding",
+                        "bge_m3_embedding",
+                        "image_scoring",
+                        "final_verifier",
+                        "writer",
+                    }:
+                        continue
+                    request = _runtime_pin_request(stage, now)
+                    receipt = owner.execute(
+                        "SELECT migration.register_region_talk_stage_runtime_pin(%s::jsonb)",
+                        (json.dumps(request),),
+                    ).fetchone()[0]
+                    assert owner.execute(
+                        "SELECT migration.register_region_talk_stage_runtime_pin(%s::jsonb)",
+                        (json.dumps({**request, "requested_at": (now + timedelta(seconds=1)).isoformat()}),),
+                    ).fetchone()[0] == receipt
+                    pins[stage["stage"]] = receipt
+                owner.commit()
 
         # The same fixed pipeline credential can form durable post-import work
         # without caller-selected SQL/tables or any publication side effect.
@@ -438,6 +627,12 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             assert preparation["publication_dispatch"] is False
             assert preparation["notification_dispatch"] is False
             assert len(preparation["candidates"]) == 1
+            connection.commit()
+            with psycopg.connect(admin_url) as proof:
+                assert proof.execute(
+                    "SELECT array_agg(stage ORDER BY stage),count(*) "
+                    "FROM migration.region_talk_stage_work_input_v9"
+                ).fetchone() == (["bge_m3_embedding", "e5_embedding"], 2)
             connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
             assert (
                 connection.execute(
@@ -725,7 +920,7 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 ).fetchall() == [(2, "FENCED"), (3, "ACTIVE")]
                 assert worker_admin.execute(
                     "SELECT schema_revision FROM hub.canonical_state"
-                ).fetchone() == (29,)
+                ).fetchone() == (30,)
 
             # Generation one was valid before rotation and is now fenced.
             with psycopg.connect(worker_url) as worker_connection:
@@ -771,8 +966,13 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                     "candidate_revision": payload["candidate_revision"],
                     "revision_fingerprint": payload["revision_fingerprint"],
                     "input_fingerprint": claim["input_fingerprint"],
-                    "producer_exact_id": "disposable-proof.v3",
-                    "metrics": {},
+                    "producer_exact_id": pins[claim["stage"]]["producer_exact_id"],
+                    "metrics": _pinned_metrics(
+                        claim["stage"],
+                        claim["contract_version"],
+                        pins[claim["stage"]],
+                        payload["input_data"],
+                    ),
                     "artifact_sha256": None,
                 }
                 worker_result = {
@@ -786,11 +986,26 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                     "result_status": "SUCCEEDED",
                     "result_metadata": result_metadata,
                     "metadata_sha256": sha256_value(result_metadata),
-                    "result_sha256": "a" * 64,
+                    "result_sha256": sha256_value(result_metadata),
                     "completed_at": now.isoformat(),
                     "publication_dispatch": False,
                     "notification_dispatch": False,
                 }
+                worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                forged = deepcopy(worker_result)
+                forged["result_metadata"]["producer_exact_id"] = "attacker@unregistered"
+                forged["result_metadata"]["metrics"] = {}
+                forged["metadata_sha256"] = sha256_value(forged["result_metadata"])
+                forged["result_sha256"] = "a" * 64
+                with pytest.raises(
+                    psycopg.errors.InvalidParameterValue,
+                    match="fails exact v9 stage validation",
+                ):
+                    worker_connection.execute(
+                        "SELECT migration.submit_region_talk_stage_worker_result(%s,%s,%s::jsonb)",
+                        (worker_task, UUID(claim["effect_id"]), json.dumps(forged)),
+                    )
+                worker_connection.rollback()
                 worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
                 result_receipt = worker_connection.execute(
                     "SELECT migration.submit_region_talk_stage_worker_result(%s,%s,%s::jsonb)",
@@ -810,6 +1025,189 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             ).fetchone()[0]
             current_candidate = refreshed["candidates"][0]
             assert current_candidate["evidence"][claim["stage"]]["status"] == "CURRENT"
+            connection.commit()
+
+            def land_exact_stage(stage: str) -> None:
+                with psycopg.connect(admin_url) as admin:
+                    row = admin.execute(
+                        "SELECT input.work_item_id,input.contract_version,input.subject_id,"
+                        "input.candidate_revision,input.revision_fingerprint,input.input_fingerprint,"
+                        "input.input_data,input.upstream_results "
+                        "FROM migration.region_talk_stage_work_input_v9 input "
+                        "LEFT JOIN migration.region_talk_stage_worker_result landed "
+                        "ON landed.work_item_id=input.work_item_id AND landed.result_status='SUCCEEDED' "
+                        "WHERE input.stage=%s AND landed.work_item_id IS NULL "
+                        "ORDER BY input.created_at DESC LIMIT 1",
+                        (stage,),
+                    ).fetchone()
+                    assert row is not None, stage
+                    (
+                        work_id,
+                        contract,
+                        subject_id,
+                        revision,
+                        revision_fingerprint,
+                        input_fingerprint,
+                        input_data,
+                        upstream_results,
+                    ) = row
+                    if stage in {"e5_embedding", "bge_m3_embedding"}:
+                        producer = pins[stage]["producer_exact_id"]
+                        metrics = _pinned_metrics(stage, contract, pins[stage], input_data)
+                    else:
+                        producer, metrics = _later_stage_metrics(stage, pins.get(stage), input_data)
+                    metadata = {
+                        "schema_version": "region-talk-stage-result-metadata.v1",
+                        "stage": stage,
+                        "contract_version": contract,
+                        "subject_type": "region_talk.candidate",
+                        "subject_id": str(subject_id),
+                        "candidate_revision": revision,
+                        "revision_fingerprint": revision_fingerprint,
+                        "input_fingerprint": input_fingerprint,
+                        "producer_exact_id": producer,
+                        "metrics": metrics,
+                        "artifact_sha256": None,
+                    }
+                    result_sha = sha256_value(metadata)
+                    assert admin.execute(
+                        "SELECT migration.region_talk_stage_result_valid_v9("
+                        "%s,%s,1,%s,1,%s::jsonb,%s::jsonb,'SUCCEEDED',%s::jsonb,%s)",
+                        (
+                            stage,
+                            contract,
+                            IDENTITY.master_instance_id,
+                            json.dumps(input_data),
+                            json.dumps(upstream_results),
+                            json.dumps(metadata),
+                            result_sha,
+                        ),
+                    ).fetchone() == (True,)
+                    effect_id = admin.execute(
+                        "SELECT migration.region_talk_stage_uuid5(%s)",
+                        (
+                            f"region-talk-stage-effect:{work_id}:1:{input_fingerprint}",
+                        ),
+                    ).fetchone()[0]
+                    admin.execute(
+                        "INSERT INTO migration.region_talk_stage_worker_result("
+                        "work_item_id,attempt,task_run_id,export_batch_id,stage_run_id,"
+                        "master_instance_id,epoch,stage,contract_version,subject_type,subject_id,"
+                        "candidate_revision,revision_fingerprint,input_fingerprint,effect_id,"
+                        "result_status,result_metadata,metadata_sha256,result_sha256,completed_at) "
+                        "VALUES(%s,1,%s,%s,%s,%s,1,%s,%s,'region_talk.candidate',%s,%s,%s,%s,%s,"
+                        "'SUCCEEDED',%s::jsonb,%s,%s,%s)",
+                        (
+                            work_id,
+                            manifest.task_run_id,
+                            manifest.export_batch_id,
+                            stage_run_id,
+                            IDENTITY.master_instance_id,
+                            stage,
+                            contract,
+                            subject_id,
+                            revision,
+                            revision_fingerprint,
+                            input_fingerprint,
+                            effect_id,
+                            json.dumps(metadata),
+                            result_sha,
+                            result_sha,
+                            now,
+                        ),
+                    )
+                    admin.execute(
+                        "UPDATE orchestration.work_item SET status='succeeded',attempt_count=1,"
+                        "result_ref=jsonb_build_object('schema_version',"
+                        "'region-talk-stage-result-ref.v1','attempt',1,'result_sha256',%s::text,"
+                        "'metadata_sha256',%s::text) WHERE work_item_id=%s",
+                        (result_sha, result_sha, work_id),
+                    )
+                    admin.commit()
+
+            other_embedding = (
+                "e5_embedding" if claim["stage"] == "bge_m3_embedding" else "bge_m3_embedding"
+            )
+            land_exact_stage(other_embedding)
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            vector_ready = connection.execute(
+                "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
+            ).fetchone()[0]
+            connection.commit()
+            with psycopg.connect(admin_url) as proof:
+                vector_input = proof.execute(
+                    "SELECT input_data FROM migration.region_talk_stage_work_input_v9 "
+                    "WHERE stage='vector_fusion'"
+                ).fetchone()[0]
+                assert vector_input["schema_version"] == "region-talk-vector-fusion-input.v1"
+                assert {row["stage"] for row in vector_input["scores"]} == {
+                    "e5_embedding",
+                    "bge_m3_embedding",
+                }
+                assert all(row["result_sha256"] for row in vector_input["scores"])
+                assert proof.execute(
+                    "SELECT count(*) FROM migration.region_talk_stage_work_input_v9 "
+                    "WHERE stage='vector_fusion'"
+                ).fetchone() == (1,)
+            assert vector_ready["candidates"][0]["evidence"]["vector_fusion"]["status"] == (
+                "MISSING"
+            )
+            land_exact_stage("vector_fusion")
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            image_ready = connection.execute(
+                "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
+            ).fetchone()[0]
+            connection.commit()
+            with psycopg.connect(admin_url) as proof:
+                image_input = proof.execute(
+                    "SELECT input_data FROM migration.region_talk_stage_work_input_v9 "
+                    "WHERE stage='image_scoring'"
+                ).fetchone()[0]
+                assert image_input["availability"] == "AVAILABLE"
+                assert image_input["artifact_sha256"] == "4" * 64
+                assert image_input["object_ref"] == "artifacts/media-1.jpg"
+            assert image_ready["candidates"][0]["evidence"]["image_scoring"]["status"] == (
+                "MISSING"
+            )
+            land_exact_stage("image_scoring")
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            connection.execute(
+                "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
+            )
+            connection.commit()
+            land_exact_stage("final_verifier")
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            connection.execute(
+                "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
+            )
+            connection.commit()
+            land_exact_stage("writer")
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            complete_preparation = connection.execute(
+                "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
+            ).fetchone()[0]
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            assert connection.execute(
+                "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
+            ).fetchone()[0] == complete_preparation
+            assert all(
+                value["status"] == "CURRENT"
+                for value in complete_preparation["candidates"][0]["evidence"].values()
+            )
+            with psycopg.connect(admin_url) as proof:
+                assert proof.execute(
+                    "SELECT count(*),count(DISTINCT work_item_id) "
+                    "FROM migration.region_talk_stage_work_input_v9"
+                ).fetchone() == (6, 6)
+            connection.commit()
+
+            refreshed = complete_preparation
             cycle_request = form_stage_commit(
                 StagePreparation.model_validate(refreshed), now=now
             ).model_dump(mode="json")
@@ -818,7 +1216,7 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
                 (manifest.task_run_id, manifest.export_batch_id, json.dumps(cycle_request)),
             ).fetchone()[0]
-            assert cycle_receipt["status"] == "WAITING_WORK"
+            assert cycle_receipt["status"] == "COMPLETE"
             status_request = {
                 "schema_version": "region-talk-stage-supervisor-status-request.v1",
                 "requested_at": now.isoformat(),
@@ -828,7 +1226,7 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 "SELECT migration.region_talk_stage_supervisor_status(%s,%s,%s::jsonb)",
                 (manifest.task_run_id, manifest.export_batch_id, json.dumps(status_request)),
             ).fetchone()[0]
-            assert stage_status["status"] == "WAITING_WORK"
+            assert stage_status["status"] == "COMPLETE"
             assert stage_status["items"][0]["dispatch_id"] == claim["dispatch_id"]
             assert "payload" not in json.dumps(stage_status)
             connection.commit()
