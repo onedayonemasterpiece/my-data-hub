@@ -2026,6 +2026,7 @@ class KaggleProviderAdapter:
         task_run_id: UUID,
         expected_source_sha256: str,
         dataset_sources: Sequence[str],
+        model_sources: Sequence[str] = (),
         control_class: ControlClass,
         disposable: bool,
         docker_image: str | None = None,
@@ -2035,6 +2036,7 @@ class KaggleProviderAdapter:
         """Repair a pushed exact notebook's remote journal without another push."""
 
         normalized_sources = tuple(_normalized_dataset_source(item) for item in dataset_sources)
+        normalized_model_sources = tuple(_normalized_model_source(item) for item in model_sources)
         arguments = {
             "task_run_id": str(task_run_id),
             "source_sha256": expected_source_sha256,
@@ -2042,6 +2044,8 @@ class KaggleProviderAdapter:
             "control_class": control_class.value,
             "disposable": disposable,
         }
+        if normalized_model_sources:
+            arguments["model_sources"] = normalized_model_sources
         if docker_image is not None or docker_image_pinning_type is not None:
             if (
                 not isinstance(docker_image, str)

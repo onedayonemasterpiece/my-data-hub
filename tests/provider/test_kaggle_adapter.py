@@ -799,7 +799,7 @@ def test_master_notebook_push_is_bound_to_the_runtime_executable_source_hash() -
     assert journal.intents == [intent]
 
 
-def test_master_pending_attestation_reconciles_lost_push_response_without_retry(
+def test_dependency_smoke_reconciles_model_sources_after_lost_push_response_without_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, api, journal = adapter()
@@ -813,8 +813,9 @@ def test_master_pending_attestation_reconciles_lost_push_response_without_retry(
             "task_run_id": str(run_id),
             "source_sha256": hashlib.sha256(source).hexdigest(),
             "dataset_sources": (),
+            "model_sources": ("owner/model/Transformers/default/7",),
             "control_class": "orchestrator_protected",
-            "disposable": False,
+            "disposable": True,
             "docker_image": TEST_RUNTIME_IMAGE,
             "docker_image_pinning_type": "original",
         },
@@ -830,7 +831,7 @@ def test_master_pending_attestation_reconciles_lost_push_response_without_retry(
 
     monkeypatch.setattr(api, "kernels_push", lost_response)
     with pytest.raises(Exception, match="exact SaveKernel response"):
-        client.push_private_master_notebook_pending_attestation(
+        client.push_private_dependency_smoke_notebook(
         intent=intent,
         task_run_id=run_id,
         source=source,
@@ -839,7 +840,9 @@ def test_master_pending_attestation_reconciles_lost_push_response_without_retry(
         kernel_type="script",
         language="python",
         control_class=ControlClass.ORCHESTRATOR_PROTECTED,
-        disposable=False,
+        disposable=True,
+        model_sources=("owner/model/Transformers/default/7",),
+        enable_internet=False,
         docker_image=TEST_RUNTIME_IMAGE,
         docker_image_pinning_type="original",
         )
@@ -855,8 +858,9 @@ def test_master_pending_attestation_reconciles_lost_push_response_without_retry(
         task_run_id=run_id,
         expected_source_sha256=hashlib.sha256(source).hexdigest(),
         dataset_sources=(),
+        model_sources=("owner/model/Transformers/default/7",),
         control_class=ControlClass.ORCHESTRATOR_PROTECTED,
-        disposable=False,
+        disposable=True,
         docker_image=TEST_RUNTIME_IMAGE,
         docker_image_pinning_type="original",
     )

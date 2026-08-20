@@ -4,24 +4,24 @@
 
 | Stage | Exact model | Runtime implementation | Reviewed model/bank bundle | Current result |
 |---|---|---|---|---|
-| `e5_embedding` | `intfloat/multilingual-e5-base@d128750597153bb5987e10b1c3493a34e5a4502a` | attached, local-files-only attention-mask mean pooling, L2 normalization | **absent** | `FAILED_RETRYABLE` (`HEAVY_RUNTIME_NOT_ATTACHED`) |
-| `bge_m3_embedding` | `BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181` | attached, local-path FlagEmbedding dense-only, L2 normalization | **absent** | `FAILED_RETRYABLE` (`HEAVY_RUNTIME_NOT_ATTACHED`) |
+| `e5_embedding` | `intfloat/multilingual-e5-base@d128750597153bb5987e10b1c3493a34e5a4502a` | attached, local-files-only attention-mask mean pooling, L2 normalization | **model absent; bank verified** | `FAILED_RETRYABLE` (`HEAVY_RUNTIME_NOT_ATTACHED`) |
+| `bge_m3_embedding` | `BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181` | attached, local-path FlagEmbedding dense-only, L2 normalization | **exact full model tree unproven; bank verified** | `FAILED_RETRYABLE` (`HEAVY_RUNTIME_NOT_ATTACHED`) |
 
 The implementations are executable against deterministic fixture encoders, but neither
-production stage is ready. The repository does not contain either pinned model snapshot or
-the canonical `semantic_bank_v1` file whose required SHA-256 is
-`4ec81e6ede79f3dae1bb366a06366e7197d960e1c04e124f77b3db12f2f1981f`.
+production stage is ready. The canonical `semantic_bank_v1` is now reconstructed and verified
+at SHA-256 `4ec81e6ede79f3dae1bb366a06366e7197d960e1c04e124f77b3db12f2f1981f`,
+but neither complete pinned model snapshot has passed the strict acquisition proof.
 The committed registry therefore marks both entries `external_assets_required`, has no
 manifest hash, and deliberately returns no attached runtime. This is an external asset
 acquisition blocker, not evidence of a successful model execution.
 
-A read-only Kaggle inventory found possible public starting points, not verified assets:
-E5 `tanviranjumapurbo/multilingual-e5-base/Transformers/default/1` (version ID `942492`),
-and BGE-M3 `yethukmutt/bge-m3` or `andreasbis/baai-bge-m3`. None has been proven byte-for-byte
-equivalent to the required Hugging Face revision. A central private smoke must inventory and
-hash every file, verify model/tokenizer config and revision provenance, and compare fixed
-tokenizer/model fixture outputs before any candidate can be repackaged privately or registered
-as the ACTIVE runtime pin. These names are leads only; they do not change the matrix above.
+A central private Kaggle smoke has now rejected the exact-version public candidates. E5
+`tanviranjumapurbo/multilingual-e5-base/Transformers/default/1` has only 9 of the upstream
+revision's 23 files and differs in material runtime files. BGE-M3
+`yethukmutt/bge-m3/Transformers/m3/1` matches 29 of 30 upstream files but omits
+`imgs/.DS_Store`; strict whole-tree equivalence therefore remains unproven. Both candidates
+executed deterministic normalized dense output offline, but the receipt outcome is `MISMATCH`,
+not readiness. See `region-talk-text-asset-acquisition.md`.
 
 ## Offline asset contract
 
@@ -29,7 +29,7 @@ as the ACTIVE runtime pin. These names are leads only; they do not change the ma
 bundle. It never downloads a model. A valid bundle has:
 
 - every regular model file listed once, sorted by relative path, with size and SHA-256;
-- `config.json`, tokenizer data and safetensors weights;
+- `config.json`, tokenizer data and the stage's exact safetensors or PyTorch weight file;
 - the canonical, complete and self-receipted semantic bank;
 - the exact stage/model revision, dimensions, prefixes, pooling and encoder contract;
 - the exact installed distribution versions needed by that reviewed bundle; and
@@ -41,8 +41,8 @@ the encoder is imported. E5 uses `local_files_only=True` with both Hugging Face 
 BGE-M3 receives only the verified local model directory. There is no `snapshot_download`
 or runtime network acquisition path.
 
-To close the blocker, acquire each exact upstream snapshot outside the Kaggle worker, obtain
-and review the exact semantic-bank bytes, assemble the complete offline dependency closure,
+To close the blocker, acquire each exact upstream snapshot in a reviewed central acquisition
+flow, assemble the complete offline dependency closure,
 build and independently verify each manifest, then commit the reviewed manifest SHA into
 `text-runtime-assets.v1.json`. Publish the bytes only as a private Kaggle input. Do not change
 an entry to `verified` until those exact bytes and hashes are reviewable.
