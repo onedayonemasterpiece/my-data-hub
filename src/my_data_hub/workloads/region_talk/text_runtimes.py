@@ -40,6 +40,10 @@ from .transforms.evidence import (
 )
 
 SHA256_RE = r"^[a-f0-9]{64}$"
+MODEL_SOURCE_RE = (
+    r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/"
+    r"[A-Za-z0-9_.-]+/[1-9][0-9]*$"
+)
 REGISTRY_NAME = "text-runtime-assets.v1.json"
 TEXT_STAGES = frozenset({"e5_embedding", "bge_m3_embedding"})
 _MAX_MANIFEST_BYTES = 2 * 1024 * 1024
@@ -152,6 +156,9 @@ class TextRuntimeAssetManifest(_StrictModel):
     semantic_bank_sha256: str = Field(pattern=SHA256_RE)
     runtime_source_sha256: str = Field(pattern=SHA256_RE)
     required_distributions: dict[str, str] = Field(min_length=2, max_length=20)
+    provider_model_source: str | None = Field(default=None, pattern=MODEL_SOURCE_RE)
+    official_tree_receipt_sha256: str | None = Field(default=None, pattern=SHA256_RE)
+    excluded_nonruntime_paths: tuple[str, ...] = Field(default=(), max_length=20)
     receipt_sha256: str = Field(pattern=SHA256_RE)
 
     @model_validator(mode="before")
@@ -189,6 +196,19 @@ class TextRuntimeAssetManifest(_StrictModel):
         expected_weight = "model.safetensors" if self.stage == "e5_embedding" else "pytorch_model.bin"
         if expected_weight not in names:
             raise ValueError("text-runtime snapshot lacks its exact model weights")
+        acquisition = (
+            self.provider_model_source,
+            self.official_tree_receipt_sha256,
+            self.excluded_nonruntime_paths,
+        )
+        if any(acquisition) and (
+            self.stage != "bge_m3_embedding"
+            or self.provider_model_source != "yethukmutt/bge-m3/Transformers/m3/1"
+            or self.official_tree_receipt_sha256
+            != "526c363c7abfa3c60eed26ab559885a29cb23384abd06f4ead6beef636d3c418"
+            or self.excluded_nonruntime_paths != ("imgs/.DS_Store",)
+        ):
+            raise ValueError("text-runtime acquired-model contract differs")
         return self
 
 
@@ -197,11 +217,14 @@ class TextRuntimeRegistryEntry(_StrictModel):
     availability: Literal["external_assets_required", "verified"]
     manifest_filename: str = Field(pattern=r"^region-talk-(?:e5|bge-m3)-assets\.v1\.json$")
     manifest_sha256: str | None = Field(default=None, pattern=SHA256_RE)
+    model_source: str | None = Field(default=None, pattern=MODEL_SOURCE_RE)
     model: TextRuntimeModelIdentity
 
     @model_validator(mode="after")
     def consistent_availability(self) -> TextRuntimeRegistryEntry:
-        if (self.availability == "verified") != (self.manifest_sha256 is not None):
+        if (self.availability == "verified") != (
+            self.manifest_sha256 is not None and self.model_source is not None
+        ) or (self.availability == "external_assets_required" and self.model_source is not None):
             raise ValueError("text-runtime registry availability/hash differ")
         expected, _contract = _stage_contract(self.stage)
         if self.model != TextRuntimeModelIdentity.from_model(expected):
@@ -452,6 +475,9 @@ def build_text_runtime_asset_manifest(
         "semantic_bank_sha256": semantic_bank.semantic_bank_sha256,
         "runtime_source_sha256": runtime_source_sha256(),
         "required_distributions": dict(sorted(required_distributions.items())),
+        "provider_model_source": None,
+        "official_tree_receipt_sha256": None,
+        "excluded_nonruntime_paths": [],
     }
     value = {
         **unsigned,
@@ -469,6 +495,8 @@ def verify_text_runtime_asset_bundle(
     expected_stage: str,
     expected_semantic_bank_sha256: str = SEMANTIC_BANK_HASH,
     version_resolver: Callable[[str], str] = importlib.metadata.version,
+    model_root_override: Path | None = None,
+    semantic_bank_path_override: Path | None = None,
 ) -> VerifiedTextRuntimeAssets:
     root = bundle_root.resolve(strict=True)
     try:
@@ -500,11 +528,16 @@ def verify_text_runtime_asset_bundle(
     ):
         raise TextRuntimeAssetError("TEXT_RUNTIME_MANIFEST_BINDING_MISMATCH")
     listed = {item.relative_path for item in manifest.model_files}
-    model_root = root.joinpath(*manifest.model_directory.split("/"))
+    model_root = (
+        model_root_override.resolve(strict=True)
+        if model_root_override is not None
+        else root.joinpath(*manifest.model_directory.split("/"))
+    )
     try:
         if model_root.is_symlink() or not model_root.is_dir():
             raise TextRuntimeAssetError("TEXT_RUNTIME_MODEL_DIRECTORY_UNSAFE")
-        model_root.resolve(strict=True).relative_to(root)
+        if model_root_override is None:
+            model_root.resolve(strict=True).relative_to(root)
     except (OSError, ValueError) as exc:
         raise TextRuntimeAssetError("TEXT_RUNTIME_MODEL_DIRECTORY_UNSAFE") from exc
     observed: set[str] = set()
@@ -512,22 +545,41 @@ def verify_text_runtime_asset_bundle(
         if path.is_symlink() or (not path.is_file() and not path.is_dir()):
             raise TextRuntimeAssetError("TEXT_RUNTIME_MODEL_DIRECTORY_UNSAFE")
         if path.is_file():
-            observed.add(path.relative_to(root).as_posix())
+            observed.add(
+                f"{manifest.model_directory}/{path.relative_to(model_root).as_posix()}"
+                if model_root_override is not None
+                else path.relative_to(root).as_posix()
+            )
     if observed != listed:
         raise TextRuntimeAssetError("TEXT_RUNTIME_MODEL_INVENTORY_MISMATCH")
     total = 0
     for item in manifest.model_files:
-        path = _safe_file(root, item.relative_path, maximum=_MAX_MODEL_BYTES)
+        relative = item.relative_path
+        file_root = root
+        if model_root_override is not None:
+            relative = relative.removeprefix(manifest.model_directory + "/")
+            file_root = model_root
+        path = _safe_file(file_root, relative, maximum=_MAX_MODEL_BYTES)
         total += path.stat().st_size
         if path.stat().st_size != item.byte_size or sha256_file(path) != item.sha256:
             raise TextRuntimeAssetError("TEXT_RUNTIME_MODEL_FILE_MISMATCH")
     if total > _MAX_MODEL_BYTES:
         raise TextRuntimeAssetError("TEXT_RUNTIME_MODEL_INVENTORY_INVALID")
-    semantic_path = _safe_file(
-        root,
-        manifest.semantic_bank_file.relative_path,
-        maximum=_MAX_SEMANTIC_BANK_BYTES,
+    semantic_path = (
+        semantic_bank_path_override.resolve(strict=True)
+        if semantic_bank_path_override is not None
+        else _safe_file(
+            root,
+            manifest.semantic_bank_file.relative_path,
+            maximum=_MAX_SEMANTIC_BANK_BYTES,
+        )
     )
+    if semantic_bank_path_override is not None and (
+        semantic_path.is_symlink()
+        or not semantic_path.is_file()
+        or semantic_path.stat().st_size > _MAX_SEMANTIC_BANK_BYTES
+    ):
+        raise TextRuntimeAssetError("TEXT_RUNTIME_SEMANTIC_BANK_HASH_MISMATCH")
     if (
         semantic_path.stat().st_size != manifest.semantic_bank_file.byte_size
         or sha256_file(semantic_path) != manifest.semantic_bank_file.sha256
@@ -784,6 +836,7 @@ def discover_attached_text_runtime(
     input_root: Path = Path("/kaggle/input"),
     registry_path: Path | None = None,
     encoder_factory: Callable[[str, Path], TextVectorEncoder] | None = None,
+    version_resolver: Callable[[str], str] = importlib.metadata.version,
 ) -> VerifiedTextStageRuntime | None:
     """Return a runtime only for a registry-pinned, exact offline bundle."""
 
@@ -796,18 +849,36 @@ def discover_attached_text_runtime(
     assert entry.manifest_sha256 is not None
     if input_root.is_symlink() or not input_root.is_dir():
         raise TextRuntimeAssetError("TEXT_RUNTIME_INPUT_ROOT_UNSAFE")
-    matches = [
-        path
-        for path in input_root.rglob(entry.manifest_filename)
-        if path.is_file() and not path.is_symlink() and sha256_file(path) == entry.manifest_sha256
-    ]
-    if len(matches) != 1:
+    manifest_base = registry_path.parent if registry_path is not None else Path(__file__).with_name("assets")
+    packaged_manifest = manifest_base / entry.manifest_filename
+    if (
+        packaged_manifest.is_symlink()
+        or not packaged_manifest.is_file()
+        or sha256_file(packaged_manifest) != entry.manifest_sha256
+    ):
         raise TextRuntimeAssetError("TEXT_RUNTIME_MANIFEST_ABSENT_OR_AMBIGUOUS")
+    manifest = TextRuntimeAssetManifest.model_validate_json(packaged_manifest.read_bytes())
+    if manifest.provider_model_source != entry.model_source:
+        raise TextRuntimeAssetError("TEXT_RUNTIME_MANIFEST_BINDING_MISMATCH")
+    weight_name = "model.safetensors" if stage == "e5_embedding" else "pytorch_model.bin"
+    weight = next(item for item in manifest.model_files if Path(item.relative_path).name == weight_name)
+    model_roots = {
+        path.parent.resolve()
+        for path in input_root.rglob(weight_name)
+        if path.is_file() and not path.is_symlink() and path.stat().st_size == weight.byte_size
+    }
+    if len(model_roots) != 1:
+        raise TextRuntimeAssetError("TEXT_RUNTIME_MODEL_DIRECTORY_ABSENT_OR_AMBIGUOUS")
+    model_root = next(iter(model_roots))
+    semantic_bank_path = manifest_base / manifest.semantic_bank_file.relative_path
     assets = verify_text_runtime_asset_bundle(
-        bundle_root=matches[0].parent,
-        manifest_path=matches[0],
+        bundle_root=manifest_base,
+        manifest_path=packaged_manifest,
         expected_manifest_sha256=entry.manifest_sha256,
         expected_stage=stage,
+        model_root_override=model_root,
+        semantic_bank_path_override=semantic_bank_path,
+        version_resolver=version_resolver,
     )
     if encoder_factory is None:
         encoder: TextVectorEncoder = (
@@ -821,6 +892,15 @@ def discover_attached_text_runtime(
         assets=assets,
         encoder=encoder,
     )
+
+
+def verified_text_runtime_model_source(stage: str) -> str | None:
+    """Return the exact KPA model source only after registry verification."""
+
+    if stage not in TEXT_STAGES:
+        return None
+    entry = next(item for item in read_text_runtime_registry().entries if item.stage == stage)
+    return entry.model_source if entry.availability == "verified" else None
 
 
 __all__ = [
@@ -839,5 +919,6 @@ __all__ = [
     "discover_attached_text_runtime",
     "read_text_runtime_registry",
     "runtime_source_sha256",
+    "verified_text_runtime_model_source",
     "verify_text_runtime_asset_bundle",
 ]

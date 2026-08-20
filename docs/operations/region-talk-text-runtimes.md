@@ -5,12 +5,12 @@
 | Stage | Exact model | Runtime implementation | Reviewed model/bank bundle | Current result |
 |---|---|---|---|---|
 | `e5_embedding` | `intfloat/multilingual-e5-base@d128750597153bb5987e10b1c3493a34e5a4502a` | attached, local-files-only attention-mask mean pooling, L2 normalization | **model absent; bank verified** | `FAILED_RETRYABLE` (`HEAVY_RUNTIME_NOT_ATTACHED`) |
-| `bge_m3_embedding` | `BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181` | attached, local-path FlagEmbedding dense-only, L2 normalization | **exact full model tree unproven; bank verified** | `FAILED_RETRYABLE` (`HEAVY_RUNTIME_NOT_ATTACHED`) |
+| `bge_m3_embedding` | `BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181` | attached, local-path FlagEmbedding dense-only, L2 normalization | **verified exact logical model source + bank** | executable when exact model source and runtime pin are attached |
 
 The implementations are executable against deterministic fixture encoders, but neither
-production stage is ready. The canonical `semantic_bank_v1` is now reconstructed and verified
+production lifecycle is ready. The canonical `semantic_bank_v1` is now reconstructed and verified
 at SHA-256 `4ec81e6ede79f3dae1bb366a06366e7197d960e1c04e124f77b3db12f2f1981f`,
-but neither complete pinned model snapshot has passed the strict acquisition proof.
+and BGE's complete logical model snapshot has passed the acquisition proof. E5 has not.
 The committed registry therefore marks both entries `external_assets_required`, has no
 manifest hash, and deliberately returns no attached runtime. This is an external asset
 acquisition blocker, not evidence of a successful model execution.
@@ -19,9 +19,9 @@ A central private Kaggle smoke has now rejected the exact-version public candida
 `tanviranjumapurbo/multilingual-e5-base/Transformers/default/1` has only 9 of the upstream
 revision's 23 files and differs in material runtime files. BGE-M3
 `yethukmutt/bge-m3/Transformers/m3/1` matches 29 of 30 upstream files but omits
-`imgs/.DS_Store`; strict whole-tree equivalence therefore remains unproven. Both candidates
-executed deterministic normalized dense output offline, but the receipt outcome is `MISMATCH`,
-not readiness. See `region-talk-text-asset-acquisition.md`.
+`imgs/.DS_Store`. The committed BGE manifest explicitly classifies only that OS metadata as
+non-runtime and binds every remaining file; BGE is now verified. The E5 mismatch remains
+blocked. See `region-talk-text-asset-acquisition.md`.
 
 ## Offline asset contract
 

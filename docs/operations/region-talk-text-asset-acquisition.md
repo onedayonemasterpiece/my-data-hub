@@ -2,20 +2,24 @@
 
 ## Decision
 
-The 2026-08-20 central Kaggle smoke **did not approve either public candidate** for
-runtime-pin registration. Both entries in `text-runtime-assets.v1.json` remain
-`external_assets_required`; workers continue to return retryable unavailability rather than
-claiming model success.
+The 2026-08-20 central Kaggle smoke rejected E5 and initially reported strict whole-tree
+`MISMATCH` for BGE-M3. A subsequent reviewed logical-model contract excludes exactly the
+upstream OS metadata file `imgs/.DS_Store`; all 29 model, tokenizer, configuration,
+documentation and image files delivered by the exact BGE model source match the pinned
+revision. BGE-M3 is therefore registered as `verified`; E5 remains
+`external_assets_required`.
 
 | Stage | Required upstream revision | Exact Kaggle model source observed | Central result |
 |---|---|---|---|
 | `e5_embedding` | `intfloat/multilingual-e5-base@d128750597153bb5987e10b1c3493a34e5a4502a` | `tanviranjumapurbo/multilingual-e5-base/Transformers/default/1` | **Mismatch**: 9 observed files versus 23 official-tree files, plus differing config, tokenizer and weights. |
-| `bge_m3_embedding` | `BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181` | `yethukmutt/bge-m3/Transformers/m3/1` | **Mismatch**: 29 of 30 official-tree files match; `imgs/.DS_Store` is absent. Strict whole-tree equivalence therefore remains unproven. |
+| `bge_m3_embedding` | `BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181` | `yethukmutt/bge-m3/Transformers/m3/1` | **Verified logical model**: 29/29 required files match; only non-runtime OS metadata `imgs/.DS_Store` is explicitly excluded. |
 
-The BGE candidate did execute its 1024-dimensional normalized dense output and all 29 attached
-files match their exact upstream byte identities. That is useful acquisition evidence, but it
-is not the required full-tree plus independently fixed-output equivalence proof. It is not a
-production-readiness claim.
+The BGE candidate executed its 1024-dimensional normalized dense output and all 29 attached
+files match their exact upstream byte identities. The committed manifest binds this finite
+logical-file contract, the exclusion, fixed provider source, official-tree receipt, semantic
+bank, runtime source and dependency versions. Discovery hashes the complete attached model
+before constructing `BGEM3FlagModel`. This approves the asset, not the full stage lifecycle:
+the launcher must attach the exact model source and register the corresponding runtime pin.
 
 ## Evidence and method
 
@@ -60,12 +64,20 @@ BGE dense formula; it performs no install or download.
 `4ec81e6ede79f3dae1bb366a06366e7197d960e1c04e124f77b3db12f2f1981f`.
 This closes semantic-bank provenance but does not override either failed model comparison.
 
-## Remaining acquisition path
+## E5 private-output fallback assessment
 
-A later lane may create a credential-free, public-Hugging-Face acquisition Notebook pinned to
-the exact commits and retain its exact versioned private output as a worker input. Before this
-can replace `external_assets_required`, the central adapter must prove Kaggle supports exact
-numeric private `kernel_sources` readback, bind the complete output tree and image/source
-identity, and prove deterministic tokenizer/model outputs. Runtime downloads, unpinned
-references, devstand model-byte copies, and treating the near-matching BGE tree as exact are
-all forbidden.
+The official Kaggle kernel metadata contract accepts `kernel_sources` only as
+`username/kernel-slug`; it has no numeric version field. Central output download can bind
+`username/kernel-slug/version`, but a consumer launch cannot name that immutable version.
+Consequently this lane did not create an E5 builder and did not extend KPA with a falsely exact
+numeric source contract.
+
+A safe later design is possible only as a coordinated launcher/runtime change: create a unique,
+orchestrator-protected builder frozen after version 1; centrally re-read its exact source and
+current version immediately before launch; attach the unversioned unique slug; and have the
+worker hash the complete mounted tree against the committed official manifest before importing
+the tokenizer/model or accepting a runtime pin. A producer update races only to fail closed;
+it must never be accepted as the named generation. That consumer attachment and admission seam
+is outside this asset-registry lane, so E5 remains blocked rather than pretending the provider
+offers numeric `kernel_sources`. Runtime downloads, unpinned references and devstand model-byte
+copies remain forbidden.

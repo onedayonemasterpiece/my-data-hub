@@ -23,6 +23,7 @@ from my_data_hub.workloads.region_talk.text_runtimes import (
     build_text_runtime_asset_manifest,
     discover_attached_text_runtime,
     read_text_runtime_registry,
+    verified_text_runtime_model_source,
     verify_text_runtime_asset_bundle,
 )
 from my_data_hub.workloads.region_talk.transforms.evidence import ALL_LABELS
@@ -418,14 +419,32 @@ def test_unmanifested_symlink_is_denied(tmp_path: Path) -> None:
         )
 
 
-def test_committed_registry_denies_unacquired_models_and_runtime_has_no_download_path(
+def test_committed_registry_approves_only_exact_bge_model_source_and_has_no_download_path(
     tmp_path: Path,
 ) -> None:
     registry = read_text_runtime_registry()
     assert [item.availability for item in registry.entries] == [
-        "external_assets_required",
+        "verified",
         "external_assets_required",
     ]
+    assert verified_text_runtime_model_source("bge_m3_embedding") == (
+        "yethukmutt/bge-m3/Transformers/m3/1"
+    )
+    assert verified_text_runtime_model_source("e5_embedding") is None
+    bge_manifest = TextRuntimeAssetManifest.model_validate_json(
+        Path("src/my_data_hub/workloads/region_talk/assets/region-talk-bge-m3-assets.v1.json").read_bytes()
+    )
+    assert bge_manifest.excluded_nonruntime_paths == ("imgs/.DS_Store",)
+    assert len(bge_manifest.model_files) == 29
+    assert bge_manifest.runtime_source_sha256 == sha256_file(
+        Path("src/my_data_hub/workloads/region_talk/text_runtimes.py")
+    )
+    wrong = bge_manifest.model_dump(mode="json")
+    wrong["excluded_nonruntime_paths"] = ["README.md"]
+    unsigned = {key: item for key, item in wrong.items() if key != "receipt_sha256"}
+    wrong["receipt_sha256"] = hashlib.sha256(canonical_json_bytes(unsigned)).hexdigest()
+    with pytest.raises(ValueError, match="acquired-model contract differs"):
+        TextRuntimeAssetManifest.model_validate(wrong)
     assert discover_attached_text_runtime(
         "e5_embedding", input_root=tmp_path
     ) is None
@@ -437,6 +456,70 @@ def test_committed_registry_denies_unacquired_models_and_runtime_has_no_download
     assert 'BGEM3FlagModel(str(model_root)' in source
 
 
+def test_verified_model_source_discovery_checks_split_model_and_packaged_bank(
+    tmp_path: Path,
+) -> None:
+    root, manifest, bank_sha, dependencies = _bundle(tmp_path, "bge_m3_embedding")
+    value = json.loads(manifest.read_bytes())
+    unsigned = {key: item for key, item in value.items() if key != "receipt_sha256"}
+    production_bank = Path(
+        "src/my_data_hub/workloads/region_talk/assets/semantic-bank.v1.json"
+    ).read_bytes()
+    (root / "semantic-bank.v1.json").write_bytes(production_bank)
+    production_bank_value = json.loads(production_bank)
+    unsigned.update(
+        provider_model_source="yethukmutt/bge-m3/Transformers/m3/1",
+        official_tree_receipt_sha256=(
+            "526c363c7abfa3c60eed26ab559885a29cb23384abd06f4ead6beef636d3c418"
+        ),
+        excluded_nonruntime_paths=["imgs/.DS_Store"],
+        semantic_bank_file={
+            "relative_path": "semantic-bank.v1.json",
+            "sha256": hashlib.sha256(production_bank).hexdigest(),
+            "byte_size": len(production_bank),
+        },
+        semantic_bank_sha256=production_bank_value["semantic_bank_sha256"],
+    )
+    value = {
+        **unsigned,
+        "receipt_sha256": hashlib.sha256(canonical_json_bytes(unsigned)).hexdigest(),
+    }
+    manifest.write_bytes(canonical_json_bytes(value) + b"\n")
+    manifest_sha = sha256_file(manifest)
+    entry = {
+        "stage": "bge_m3_embedding",
+        "availability": "verified",
+        "manifest_filename": manifest.name,
+        "manifest_sha256": manifest_sha,
+        "model_source": "yethukmutt/bge-m3/Transformers/m3/1",
+        "model": value["model"],
+    }
+    e5 = read_text_runtime_registry().entries[1].model_dump(mode="json")
+    registry_unsigned = {
+        "schema_version": "region-talk-text-runtime-registry.v1",
+        "entries": [entry, e5],
+    }
+    registry = {
+        **registry_unsigned,
+        "receipt_sha256": hashlib.sha256(canonical_json_bytes(registry_unsigned)).hexdigest(),
+    }
+    registry_path = root / "text-runtime-assets.v1.json"
+    registry_path.write_bytes(canonical_json_bytes(registry) + b"\n")
+    runtime = discover_attached_text_runtime(
+        "bge_m3_embedding",
+        input_root=root,
+        registry_path=registry_path,
+        encoder_factory=lambda _stage, _root: _FixtureEncoder(BGE_M3.dimensions),
+        version_resolver=dependencies.__getitem__,
+    )
+    assert runtime is not None
+    assert runtime.assets.model_root == (root / "model").resolve()
+    assert bank_sha != runtime.assets.semantic_bank.semantic_bank_sha256
+    assert runtime.assets.semantic_bank.semantic_bank_sha256 == production_bank_value[
+        "semantic_bank_sha256"
+    ]
+
+
 def test_registry_is_packaged_as_canonical_runtime_data() -> None:
     packaged = files("my_data_hub.workloads.region_talk.assets").joinpath(
         "text-runtime-assets.v1.json"
@@ -445,3 +528,9 @@ def test_registry_is_packaged_as_canonical_runtime_data() -> None:
     value = json.loads(body)
     assert body == canonical_json_bytes(value) + b"\n"
     assert read_text_runtime_registry(Path(str(packaged))).receipt_sha256 == value["receipt_sha256"]
+    packaged_bge = files("my_data_hub.workloads.region_talk.assets").joinpath(
+        "region-talk-bge-m3-assets.v1.json"
+    )
+    assert TextRuntimeAssetManifest.model_validate_json(packaged_bge.read_bytes()).stage == (
+        "bge_m3_embedding"
+    )
