@@ -45,6 +45,10 @@ from my_data_hub.workloads.region_talk.heavy_runtimes import (
     DeterministicImageRuntime,
     DeterministicWriterRuntime,
 )
+from my_data_hub.workloads.region_talk.heavy_wiring import (
+    HeavyAttachedStageRuntime,
+    HeavyStageInputReceipt,
+)
 
 ZERO = "0" * 64
 REVISION = "1" * 64
@@ -54,6 +58,14 @@ MODEL_BUNDLE = "2" * 64
 def _exact(model: type[Any], hash_field: str, value: dict[str, Any]) -> Any:
     value = dict(value)
     value[hash_field] = canonical_sha256(value)
+    return model.model_validate(value)
+
+
+def _heavy_exact(model: type[Any], value: dict[str, Any]) -> Any:
+    value = dict(value)
+    value["work_input_fingerprint"] = "3" * 64
+    value["enrichment_sha256"] = canonical_sha256(value)
+    value["input_fingerprint"] = canonical_sha256(value)
     return model.model_validate(value)
 
 
@@ -77,7 +89,7 @@ def _manifest(body: bytes = b"reviewed-image") -> MediaArtifactManifest:
         MediaAcquisitionReceipt,
         "receipt_sha256",
         {
-            "schema_version": "region-talk-media-artifact-acquisition-receipt.v1",
+            "schema_version": "region-talk-media-artifact-acquisition-receipt.v2",
             "registered": True,
             "acquisition_id": "11111111-1111-5111-8111-111111111111",
             "task_run_id": "33333333-3333-4333-8333-333333333333",
@@ -101,6 +113,7 @@ def _manifest(body: bytes = b"reviewed-image") -> MediaArtifactManifest:
             "width": 640,
             "height": 480,
             "acquisition_evidence_sha256": "a" * 64,
+            "legacy_receipt_sha256": "b" * 64,
             "task_readable": True,
             "publication_dispatch": False,
             "notification_dispatch": False,
@@ -132,9 +145,8 @@ def _manifest(body: bytes = b"reviewed-image") -> MediaArtifactManifest:
 
 
 def image_input(*, body: bytes = b"reviewed-image") -> ImageScoringInput:
-    return _exact(
+    return _heavy_exact(
         ImageScoringInput,
-        "input_fingerprint",
         {
             "schema_version": "region-talk-image-input.v1",
             "candidate_revision_fingerprint": REVISION,
@@ -232,9 +244,8 @@ def final_input() -> FinalVerifierInput:
     image = image_result()
     facts = _fact_pack()
     source = _source()
-    return _exact(
+    return _heavy_exact(
         FinalVerifierInput,
-        "input_fingerprint",
         {
             "schema_version": "region-talk-final-verifier-input.v1",
             "candidate_revision_fingerprint": REVISION,
@@ -317,9 +328,8 @@ def writer_input() -> WriterInput:
     image = final_request.image_result
     verified = final_result(final_request)
     facts = final_request.fact_pack
-    return _exact(
+    return _heavy_exact(
         WriterInput,
-        "input_fingerprint",
         {
             "schema_version": "region-talk-writer-input.v1",
             "candidate_revision_fingerprint": REVISION,
@@ -443,7 +453,7 @@ def test_result_hash_and_stage_are_not_trusted() -> None:
         validate_heavy_stage_input(
             "image_scoring",
             image_input().model_dump(mode="json"),
-            expected_input_fingerprint=ZERO,
+            expected_work_input_fingerprint=ZERO,
         )
 
     rebound = result.model_dump(mode="json")
@@ -691,6 +701,15 @@ def test_0030_image_guard_metrics_are_derived_not_provider_supplied() -> None:
         "receipt_sha256": "6" * 64,
     }
     artifact = request.artifact_manifest.items[0]
+    legacy_receipt = request.artifact_manifest.acquisition_receipts[0].model_dump(mode="json")
+    legacy_receipt["schema_version"] = "region-talk-media-artifact-acquisition-receipt.v1"
+    legacy_receipt.pop("legacy_receipt_sha256")
+    # Migration 0031 bound this value to the raw source URL.  The sparse bridge
+    # treats it as opaque legacy authority; 0032 supplies normalized v2 authority.
+    legacy_receipt["source_url_sha256"] = "e" * 64
+    legacy_receipt["receipt_sha256"] = canonical_sha256(
+        {key: value for key, value in legacy_receipt.items() if key != "receipt_sha256"}
+    )
     work = DagImageWorkInput.model_validate(
         {
             "schema_version": "region-talk-image-input.v1",
@@ -702,8 +721,8 @@ def test_0030_image_guard_metrics_are_derived_not_provider_supplied() -> None:
             "artifact_sha256": artifact.artifact_sha256,
             "byte_size": artifact.byte_size,
             "content_type": artifact.content_type,
-            "acquisition_receipt": request.artifact_manifest.acquisition_receipts[0].model_dump(mode="json"),
-            "acquisition_receipt_sha256": request.artifact_manifest.acquisition_receipts[0].receipt_sha256,
+            "acquisition_receipt": legacy_receipt,
+            "acquisition_receipt_sha256": legacy_receipt["receipt_sha256"],
             "candidate_revision": 1,
             "runtime_pin": pin,
         }
@@ -726,3 +745,42 @@ def test_0030_image_guard_metrics_are_derived_not_provider_supplied() -> None:
         "provider_image_source_commit",
         "pin_sha256",
     }
+
+    envelope_base = {
+        "schema_version": "region-talk-heavy-stage-input-receipt.v1",
+        "status": "READY",
+        "stage": "image_scoring",
+        "work_input_fingerprint": request.work_input_fingerprint,
+        "enrichment_sha256": request.enrichment_sha256,
+        "dag_input": work.model_dump(mode="json"),
+        "heavy_input": request.model_dump(mode="json"),
+        "reason_code": "",
+        "publication_dispatch": False,
+        "notification_dispatch": False,
+    }
+    envelope = HeavyStageInputReceipt.model_validate(
+        {**envelope_base, "receipt_sha256": canonical_sha256(envelope_base)}
+    )
+    execution = HeavyAttachedStageRuntime(
+        stage="image_scoring",
+        runtime=DeterministicImageRuntime(
+            reader=_Reader(b"reviewed-image"),
+            scorer=_Scorer(
+                {
+                    "cv_overall_media_score": 0.72,
+                    "technical_quality_score": 0.74,
+                    "clip_visual_fit_score": 0.71,
+                    "laion_aesthetic_score": 0.64,
+                    "nima_quality_score": 0.68,
+                    "overall_media_score": 0.7,
+                }
+            ),
+        ),
+    ).execute(
+        stage="image_scoring",
+        input_fingerprint=request.work_input_fingerprint,
+        payload=type("Payload", (), {"input_data": envelope.model_dump(mode="json")})(),
+    )
+    assert execution.metrics == metrics
+    assert execution.artifact_sha256 == execution.private_result.result_sha256
+    assert execution.private_result.enrichment_sha256 != execution.private_result.work_input_fingerprint

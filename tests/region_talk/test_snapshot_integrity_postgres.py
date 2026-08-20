@@ -25,6 +25,8 @@ from my_data_hub.master_runtime.credentials import CredentialProvisioner
 from my_data_hub.master_runtime.database_gate import DatabaseGate
 from my_data_hub.workloads.region_talk.constants import DIRECT_SOURCE_TABLES
 from my_data_hub.workloads.region_talk.direct_snapshot import DirectSnapshotRunner
+from my_data_hub.workloads.region_talk.heavy_contracts import ImageScoringInput, sha256_text
+from my_data_hub.workloads.region_talk.heavy_wiring import HeavyStageInputReceipt
 from my_data_hub.workloads.region_talk.stage_execution import StagePreparation, form_stage_commit
 from my_data_hub.workloads.region_talk.transforms.evidence import SEMANTIC_BANK_HASH
 
@@ -552,7 +554,7 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 asset_id = owner.execute(
                     "INSERT INTO hub.content_asset(content_id,asset_type,source_url,normalized_url,"
                     "source_external_id,position,mime_type,byte_size,sha256,status,metadata) "
-                    "VALUES(%s,'image','https://example.test/private-image.jpg',"
+                        "VALUES(%s,'image','https://EXAMPLE.test/private-image.jpg?utm_source=mutable',"
                     "'https://example.test/private-image.jpg','media-1',0,'image/jpeg',1234,%s,"
                     "'available',%s::jsonb) RETURNING asset_id",
                     (
@@ -921,7 +923,7 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 ).fetchall() == [(2, "FENCED"), (3, "ACTIVE")]
                 assert worker_admin.execute(
                     "SELECT schema_revision FROM hub.canonical_state"
-                ).fetchone() == (31,)
+                    ).fetchone() == (32,)
 
             # Generation one was valid before rotation and is now fenced.
             with psycopg.connect(worker_url) as worker_connection:
@@ -992,6 +994,14 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                     "publication_dispatch": False,
                     "notification_dispatch": False,
                 }
+                def combined_result(value: dict[str, Any]) -> dict[str, Any]:
+                    return {
+                        "schema_version": "region-talk-stage-worker-combined-result.v1",
+                        "direct_result": value,
+                        "private_result": None,
+                        "publication_dispatch": False,
+                        "notification_dispatch": False,
+                    }
                 worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
                 forged = deepcopy(worker_result)
                 forged["result_metadata"]["producer_exact_id"] = "attacker@unregistered"
@@ -1003,20 +1013,20 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                     match="fails exact v9 stage validation",
                 ):
                     worker_connection.execute(
-                        "SELECT migration.submit_region_talk_stage_worker_result(%s,%s,%s::jsonb)",
-                        (worker_task, UUID(claim["effect_id"]), json.dumps(forged)),
+                        "SELECT migration.submit_region_talk_heavy_stage_worker_result(%s,%s,%s::jsonb)",
+                        (worker_task, UUID(claim["effect_id"]), json.dumps(combined_result(forged))),
                     )
                 worker_connection.rollback()
                 worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
                 result_receipt = worker_connection.execute(
-                    "SELECT migration.submit_region_talk_stage_worker_result(%s,%s,%s::jsonb)",
-                    (worker_task, UUID(claim["effect_id"]), json.dumps(worker_result)),
+                    "SELECT migration.submit_region_talk_heavy_stage_worker_result(%s,%s,%s::jsonb)",
+                    (worker_task, UUID(claim["effect_id"]), json.dumps(combined_result(worker_result))),
                 ).fetchone()[0]
                 assert result_receipt["accepted"] is True
                 worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
                 assert worker_connection.execute(
-                    "SELECT migration.submit_region_talk_stage_worker_result(%s,%s,%s::jsonb)",
-                    (worker_task, UUID(claim["effect_id"]), json.dumps(worker_result)),
+                    "SELECT migration.submit_region_talk_heavy_stage_worker_result(%s,%s,%s::jsonb)",
+                    (worker_task, UUID(claim["effect_id"]), json.dumps(combined_result(worker_result))),
                 ).fetchone()[0] == result_receipt
                 worker_connection.commit()
             connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
@@ -1096,8 +1106,8 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                     match="fails exact v9 stage validation",
                 ):
                     stale_worker.execute(
-                        "SELECT migration.submit_region_talk_stage_worker_result(%s,%s,%s::jsonb)",
-                        (worker_task, UUID(claim["effect_id"]), json.dumps(worker_result)),
+                        "SELECT migration.submit_region_talk_heavy_stage_worker_result(%s,%s,%s::jsonb)",
+                        (worker_task, UUID(claim["effect_id"]), json.dumps(combined_result(worker_result))),
                     )
             connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
             assert connection.execute(
@@ -1279,7 +1289,7 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 "source_media_id": "media-1",
                 "normalized_source_url": "https://example.test/private-image.jpg",
                 "source_url_sha256": sha256(
-                    b"https://example.test/private-image.jpg"
+                    b"https://EXAMPLE.test/private-image.jpg?utm_source=mutable"
                 ).hexdigest(),
                 "object_ref": "artifacts/media-1.jpg",
                 "artifact_sha256": "4" * 64,
@@ -1333,6 +1343,114 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 assert image_input["object_ref"] == "artifacts/media-1.jpg"
                 assert image_input["acquisition_receipt"] == acquisition
                 assert image_input["acquisition_receipt_sha256"] == acquisition["receipt_sha256"]
+                normalized_receipt = proof.execute(
+                    "SELECT migration.region_talk_media_artifact_acquisition_receipt_v2(%s)",
+                    (UUID(acquisition["acquisition_id"]),),
+                ).fetchone()[0]
+                assert normalized_receipt["source_url_sha256"] == sha256_text(
+                    "https://example.test/private-image.jpg"
+                )
+                assert normalized_receipt["source_url_sha256"] != acquisition["source_url_sha256"]
+                assert normalized_receipt["legacy_receipt_sha256"] == acquisition["receipt_sha256"]
+
+                proof.execute(
+                    "UPDATE hub.content_item SET metadata=metadata||%s::jsonb WHERE content_id=%s",
+                    (json.dumps({"canonical_source_key": "web:example.test"}), content_id),
+                )
+                content_row = proof.execute(
+                    "SELECT title,summary,body_excerpt,canonical_url,normalized_url,content_type "
+                    "FROM hub.content_item WHERE content_id=%s",
+                    (content_id,),
+                ).fetchone()
+                body_text = content_row[2] or ""
+                content_evidence = {
+                    "title": content_row[0] or "",
+                    "summary": content_row[1] or "",
+                    "body_text": body_text,
+                    "text_sha256": sha256_text(
+                        body_text or "\n\n".join(filter(None, (content_row[0], content_row[1])))
+                    ),
+                    "canonical_url": content_row[3] or content_row[4],
+                    "canonical_source_key": "web:example.test",
+                    "content_type": content_row[5],
+                }
+                fact = {
+                    "fact_id": "fact-1",
+                    "claim": "Fixture claim",
+                    "support_excerpt": "Fixture support",
+                    "source_url": content_evidence["canonical_url"],
+                    "support_sha256": sha256_text("Fixture support"),
+                }
+                fact_pack_base = {
+                    "schema_version": "region-talk-fact-pack.v1",
+                    "candidate_revision_fingerprint": acquisition["candidate_revision_fingerprint"],
+                    "facts": [fact],
+                }
+                fact_pack = {**fact_pack_base, "fact_pack_sha256": sha256_value(fact_pack_base)}
+                source_base = {
+                    "candidate_revision_fingerprint": acquisition["candidate_revision_fingerprint"],
+                    "canonical_source_key": "web:example.test",
+                    "externality_status": "verified",
+                    "source_scope": "external",
+                }
+                source = {**source_base, "source_fingerprint": sha256_value(source_base)}
+                profile_base = {
+                    "candidate_revision_fingerprint": acquisition["candidate_revision_fingerprint"],
+                    "canonical_source_key": "web:example.test",
+                    "source_fingerprint": source["source_fingerprint"],
+                    "entity_type": "media_brand",
+                    "externality_status": "verified",
+                    "dimensions": {
+                        "publisher_identity": "Fixture publisher",
+                        "intended_audience": "Fixture audience",
+                        "distinctive_value": "Fixture value",
+                    },
+                }
+                source_profile = {
+                    **profile_base,
+                    "profile_fingerprint": sha256_value(profile_base),
+                }
+                evidence_request = {
+                    "schema_version": "region-talk-heavy-evidence-pack.v1",
+                    "task_run_id": str(manifest.task_run_id),
+                    "export_batch_id": str(manifest.export_batch_id),
+                    "stage_run_id": str(stage_run_id),
+                    "canonical_revision": 1,
+                    "master_instance_id": str(IDENTITY.master_instance_id),
+                    "epoch": 1,
+                    "candidate_id": str(_candidate_id),
+                    "candidate_revision": candidate_revision,
+                    "revision_fingerprint": acquisition["candidate_revision_fingerprint"],
+                    "content": content_evidence,
+                    "eligibility_fingerprint": "e" * 64,
+                    "fact_pack": fact_pack,
+                    "source": source,
+                    "source_profile": source_profile,
+                    "history": [],
+                    "requested_at": now.isoformat(),
+                    "publication_dispatch": False,
+                    "notification_dispatch": False,
+                }
+                evidence_receipt = proof.execute(
+                    "SELECT migration.register_region_talk_heavy_evidence_pack(%s::jsonb)",
+                    (json.dumps(evidence_request),),
+                ).fetchone()[0]
+                assert evidence_receipt["registered"] is True
+                work_id = proof.execute(
+                    "SELECT work_item_id FROM migration.region_talk_stage_work_input_v9 "
+                    "WHERE stage='image_scoring'"
+                ).fetchone()[0]
+                rich_receipt = HeavyStageInputReceipt.model_validate(
+                    proof.execute(
+                        "SELECT migration.region_talk_heavy_stage_input_v11(%s)", (work_id,)
+                    ).fetchone()[0]
+                )
+                rich_image = ImageScoringInput.model_validate(rich_receipt.heavy_input)
+                assert rich_image.work_input_fingerprint == rich_receipt.work_input_fingerprint
+                assert rich_image.enrichment_sha256 == rich_receipt.enrichment_sha256
+                assert rich_image.artifact_manifest is not None
+                assert rich_image.artifact_manifest.acquisition_receipts[0].schema_version.endswith(".v2")
+                proof.rollback()
             assert image_ready["candidates"][0]["evidence"]["image_scoring"]["status"] == (
                 "MISSING"
             )

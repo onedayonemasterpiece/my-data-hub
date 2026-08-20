@@ -120,7 +120,7 @@ class MediaArtifact(StrictModel):
 
 
 class MediaAcquisitionReceipt(StrictModel):
-    schema_version: Literal["region-talk-media-artifact-acquisition-receipt.v1"]
+    schema_version: Literal["region-talk-media-artifact-acquisition-receipt.v2"]
     registered: Literal[True]
     acquisition_id: UUID
     task_run_id: UUID
@@ -144,6 +144,7 @@ class MediaAcquisitionReceipt(StrictModel):
     width: int | None = Field(default=None, ge=1, le=50_000)
     height: int | None = Field(default=None, ge=1, le=50_000)
     acquisition_evidence_sha256: str = Field(pattern=SHA256_PATTERN)
+    legacy_receipt_sha256: str = Field(pattern=SHA256_PATTERN)
     task_readable: Literal[True]
     publication_dispatch: Literal[False] = False
     notification_dispatch: Literal[False] = False
@@ -213,6 +214,8 @@ class ImagePolicy(StrictModel):
 
 class ImageScoringInput(StrictModel):
     schema_version: Literal["region-talk-image-input.v1"]
+    work_input_fingerprint: str = Field(pattern=SHA256_PATTERN)
+    enrichment_sha256: str = Field(pattern=SHA256_PATTERN)
     input_fingerprint: str = Field(pattern=SHA256_PATTERN)
     candidate_revision_fingerprint: str = Field(pattern=SHA256_PATTERN)
     content: ContentEvidence
@@ -233,6 +236,8 @@ class ImageScoringInput(StrictModel):
                 raise ValueError("media manifest is stale for the candidate revision")
         elif self.artifact_manifest is not None or not self.unavailable_reason:
             raise ValueError("UNAVAILABLE image input requires a reason and no artifact manifest")
+        if canonical_sha256(_without(self, "input_fingerprint", "enrichment_sha256")) != self.enrichment_sha256:
+            raise ValueError("image enrichment_sha256 differs")
         if canonical_sha256(_without(self, "input_fingerprint")) != self.input_fingerprint:
             raise ValueError("image input_fingerprint differs")
         return self
@@ -359,6 +364,8 @@ class FinalVerifierPolicy(StrictModel):
 
 class FinalVerifierInput(StrictModel):
     schema_version: Literal["region-talk-final-verifier-input.v1"]
+    work_input_fingerprint: str = Field(pattern=SHA256_PATTERN)
+    enrichment_sha256: str = Field(pattern=SHA256_PATTERN)
     input_fingerprint: str = Field(pattern=SHA256_PATTERN)
     candidate_revision_fingerprint: str = Field(pattern=SHA256_PATTERN)
     content: ContentEvidence
@@ -393,6 +400,8 @@ class FinalVerifierInput(StrictModel):
             raise ValueError("image result input receipt differs")
         if self.source.canonical_source_key != self.content.canonical_source_key:
             raise ValueError("source evidence differs from content source")
+        if canonical_sha256(_without(self, "input_fingerprint", "enrichment_sha256")) != self.enrichment_sha256:
+            raise ValueError("final verifier enrichment_sha256 differs")
         if canonical_sha256(_without(self, "input_fingerprint")) != self.input_fingerprint:
             raise ValueError("final verifier input_fingerprint differs")
         return self
@@ -481,6 +490,8 @@ class WriterPolicy(StrictModel):
 
 class WriterInput(StrictModel):
     schema_version: Literal["region-talk-writer-input.v1"]
+    work_input_fingerprint: str = Field(pattern=SHA256_PATTERN)
+    enrichment_sha256: str = Field(pattern=SHA256_PATTERN)
     input_fingerprint: str = Field(pattern=SHA256_PATTERN)
     candidate_revision_fingerprint: str = Field(pattern=SHA256_PATTERN)
     content: ContentEvidence
@@ -528,6 +539,8 @@ class WriterInput(StrictModel):
             raise ValueError("writer source profile differs from content source")
         if len({item.history_id for item in self.history}) != len(self.history):
             raise ValueError("writer history IDs must be unique")
+        if canonical_sha256(_without(self, "input_fingerprint", "enrichment_sha256")) != self.enrichment_sha256:
+            raise ValueError("writer enrichment_sha256 differs")
         if canonical_sha256(_without(self, "input_fingerprint")) != self.input_fingerprint:
             raise ValueError("writer input_fingerprint differs")
         return self
@@ -642,7 +655,7 @@ def validate_heavy_stage_input(
     stage: str,
     value: dict[str, Any],
     *,
-    expected_input_fingerprint: str,
+    expected_work_input_fingerprint: str,
 ) -> HeavyStageInput:
     parsed = HEAVY_INPUT_ADAPTER.validate_python(value)
     expected_type = {
@@ -652,7 +665,7 @@ def validate_heavy_stage_input(
     }.get(stage)
     if expected_type is None or not isinstance(parsed, expected_type):
         raise HeavyContractError("heavy input schema differs from stage")
-    if parsed.input_fingerprint != expected_input_fingerprint:
+    if parsed.work_input_fingerprint != expected_work_input_fingerprint:
         raise HeavyContractError("heavy input differs from work input fingerprint")
     return parsed
 

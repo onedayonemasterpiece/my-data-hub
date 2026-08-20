@@ -32,6 +32,8 @@ from my_data_hub.workloads.region_talk.transforms.models import (
     VectorFusionRequest,
 )
 
+from .heavy_contracts import HeavyRuntimeUnavailable
+from .heavy_wiring import AttachedHeavyStageExecution, HeavyAttachedStageRuntime
 from .stage_dispatch import (
     StageExecutionPayload,
     StageResultMetadata,
@@ -121,7 +123,16 @@ class DirectStageWorkerFunctions(Protocol):
         worker_task_run_id: UUID,
         effect_id: UUID,
         request: StageWorkerDirectResultRequest,
+        private_result: dict[str, Any] | None = None,
     ) -> StageWorkerDirectResultReceipt: ...
+
+    def fetch_heavy_input(
+        self,
+        *,
+        worker_task_run_id: UUID,
+        effect_id: UUID,
+        request: StageWorkerPayloadFetchRequest,
+    ) -> Any: ...
 
 
 class DirectStageCredentialCheckpoint(Protocol):
@@ -146,13 +157,32 @@ def attached_stage_runtime_from_env(stage: str) -> AttachedStageRuntime | None:
     registry names a reviewed exact offline bundle.
     """
 
-    raw = os.getenv("MY_DATA_HUB_REGION_TALK_STAGE_RUNTIME", "").strip()
+    heavy = stage in {"image_scoring", "final_verifier", "writer"}
+    raw = os.getenv(
+        "MY_DATA_HUB_REGION_TALK_HEAVY_RUNTIME_FACTORY" if heavy else "MY_DATA_HUB_REGION_TALK_STAGE_RUNTIME",
+        "",
+    ).strip()
     if not raw:
         if stage in {"e5_embedding", "bge_m3_embedding"}:
             from .text_runtimes import discover_attached_text_runtime
 
             return discover_attached_text_runtime(stage)
         return None
+    if heavy:
+        from pathlib import Path
+
+        from .heavy_assets import load_asset_manifest
+
+        manifest_path = Path(
+            os.getenv(
+                "MY_DATA_HUB_REGION_TALK_HEAVY_ASSET_MANIFEST",
+                str(Path(__file__).with_name("assets") / "heavy-runtime-assets.v1.json"),
+            )
+        )
+        try:
+            load_asset_manifest(manifest_path).require_production_ready()
+        except HeavyRuntimeUnavailable:
+            return None
     if raw.count(":") != 1:
         raise ValueError("attached stage runtime must be module:factory")
     module_name, attribute = raw.split(":", 1)
@@ -164,6 +194,8 @@ def attached_stage_runtime_from_env(stage: str) -> AttachedStageRuntime | None:
         raise ValueError("attached stage runtime reference is invalid")
     factory = getattr(importlib.import_module(module_name), attribute)
     runtime = factory(stage=stage)
+    if heavy:
+        runtime = HeavyAttachedStageRuntime(stage=stage, runtime=runtime)
     if not isinstance(getattr(runtime, "producer_exact_id", None), str) or not callable(
         getattr(runtime, "execute", None)
     ):
@@ -280,6 +312,7 @@ def process_region_talk_stage_item(
     stage: str,
     contract_version: str,
     runtime: AttachedStageRuntime | None = None,
+    private_result_capture: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Execute one exact stage input or raise a retryable unavailable result.
 
@@ -348,7 +381,7 @@ def process_region_talk_stage_item(
             raise RegionTalkStageRuntimeUnavailable(
                 f"{stage} accepted its exact input but no verified runtime is attached{suffix}"
             )
-        metrics = runtime.execute(
+        execution = runtime.execute(
             stage=stage,
             contract_version=contract_version,
             subject_id=parsed.subject_id,
@@ -356,6 +389,14 @@ def process_region_talk_stage_item(
             payload=payload,
         )
         producer = runtime.producer_exact_id
+        artifact_sha256 = None
+        if isinstance(execution, AttachedHeavyStageExecution):
+            metrics = execution.metrics
+            artifact_sha256 = execution.artifact_sha256
+            if private_result_capture is not None:
+                private_result_capture.append(execution.private_result.model_dump(mode="json"))
+        else:
+            metrics = execution
         if not isinstance(metrics, dict):
             raise ValueError("attached runtime returned non-object metrics")
 
@@ -369,7 +410,7 @@ def process_region_talk_stage_item(
         input_fingerprint=parsed.input_fingerprint,
         producer_exact_id=producer,
         metrics=metrics,
-        artifact_sha256=None,
+        artifact_sha256=artifact_sha256 if stage != "vector_fusion" else None,
     )
     # Re-encode now so cyclic/non-canonical custom mappings cannot cross the
     # Notebook boundary even if a runtime returned one.
@@ -411,6 +452,23 @@ def execute_direct_region_talk_stage_worker(
             master_instance_id=fetched.master_instance_id,
             epoch=fetched.epoch,
         )
+    if fetched.stage in {"image_scoring", "final_verifier", "writer"} and runtime is not None:
+        fetch_heavy = getattr(functions, "fetch_heavy_input", None)
+        if not callable(fetch_heavy):
+            runtime = None
+        else:
+            heavy_receipt = fetch_heavy(
+                worker_task_run_id=request.worker_task_run_id,
+                effect_id=request.effect_id,
+                request=request,
+            )
+            fetched = fetched.model_copy(
+                update={
+                    "payload": fetched.payload.model_copy(
+                        update={"input_data": heavy_receipt.model_dump(mode="json")}
+                    )
+                }
+            )
     item = {
         "work_item_id": str(fetched.work_item_id),
         "subject_type": fetched.subject_type,
@@ -418,6 +476,7 @@ def execute_direct_region_talk_stage_worker(
         "input_fingerprint": fetched.input_fingerprint,
         "payload": fetched.payload.model_dump(mode="json"),
     }
+    private_results: list[dict[str, Any]] = []
     try:
         result_metadata = StageResultMetadata.model_validate(
             process_region_talk_stage_item(
@@ -425,10 +484,11 @@ def execute_direct_region_talk_stage_worker(
                 stage=fetched.stage,
                 contract_version=fetched.contract_version,
                 runtime=runtime,
+                private_result_capture=private_results,
             )
         )
         status = StageWorkerStatus.SUCCEEDED
-    except RegionTalkStageRuntimeUnavailable as exc:
+    except (RegionTalkStageRuntimeUnavailable, HeavyRuntimeUnavailable) as exc:
         status = StageWorkerStatus.FAILED_RETRYABLE
         result_metadata = _failure_metadata(
             fetched,
@@ -477,6 +537,7 @@ def execute_direct_region_talk_stage_worker(
         worker_task_run_id=fetched.worker_task_run_id,
         effect_id=fetched.effect_id,
         request=submission,
+        private_result=private_results[0] if private_results else None,
     )
 
 

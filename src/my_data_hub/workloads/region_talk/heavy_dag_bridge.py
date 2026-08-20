@@ -19,11 +19,57 @@ from .heavy_contracts import (
     SHA256_PATTERN,
     FinalVerifierResult,
     ImageScoringResult,
-    MediaAcquisitionReceipt,
     StrictModel,
     WriterResult,
+    canonical_sha256,
     sha256_text,
 )
+
+
+class DagMediaAcquisitionReceiptV1(StrictModel):
+    """Frozen 0031 receipt.
+
+    Its ``source_url_sha256`` was defined over the raw source URL, not the
+    normalized URL.  It is accepted only for parsing the immutable sparse DAG
+    envelope.  Heavy execution requires the authoritative v2 projection.
+    """
+
+    schema_version: Literal["region-talk-media-artifact-acquisition-receipt.v1"]
+    registered: Literal[True]
+    acquisition_id: UUID
+    task_run_id: UUID
+    export_batch_id: UUID
+    stage_run_id: UUID
+    canonical_revision: int = Field(ge=1)
+    master_instance_id: UUID
+    epoch: int = Field(ge=1)
+    candidate_id: UUID
+    candidate_revision: int = Field(ge=1)
+    candidate_revision_fingerprint: str = Field(pattern=SHA256_PATTERN)
+    content_id: UUID
+    asset_id: UUID
+    source_media_id: str = Field(min_length=1, max_length=500)
+    normalized_source_url: str = Field(min_length=1, max_length=4_000)
+    source_url_sha256: str = Field(pattern=SHA256_PATTERN)
+    object_ref: str = Field(min_length=1, max_length=2_000)
+    artifact_sha256: str = Field(pattern=SHA256_PATTERN)
+    byte_size: int = Field(ge=1, le=1_073_741_824)
+    content_type: str = Field(min_length=1, max_length=200)
+    width: int | None = Field(default=None, ge=1, le=100_000)
+    height: int | None = Field(default=None, ge=1, le=100_000)
+    acquisition_evidence_sha256: str = Field(pattern=SHA256_PATTERN)
+    task_readable: Literal[True]
+    publication_dispatch: Literal[False]
+    notification_dispatch: Literal[False]
+    receipt_sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def exact_legacy_receipt(self) -> DagMediaAcquisitionReceiptV1:
+        if self.acquisition_id.version != 5:
+            raise ValueError("acquisition_id must be server-derived UUIDv5")
+        if canonical_sha256(self.model_dump(mode="json", exclude={"receipt_sha256"})) != self.receipt_sha256:
+            raise ValueError("legacy acquisition receipt_sha256 differs")
+        return self
 
 
 class StageRuntimePinReceipt(StrictModel):
@@ -77,7 +123,7 @@ class DagImageWorkInput(StrictModel):
     artifact_sha256: str = Field(pattern=SHA256_PATTERN)
     byte_size: int = Field(ge=1)
     content_type: str = Field(min_length=1, max_length=200)
-    acquisition_receipt: MediaAcquisitionReceipt
+    acquisition_receipt: DagMediaAcquisitionReceiptV1
     acquisition_receipt_sha256: str = Field(pattern=SHA256_PATTERN)
     candidate_revision: int = Field(ge=1)
     runtime_pin: StageRuntimePinReceipt
@@ -224,6 +270,7 @@ def writer_guard_metrics(result: WriterResult, work: DagWriterWorkInput) -> dict
 __all__ = [
     "DagFinalVerifierWorkInput",
     "DagImageWorkInput",
+    "DagMediaAcquisitionReceiptV1",
     "DagWriterWorkInput",
     "StageRuntimePinReceipt",
     "final_guard_metrics",

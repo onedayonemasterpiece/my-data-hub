@@ -872,6 +872,28 @@ class StageWorkerDirectResultRequest(StrictModel):
         return self
 
 
+class StageWorkerCombinedResultRequest(StrictModel):
+    """One atomic public-metadata/private-heavy submission to the master."""
+
+    schema_version: Literal["region-talk-stage-worker-combined-result.v1"] = (
+        "region-talk-stage-worker-combined-result.v1"
+    )
+    direct_result: StageWorkerDirectResultRequest
+    private_result: dict[str, Any] | None = None
+    publication_dispatch: Literal[False] = False
+    notification_dispatch: Literal[False] = False
+
+    @model_validator(mode="after")
+    def exact_private_success(self) -> StageWorkerCombinedResultRequest:
+        heavy = self.direct_result.result_metadata.stage in {"image_scoring", "final_verifier", "writer"}
+        succeeded = self.direct_result.result_status is StageWorkerStatus.SUCCEEDED
+        if heavy and succeeded and self.private_result is None:
+            raise ValueError("successful heavy stage lacks private result")
+        if (not succeeded or not heavy) and self.private_result is not None:
+            raise ValueError("private result is only valid for a successful heavy stage")
+        return self
+
+
 class StageWorkerDirectResultReceipt(StrictModel):
     schema_version: Literal["region-talk-stage-worker-direct-result-receipt.v1"]
     accepted: Literal[True]
@@ -1014,7 +1036,8 @@ class PostgresStageWorkerFunctions:
 
     _ALLOWED: ClassVar[frozenset[str]] = frozenset({
         "migration.fetch_region_talk_stage_work_payload",
-        "migration.submit_region_talk_stage_worker_result",
+        "migration.fetch_region_talk_heavy_stage_input",
+        "migration.submit_region_talk_heavy_stage_worker_result",
     })
 
     def __init__(self, connection: Any) -> None:
@@ -1070,10 +1093,33 @@ class PostgresStageWorkerFunctions:
         worker_task_run_id: UUID,
         effect_id: UUID,
         request: StageWorkerDirectResultRequest,
+        private_result: dict[str, Any] | None = None,
     ) -> StageWorkerDirectResultReceipt:
+        combined = StageWorkerCombinedResultRequest(
+            direct_result=request,
+            private_result=private_result,
+        )
         return StageWorkerDirectResultReceipt.model_validate(
             self._call(
-                "migration.submit_region_talk_stage_worker_result",
+                "migration.submit_region_talk_heavy_stage_worker_result",
+                worker_task_run_id,
+                effect_id,
+                combined,
+            )
+        )
+
+    def fetch_heavy_input(
+        self,
+        *,
+        worker_task_run_id: UUID,
+        effect_id: UUID,
+        request: StageWorkerPayloadFetchRequest,
+    ) -> Any:
+        from .heavy_wiring import HeavyStageInputReceipt
+
+        return HeavyStageInputReceipt.model_validate(
+            self._call(
+                "migration.fetch_region_talk_heavy_stage_input",
                 worker_task_run_id,
                 effect_id,
                 request,
@@ -1391,6 +1437,7 @@ __all__ = [
     "StageWorkPayloadReceipt",
     "StageWorkerBindRequest",
     "StageWorkerBindingReceipt",
+    "StageWorkerCombinedResultRequest",
     "StageWorkerCredentialStatus",
     "StageWorkerDirectResultReceipt",
     "StageWorkerDirectResultRequest",
