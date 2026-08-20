@@ -48,6 +48,7 @@ from my_data_hub.workloads.region_talk.heavy_runtimes import (
 from my_data_hub.workloads.region_talk.heavy_wiring import (
     HeavyAttachedStageRuntime,
     HeavyStageInputReceipt,
+    validate_heavy_private_result_contract,
 )
 
 ZERO = "0" * 64
@@ -784,3 +785,40 @@ def test_0030_image_guard_metrics_are_derived_not_provider_supplied() -> None:
     assert execution.metrics == metrics
     assert execution.artifact_sha256 == execution.private_result.result_sha256
     assert execution.private_result.enrichment_sha256 != execution.private_result.work_input_fingerprint
+
+    metadata = {
+        "input_fingerprint": request.work_input_fingerprint,
+        "producer_exact_id": execution.private_result.result_data["producer_exact_id"],
+        "artifact_sha256": execution.private_result.result_sha256,
+        "metrics": metrics,
+    }
+    private = execution.private_result.model_dump(mode="json")
+    assert validate_heavy_private_result_contract(
+        stage="image_scoring",
+        value=private,
+        direct_result_sha256=execution.private_result.result_sha256,
+        result_metadata=metadata,
+    ).result_sha256 == execution.private_result.result_sha256
+
+    minimal_base = {"input_fingerprint": result.input_fingerprint}
+    minimal = {**minimal_base, "result_sha256": canonical_sha256(minimal_base)}
+    fabricated = {
+        **private,
+        "result_sha256": minimal["result_sha256"],
+        "result_data": minimal,
+    }
+    with pytest.raises(ValidationError):
+        validate_heavy_private_result_contract(
+            stage="image_scoring",
+            value=fabricated,
+            direct_result_sha256=minimal["result_sha256"],
+            result_metadata={**metadata, "artifact_sha256": minimal["result_sha256"]},
+        )
+
+    with pytest.raises(ValueError, match="guard metric differs"):
+        validate_heavy_private_result_contract(
+            stage="image_scoring",
+            value=private,
+            direct_result_sha256=execution.private_result.result_sha256,
+            result_metadata={**metadata, "metrics": {**metrics, "actual_image": False}},
+        )

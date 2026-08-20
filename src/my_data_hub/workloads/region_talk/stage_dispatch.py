@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.notebooks.contracts import NotebookResult
 
+from .heavy_wiring import HeavyStagePrivateResult, validate_heavy_private_result_contract
 from .stage_execution import HEAVY_STAGES, STAGE_BY_KEY
 
 SHA256_PATTERN = r"^[a-f0-9]{64}$"
@@ -879,7 +880,7 @@ class StageWorkerCombinedResultRequest(StrictModel):
         "region-talk-stage-worker-combined-result.v1"
     )
     direct_result: StageWorkerDirectResultRequest
-    private_result: dict[str, Any] | None = None
+    private_result: HeavyStagePrivateResult | None = None
     publication_dispatch: Literal[False] = False
     notification_dispatch: Literal[False] = False
 
@@ -891,6 +892,14 @@ class StageWorkerCombinedResultRequest(StrictModel):
             raise ValueError("successful heavy stage lacks private result")
         if (not succeeded or not heavy) and self.private_result is not None:
             raise ValueError("private result is only valid for a successful heavy stage")
+        if heavy and succeeded:
+            assert self.private_result is not None
+            validate_heavy_private_result_contract(
+                stage=self.direct_result.result_metadata.stage,
+                value=self.private_result.model_dump(mode="json"),
+                direct_result_sha256=self.direct_result.result_sha256,
+                result_metadata=self.direct_result.result_metadata.model_dump(mode="json"),
+            )
         return self
 
 

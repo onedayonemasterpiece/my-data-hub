@@ -25,8 +25,28 @@ from my_data_hub.master_runtime.credentials import CredentialProvisioner
 from my_data_hub.master_runtime.database_gate import DatabaseGate
 from my_data_hub.workloads.region_talk.constants import DIRECT_SOURCE_TABLES
 from my_data_hub.workloads.region_talk.direct_snapshot import DirectSnapshotRunner
-from my_data_hub.workloads.region_talk.heavy_contracts import ImageScoringInput, sha256_text
-from my_data_hub.workloads.region_talk.heavy_wiring import HeavyStageInputReceipt
+from my_data_hub.workloads.region_talk.heavy_contracts import (
+    FinalVerifierInput,
+    FinalVerifierResult,
+    ImageScoringInput,
+    ImageScoringResult,
+    WriterInput,
+    WriterResult,
+    canonical_sha256,
+    sha256_text,
+)
+from my_data_hub.workloads.region_talk.heavy_dag_bridge import (
+    DagFinalVerifierWorkInput,
+    DagImageWorkInput,
+    DagWriterWorkInput,
+    final_guard_metrics,
+    image_guard_metrics,
+    writer_guard_metrics,
+)
+from my_data_hub.workloads.region_talk.heavy_wiring import (
+    HeavyStageInputReceipt,
+    HeavyStagePrivateResult,
+)
 from my_data_hub.workloads.region_talk.stage_execution import StagePreparation, form_stage_commit
 from my_data_hub.workloads.region_talk.transforms.evidence import SEMANTIC_BANK_HASH
 
@@ -923,7 +943,7 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 ).fetchall() == [(2, "FENCED"), (3, "ACTIVE")]
                 assert worker_admin.execute(
                     "SELECT schema_revision FROM hub.canonical_state"
-                    ).fetchone() == (32,)
+                    ).fetchone() == (33,)
 
             # Generation one was valid before rotation and is now fenced.
             with psycopg.connect(worker_url) as worker_connection:
@@ -1214,6 +1234,346 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                     )
                     admin.commit()
 
+            def land_heavy_stage_via_combined(stage: str) -> None:
+                """Exercise the real child binding/fetch/private combined-submit path."""
+
+                claim_request = {
+                    "schema_version": "region-talk-stage-work-metadata-claim.v2",
+                    "claim_request_id": str(
+                        uuid5(STAGE_NAMESPACE, f"heavy-claim:{stage_run_id}:{stage}")
+                    ),
+                    "lease_owner": f"disposable-heavy-{stage}",
+                    "requested_at": now.isoformat(),
+                    "publication_dispatch": False,
+                    "notification_dispatch": False,
+                }
+                connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                heavy_claim = connection.execute(
+                    "SELECT migration.claim_region_talk_stage_work_metadata(%s,%s,%s::jsonb)",
+                    (manifest.task_run_id, manifest.export_batch_id, json.dumps(claim_request)),
+                ).fetchone()[0]
+                assert heavy_claim["status"] == "CLAIMED"
+                assert heavy_claim["stage"] == stage
+                connection.commit()
+
+                worker_task_id = UUID(heavy_claim["worker_task_run_id"])
+                worker_credential_id = uuid5(STAGE_NAMESPACE, f"heavy-credential:{stage}")
+                worker_principal = f"mdh_e1_regiong4_{sha256(stage.encode()).hexdigest()[:8]}"
+                worker_password = f"region-talk-{stage}-worker-password"
+                command_sha = sha256(f"command:{stage}".encode()).hexdigest()
+                token_sha = sha256(f"token:{stage}".encode()).hexdigest()
+                with psycopg.connect(admin_url) as worker_admin:
+                    worker_gate = DatabaseGate(worker_admin)
+                    CredentialProvisioner(worker_admin, worker_gate).create(
+                        principal=worker_principal,
+                        password=worker_password,
+                        group="mdh_region_talk_pipeline",
+                        identity=IDENTITY,
+                        credential_id=worker_credential_id,
+                        expires_at=now + timedelta(minutes=9),
+                        now=now,
+                    )
+                    worker_admin.execute(
+                        "SELECT master_control.register_task_credential_binding("
+                        "%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (
+                            worker_credential_id,
+                            worker_principal,
+                            "region_talk",
+                            worker_task_id,
+                            1,
+                            IDENTITY.master_instance_id,
+                            1,
+                            command_sha,
+                            token_sha,
+                        ),
+                    )
+                    worker_admin.commit()
+                bind_request = {
+                    "schema_version": "region-talk-stage-worker-bind.v1",
+                    "dispatch_id": heavy_claim["dispatch_id"],
+                    "effect_id": heavy_claim["effect_id"],
+                    "claim_receipt_sha256": heavy_claim["claim_receipt_sha256"],
+                    "worker_task_run_id": str(worker_task_id),
+                    "worker_credential_id": str(worker_credential_id),
+                    "worker_generation": 1,
+                    "worker_command_sha256": command_sha,
+                    "worker_task_token_sha256": token_sha,
+                    "requested_at": now.isoformat(),
+                    "publication_dispatch": False,
+                    "notification_dispatch": False,
+                }
+                connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                heavy_binding = connection.execute(
+                    "SELECT migration.bind_region_talk_stage_worker(%s,%s,%s::jsonb)",
+                    (manifest.task_run_id, manifest.export_batch_id, json.dumps(bind_request)),
+                ).fetchone()[0]
+                connection.commit()
+                fetch_request = {
+                    "schema_version": "region-talk-stage-work-payload-fetch.v1",
+                    "worker_task_run_id": str(worker_task_id),
+                    "dispatch_id": heavy_claim["dispatch_id"],
+                    "effect_id": heavy_claim["effect_id"],
+                    "worker_binding_sha256": heavy_binding["worker_binding_sha256"],
+                    "requested_at": now.isoformat(),
+                    "publication_dispatch": False,
+                    "notification_dispatch": False,
+                }
+                worker_url = (
+                    f"postgresql://{worker_principal}:{worker_password}@127.0.0.1:{port}/postgres"
+                )
+                with psycopg.connect(worker_url) as worker_connection:
+                    worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                    sparse = worker_connection.execute(
+                        "SELECT migration.fetch_region_talk_stage_work_payload(%s,%s,%s::jsonb)",
+                        (worker_task_id, UUID(heavy_claim["effect_id"]), json.dumps(fetch_request)),
+                    ).fetchone()[0]
+                    worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                    rich = HeavyStageInputReceipt.model_validate(
+                        worker_connection.execute(
+                            "SELECT migration.fetch_region_talk_heavy_stage_input(%s,%s,%s::jsonb)",
+                            (
+                                worker_task_id,
+                                UUID(heavy_claim["effect_id"]),
+                                json.dumps(fetch_request),
+                            ),
+                        ).fetchone()[0]
+                    )
+                    assert rich.status == "READY"
+                    assert rich.heavy_input is not None and rich.enrichment_sha256 is not None
+                    if stage == "image_scoring":
+                        typed_input = ImageScoringInput.model_validate(rich.heavy_input)
+                        assert typed_input.artifact_manifest is not None
+                        artifact = typed_input.artifact_manifest.items[0]
+                        result_base = {
+                            "schema_version": "region-talk-image-scoring-result.v1",
+                            "input_fingerprint": typed_input.input_fingerprint,
+                            "candidate_revision_fingerprint": typed_input.candidate_revision_fingerprint,
+                            "media_manifest_sha256": typed_input.artifact_manifest.manifest_sha256,
+                            "producer_exact_id": rich.dag_input["runtime_pin"]["producer_exact_id"],
+                            "decision": "legacy_auto_accept",
+                            "reason_codes": ["legacy_anchor_passed"],
+                            "frames": [{
+                                "media_id": artifact.source_media_id,
+                                "artifact_sha256": artifact.artifact_sha256,
+                                "content_text_sha256": typed_input.content.text_sha256,
+                                "scorer_request_fingerprint": "a" * 64,
+                                "cv_overall_media_score": 0.8,
+                                "technical_quality_score": 0.8,
+                                "clip_visual_fit_score": 0.8,
+                                "laion_aesthetic_score": 0.8,
+                                "nima_quality_score": 0.8,
+                                "overall_media_score": 0.8,
+                                "model_bundle_sha256": typed_input.policy.model_bundle_sha256,
+                            }],
+                            "selected_media_ids": [artifact.source_media_id],
+                            "visual_adjudication": None,
+                            "publication_dispatch": False,
+                            "notification_dispatch": False,
+                        }
+                        typed_result = ImageScoringResult.model_validate({
+                            **result_base, "result_sha256": canonical_sha256(result_base)
+                        })
+                        metrics = image_guard_metrics(
+                            typed_result, DagImageWorkInput.model_validate(rich.dag_input)
+                        )
+                    elif stage == "final_verifier":
+                        typed_input = FinalVerifierInput.model_validate(rich.heavy_input)
+                        fact_id = typed_input.fact_pack.facts[0].fact_id
+                        result_base = {
+                            "schema_version": "region-talk-final-verifier-result.v1",
+                            "input_fingerprint": typed_input.input_fingerprint,
+                            "candidate_revision_fingerprint": typed_input.candidate_revision_fingerprint,
+                            "fact_pack_sha256": typed_input.fact_pack.fact_pack_sha256,
+                            "source_fingerprint": typed_input.source.source_fingerprint,
+                            "image_result_sha256": typed_input.image_result_sha256,
+                            "producer_exact_id": rich.dag_input["runtime_pin"]["producer_exact_id"],
+                            "decision": "accept",
+                            "reason_codes": ["grounding_current"],
+                            "grounding": [{"claim": "Fixture claim", "fact_ids": [fact_id]}],
+                            "request_fingerprint": "b" * 64,
+                            "model_id": typed_input.policy.model_id,
+                            "publication_dispatch": False,
+                            "notification_dispatch": False,
+                        }
+                        typed_result = FinalVerifierResult.model_validate({
+                            **result_base, "result_sha256": canonical_sha256(result_base)
+                        })
+                        metrics = final_guard_metrics(
+                            typed_result, DagFinalVerifierWorkInput.model_validate(rich.dag_input)
+                        )
+                    else:
+                        typed_input = WriterInput.model_validate(rich.heavy_input)
+                        fact_id = typed_input.fact_pack.facts[0].fact_id
+                        media_ids = list(typed_input.image_result.selected_media_ids)
+                        result_base = {
+                            "schema_version": "region-talk-writer-result.v1",
+                            "input_fingerprint": typed_input.input_fingerprint,
+                            "candidate_revision_fingerprint": typed_input.candidate_revision_fingerprint,
+                            "fact_pack_sha256": typed_input.fact_pack.fact_pack_sha256,
+                            "source_profile_fingerprint": typed_input.source_profile.profile_fingerprint,
+                            "final_result_sha256": typed_input.final_result_sha256,
+                            "producer_exact_id": rich.dag_input["runtime_pin"]["producer_exact_id"],
+                            "status": "ready_for_operator_review",
+                            "title": "Fixture title",
+                            "paragraph_one": "Fixture grounded first paragraph.",
+                            "paragraph_two": "Fixture grounded second paragraph.",
+                            "grounding": [{"claim": "Fixture claim", "fact_ids": [fact_id]}],
+                            "strategy": {
+                                "angle": "Fixture angle",
+                                "current_hook_fact_ids": [fact_id],
+                                "source_value_fact_ids": [fact_id],
+                                "visual_hook_media_ids": media_ids,
+                            },
+                            "critic": {"decision": "pass", "defects": []},
+                            "rewrite_count": 0,
+                            "request_fingerprint": "c" * 64,
+                            "model_id": typed_input.policy.model_id,
+                            "publication_dispatch": False,
+                            "notification_dispatch": False,
+                        }
+                        typed_result = WriterResult.model_validate({
+                            **result_base, "result_sha256": canonical_sha256(result_base)
+                        })
+                        metrics = writer_guard_metrics(
+                            typed_result, DagWriterWorkInput.model_validate(rich.dag_input)
+                        )
+                    private = HeavyStagePrivateResult(
+                        stage=stage,
+                        work_input_fingerprint=rich.work_input_fingerprint,
+                        enrichment_sha256=rich.enrichment_sha256,
+                        input_fingerprint=typed_input.input_fingerprint,
+                        result_sha256=typed_result.result_sha256,
+                        result_data=typed_result.model_dump(mode="json"),
+                    ).model_dump(mode="json")
+                    metadata = {
+                        "schema_version": "region-talk-stage-result-metadata.v1",
+                        "stage": stage,
+                        "contract_version": heavy_claim["contract_version"],
+                        "subject_type": "region_talk.candidate",
+                        "subject_id": heavy_claim["subject_id"],
+                        "candidate_revision": sparse["payload"]["candidate_revision"],
+                        "revision_fingerprint": sparse["payload"]["revision_fingerprint"],
+                        "input_fingerprint": heavy_claim["input_fingerprint"],
+                        "producer_exact_id": rich.dag_input["runtime_pin"]["producer_exact_id"],
+                        "metrics": metrics,
+                        "artifact_sha256": typed_result.result_sha256,
+                    }
+                    direct = {
+                        "schema_version": "region-talk-stage-worker-direct-result.v1",
+                        "worker_task_run_id": str(worker_task_id),
+                        "dispatch_id": heavy_claim["dispatch_id"],
+                        "effect_id": heavy_claim["effect_id"],
+                        "worker_binding_sha256": heavy_binding["worker_binding_sha256"],
+                        "work_item_id": heavy_claim["work_item_id"],
+                        "attempt": heavy_claim["attempt"],
+                        "result_status": "SUCCEEDED",
+                        "result_metadata": metadata,
+                        "metadata_sha256": sha256_value(metadata),
+                        "result_sha256": typed_result.result_sha256,
+                        "completed_at": now.isoformat(),
+                        "publication_dispatch": False,
+                        "notification_dispatch": False,
+                    }
+                    combined = {
+                        "schema_version": "region-talk-stage-worker-combined-result.v1",
+                        "direct_result": direct,
+                        "private_result": private,
+                        "publication_dispatch": False,
+                        "notification_dispatch": False,
+                    }
+                    typed_forgery = deepcopy(combined)
+                    typed_forgery["private_result"]["result_data"].pop("producer_exact_id")
+                    typed_forgery_sha = canonical_sha256(
+                        {
+                            key: value
+                            for key, value in typed_forgery["private_result"]["result_data"].items()
+                            if key != "result_sha256"
+                        }
+                    )
+                    typed_forgery["private_result"]["result_data"]["result_sha256"] = (
+                        typed_forgery_sha
+                    )
+                    typed_forgery["private_result"]["result_sha256"] = typed_forgery_sha
+                    typed_forgery["direct_result"]["result_sha256"] = typed_forgery_sha
+                    typed_forgery["direct_result"]["result_metadata"][
+                        "artifact_sha256"
+                    ] = typed_forgery_sha
+                    typed_forgery["direct_result"]["metadata_sha256"] = sha256_value(
+                        typed_forgery["direct_result"]["result_metadata"]
+                    )
+                    worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                    with pytest.raises(
+                        psycopg.errors.InvalidParameterValue,
+                        match="violates exact stage contract or guard metrics",
+                    ):
+                        worker_connection.execute(
+                            "SELECT migration.submit_region_talk_heavy_stage_worker_result("
+                            "%s,%s,%s::jsonb)",
+                            (
+                                worker_task_id,
+                                UUID(heavy_claim["effect_id"]),
+                                json.dumps(typed_forgery),
+                            ),
+                        )
+                    worker_connection.rollback()
+
+                    metric_forgery = deepcopy(combined)
+                    metric_forgery["direct_result"]["result_metadata"]["metrics"][
+                        "pin_sha256"
+                    ] = "f" * 64
+                    metric_forgery["direct_result"]["metadata_sha256"] = sha256_value(
+                        metric_forgery["direct_result"]["result_metadata"]
+                    )
+                    worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                    with pytest.raises(
+                        psycopg.errors.InvalidParameterValue,
+                        match="violates exact stage contract or guard metrics",
+                    ):
+                        worker_connection.execute(
+                            "SELECT migration.submit_region_talk_heavy_stage_worker_result("
+                            "%s,%s,%s::jsonb)",
+                            (
+                                worker_task_id,
+                                UUID(heavy_claim["effect_id"]),
+                                json.dumps(metric_forgery),
+                            ),
+                        )
+                    worker_connection.rollback()
+
+                    forged = deepcopy(combined)
+                    forged["private_result"]["enrichment_sha256"] = "f" * 64
+                    worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                    with pytest.raises(
+                        psycopg.errors.InvalidParameterValue,
+                        match="private heavy result differs from current enriched work",
+                    ):
+                        worker_connection.execute(
+                            "SELECT migration.submit_region_talk_heavy_stage_worker_result("
+                            "%s,%s,%s::jsonb)",
+                            (
+                                worker_task_id,
+                                UUID(heavy_claim["effect_id"]),
+                                json.dumps(forged),
+                            ),
+                        )
+                    worker_connection.rollback()
+                    worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                    receipt = worker_connection.execute(
+                        "SELECT migration.submit_region_talk_heavy_stage_worker_result("
+                        "%s,%s,%s::jsonb)",
+                        (worker_task_id, UUID(heavy_claim["effect_id"]), json.dumps(combined)),
+                    ).fetchone()[0]
+                    assert receipt["accepted"] is True
+                    assert receipt["result_sha256"] == typed_result.result_sha256
+                    worker_connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+                    assert worker_connection.execute(
+                        "SELECT migration.submit_region_talk_heavy_stage_worker_result("
+                        "%s,%s,%s::jsonb)",
+                        (worker_task_id, UUID(heavy_claim["effect_id"]), json.dumps(combined)),
+                    ).fetchone()[0] == receipt
+                    worker_connection.commit()
+
             other_embedding = (
                 "e5_embedding" if claim["stage"] == "bge_m3_embedding" else "bge_m3_embedding"
             )
@@ -1450,25 +1810,25 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 assert rich_image.enrichment_sha256 == rich_receipt.enrichment_sha256
                 assert rich_image.artifact_manifest is not None
                 assert rich_image.artifact_manifest.acquisition_receipts[0].schema_version.endswith(".v2")
-                proof.rollback()
+                proof.commit()
             assert image_ready["candidates"][0]["evidence"]["image_scoring"]["status"] == (
                 "MISSING"
             )
-            land_exact_stage("image_scoring")
+            land_heavy_stage_via_combined("image_scoring")
             connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
             connection.execute(
                 "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
                 (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
             )
             connection.commit()
-            land_exact_stage("final_verifier")
+            land_heavy_stage_via_combined("final_verifier")
             connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
             connection.execute(
                 "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
                 (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
             )
             connection.commit()
-            land_exact_stage("writer")
+            land_heavy_stage_via_combined("writer")
             connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
             complete_preparation = connection.execute(
                 "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",

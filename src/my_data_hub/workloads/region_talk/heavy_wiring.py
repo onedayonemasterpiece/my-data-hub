@@ -11,16 +11,23 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
+from my_data_hub.hashing import sha256_value
+
 from .heavy_contracts import (
     SHA256_PATTERN,
     FinalVerifierInput,
+    FinalVerifierResult,
     HeavyRuntimeUnavailable,
     ImageScoringInput,
+    ImageScoringResult,
     StrictModel,
     WriterInput,
+    WriterResult,
     canonical_sha256,
+    sha256_text,
     validate_heavy_result_against_input,
     validate_heavy_stage_input,
+    validate_heavy_stage_result,
 )
 from .heavy_dag_bridge import (
     DagFinalVerifierWorkInput,
@@ -89,6 +96,96 @@ class HeavyStagePrivateResult(StrictModel):
         if self.result_data.get("result_sha256") != self.result_sha256:
             raise ValueError("private result hash differs")
         return self
+
+
+def validate_heavy_private_result_contract(
+    *,
+    stage: str,
+    value: dict[str, Any],
+    direct_result_sha256: str,
+    result_metadata: dict[str, Any],
+) -> HeavyStagePrivateResult:
+    """Validate the untrusted combined-result envelope before database I/O.
+
+    Evidence-to-result validation still happens at the authoritative SQL boundary,
+    where the current rich input is available.  This local check closes the typed
+    result, hash, dispatch flags, producer, and derivable guard-metric bindings.
+    """
+
+    private = HeavyStagePrivateResult.model_validate(value)
+    if private.stage != stage:
+        raise ValueError("private heavy result stage differs")
+    metadata_artifact = result_metadata.get("artifact_sha256")
+    if private.result_sha256 != direct_result_sha256 or metadata_artifact != direct_result_sha256:
+        raise ValueError("private heavy result digest differs from direct result")
+    if private.work_input_fingerprint != result_metadata.get("input_fingerprint"):
+        raise ValueError("private heavy result differs from immutable DB work")
+    result = validate_heavy_stage_result(
+        stage,
+        private.result_data,
+        expected_input_fingerprint=private.input_fingerprint,
+    )
+    if result.result_sha256 != private.result_sha256:
+        raise ValueError("typed heavy result digest differs")
+    if result.producer_exact_id != result_metadata.get("producer_exact_id"):
+        raise ValueError("typed heavy result producer differs")
+    metrics = result_metadata.get("metrics")
+    if not isinstance(metrics, dict):
+        raise ValueError("heavy result guard metrics are absent")
+    if isinstance(result, ImageScoringResult):
+        server_bound_keys = {"input_artifact_sha256"}
+        expected = {
+            "schema_version": "region-talk.image-diagnostic-result.v1",
+            "decision": (
+                "accept"
+                if result.decision in {"legacy_auto_accept", "vlm_visual_accept"}
+                else "needs_review"
+            ),
+            "actual_image": True,
+            "postcard_score": result.frames[0].overall_media_score,
+            "asset_manifest_sha256": result.frames[0].model_bundle_sha256,
+        }
+    elif isinstance(result, FinalVerifierResult):
+        server_bound_keys = {"vector_result_sha256"}
+        expected = {
+            "schema_version": "region-talk.final-verifier-result.v1",
+            "decision": {"accept": "PASS", "needs_review": "REVIEW", "reject": "REJECT"}[
+                result.decision
+            ],
+            "reason_codes": list(result.reason_codes),
+            "image_result_sha256": result.image_result_sha256,
+            "model_id": result.model_id,
+        }
+    elif isinstance(result, WriterResult):
+        server_bound_keys = set()
+        body = result.paragraph_one + "\n\n" + result.paragraph_two
+        expected = {
+            "schema_version": "region-talk.writer-result.v1",
+            "draft_sha256": sha256_value({"title": result.title, "body": body}),
+            "title_sha256": sha256_text(result.title),
+            "body_sha256": sha256_text(body),
+            "character_count": len(result.title) + len(body),
+            "final_result_sha256": result.final_result_sha256,
+            "model_id": result.model_id,
+        }
+    else:  # pragma: no cover - discriminated validation above makes this unreachable
+        raise ValueError("unsupported heavy result stage")
+    pin_keys = {
+        "model_id",
+        "model_revision",
+        "encoder_contract",
+        "asset_manifest_sha256",
+        "runtime_source_sha256",
+        "provider_image_identity",
+        "provider_image_source_commit",
+        "pin_sha256",
+    }
+    if set(metrics) != set(expected) | pin_keys | server_bound_keys:
+        raise ValueError("heavy result guard metric shape differs")
+    for key, expected_value in expected.items():
+        if metrics.get(key) != expected_value:
+            raise ValueError(f"heavy result guard metric differs: {key}")
+    return private
 
 
 class AttachedHeavyStageExecution(StrictModel):
@@ -162,4 +259,5 @@ __all__ = [
     "HeavyAttachedStageRuntime",
     "HeavyStageInputReceipt",
     "HeavyStagePrivateResult",
+    "validate_heavy_private_result_contract",
 ]
