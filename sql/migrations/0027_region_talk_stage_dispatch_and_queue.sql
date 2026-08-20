@@ -189,10 +189,12 @@ BEGIN
             -- spelling before independently recomputing the receipt digest.
             v_fixed:=jsonb_set(v_receipt-'receipt_sha256','{started_at}',to_jsonb(
                 to_char((v_receipt->>'started_at')::timestamptz AT TIME ZONE 'UTC',
-                        'YYYY-MM-DD"T"HH24:MI:SS.US')||'+00:00'));
+                        CASE WHEN v_receipt->>'started_at' LIKE '%.%'
+                          THEN 'YYYY-MM-DD"T"HH24:MI:SS.US' ELSE 'YYYY-MM-DD"T"HH24:MI:SS' END)||'+00:00'));
             v_fixed:=jsonb_set(v_fixed,'{completed_at}',to_jsonb(
                 to_char((v_receipt->>'completed_at')::timestamptz AT TIME ZONE 'UTC',
-                        'YYYY-MM-DD"T"HH24:MI:SS.US')||'+00:00'));
+                        CASE WHEN v_receipt->>'completed_at' LIKE '%.%'
+                          THEN 'YYYY-MM-DD"T"HH24:MI:SS.US' ELSE 'YYYY-MM-DD"T"HH24:MI:SS' END)||'+00:00'));
             IF v_receipt->>'input_sha256'<>migration.region_talk_json_sha256(v_input)
                OR v_receipt->>'output_sha256'<>migration.region_talk_json_sha256(v_output)
                OR v_receipt->>'receipt_sha256'<>migration.region_talk_json_sha256(v_fixed) THEN
@@ -358,6 +360,7 @@ DECLARE
     content hub.content_item%ROWTYPE;
     v_lease_token uuid; v_owner text; v_attempt integer; v_effect_id uuid;
     v_payload jsonb; v_base jsonb; v_status text; v_upstream jsonb;
+    v_lease_expires timestamptz;
 BEGIN
     IF requested_request->>'schema_version'<>'region-talk-stage-work-claim.v1'
        OR requested_request - ARRAY['schema_version','lease_token','lease_owner','requested_at',
@@ -379,6 +382,16 @@ BEGIN
      WHERE task_run_id=requested_task_run_id AND export_batch_id=requested_export_batch_id;
     SELECT * INTO STRICT run FROM migration.region_talk_post_import_stage_run
      WHERE task_run_id=requested_task_run_id AND export_batch_id=requested_export_batch_id;
+
+    UPDATE orchestration.work_item exhausted SET status='failed_terminal',
+           lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,
+           last_error=jsonb_build_object('schema_version','region-talk-stage-failure.v1',
+             'reason','lease expired after maximum attempts')
+      FROM orchestration.pipeline_stage exhausted_stage
+     WHERE exhausted.stage_id=exhausted_stage.stage_id
+       AND exhausted.payload->>'stage_run_id'=run.stage_run_id::text
+       AND exhausted.status='leased' AND exhausted.lease_expires_at<=clock_timestamp()
+       AND exhausted.attempt_count>=exhausted_stage.max_attempts;
 
     SELECT work.* INTO item
       FROM orchestration.work_item work
@@ -419,10 +432,14 @@ BEGIN
     IF NOT FOUND THEN
         v_status:=CASE run.state WHEN 'COMPLETE' THEN 'COMPLETE' WHEN 'FAILED' THEN 'FAILED'
           ELSE CASE WHEN EXISTS(
+            SELECT 1 FROM orchestration.work_item failed
+             WHERE failed.payload->>'stage_run_id'=run.stage_run_id::text
+               AND failed.status='failed_terminal') THEN 'FAILED'
+          ELSE CASE WHEN EXISTS(
             SELECT 1 FROM orchestration.work_item pending
              WHERE pending.payload->>'stage_run_id'=run.stage_run_id::text
                AND pending.status IN('pending','failed_retryable','leased','running'))
-            THEN 'WAITING_DEPENDENCY' ELSE 'EMPTY' END END;
+            THEN 'WAITING_DEPENDENCY' ELSE 'EMPTY' END END END;
         v_base:=jsonb_build_object(
             'schema_version','region-talk-stage-work-claim-receipt.v1','status',v_status,
             'master_instance_id',registration.master_instance_id,'epoch',registration.epoch,
@@ -464,9 +481,10 @@ BEGIN
           ELSE jsonb_build_object('schema_version','region-talk-upstream-stage-input.v1',
             'upstream_results',v_upstream) END,
         'publication_dispatch',false,'notification_dispatch',false);
+    v_lease_expires:=clock_timestamp()+make_interval(secs=>stage.timeout_seconds);
     UPDATE orchestration.work_item SET status='leased',attempt_count=v_attempt,
            lease_owner=v_owner,lease_token=v_lease_token,
-           lease_expires_at=clock_timestamp()+make_interval(secs=>stage.timeout_seconds)
+           lease_expires_at=v_lease_expires
      WHERE work_item_id=item.work_item_id;
     v_base:=jsonb_build_object(
         'schema_version','region-talk-stage-work-claim-receipt.v1','status','CLAIMED',
@@ -477,7 +495,7 @@ BEGIN
         'subject_id',item.subject_id,'input_fingerprint',item.input_fingerprint,
         'attempt',v_attempt,'max_attempts',stage.max_attempts,'timeout_seconds',stage.timeout_seconds,
         'effect_id',v_effect_id,'lease_token',v_lease_token,
-        'lease_expires_at',clock_timestamp()+make_interval(secs=>stage.timeout_seconds),
+        'lease_expires_at',v_lease_expires,
         'payload',v_payload,'publication_dispatch',false,'notification_dispatch',false);
     RETURN v_base||jsonb_build_object('receipt_sha256',migration.region_talk_json_sha256(v_base));
 END
@@ -509,6 +527,14 @@ BEGIN
        OR requested_result->'notification_dispatch' IS DISTINCT FROM 'false'::jsonb
        OR jsonb_typeof(requested_result->'result_metadata')<>'object'
        OR requested_result->'result_metadata'->>'schema_version'<>'region-talk-stage-result-metadata.v1'
+       OR (requested_result->'result_metadata') - ARRAY['schema_version','stage','contract_version',
+          'subject_type','subject_id','candidate_revision','revision_fingerprint','input_fingerprint',
+          'producer_exact_id','metrics','artifact_sha256']::text[] <> '{}'::jsonb
+       OR length(coalesce(requested_result->'result_metadata'->>'producer_exact_id',''))
+          NOT BETWEEN 1 AND 500
+       OR jsonb_typeof(requested_result->'result_metadata'->'metrics')<>'object'
+       OR (requested_result->'result_metadata'->>'artifact_sha256' IS NOT NULL AND
+           requested_result->'result_metadata'->>'artifact_sha256' !~ '^[a-f0-9]{64}$')
        OR octet_length((requested_result->'result_metadata')::text)>65536 THEN
         RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='Region Talk worker result violates fixed contract';
     END IF;
@@ -601,9 +627,14 @@ DECLARE registration master_control.task_credential_registration%ROWTYPE;
   v_id uuid; v_base jsonb; v_counts jsonb;
 BEGIN
   IF requested_request->>'schema_version'<>'region-talk-stage-work-status-request.v1'
-     OR requested_request - ARRAY['schema_version','work_item_id','requested_at']::text[]<>'{}'::jsonb THEN
+     OR requested_request - ARRAY['schema_version','work_item_id','requested_at']::text[]<>'{}'::jsonb
+     OR requested_request->>'requested_at' IS NULL THEN
     RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='Region Talk status request violates fixed contract';
   END IF;
+  BEGIN PERFORM (requested_request->>'requested_at')::timestamptz;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='Region Talk status request time is invalid';
+  END;
   registration:=master_control.assert_registered_task_credential('region_talk',requested_task_run_id);
   SELECT * INTO STRICT run FROM migration.region_talk_post_import_stage_run
    WHERE task_run_id=requested_task_run_id AND export_batch_id=requested_export_batch_id;
@@ -679,11 +710,13 @@ REVOKE ALL ON migration.region_talk_stage_worker_result,
 REVOKE EXECUTE ON FUNCTION migration.region_talk_canonical_json(jsonb),
     migration.region_talk_json_sha256(jsonb),
     migration.execute_region_talk_post_import_stages_v1_unverified(uuid,uuid,jsonb),
+    migration.execute_region_talk_post_import_stages(uuid,uuid,jsonb),
     migration.claim_region_talk_stage_work(uuid,uuid,jsonb),
     migration.submit_region_talk_stage_result(uuid,uuid,jsonb),
     migration.region_talk_stage_work_status(uuid,uuid,jsonb)
     FROM PUBLIC,mdh_mcp_reader,mdh_mcp_editor,mdh_region_talk_pipeline;
-GRANT EXECUTE ON FUNCTION migration.claim_region_talk_stage_work(uuid,uuid,jsonb),
+GRANT EXECUTE ON FUNCTION migration.execute_region_talk_post_import_stages(uuid,uuid,jsonb),
+    migration.claim_region_talk_stage_work(uuid,uuid,jsonb),
     migration.submit_region_talk_stage_result(uuid,uuid,jsonb),
     migration.region_talk_stage_work_status(uuid,uuid,jsonb) TO mdh_region_talk_pipeline;
 GRANT SELECT ON region_talk.publication_queue_v3,

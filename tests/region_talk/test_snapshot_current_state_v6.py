@@ -40,6 +40,7 @@ def test_worker_dispatch_is_fixed_epoch_bound_and_immutable() -> None:
     assert "migration.region_talk_stage_work_status(" in sql
     assert "Region Talk result crosses task epoch" in sql
     assert "execute_region_talk_post_import_stages_v1_unverified(uuid,uuid,jsonb)" in sql
+    assert "migration.execute_region_talk_post_import_stages(uuid,uuid,jsonb)," in sql
     assert "publication_dispatch',false" in sql
     assert "notification_dispatch',false" in sql
 

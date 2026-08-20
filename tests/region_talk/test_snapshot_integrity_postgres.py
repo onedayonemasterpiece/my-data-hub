@@ -18,11 +18,13 @@ from uuid import UUID, uuid5
 import pytest
 
 from my_data_hub.db.migrations import migrate
+from my_data_hub.hashing import sha256_value
 from my_data_hub.master_runtime.contracts import MasterIdentity
 from my_data_hub.master_runtime.credentials import CredentialProvisioner
 from my_data_hub.master_runtime.database_gate import DatabaseGate
 from my_data_hub.workloads.region_talk.constants import DIRECT_SOURCE_TABLES
 from my_data_hub.workloads.region_talk.direct_snapshot import DirectSnapshotRunner
+from my_data_hub.workloads.region_talk.stage_execution import StagePreparation, form_stage_commit
 
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE = "pgvector/pgvector:0.8.6-pg18-bookworm"
@@ -444,74 +446,22 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 ).fetchone()[0]
                 == preparation
             )
-            candidate = preparation["candidates"][0]
-            e5_input = candidate["evidence"]["e5_embedding"]["input_fingerprint"]
-            work_item_id = uuid5(
-                STAGE_NAMESPACE,
-                f"region-talk-work:{stage_run_id}:{candidate['candidate_id']}:"
-                f"{candidate['candidate_revision']}:e5_embedding:{e5_input}",
-            )
-            started_at = now.isoformat()
-            completed_at = (now + timedelta(seconds=1)).isoformat()
-            stage_receipts = [
-                {
-                    "stage": stage["stage"],
-                    "contract_version": stage["contract_version"],
-                    "status": (
-                        "SUCCEEDED"
-                        if stage["stage"] == "canonical_import"
-                        else "WAITING_WORK"
-                        if stage["stage"] == "e5_embedding"
-                        else "SKIPPED_BLOCKED"
-                    ),
-                    "attempt": 1,
-                    "max_attempts": stage["max_attempts"],
-                    "timeout_seconds": stage["timeout_seconds"],
-                    "rows_observed": 1,
-                    "rows_changed": 0,
-                    "work_request_count": 1 if stage["stage"] == "e5_embedding" else 0,
-                    "input_sha256": "4" * 64,
-                    "output_sha256": "5" * 64,
-                    "receipt_sha256": "6" * 64,
-                    "started_at": started_at,
-                    "completed_at": completed_at,
-                }
-                for stage in POST_IMPORT_DAG
-            ]
-            commit_request = {
-                **prepare_request,
-                "operation": "commit",
-                "preparation_sha256": preparation["preparation_sha256"],
-                "candidate_outcomes": [
-                    {
-                        "candidate_id": candidate["candidate_id"],
-                        "candidate_revision": candidate["candidate_revision"],
-                        "revision_fingerprint": candidate["revision_fingerprint"],
-                        "disposition": "QUEUED_REVIEW",
-                        "review_basis": "LEGACY_SELECTED",
-                        "queue_rank": 1,
-                        "work_requests": [
-                            {
-                                "schema_version": "region-talk-stage-work-request.v1",
-                                "work_item_id": str(work_item_id),
-                                "stage": "e5_embedding",
-                                "contract_version": "e5_semantic_bank_scores_v1",
-                                "subject_type": "region_talk.candidate",
-                                "subject_id": candidate["candidate_id"],
-                                "input_fingerprint": e5_input,
-                                "status": "PENDING",
-                                "attempt_count": 0,
-                                "max_attempts": 3,
-                                "timeout_seconds": 900,
-                                "reason": "missing_current_e5_evidence",
-                                "publication_dispatch": False,
-                                "notification_dispatch": False,
-                            }
-                        ],
-                    }
-                ],
-                "stage_receipts": stage_receipts,
-            }
+            connection.commit()
+            commit_request = form_stage_commit(
+                StagePreparation.model_validate(preparation), now=now
+            ).model_dump(mode="json")
+            tampered = deepcopy(commit_request)
+            tampered["stage_receipts"][0]["input_sha256"] = "0" * 64
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            with pytest.raises(
+                psycopg.errors.InvalidParameterValue,
+                match="stage receipt hash verification failed",
+            ):
+                connection.execute(
+                    "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                    (manifest.task_run_id, manifest.export_batch_id, json.dumps(tampered)),
+                )
+            connection.rollback()
             connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
             stage_receipt = connection.execute(
                 "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
@@ -520,9 +470,109 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             connection.commit()
             assert stage_receipt["status"] == "WAITING_WORK"
             assert stage_receipt["queue_count"] == 1
-            assert stage_receipt["work_request_count"] == 1
+            assert stage_receipt["work_request_count"] == 2
             assert stage_receipt["publication_dispatch"] is False
             assert stage_receipt["notification_dispatch"] is False
+
+            claim_request = {
+                "schema_version": "region-talk-stage-work-claim.v1",
+                "lease_token": "99999999-9999-4999-8999-999999999999",
+                "lease_owner": "disposable-postgres-proof",
+                "requested_at": now.isoformat(),
+                "publication_dispatch": False,
+                "notification_dispatch": False,
+            }
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            claim = connection.execute(
+                "SELECT migration.claim_region_talk_stage_work(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(claim_request)),
+            ).fetchone()[0]
+            assert claim["status"] == "CLAIMED"
+            assert claim["master_instance_id"] == str(IDENTITY.master_instance_id)
+            assert claim["epoch"] == 1
+            assert claim["payload"]["input_fingerprint"] == claim["input_fingerprint"]
+            assert claim["payload"]["publication_dispatch"] is False
+            result_metadata = {
+                "schema_version": "region-talk-stage-result-metadata.v1",
+                "stage": claim["stage"],
+                "contract_version": claim["contract_version"],
+                "subject_type": claim["subject_type"],
+                "subject_id": claim["subject_id"],
+                "candidate_revision": claim["payload"]["candidate_revision"],
+                "revision_fingerprint": claim["payload"]["revision_fingerprint"],
+                "input_fingerprint": claim["input_fingerprint"],
+                "producer_exact_id": "disposable-proof.v1",
+                "metrics": {},
+                "artifact_sha256": None,
+            }
+            worker_result = {
+                "schema_version": "region-talk-stage-worker-result.v1",
+                "master_instance_id": claim["master_instance_id"],
+                "epoch": claim["epoch"],
+                "task_run_id": str(manifest.task_run_id),
+                "export_batch_id": str(manifest.export_batch_id),
+                "stage_run_id": claim["stage_run_id"],
+                "work_item_id": claim["work_item_id"],
+                "stage": claim["stage"],
+                "contract_version": claim["contract_version"],
+                "subject_type": claim["subject_type"],
+                "subject_id": claim["subject_id"],
+                "candidate_revision": claim["payload"]["candidate_revision"],
+                "revision_fingerprint": claim["payload"]["revision_fingerprint"],
+                "input_fingerprint": claim["input_fingerprint"],
+                "attempt": claim["attempt"],
+                "effect_id": claim["effect_id"],
+                "lease_token": claim["lease_token"],
+                "result_status": "SUCCEEDED",
+                "result_metadata": result_metadata,
+                "metadata_sha256": sha256_value(result_metadata),
+                "result_sha256": "a" * 64,
+                "completed_at": now.isoformat(),
+                "publication_dispatch": False,
+                "notification_dispatch": False,
+            }
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            result_receipt = connection.execute(
+                "SELECT migration.submit_region_talk_stage_result(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(worker_result)),
+            ).fetchone()[0]
+            assert result_receipt["accepted"] is True
+            # Exact immutable result replay is idempotent.
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            assert connection.execute(
+                "SELECT migration.submit_region_talk_stage_result(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(worker_result)),
+            ).fetchone()[0] == result_receipt
+            connection.commit()
+
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            refreshed = connection.execute(
+                "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
+            ).fetchone()[0]
+            current_candidate = refreshed["candidates"][0]
+            assert current_candidate["evidence"][claim["stage"]]["status"] == "CURRENT"
+            cycle_request = form_stage_commit(
+                StagePreparation.model_validate(refreshed), now=now
+            ).model_dump(mode="json")
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            cycle_receipt = connection.execute(
+                "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(cycle_request)),
+            ).fetchone()[0]
+            assert cycle_receipt["status"] == "WAITING_WORK"
+            status_request = {
+                "schema_version": "region-talk-stage-work-status-request.v1",
+                "requested_at": now.isoformat(),
+            }
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            stage_status = connection.execute(
+                "SELECT migration.region_talk_stage_work_status(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(status_request)),
+            ).fetchone()[0]
+            assert stage_status["scope"] == "STAGE_RUN"
+            assert stage_status["status"] == "WAITING_WORK"
+            connection.commit()
 
         with psycopg.connect(admin_url) as connection:
             assert connection.execute("SELECT canonical_revision FROM hub.canonical_state").fetchone() == (1,)
@@ -707,7 +757,9 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 (replay_manifest.export_batch_id,),
             ).fetchone()[0]
             head = connection.execute(
-                "SELECT target_id,payload_sha256 FROM migration.region_talk_canonical_state_head "
+                "SELECT target_id,payload_sha256,source_updated_at,canonical_revision,"
+                "export_batch_id,raw_record_id,updated_at "
+                "FROM migration.region_talk_canonical_state_head "
                 "WHERE identity_kind='source_status' "
                 "AND identity_key='region_talk_compact_state_kv:source-status-1'"
             ).fetchone()
@@ -727,10 +779,12 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 ),
             ).fetchone() == (False,)
             assert connection.execute(
-                "SELECT source_updated_at FROM migration.region_talk_canonical_state_head "
+                "SELECT target_id,payload_sha256,source_updated_at,canonical_revision,"
+                "export_batch_id,raw_record_id,updated_at "
+                "FROM migration.region_talk_canonical_state_head "
                 "WHERE identity_kind='source_status' "
                 "AND identity_key='region_talk_compact_state_kv:source-status-1'"
-            ).fetchone() == (changed_at,)
+            ).fetchone() == head
             assert connection.execute(
                 "SELECT disposition FROM migration.region_talk_canonical_state_observation "
                 "WHERE export_batch_id=%s AND identity_kind='source_status'",
