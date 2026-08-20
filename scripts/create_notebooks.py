@@ -223,6 +223,19 @@ SPECS: tuple[NotebookSpec, ...] = (
         "stage_contract",
     ),
     NotebookSpec(
+        "35-region-talk-vector-fusion",
+        "35 Region Talk vector fusion",
+        "Execute deterministic fusion of exact-current E5 and BGE-M3 evidence.",
+        {"vector_fusion": "region-talk.vector-fusion.v1"},
+        {
+            "provider": "my-data-hub",
+            "name": "region-talk-vector-fusion",
+            "version": "region-talk.vector-fusion.v1",
+            "task": "vector-fusion",
+        },
+        "stage_contract",
+    ),
+    NotebookSpec(
         "40-region-talk-image-diagnostic",
         "40 Region Talk image diagnostic",
         "Adapter shell for ordered-media diagnostics and explicit terminal evidence.",
@@ -334,8 +347,12 @@ def process_item(work_item: dict) -> dict:
     }'''
     if spec.adapter == "stage_contract":
         return '''from my_data_hub.workloads.region_talk.notebook_stages import (
+    attached_stage_runtime_from_env,
     process_region_talk_stage_item,
 )
+
+
+attached_runtime = attached_stage_runtime_from_env(manifest.stage)
 
 
 def process_item(work_item: dict) -> dict:
@@ -343,6 +360,7 @@ def process_item(work_item: dict) -> dict:
         work_item,
         stage=manifest.stage,
         contract_version=manifest.stage_contract_version,
+        runtime=attached_runtime,
     )'''
     return '''def process_item(_work_item: dict) -> dict:
     raise NotImplementedError(

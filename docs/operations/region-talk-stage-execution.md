@@ -39,27 +39,46 @@ revision, stage, and input fingerprint.
 
 ## Heavy-worker state
 
-The required E5, BGE-M3, image, final-verifier, and writer notebooks no longer contain ambiguous
-`NotImplementedError` shells. They validate the exact stage work-item contract and return
-`HEAVY_RUNTIME_NOT_ATTACHED` until a verified heavyweight implementation is installed. E5 and
-BGE-M3 identify the existing repository pins:
+Migration 0027 adds fixed task/ACTIVE-epoch-bound claim, result landing, and status functions.
+`RegionTalkStageDispatcher` is the separate lightweight controller for those functions. It:
+
+1. atomically claims only a dependency-ready work item from the accepted snapshot;
+2. verifies the database-derived UUIDv5 effect identity and fixed stage policy;
+3. persists the exact claim and launch metadata before the provider effect;
+4. observes before launching the stage's exact private Notebook through its one injected adapter;
+5. validates the generic Notebook result envelope, subject/input/output hashes, model/runtime
+   identity, and bounded result metadata;
+6. lands the result through `migration.submit_region_talk_stage_result`; and
+7. re-runs PREPARE/COMMIT so exact-current evidence advances the next dependency.
+
+Response loss replays the byte-equivalent result submission. A restart observes the same effect
+instead of launching a duplicate. An expired lease remains `WAITING_WORK`; a late result is not
+submitted and the database owns the next bounded attempt. `EMPTY` and `WAITING_DEPENDENCY` are
+also nonterminal. Only an explicit database `COMPLETE` receipt can complete stage execution.
+
+The required E5, BGE-M3, vector-fusion, image, final-verifier, and writer notebooks contain no
+ambiguous `NotImplementedError` shells. They validate the exact execution payload. Vector fusion
+executes the repository's deterministic `fuse_vector_evidence` transform using two verified
+upstream metadata receipts. Other stages execute only through an explicitly attached private
+runtime with an exact producer identity; without one they return the retryable
+`HEAVY_RUNTIME_NOT_ATTACHED` failure. E5 and BGE-M3 retain the repository pins:
 
 - `intfloat/multilingual-e5-base@d128750597153bb5987e10b1c3493a34e5a4502a`
 - `BAAI/bge-m3@5617a9f61b028005a4858fdac845db406aefb181`
 
-This contract-ready state is intentionally still `production_ready=false`.
+All templates intentionally remain `production_ready=false`. Scheduling, publication, and
+notification remain disabled until a real private run supplies the required receipts.
 
 ## Residual blockers
 
-1. No real E5 semantic-bank, BGE-M3 semantic-bank, image diagnostic, final verifier, or writer
-   execution receipt exists for this Region Talk stage path. Their queued work is not PASS.
-2. The image/final-verifier/writer donor model revisions and shadow-equivalence evidence remain
-   unavailable, so those notebooks report an explicit retryable unavailable result.
-3. Migration 0026 conservatively reports heavyweight evidence as missing. Exact evidence import
-   and stale/current reconciliation must be implemented before a future candidate can use
-   `CURRENT_EVIDENCE` in production.
-4. The parent integration must place the supervisor call immediately after
-   `DirectSnapshotRunner.run()` and require its typed receipt before terminal success. This lane
-   intentionally does not edit the shared direct-pipeline integration point.
-5. No live YDB/PostgreSQL/Kaggle run was performed by this lane; row counts, queue counts, and
-   operational readiness remain unclaimed.
+1. No real Region Talk semantic-bank E5/BGE, image diagnostic, final verifier, or writer result
+   exists. Their queued work is not PASS. Without E5/BGE results the executable vector-fusion
+   stage correctly remains dependency-blocked.
+2. The semantic-bank runtime assets and the image/final-verifier/writer donor implementations,
+   exact revisions, and shadow-equivalence receipts are not attached. Those workers therefore
+   produce retryable failures rather than current evidence.
+3. The parent integration must inject the production Kaggle stage adapter and call the dispatcher
+   while a stage receipt is `WAITING_WORK`; it must not map that state to cycle `COMPLETE` or
+   terminal `SUCCEEDED`.
+4. No live YDB/PostgreSQL/Kaggle run was performed here. The schedule remains off, and row counts,
+   provider-run identities, checkpoint evidence, and operational readiness remain unclaimed.

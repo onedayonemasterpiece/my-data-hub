@@ -376,6 +376,7 @@ def test_generated_required_stage_notebooks_have_no_notimplemented_shell() -> No
     required = (
         "20-region-talk-e5-enrichment",
         "30-region-talk-bge-m3-enrichment",
+        "35-region-talk-vector-fusion",
         "40-region-talk-image-diagnostic",
         "50-region-talk-final-verifier",
         "70-region-talk-writer",
