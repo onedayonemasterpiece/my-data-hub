@@ -8,6 +8,9 @@ Done. No live or production state was mutated.
 
 - Base SHA: `660b06a`
 - Implementation SHA: `f8addce`
+- Final-audit follow-up base SHA: `91e22ce`
+- Migration 0027 implementation SHA: `d6f9ed5`
+- Dynamic proof/hardening SHA: `36f1037`
 - Results receipt SHA: recorded by the commit containing this file
 
 ## Delivered
@@ -21,6 +24,32 @@ Done. No live or production state was mutated.
 - Added the narrow pgcrypto owner grant required by the UUIDv5 SECURITY DEFINER helper; the pipeline LOGIN must still `SET LOCAL ROLE mdh_region_talk_pipeline`, and exact task/accepted-batch authorization is enforced inside the function.
 - Updated Region Talk migration documentation and disposable PostgreSQL regressions.
 
+### Final-audit follow-up B1-B4
+
+- Added append-only migration 0027 and advanced the schema revision to 27.
+- Made exact-payload replay observation-only: canonical revision, export batch, raw
+  pointer, source clock, mutable projection, and head observation time remain unchanged;
+  changed stale payloads remain denied.
+- Added compact canonical-JSON hashing in PostgreSQL and independently recomputed every
+  submitted stage input, output, and receipt digest before durable persistence. UTC
+  timestamp normalization matches the typed Python contract; tampered hashes fail.
+- Reconciled the MCP-visible canonical publication queue with the durable post-import
+  review queue, constrained to the latest accepted batch/current candidate revision and
+  one projection per review/plan identity. Publication and notification remain false.
+- Added fixed, task/ACTIVE-epoch-bound `claim_region_talk_stage_work`,
+  `submit_region_talk_stage_result`, and `region_talk_stage_work_status` functions.
+  Claims atomically select dependency-ready current work, carry deterministic effect and
+  lease identities, reclaim expired bounded attempts, and expose no generic queue read or
+  SQL choice.
+- Added immutable, bounded worker-result landing with exact stage/contract/subject/
+  revision/input/attempt identity and server-recomputed metadata hash. Exact submit replay
+  is idempotent; cross-epoch, stale, or conflicting results fail closed.
+- PREPARE now marks evidence `CURRENT` only from an exact successful immutable landing and
+  supports append-only follow-up cycles after `WAITING_WORK`; it no longer hardcodes every
+  heavy stage as missing.
+- Explicitly revoked the renamed unverified v1 function from the pipeline and PUBLIC;
+  only the validating fixed seam is granted to `mdh_region_talk_pipeline`.
+
 ## Evidence and commands
 
 - `.venv/bin/python -m pytest -q tests/region_talk/test_snapshot_current_state_v5.py tests/region_talk/test_snapshot_current_state_v4.py tests/region_talk/test_snapshot_integrity_v3.py tests/region_talk/test_direct_snapshot_sql.py tests/test_db_migrations.py` — 21 passed.
@@ -33,11 +62,23 @@ Done. No live or production state was mutated.
 - `git diff --check` for all lane-owned files — passed.
 - Full `.venv/bin/python -m pytest -q` — one failure outside this lane in the concurrently edited, uncommitted `test_production_assembly_response_loss.py` provider fixture (`_Provider` lacks `push_private_notebook_pending_runtime_attestation`); all other tests passed or skipped.
 
+Follow-up verification on current integration:
+
+- `MDH_RUN_DISPOSABLE_POSTGRES=1 ./.venv/bin/pytest -q tests/region_talk/test_snapshot_integrity_postgres.py -x` — 1 passed against a fresh tmpfs PostgreSQL 18 container. It proves migrations-only schema 27, full head-tuple non-regression on exact replay, stale changed rejection, server receipt-tamper rejection, deterministic PREPARE/COMMIT, bounded claim, immutable exact result submit/replay, verified `CURRENT` evidence, append-only second-cycle COMMIT, MCP queue visibility, and fixed false dispatch.
+- `./.venv/bin/pytest -q tests/region_talk/test_snapshot_current_state_v5.py tests/region_talk/test_snapshot_current_state_v6.py tests/region_talk/test_stage_execution.py tests/region_talk/test_reader.py` — 28 passed.
+- `./.venv/bin/python scripts/validate_repository.py` — 5100 checks, 0 errors.
+- `./.venv/bin/python -m compileall -q src tests` — passed.
+- `./.venv/bin/ruff check tests/region_talk/test_snapshot_integrity_postgres.py tests/region_talk/test_snapshot_current_state_v6.py` — passed.
+- Full pytest was intentionally not rerun in this follow-up because the integration owner
+  reserved the constrained disk/full-suite slot for final integration validation.
+
 ## Changed files
 
 - `sql/migrations/0026_region_talk_bootstrap_and_current_state.sql`
+- `sql/migrations/0027_region_talk_stage_dispatch_and_queue.sql`
 - `sql/admin/role_contract.sql`
 - `tests/region_talk/test_snapshot_current_state_v5.py`
+- `tests/region_talk/test_snapshot_current_state_v6.py`
 - `tests/region_talk/test_snapshot_integrity_postgres.py`
 - `docs/migrations/region-talk/mapping.md`
 - `docs/migrations/region-talk/direct-snapshot-v2.md`
@@ -45,5 +86,10 @@ Done. No live or production state was mutated.
 
 ## Risks / follow-up
 
-- Existing heavy evidence is intentionally surfaced as `MISSING`; 0026 never infers a current model PASS from legacy payloads. The typed stage runtime must submit exact work receipts before future non-legacy candidates can enter review.
-- The shared integration worktree still contains other lanes' uncommitted files. All files owned by this lane except this receipt were clean immediately after `f8addce`; none of those unrelated edits were staged or committed here.
+- Migration 0027 supplies the durable dispatcher/result boundary but does not itself attach
+  external model providers. Missing or unavailable stage inputs remain honest waiting or
+  retryable work until the separately owned typed runtime lands verified evidence.
+- No live Kaggle, YDB, production PostgreSQL, publication, notification, or canonical
+  business-data mutation was performed.
+- The shared integration worktree contains another lane's uncommitted results receipt;
+  it was not staged or modified by this lane.
