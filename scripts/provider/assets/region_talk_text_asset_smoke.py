@@ -147,22 +147,26 @@ def _e5_output(root: Path) -> dict[str, Any]:
 
 
 def _bge_output(root: Path) -> dict[str, Any]:
-    from FlagEmbedding import BGEM3FlagModel
+    import torch
+    from transformers import AutoModel, AutoTokenizer
 
     os.environ["HF_HUB_OFFLINE"] = "1"
-    model = BGEM3FlagModel(str(root), normalize_embeddings=True, use_fp16=False)
-    result = model.encode(
-        list(FIXED_TEXTS),
-        batch_size=2,
-        max_length=512,
-        return_dense=True,
-        return_sparse=False,
-        return_colbert_vecs=False,
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    tokenizer = AutoTokenizer.from_pretrained(root, local_files_only=True)
+    model = AutoModel.from_pretrained(root, local_files_only=True).eval()
+    encoded = tokenizer(
+        list(FIXED_TEXTS), padding=True, truncation=True, max_length=512, return_tensors="pt"
     )
-    output_sha, dimensions, norms = _rounded_vector_hash(result["dense_vecs"].tolist())
-    tokenizer = getattr(model, "tokenizer", None)
-    token_body = tokenizer(list(FIXED_TEXTS), padding=True, truncation=True, max_length=512)
-    del model, result
+    token_body = {key: value.tolist() for key, value in sorted(encoded.items())}
+    with torch.inference_mode():
+        # BGE-M3's primary implementation specifies normalized [CLS] as the
+        # dense representation.  Using the image-pinned Transformers runtime
+        # here avoids silently relying on an unavailable FlagEmbedding wheel
+        # while exercising the exact attached model bytes offline.
+        hidden = model(**encoded).last_hidden_state
+    vectors = torch.nn.functional.normalize(hidden[:, 0], p=2, dim=1).cpu().tolist()
+    output_sha, dimensions, norms = _rounded_vector_hash(vectors)
+    del model, tokenizer, encoded, hidden, vectors
     gc.collect()
     return {
         "tokenizer_output_sha256": hashlib.sha256(_canonical(token_body)).hexdigest(),
@@ -212,7 +216,7 @@ def main() -> int:
         "notebook_kaggle_credentials": False,
         "distributions": {
             name: importlib.metadata.version(name)
-            for name in ("FlagEmbedding", "safetensors", "tokenizers", "torch", "transformers")
+            for name in ("safetensors", "tokenizers", "torch", "transformers")
         },
         "candidates": observations,
     }

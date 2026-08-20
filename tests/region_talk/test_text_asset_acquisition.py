@@ -101,7 +101,6 @@ def test_official_comparator_accepts_exact_tree_and_reports_precise_mismatch() -
         internet_enabled=False,
         notebook_kaggle_credentials=False,
         distributions={
-            "FlagEmbedding": "1.4.0",
             "safetensors": "0.7.0",
             "tokenizers": "0.22.2",
             "torch": "2.10.0+cpu",
@@ -134,6 +133,8 @@ def test_kaggle_smoke_is_offline_no_secret_and_hashes_all_files() -> None:
     assert "urllib" not in source
     assert "requests" not in source
     assert "snapshot_download" not in source
+    assert "from FlagEmbedding" not in source
+    assert "hidden[:, 0]" in source
     assert "KAGGLE_USERNAME" in source and "credential env is forbidden" in source
     assert "Path(\"/kaggle/input\").rglob" in source
     assert "yethukmutt/bge-m3/Transformers/m3/1" in source

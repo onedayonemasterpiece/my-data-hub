@@ -125,7 +125,7 @@ class TextAssetSmokeObservation(StrictModel):
     python_version: str
     internet_enabled: Literal[False]
     notebook_kaggle_credentials: Literal[False]
-    distributions: dict[str, str] = Field(min_length=5, max_length=20)
+    distributions: dict[str, str] = Field(min_length=4, max_length=20)
     candidates: tuple[CandidateSmokeObservation, ...] = Field(min_length=2, max_length=2)
 
     @model_validator(mode="after")
@@ -133,7 +133,7 @@ class TextAssetSmokeObservation(StrictModel):
         if (
             tuple(item.stage for item in self.candidates) != ("e5_embedding", "bge_m3_embedding")
             or set(self.distributions)
-            != {"FlagEmbedding", "safetensors", "tokenizers", "torch", "transformers"}
+            != {"safetensors", "tokenizers", "torch", "transformers"}
             or any(not value for value in self.distributions.values())
         ):
             raise ValueError("smoke candidates must contain E5 then BGE-M3 exactly")
