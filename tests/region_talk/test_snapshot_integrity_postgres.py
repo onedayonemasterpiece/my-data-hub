@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -12,7 +13,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import pytest
 
@@ -20,8 +21,6 @@ from my_data_hub.db.migrations import migrate
 from my_data_hub.master_runtime.contracts import MasterIdentity
 from my_data_hub.master_runtime.credentials import CredentialProvisioner
 from my_data_hub.master_runtime.database_gate import DatabaseGate
-from my_data_hub.orchestrator.registry import load_pipeline_definition
-from my_data_hub.orchestrator.repository import register_pipeline
 from my_data_hub.workloads.region_talk.constants import DIRECT_SOURCE_TABLES
 from my_data_hub.workloads.region_talk.direct_snapshot import DirectSnapshotRunner
 
@@ -30,6 +29,65 @@ IMAGE = "pgvector/pgvector:0.8.6-pg18-bookworm"
 IDENTITY = MasterIdentity(UUID("11111111-1111-4111-8111-111111111111"), "fixture-run", 1)
 PRINCIPAL = "mdh_e1_regiong1_deadbeef"
 PASSWORD = "region-talk-fixture-password-long-enough"
+STAGE_NAMESPACE = UUID("54a0dba7-1e4b-4d56-a143-173304989e85")
+POST_IMPORT_DAG = [
+    {
+        "stage": "canonical_import",
+        "contract_version": "region-talk-direct-snapshot-receipt.v2",
+        "dependencies": [],
+        "max_attempts": 1,
+        "timeout_seconds": 3600,
+    },
+    {
+        "stage": "e5_embedding",
+        "contract_version": "e5_semantic_bank_scores_v1",
+        "dependencies": ["canonical_import"],
+        "max_attempts": 3,
+        "timeout_seconds": 900,
+    },
+    {
+        "stage": "bge_m3_embedding",
+        "contract_version": "bge_m3_flagembedding_dense_v1",
+        "dependencies": ["canonical_import"],
+        "max_attempts": 3,
+        "timeout_seconds": 1200,
+    },
+    {
+        "stage": "vector_fusion",
+        "contract_version": "region-talk.vector-fusion.v1",
+        "dependencies": ["e5_embedding", "bge_m3_embedding"],
+        "max_attempts": 3,
+        "timeout_seconds": 300,
+    },
+    {
+        "stage": "image_scoring",
+        "contract_version": "region-talk.image-diagnostic.v1",
+        "dependencies": ["vector_fusion"],
+        "max_attempts": 3,
+        "timeout_seconds": 1200,
+    },
+    {
+        "stage": "final_verifier",
+        "contract_version": "region-talk.final-verifier.v1",
+        "dependencies": ["image_scoring"],
+        "max_attempts": 3,
+        "timeout_seconds": 600,
+    },
+    {
+        "stage": "writer",
+        "contract_version": "region-talk.writer.v1",
+        "dependencies": ["final_verifier"],
+        "max_attempts": 3,
+        "timeout_seconds": 900,
+    },
+    {
+        "stage": "review_queue",
+        "contract_version": "region-talk.review-queue.v1",
+        "dependencies": ["writer"],
+        "max_attempts": 3,
+        "timeout_seconds": 300,
+    },
+]
 
 
 class MemoryReader:
@@ -220,12 +278,23 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             connection.commit()
 
         now = datetime.now(UTC)
-        register_pipeline(
-            admin_url,
-            load_pipeline_definition(ROOT / "config/pipelines/region-talk.v1.json"),
-            ROOT / "config/pipelines/region-talk.v1.json",
-        )
         with psycopg.connect(admin_url) as connection:
+            assert connection.execute(
+                "SELECT status FROM orchestration.pipeline "
+                "WHERE workload='region-talk' AND name='region-talk-main' AND version='1.0.0'"
+            ).fetchone() == ("paused",)
+            assert connection.execute(
+                "SELECT enabled FROM orchestration.pipeline_stage stage "
+                "JOIN orchestration.pipeline pipeline USING(pipeline_id) "
+                "WHERE pipeline.workload='region-talk' AND pipeline.name='region-talk-main' "
+                "AND stage.stage_key='source_discovery' AND stage.stage_version='v1'"
+            ).fetchone() == (True,)
+            assert connection.execute(
+                "SELECT enabled FROM orchestration.pipeline_stage stage "
+                "JOIN orchestration.pipeline pipeline USING(pipeline_id) "
+                "WHERE pipeline.workload='region-talk' AND pipeline.name='region-talk-main' "
+                "AND stage.stage_key='publication_dispatch' AND stage.stage_version='v1'"
+            ).fetchone() == (False,)
             gate = DatabaseGate(connection)
             gate.acquire(IDENTITY, now + timedelta(minutes=10))
             gate.activate(IDENTITY)
@@ -337,6 +406,121 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 runner._finalize(manifest, conflicting_tables)
         assert first.status == replay.status == "complete"
 
+        # The same fixed pipeline credential can form durable post-import work
+        # without caller-selected SQL/tables or any publication side effect.
+        stage_run_id = uuid5(
+            STAGE_NAMESPACE,
+            f"region-talk-stage-run:{manifest.task_run_id}:{manifest.export_batch_id}",
+        )
+        prepare_request = {
+            "schema_version": "region-talk-post-import-stage-request.v1",
+            "operation": "prepare",
+            "stage_run_id": str(stage_run_id),
+            "task_run_id": str(manifest.task_run_id),
+            "export_batch_id": str(manifest.export_batch_id),
+            "ordered_stages": POST_IMPORT_DAG,
+            "requested_at": now.isoformat(),
+            "publication_dispatch": False,
+            "notification_dispatch": False,
+        }
+        with psycopg.connect(role_url) as connection:
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            preparation = connection.execute(
+                "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
+            ).fetchone()[0]
+            assert preparation["status"] == "PREPARED"
+            assert preparation["publication_dispatch"] is False
+            assert preparation["notification_dispatch"] is False
+            assert len(preparation["candidates"]) == 1
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            assert (
+                connection.execute(
+                    "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                    (manifest.task_run_id, manifest.export_batch_id, json.dumps(prepare_request)),
+                ).fetchone()[0]
+                == preparation
+            )
+            candidate = preparation["candidates"][0]
+            e5_input = candidate["evidence"]["e5_embedding"]["input_fingerprint"]
+            work_item_id = uuid5(
+                STAGE_NAMESPACE,
+                f"region-talk-work:{stage_run_id}:{candidate['candidate_id']}:"
+                f"{candidate['candidate_revision']}:e5_embedding:{e5_input}",
+            )
+            started_at = now.isoformat()
+            completed_at = (now + timedelta(seconds=1)).isoformat()
+            stage_receipts = [
+                {
+                    "stage": stage["stage"],
+                    "contract_version": stage["contract_version"],
+                    "status": (
+                        "SUCCEEDED"
+                        if stage["stage"] == "canonical_import"
+                        else "WAITING_WORK"
+                        if stage["stage"] == "e5_embedding"
+                        else "SKIPPED_BLOCKED"
+                    ),
+                    "attempt": 1,
+                    "max_attempts": stage["max_attempts"],
+                    "timeout_seconds": stage["timeout_seconds"],
+                    "rows_observed": 1,
+                    "rows_changed": 0,
+                    "work_request_count": 1 if stage["stage"] == "e5_embedding" else 0,
+                    "input_sha256": "4" * 64,
+                    "output_sha256": "5" * 64,
+                    "receipt_sha256": "6" * 64,
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                }
+                for stage in POST_IMPORT_DAG
+            ]
+            commit_request = {
+                **prepare_request,
+                "operation": "commit",
+                "preparation_sha256": preparation["preparation_sha256"],
+                "candidate_outcomes": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "candidate_revision": candidate["candidate_revision"],
+                        "revision_fingerprint": candidate["revision_fingerprint"],
+                        "disposition": "QUEUED_REVIEW",
+                        "review_basis": "LEGACY_SELECTED",
+                        "queue_rank": 1,
+                        "work_requests": [
+                            {
+                                "schema_version": "region-talk-stage-work-request.v1",
+                                "work_item_id": str(work_item_id),
+                                "stage": "e5_embedding",
+                                "contract_version": "e5_semantic_bank_scores_v1",
+                                "subject_type": "region_talk.candidate",
+                                "subject_id": candidate["candidate_id"],
+                                "input_fingerprint": e5_input,
+                                "status": "PENDING",
+                                "attempt_count": 0,
+                                "max_attempts": 3,
+                                "timeout_seconds": 900,
+                                "reason": "missing_current_e5_evidence",
+                                "publication_dispatch": False,
+                                "notification_dispatch": False,
+                            }
+                        ],
+                    }
+                ],
+                "stage_receipts": stage_receipts,
+            }
+            connection.execute("SET LOCAL ROLE mdh_region_talk_pipeline")
+            stage_receipt = connection.execute(
+                "SELECT migration.execute_region_talk_post_import_stages(%s,%s,%s::jsonb)",
+                (manifest.task_run_id, manifest.export_batch_id, json.dumps(commit_request)),
+            ).fetchone()[0]
+            connection.commit()
+            assert stage_receipt["status"] == "WAITING_WORK"
+            assert stage_receipt["queue_count"] == 1
+            assert stage_receipt["work_request_count"] == 1
+            assert stage_receipt["publication_dispatch"] is False
+            assert stage_receipt["notification_dispatch"] is False
+
         with psycopg.connect(admin_url) as connection:
             assert connection.execute("SELECT canonical_revision FROM hub.canonical_state").fetchone() == (1,)
             assert connection.execute(
@@ -345,6 +529,9 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             assert connection.execute("SELECT count(*) FROM hub.content_item").fetchone()[0] >= 4
             assert connection.execute("SELECT count(*) FROM region_talk.source").fetchone()[0] >= 3
             assert connection.execute("SELECT count(*) FROM orchestration.work_item").fetchone()[0] >= 1
+            assert connection.execute(
+                "SELECT status FROM region_talk.source WHERE evidence ? 'current_status_raw_record_id'"
+            ).fetchone() == ("active",)
             assert connection.execute("SELECT count(*) FROM region_talk.publication_candidate").fetchone() == (1,)
             assert connection.execute("SELECT count(*) FROM region_talk.candidate_revision").fetchone() == (1,)
             assert connection.execute("SELECT count(*) FROM region_talk.publication_plan").fetchone() == (1,)
@@ -433,10 +620,10 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
                 "SELECT status,reason FROM region_talk.source_status ORDER BY occurred_at DESC LIMIT 1"
             ).fetchone() == ("paused", "operator_pause")
             assert connection.execute("SELECT count(*) FROM region_talk.source_status").fetchone() == (2,)
-            assert connection.execute("SELECT status,priority FROM orchestration.work_item").fetchone() == (
-                "succeeded",
-                5,
-            )
+            assert connection.execute(
+                "SELECT status,priority FROM orchestration.work_item "
+                "WHERE subject_type='region_talk.source'"
+            ).fetchone() == ("succeeded", 5)
             assert connection.execute("SELECT count(*) FROM orchestration.work_item_event").fetchone() == (1,)
             assert connection.execute("SELECT count(*) FROM region_talk.review_decision").fetchone() == (2,)
             assert connection.execute(
@@ -459,6 +646,161 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             assert connection.execute("SELECT export_batch_id FROM region_talk.accepted_snapshot_v2").fetchone() == (
                 second_manifest.export_batch_id,
             )
+
+        # An exact-payload observation with an older source timestamp advances
+        # snapshot evidence without moving the current-state clock backwards.
+        replay_rows = deepcopy(second_rows)
+        replay_at = now - timedelta(minutes=1)
+        replay_compact = {row["pk"]: row for row in replay_rows["region_talk_compact_state_kv"]}
+        replay_compact["source-status-1"]["updated_at"] = replay_at
+        replay_principal = "mdh_e1_regiong4_aaaaaaaa"
+        replay_password = "region-talk-replay-password-long-enough"
+        replay_credential = UUID("44444444-4444-4444-8444-444444444444")
+        replay_task = UUID("45454545-4545-4545-8545-454545454545")
+        with psycopg.connect(admin_url) as connection:
+            gate = DatabaseGate(connection)
+            CredentialProvisioner(connection, gate).create(
+                principal=replay_principal,
+                password=replay_password,
+                group="mdh_region_talk_pipeline",
+                identity=IDENTITY,
+                credential_id=replay_credential,
+                expires_at=now + timedelta(minutes=9),
+                now=now,
+            )
+            connection.execute(
+                "SELECT master_control.register_task_credential_binding(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    replay_credential,
+                    replay_principal,
+                    "region_talk",
+                    replay_task,
+                    1,
+                    IDENTITY.master_instance_id,
+                    1,
+                    "c" * 64,
+                    "d" * 64,
+                ),
+            )
+            connection.commit()
+        with psycopg.connect(
+            f"postgresql://{replay_principal}:{replay_password}@127.0.0.1:{port}/postgres"
+        ) as connection:
+            runner = DirectSnapshotRunner(MemoryReader(replay_rows), connection, page_size=3)
+            replay_manifest = runner.inventory(
+                export_batch_id=UUID("45454545-4545-4545-8545-454545454546"),
+                task_run_id=replay_task,
+                master_instance_id=IDENTITY.master_instance_id,
+                master_epoch=1,
+                source_database="fixture",
+                request_sha256="e" * 64,
+                created_at=now,
+            )
+            assert runner.run(replay_manifest).status == "complete"
+        with psycopg.connect(admin_url) as connection:
+            replay_raw_id = connection.execute(
+                "SELECT raw_record_id FROM migration.raw_record "
+                "WHERE export_batch_id=%s AND row_kind='source_status_item'",
+                (replay_manifest.export_batch_id,),
+            ).fetchone()[0]
+            head = connection.execute(
+                "SELECT target_id,payload_sha256 FROM migration.region_talk_canonical_state_head "
+                "WHERE identity_kind='source_status' "
+                "AND identity_key='region_talk_compact_state_kv:source-status-1'"
+            ).fetchone()
+            # The YDB fixture includes updated_at in its raw JSON, so changing
+            # that timestamp also changes the landed payload hash. Exercise the
+            # exact-payload replay branch directly with the accepted raw identity.
+            assert connection.execute(
+                "SELECT migration.region_talk_claim_canonical_state("
+                "'source_status','region_talk_compact_state_kv:source-status-1',"
+                "'region_talk.source',%s,%s,%s,%s,%s,3)",
+                (
+                    head[0],
+                    replay_raw_id,
+                    replay_manifest.export_batch_id,
+                    replay_at,
+                    head[1],
+                ),
+            ).fetchone() == (False,)
+            assert connection.execute(
+                "SELECT source_updated_at FROM migration.region_talk_canonical_state_head "
+                "WHERE identity_kind='source_status' "
+                "AND identity_key='region_talk_compact_state_kv:source-status-1'"
+            ).fetchone() == (changed_at,)
+            assert connection.execute(
+                "SELECT disposition FROM migration.region_talk_canonical_state_observation "
+                "WHERE export_batch_id=%s AND identity_kind='source_status'",
+                (replay_manifest.export_batch_id,),
+            ).fetchone() == ("stale",)
+            connection.commit()
+
+        # A later accepted snapshot with a changed but older status payload is
+        # retained as stale evidence and cannot overwrite the paused head.
+        stale_rows = deepcopy(second_rows)
+        stale_compact = {row["pk"]: row for row in stale_rows["region_talk_compact_state_kv"]}
+        stale_compact["source-status-1"]["updated_at"] = now
+        stale_compact["source-status-1"]["payload_json"].update({"status": "active", "reason": "stale_changed_payload"})
+        stale_principal = "mdh_e1_regiong5_bbbbbbbb"
+        stale_password = "region-talk-stale-password-long-enough"
+        stale_credential = UUID("55555555-5555-4555-8555-555555555555")
+        stale_task = UUID("56565656-5656-4565-8565-565656565656")
+        with psycopg.connect(admin_url) as connection:
+            gate = DatabaseGate(connection)
+            CredentialProvisioner(connection, gate).create(
+                principal=stale_principal,
+                password=stale_password,
+                group="mdh_region_talk_pipeline",
+                identity=IDENTITY,
+                credential_id=stale_credential,
+                expires_at=now + timedelta(minutes=9),
+                now=now,
+            )
+            connection.execute(
+                "SELECT master_control.register_task_credential_binding(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    stale_credential,
+                    stale_principal,
+                    "region_talk",
+                    stale_task,
+                    1,
+                    IDENTITY.master_instance_id,
+                    1,
+                    "1" * 64,
+                    "2" * 64,
+                ),
+            )
+            connection.commit()
+        with psycopg.connect(
+            f"postgresql://{stale_principal}:{stale_password}@127.0.0.1:{port}/postgres"
+        ) as connection:
+            runner = DirectSnapshotRunner(MemoryReader(stale_rows), connection, page_size=3)
+            stale_manifest = runner.inventory(
+                export_batch_id=UUID("56565656-5656-4565-8565-565656565657"),
+                task_run_id=stale_task,
+                master_instance_id=IDENTITY.master_instance_id,
+                master_epoch=1,
+                source_database="fixture",
+                request_sha256="3" * 64,
+                created_at=now,
+            )
+            assert runner.run(stale_manifest).status == "complete"
+        with psycopg.connect(admin_url) as connection:
+            assert connection.execute(
+                "SELECT status FROM region_talk.source WHERE evidence->>'current_status_export_batch_id'=%s",
+                (str(second_manifest.export_batch_id),),
+            ).fetchone() == ("paused",)
+            assert connection.execute("SELECT count(*) FROM region_talk.source_status").fetchone() == (2,)
+            assert connection.execute(
+                "SELECT source_updated_at FROM migration.region_talk_canonical_state_head "
+                "WHERE identity_kind='source_status' "
+                "AND identity_key='region_talk_compact_state_kv:source-status-1'"
+            ).fetchone() == (changed_at,)
+            assert connection.execute(
+                "SELECT disposition FROM migration.region_talk_canonical_state_observation "
+                "WHERE export_batch_id=%s AND identity_kind='source_status'",
+                (stale_manifest.export_batch_id,),
+            ).fetchone() == ("stale",)
 
         # Same row count but changed payload lands with valid new row/page hashes;
         # finalization still rejects it against Pass A and persisted evidence.
@@ -515,7 +857,12 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             runner._begin(manifest)
             changed["region_talk_compact_state_kv"][0]["payload_json"]["canonical_url"] = "https://example.test/changed"
             observed = [
-                runner._scan(spec, land_batch_id=manifest.export_batch_id, task_run_id=manifest.task_run_id).receipt()
+                runner._scan(
+                    spec,
+                    phase="pass_b",
+                    land_batch_id=manifest.export_batch_id,
+                    task_run_id=manifest.task_run_id,
+                ).receipt()
                 for spec in DIRECT_SOURCE_TABLES
             ]
             with pytest.raises(psycopg.errors.ObjectNotInPrerequisiteState, match="server-recomputed evidence"):
@@ -527,6 +874,6 @@ def test_snapshot_integrity_replay_canonical_apply_and_latest_views() -> None:
             assert connection.execute("SELECT count(*) FROM region_talk.articles_v2").fetchone() == (1,)
             assert connection.execute("SELECT count(*) FROM region_talk.posts_v2").fetchone() == (1,)
             assert connection.execute("SELECT count(*) FROM region_talk.publication_queue_v3").fetchone() == (1,)
-            assert connection.execute("SELECT canonical_revision FROM hub.canonical_state").fetchone() == (2,)
+            assert connection.execute("SELECT canonical_revision FROM hub.canonical_state").fetchone() == (4,)
     finally:
         subprocess.run(["docker", "rm", "--force", container], check=False, capture_output=True)

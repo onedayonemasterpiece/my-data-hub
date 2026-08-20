@@ -39,6 +39,11 @@ $$;
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+-- The owner-only deterministic UUIDv5 helper uses pgcrypto SHA-1.  Keep the
+-- extension schema closed while granting only that exact primitive to the
+-- SECURITY DEFINER owner; no service role receives public-schema access.
+GRANT USAGE ON SCHEMA public TO mdh_owner;
+GRANT EXECUTE ON FUNCTION public.digest(bytea,text) TO mdh_owner;
 
 -- The production API is an intake/readiness process, not a generic application writer.
 -- Converge installations that applied the earlier broad scaffold before re-granting only

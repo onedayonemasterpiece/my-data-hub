@@ -117,6 +117,20 @@ the first snapshot forever. Source status and review/work transitions append his
 mutable projection tables update in place while continuing to reference the immutable
 raw row and export batch.
 
+Migration 0026 makes exact-payload replay monotonic: replay may refresh the accepted
+revision/raw pointer, but it retains the greatest observed non-null source timestamp.
+A later changed payload with an older timestamp is therefore recorded as `stale` and
+cannot overwrite the head. The first `source_status_item` also updates the mutable
+`region_talk.source.status` projection while reusing the immutable status row already
+created by 0024.
+
+The same migration registers the versioned `region-talk-main` definition and all fixed
+stages during database bootstrap. The pipeline remains `paused`; its
+`publication_dispatch` stage is disabled. Missing heavy post-import evidence is emitted
+only through the fixed task-bound `execute_region_talk_post_import_stages` contract as
+durable typed work. Review queue rows and work payloads constrain both publication and
+notification dispatch to `false`.
+
 The database task authority is also no longer established by the first page. The master
 registers the generated credential against the exact task and generation before worker
 handoff, and every direct-snapshot procedure verifies that registration for the LOGIN.

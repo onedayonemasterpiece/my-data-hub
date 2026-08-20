@@ -97,6 +97,24 @@ existing canonical current object and appends its status/work/review evidence; a
 payload replay is a no-op, and an older observed timestamp cannot overwrite the head.
 Raw snapshot rows and every applied/replay/stale decision remain append-only evidence.
 
+Migration 0026 closes two fresh-master gaps. Database bootstrap itself installs the
+paused `region-talk-main` pipeline and its fixed stages, so a `source_queue_item` can be
+canonicalized without an out-of-band Python registry call. Exact-payload replay uses a
+monotonic source timestamp, later stale changed payloads remain evidence-only, and the
+first source-status observation updates the source projection immediately. The
+publication stage stays disabled and every imported work payload carries
+`publication_dispatch=false`.
+
+After canonical apply, the same exact registered task credential may call the single
+fixed `migration.execute_region_talk_post_import_stages(uuid,uuid,jsonb)` seam. PREPARE
+binds a deterministic UUIDv5 stage run to the latest accepted batch and returns only
+canonical candidates plus honest `MISSING` heavy-evidence states. COMMIT validates
+complete typed outcomes and the fixed DAG, persists append-only stage receipts and
+candidate outcomes, forms the bounded review queue, and creates deterministic
+`orchestration.work_item` requests for missing evidence. Request identity excludes the
+transport-only `requested_at`, so response-loss replay is stable. Caller-selected SQL,
+table names, stages, publication, and notification effects are not accepted.
+
 The full snapshot does not create blogger actors. Blogger evidence rows reuse the
 dedicated identity map/profile when present and otherwise remain raw pending that
 reviewed path. This preserves the 266-to-263 decision instead of duplicating it.
