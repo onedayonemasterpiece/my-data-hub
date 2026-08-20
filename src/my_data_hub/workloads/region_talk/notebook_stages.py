@@ -137,15 +137,21 @@ class DirectStageCredentialCheckpoint(Protocol):
 
 
 def attached_stage_runtime_from_env(stage: str) -> AttachedStageRuntime | None:
-    """Load one explicitly attached, execution-pin-owned runtime factory.
+    """Load one reviewed built-in runtime or an explicit runtime factory.
 
-    The value is a Python ``module:factory`` reference.  It is intentionally
-    read only inside the private worker process; the remote MCP has no path to
-    set it and no provider credential is accepted by this contract.
+    The optional value is a Python ``module:factory`` reference.  It is
+    intentionally read only inside the private worker process; the remote MCP
+    has no path to set it and no provider credential is accepted by this
+    contract. Built-in text discovery remains unavailable until its committed
+    registry names a reviewed exact offline bundle.
     """
 
     raw = os.getenv("MY_DATA_HUB_REGION_TALK_STAGE_RUNTIME", "").strip()
     if not raw:
+        if stage in {"e5_embedding", "bge_m3_embedding"}:
+            from .text_runtimes import discover_attached_text_runtime
+
+            return discover_attached_text_runtime(stage)
         return None
     if raw.count(":") != 1:
         raise ValueError("attached stage runtime must be module:factory")
@@ -399,6 +405,12 @@ def execute_direct_region_talk_stage_worker(
         or fetched.worker_binding_sha256 != request.worker_binding_sha256
     ):
         raise ValueError("fetched payload differs from the exact worker request")
+    bind_worker_capability = getattr(runtime, "bind_worker_capability", None)
+    if callable(bind_worker_capability):
+        bind_worker_capability(
+            master_instance_id=fetched.master_instance_id,
+            epoch=fetched.epoch,
+        )
     item = {
         "work_item_id": str(fetched.work_item_id),
         "subject_type": fetched.subject_type,
