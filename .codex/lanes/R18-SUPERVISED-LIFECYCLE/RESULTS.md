@@ -3,7 +3,8 @@
 ## Scope
 
 - Base SHA: `771d68cd7841b02524aeeaa25eb6db737b8f3124`
-- Code/test head SHA: `edf5cdd` (`fix(region-talk): supervise rotated worker lifecycle`)
+- Implementation SHAs: `edf5cdd` (`fix(region-talk): supervise rotated worker lifecycle`) and
+  fail-closed follow-up `3882438` (`fix(region-talk): keep provider-only completion retryable`).
 - Final documentation commit SHA: reported in the parent handoff because this file is part of
   that commit.
 - Live mutation: none.
