@@ -64,21 +64,27 @@ class TextRuntimeFile(_StrictModel):
 
 class SemanticBankEntry(_StrictModel):
     label: str = Field(pattern=r"^[a-z][a-z0-9_]{1,99}$")
-    text: str = Field(min_length=1, max_length=4_000)
-    text_sha256: str = Field(pattern=SHA256_RE)
+    examples: tuple[str, ...] = Field(min_length=2, max_length=10)
 
     @model_validator(mode="after")
-    def exact_text_hash(self) -> SemanticBankEntry:
+    def exact_examples(self) -> SemanticBankEntry:
         if self.label not in ALL_LABELS:
             raise ValueError("semantic-bank label is not in the fixed evidence contract")
-        if hashlib.sha256(self.text.encode("utf-8")).hexdigest() != self.text_sha256:
-            raise ValueError("semantic-bank text hash differs")
+        if len(set(self.examples)) != len(self.examples) or any(
+            not text or len(text) > 4_000 for text in self.examples
+        ):
+            raise ValueError("semantic-bank examples must be bounded and unique")
         return self
 
 
 class SemanticBankDocument(_StrictModel):
     schema_version: Literal["region-talk-semantic-bank.v1"]
     semantic_bank_version: Literal["semantic_bank_v1"]
+    semantic_bank_sha256: str = Field(pattern=SHA256_RE)
+    donor_repository: str
+    donor_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+    donor_path: str
+    donor_blob_git_oid: str = Field(pattern=r"^[a-f0-9]{40}$")
     entries: tuple[SemanticBankEntry, ...] = Field(min_length=len(ALL_LABELS), max_length=len(ALL_LABELS))
     receipt_sha256: str = Field(pattern=SHA256_RE)
 
@@ -94,7 +100,12 @@ class SemanticBankDocument(_StrictModel):
     @model_validator(mode="after")
     def exact_labels(self) -> SemanticBankDocument:
         labels = tuple(entry.label for entry in self.entries)
-        if labels != tuple(sorted(ALL_LABELS)):
+        logical_bank = {entry.label: list(entry.examples) for entry in self.entries}
+        if (
+            labels != tuple(sorted(ALL_LABELS))
+            or self.semantic_bank_sha256
+            != hashlib.sha256(canonical_json_bytes(logical_bank)).hexdigest()
+        ):
             raise ValueError("semantic-bank labels must be complete, unique, and sorted")
         return self
 
@@ -159,7 +170,6 @@ class TextRuntimeAssetManifest(_StrictModel):
             self.stage_contract_version != expected_contract
             or self.model != TextRuntimeModelIdentity.from_model(expected_model)
             or self.semantic_bank_version != SEMANTIC_BANK_VERSION
-            or self.semantic_bank_sha256 != self.semantic_bank_file.sha256
             or len({item.relative_path for item in self.model_files}) != len(self.model_files)
             or any(
                 not item.relative_path.startswith(self.model_directory + "/")
@@ -176,8 +186,9 @@ class TextRuntimeAssetManifest(_StrictModel):
         names = {Path(item.relative_path).name for item in self.model_files}
         if "config.json" not in names or not ({"tokenizer.json", "sentencepiece.bpe.model"} & names):
             raise ValueError("text-runtime snapshot lacks config/tokenizer inventory")
-        if not any(name.endswith(".safetensors") for name in names):
-            raise ValueError("text-runtime snapshot lacks safetensors weights")
+        expected_weight = "model.safetensors" if self.stage == "e5_embedding" else "pytorch_model.bin"
+        if expected_weight not in names:
+            raise ValueError("text-runtime snapshot lacks its exact model weights")
         return self
 
 
@@ -418,13 +429,13 @@ def build_text_runtime_asset_manifest(
         raise TextRuntimeAssetError("TEXT_RUNTIME_MODEL_INVENTORY_INVALID")
     semantic = _safe_file(root, semantic_bank_relative_path, maximum=_MAX_SEMANTIC_BANK_BYTES)
     semantic_sha = sha256_file(semantic)
-    if semantic_sha != expected_semantic_bank_sha256:
-        raise TextRuntimeAssetError("TEXT_RUNTIME_SEMANTIC_BANK_HASH_MISMATCH")
     semantic_body = semantic.read_bytes()
     semantic_value = json.loads(semantic_body)
     if semantic_body != canonical_json_bytes(semantic_value) + b"\n":
         raise TextRuntimeAssetError("TEXT_RUNTIME_SEMANTIC_BANK_NOT_CANONICAL")
-    SemanticBankDocument.model_validate(semantic_value)
+    semantic_bank = SemanticBankDocument.model_validate(semantic_value)
+    if semantic_bank.semantic_bank_sha256 != expected_semantic_bank_sha256:
+        raise TextRuntimeAssetError("TEXT_RUNTIME_SEMANTIC_BANK_HASH_MISMATCH")
     unsigned = {
         "schema_version": "region-talk-text-runtime-assets.v1",
         "stage": stage,
@@ -438,7 +449,7 @@ def build_text_runtime_asset_manifest(
             byte_size=semantic.stat().st_size,
         ).model_dump(mode="json"),
         "semantic_bank_version": SEMANTIC_BANK_VERSION,
-        "semantic_bank_sha256": semantic_sha,
+        "semantic_bank_sha256": semantic_bank.semantic_bank_sha256,
         "runtime_source_sha256": runtime_source_sha256(),
         "required_distributions": dict(sorted(required_distributions.items())),
     }
@@ -530,6 +541,8 @@ def verify_text_runtime_asset_bundle(
         semantic_bank = SemanticBankDocument.model_validate(semantic_value)
     except ValueError as exc:
         raise TextRuntimeAssetError("TEXT_RUNTIME_SEMANTIC_BANK_INVALID") from exc
+    if semantic_bank.semantic_bank_sha256 != expected_semantic_bank_sha256:
+        raise TextRuntimeAssetError("TEXT_RUNTIME_SEMANTIC_BANK_HASH_MISMATCH")
     for distribution, expected in manifest.required_distributions.items():
         try:
             observed_version = version_resolver(distribution)
@@ -640,9 +653,12 @@ class VerifiedTextStageRuntime:
         ):
             raise ValueError("text runtime input hash differs")
         entries = self.assets.semantic_bank.entries
+        labels_and_examples = tuple(
+            (entry.label, example) for entry in entries for example in entry.examples
+        )
         texts = [
-            model.prepare_text(text, query=False),
-            *(model.prepare_text(entry.text, query=True) for entry in entries),
+            model.prepare_text(text, query=True),
+            *(model.prepare_text(example, query=False) for _label, example in labels_and_examples),
         ]
         raw = self.encoder.encode(
             texts,
@@ -653,7 +669,7 @@ class VerifiedTextStageRuntime:
             dense_only=True,
         )
         vectors = tuple(tuple(float(value) for value in vector) for vector in raw)
-        if len(vectors) != len(entries) + 1:
+        if len(vectors) != len(labels_and_examples) + 1:
             raise ValueError("text encoder returned the wrong vector count")
         for vector in vectors:
             if len(vector) != model.dimensions or any(not math.isfinite(value) for value in vector):
@@ -662,12 +678,13 @@ class VerifiedTextStageRuntime:
             if not math.isclose(norm, 1.0, rel_tol=1e-4, abs_tol=1e-4):
                 raise ValueError("text encoder returned a non-normalized vector")
         candidate = vectors[0]
+        raw_scores: dict[str, float] = {}
+        for (label, _example), vector in zip(labels_and_examples, vectors[1:], strict=True):
+            score = sum(left * right for left, right in zip(candidate, vector, strict=True))
+            raw_scores[label] = max(raw_scores.get(label, -1.0), score)
         scores = {
-            entry.label: round(
-                min(1.0, max(0.0, sum(left * right for left, right in zip(candidate, vector, strict=True)))),
-                6,
-            )
-            for entry, vector in zip(entries, vectors[1:], strict=True)
+            label: round(min(1.0, max(0.0, score)), 6)
+            for label, score in sorted(raw_scores.items())
         }
         evidence_sha = vector_evidence_fingerprint(
             contract_version=contract_version,

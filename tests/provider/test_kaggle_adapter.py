@@ -1526,6 +1526,7 @@ def test_dependency_smoke_disposable_push_uses_exact_offline_image_contract() ->
     client, api, journal = adapter()
     run_id = uuid4()
     source = f'TASK_RUN_ID = "{run_id}"\n'.encode()
+    model_source = "upstream/model/Transformers/default/7"
     intent = effect(
         MutationAction.PUSH_NOTEBOOK,
         "owner/dependency-smoke",
@@ -1534,6 +1535,7 @@ def test_dependency_smoke_disposable_push_uses_exact_offline_image_contract() ->
             "task_run_id": str(run_id),
             "source_sha256": hashlib.sha256(source).hexdigest(),
             "dataset_sources": ("owner/runtime/12",),
+            "model_sources": (model_source,),
             "control_class": "orchestrator_protected",
             "disposable": True,
             "docker_image": TEST_RUNTIME_IMAGE,
@@ -1545,6 +1547,7 @@ def test_dependency_smoke_disposable_push_uses_exact_offline_image_contract() ->
         code_file="smoke.py", kernel_type="script", language="python",
         control_class=ControlClass.ORCHESTRATOR_PROTECTED, disposable=True,
         dataset_sources=("owner/runtime/12",), enable_internet=False,
+        model_sources=(model_source,),
         docker_image=TEST_RUNTIME_IMAGE, docker_image_pinning_type="original",
     )
     metadata = api.kernel_metadata[result.run.provider_ref]
@@ -1552,4 +1555,51 @@ def test_dependency_smoke_disposable_push_uses_exact_offline_image_contract() ->
     assert metadata["docker_image"] == TEST_RUNTIME_IMAGE
     assert metadata["docker_image_pinning_type"] == "original"
     assert metadata["dataset_sources"] == ["owner/runtime/12"]
+    assert metadata["model_sources"] == [model_source]
     assert len(journal.claims) == 1
+
+
+@pytest.mark.parametrize(
+    "model_source",
+    (
+        "owner/model/Transformers/default/latest",
+        "owner/model/Transformers/default/0",
+        "owner/model/Transformers/default",
+        "owner/model/Transformers/default/1/extra",
+    ),
+)
+def test_notebook_model_source_must_be_exact_version(model_source: str) -> None:
+    client, _api, _journal = adapter()
+    run_id = uuid4()
+    source = f'TASK_RUN_ID = "{run_id}"\n'.encode()
+    intent = effect(
+        MutationAction.PUSH_NOTEBOOK,
+        "owner/model-source-denial",
+        task_id=run_id,
+        arguments={
+            "task_run_id": str(run_id),
+            "source_sha256": hashlib.sha256(source).hexdigest(),
+            "dataset_sources": (),
+            "model_sources": (model_source,),
+            "control_class": "orchestrator_protected",
+            "disposable": True,
+            "docker_image": TEST_RUNTIME_IMAGE,
+            "docker_image_pinning_type": "original",
+        },
+    )
+    with pytest.raises(KaggleIdentityError, match="model source"):
+        client.push_private_dependency_smoke_notebook(
+            intent=intent,
+            task_run_id=run_id,
+            source=source,
+            title="model-source-denial",
+            code_file="smoke.py",
+            kernel_type="script",
+            language="python",
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+            disposable=True,
+            model_sources=(model_source,),
+            enable_internet=False,
+            docker_image=TEST_RUNTIME_IMAGE,
+            docker_image_pinning_type="original",
+        )

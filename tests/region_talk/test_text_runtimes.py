@@ -41,17 +41,24 @@ IMAGE_COMMIT = "9" * 40
 def _semantic_bank(path: Path) -> str:
     entries = []
     for label in sorted(ALL_LABELS):
-        text = f"fixture semantic definition for {label}"
         entries.append(
             {
                 "label": label,
-                "text": text,
-                "text_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                "examples": [
+                    f"fixture semantic definition one for {label}",
+                    f"fixture semantic definition two for {label}",
+                ],
             }
         )
+    logical = {entry["label"]: entry["examples"] for entry in entries}
     unsigned = {
         "schema_version": "region-talk-semantic-bank.v1",
         "semantic_bank_version": "semantic_bank_v1",
+        "semantic_bank_sha256": hashlib.sha256(canonical_json_bytes(logical)).hexdigest(),
+        "donor_repository": "https://example.invalid/fixture.git",
+        "donor_commit": "1" * 40,
+        "donor_path": "fixture.py",
+        "donor_blob_git_oid": "2" * 40,
         "entries": entries,
     }
     value = {
@@ -60,7 +67,7 @@ def _semantic_bank(path: Path) -> str:
     }
     SemanticBankDocument.model_validate(value)
     path.write_bytes(canonical_json_bytes(value) + b"\n")
-    return sha256_file(path)
+    return unsigned["semantic_bank_sha256"]
 
 
 def _bundle(tmp_path: Path, stage: str) -> tuple[Path, Path, str, dict[str, str]]:
@@ -69,7 +76,8 @@ def _bundle(tmp_path: Path, stage: str) -> tuple[Path, Path, str, dict[str, str]
     model.mkdir(parents=True)
     (model / "config.json").write_text('{"fixture":true}\n')
     (model / "tokenizer.json").write_text('{"fixture":"tokenizer"}\n')
-    (model / "model.safetensors").write_bytes(b"deterministic-fixture-weights")
+    weight_name = "model.safetensors" if stage == "e5_embedding" else "pytorch_model.bin"
+    (model / weight_name).write_bytes(b"deterministic-fixture-weights")
     bank_path = root / "semantic-bank.v1.json"
     bank_sha = _semantic_bank(bank_path)
     dependencies = (
@@ -257,8 +265,8 @@ def test_verified_text_runtime_executes_typed_stage_deterministically(
     assert set(metrics["scores"]) == ALL_LABELS
     assert len(metrics["evidence_fingerprint"]) == 64
     texts, call = encoder.calls[0]
-    assert texts[0].startswith(model.document_prefix)
-    assert all(text.startswith(model.query_prefix) for text in texts[1:])
+    assert texts[0].startswith(model.query_prefix)
+    assert all(text.startswith(model.document_prefix) for text in texts[1:])
     assert call == {
         "model": model,
         "max_tokens": model.max_tokens,

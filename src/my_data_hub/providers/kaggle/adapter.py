@@ -138,6 +138,22 @@ def _normalized_dataset_source(value: object) -> str:
     return source
 
 
+def _normalized_model_source(value: object) -> str:
+    source = str(value or "").strip().removeprefix("/")
+    parts = source.split("/")
+    if len(parts) != 5 or any(not part for part in parts):
+        raise KaggleIdentityError(
+            "Kaggle model source must be exact owner/model/framework/variation/version"
+        )
+    _normalized_ref("/".join(parts[:2]))
+    for part in parts[2:4]:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", part):
+            raise KaggleIdentityError("Kaggle model source contains an invalid identity segment")
+    if not parts[4].isdigit() or int(parts[4]) < 1:
+        raise KaggleIdentityError("Kaggle model source version must be an exact positive integer")
+    return source
+
+
 def _version(value: object) -> int | None:
     if value in (None, ""):
         return None
@@ -1352,6 +1368,7 @@ class KaggleProviderAdapter:
         control_class: ControlClass,
         disposable: bool,
         dataset_sources: Sequence[str] = (),
+        model_sources: Sequence[str] = (),
         enable_internet: bool = False,
         timeout_seconds: int | None = None,
     ) -> NotebookMutationResult:
@@ -1366,6 +1383,7 @@ class KaggleProviderAdapter:
             control_class=control_class,
             disposable=disposable,
             dataset_sources=dataset_sources,
+            model_sources=model_sources,
             enable_internet=enable_internet,
             timeout_seconds=timeout_seconds,
             pending_runtime_attestation=False,
@@ -1384,6 +1402,7 @@ class KaggleProviderAdapter:
         control_class: ControlClass,
         disposable: bool,
         dataset_sources: Sequence[str] = (),
+        model_sources: Sequence[str] = (),
         enable_internet: bool = False,
         timeout_seconds: int | None = None,
         docker_image: str | None = None,
@@ -1411,6 +1430,7 @@ class KaggleProviderAdapter:
             control_class=control_class,
             disposable=disposable,
             dataset_sources=dataset_sources,
+            model_sources=model_sources,
             enable_internet=enable_internet,
             timeout_seconds=timeout_seconds,
             docker_image=docker_image,
@@ -1488,6 +1508,7 @@ class KaggleProviderAdapter:
         control_class: ControlClass,
         disposable: bool,
         dataset_sources: Sequence[str] = (),
+        model_sources: Sequence[str] = (),
         enable_internet: bool = False,
         timeout_seconds: int | None = None,
         pending_runtime_attestation: bool,
@@ -1514,6 +1535,7 @@ class KaggleProviderAdapter:
             raise KaggleContractError("notebook source must embed the exact task_run_id")
         source_sha = executable_source_sha256(canonical_source, kernel_type=kernel_type)
         normalized_sources = tuple(_normalized_dataset_source(item) for item in dataset_sources)
+        normalized_model_sources = tuple(_normalized_model_source(item) for item in model_sources)
         if pending_runtime_attestation and (
             not isinstance(docker_image, str)
             or not _IMMUTABLE_IMAGE.fullmatch(docker_image)
@@ -1527,6 +1549,8 @@ class KaggleProviderAdapter:
                 "control_class": control_class.value,
                 "disposable": disposable,
         }
+        if normalized_model_sources:
+            intent_arguments["model_sources"] = normalized_model_sources
         if pending_runtime_attestation:
             intent_arguments.update(
                 {
@@ -1565,7 +1589,7 @@ class KaggleProviderAdapter:
                 "dataset_sources": list(normalized_sources),
                 "kernel_sources": [],
                 "competition_sources": [],
-                "model_sources": [],
+                "model_sources": list(normalized_model_sources),
             }
             if pending_runtime_attestation:
                 metadata.update({"docker_image": docker_image,
