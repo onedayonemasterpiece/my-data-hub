@@ -13,7 +13,7 @@ import pytest
 
 from my_data_hub.control_plane.adapters import KaggleMCPProviderGateway, LedgerControlReader, LedgerWriteGate
 from my_data_hub.control_plane.clock import DeterministicClock
-from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.control_plane.ledger import ControlLedger, StaleRuntimeEvent
 from my_data_hub.hashing import sha256_value
 from my_data_hub.mcp.contracts import MasterSnapshot, MasterState
 from my_data_hub.mcp.oauth import AccessIdentity
@@ -31,6 +31,7 @@ from my_data_hub.providers.kaggle.contracts import (
     KaggleKernelRunIdentity,
     KaggleKernelSourceIdentity,
     KaggleKernelStatus,
+    KaggleNotFound,
     KernelState,
     MutationAction,
     NotebookMutationResult,
@@ -892,6 +893,9 @@ def test_provider_run_exposes_bounded_runtime_options_status_and_declared_output
             "media_type": "application/x-subrip",
         }
     ]
+    projection = ledger.provider_resource("owner/internet-notebook", "1")
+    assert projection is not None
+    assert projection["state"] == "complete"
 
     chunk = gateway.invoke(
         "provider.resources.download",
@@ -912,6 +916,148 @@ def test_provider_run_exposes_bounded_runtime_options_status_and_declared_output
     assert chunk["contract_version"] == "my-data-hub-mcp-notebook-output-chunk.v1"
     assert b64decode(chunk["content_base64"], validate=True) == adapter.output_bytes
     assert chunk["complete"] is True
+
+
+def test_provider_notebook_read_projects_terminal_status_to_control_ledger(tmp_path: Path) -> None:
+    ledger = ControlLedger(tmp_path / "provider-read-status.sqlite3")
+    adapter = FakeAdapter(ledger)
+    gateway = KaggleMCPProviderGateway(ledger, adapter)  # type: ignore[arg-type]
+    request = _run_request(
+        task_id=uuid4(),
+        dataset_inputs=[],
+        notebook_ref="owner/read-status-notebook",
+        idempotency_key="provider-read-status-1",
+    )
+    notebook = gateway.invoke("provider.resources.run", request, principal())
+    before = ledger.provider_resource("owner/read-status-notebook", "1")
+    assert before is not None and before["state"] == "running"
+
+    observed = gateway.invoke(
+        "provider.resources.read",
+        {
+            "resource_ref": "owner/read-status-notebook",
+            "control_class": "mcp_managed",
+            "private": True,
+            "payload": {"kind": "notebook", "claim_sha256": notebook["claim_sha256"]},
+        },
+        principal(),
+    )
+
+    assert observed["run_state"] == "complete"
+    after = ledger.provider_resource("owner/read-status-notebook", "1")
+    assert after is not None and after["state"] == "complete"
+
+
+def test_provider_delete_projects_absence_and_blocks_all_notebook_reads(tmp_path: Path) -> None:
+    ledger = ControlLedger(tmp_path / "provider-delete-absence.sqlite3")
+    adapter = FakeAdapter(ledger)
+    gateway = KaggleMCPProviderGateway(ledger, adapter)  # type: ignore[arg-type]
+    request = _run_request(
+        task_id=uuid4(),
+        dataset_inputs=[],
+        notebook_ref="owner/deleted-notebook",
+        idempotency_key="provider-deleted-run-1",
+        expected_outputs=[
+            {"path": "result.json", "max_bytes": 4096, "media_type": "application/json"}
+        ],
+    )
+    notebook = gateway.invoke("provider.resources.run", request, principal())
+    gateway.invoke(
+        "provider.resources.delete",
+        {
+            "resource_ref": "owner/deleted-notebook",
+            "control_class": "mcp_managed",
+            "private": True,
+            "payload": {
+                "kind": "notebook",
+                "task_id": notebook["task_id"],
+                "effect_id": str(uuid4()),
+                "idempotency_key": "provider-deleted-cleanup-1",
+                "claim_sha256": notebook["claim_sha256"],
+            },
+        },
+        principal(),
+    )
+    projection = ledger.provider_resource("owner/deleted-notebook", "1")
+    assert projection is not None and projection["state"] == "absent"
+
+    def unexpected(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("absent projection must short-circuit provider reads")
+
+    adapter.read_private_notebook_source = unexpected  # type: ignore[method-assign]
+    adapter.read_run_status = unexpected  # type: ignore[method-assign]
+    adapter.download_exact_run_output_file = unexpected  # type: ignore[method-assign]
+    common = {
+        "resource_ref": "owner/deleted-notebook",
+        "control_class": "mcp_managed",
+        "private": True,
+    }
+    requests = (
+        (
+            "provider.resources.read",
+            {**common, "payload": {"kind": "notebook", "claim_sha256": notebook["claim_sha256"]}},
+        ),
+        (
+            "provider.resources.list",
+            {
+                **common,
+                "payload": {
+                    "kind": "notebook",
+                    "claim_sha256": notebook["claim_sha256"],
+                    "cursor": 0,
+                    "limit": 50,
+                },
+            },
+        ),
+        (
+            "provider.resources.download",
+            {
+                **common,
+                "payload": {
+                    "kind": "notebook",
+                    "claim_sha256": notebook["claim_sha256"],
+                    "path": "result.json",
+                    "offset": 0,
+                    "max_bytes": 4096,
+                },
+            },
+        ),
+    )
+    for tool, arguments in requests:
+        with pytest.raises(KaggleNotFound, match="absent"):
+            gateway.invoke(tool, arguments, principal())
+
+
+def test_provider_resource_observations_are_exact_monotonic_and_metadata_preserving(
+    tmp_path: Path,
+) -> None:
+    ledger = ControlLedger(tmp_path / "provider-observation.sqlite3")
+    identity = {
+        "provider": "kaggle",
+        "resource_ref": "owner/exact-resource",
+        "resource_kind": "notebook",
+        "source_identity": str(uuid4()),
+        "source_version": "7",
+        "control_class": "mcp_managed",
+        "private": True,
+    }
+    ledger.register_provider_resource(**identity, state="running", metadata={"immutable": "value"})
+    ledger.record_provider_resource_terminal_observation(**identity, state="complete")
+    ledger.record_provider_resource_terminal_observation(**identity, state="complete")
+    projection = ledger.provider_resource(identity["resource_ref"], identity["source_version"])
+    assert projection is not None
+    assert projection["state"] == "complete"
+    assert projection["metadata"] == {"immutable": "value"}
+    with pytest.raises(StaleRuntimeEvent, match="terminal"):
+        ledger.record_provider_resource_terminal_observation(**identity, state="failed")
+
+    ledger.record_provider_resource_absence(**identity)
+    ledger.record_provider_resource_absence(**identity)
+    projection = ledger.provider_resource(identity["resource_ref"], identity["source_version"])
+    assert projection is not None and projection["state"] == "absent"
+    assert projection["metadata"] == {"immutable": "value"}
+    with pytest.raises(StaleRuntimeEvent, match="absent"):
+        ledger.record_provider_resource_terminal_observation(**identity, state="complete")
 
 
 def test_provider_run_denies_internet_when_private_dataset_inputs_are_attached(

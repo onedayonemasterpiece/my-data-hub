@@ -17,8 +17,10 @@ from my_data_hub.providers.kaggle import (
     KaggleContractError,
     KaggleIdentityError,
     KaggleKernelRunIdentity,
+    KaggleNotFound,
     KagglePolicyError,
     KaggleProviderAdapter,
+    KaggleProviderError,
     KaggleProviderIdentity,
     KernelState,
     MutationAction,
@@ -739,6 +741,33 @@ def test_notebook_source_read_uses_exact_latest_identity_when_versioned_pull_is_
     )
 
     assert observed == result.source
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [(404, KaggleNotFound), (403, KaggleProviderError)],
+)
+def test_notebook_source_read_normalizes_raw_provider_http_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    expected: type[Exception],
+) -> None:
+    client, api, _journal = adapter()
+    monkeypatch.setattr(
+        api,
+        "get_kernel_latest_response",
+        lambda _ref: (_ for _ in ()).throw(HttpFailure(status)),
+    )
+
+    with pytest.raises(expected) as caught:
+        client.read_private_notebook_source(
+            provider_ref="owner/unavailable-notebook",
+            source_version=1,
+            expected_source_sha256=None,
+        )
+
+    assert not isinstance(caught.value, HttpFailure)
+    assert str(status) not in str(caught.value)
 
 
 def test_master_legacy_push_persists_numeric_response_pending_runtime_attestation(

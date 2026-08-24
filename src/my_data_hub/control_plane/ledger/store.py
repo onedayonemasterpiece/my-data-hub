@@ -1561,6 +1561,94 @@ class ControlLedger:
                 ),
             )
 
+    def record_provider_resource_terminal_observation(
+        self,
+        *,
+        provider: str,
+        resource_ref: str,
+        resource_kind: str,
+        source_identity: str,
+        source_version: str,
+        control_class: str,
+        private: bool | None,
+        state: str,
+    ) -> None:
+        """Project one exact live provider terminal observation monotonically."""
+
+        if state not in {"complete", "failed"}:
+            raise ValueError("provider terminal observation state is invalid")
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT provider,resource_ref,resource_kind,source_identity,source_version,control_class,"
+                "private,state FROM provider_resources WHERE provider=? AND resource_ref=? AND source_version=?",
+                (provider, resource_ref, source_version),
+            ).fetchone()
+            expected_private = None if private is None else int(private)
+            if row is None or any(
+                (
+                    row["provider"] != provider,
+                    row["resource_ref"] != resource_ref,
+                    row["resource_kind"] != resource_kind,
+                    row["source_identity"] != source_identity,
+                    row["source_version"] != source_version,
+                    row["control_class"] != control_class,
+                    row["private"] != expected_private,
+                )
+            ):
+                raise StaleRuntimeEvent("provider terminal observation identity is not exact")
+            current = str(row["state"])
+            if current == state:
+                return
+            if current == "absent":
+                raise StaleRuntimeEvent("provider terminal observation cannot replace absent state")
+            if current in {"complete", "failed"}:
+                raise StaleRuntimeEvent("provider terminal observation conflicts with terminal state")
+            connection.execute(
+                "UPDATE provider_resources SET state=?,observed_at=? "
+                "WHERE provider=? AND resource_ref=? AND source_version=?",
+                (state, _format_time(self.clock.now()), provider, resource_ref, source_version),
+            )
+
+    def record_provider_resource_absence(
+        self,
+        *,
+        provider: str,
+        resource_ref: str,
+        resource_kind: str,
+        source_identity: str,
+        source_version: str,
+        control_class: str,
+        private: bool | None,
+    ) -> None:
+        """Project absence only for the exact resource identity explicitly deleted."""
+
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT provider,resource_ref,resource_kind,source_identity,source_version,control_class,"
+                "private,state FROM provider_resources WHERE provider=? AND resource_ref=? AND source_version=?",
+                (provider, resource_ref, source_version),
+            ).fetchone()
+            expected_private = None if private is None else int(private)
+            if row is None or any(
+                (
+                    row["provider"] != provider,
+                    row["resource_ref"] != resource_ref,
+                    row["resource_kind"] != resource_kind,
+                    row["source_identity"] != source_identity,
+                    row["source_version"] != source_version,
+                    row["control_class"] != control_class,
+                    row["private"] != expected_private,
+                )
+            ):
+                raise StaleRuntimeEvent("provider absence observation identity is not exact")
+            if str(row["state"]) == "absent":
+                return
+            connection.execute(
+                "UPDATE provider_resources SET state='absent',observed_at=? "
+                "WHERE provider=? AND resource_ref=? AND source_version=?",
+                (_format_time(self.clock.now()), provider, resource_ref, source_version),
+            )
+
     def fence_checkpoint_failed_master(
         self,
         *,
