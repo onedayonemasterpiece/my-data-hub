@@ -10,10 +10,18 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "deploy/control-plane/install.sh"
 COMPOSE = ROOT / "compose.control-plane.yaml"
+DOCKERFILE = ROOT / "deploy/control-plane/Dockerfile"
 
 
 def installer_source() -> str:
     return INSTALLER.read_text(encoding="utf-8")
+
+
+def test_control_plane_image_includes_all_wheel_force_include_roots() -> None:
+    source = DOCKERFILE.read_text(encoding="utf-8")
+    assert "COPY sql ./sql" in source
+    assert "COPY schemas ./schemas" in source
+    assert "install -d -o mdh -g mdh -m 0711 /state" in source
 
 
 def provider_oauth_client_probe_source() -> str:
@@ -32,6 +40,28 @@ def run_provider_oauth_client_probe(tmp_path: Path, clients: list[object]) -> su
     return subprocess.run(
         ["python3", "-", str(oauth_env)],
         input=provider_oauth_client_probe_source(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def unified_oauth_client_probe_source() -> str:
+    source = installer_source()
+    marker = 'unified_oauth_client_id="$(python3 - "$oauth_env" <<\'PY\'\n'
+    start = source.index(marker) + len(marker)
+    return source[start : source.index("\nPY\n)", start)]
+
+
+def run_unified_oauth_client_probe(tmp_path: Path, clients: list[object]) -> subprocess.CompletedProcess[str]:
+    oauth_env = tmp_path / "oauth.env"
+    oauth_env.write_text(
+        f"MY_DATA_HUB_OAUTH_CLIENTS_JSON='{json.dumps(clients)}'\n",
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        ["python3", "-", str(oauth_env)],
+        input=unified_oauth_client_probe_source(),
         text=True,
         capture_output=True,
         check=False,
@@ -133,6 +163,12 @@ def test_compose_has_exact_opt_in_profile_split_secret_boundaries_and_loopback_p
         "control-plane": {"condition": "service_healthy"},
         "oauth-server": {"condition": "service_healthy"},
     }
+    assert services["remote-mcp"]["network_mode"] == "host"
+    assert services["remote-mcp"]["extra_hosts"] == [
+        "master-tunnel.internal:127.0.0.1"
+    ]
+    assert services["remote-mcp"]["environment"]["MY_DATA_HUB_MCP_HOST"] == "127.0.0.1"
+    assert "ports" not in services["remote-mcp"]
     assert services["oauth-server"]["depends_on"] == {"control-plane": {"condition": "service_healthy"}}
 
     env_files = {name: service["env_file"][0]["path"] for name, service in services.items()}
@@ -157,13 +193,14 @@ def test_compose_has_exact_opt_in_profile_split_secret_boundaries_and_loopback_p
     assert oauth["environment"]["MY_DATA_HUB_OWNER_PORTAL_STATE_KEY_FILE"] == ("/run/secrets/owner-portal-state.key")
     assert all(":ro" in binding for binding in oauth["volumes"] if "/run/secrets/" in binding)
 
-    for service in services.values():
+    for name, service in services.items():
         assert service["restart"] == "unless-stopped"
         assert service["logging"] == {
             "driver": "json-file",
             "options": {"max-size": "10m", "max-file": "5"},
         }
-        assert all(binding.startswith("127.0.0.1:") for binding in service["ports"])
+        if name != "remote-mcp":
+            assert all(binding.startswith("127.0.0.1:") for binding in service["ports"])
     serialized = COMPOSE.read_text(encoding="utf-8").casefold()
     for forbidden in ("pgdata", "pg_dump", "db migrate", "connector-committer"):
         assert forbidden not in serialized
@@ -219,6 +256,37 @@ def test_operator_profile_keeps_kaggle_authority_only_in_control_process() -> No
     assert "KAGGLE_API_TOKEN" not in json.dumps(compose["services"]["remote-mcp"])
 
 
+def test_operator_profile_keeps_chatgpt_cimd_with_exact_operator_scopes() -> None:
+    source = installer_source()
+    start = source.index('cat > "$operator_override"')
+    end = source.index('chmod 600 "$operator_override"', start)
+    operator_override = source[start:end]
+    exact_scopes = (
+        "openid,offline_access,platform:read,master:read,operation:read,checkpoint:read,"
+        "embedding:read,provider:read,bloggers:read,data:read,master:ensure,master:rotate,"
+        "recovery:request,acceptance:probe,data:write,"
+        "bloggers:write,provider:write"
+    )
+    assert 'MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED: "true"' in operator_override
+    assert f"MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: {exact_scopes}" in operator_override
+    assert "acceptance:operate" not in operator_override
+    assert "migration:operate" not in operator_override
+
+
+def test_remote_mcp_host_network_uses_only_loopback_control_gateway() -> None:
+    source = installer_source()
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    remote = compose["services"]["remote-mcp"]
+    assert remote["network_mode"] == "host"
+    assert remote["environment"]["MY_DATA_HUB_MCP_HOST"] == "127.0.0.1"
+    assert "ports" not in remote
+    assert "http://control-plane:8080/internal/mcp-provider/invoke" not in source
+    assert source.count(
+        "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL: "
+        "http://127.0.0.1:8080/internal/mcp-provider/invoke"
+    ) == 3
+
+
 def test_provider_only_mcp_action_is_explicit_and_skips_master_only_prerequisites() -> None:
     source = installer_source()
     assert "provider_only=true" in source
@@ -253,6 +321,13 @@ def test_provider_only_mcp_action_is_explicit_and_skips_master_only_prerequisite
     assert "verify_master_assets.py" not in provider_branch.split("else", 1)[0]
     assert "root-installed epoch tunnel broker socket is required" not in provider_branch.split("else", 1)[0]
     assert "operator_profile_gate.py" not in provider_branch.split("else", 1)[0]
+
+
+def test_control_plane_tmpfs_can_hold_master_asset_staging_and_exact_readback() -> None:
+    """The central adapter holds upload staging plus zip+tree readback concurrently."""
+
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    assert compose["services"]["control-plane"]["tmpfs"] == ["/tmp:size=256m,mode=1777"]
 
 
 def test_provider_only_probe_recognizes_exact_opencode_public_loopback_client(tmp_path: Path) -> None:
@@ -334,6 +409,100 @@ def test_provider_only_override_removes_master_mounts_and_static_bearers() -> No
         "KAGGLE_KEY",
     ):
         assert forbidden not in override
+    control, remote = override.split("  remote-mcp:", 1)
+    assert 'MY_DATA_HUB_PROVIDER_UPLOAD_ROOT: /uploads' in control
+    assert 'MY_DATA_HUB_PROVIDER_UPLOAD_DIR:?provider upload directory is required}:/uploads' in control
+    assert "/uploads" not in remote
+
+
+def test_unified_bootstrap_action_combines_master_runtime_provider_and_bounded_reads() -> None:
+    source = installer_source()
+    assert "INSTALL_MY_DATA_HUB_UNIFIED_BOOTSTRAP" in source
+    start = source.index('cat > "$unified_bootstrap_override"')
+    end = source.index('chmod 600 "$unified_bootstrap_override"', start)
+    override = source[start:end]
+    exact_scopes = (
+        "platform:read,master:read,operation:read,checkpoint:read,embedding:read,"
+        "provider:read,bloggers:read,provider:write"
+    )
+    assert 'MY_DATA_HUB_UNIFIED_BOOTSTRAP_MODE: "true"' in override
+    assert 'MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED: "false"' in override
+    assert 'MY_DATA_HUB_MCP_UNIFIED_BOOTSTRAP_PROFILE_ENABLED: "true"' in override
+    assert f"MY_DATA_HUB_MCP_SCOPES: {exact_scopes}" in override
+    assert "data:write" not in override
+    assert "master:ensure" not in override
+    assert "acceptance:operate" not in override
+    assert "migration:operate" not in override
+    assert (
+        "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access," + exact_scopes
+    ) in override
+    assert 'unified_bootstrap_compose_arg=" -f $unified_bootstrap_override"' in source
+
+
+def test_unified_bootstrap_opencode_client_requires_exact_scopes_and_loopback(tmp_path: Path) -> None:
+    exact = [
+        "openid",
+        "offline_access",
+        "platform:read",
+        "master:read",
+        "operation:read",
+        "checkpoint:read",
+        "embedding:read",
+        "provider:read",
+        "provider:write",
+        "bloggers:read",
+    ]
+    valid = run_unified_oauth_client_probe(
+        tmp_path,
+        [{
+            "client_id": "opencode-my-data-hub-unified",
+            "redirect_uris": ["http://127.0.0.1:19876/mcp/oauth/callback"],
+            "allowed_scopes": exact,
+        }],
+    )
+    assert valid.returncode == 0
+    assert valid.stdout == "opencode-my-data-hub-unified\n"
+
+    extra = run_unified_oauth_client_probe(
+        tmp_path,
+        [{
+            "client_id": "unsafe-overbroad",
+            "redirect_uris": ["http://127.0.0.1:19876/mcp/oauth/callback"],
+            "allowed_scopes": [*exact, "data:write"],
+        }],
+    )
+    assert extra.returncode == 0
+    assert extra.stdout == "\n"
+
+
+def test_unified_bootstrap_readiness_precedes_release_commit_and_is_rollback_guarded() -> None:
+    source = installer_source()
+    readiness = source.index("unified bootstrap readiness did not prove both master runtime and provider gateway")
+    release_commit = source.index('mv -Tf "$next_link" "$current"')
+    trap_removed = source.index("trap - ERR", release_commit)
+    rollback = source.index("rollback()")
+    trap_installed = source.index("trap rollback ERR")
+    assert rollback < trap_installed < readiness < release_commit < trap_removed
+    for required in (
+        'receipt.get("master_runtime_ready") is True',
+        'receipt.get("master_provider_status") == "available"',
+        'receipt.get("provider_gateway_ready") is True',
+    ):
+        assert required in source
+
+
+def test_chunked_upload_staging_is_private_and_mounted_only_into_central_control() -> None:
+    source = installer_source()
+    assert 'provider_upload_dir="${MY_DATA_HUB_PROVIDER_UPLOAD_DIR:-$runtime_root/provider-uploads}"' in source
+    assert 'private_dirs+=("$provider_upload_dir")' in source
+    assert "MY_DATA_HUB_PROVIDER_UPLOAD_DIR=$provider_upload_dir" in source
+    start = source.index('cat > "$operator_override"')
+    end = source.index('chmod 600 "$operator_override"', start)
+    operator_override = source[start:end]
+    control, remote = operator_override.split("  remote-mcp:", 1)
+    assert 'MY_DATA_HUB_PROVIDER_UPLOAD_ROOT: /uploads' in control
+    assert 'MY_DATA_HUB_PROVIDER_UPLOAD_DIR:?provider upload directory is required}:/uploads' in control
+    assert "/uploads" not in remote
 
 
 def test_fm08_host_supervisor_is_explicit_private_and_has_one_restart_target() -> None:
@@ -372,7 +541,11 @@ def test_acceptance_scenarios_are_owner_opt_in_and_use_provider_status_input() -
     assert 'value.get("brokered_checkpoint_upload") is not True' in source
     start = source.index('cat > "$acceptance_scenarios_override"')
     end = source.index('chmod 600 "$acceptance_scenarios_override"', start)
-    assert 'MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "false"' not in source[start:end]
+    acceptance_override = source[start:end]
+    assert 'MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED: "false"' not in acceptance_override
+    assert "MY_DATA_HUB_MCP_SCOPES:" in acceptance_override
+    assert "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES:" in acceptance_override
+    assert "acceptance:operate" in acceptance_override
     assert "MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED" not in COMPOSE.read_text()
 
 

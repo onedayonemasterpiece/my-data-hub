@@ -57,6 +57,7 @@ from my_data_hub.workloads.bloggers.master_stage import (
     BloggerMigrationQuarantined,
     BloggerMigrationRequest,
     BloggerStageContext,
+    blogger_failure_code,
     execute_blogger_migration_stage,
 )
 
@@ -64,14 +65,14 @@ from .bootstrap import BootstrapRequest, MasterBootstrap
 from .contracts import BootSource, MasterIdentity, MasterPaths
 from .credentials import CredentialProvisioner, LoginPolicy
 from .database_gate import DatabaseGate
-from .postgres import PostgresBinaries, PostgresConfig, PostgresSupervisor
+from .postgres import PostgresBinaries, PostgresConfig, PostgresSupervisor, SubprocessRunner
 from .tunnel import ReverseTunnelSpec, TunnelSupervisor
 
 MASTER_TERMINAL_OUTPUT_NAME = "my-data-hub-master-terminal.json"
 MASTER_TERMINAL_SCHEMA_VERSION = "my-data-hub-master-terminal.v1"
 MASTER_TERMINAL_MAX_BYTES = 256 * 1024
 POSTGRES_RUNTIME_LIBRARY_PATH = (
-    "/kaggle/working/mdh-postgresql-runtime/pgsql/lib:/kaggle/working/mdh-postgresql-runtime/pgsql/lib/runtime-deps"
+    "/opt/mdh-postgresql-runtime/pgsql/lib:/opt/mdh-postgresql-runtime/pgsql/lib/runtime-deps"
 )
 _MASTER_TERMINAL_EVENT_TYPES = (
     RuntimeEventType.RUNTIME_DRAINING,
@@ -308,17 +309,15 @@ def validate_relocated_postgres_runtime(config: NotebookMasterConfig) -> None:
 
     if os.environ.get("LD_LIBRARY_PATH") != POSTGRES_RUNTIME_LIBRARY_PATH:
         raise RuntimeError("PostgreSQL runtime library path is not the exact relocated binding")
+    runner = SubprocessRunner()
     for name in ("initdb", "pg_ctl", "psql"):
         executable = config.postgres_bin / name
         if executable.is_symlink() or not executable.is_file() or not os.access(executable, os.X_OK):
             raise RuntimeError(f"relocated PostgreSQL tool is unavailable: {name}")
-        completed = subprocess.run(
+        completed = runner.run(
             [str(executable), "--version"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=os.environ.copy(),
+            timeout_seconds=10,
+            environment=os.environ.copy(),
         )
         if len(completed.stdout) > 4096 or "18.4" not in completed.stdout:
             raise RuntimeError(f"relocated PostgreSQL tool version differs: {name}")
@@ -939,6 +938,13 @@ def _connector_checkpoint_url(callback_url: str, run_id: str, attempt_id: str) -
     return f"{base}/internal/runtime/connector-checkpoint/{run_id}/{attempt_id}"
 
 
+def _security_evidence_url(callback_url: str, run_id: str, attempt_id: str) -> str:
+    if callback_url != CANONICAL_RUNTIME_CALLBACK_URL:
+        raise ValueError("callback URL does not match the owner-pinned HTTPS runtime endpoint")
+    base = callback_url.removesuffix("/internal/runtime/events")
+    return f"{base}/internal/runtime/security-evidence/{run_id}/{attempt_id}"
+
+
 def _runtime_metadata_headers(config: NotebookMasterConfig, run_secret: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {run_secret}",
@@ -946,6 +952,72 @@ def _runtime_metadata_headers(config: NotebookMasterConfig, run_secret: str) -> 
         "X-MDH-Master-Instance-ID": str(config.master_instance_id),
         "X-MDH-Epoch": str(config.epoch),
     }
+
+
+def _post_security_evidence(
+    *,
+    config: NotebookMasterConfig,
+    callback_url: str,
+    run_secret: str,
+    evidence: dict[str, Any],
+    attempts: int = 3,
+    sleep: Any = time.sleep,
+) -> None:
+    encoded = canonical_json_bytes(evidence)
+    if len(encoded) > 16 * 1024 or not 1 <= attempts <= 5:
+        raise RuntimeError("master security evidence transport bounds are invalid")
+    for attempt in range(attempts):
+        request = urllib.request.Request(
+            _security_evidence_url(callback_url, config.run_id, config.attempt_id),
+            data=encoded,
+            headers=_runtime_metadata_headers(config, run_secret),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                body = json.loads(response.read(16 * 1024))
+            if (
+                body.get("recorded") is True
+                and body.get("role_verification_sha256") == evidence["role_verification_sha256"]
+                and body.get("security_test_receipt_sha256") == evidence["security_test_receipt_sha256"]
+            ):
+                return
+        except Exception:
+            pass
+        if attempt + 1 < attempts:
+            sleep(min(2**attempt, 2))
+    raise RuntimeError("control did not acknowledge exact master security evidence")
+
+
+def _record_master_security_evidence(
+    *,
+    config: NotebookMasterConfig,
+    callback_url: str,
+    run_secret: str,
+    database_url: str,
+    ready: Any,
+) -> None:
+    from my_data_hub.master_runtime.role_security_probe import (
+        build_role_security_evidence,
+        run_role_security_probes,
+    )
+
+    with psycopg.connect(database_url) as security_connection:
+        security_result = run_role_security_probes(security_connection)
+    security_evidence = build_role_security_evidence(
+        security_result,
+        source_commit=config.source_version,
+        master_instance_id=str(config.master_instance_id),
+        epoch=config.epoch,
+        schema_version=int(ready.schema_version),
+        canonical_revision=int(ready.canonical_revision),
+    )
+    _post_security_evidence(
+        config=config,
+        callback_url=callback_url,
+        run_secret=run_secret,
+        evidence=security_evidence,
+    )
 
 
 def _claim_blogger_migration(
@@ -1612,15 +1684,14 @@ def _wait_for_activation(
     raise TimeoutError("control plane did not activate the exact master epoch")
 
 
-def _bootstrap_owner(database_url: str) -> None:
+def _bootstrap_owner(database_url: str, bootstrap_sql: str) -> None:
+    if not bootstrap_sql.strip() or len(bootstrap_sql.encode()) > 131_072:
+        raise RuntimeError("bootstrap role contract is absent or exceeds its bound")
     with psycopg.connect(database_url, autocommit=True) as connection, connection.cursor() as cursor:
-        cursor.execute(
-            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='mdh_owner') THEN "
-            "CREATE ROLE mdh_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT "
-            "NOREPLICATION NOBYPASSRLS; END IF; END $$"
-        )
-        cursor.execute("GRANT mdh_owner TO postgres")
-        cursor.execute("GRANT CREATE,TEMPORARY ON DATABASE postgres TO mdh_owner")
+        # This is the only local privileged SQL boundary.  The reviewed file
+        # creates password-free NOLOGIN group roles and the four exact
+        # extensions required before owner-scoped append-only migrations.
+        cursor.execute(bootstrap_sql)
 
 
 def run_master(
@@ -1754,7 +1825,10 @@ def run_master(
         supervisor.write_configuration()
 
     def apply_migrations() -> None:
-        _bootstrap_owner(database_url)
+        bootstrap_role_resource = files("my_data_hub.master_runtime").joinpath(
+            "sql/admin/bootstrap_roles.sql"
+        )
+        _bootstrap_owner(database_url, bootstrap_role_resource.read_text(encoding="utf-8"))
         migration_resource = files("my_data_hub.master_runtime").joinpath("sql/migrations")
         with as_file(migration_resource) as directory:
             migrate(database_url, directory)
@@ -1867,6 +1941,13 @@ def run_master(
         gate = DatabaseGate(gate_connection)
         _require_active_window(active_deadline=active_deadline)
         gate.activate(identity)
+        _record_master_security_evidence(
+            config=config,
+            callback_url=callback_url,
+            run_secret=run_secret,
+            database_url=database_url,
+            ready=ready,
+        )
     except Exception:
         if gate_connection is not None:
             with suppress(Exception):
@@ -2080,7 +2161,7 @@ def run_master(
                             suffix="/failed",
                             payload={
                                 "request_id": str(migration_request.request_id),
-                                "failure_code": type(exc).__name__[:100],
+                                "failure_code": blogger_failure_code(exc),
                             },
                         )
                     raise

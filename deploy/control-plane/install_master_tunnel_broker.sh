@@ -55,6 +55,16 @@ for path_value in "$state_root" "$account_home" "$ca_private" "$sshd_fragment" "
     exit 2
   }
 done
+broker_socket_parent="$(dirname "$broker_socket")"
+[[ "$broker_socket_parent" == /run/* ]] || {
+  echo "tunnel broker socket must be located below /run" >&2
+  exit 2
+}
+broker_runtime_directory="${broker_socket_parent#/run/}"
+[[ "$broker_runtime_directory" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ ]] || {
+  echo "tunnel broker runtime directory is invalid" >&2
+  exit 2
+}
 [[ "$control_uid" =~ ^[0-9]+$ && "$control_gid" =~ ^[0-9]+$ ]] || {
   echo "control UID/GID must be numeric" >&2
   exit 2
@@ -93,7 +103,8 @@ for tunnel_account in "$account" "$worker_account"; do
   usermod --shell /usr/sbin/nologin --password '*' "$tunnel_account"
   install -d -o "$tunnel_account" -g "$tunnel_account" -m 0700 "$tunnel_home"
 done
-install -d -o root -g root -m 0700 "$state_root" "$(dirname "$ca_private")"
+install -d -o root -g root -m 0711 "$state_root"
+install -d -o root -g root -m 0700 "$(dirname "$ca_private")"
 install -d -o root -g root -m 0755 "$(dirname "$broker_program")" "$(dirname "$sshd_fragment")" "$unit_root"
 install -o root -g root -m 0755 "$broker_source" "$broker_program"
 install -o root -g root -m 0644 "$broker_source" "$(dirname "$broker_ipc_program")/tunnel_broker.py"
@@ -213,7 +224,9 @@ Before=my-data-hub-master-tunnel-reconcile.timer
 
 [Service]
 Type=simple
-ExecStartPre=/usr/bin/install -d -o root -g $control_gid -m 0750 $(dirname "$broker_socket")
+Group=$control_gid
+RuntimeDirectory=$broker_runtime_directory
+RuntimeDirectoryMode=0750
 ExecStartPre=/usr/bin/rm -f $broker_socket
 ExecStart=$broker_ipc_program --state-root $state_root --ca-private-key $ca_private --account $account --worker-account $worker_account --socket $broker_socket --allowed-uid $control_uid --socket-gid $control_gid
 Restart=on-failure
@@ -230,7 +243,84 @@ WantedBy=multi-user.target
 UNIT
 chmod 0644 "$ipc_unit"
 systemctl daemon-reload
-systemctl enable --now my-data-hub-master-tunnel-broker.service
+if ! systemctl enable --now my-data-hub-master-tunnel-broker.service; then
+  systemctl disable --now my-data-hub-master-tunnel-broker.service >/dev/null 2>&1 || true
+  echo "master tunnel broker service failed to start" >&2
+  exit 2
+fi
+if ! systemctl is-active --quiet my-data-hub-master-tunnel-broker.service; then
+  systemctl status my-data-hub-master-tunnel-broker.service --no-pager -l >&2 || true
+  systemctl disable --now my-data-hub-master-tunnel-broker.service >/dev/null 2>&1 || true
+  echo "master tunnel broker service is not active" >&2
+  exit 2
+fi
+if ! python3 - "$broker_socket" "$control_gid" "$state_root" <<'PY'
+import os
+from pathlib import Path
+import stat
+import sys
+import time
+
+socket_path = Path(sys.argv[1])
+expected_gid = int(sys.argv[2])
+state_root = Path(sys.argv[3])
+deadline = time.monotonic() + 5.0
+while time.monotonic() < deadline:
+    try:
+        observed = socket_path.lstat()
+    except FileNotFoundError:
+        time.sleep(0.05)
+        continue
+    if (
+        stat.S_ISSOCK(observed.st_mode)
+        and observed.st_uid == 0
+        and observed.st_gid == expected_gid
+        and stat.S_IMODE(observed.st_mode) == 0o660
+    ):
+        break
+    raise SystemExit("master tunnel broker socket violates its owner/mode contract")
+else:
+    raise SystemExit("master tunnel broker socket was not created within five seconds")
+
+parent = socket_path.parent.lstat()
+if (
+    not stat.S_ISDIR(parent.st_mode)
+    or parent.st_uid != 0
+    or parent.st_gid != expected_gid
+    or stat.S_IMODE(parent.st_mode) != 0o750
+):
+    raise SystemExit("master tunnel broker runtime directory violates its owner/mode contract")
+
+state_directory = state_root.lstat()
+if (
+    not stat.S_ISDIR(state_directory.st_mode)
+    or state_directory.st_uid != 0
+    or state_directory.st_gid != 0
+    or stat.S_IMODE(state_directory.st_mode) != 0o711
+):
+    raise SystemExit("master tunnel broker state directory violates its searchable owner/mode contract")
+for name, mode in (
+    ("authorized_principals", 0o644),
+    ("authorized_worker_principals", 0o644),
+    ("revoked.krl", 0o644),
+    ("state.json", 0o600),
+    ("broker.lock", 0o600),
+):
+    item = (state_root / name).lstat()
+    if (
+        not stat.S_ISREG(item.st_mode)
+        or item.st_uid != 0
+        or item.st_gid != 0
+        or stat.S_IMODE(item.st_mode) != mode
+    ):
+        raise SystemExit(f"master tunnel broker state file violates its owner/mode contract: {name}")
+PY
+then
+  systemctl status my-data-hub-master-tunnel-broker.service --no-pager -l >&2 || true
+  systemctl disable --now my-data-hub-master-tunnel-broker.service >/dev/null 2>&1 || true
+  echo "master tunnel broker socket readiness failed" >&2
+  exit 2
+fi
 trap - EXIT
 cleanup
 printf 'master_tunnel_broker_installed=true\naccount=%s\nlisten=127.0.0.1:%s\nsocket=%s\nactive_epoch=none_until_authenticated_activation\n' \

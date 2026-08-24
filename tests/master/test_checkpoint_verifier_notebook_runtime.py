@@ -62,6 +62,7 @@ def test_generated_verifier_actually_starts_an_isolated_restore_and_emits_bound_
     assert "IsolatedPostgresRestoreVerifier" in source
     assert "MY_DATA_HUB_RESTORE_DATABASE_URL" not in source
     assert "psycopg.connect" not in source
+    assert 'item.name != "pgsql"' in source
 
     spec = importlib.util.spec_from_file_location("checkpoint_verifier_runtime_test", source_path)
     assert spec is not None and spec.loader is not None

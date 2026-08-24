@@ -27,6 +27,17 @@ TUNNEL_KNOWN_HOSTS_NAME = "tunnel-known-hosts"
 EMBEDDING_DEPENDENCY_MANIFEST_NAME = "embedding-worker-dependencies.json"
 EMBEDDING_WHEELHOUSE_NAME = "embedding-worker-wheelhouse"
 EMBEDDING_WHEEL_LOCK_PATH = "scripts/provider/assets/embedding-worker-wheel-lock.v1.json"
+MASTER_YDB_WHEEL_LOCK_PATH = "scripts/provider/assets/master-ydb-wheel-lock.v1.json"
+MASTER_YDB_DEPENDENCY_MANIFEST_NAME = "master-ydb-dependency.json"
+MASTER_YDB_WHEELHOUSE_NAME = "master-python-wheelhouse"
+MASTER_YDB_VERSION = "3.31.2"
+MASTER_YDB_WHEEL_NAME = "ydb-3.31.2-py3-none-any.whl"
+MASTER_YDB_WHEEL_SHA256 = "043b91af7dab122e9ee24cb1948576f324dc9b6dbb45952d2e7c58d99e2c5ddb"
+MASTER_YDB_WHEEL_SOURCE_URL = (
+    "https://files.pythonhosted.org/packages/f4/2c/"
+    "0822896487b379b3dfce9011428728c3e22dcf311a29eacf5e47d203e182/"
+    "ydb-3.31.2-py3-none-any.whl"
+)
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 REJECTED_POSTGRES_RUNTIME_SHA256 = {
     # Built with pgvector's host-native OPTFLAGS and therefore not portable.
@@ -214,6 +225,42 @@ def _verify_wheelhouse(lock: dict[str, object], wheelhouse: Path) -> list[dict[s
     return verified
 
 
+def _load_master_ydb_wheel(lock_path: Path, wheel_path: Path) -> tuple[dict[str, object], bytes, bytes]:
+    lock_body = _read_bounded(lock_path, maximum=16 * 1024)
+    try:
+        lock = json.loads(lock_body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AssetBundleError("master YDB dependency lock is invalid JSON") from exc
+    expected_keys = {
+        "schema_version",
+        "index_url",
+        "runtime",
+        "version",
+        "filename",
+        "sha256",
+        "source_url",
+    }
+    runtime = lock.get("runtime") if isinstance(lock, dict) else None
+    if (
+        not isinstance(lock, dict)
+        or set(lock) != expected_keys
+        or lock.get("schema_version") != "my-data-hub-master-ydb-wheel-lock.v1"
+        or lock.get("index_url") != "https://pypi.org/simple"
+        or runtime
+        != {"python_abi": "cp312", "source_commit": KAGGLE_CPU_IMAGE_SOURCE_COMMIT}
+        or lock.get("version") != MASTER_YDB_VERSION
+        or lock.get("filename") != MASTER_YDB_WHEEL_NAME
+        or lock.get("sha256") != MASTER_YDB_WHEEL_SHA256
+        or lock.get("source_url") != MASTER_YDB_WHEEL_SOURCE_URL
+        or lock_body != canonical_json_bytes(lock)
+    ):
+        raise AssetBundleError("master YDB dependency lock differs from the reviewed artifact")
+    wheel = _read_bounded(wheel_path, maximum=16 * 1024 * 1024)
+    if wheel_path.name != lock["filename"] or _sha256(wheel) != lock["sha256"]:
+        raise AssetBundleError("master YDB dependency wheel differs from the exact lock")
+    return lock, lock_body, wheel
+
+
 def _verify_embedding_worker_asset(body: bytes) -> None:
     try:
         notebook = json.loads(body)
@@ -252,6 +299,8 @@ def build_bundle(
     tunnel_known_hosts: Path,
     embedding_wheelhouse: Path,
     embedding_dependency_lock: Path,
+    master_ydb_wheel: Path,
+    master_ydb_dependency_lock: Path,
     wheel_builder: Callable[[Path, Path], Path] = _build_wheel,
 ) -> dict[str, object]:
     root = root.resolve()
@@ -286,6 +335,8 @@ def build_bundle(
     dataset_dir.mkdir(mode=0o700)
     embedded_wheelhouse_dir = dataset_dir / EMBEDDING_WHEELHOUSE_NAME
     embedded_wheelhouse_dir.mkdir(mode=0o700)
+    master_wheelhouse_dir = dataset_dir / MASTER_YDB_WHEELHOUSE_NAME
+    master_wheelhouse_dir.mkdir(mode=0o700)
 
     master_path = root / "notebooks/02-postgres-master/worker.ipynb"
     verifier_path = root / "notebooks/03-checkpoint-verifier-restore-smoke/worker.ipynb"
@@ -297,6 +348,9 @@ def build_bundle(
     _verify_embedding_worker_asset(bge_worker)
     dependency_lock, dependency_lock_body = _load_dependency_lock(embedding_dependency_lock)
     dependency_wheels = _verify_wheelhouse(dependency_lock, embedding_wheelhouse)
+    ydb_lock, ydb_lock_body, ydb_wheel = _load_master_ydb_wheel(
+        master_ydb_dependency_lock, master_ydb_wheel
+    )
     with tempfile.TemporaryDirectory(prefix="mdh-master-wheel-") as temporary:
         wheel_path = wheel_builder(root, Path(temporary))
         wheel = _read_bounded(wheel_path, maximum=MAX_ASSET_BYTES)
@@ -368,6 +422,8 @@ def build_bundle(
         dataset_dir / "bge-worker.json": bge_worker,
         dataset_dir / EMBEDDING_DEPENDENCY_MANIFEST_NAME: dependency_manifest_body,
         dataset_dir / EMBEDDING_DEPENDENCY_SMOKE_RUNNER_NAME: smoke_runner,
+        dataset_dir / MASTER_YDB_DEPENDENCY_MANIFEST_NAME: ydb_lock_body,
+        master_wheelhouse_dir / str(ydb_lock["filename"]): ydb_wheel,
     }
     for item in dependency_wheels:
         name = str(item["filename"])
@@ -439,6 +495,16 @@ def build_bundle(
                 "sha256": _sha256(smoke_runner),
                 "byte_size": len(smoke_runner),
             },
+            "master_ydb_dependency_manifest": {
+                "path": f"dataset/{MASTER_YDB_DEPENDENCY_MANIFEST_NAME}",
+                "sha256": _sha256(ydb_lock_body),
+                "byte_size": len(ydb_lock_body),
+            },
+            "master_ydb_wheel": {
+                "path": f"dataset/{MASTER_YDB_WHEELHOUSE_NAME}/{ydb_lock['filename']}",
+                "sha256": _sha256(ydb_wheel),
+                "byte_size": len(ydb_wheel),
+            },
         },
         "embedding_dependency_wheels": [
             {
@@ -498,7 +564,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--postgres-runtime-sha256", required=True)
     parser.add_argument("--tunnel-known-hosts", type=Path, required=True)
     parser.add_argument("--embedding-wheelhouse", type=Path, required=True)
+    parser.add_argument("--master-ydb-wheel", type=Path, required=True)
     return parser.parse_args()
+
+
+def release_asset_dataset_ref(owner: str, source_commit: str) -> str:
+    """Return a release-scoped immutable Dataset ref within Kaggle's slug bound."""
+
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or not re.fullmatch(r"[a-f0-9]{40}", source_commit):
+        raise ValueError("release asset Dataset identity is invalid")
+    return f"{owner}/mdh-master-assets-{source_commit[:32]}"
 
 
 def main() -> int:
@@ -512,7 +587,7 @@ def main() -> int:
         root=root,
         output=args.output.expanduser().resolve(),
         source_commit=commit,
-        launch_dataset_ref=f"{owner}/my-data-hub-master-assets",
+        launch_dataset_ref=release_asset_dataset_ref(owner, commit),
         master_notebook_ref=f"{owner}/my-data-hub-postgres-master",
         checkpoint_dataset_ref=f"{owner}/my-data-hub-checkpoints",
         checkpoint_verifier_ref=f"{owner}/my-data-hub-checkpoint-verifier",
@@ -522,6 +597,8 @@ def main() -> int:
         tunnel_known_hosts=args.tunnel_known_hosts.expanduser().resolve(),
         embedding_wheelhouse=args.embedding_wheelhouse.expanduser().resolve(),
         embedding_dependency_lock=root / EMBEDDING_WHEEL_LOCK_PATH,
+        master_ydb_wheel=args.master_ydb_wheel.expanduser().resolve(),
+        master_ydb_dependency_lock=root / MASTER_YDB_WHEEL_LOCK_PATH,
     )
     print(
         json.dumps(

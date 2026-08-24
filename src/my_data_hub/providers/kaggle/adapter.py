@@ -65,6 +65,7 @@ from .contracts import (
     UnauthenticatedDatasetProbe,
 )
 from .retry import BoundedRetry, RetryPolicy, classify_failure
+from .source_attestation import executable_source_sha256
 
 MAX_EXACT_OUTPUT_PROVIDER_LOG_BYTES = 1024 * 1024
 MAX_BROKERED_BLOB_BYTES = 10 * 1024**3
@@ -1491,7 +1492,7 @@ class KaggleProviderAdapter:
         canonical_source = _canonical_notebook_source(source, kernel_type=kernel_type)
         if str(task_run_id).encode("ascii") not in canonical_source:
             raise KaggleContractError("notebook source must embed the exact task_run_id")
-        source_sha = hashlib.sha256(canonical_source).hexdigest()
+        source_sha = executable_source_sha256(canonical_source, kernel_type=kernel_type)
         normalized_sources = tuple(_normalized_dataset_source(item) for item in dataset_sources)
         if pending_runtime_attestation and (
             not isinstance(docker_image, str)
@@ -1729,7 +1730,9 @@ class KaggleProviderAdapter:
             source_path = folder.joinpath(*code_file.split("/"))
             if not source_path.is_file() or folder not in source_path.parents:
                 raise KaggleContractError("Kaggle source pull did not return a bounded local file")
-            source_sha = sha256_file(source_path)
+            source_sha = executable_source_sha256(
+                source_path.read_bytes(), kernel_type=str(metadata.get("kernel_type") or "")
+            )
         return source_sha, provider_id
 
     def _read_latest_private_notebook_identity(
@@ -1787,7 +1790,11 @@ class KaggleProviderAdapter:
             or not isinstance(source, str)
         ):
             raise KaggleIdentityError("Kaggle latest readback lacks exact private identity")
-        source_sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        kernel_type = str(_field(metadata, "kernel_type", "kernelType") or "")
+        try:
+            source_sha = executable_source_sha256(source.encode("utf-8"), kernel_type=kernel_type)
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+            raise KaggleIdentityError("Kaggle latest readback source contract is invalid") from exc
         if expected_source_sha256 is not None and source_sha != expected_source_sha256:
             raise KaggleIdentityError("Kaggle latest readback differs from the exact pushed source")
         fingerprint = ProviderFingerprint(

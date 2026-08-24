@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -91,6 +92,77 @@ def test_operator_gate_binds_exact_commit_security_receipts_and_signature(tmp_pa
     )
     assert rejected.returncode != 0
     assert "signature is invalid" in rejected.stderr
+
+
+def test_operator_gate_is_issued_only_from_current_ledger_security_checkpoint_authority(tmp_path: Path) -> None:
+    key = tmp_path / "write-gate.key"
+    key.write_bytes(b"operator-gate-test-key-material-32-bytes")
+    key.chmod(0o600)
+    ledger = tmp_path / "control.sqlite3"
+    checkpoint_id = str(uuid4())
+    master_id = str(uuid4())
+    with sqlite3.connect(ledger) as connection:
+        connection.executescript(
+            "CREATE TABLE master_security_evidence (source_commit TEXT,master_instance_id TEXT,epoch INTEGER,"
+            "canonical_revision INTEGER,role_verification_sha256 TEXT,security_test_receipt_sha256 TEXT,"
+            "observed_at TEXT);"
+            "CREATE TABLE checkpoint_heads (service_kind TEXT,current_checkpoint_id TEXT);"
+            "CREATE TABLE checkpoint_candidates (checkpoint_id TEXT,status TEXT,verified_at TEXT,"
+            "master_instance_id TEXT,epoch INTEGER,manifest_json TEXT);"
+        )
+        connection.execute(
+            "INSERT INTO master_security_evidence VALUES (?,?,?,?,?,?,?)",
+            (COMMIT, master_id, 3, 41, "b" * 64, "c" * 64, "2026-08-18T12:00:00Z"),
+        )
+        connection.execute("INSERT INTO checkpoint_heads VALUES ('postgres-master',?)", (checkpoint_id,))
+        connection.execute(
+            "INSERT INTO checkpoint_candidates VALUES (?,'VERIFIED',?,?,?,?)",
+            (checkpoint_id, "2026-08-18T12:01:00Z", master_id, 3, json.dumps({"canonical_revision": 41})),
+        )
+    ledger.chmod(0o600)
+    receipt = tmp_path / "receipt-from-ledger.json"
+    issued = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "issue-from-ledger",
+            "--commit",
+            COMMIT,
+            "--control-ledger",
+            str(ledger),
+            "--expires-at",
+            (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            "--signing-key-file",
+            str(key),
+            "--output",
+            str(receipt),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert issued.returncode == 0, issued.stderr
+    body = json.loads(receipt.read_text())
+    assert body["checkpoint_id"] == checkpoint_id and body["checkpoint_revision"] == 41
+    verified = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "verify",
+            "--commit",
+            COMMIT,
+            "--receipt",
+            str(receipt),
+            "--signing-key-file",
+            str(key),
+            "--control-ledger",
+            str(ledger),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert verified.returncode == 0, verified.stderr
 
 
 def test_operator_install_is_explicit_gated_override_while_base_remains_reader_only() -> None:

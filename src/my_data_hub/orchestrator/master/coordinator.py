@@ -272,16 +272,15 @@ class MasterCoordinator:
                 return True
             event_id = str(uuid5(NAMESPACE_URL, f"provider-terminal-error:{operation.operation_id}"))
             self._deactivate_tunnel_authority(operation.identity, "provider_terminal_failed")
-            self.ledger.project_master_lifecycle(
+            self.ledger.project_master_terminal_failure(
                 operation_id=operation.operation_id,
+                run_id=str(operation.identity["run_id"]),
+                attempt_id=str(operation.identity["attempt_id"]),
                 service_instance_id=str(operation.identity["service_instance_id"]),
                 epoch=int(operation.identity["epoch"]),
                 expected_operation_state=operation.state,
-                operation_state=MasterState.FAILED.value,
-                service_state=MasterState.FENCED.value,
                 event_id=event_id,
             )
-            self.ledger.revoke_runtime_token(str(operation.identity["run_id"]), str(operation.identity["attempt_id"]))
             return True
         if decision != TerminalDecision.SUCCEEDED or output is None:
             return False

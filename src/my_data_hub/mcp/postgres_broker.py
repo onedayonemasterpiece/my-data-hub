@@ -11,21 +11,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import math
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qs, urlsplit
 
-from my_data_hub.embeddings.models import BGE_M3, E5_MULTILINGUAL_BASE
-from my_data_hub.embeddings.rrf import (
-    RankedRetrieverResult,
-    UnavailableRetriever,
-    reciprocal_rank_fusion,
-)
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.contracts import MasterSession, MasterSessionBroker, SessionRequest
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy, change_request_sha256
@@ -58,6 +51,20 @@ WHERE document.is_current
 GROUP BY model.model_key,model.provider_model_id,model.exact_revision,model.dimensions
 ORDER BY model.model_key
 """
+
+_REGION_TALK_READ_TOOLS = frozenset(
+    {
+        "region_talk.inventory",
+        "region_talk.articles.list",
+        "region_talk.articles.get",
+        "region_talk.articles.search",
+        "region_talk.posts.list",
+        "region_talk.posts.get",
+        "region_talk.posts.search",
+        "region_talk.queue.list",
+        "region_talk.queue.summary",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +246,8 @@ _ROLE_GROUPS = {
     "migration_operator": "mdh_migration_operator",
     "operator": "mdh_mcp_editor",
     "provider_operator": "mdh_mcp_editor",
+    "connector": "mdh_connector_intake",
+    "canonical_committer": "mdh_canonical_committer",
 }
 
 
@@ -293,34 +302,38 @@ class PostgresMasterSession(MasterSession):
             connect_timeout=3,
             row_factory=dict_row,
         ) as connection, connection.cursor() as cursor:
-            is_change = self.request.tool in {"data.change.preview", "data.change.apply"}
-            is_reconciliation = self.request.tool == "data.change.reconcile"
+            is_change = self.request.tool in {
+                "data.change.preview",
+                "data.change.apply",
+                "bloggers.import.preview",
+                "bloggers.import.apply",
+            }
+            is_reconciliation = self.request.tool in {
+                "data.change.reconcile",
+                "bloggers.import.reconcile",
+            }
             cursor.execute("SET TRANSACTION READ WRITE" if is_change else "SET TRANSACTION READ ONLY")
-            cursor.execute("SET LOCAL statement_timeout = %s", (self.request.limits.timeout_ms,))
-            cursor.execute("SET LOCAL lock_timeout = %s", (min(2_000, self.request.limits.timeout_ms),))
-            cursor.execute("SET LOCAL idle_in_transaction_session_timeout = %s", (self.request.limits.timeout_ms,))
+            self._set_local_timeouts(cursor)
             cursor.execute("SET LOCAL ROLE " + _ROLE_GROUPS[self.request.role])
             self._assert_restricted_login(cursor)
-            if is_change:
+            if self.request.tool == "submit_discovery_batch":
+                rows = self._dispatch_discovery_submission(arguments)
+            elif self.request.tool.startswith("bloggers.import."):
+                rows = self._dispatch_blogger_import(cursor, arguments)
+            elif is_change:
                 rows = self._dispatch_change(cursor, arguments)
             elif is_reconciliation:
                 rows = self._dispatch_change_reconciliation(cursor, arguments)
             else:
                 rows = self._dispatch(cursor, arguments)
-            state = cursor.execute(
-                "SELECT c.canonical_revision,e.current_epoch "
-                "FROM hub.canonical_state c CROSS JOIN master_control.epoch_state e "
-                "WHERE c.singleton=true AND e.singleton=true"
-            ).fetchone()
-            if self.request.tool == "data.change.apply":
+            canonical_revision = self._canonical_revision(cursor)
+            if self.request.tool in {"data.change.apply", "bloggers.import.preview", "bloggers.import.apply"}:
                 connection.commit()
             else:
                 connection.rollback()
-        if state is None or int(state["current_epoch"] or 0) != self.request.epoch:
-            raise SessionBrokerError("master epoch changed during the MCP session")
         result = {
             **rows,
-            "canonical_revision": int(state["canonical_revision"]),
+            "canonical_revision": canonical_revision,
             "master_epoch": self.request.epoch,
         }
         encoded = canonical_json_bytes(_jsonable(result))
@@ -328,12 +341,208 @@ class PostgresMasterSession(MasterSession):
             raise SessionBrokerError("master response exceeds the broker byte cap")
         return _jsonable(result)
 
+    def _canonical_revision(self, cursor: Any) -> int:
+        """Return the revision without granting readers epoch-control authority.
+
+        The credential envelope and loopback tunnel are already bound to the
+        resolved ACTIVE master instance and epoch.  Canonical write functions
+        perform their own database-side epoch checks.  Reading
+        ``master_control.epoch_state`` here was both redundant and invalid for
+        the deliberately restricted reader/connector roles.
+
+        Connector intake does not mutate canonical state and intentionally has
+        no access to ``hub.canonical_state``.  For that role the control-plane
+        snapshot carried in the session request is the exact bounded response
+        metadata.  All roles that may observe or mutate canonical data read the
+        post-dispatch revision from the canonical singleton itself.
+        """
+
+        if self.request.role == "connector":
+            if self.request.canonical_revision is None:
+                raise SessionBrokerError(
+                    "connector session omitted the resolved canonical revision"
+                )
+            return self.request.canonical_revision
+        row = cursor.execute(
+            "SELECT canonical_revision FROM hub.canonical_state WHERE singleton=true"
+        ).fetchone()
+        if row is None:
+            raise SessionBrokerError("canonical revision singleton is absent")
+        value = row["canonical_revision"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise SessionBrokerError("canonical revision singleton is invalid")
+        return value
+
+    def _set_local_timeouts(self, cursor: Any) -> None:
+        """Set transaction-local timeouts without parameterizing SET syntax.
+
+        PostgreSQL's ``SET ... = value`` production does not accept a bind
+        placeholder. ``set_config`` accepts a bound text value and its final
+        ``true`` argument keeps each setting transaction-local.
+        """
+
+        values = (
+            ("statement_timeout", self.request.limits.timeout_ms),
+            ("lock_timeout", min(2_000, self.request.limits.timeout_ms)),
+            ("idle_in_transaction_session_timeout", self.request.limits.timeout_ms),
+        )
+        for setting, milliseconds in values:
+            cursor.execute(
+                f"SELECT pg_catalog.set_config('{setting}', %s, true)",
+                (f"{milliseconds}ms",),
+            )
+
+    def _dispatch_discovery_submission(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self.request.role != "connector" or set(arguments) != {"payload"}:
+            raise SessionBrokerError("blogger discovery intake requires one closed payload")
+        raw = arguments.get("payload")
+        if not isinstance(raw, Mapping):
+            raise SessionBrokerError("blogger discovery payload must be an object")
+        from my_data_hub.connectors.postgres import PostgresConnectorAcceptanceRepository
+        from my_data_hub.connectors.service import ConnectorIntakeService
+        from my_data_hub.workloads.bloggers.discovery import validate_submit_discovery_batch
+
+        request = validate_submit_discovery_batch(raw)
+        envelope = request.connector_envelope()
+        decision = ConnectorIntakeService(
+            PostgresConnectorAcceptanceRepository(
+                self.credential.database_url, session_role="mdh_connector_intake"
+            )
+        ).submit(
+            request.connector_envelope_bytes(),
+            authenticated_connector_id=envelope.connector_id,
+            authenticated_principal=f"service:{envelope.connector_id}",
+            correlation_id=request.request_sha256[:32],
+            artifact_record_count=request.record_count if request.artifact is not None else None,
+        )
+        response: dict[str, Any] = {
+            "batch_id": str(request.batch_id),
+            "request_sha256": request.request_sha256,
+            "payload_sha256": request.semantic_payload_sha256,
+            "record_count": request.record_count,
+            "delivery_mode": request.delivery_mode.value,
+            "disposition": decision.disposition.value,
+        }
+        if decision.receipt is not None:
+            response["receipt"] = decision.receipt.model_dump(mode="json")
+        if decision.quarantine is not None:
+            response["quarantine"] = _jsonable(asdict(decision.quarantine))
+        if request.artifact is not None:
+            response.update(
+                materialization_required=True,
+                materialization_state="AWAITING_VERIFIED_PROVIDER_MATERIALIZER",
+            )
+        return response
+
+    def _dispatch_blogger_import(
+        self, cursor: Any, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        if self.request.role != "canonical_committer":
+            raise SessionBrokerError("blogger import requires canonical_committer credential")
+        from my_data_hub.workloads.bloggers.discovery_postgres import (
+            BloggerDiscoveryPostgres,
+            BloggerImportIdentity,
+        )
+
+        required = {
+            "operation_id",
+            "batch_id",
+            "request_sha256",
+            "expected_revision",
+            "principal_id",
+            "client_id",
+        }
+        permit = arguments.get("_write_permit")
+        if self.request.tool != "bloggers.import.reconcile":
+            required = required | {"_write_permit"}
+            if not isinstance(permit, dict) or set(permit) != {
+                "permit_id", "tool", "master_epoch", "canonical_revision", "expires_at"
+            }:
+                raise SessionBrokerError("blogger import lacks an exact write permit")
+            if (
+                permit["permit_id"] != arguments.get("operation_id")
+                or permit["tool"] != self.request.tool
+                or permit["master_epoch"] != self.request.epoch
+                or permit["canonical_revision"] != arguments.get("expected_revision")
+                or int(permit["expires_at"]) <= int(datetime.now(UTC).timestamp())
+            ):
+                raise SessionBrokerError("blogger import permit is stale or mismatched")
+        if self.request.tool in {"bloggers.import.apply", "bloggers.import.reconcile"}:
+            required = required | {"plan_sha256"}
+        if self.request.tool == "bloggers.import.reconcile":
+            required = required | {"master_instance_id", "master_epoch"}
+        if set(arguments) != required:
+            raise SessionBrokerError("blogger import arguments differ from the fixed contract")
+        if (
+            arguments["principal_id"] != self.request.principal.subject
+            or arguments["client_id"] != self.request.principal.client_id
+        ):
+            raise SessionBrokerError("blogger import identity differs from the session")
+        from uuid import UUID
+
+        identity = BloggerImportIdentity(
+            batch_id=UUID(str(arguments["batch_id"])),
+            operation_id=str(arguments["operation_id"]),
+            request_sha256=str(arguments["request_sha256"]),
+            expected_revision=int(arguments["expected_revision"]),
+            principal_id=str(arguments["principal_id"]),
+            client_id=str(arguments["client_id"]),
+        )
+        if self.request.tool == "bloggers.import.preview":
+            receipt = BloggerDiscoveryPostgres.preview(cursor, identity)
+            return {
+                "operation_id": receipt.operation_id,
+                "batch_id": str(receipt.batch_id),
+                "request_sha256": receipt.request_sha256,
+                "plan_sha256": receipt.plan_sha256,
+                "expected_revision": receipt.expected_revision,
+                "summary": {
+                    "create_actor_count": receipt.create_actor_count,
+                    "link_existing_count": receipt.link_existing_count,
+                    "quarantine_count": receipt.quarantine_count,
+                    "account_count": receipt.account_count,
+                },
+                "status": "PREVIEW_EXECUTED",
+            }
+        if self.request.tool == "bloggers.import.apply":
+            receipt = BloggerDiscoveryPostgres.apply(
+                cursor, identity, plan_sha256=str(arguments["plan_sha256"])
+            )
+        else:
+            receipt = BloggerDiscoveryPostgres.reconcile(
+                cursor,
+                identity,
+                plan_sha256=str(arguments["plan_sha256"]),
+                master_instance_id=UUID(str(arguments["master_instance_id"])),
+                master_epoch=int(arguments["master_epoch"]),
+            )
+            if receipt is None:
+                return {"found": False, "operation_id": identity.operation_id}
+        result = {
+            "found": True,
+            "operation_id": receipt.operation_id,
+            "batch_id": str(receipt.batch_id),
+            "plan_sha256": receipt.plan_sha256,
+            "affected_rows": receipt.affected_rows,
+            "committed_revision": receipt.revision_after,
+            "duplicate": receipt.duplicate,
+            "request_sha256": identity.request_sha256,
+            "receipt_master_instance_id": str(arguments.get("master_instance_id", self.request.master_instance_id)),
+            "receipt_master_epoch": int(arguments.get("master_epoch", self.request.epoch)),
+            "expected_revision": identity.expected_revision,
+            "principal_id": identity.principal_id,
+            "client_id": identity.client_id,
+            "status": "COMMITTED_PENDING_CHECKPOINT",
+        }
+        if receipt.committed_at is not None:
+            result["committed_at"] = receipt.committed_at
+        return result
+
     def _assert_restricted_login(self, cursor: Any) -> None:
         row = cursor.execute(
             "SELECT r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolreplication,r.rolbypassrls,"
             "pg_has_role(session_user,%s,'member') AS requested_member,"
-            "pg_has_role(session_user,'mdh_owner','member') AS owner_member,"
-            "pg_has_role(session_user,'mdh_role_admin','member') AS role_admin_member "
+            "pg_has_role(session_user,'mdh_owner','member') AS owner_member "
             "FROM pg_roles r WHERE r.rolname=session_user",
             (_ROLE_GROUPS[self.request.role],),
         ).fetchone()
@@ -341,7 +550,7 @@ class PostgresMasterSession(MasterSession):
             row is None
             or any(bool(row[name]) for name in (
                 "rolsuper", "rolcreatedb", "rolcreaterole", "rolreplication", "rolbypassrls",
-                "owner_member", "role_admin_member",
+                "owner_member",
             ))
             or not bool(row["requested_member"])
         ):
@@ -466,31 +675,47 @@ class PostgresMasterSession(MasterSession):
     def _dispatch(self, cursor: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         tool = self.request.tool
         limit = self.request.limits.max_rows
+        if tool in _REGION_TALK_READ_TOOLS:
+            return self._dispatch_region_talk_read(cursor, arguments)
         if tool == "runtime.stale_epoch.probe":
             cursor.execute("SELECT current_epoch FROM master_control.epoch_state WHERE singleton=true")
             row = cursor.fetchone()
             return {"observed_epoch": int(row["current_epoch"]) if row else None}
         if tool == "bloggers.list":
-            requested = min(int(arguments.get("limit", 50)), limit)
-            cursor_value = arguments.get("cursor")
-            cursor.execute(
-                "SELECT * FROM region_talk.bloggers_ru_v1 "
-                "WHERE (%s::uuid IS NULL OR blogger_id > %s::uuid) "
-                "ORDER BY blogger_id LIMIT %s",
-                (cursor_value, cursor_value, requested + 1),
+            from my_data_hub.workloads.bloggers.discovery_reader import (
+                BloggerDiscoveryReader,
+                BloggerSearchRequest,
             )
-            rows = cursor.fetchall()
-            has_more = len(rows) > requested
-            page = rows[:requested]
+
+            requested = min(int(arguments.get("limit", 50)), limit, 100)
+            rows = BloggerDiscoveryReader.search(
+                cursor,
+                BloggerSearchRequest(
+                    project_slug=str(arguments.get("project_slug", "")),
+                    limit=requested,
+                    after_name=arguments.get("after_name"),
+                    after_blogger_id=arguments.get("after_blogger_id"),
+                ),
+            )
             return {
-                "items": page,
-                "cursor": str(page[-1]["blogger_id"]) if has_more and page else None,
-                "complete": not has_more,
+                "items": [asdict(row) for row in rows],
+                "next_cursor": (
+                    {
+                        "after_name": rows[-1].display_name,
+                        "after_blogger_id": str(rows[-1].blogger_id),
+                    }
+                    if len(rows) == requested
+                    else None
+                ),
+                "complete": len(rows) < requested,
             }
         if tool == "bloggers.get":
             row = cursor.execute(
-                "SELECT * FROM region_talk.bloggers_ru_v1 WHERE blogger_id=%s::uuid",
-                (arguments.get("blogger_id"),),
+                "SELECT b.blogger_id,b.display_name,b.actor_kind,b.public_description,"
+                "b.public_accounts,b.requires_review FROM hub.bloggers_v1 b "
+                "JOIN hub.project p ON p.project_id=b.project_id "
+                "WHERE p.slug=%s AND b.blogger_id=%s::uuid",
+                (arguments.get("project_slug"), arguments.get("blogger_id")),
             ).fetchone()
             return {"found": row is not None, "blogger": row}
         if tool == "bloggers.provenance":
@@ -507,7 +732,9 @@ class PostgresMasterSession(MasterSession):
             row = cursor.execute(
                 "SELECT count(*) AS bloggers, count(*) FILTER (WHERE requires_review) AS requires_review,"
                 "count(*) FILTER (WHERE jsonb_array_length(public_accounts)>0) AS with_public_accounts "
-                "FROM region_talk.bloggers_ru_v1"
+                "FROM hub.bloggers_v1 b JOIN hub.project p ON p.project_id=b.project_id "
+                "WHERE p.slug=%s",
+                (arguments.get("project_slug"),),
             ).fetchone()
             return {"statistics": row}
         if tool == "bloggers.migration.accounting":
@@ -555,148 +782,33 @@ class PostgresMasterSession(MasterSession):
                 "complete": bool(rows) and all(float(row["coverage"]) == 1.0 for row in rows),
             }
         if tool == "bloggers.search":
-            query = str(arguments.get("query", "")).strip()
-            if not 1 <= len(query) <= 500:
-                raise SessionBrokerError("blogger search query is empty or oversized")
-            requested = min(int(arguments.get("limit", 20)), limit)
-            candidate_limit = min(max(requested * 5, 50), 500)
-            exact_ids = tuple(
-                str(row["blogger_id"])
-                for row in cursor.execute(
-                    "SELECT blogger_id FROM region_talk.bloggers_ru_v1 "
-                    "WHERE display_name ILIKE '%%'||%s||'%%' "
-                    "ORDER BY (lower(display_name)=lower(%s)) DESC,lower(display_name),blogger_id LIMIT %s",
-                    (query, query, candidate_limit),
-                ).fetchall()
+            from my_data_hub.workloads.bloggers.discovery_reader import (
+                BloggerDiscoveryReader,
+                BloggerSearchRequest,
             )
-            fts_ids = tuple(
-                str(row["actor_id"])
-                for row in cursor.execute(
-                    "SELECT actor_id FROM search.document WHERE is_current "
-                    "AND search_vector @@ websearch_to_tsquery('pg_catalog.russian',%s) "
-                    "ORDER BY ts_rank_cd(search_vector,websearch_to_tsquery('pg_catalog.russian',%s)) DESC,"
-                    "actor_id LIMIT %s",
-                    (query, query, candidate_limit),
-                ).fetchall()
+
+            requested = min(int(arguments.get("limit", 20)), limit, 100)
+            request = BloggerSearchRequest.model_validate(
+                {
+                    "project_slug": arguments.get("project_slug"),
+                    "query": arguments.get("query"),
+                    "limit": requested,
+                    "after_name": arguments.get("after_name"),
+                    "after_blogger_id": arguments.get("after_blogger_id"),
+                }
             )
-            coverage = cursor.execute(
-                "SELECT model_exact_id,expected_documents,completed_documents,"
-                "CASE WHEN expected_documents=0 THEN 0.0 "
-                "ELSE completed_documents::double precision/expected_documents END AS coverage "
-                f"FROM ({_EMBEDDING_COVERAGE_SQL}) coverage"
-            ).fetchall()
-            rankings = [
-                RankedRetrieverResult(name="exact", document_ids=exact_ids),
-                RankedRetrieverResult(name="fts", document_ids=fts_ids),
-            ]
-            index_revision_row = cursor.execute(
-                "SELECT canonical_revision FROM hub.canonical_state WHERE singleton=true"
-            ).fetchone()
-            index_revision = int(index_revision_row["canonical_revision"])
-            unavailable: list[UnavailableRetriever] = []
-            vector_specs = (
-                (
-                    "e5", "e5_query_vector", 768, "embedding_768",
-                    "e5_multilingual_base_v1", E5_MULTILINGUAL_BASE,
-                ),
-                (
-                    "bge_m3", "bge_m3_query_vector", 1024, "embedding_1024",
-                    "bge_m3_dense_v1", BGE_M3,
-                ),
-            )
-            for name, argument_name, dimensions, table, vector_space, model_contract in vector_specs:
-                vector = arguments.get(argument_name)
-                if vector is None:
-                    query_sha256 = hashlib.sha256(query.encode()).hexdigest()
-                    query_table = table.replace("embedding_", "query_embedding_")
-                    cached = cursor.execute(
-                        f"SELECT q.embedding::text AS embedding,q.created_revision FROM search.{query_table} q "
-                        "JOIN search.embedding_model m ON m.model_id=q.model_id "
-                        "WHERE q.query_sha256=%s AND m.dimensions=%s AND m.provider_model_id=%s "
-                        "AND m.exact_revision=%s AND q.model_revision=m.exact_revision",
-                        (
-                            query_sha256,
-                            dimensions,
-                            model_contract.model_key,
-                            model_contract.revision,
-                        ),
-                    ).fetchone()
-                    if cached is None:
-                        unavailable.append(
-                            UnavailableRetriever(
-                                name=name, reason="exact_query_vector_absent", retryable=False
-                            )
-                        )
-                        continue
-                    halfvec = str(cached["embedding"])
-                else:
-                    if (
-                        not isinstance(vector, list)
-                        or len(vector) != dimensions
-                        or any(
-                            not isinstance(item, (int, float)) or not math.isfinite(float(item))
-                            for item in vector
-                        )
-                    ):
-                        raise SessionBrokerError(f"{name} query vector violates its exact vector space")
-                    norm = math.sqrt(sum(float(item) ** 2 for item in vector))
-                    if not 0.999 <= norm <= 1.001:
-                        raise SessionBrokerError(f"{name} query vector is not L2-normalized")
-                    halfvec = "[" + ",".join(format(float(item), ".9g") for item in vector) + "]"
-                vector_rows = cursor.execute(
-                    f"SELECT d.actor_id,m.exact_revision FROM search.{table} e "
-                    "JOIN search.document d ON d.search_document_id=e.search_document_id AND d.is_current "
-                    "JOIN search.embedding_model m ON m.model_id=e.model_id "
-                    "JOIN search.embedding_job j ON j.search_document_id=e.search_document_id "
-                    "AND j.model_id=e.model_id AND j.input_hash=e.input_hash AND j.status='succeeded' "
-                    "WHERE m.provider_model_id=%s AND m.exact_revision=%s "
-                    "ORDER BY e.embedding <=> %s::halfvec,d.actor_id LIMIT %s",
-                    (
-                        model_contract.model_key,
-                        model_contract.revision,
-                        halfvec,
-                        candidate_limit,
-                    ),
-                ).fetchall()
-                rankings.append(
-                    RankedRetrieverResult(
-                        name=name,
-                        document_ids=tuple(str(row["actor_id"]) for row in vector_rows),
-                        index_revision=index_revision,
-                        vector_space=vector_space,
-                    )
-                )
-            fused = reciprocal_rank_fusion(
-                requested_retrievers=("exact", "fts", "e5", "bge_m3"),
-                rankings=tuple(rankings),
-                unavailable=tuple(unavailable),
-            )
-            selected = [hit.document_id for hit in fused.hits[:requested]]
-            rows_by_id: dict[str, Any] = {}
-            if selected:
-                detail_rows = cursor.execute(
-                    "SELECT * FROM region_talk.bloggers_ru_v1 WHERE blogger_id=ANY(%s::uuid[])",
-                    (selected,),
-                ).fetchall()
-                rows_by_id = {str(row["blogger_id"]): row for row in detail_rows}
-            rows = [
-                {**rows_by_id[hit.document_id], "rrf": hit.model_dump(mode="json")}
-                for hit in fused.hits[:requested]
-                if hit.document_id in rows_by_id
-            ]
+            rows = BloggerDiscoveryReader.search(cursor, request)
             return {
-                "items": rows,
-                "cursor": None,
-                "canonical_revision": index_revision,
-                "retrievers": {
-                    "requested": list(fused.coverage.retrievers_requested),
-                    "completed": list(fused.coverage.retrievers_completed),
-                    "unavailable": [item.name for item in fused.coverage.retrievers_unavailable],
-                    "details": fused.coverage.model_dump(mode="json"),
-                    "rrf_k": fused.rrf_k,
-                },
-                "embedding_coverage": coverage,
-                "complete": fused.coverage.is_complete,
+                "items": [asdict(row) for row in rows],
+                "next_cursor": (
+                    {
+                        "after_name": rows[-1].display_name,
+                        "after_blogger_id": str(rows[-1].blogger_id),
+                    }
+                    if len(rows) == requested
+                    else None
+                ),
+                "complete": len(rows) < requested,
             }
         if tool == "data.query":
             parameters = arguments.get("parameters", [])
@@ -717,6 +829,62 @@ class PostgresMasterSession(MasterSession):
             truncated = len(rows) > limit
             return {"columns": columns, "rows": rows[:limit], "truncated": truncated}
         raise SessionBrokerError("tool is not implemented by the read-only PostgreSQL broker")
+
+    def _dispatch_region_talk_read(
+        self,
+        cursor: Any,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Dispatch only fixed Region Talk reader methods; never accept SQL."""
+
+        from uuid import UUID
+
+        from my_data_hub.mcp.region_talk_schemas import (
+            region_talk_page,
+            region_talk_reader_request,
+            validate_region_talk_arguments,
+        )
+        from my_data_hub.workloads.region_talk.reader import RegionTalkReader
+
+        tool = self.request.tool
+        validated = validate_region_talk_arguments(tool, arguments)
+        request = region_talk_reader_request(validated)
+        if tool == "region_talk.inventory":
+            result = RegionTalkReader.inventory(cursor)
+            if not isinstance(result, Mapping):
+                raise SessionBrokerError("Region Talk inventory reader returned an invalid result")
+            return dict(result)
+        if tool == "region_talk.queue.summary":
+            result = RegionTalkReader.queue_summary(cursor)
+            if not isinstance(result, Mapping):
+                raise SessionBrokerError("Region Talk queue summary reader returned an invalid result")
+            return dict(result)
+        if tool == "region_talk.articles.get":
+            result = RegionTalkReader.get_article(cursor, UUID(str(validated["item_id"])))
+            if result is not None and not isinstance(result, Mapping):
+                raise SessionBrokerError("Region Talk article reader returned an invalid result")
+            return {"found": result is not None, "article": dict(result) if result else None}
+        if tool == "region_talk.posts.get":
+            result = RegionTalkReader.get_post(cursor, UUID(str(validated["item_id"])))
+            if result is not None and not isinstance(result, Mapping):
+                raise SessionBrokerError("Region Talk post reader returned an invalid result")
+            return {"found": result is not None, "post": dict(result) if result else None}
+        reader_names = {
+            "region_talk.articles.list": "list_articles",
+            "region_talk.articles.search": "search_articles",
+            "region_talk.posts.list": "list_posts",
+            "region_talk.posts.search": "search_posts",
+            "region_talk.queue.list": "list_queue",
+        }
+        reader_name = reader_names.get(tool)
+        if reader_name is None:  # pragma: no cover - guarded by the exact tool set above
+            raise SessionBrokerError("Region Talk reader tool is not implemented")
+        reader = getattr(RegionTalkReader, reader_name)
+        result = reader(cursor, request)
+        try:
+            return region_talk_page(result, arguments=validated)
+        except ValueError as exc:
+            raise SessionBrokerError(str(exc)) from exc
 
 
 def _jsonable(value: Any) -> Any:

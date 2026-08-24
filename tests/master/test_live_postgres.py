@@ -11,10 +11,11 @@ from uuid import UUID
 
 import pytest
 
-from my_data_hub.db.migrations import migrate
+from my_data_hub.db.migrations import discover_migrations, migrate
 from my_data_hub.master_runtime.contracts import MasterIdentity
 from my_data_hub.master_runtime.credentials import CredentialProvisioner
 from my_data_hub.master_runtime.database_gate import DatabaseGate
+from my_data_hub.master_runtime.role_security_probe import run_role_security_probes
 from my_data_hub.workloads.bloggers.importer import BloggerSnapshotImporter
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -79,6 +80,13 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
         with psycopg.connect(admin_url) as admin:
             admin.execute((ROOT / "sql/admin/role_contract.sql").read_text())
             admin.commit()
+        with psycopg.connect(admin_url) as admin:
+            security = run_role_security_probes(admin)
+        assert security["ok"] is True
+        assert security["probe_count"] == 94
+        assert security["role_probe_count"] == 16
+        assert security["security_probe_count"] == 78
+        assert security["failures"] == []
 
         now = datetime.now(UTC)
         a = MasterIdentity(UUID("11111111-1111-4111-8111-111111111111"), "docker-run-a", 1)
@@ -401,9 +409,10 @@ def test_live_old_session_commit_is_rejected_after_fence_and_epoch_rotation() ->
                 "SELECT highest_epoch,current_epoch,gate_state FROM master_control.epoch_state"
             ).fetchone()
             assert state == (3, 3, "open")
+            expected_schema_revision = discover_migrations(ROOT / "sql/migrations")[-1].version
             assert admin.execute(
                 "SELECT schema_revision FROM hub.canonical_state WHERE singleton"
-            ).fetchone()[0] == 19
+            ).fetchone()[0] == expected_schema_revision
             assert admin.execute(
                 "SELECT canonical_revision FROM hub.canonical_state WHERE singleton"
             ).fetchone()[0] == first_import.canonical_revision

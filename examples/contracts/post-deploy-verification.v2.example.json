@@ -77,7 +77,17 @@
       "master.status",
       "operation.get",
       "platform.status",
-      "provider.resources.status"
+      "provider.resources.status",
+      "region_talk.articles.get",
+      "region_talk.articles.list",
+      "region_talk.articles.search",
+      "region_talk.inventory",
+      "region_talk.pipeline.status",
+      "region_talk.posts.get",
+      "region_talk.posts.list",
+      "region_talk.posts.search",
+      "region_talk.queue.list",
+      "region_talk.queue.summary"
     ],
     "writes_discoverable": false
   },

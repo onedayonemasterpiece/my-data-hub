@@ -15,7 +15,8 @@ class ControlLedgerVerifiedCheckpointCoordinator:
     This adapter does not upload, verify, or promote checkpoints. The task-bound
     master runtime claims the durable request, exits its ACTIVE loop, and uses its
     existing ``RuntimeCheckpointCoordinator`` / central upload broker. This class
-    returns terminal success only from the resulting current VERIFIED ledger head.
+    returns terminal success only from a VERIFIED checkpoint that is still in
+    the current ledger HEAD ancestry.
     """
 
     ledger: ControlLedger
@@ -68,19 +69,50 @@ class ControlLedgerVerifiedCheckpointCoordinator:
                         failure_code=f"MASTER_{source.state}_WITHOUT_VERIFIED_CHECKPOINT",
                     )
         elif row["state"] == "DURABLE_COMPLETE":
-            head = self.ledger.checkpoint_head("postgres-master")
             candidate = self.ledger.checkpoint_candidate(str(row["checkpoint_id"]))
             if (
-                head is None
-                or head.current_checkpoint_id != row["checkpoint_id"]
-                or candidate is None
+                candidate is None
                 or candidate.get("status") != "VERIFIED"
                 or candidate.get("manifest_sha256") != row["manifest_sha256"]
+                or not self._is_current_or_verified_ancestor(str(row["checkpoint_id"]))
             ):
                 raise RuntimeError(
-                    "recorded connector durability checkpoint is no longer exact current VERIFIED HEAD"
+                    "recorded connector durability checkpoint is not in the current verified checkpoint ancestry"
                 )
         return self._status(row)
+
+    def _is_current_or_verified_ancestor(self, checkpoint_id: str) -> bool:
+        """Prove that ``checkpoint_id`` remains protected by the current HEAD.
+
+        Advancing HEAD must not invalidate an already durable operation.  The
+        proof follows only VERIFIED, generation-consistent parent links and is
+        bounded by the durable HEAD generation; a missing link or cycle fails
+        closed.
+        """
+
+        head = self.ledger.checkpoint_head("postgres-master")
+        if head is None or head.current_checkpoint_id is None:
+            return False
+        current_checkpoint_id: str | None = head.current_checkpoint_id
+        expected_source_generation = head.generation - 1
+        seen: set[str] = set()
+        for _ in range(head.generation):
+            if current_checkpoint_id is None or current_checkpoint_id in seen:
+                return False
+            seen.add(current_checkpoint_id)
+            candidate = self.ledger.checkpoint_candidate(current_checkpoint_id)
+            if candidate is None or candidate.get("status") != "VERIFIED":
+                return False
+            if current_checkpoint_id == checkpoint_id:
+                return True
+            if candidate.get("source_head_generation") != expected_source_generation:
+                return False
+            source_checkpoint_id = candidate.get("source_checkpoint_id")
+            current_checkpoint_id = (
+                str(source_checkpoint_id) if isinstance(source_checkpoint_id, str) else None
+            )
+            expected_source_generation -= 1
+        return False
 
     @staticmethod
     def _status(row: dict[str, Any]) -> dict[str, Any]:

@@ -9,7 +9,8 @@ BEGIN
         'mdh_owner', 'mdh_migrator', 'mdh_application', 'mdh_orchestrator',
         'mdh_connector_intake', 'mdh_mcp_reader', 'mdh_mcp_editor',
         'mdh_migration_operator', 'mdh_canonical_committer', 'mdh_backup', 'mdh_monitoring',
-        'mdh_authenticator', 'mdh_master_controller', 'mdh_checkpoint', 'mdh_embedding_worker'
+        'mdh_authenticator', 'mdh_master_controller', 'mdh_checkpoint', 'mdh_embedding_worker',
+        'mdh_blogger_materializer'
     ] LOOP
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
             EXECUTE format('CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS', role_name);
@@ -29,7 +30,7 @@ GRANT mdh_owner TO mdh_migrator;
 DO $$
 BEGIN
     EXECUTE format('REVOKE ALL ON DATABASE %I FROM PUBLIC', current_database());
-    EXECUTE format('GRANT CONNECT ON DATABASE %I TO mdh_migrator, mdh_application, mdh_orchestrator, mdh_connector_intake, mdh_mcp_reader, mdh_mcp_editor, mdh_migration_operator, mdh_canonical_committer, mdh_backup, mdh_monitoring, mdh_authenticator, mdh_master_controller, mdh_checkpoint, mdh_embedding_worker', current_database());
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO mdh_migrator, mdh_application, mdh_orchestrator, mdh_connector_intake, mdh_mcp_reader, mdh_mcp_editor, mdh_migration_operator, mdh_canonical_committer, mdh_backup, mdh_monitoring, mdh_authenticator, mdh_master_controller, mdh_checkpoint, mdh_embedding_worker, mdh_blogger_materializer', current_database());
     EXECUTE format('GRANT CREATE, TEMPORARY ON DATABASE %I TO mdh_migrator', current_database());
     EXECUTE format('GRANT TEMPORARY ON DATABASE %I TO mdh_application, mdh_orchestrator', current_database());
 END
@@ -96,6 +97,15 @@ GRANT SELECT, INSERT, UPDATE ON search.document, search.embedding_job,
 GRANT SELECT, INSERT ON search.embedding_768, search.embedding_1024 TO mdh_canonical_committer;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA integration, sync TO mdh_canonical_committer;
 GRANT EXECUTE ON FUNCTION hub.advance_canonical_revision(bigint) TO mdh_canonical_committer;
+GRANT SELECT ON hub.bloggers_v1 TO mdh_mcp_reader;
+GRANT USAGE ON SCHEMA integration TO mdh_blogger_materializer;
+GRANT EXECUTE ON FUNCTION integration.materialize_blogger_discovery_artifact(uuid,text,jsonb,text)
+    TO mdh_blogger_materializer;
+GRANT EXECUTE ON FUNCTION
+    integration.preview_blogger_discovery(uuid,text,text,bigint,text,text),
+    integration.apply_blogger_discovery(uuid,text,text,text,bigint,text,text),
+    integration.reconcile_blogger_discovery(text,text,text,uuid,bigint,bigint,text,text)
+    TO mdh_canonical_committer;
 GRANT SELECT ON ALL TABLES IN SCHEMA hub, analysis, orchestration, sync, region_talk, joplin
     TO mdh_mcp_reader;
 -- Raw migration payloads and exact artifact locators are migration-owner-only.

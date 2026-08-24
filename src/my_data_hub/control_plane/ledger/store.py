@@ -9,7 +9,7 @@ import sqlite3
 import stat
 import threading
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -73,7 +73,15 @@ def _safe_json(value: Mapping[str, Any] | None, *, max_bytes: int = MAX_METADATA
             for key, nested in candidate.items():
                 lowered = str(key).lower()
                 safe_boolean_observation = lowered == "credentials_invalidated" and nested is True
-                if any(fragment in lowered for fragment in _SECRET_FRAGMENTS) and not safe_boolean_observation:
+                safe_authorization_identifier = False
+                if lowered == "authorization_id" and isinstance(nested, str):
+                    with suppress(ValueError):
+                        safe_authorization_identifier = str(UUID(nested)) == nested
+                if (
+                    any(fragment in lowered for fragment in _SECRET_FRAGMENTS)
+                    and not safe_boolean_observation
+                    and not safe_authorization_identifier
+                ):
                     raise EventRejected(f"secret-bearing field is forbidden in the control ledger: {key}")
                 inspect(nested)
         elif isinstance(candidate, (list, tuple)):
@@ -122,21 +130,35 @@ class ControlLedger:
         with self._permission_lock:
             for suffix in ("", "-wal", "-shm"):
                 candidate = Path(f"{self.path}{suffix}")
-                flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
                 try:
-                    descriptor = os.open(candidate, flags)
+                    before = os.stat(candidate, follow_symlinks=False)
                 except FileNotFoundError:
                     # SQLite may unlink WAL/SHM while a connection is closing.
                     # Absence is safe; each connection tightens new sidecars.
                     continue
                 except OSError as exc:
                     raise ValueError("control ledger files must be regular non-symlinks") from exc
+
+                if not stat.S_ISREG(before.st_mode):
+                    raise ValueError("control ledger files must be regular non-symlinks")
                 try:
-                    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                        raise ValueError("control ledger files must be regular non-symlinks")
-                    os.fchmod(descriptor, 0o600)
-                finally:
-                    os.close(descriptor)
+                    # Do not open and close the database, WAL or SHM paths here.  On
+                    # POSIX, closing any descriptor for a file releases every advisory
+                    # lock that this process holds for that inode.  Doing so while a
+                    # sibling SQLite connection is active can invalidate WAL locking
+                    # and crash a process with SIGBUS.  Path-based chmod preserves the
+                    # SQLite descriptors and their locks.
+                    os.chmod(candidate, 0o600, follow_symlinks=False)
+                    after = os.stat(candidate, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise ValueError("control ledger files must be regular non-symlinks") from exc
+                if (
+                    not stat.S_ISREG(after.st_mode)
+                    or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+                ):
+                    raise ValueError("control ledger files must be stable regular non-symlinks")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -1380,6 +1402,98 @@ class ControlLedger:
                 ),
             )
 
+    def project_master_terminal_failure(
+        self,
+        *,
+        operation_id: str,
+        run_id: str,
+        attempt_id: str,
+        service_instance_id: str,
+        epoch: int,
+        expected_operation_state: str,
+        event_id: str,
+    ) -> None:
+        """Fence a provider-terminal master even before service registration.
+
+        Kaggle can fail after the run was durably triggered but before the
+        Notebook emits its first authenticated service event.  In that state
+        there is intentionally no ``services`` row yet; requiring one would
+        strand the operation in REGISTERING forever.
+        """
+
+        now = _format_time(self.clock.now())
+        metadata = _safe_json({"event_id": event_id, "code": "PROVIDER_TERMINAL_FAILED"})
+        with self._transaction() as connection:
+            operation = connection.execute(
+                "SELECT state FROM operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            attempt = connection.execute(
+                "SELECT state,service_instance_id,epoch FROM run_attempts "
+                "WHERE operation_id=? AND run_id=? AND attempt_id=?",
+                (operation_id, run_id, attempt_id),
+            ).fetchone()
+            current = connection.execute(
+                "SELECT current_epoch FROM service_epochs WHERE service_kind='postgres-master'"
+            ).fetchone()
+            service = connection.execute(
+                "SELECT state,epoch FROM services WHERE service_instance_id=?", (service_instance_id,)
+            ).fetchone()
+            status_authority = connection.execute(
+                "SELECT resource_lease_json FROM master_status_dataset_authorities WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if operation is None or attempt is None or current is None:
+                raise StaleRuntimeEvent("provider-terminal master identity is incomplete")
+            if operation["state"] == "FAILED" and attempt["state"] == "FAILED":
+                return
+            if (
+                operation["state"] != expected_operation_state
+                or attempt["service_instance_id"] != service_instance_id
+                or int(attempt["epoch"]) != epoch
+                or int(current[0]) != epoch
+                or (service is not None and int(service["epoch"]) != epoch)
+            ):
+                raise StaleRuntimeEvent("provider-terminal master identity is stale or fenced")
+            connection.execute(
+                "UPDATE operations SET state='FAILED',updated_at=? WHERE operation_id=? AND state=?",
+                (now, operation_id, expected_operation_state),
+            )
+            connection.execute(
+                "UPDATE run_attempts SET state='FAILED',updated_at=? "
+                "WHERE operation_id=? AND run_id=? AND attempt_id=? AND epoch=?",
+                (now, operation_id, run_id, attempt_id, epoch),
+            )
+            if service is not None:
+                connection.execute(
+                    "UPDATE services SET state='FENCED',latest_event_id=?,updated_at=? "
+                    "WHERE service_instance_id=? AND epoch=?",
+                    (event_id, now, service_instance_id, epoch),
+                )
+            connection.execute(
+                "UPDATE runtime_token_hashes SET revoked_at=? WHERE run_id=? AND attempt_id=?",
+                (now, run_id, attempt_id),
+            )
+            if status_authority is not None:
+                lease = json.loads(str(status_authority["resource_lease_json"]))
+                try:
+                    lease_id = str(lease["lease_id"])
+                    holder_id = str(lease["holder_id"])
+                    lease_epoch = int(lease["epoch"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise StaleRuntimeEvent("provider-terminal master resource lease is invalid") from exc
+                if holder_id != run_id:
+                    raise StaleRuntimeEvent("provider-terminal master resource lease differs")
+                connection.execute(
+                    "UPDATE resource_leases SET released_at=? WHERE lease_id=? AND holder_id=? AND epoch=? "
+                    "AND released_at IS NULL",
+                    (now, lease_id, holder_id, lease_epoch),
+                )
+            connection.execute(
+                "INSERT INTO operation_log(operation_id,from_state,to_state,recorded_at,metadata_json) "
+                "VALUES (?,?,'FAILED',?,?)",
+                (operation_id, expected_operation_state, now, metadata),
+            )
+
     def renew_service(self, service_instance_id: str, epoch: int, lease_until: datetime, event_id: str) -> None:
         now = self.clock.now()
         if lease_until <= now:
@@ -1444,6 +1558,143 @@ class ControlLedger:
                     state,
                     _safe_json(metadata),
                     _format_time(self.clock.now()),
+                ),
+            )
+
+    def fence_checkpoint_failed_master(
+        self,
+        *,
+        operation_id: str,
+        run_id: str,
+        attempt_id: str,
+        service_instance_id: str,
+        epoch: int,
+        event_id: str,
+    ) -> None:
+        """Fence an unrecoverable failed checkpoint after tunnel deactivation.
+
+        This operator boundary is intentionally narrower than a generic state
+        edit: the exact current runtime must already be draining, its
+        publication must be terminally failed, and no candidate from the
+        operation may be the verified HEAD.  Provider termination/tunnel
+        deactivation remains an external precondition; this transaction only
+        retires the control authority so a replacement epoch can be admitted.
+        """
+
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            operation = connection.execute(
+                "SELECT state FROM operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            attempt = connection.execute(
+                "SELECT state,service_instance_id,epoch FROM run_attempts "
+                "WHERE operation_id=? AND run_id=? AND attempt_id=?",
+                (operation_id, run_id, attempt_id),
+            ).fetchone()
+            service = connection.execute(
+                "SELECT state,run_id,attempt_id,master_instance_id,epoch FROM services "
+                "WHERE service_instance_id=?",
+                (service_instance_id,),
+            ).fetchone()
+            current = connection.execute(
+                "SELECT current_epoch FROM service_epochs WHERE service_kind='postgres-master'"
+            ).fetchone()
+            token = connection.execute(
+                "SELECT revoked_at FROM runtime_token_hashes WHERE run_id=? AND attempt_id=?",
+                (run_id, attempt_id),
+            ).fetchone()
+            if (
+                operation is not None
+                and operation["state"] == "FENCED"
+                and attempt is not None
+                and attempt["state"] == "FENCED"
+                and service is not None
+                and service["state"] == "FENCED"
+                and token is not None
+                and token["revoked_at"] is not None
+            ):
+                return
+            terminal_publications = connection.execute(
+                "SELECT count(*) FROM checkpoint_blob_publications "
+                "WHERE operation_id=? AND state IN ('FAILED','QUARANTINED')",
+                (operation_id,),
+            ).fetchone()
+            nonterminal_publications = connection.execute(
+                "SELECT count(*) FROM checkpoint_blob_publications "
+                "WHERE operation_id=? AND state NOT IN ('FAILED','QUARANTINED')",
+                (operation_id,),
+            ).fetchone()
+            verified_authority = connection.execute(
+                "SELECT count(*) FROM checkpoint_candidates c "
+                "LEFT JOIN checkpoint_heads h ON h.current_checkpoint_id=c.checkpoint_id "
+                "WHERE c.operation_id=? AND (c.status='VERIFIED' OR h.current_checkpoint_id IS NOT NULL)",
+                (operation_id,),
+            ).fetchone()
+            if not (
+                operation is not None
+                and operation["state"] == "CHECKPOINT_FAILED"
+                and attempt is not None
+                and attempt["service_instance_id"] == service_instance_id
+                and int(attempt["epoch"]) == epoch
+                and service is not None
+                and service["state"] == "DRAINING"
+                and service["run_id"] == run_id
+                and service["attempt_id"] == attempt_id
+                and int(service["epoch"]) == epoch
+                and current is not None
+                and int(current["current_epoch"]) == epoch
+                and terminal_publications is not None
+                and int(terminal_publications[0]) >= 1
+                and nonterminal_publications is not None
+                and int(nonterminal_publications[0]) == 0
+                and verified_authority is not None
+                and int(verified_authority[0]) == 0
+            ):
+                raise StaleRuntimeEvent("checkpoint-failed master is not safely fenceable")
+            connection.execute(
+                "UPDATE operations SET state='FENCED',updated_at=? "
+                "WHERE operation_id=? AND state='CHECKPOINT_FAILED'",
+                (now, operation_id),
+            )
+            connection.execute(
+                "UPDATE run_attempts SET state='FENCED',updated_at=? "
+                "WHERE operation_id=? AND run_id=? AND attempt_id=? AND epoch=?",
+                (now, operation_id, run_id, attempt_id, epoch),
+            )
+            connection.execute(
+                "UPDATE services SET state='FENCED',latest_event_id=?,updated_at=? "
+                "WHERE service_instance_id=? AND epoch=? AND state='DRAINING'",
+                (event_id, now, service_instance_id, epoch),
+            )
+            connection.execute(
+                "UPDATE runtime_token_hashes SET revoked_at=? WHERE run_id=? AND attempt_id=?",
+                (now, run_id, attempt_id),
+            )
+            status_authority = connection.execute(
+                "SELECT resource_lease_json FROM master_status_dataset_authorities WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if status_authority is not None:
+                lease = json.loads(str(status_authority["resource_lease_json"]))
+                if str(lease.get("holder_id")) != run_id:
+                    raise StaleRuntimeEvent("checkpoint-failed resource lease differs")
+                connection.execute(
+                    "UPDATE resource_leases SET released_at=? WHERE lease_id=? AND holder_id=? AND epoch=? "
+                    "AND released_at IS NULL",
+                    (now, str(lease["lease_id"]), run_id, int(lease["epoch"])),
+                )
+            connection.execute(
+                "INSERT INTO operation_log(operation_id,from_state,to_state,recorded_at,metadata_json) "
+                "VALUES (?,'CHECKPOINT_FAILED','FENCED',?,?)",
+                (
+                    operation_id,
+                    now,
+                    _safe_json(
+                        {
+                            "code": "OPERATOR_CHECKPOINT_FAILURE_RECOVERY",
+                            "event_id": event_id,
+                        }
+                    ),
                 ),
             )
 
@@ -1640,6 +1891,16 @@ class ControlLedger:
         with self._reader() as connection:
             row = connection.execute(
                 "SELECT * FROM master_requests WHERE state<>'DONE' ORDER BY created_at DESC,request_id DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def master_request_by_operation_id(self, operation_id: str) -> dict[str, Any] | None:
+        if not operation_id:
+            return None
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM master_requests WHERE operation_id=? ORDER BY created_at DESC,request_id DESC LIMIT 1",
+                (operation_id,),
             ).fetchone()
         return dict(row) if row else None
 
@@ -1967,6 +2228,807 @@ class ControlLedger:
             ).fetchone()
             assert row is not None
             return self._mcp_write_from_row(row), True
+
+    def ensure_blogger_import_operation(
+        self,
+        *,
+        operation_id: str,
+        batch_id: str,
+        idempotency_key: str,
+        principal_id: str,
+        client_id: str,
+        master_instance_id: str | None,
+        epoch: int | None,
+        expected_revision: int,
+        request_sha256: str,
+        pre_change_checkpoint_id: str | None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist only the identity/hash metadata for one typed blogger preview."""
+
+        try:
+            exact_batch_id = str(UUID(batch_id))
+        except ValueError as exc:
+            raise ValueError("blogger import batch_id is invalid") from exc
+        if (
+            not re.fullmatch(r"[a-f0-9]{64}", operation_id)
+            or not re.fullmatch(r"[a-f0-9]{64}", request_sha256)
+            or not 8 <= len(idempotency_key) <= 300
+            or not principal_id
+            or not client_id
+            or expected_revision < 0
+        ):
+            raise ValueError("blogger import operation identity is invalid")
+        binding = (master_instance_id, epoch, pre_change_checkpoint_id)
+        if not (
+            all(value is None for value in binding)
+            or (
+                isinstance(master_instance_id, str)
+                and bool(master_instance_id)
+                and isinstance(epoch, int)
+                and epoch >= 1
+                and isinstance(pre_change_checkpoint_id, str)
+                and bool(pre_change_checkpoint_id)
+            )
+        ):
+            raise ValueError("blogger import master binding must be wholly absent or complete")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=? OR "
+                "(principal_id=? AND client_id=? AND idempotency_key=?) OR "
+                "(principal_id=? AND client_id=? AND batch_id=?)",
+                (
+                    operation_id,
+                    principal_id,
+                    client_id,
+                    idempotency_key,
+                    principal_id,
+                    client_id,
+                    exact_batch_id,
+                ),
+            ).fetchone()
+            expected = {
+                "operation_id": operation_id,
+                "batch_id": exact_batch_id,
+                "idempotency_key": idempotency_key,
+                "principal_id": principal_id,
+                "client_id": client_id,
+                "expected_revision": expected_revision,
+                "request_sha256": request_sha256,
+            }
+            if row is not None:
+                existing = self._blogger_import_from_row(row)
+                if any(existing[key] != value for key, value in expected.items()):
+                    raise IdempotencyConflict(
+                        "blogger import identity was reused for a different batch or request"
+                    )
+                existing_binding = (
+                    existing["master_instance_id"],
+                    existing["epoch"],
+                    existing["pre_change_checkpoint_id"],
+                )
+                if any(value is not None for value in binding) and existing_binding != binding:
+                    raise IdempotencyConflict(
+                        "blogger import identity was reused with a different master binding"
+                    )
+                return existing, False
+            if master_instance_id is not None:
+                assert epoch is not None and pre_change_checkpoint_id is not None
+                self._require_blogger_checkpoint_authority(
+                    connection,
+                    checkpoint_id=pre_change_checkpoint_id,
+                    master_instance_id=master_instance_id,
+                    epoch=epoch,
+                )
+            connection.execute(
+                "INSERT INTO mcp_blogger_import_operations("
+                "operation_id,batch_id,idempotency_key,principal_id,client_id,master_instance_id,"
+                "epoch,expected_revision,request_sha256,state,pre_change_checkpoint_id,created_at,updated_at"
+                ") VALUES (?,?,?,?,?,?,?,?,?,'REQUESTED',?,?,?)",
+                (
+                    operation_id,
+                    exact_batch_id,
+                    idempotency_key,
+                    principal_id,
+                    client_id,
+                    master_instance_id,
+                    epoch,
+                    expected_revision,
+                    request_sha256,
+                    pre_change_checkpoint_id,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO mcp_blogger_import_events(operation_id,state,metadata_json,recorded_at) "
+                "VALUES (?,'REQUESTED',?,?)",
+                (
+                    operation_id,
+                    _safe_json(
+                        {
+                            "batch_id": exact_batch_id,
+                            "request_sha256": request_sha256,
+                            "expected_revision": expected_revision,
+                        }
+                    ),
+                    now,
+                ),
+            )
+            current = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert current is not None
+            return self._blogger_import_from_row(current), True
+
+    def bind_blogger_import_active_master(
+        self,
+        operation_id: str,
+        *,
+        master_instance_id: str,
+        epoch: int,
+        pre_change_checkpoint_id: str,
+    ) -> dict[str, Any]:
+        """Bind a persisted cold-start request to one ACTIVE epoch and checkpoint."""
+
+        if not master_instance_id or epoch < 1 or not pre_change_checkpoint_id:
+            raise ValueError("blogger import ACTIVE-master binding is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if row is None or str(row["state"]) not in {"REQUESTED", "WAITING_MASTER"}:
+                raise StaleRuntimeEvent("blogger import cannot bind an ACTIVE master in this state")
+            existing = self._blogger_import_from_row(row)
+            current_binding = (
+                existing["master_instance_id"],
+                existing["epoch"],
+                existing["pre_change_checkpoint_id"],
+            )
+            requested_binding = (master_instance_id, epoch, pre_change_checkpoint_id)
+            if all(value is not None for value in current_binding):
+                if current_binding == requested_binding:
+                    return existing
+                raise IdempotencyConflict("blogger import is already bound to a different epoch")
+            self._require_blogger_checkpoint_authority(
+                connection,
+                checkpoint_id=pre_change_checkpoint_id,
+                master_instance_id=master_instance_id,
+                epoch=epoch,
+            )
+            connection.execute(
+                "UPDATE mcp_blogger_import_operations SET master_instance_id=?,epoch=?,"
+                "pre_change_checkpoint_id=?,updated_at=? WHERE operation_id=?",
+                (master_instance_id, epoch, pre_change_checkpoint_id, now, operation_id),
+            )
+            connection.execute(
+                "INSERT INTO mcp_blogger_import_events(operation_id,state,metadata_json,recorded_at) "
+                "VALUES (?,?,?,?)",
+                (
+                    operation_id,
+                    str(row["state"]),
+                    _safe_json(
+                        {
+                            "active_master_bound": True,
+                            "master_instance_id": master_instance_id,
+                            "epoch": epoch,
+                            "pre_change_checkpoint_id": pre_change_checkpoint_id,
+                        }
+                    ),
+                    now,
+                ),
+            )
+            current = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert current is not None
+            return self._blogger_import_from_row(current)
+
+    def record_blogger_import_preview(
+        self,
+        operation_id: str,
+        *,
+        preview_receipt: str,
+        plan_sha256: str,
+        summary: Mapping[str, int],
+    ) -> dict[str, Any]:
+        allowed = {
+            "create_actor_count",
+            "link_existing_count",
+            "quarantine_count",
+            "account_count",
+        }
+        if (
+            not preview_receipt
+            or not re.fullmatch(r"[a-f0-9]{64}", plan_sha256)
+            or set(summary) != allowed
+            or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in summary.values())
+        ):
+            raise ValueError("blogger preview receipt or bounded summary is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if row is None or any(
+                row[column] is None
+                for column in ("master_instance_id", "epoch", "pre_change_checkpoint_id")
+            ):
+                raise StaleRuntimeEvent("blogger preview requires an ACTIVE-master binding")
+            existing = self._blogger_import_from_row(row)
+            if str(row["state"]) == "PREVIEWED":
+                if (
+                    existing["preview_receipt"] == preview_receipt
+                    and existing["plan_sha256"] == plan_sha256
+                    and existing["preview_summary"] == dict(summary)
+                ):
+                    return existing
+                raise IdempotencyConflict("blogger preview replay differs from immutable plan")
+            if str(row["state"]) not in {"REQUESTED", "WAITING_MASTER"}:
+                raise StaleRuntimeEvent("blogger import lifecycle transition is stale")
+            connection.execute(
+                "UPDATE mcp_blogger_import_operations SET state='PREVIEWED',preview_receipt=?,"
+                "plan_sha256=?,preview_summary_json=?,updated_at=? WHERE operation_id=?",
+                (preview_receipt, plan_sha256, _safe_json(dict(summary)), now, operation_id),
+            )
+            connection.execute(
+                "INSERT INTO mcp_blogger_import_events(operation_id,state,metadata_json,recorded_at) "
+                "VALUES (?,'PREVIEWED',?,?)",
+                (operation_id, _safe_json({"plan_sha256": plan_sha256, **summary}), now),
+            )
+            current = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert current is not None
+            return self._blogger_import_from_row(current)
+
+    def mark_blogger_import_waiting_master(self, operation_id: str) -> dict[str, Any]:
+        """Checkpoint a cold-start wait without terminalizing the owner request."""
+
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+        if row is not None and str(row["state"]) == "WAITING_MASTER":
+            return self._blogger_import_from_row(row)
+        return self._transition_blogger_import(
+            operation_id,
+            expected_states={"REQUESTED"},
+            new_state="WAITING_MASTER",
+            updates={},
+            metadata={"continuation": "resume_preview_after_active_master"},
+        )
+
+    def restart_blogger_import_after_preview_epoch_loss(
+        self,
+        operation_id: str,
+        *,
+        failed_master_instance_id: str,
+        failed_epoch: int,
+    ) -> dict[str, Any]:
+        """Discard only an un-applied dead-epoch preview and retain request identity."""
+
+        if not failed_master_instance_id or failed_epoch < 1:
+            raise ValueError("failed blogger preview epoch identity is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if (
+                row is None
+                or str(row["state"]) != "PREVIEWED"
+                or row["master_instance_id"] != failed_master_instance_id
+                or int(row["epoch"] or 0) != failed_epoch
+            ):
+                raise StaleRuntimeEvent("blogger preview restart does not match the dead epoch")
+            self._require_blogger_preview_epoch_dead(
+                connection,
+                master_instance_id=failed_master_instance_id,
+                epoch=failed_epoch,
+            )
+            old_plan_sha256 = str(row["plan_sha256"])
+            connection.execute(
+                "UPDATE mcp_blogger_import_operations SET state='WAITING_MASTER',"
+                "master_instance_id=NULL,epoch=NULL,pre_change_checkpoint_id=NULL,"
+                "preview_receipt=NULL,plan_sha256=NULL,preview_summary_json=NULL,"
+                "preview_generation=preview_generation+1,updated_at=? WHERE operation_id=?",
+                (now, operation_id),
+            )
+            connection.execute(
+                "INSERT INTO mcp_blogger_import_events(operation_id,state,metadata_json,recorded_at) "
+                "VALUES (?,'WAITING_MASTER',?,?)",
+                (
+                    operation_id,
+                    _safe_json(
+                        {
+                            "continuation": "rebind_and_repreview_after_epoch_loss",
+                            "failed_master_instance_id": failed_master_instance_id,
+                            "failed_epoch": failed_epoch,
+                            "discarded_plan_sha256": old_plan_sha256,
+                        }
+                    ),
+                    now,
+                ),
+            )
+            current = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert current is not None
+            return self._blogger_import_from_row(current)
+
+    @staticmethod
+    def _require_blogger_preview_epoch_dead(
+        connection: sqlite3.Connection,
+        *,
+        master_instance_id: str,
+        epoch: int,
+    ) -> None:
+        authority = connection.execute(
+            "SELECT current_epoch FROM service_epochs WHERE service_kind='postgres-master'"
+        ).fetchone()
+        if authority is None:
+            raise StaleRuntimeEvent(
+                "blogger preview reset lacks authoritative PostgreSQL epoch state"
+            )
+        current_epoch = int(authority["current_epoch"])
+        if current_epoch > epoch:
+            return
+        service = connection.execute(
+            "SELECT state FROM services WHERE service_kind='postgres-master' "
+            "AND master_instance_id=? AND epoch=?",
+            (master_instance_id, epoch),
+        ).fetchone()
+        if (
+            current_epoch == epoch
+            and service is not None
+            and str(service["state"]) in {"FENCED", "STOPPED"}
+        ):
+            return
+        raise StaleRuntimeEvent(
+            "blogger preview reset requires an authoritatively stopped or fenced PostgreSQL epoch"
+        )
+
+    def begin_blogger_import_apply(
+        self, operation_id: str, *, preview_receipt: str, plan_sha256: str
+    ) -> dict[str, Any]:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT preview_receipt,plan_sha256 FROM mcp_blogger_import_operations "
+                "WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+        if (
+            row is None
+            or not hmac.compare_digest(str(row["preview_receipt"] or ""), preview_receipt)
+            or not hmac.compare_digest(str(row["plan_sha256"] or ""), plan_sha256)
+        ):
+            raise PermissionError("blogger apply does not bind the durable preview and plan")
+        return self._transition_blogger_import(
+            operation_id,
+            expected_states={"PREVIEWED"},
+            new_state="APPLYING",
+            updates={},
+            metadata={"plan_sha256": plan_sha256},
+        )
+
+    def record_blogger_import_commit(
+        self, operation_id: str, *, affected_rows: int, committed_revision: int
+    ) -> dict[str, Any]:
+        if affected_rows < 1 or committed_revision < 1:
+            raise ValueError("blogger commit result is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if row is not None and str(row["state"]) in {
+                "COMMITTED_PENDING_CHECKPOINT",
+                "CHECKPOINTING",
+                "CHECKPOINT_VERIFIED",
+                "DURABLE_COMPLETE",
+            }:
+                existing = self._blogger_import_from_row(row)
+                if (
+                    existing["affected_rows"] == affected_rows
+                    and existing["committed_revision"] == committed_revision
+                ):
+                    return existing
+                raise IdempotencyConflict("blogger commit replay differs from immutable receipt")
+            if row is None or str(row["state"]) != "APPLYING":
+                raise StaleRuntimeEvent("blogger import lifecycle transition is stale")
+            connection.execute(
+                "UPDATE mcp_blogger_import_operations SET state='COMMITTED_PENDING_CHECKPOINT',"
+                "affected_rows=?,committed_revision=?,committed_at=?,updated_at=? WHERE operation_id=?",
+                (affected_rows, committed_revision, now, now, operation_id),
+            )
+            connection.execute(
+                "INSERT INTO mcp_blogger_import_events(operation_id,state,metadata_json,recorded_at) "
+                "VALUES (?,'COMMITTED_PENDING_CHECKPOINT',?,?)",
+                (
+                    operation_id,
+                    _safe_json(
+                        {"affected_rows": affected_rows, "committed_revision": committed_revision}
+                    ),
+                    now,
+                ),
+            )
+            current = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert current is not None
+            return self._blogger_import_from_row(current)
+
+    def reconcile_blogger_import_commit(
+        self,
+        operation_id: str,
+        *,
+        request_sha256: str,
+        plan_sha256: str,
+        master_instance_id: str,
+        epoch: int,
+        expected_revision: int,
+        principal_id: str,
+        client_id: str,
+        affected_rows: int,
+        committed_revision: int,
+        committed_at: str,
+    ) -> dict[str, Any]:
+        if (
+            not re.fullmatch(r"[a-f0-9]{64}", request_sha256)
+            or not re.fullmatch(r"[a-f0-9]{64}", plan_sha256)
+            or not master_instance_id
+            or epoch < 1
+            or expected_revision < 0
+            or not principal_id
+            or not client_id
+            or affected_rows < 1
+            or committed_revision != expected_revision + 1
+            or not committed_at
+        ):
+            raise ValueError("canonical blogger reconciliation receipt is invalid")
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if row is None:
+                raise StaleRuntimeEvent("blogger reconciliation has no durable preview intent")
+            record = self._blogger_import_from_row(row)
+            expected = {
+                "request_sha256": request_sha256,
+                "plan_sha256": plan_sha256,
+                "master_instance_id": master_instance_id,
+                "epoch": epoch,
+                "expected_revision": expected_revision,
+                "principal_id": principal_id,
+                "client_id": client_id,
+            }
+            if any(record[key] != value for key, value in expected.items()):
+                raise StaleRuntimeEvent(
+                    "canonical blogger receipt differs from durable preview identity"
+                )
+            if record["state"] != "APPLYING":
+                if (
+                    record["state"]
+                    in {
+                        "COMMITTED_PENDING_CHECKPOINT",
+                        "CHECKPOINTING",
+                        "CHECKPOINT_VERIFIED",
+                        "DURABLE_COMPLETE",
+                    }
+                    and record["affected_rows"] == affected_rows
+                    and record["committed_revision"] == committed_revision
+                ):
+                    return record
+                raise StaleRuntimeEvent("blogger reconciliation is stale or conflicts")
+            now = _format_time(self.clock.now())
+            connection.execute(
+                "UPDATE mcp_blogger_import_operations SET state='COMMITTED_PENDING_CHECKPOINT',"
+                "affected_rows=?,committed_revision=?,committed_at=?,updated_at=? WHERE operation_id=?",
+                (affected_rows, committed_revision, committed_at, now, operation_id),
+            )
+            connection.execute(
+                "INSERT INTO mcp_blogger_import_events(operation_id,state,metadata_json,recorded_at) "
+                "VALUES (?,'COMMITTED_PENDING_CHECKPOINT',?,?)",
+                (
+                    operation_id,
+                    _safe_json(
+                        {
+                            "affected_rows": affected_rows,
+                            "committed_revision": committed_revision,
+                            "reconciled_from": "canonical_postgres_receipt",
+                        }
+                    ),
+                    now,
+                ),
+            )
+            current = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert current is not None
+            return self._blogger_import_from_row(current)
+
+    def blogger_import_operation(self, operation_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+        return self._blogger_import_from_row(row) if row else None
+
+    def advance_blogger_import_checkpoint(
+        self,
+        operation_id: str,
+        *,
+        state: str,
+        post_change_checkpoint_id: str | None = None,
+    ) -> dict[str, Any]:
+        allowed = {
+            "CHECKPOINTING": {"COMMITTED_PENDING_CHECKPOINT"},
+            "CHECKPOINT_VERIFIED": {"CHECKPOINTING"},
+            "DURABLE_COMPLETE": {"CHECKPOINT_VERIFIED"},
+        }
+        if state not in allowed or (state != "CHECKPOINTING" and not post_change_checkpoint_id):
+            raise ValueError("blogger checkpoint transition is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if row is None:
+                raise StaleRuntimeEvent("blogger checkpoint operation does not exist")
+            existing = self._blogger_import_from_row(row)
+            if str(row["state"]) == state:
+                if (
+                    post_change_checkpoint_id is None
+                    or existing["post_change_checkpoint_id"] == post_change_checkpoint_id
+                ):
+                    return existing
+                raise IdempotencyConflict(
+                    "blogger checkpoint replay differs from immutable identity"
+                )
+            if str(row["state"]) not in allowed[state]:
+                raise StaleRuntimeEvent("blogger import lifecycle transition is stale")
+            stored_checkpoint_id = existing["post_change_checkpoint_id"]
+            if (
+                stored_checkpoint_id is not None
+                and post_change_checkpoint_id is not None
+                and stored_checkpoint_id != post_change_checkpoint_id
+            ):
+                raise IdempotencyConflict("blogger durable checkpoint identity cannot be replaced")
+            effective_checkpoint_id = post_change_checkpoint_id or stored_checkpoint_id
+            if state in {"CHECKPOINT_VERIFIED", "DURABLE_COMPLETE"}:
+                if (
+                    effective_checkpoint_id is None
+                    or existing["committed_revision"] is None
+                ):
+                    raise StaleRuntimeEvent("blogger durable checkpoint lacks request authority")
+                self._require_blogger_post_checkpoint_authority(
+                    connection,
+                    operation_id=operation_id,
+                    batch_id=str(existing["batch_id"]),
+                    committed_revision=int(existing["committed_revision"]),
+                    checkpoint_id=str(effective_checkpoint_id),
+                )
+            connection.execute(
+                "UPDATE mcp_blogger_import_operations SET state=?,post_change_checkpoint_id=?,"
+                "updated_at=? WHERE operation_id=?",
+                (state, effective_checkpoint_id, now, operation_id),
+            )
+            connection.execute(
+                "INSERT INTO mcp_blogger_import_events(operation_id,state,metadata_json,recorded_at) "
+                "VALUES (?,?,?,?)",
+                (
+                    operation_id,
+                    state,
+                    _safe_json({"post_change_checkpoint_id": effective_checkpoint_id}),
+                    now,
+                ),
+            )
+            current = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert current is not None
+            return self._blogger_import_from_row(current)
+
+    @staticmethod
+    def _require_blogger_post_checkpoint_authority(
+        connection: sqlite3.Connection,
+        *,
+        operation_id: str,
+        batch_id: str,
+        committed_revision: int,
+        checkpoint_id: str,
+    ) -> None:
+        request_identity = {
+            "kind": "mcp-blogger-import-checkpoint-v1",
+            "operation_id": operation_id,
+            "batch_id": batch_id,
+            "canonical_revision": committed_revision,
+        }
+        request_id = hashlib.sha256(_canonical_json(request_identity).encode()).hexdigest()
+        request = connection.execute(
+            "SELECT * FROM connector_checkpoint_requests WHERE operation_id=? "
+            "AND idempotency_key=?",
+            (f"connector-checkpoint:{request_id}", request_id),
+        ).fetchone()
+        checkpoint = connection.execute(
+            "SELECT candidate.operation_id,candidate.status,candidate.master_instance_id,"
+            "candidate.epoch,candidate.service_kind,candidate.manifest_json,"
+            "candidate.version_ref,candidate.verified_at,head.current_checkpoint_id "
+            "FROM checkpoint_candidates candidate "
+            "LEFT JOIN checkpoint_heads head ON head.service_kind=candidate.service_kind "
+            "WHERE candidate.checkpoint_id=?",
+            (checkpoint_id,),
+        ).fetchone()
+        try:
+            manifest = json.loads(str(checkpoint["manifest_json"])) if checkpoint is not None else None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            manifest = None
+        protected_revision = (
+            manifest.get("canonical_revision") if isinstance(manifest, dict) else None
+        )
+        if (
+            request is None
+            or request["state"] != "DURABLE_COMPLETE"
+            or request["checkpoint_id"] != checkpoint_id
+            or int(request["canonical_revision"]) != committed_revision
+            or checkpoint is None
+            or checkpoint["status"] != "VERIFIED"
+            or checkpoint["service_kind"] != "postgres-master"
+            or checkpoint["operation_id"] != request["master_operation_id"]
+            or checkpoint["master_instance_id"] != request["master_instance_id"]
+            or int(checkpoint["epoch"]) != int(request["epoch"])
+            or not checkpoint["version_ref"]
+            or not checkpoint["verified_at"]
+            or checkpoint["current_checkpoint_id"] != checkpoint_id
+            or not isinstance(manifest, dict)
+            or not isinstance(protected_revision, int)
+            or isinstance(protected_revision, bool)
+            or protected_revision < committed_revision
+        ):
+            raise StaleRuntimeEvent(
+                "blogger checkpoint lacks its exact request-bound VERIFIED HEAD authority"
+            )
+
+    def _require_blogger_checkpoint_authority(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        checkpoint_id: str,
+        master_instance_id: str,
+        epoch: int,
+    ) -> None:
+        """Require the exact VERIFIED HEAD restored by the write epoch.
+
+        A normal cold start restores a checkpoint produced by the preceding
+        draining epoch.  The producer identity therefore cannot be required
+        to equal the successor that is about to write.  For that normal case,
+        bind the successor through its ACTIVE service operation and the
+        immutable ``boot_checkpoint`` recorded before its provider launch.
+        The same-epoch branch is retained for a master that checkpoints and
+        resumes without a replacement.
+        """
+
+        checkpoint = connection.execute(
+            "SELECT candidate.status,candidate.master_instance_id,candidate.epoch,"
+            "candidate.service_kind,candidate.version_ref,candidate.manifest_sha256,"
+            "head.current_checkpoint_id,head.generation "
+            "FROM checkpoint_candidates candidate "
+            "LEFT JOIN checkpoint_heads head ON head.service_kind=candidate.service_kind "
+            "WHERE candidate.checkpoint_id=?",
+            (checkpoint_id,),
+        ).fetchone()
+        exact_head = (
+            checkpoint is not None
+            and checkpoint["status"] == "VERIFIED"
+            and checkpoint["service_kind"] == "postgres-master"
+            and checkpoint["current_checkpoint_id"] == checkpoint_id
+            and isinstance(checkpoint["version_ref"], str)
+            and bool(checkpoint["version_ref"])
+        )
+        if not exact_head:
+            raise StaleRuntimeEvent(
+                "blogger checkpoint is not the exact verified PostgreSQL HEAD for its epoch"
+            )
+        assert checkpoint is not None
+        if (
+            checkpoint["master_instance_id"] == master_instance_id
+            and int(checkpoint["epoch"]) == epoch
+        ):
+            return
+
+        successor = connection.execute(
+            "SELECT operation.operation_id,operation.state AS operation_state,"
+            "service.state AS service_state,service.lease_until,"
+            "authority.state AS authority_state,authority.status_dataset_json,"
+            "service_epoch.current_epoch "
+            "FROM services service "
+            "JOIN service_epochs service_epoch ON service_epoch.service_kind=service.service_kind "
+            "JOIN run_attempts attempt ON attempt.run_id=service.run_id "
+            "AND attempt.attempt_id=service.attempt_id "
+            "JOIN operations operation ON operation.operation_id=attempt.operation_id "
+            "JOIN master_status_dataset_authorities authority "
+            "ON authority.operation_id=operation.operation_id "
+            "WHERE service.service_kind='postgres-master' "
+            "AND service.master_instance_id=? AND service.epoch=?",
+            (master_instance_id, epoch),
+        ).fetchone()
+        boot_checkpoint: object = None
+        if successor is not None and successor["status_dataset_json"] is not None:
+            with suppress(json.JSONDecodeError, TypeError):
+                status_dataset = json.loads(str(successor["status_dataset_json"]))
+                if isinstance(status_dataset, dict):
+                    boot_checkpoint = status_dataset.get("boot_checkpoint")
+        if (
+            successor is None
+            or successor["operation_state"] != "ACTIVE"
+            or successor["service_state"] != "ACTIVE"
+            or int(successor["current_epoch"]) != epoch
+            or _parse_time(str(successor["lease_until"])) <= self.clock.now()
+            or successor["authority_state"] != "READY"
+            or not isinstance(boot_checkpoint, dict)
+            or boot_checkpoint.get("kind") != "VERIFIED"
+            or boot_checkpoint.get("checkpoint_id") != checkpoint_id
+            or boot_checkpoint.get("generation") != int(checkpoint["generation"])
+            or boot_checkpoint.get("exact_version_ref") != checkpoint["version_ref"]
+            or boot_checkpoint.get("manifest_sha256") != checkpoint["manifest_sha256"]
+        ):
+            raise StaleRuntimeEvent(
+                "blogger checkpoint is not the exact verified PostgreSQL HEAD restored by the ACTIVE epoch"
+            )
+
+    def _transition_blogger_import(
+        self,
+        operation_id: str,
+        *,
+        expected_states: set[str],
+        new_state: str,
+        updates: Mapping[str, Any],
+        metadata: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        allowed_columns = {
+            "preview_receipt",
+            "plan_sha256",
+            "preview_summary_json",
+            "affected_rows",
+            "committed_revision",
+            "committed_at",
+            "post_change_checkpoint_id",
+        }
+        if not set(updates) <= allowed_columns:
+            raise ValueError("unsupported blogger import projection update")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if row is None or str(row["state"]) not in expected_states:
+                raise StaleRuntimeEvent("blogger import lifecycle transition is stale")
+            assignments = ["state=?", "updated_at=?", *(f"{column}=?" for column in updates)]
+            values = [new_state, now, *updates.values(), operation_id]
+            connection.execute(
+                f"UPDATE mcp_blogger_import_operations SET {','.join(assignments)} "
+                "WHERE operation_id=?",
+                values,
+            )
+            connection.execute(
+                "INSERT INTO mcp_blogger_import_events(operation_id,state,metadata_json,recorded_at) "
+                "VALUES (?,?,?,?)",
+                (operation_id, new_state, _safe_json(dict(metadata)), now),
+            )
+            current = connection.execute(
+                "SELECT * FROM mcp_blogger_import_operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert current is not None
+            return self._blogger_import_from_row(current)
+
+    @staticmethod
+    def _blogger_import_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(zip(row.keys(), row, strict=True))
+        if result.get("preview_summary_json"):
+            result["preview_summary"] = json.loads(result["preview_summary_json"])
+        return result
 
     def record_mcp_write_preview(
         self,
@@ -2323,6 +3385,73 @@ class ControlLedger:
             ).fetchone()
         return json.loads(str(row["claim_json"])) if row else None
 
+    def provider_resource_claim_for_task(
+        self,
+        *,
+        task_id: str,
+        resource_kind: str,
+        control_class: str,
+        disposable: bool,
+    ) -> dict[str, Any] | None:
+        """Resolve one exact task-owned resource claim without guessing a latest version."""
+
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT claim_json FROM provider_resource_claims WHERE task_id=? "
+                "AND resource_kind=? AND control_class=? AND disposable=? "
+                "ORDER BY provider_version,claim_sha256",
+                (task_id, resource_kind, control_class, int(disposable)),
+            ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise IdempotencyConflict("task has more than one matching provider resource claim")
+        payload = json.loads(str(rows[0]["claim_json"]))
+        if not isinstance(payload, dict):
+            raise IdempotencyConflict("task provider resource claim is not an object")
+        return payload
+
+    def provider_resource_claim_exact(
+        self,
+        *,
+        provider_ref: str,
+        provider_version: int,
+        resource_kind: str,
+        control_class: str,
+        disposable: bool,
+    ) -> dict[str, Any] | None:
+        """Resolve one immutable provider version without falling back to latest.
+
+        Release-scoped master assets may be reused by a later task.  Such a
+        task must not be credited with creating the Dataset, but its durable
+        orchestration receipt can still bind the exact original claim by
+        provider ref and numeric version.
+        """
+
+        if provider_version < 1:
+            return None
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT claim_json FROM provider_resource_claims WHERE provider_ref=? "
+                "AND provider_version=? AND resource_kind=? AND control_class=? AND disposable=? "
+                "ORDER BY claim_sha256",
+                (
+                    provider_ref,
+                    provider_version,
+                    resource_kind,
+                    control_class,
+                    int(disposable),
+                ),
+            ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise IdempotencyConflict("provider version has more than one durable resource claim")
+        payload = json.loads(str(rows[0]["claim_json"]))
+        if not isinstance(payload, dict):
+            raise IdempotencyConflict("provider resource claim is not an object")
+        return payload
+
     def provider_resource_claim(self, claim_sha256: str) -> dict[str, Any] | None:
         if len(claim_sha256) != 64:
             return None
@@ -2352,6 +3481,26 @@ class ControlLedger:
                 (effect_id,),
             ).fetchone()
         return json.loads(str(row["receipt_json"])) if row else None
+
+    def latest_successful_provider_effect_receipt(self, effect_id: str) -> dict[str, Any] | None:
+        """Return the newest conclusive success for one immutable provider effect.
+
+        A transport-loss reconciliation can append ``uncertain`` after an earlier
+        exact readback was durably recorded.  Such a later observation must not
+        erase the successful receipt used to bind an immutable resource claim.
+        """
+
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT receipt_json FROM provider_effect_receipts WHERE effect_id=? "
+                "ORDER BY sequence DESC",
+                (effect_id,),
+            ).fetchall()
+        for row in rows:
+            receipt = json.loads(str(row["receipt_json"]))
+            if receipt.get("outcome") in {"applied", "already_applied"}:
+                return receipt
+        return None
 
     def ensure_acceptance_evidence_task(
         self,
@@ -4954,6 +6103,277 @@ class ControlLedger:
                 ):
                     raise StaleRuntimeEvent("checkpoint candidate cannot be uploaded from its current state")
 
+    def retire_failed_checkpoint_version(
+        self,
+        checkpoint_id: str,
+        *,
+        version_ref: str,
+        deletion_effect_id: str,
+        deletion_receipt_sha256: str,
+    ) -> dict[str, Any]:
+        """Release a deleted failed provider version without losing its audit identity.
+
+        The caller must first persist an exact DELETE_DATASET intent and an
+        APPLIED/ABSENT receipt after provider read-back.  Only a terminal
+        failed candidate that is not either durable HEAD may be retired.
+        """
+
+        if not version_ref or len(version_ref) > 512:
+            raise ValueError("retired checkpoint exact version ref is invalid")
+        if len(deletion_receipt_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in deletion_receipt_sha256
+        ):
+            raise ValueError("checkpoint deletion receipt hash is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM retired_checkpoint_versions WHERE checkpoint_id=?",
+                (checkpoint_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["version_ref"] != version_ref
+                    or existing["deletion_effect_id"] != deletion_effect_id
+                    or existing["deletion_receipt_sha256"] != deletion_receipt_sha256
+                ):
+                    raise StaleRuntimeEvent("retired checkpoint version replay differs")
+                return dict(existing)
+
+            candidate = connection.execute(
+                "SELECT dataset_ref,version_ref,status FROM checkpoint_candidates WHERE checkpoint_id=?",
+                (checkpoint_id,),
+            ).fetchone()
+            publication = connection.execute(
+                "SELECT state,exact_version_ref FROM checkpoint_blob_publications WHERE checkpoint_id=?",
+                (checkpoint_id,),
+            ).fetchone()
+            head = connection.execute(
+                "SELECT current_checkpoint_id,previous_checkpoint_id FROM checkpoint_heads "
+                "WHERE current_checkpoint_id=? OR previous_checkpoint_id=? LIMIT 1",
+                (checkpoint_id, checkpoint_id),
+            ).fetchone()
+            authority = connection.execute(
+                "SELECT i.action,i.provider_ref,r.receipt_json,r.receipt_sha256 "
+                "FROM provider_effect_intents i JOIN provider_effect_receipts r ON r.effect_id=i.effect_id "
+                "WHERE i.effect_id=? AND r.receipt_sha256=? ORDER BY r.sequence DESC LIMIT 1",
+                (deletion_effect_id, deletion_receipt_sha256),
+            ).fetchone()
+            if candidate is None or candidate["status"] != "FAILED" or head is not None:
+                raise StaleRuntimeEvent("only a non-HEAD failed checkpoint version may be retired")
+            exact_ref = candidate["version_ref"] or (
+                publication["exact_version_ref"] if publication is not None else None
+            )
+            if (
+                exact_ref != version_ref
+                or publication is None
+                or publication["state"] not in {"FAILED", "QUARANTINED"}
+            ):
+                raise StaleRuntimeEvent("failed checkpoint retirement version binding differs")
+            if authority is None or authority["action"] != "delete_dataset":
+                raise StaleRuntimeEvent("checkpoint retirement lacks its exact deletion receipt")
+            if authority["provider_ref"] != candidate["dataset_ref"]:
+                raise StaleRuntimeEvent("checkpoint deletion receipt targets another Dataset")
+            receipt = json.loads(str(authority["receipt_json"]))
+            if (
+                receipt.get("action") != "delete_dataset"
+                or receipt.get("outcome") not in {"applied", "already_applied", "not_found"}
+                or "absent" not in str(receipt.get("detail_code", ""))
+            ):
+                raise StaleRuntimeEvent("checkpoint deletion receipt is not terminal absence evidence")
+            connection.execute(
+                "INSERT INTO retired_checkpoint_versions(checkpoint_id,dataset_ref,version_ref,"
+                "deletion_effect_id,deletion_receipt_sha256,retired_at) VALUES (?,?,?,?,?,?)",
+                (
+                    checkpoint_id,
+                    candidate["dataset_ref"],
+                    version_ref,
+                    deletion_effect_id,
+                    deletion_receipt_sha256,
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE checkpoint_candidates SET version_ref=NULL WHERE checkpoint_id=? AND status='FAILED'",
+                (checkpoint_id,),
+            )
+            row = connection.execute(
+                "SELECT * FROM retired_checkpoint_versions WHERE checkpoint_id=?", (checkpoint_id,)
+            ).fetchone()
+            assert row is not None
+            return dict(row)
+
+    def checkpoint_dataset_incarnation_retirement(
+        self,
+        replacement_checkpoint_id: str,
+    ) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT * FROM checkpoint_dataset_incarnation_retirements "
+                "WHERE replacement_checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def prepare_missing_checkpoint_dataset_incarnation(
+        self,
+        replacement_checkpoint_id: str,
+        *,
+        dataset_ref: str,
+        source_head_checkpoint_id: str,
+        source_head_generation: int,
+    ) -> dict[str, Any]:
+        """Persist an exact reset intent before recreating an absent Dataset.
+
+        This is a disaster-recovery boundary for a provider Dataset that is
+        independently absent while the ledger still has a durable HEAD.  The
+        append-only intent retains every historical binding before the
+        provider effect, so response-loss replay cannot confuse this recovery
+        with the ordinary first checkpoint (which also starts at version 1).
+        """
+
+        if not dataset_ref or len(dataset_ref) > 300 or source_head_generation < 1:
+            raise ValueError("checkpoint Dataset incarnation identity is invalid")
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM checkpoint_dataset_incarnation_retirements "
+                "WHERE replacement_checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["dataset_ref"] != dataset_ref
+                    or existing["source_head_checkpoint_id"] != source_head_checkpoint_id
+                    or int(existing["source_head_generation"]) != source_head_generation
+                ):
+                    raise StaleRuntimeEvent("checkpoint Dataset incarnation retirement replay differs")
+                return dict(existing)
+
+            head = connection.execute(
+                "SELECT generation,current_checkpoint_id FROM checkpoint_heads "
+                "WHERE service_kind='postgres-master'",
+            ).fetchone()
+            replacement = connection.execute(
+                "SELECT dataset_ref,source_checkpoint_id,source_head_generation,status "
+                "FROM checkpoint_candidates WHERE checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+            publication = connection.execute(
+                "SELECT state,expected_provider_version FROM "
+                "checkpoint_blob_publications WHERE checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+            if (
+                head is None
+                or int(head["generation"]) != source_head_generation
+                or head["current_checkpoint_id"] != source_head_checkpoint_id
+                or replacement is None
+                or replacement["dataset_ref"] != dataset_ref
+                or replacement["source_checkpoint_id"] != source_head_checkpoint_id
+                or int(replacement["source_head_generation"]) != source_head_generation
+                or replacement["status"] != "CANDIDATE"
+                or publication is None
+                or publication["state"] not in {"READY_TO_FINALIZE", "FINALIZING"}
+                or (
+                    publication["expected_provider_version"] is not None
+                    and int(publication["expected_provider_version"]) != 1
+                )
+            ):
+                raise StaleRuntimeEvent("checkpoint Dataset reset intent is not exact")
+            rows = connection.execute(
+                "SELECT checkpoint_id,version_ref FROM checkpoint_candidates "
+                "WHERE dataset_ref=? AND version_ref IS NOT NULL ORDER BY checkpoint_id",
+                (dataset_ref,),
+            ).fetchall()
+            retired = [
+                {"checkpoint_id": str(row["checkpoint_id"]), "version_ref": str(row["version_ref"])}
+                for row in rows
+            ]
+            if not retired or not any(
+                item["checkpoint_id"] == source_head_checkpoint_id for item in retired
+            ):
+                raise StaleRuntimeEvent("checkpoint Dataset retirement lacks the durable HEAD binding")
+            retired_json = _safe_json(retired)
+            retired_sha256 = hashlib.sha256(retired_json.encode()).hexdigest()
+            connection.execute(
+                "INSERT INTO checkpoint_dataset_incarnation_retirements("
+                "replacement_checkpoint_id,dataset_ref,source_head_checkpoint_id,"
+                "source_head_generation,retired_versions_json,retired_versions_sha256,"
+                "observed_absent_at) VALUES (?,?,?,?,?,?,?)",
+                (
+                    replacement_checkpoint_id,
+                    dataset_ref,
+                    source_head_checkpoint_id,
+                    source_head_generation,
+                    retired_json,
+                    retired_sha256,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM checkpoint_dataset_incarnation_retirements "
+                "WHERE replacement_checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+            assert row is not None
+            return dict(row)
+
+    def retire_missing_checkpoint_dataset_incarnation(
+        self,
+        replacement_checkpoint_id: str,
+        *,
+        dataset_ref: str,
+        source_head_checkpoint_id: str,
+        source_head_generation: int,
+    ) -> dict[str, Any]:
+        """Release old exact refs after the replacement resolves as version 1."""
+
+        with self._transaction() as connection:
+            retirement = connection.execute(
+                "SELECT * FROM checkpoint_dataset_incarnation_retirements "
+                "WHERE replacement_checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+            head = connection.execute(
+                "SELECT generation,current_checkpoint_id FROM checkpoint_heads "
+                "WHERE service_kind='postgres-master'",
+            ).fetchone()
+            replacement = connection.execute(
+                "SELECT dataset_ref,source_checkpoint_id,source_head_generation,status "
+                "FROM checkpoint_candidates WHERE checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+            publication = connection.execute(
+                "SELECT state,exact_version_ref,expected_provider_version FROM "
+                "checkpoint_blob_publications WHERE checkpoint_id=?",
+                (replacement_checkpoint_id,),
+            ).fetchone()
+            if (
+                retirement is None
+                or retirement["dataset_ref"] != dataset_ref
+                or retirement["source_head_checkpoint_id"] != source_head_checkpoint_id
+                or int(retirement["source_head_generation"]) != source_head_generation
+                or head is None
+                or int(head["generation"]) != source_head_generation
+                or head["current_checkpoint_id"] != source_head_checkpoint_id
+                or replacement is None
+                or replacement["dataset_ref"] != dataset_ref
+                or replacement["source_checkpoint_id"] != source_head_checkpoint_id
+                or int(replacement["source_head_generation"]) != source_head_generation
+                or replacement["status"] != "CANDIDATE"
+                or publication is None
+                or publication["state"] != "DATASET_RESOLVED"
+                or publication["exact_version_ref"] != f"{dataset_ref}/1"
+                or int(publication["expected_provider_version"] or 0) != 1
+            ):
+                raise StaleRuntimeEvent("checkpoint Dataset replacement is not exact and resolved")
+            connection.execute(
+                "UPDATE checkpoint_candidates SET version_ref=NULL "
+                "WHERE dataset_ref=? AND version_ref IS NOT NULL AND checkpoint_id<>?",
+                (dataset_ref, replacement_checkpoint_id),
+            )
+            return dict(retirement)
+
     def record_checkpoint_package_sha256(self, checkpoint_id: str, package_sha256: str) -> None:
         if len(package_sha256) != 64 or any(char not in "0123456789abcdef" for char in package_sha256):
             raise ValueError("checkpoint package hash is invalid")
@@ -6024,6 +7444,108 @@ class ControlLedger:
             ):
                 raise IdempotencyConflict("master terminal recovery evidence identity collision")
         return audit_id
+
+    def record_master_security_evidence(
+        self, *, operation_id: str, evidence: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        required = {
+            "contract",
+            "source_commit",
+            "master_instance_id",
+            "epoch",
+            "schema_version",
+            "canonical_revision",
+            "outcome",
+            "role_probe_count",
+            "security_probe_count",
+            "role_verification_sha256",
+            "security_test_receipt_sha256",
+            "observed_at",
+        }
+        if set(evidence) != required or evidence.get("contract") != "my-data-hub-master-security-evidence.v1":
+            raise ValueError("master security evidence differs from its exact contract")
+        if evidence.get("outcome") != "PASSED":
+            raise ValueError("master security evidence is not successful")
+        for key in ("source_commit", "role_verification_sha256", "security_test_receipt_sha256"):
+            expected = 40 if key == "source_commit" else 64
+            value = evidence.get(key)
+            if not isinstance(value, str) or len(value) != expected or not re.fullmatch(r"[a-f0-9]+", value):
+                raise ValueError(f"master security evidence {key} is invalid")
+        for key, minimum in (("epoch", 1), ("schema_version", 1), ("canonical_revision", 0),
+                             ("role_probe_count", 1), ("security_probe_count", 1)):
+            value = evidence.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+                raise ValueError(f"master security evidence {key} is invalid")
+        try:
+            master_instance_id = str(UUID(str(evidence["master_instance_id"])))
+            observed_at = _format_time(_parse_time(str(evidence["observed_at"])))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("master security evidence identity or time is invalid") from exc
+        evidence_json = _safe_json(evidence)
+        evidence_sha256 = hashlib.sha256(evidence_json.encode("utf-8")).hexdigest()
+        with self._transaction() as connection:
+            operation = connection.execute(
+                "SELECT operation_id,state,identity_json FROM operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            if operation is None:
+                raise StaleRuntimeEvent("master security evidence operation is absent")
+            identity = json.loads(operation["identity_json"])
+            if (
+                operation["state"] != "ACTIVE"
+                or str(identity.get("run_id", "")) == ""
+                or str(identity.get("attempt_id", "")) == ""
+                or str(identity.get("master_instance_id")) != master_instance_id
+                or int(identity.get("epoch", 0)) != int(evidence["epoch"])
+            ):
+                raise StaleRuntimeEvent("master security evidence differs from the ACTIVE operation")
+            values = (
+                operation_id,
+                str(identity["run_id"]),
+                str(identity["attempt_id"]),
+                master_instance_id,
+                int(evidence["epoch"]),
+                str(evidence["source_commit"]),
+                int(evidence["schema_version"]),
+                int(evidence["canonical_revision"]),
+                int(evidence["role_probe_count"]),
+                int(evidence["security_probe_count"]),
+                str(evidence["role_verification_sha256"]),
+                str(evidence["security_test_receipt_sha256"]),
+                observed_at,
+                evidence_sha256,
+            )
+            try:
+                connection.execute(
+                    "INSERT INTO master_security_evidence(operation_id,run_id,attempt_id,master_instance_id,epoch,"
+                    "source_commit,schema_version,canonical_revision,role_probe_count,security_probe_count,"
+                    "role_verification_sha256,security_test_receipt_sha256,observed_at,evidence_sha256) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    values,
+                )
+            except sqlite3.IntegrityError:
+                stored = connection.execute(
+                    "SELECT * FROM master_security_evidence WHERE operation_id=?", (operation_id,)
+                ).fetchone()
+                if stored is None or tuple(stored) != values:
+                    raise IdempotencyConflict("master security evidence identity collision") from None
+            stored = connection.execute(
+                "SELECT * FROM master_security_evidence WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            assert stored is not None
+            return dict(stored)
+
+    def latest_master_security_evidence(self, *, source_commit: str | None = None) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            if source_commit is None:
+                row = connection.execute(
+                    "SELECT * FROM master_security_evidence ORDER BY observed_at DESC LIMIT 1"
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT * FROM master_security_evidence WHERE source_commit=? ORDER BY observed_at DESC LIMIT 1",
+                    (source_commit,),
+                ).fetchone()
+            return dict(row) if row is not None else None
 
     @staticmethod
     def _operation_from_row(row: sqlite3.Row) -> OperationRecord:

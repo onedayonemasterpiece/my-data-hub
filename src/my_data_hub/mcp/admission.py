@@ -40,7 +40,6 @@ _SECURITY_RESPONSE_HEADERS = (
     (b"cache-control", b"no-store"),
     (b"pragma", b"no-cache"),
     (b"x-content-type-options", b"nosniff"),
-    (b"referrer-policy", b"no-referrer"),
     (b"x-frame-options", b"DENY"),
 )
 
@@ -250,6 +249,7 @@ class HTTPAdmissionSecurity:
         trusted_proxy_ips: tuple[str, ...] = (),
         unauthenticated_paths: tuple[str, ...] = (),
         resource_metadata_url: str | None = None,
+        referrer_policy: str = "no-referrer",
     ) -> None:
         if not allowed_hosts:
             raise ValueError("at least one exact allowed Host is required")
@@ -263,8 +263,11 @@ class HTTPAdmissionSecurity:
             raise ValueError("unauthenticated paths must be exact absolute paths")
         if resource_metadata_url is not None and not resource_metadata_url.startswith("https://"):
             raise ValueError("OAuth resource metadata URL must use HTTPS")
+        if referrer_policy not in {"no-referrer", "origin"}:
+            raise ValueError("referrer policy must be exactly no-referrer or origin")
         self.unauthenticated_paths = frozenset(unauthenticated_paths)
         self.resource_metadata_url = resource_metadata_url
+        self.referrer_policy = referrer_policy
         self._semaphore = asyncio.Semaphore(self.limits.max_concurrency)
         self._rate = SlidingWindowRateLimiter(max_keys=self.limits.max_rate_keys)
 
@@ -516,8 +519,9 @@ class HTTPAdmissionSecurity:
             # Never expose application, adapter, or ASGI protocol exception text.
             await self._reject(send, 500, "internal_error", correlation_id)
 
-    @staticmethod
-    def _secure_headers(existing: Iterable[tuple[bytes, bytes]], correlation_id: str) -> list[tuple[bytes, bytes]]:
+    def _secure_headers(
+        self, existing: Iterable[tuple[bytes, bytes]], correlation_id: str
+    ) -> list[tuple[bytes, bytes]]:
         replaced = {
             "cache-control",
             "pragma",
@@ -528,6 +532,7 @@ class HTTPAdmissionSecurity:
         }
         headers = [(key, value) for key, value in existing if key.decode("latin-1").casefold() not in replaced]
         headers.extend(_SECURITY_RESPONSE_HEADERS)
+        headers.append((b"referrer-policy", self.referrer_policy.encode("ascii")))
         headers.append((b"x-correlation-id", correlation_id.encode("ascii")))
         return headers
 
@@ -539,9 +544,8 @@ class HTTPAdmissionSecurity:
                 message["headers"] = self._secure_headers(message.get("headers", ()), correlation_id)
             await send(message)
 
-    @classmethod
     async def _reject(
-        cls,
+        self,
         send: ASGISend,
         status: int,
         code: str,
@@ -552,7 +556,7 @@ class HTTPAdmissionSecurity:
         resource_metadata_url: str | None = None,
     ) -> None:
         body = json.dumps({"error": code}, separators=(",", ":")).encode("utf-8")
-        headers = cls._secure_headers(((b"content-type", b"application/json"),), correlation_id)
+        headers = self._secure_headers(((b"content-type", b"application/json"),), correlation_id)
         if authenticate:
             challenge = 'Bearer realm="my-data-hub"'
             if resource_metadata_url:

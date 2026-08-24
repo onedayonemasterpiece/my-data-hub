@@ -113,7 +113,9 @@ def test_production_control_profile_has_no_local_database_path() -> None:
     assert oauth_server["profiles"] == ["remote-mcp"]
     assert oauth_server["entrypoint"] == ["python", "-m", "my_data_hub.oauth_server.runtime"]
     assert remote_mcp["environment"]["MY_DATA_HUB_MCP_WRITE_ENABLED"] == "false"
-    assert remote_mcp["ports"] == ["127.0.0.1:${MY_DATA_HUB_MCP_PORT:-8765}:8765"]
+    assert remote_mcp["network_mode"] == "host"
+    assert remote_mcp["environment"]["MY_DATA_HUB_MCP_HOST"] == "127.0.0.1"
+    assert "ports" not in remote_mcp
     connector_intake = compose["services"]["connector-intake"]
     assert connector_intake["profiles"] == ["connectors"]
     assert connector_intake["ports"] == [

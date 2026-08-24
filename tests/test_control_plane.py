@@ -37,8 +37,12 @@ def test_control_plane_is_ready_while_master_is_absent(
         "canonical_database_runtime": "kaggle_notebook",
         "lifecycle_implementation": "durable_control_ledger_v1",
         "production_publication": False,
-        "remote_mcp_writes": False,
-    }
+            "remote_mcp_writes": False,
+            "master_runtime_ready": False,
+            "master_provider_status": "provider_unavailable",
+            "provider_gateway_ready": False,
+            "unified_bootstrap_mode": False,
+        }
 
 
 @pytest.mark.parametrize(

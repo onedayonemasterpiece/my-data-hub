@@ -1,0 +1,38 @@
+mode: serial_integrator
+repo: my-data-hub
+base_ref: 884597b736cf6d716acbd5380ea59fa248b868d5
+base_branch: integration/pr5-one-pass
+integration_branch: codex/unified-bootstrap-r02
+global_constraints:
+  - no live deploy or root mutation
+  - no canonical write/operator profile
+  - provider-only behavior unchanged
+  - no fabricated checkpoint/security readiness
+verification_owner: /root/master_autostart_audit
+stop_conditions:
+  - integration HEAD differs from exact assigned base before work
+  - required shared surfaces concurrently modified in this worktree
+lanes:
+  - id: unified-bootstrap-r02
+    role: worker
+    requirement_ids: [U1, U2, U3, U4, U5]
+    target: unified bootstrap/autostart profile and deployment action
+    depends_on: []
+    execution_mode: serial_after_dependency
+    branch: codex/unified-bootstrap-r02
+    worktree: /home/dev/.codex/worktrees/my-data-hub/unified-bootstrap
+    writable_files:
+      - src/my_data_hub/config.py
+      - src/my_data_hub/mcp/
+      - src/my_data_hub/control_plane/
+      - deploy/control-plane/
+      - tests/
+      - docs/
+      - .codex/lanes/unified-bootstrap-r02/
+    forbidden_files:
+      - migrations/
+      - architecture/invariants.yaml
+      - production runtime state
+    expected_output: committed implementation, tests, docs, RESULTS
+    verification_scope: full_local
+    status: spawned

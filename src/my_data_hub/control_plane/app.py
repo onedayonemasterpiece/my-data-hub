@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import tempfile
 from contextlib import asynccontextmanager, suppress
@@ -40,6 +41,7 @@ from my_data_hub.control_plane.ledger import (
     MasterAdmissionRejected,
     StaleRuntimeEvent,
 )
+from my_data_hub.control_plane.provider_uploads import ProviderUploadConflict
 from my_data_hub.control_plane.runtime import (
     ControlPlaneMasterRuntime,
     MasterRuntimeSettings,
@@ -75,7 +77,12 @@ from my_data_hub.providers.kaggle import (
     KaggleProviderAdapter,
 )
 from my_data_hub.providers.kaggle.contracts import (
+    KaggleAmbiguousMutation,
+    KaggleContractError,
     KaggleKernelRunIdentity,
+    KaggleNotFound,
+    KagglePolicyError,
+    KaggleProviderError,
     MutationAction,
     ProviderEffectIntent,
     ProviderEffectReceipt,
@@ -93,6 +100,8 @@ from my_data_hub.workloads.bloggers.master_stage import (
     BloggerQuarantineReceipt,
     resolution_matches_quarantine,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 DATABASE_ENVIRONMENT_NAMES = (
     "MY_DATA_HUB_DATABASE_URL",
@@ -251,6 +260,8 @@ class ControlPlaneSettings:
     operator_credentials_enabled: bool = False
     provider_gateway_enabled: bool = False
     provider_only_mode: bool = False
+    unified_bootstrap_mode: bool = False
+    provider_upload_root: Path | None = None
     acceptance_scenarios_enabled: bool = False
     connector_runtime_enabled: bool = False
 
@@ -259,11 +270,19 @@ class ControlPlaneSettings:
             raise ControlPlaneConfigurationError("control-plane listener is invalid")
         if self.scheduler_enabled or self.production_publish_enabled or self.remote_mcp_writes_enabled:
             raise ControlPlaneConfigurationError("PR-A control-plane write and publication gates must remain false")
-        if self.provider_gateway_enabled and not self.operator_credentials_enabled:
+        if self.provider_gateway_enabled and not (
+            self.operator_credentials_enabled or self.unified_bootstrap_mode
+        ):
             raise ControlPlaneConfigurationError("provider gateway requires the explicit operator credential gate")
         if self.acceptance_scenarios_enabled and not self.provider_gateway_enabled:
             raise ControlPlaneConfigurationError(
                 "acceptance scenarios require the authenticated single control gateway"
+            )
+        if self.provider_upload_root is not None and (
+            not self.provider_upload_root.is_absolute() or self.provider_upload_root.is_symlink()
+        ):
+            raise ControlPlaneConfigurationError(
+                "provider upload staging root must be an absolute non-symlink path"
             )
         if self.provider_only_mode and (
             not self.provider_gateway_enabled
@@ -274,6 +293,18 @@ class ControlPlaneSettings:
         ):
             raise ControlPlaneConfigurationError(
                 "provider-only control requires only the authenticated provider gateway"
+            )
+        if self.unified_bootstrap_mode and (
+            self.provider_only_mode
+            or self.operator_credentials_enabled
+            or not self.provider_gateway_enabled
+            or self.master_runtime is None
+            or self.acceptance_scenarios_enabled
+            or self.connector_runtime_enabled
+        ):
+            raise ControlPlaneConfigurationError(
+                "unified bootstrap control requires the master runtime and provider gateway "
+                "without operator, acceptance, or connector authority"
             )
 
     @classmethod
@@ -303,6 +334,10 @@ class ControlPlaneSettings:
             operator_credentials_enabled=_boolean("MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED"),
             provider_gateway_enabled=_boolean("MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED"),
             provider_only_mode=_boolean("MY_DATA_HUB_PROVIDER_ONLY_MODE"),
+            unified_bootstrap_mode=_boolean("MY_DATA_HUB_UNIFIED_BOOTSTRAP_MODE"),
+            provider_upload_root=Path(
+                os.getenv("MY_DATA_HUB_PROVIDER_UPLOAD_ROOT", "/uploads")
+            ).expanduser(),
             acceptance_scenarios_enabled=_boolean("MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED"),
             connector_runtime_enabled=_boolean("MY_DATA_HUB_CONNECTOR_RUNTIME_ENABLED"),
         )
@@ -365,7 +400,17 @@ def create_app(
             raise ControlPlaneConfigurationError("master runtime and app must share one control ledger")
         provider_status = "available"
     if provider_gateway is None and provider_adapter is not None:
-        provider_gateway = KaggleMCPProviderGateway(control_ledger, provider_adapter)
+        provider_gateway = KaggleMCPProviderGateway(
+            control_ledger,
+            provider_adapter,
+            upload_root=runtime.provider_upload_root if runtime.provider_gateway_enabled else None,
+        )
+    if runtime.unified_bootstrap_mode and (
+        master_runtime is None or provider_gateway is None or provider_status != "available"
+    ):
+        raise ControlPlaneConfigurationError(
+            "unified bootstrap runtime requires the concrete master and central provider adapter"
+        )
     def _exact_master_asset_claim(settings: MasterRuntimeSettings | None) -> dict[str, Any] | None:
         if settings is None or not hasattr(settings, "assets"):
             return None
@@ -377,7 +422,7 @@ def create_app(
         if claim is None:
             return None
         authority = control_ledger.provider_effect_authority(str(claim["effect_id"]))
-        receipt = control_ledger.latest_provider_effect_receipt(str(claim["effect_id"]))
+        receipt = control_ledger.latest_successful_provider_effect_receipt(str(claim["effect_id"]))
         expected_content_tree_sha256 = KaggleMasterRuntimeProvider._mapping_sha(settings.assets.dataset_files)
         expected_arguments_sha256 = sha256_value(
             {
@@ -408,7 +453,7 @@ def create_app(
     # Provider mutations are deferred to the lifespan reconciler; app
     # construction remains side-effect free and embedding admission closed.
     if runtime.provider_gateway_enabled:
-        if not operator_credential_enabled or provider_gateway is None:
+        if not (operator_credential_enabled or runtime.unified_bootstrap_mode) or provider_gateway is None:
             raise ControlPlaneConfigurationError("provider gateway requires the single authenticated control adapter")
         if provider_gateway_token is None:
             token_path = Path(os.getenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE", "")).expanduser()
@@ -514,23 +559,41 @@ def create_app(
     async def lifespan(_app: FastAPI):
         stopped = asyncio.Event()
         task: asyncio.Task[None] | None = None
+        upload_reaper_task: asyncio.Task[None] | None = None
+
+        async def reconcile_upload_expiry() -> None:
+            while not stopped.is_set():
+                if provider_gateway is not None:
+                    with suppress(Exception):
+                        await asyncio.to_thread(provider_gateway.reap_uploads)
+                try:
+                    await asyncio.wait_for(stopped.wait(), timeout=30.0)
+                except TimeoutError:
+                    continue
 
         async def reconcile_requests() -> None:
             while not stopped.is_set():
+                if checkpoint_upload_broker is not None:
+                    with suppress(Exception):
+                        await asyncio.to_thread(checkpoint_upload_broker.reconcile_pending_once)
+                        # A draining runtime cannot safely wait behind the
+                        # slower provider-run poll below.  The same central
+                        # adapter is kept serial: checkpoint recovery has
+                        # priority, then ordinary master reconciliation runs.
                 if master_runtime is not None:
                     with suppress(Exception):
                         await asyncio.to_thread(master_runtime.reconcile_requested_once)
+                        reconcile_incomplete = getattr(
+                            master_runtime, "reconcile_incomplete_once", None
+                        )
+                        if reconcile_incomplete is not None:
+                            await asyncio.to_thread(reconcile_incomplete)
                         reconcile_acceptance = getattr(master_runtime, "reconcile_acceptance_once", None)
                         if reconcile_acceptance is not None:
                             await asyncio.to_thread(reconcile_acceptance)
                         reconcile_status_cleanup = getattr(master_runtime, "reconcile_status_cleanup_once", None)
                         if reconcile_status_cleanup is not None:
                             await asyncio.to_thread(reconcile_status_cleanup)
-                if checkpoint_upload_broker is not None:
-                    with suppress(Exception):
-                        await asyncio.to_thread(checkpoint_upload_broker.reconcile_pending_once)
-                        # The durable request remains PENDING; provider details
-                        # never enter logs/responses and bounded retry resumes.
                 if app.state.embedding_direct_plane_launcher is None and provider_adapter is not None:
                     settings = runtime.master_runtime
                     claim = _exact_master_asset_claim(settings)
@@ -580,12 +643,16 @@ def create_app(
 
         if master_runtime is not None:
             task = asyncio.create_task(reconcile_requests())
+        if provider_gateway is not None and getattr(provider_gateway, "uploads", None) is not None:
+            upload_reaper_task = asyncio.create_task(reconcile_upload_expiry())
         try:
             yield
         finally:
             stopped.set()
             if task is not None:
                 await task
+            if upload_reaper_task is not None:
+                await upload_reaper_task
 
     app = FastAPI(
         title="my-data-hub lightweight control plane",
@@ -870,11 +937,14 @@ def create_app(
             "lifecycle_implementation": "durable_control_ledger_v1",
             "production_publication": runtime.production_publish_enabled,
             "remote_mcp_writes": runtime.remote_mcp_writes_enabled,
+            "master_runtime_ready": app.state.master_runtime is not None,
+            "master_provider_status": app.state.master_provider_status,
+            "provider_gateway_ready": app.state.provider_gateway is not None,
+            "unified_bootstrap_mode": runtime.unified_bootstrap_mode,
         }
         if runtime.provider_only_mode:
             result.update(
                 provider_only_mode=True,
-                provider_gateway_ready=app.state.provider_gateway is not None,
             )
         return result
 
@@ -917,6 +987,11 @@ def create_app(
                     "provider.resources.download",
                     "provider.inventory.live",
                     "provider.resources.delete",
+                    "provider.upload.start",
+                    "provider.upload.put_chunk",
+                    "provider.upload.status",
+                    "provider.upload.finalize",
+                    "provider.upload.abort",
                     "provider.acceptance.claim.get",
                     "provider.acceptance.claim.cleanup",
                 }
@@ -932,6 +1007,11 @@ def create_app(
                     "provider.resources.download",
                     "provider.inventory.live",
                     "provider.resources.delete",
+                    "provider.upload.start",
+                    "provider.upload.put_chunk",
+                    "provider.upload.status",
+                    "provider.upload.finalize",
+                    "provider.upload.abort",
                     "provider.acceptance.dataset.lifecycle",
                     "provider.acceptance.notebook.lifecycle",
                     "provider.acceptance.claim.get",
@@ -950,6 +1030,11 @@ def create_app(
             request: Request,
             authorization: str | None = Header(default=None),
         ) -> dict[str, Any]:
+            correlation_id = str(uuid4())
+
+            def gateway_detail(code: str) -> dict[str, str]:
+                return {"code": code, "correlation_id": correlation_id}
+
             supplied = (
                 authorization.removeprefix("Bearer ").strip()
                 if authorization and authorization.startswith("Bearer ")
@@ -957,16 +1042,22 @@ def create_app(
             )
             expected = provider_gateway_token.decode("ascii") if provider_gateway_token else ""
             if not supplied or not hmac.compare_digest(supplied, expected):
-                raise HTTPException(status_code=401, detail={"code": "provider_gateway_token_invalid"})
+                raise HTTPException(status_code=401, detail=gateway_detail("provider_gateway_token_invalid"))
             raw = await request.body()
             if len(raw) > 512 * 1024:
-                raise HTTPException(status_code=413, detail={"code": "provider_gateway_request_too_large"})
+                raise HTTPException(
+                    status_code=413, detail=gateway_detail("provider_gateway_request_too_large")
+                )
             try:
                 body = json.loads(raw)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise HTTPException(status_code=400, detail={"code": "provider_gateway_json_invalid"}) from exc
+                raise HTTPException(
+                    status_code=400, detail=gateway_detail("provider_gateway_json_invalid")
+                ) from exc
             if not isinstance(body, dict) or set(body) != {"tool", "arguments", "principal"}:
-                raise HTTPException(status_code=422, detail={"code": "provider_gateway_envelope_invalid"})
+                raise HTTPException(
+                    status_code=422, detail=gateway_detail("provider_gateway_envelope_invalid")
+                )
             tool = body["tool"]
             arguments = body["arguments"]
             principal = body["principal"]
@@ -999,7 +1090,9 @@ def create_app(
                 or not isinstance(principal["issued_at"], int)
                 or isinstance(principal["issued_at"], bool)
             ):
-                raise HTTPException(status_code=422, detail={"code": "provider_gateway_contract_invalid"})
+                raise HTTPException(
+                    status_code=422, detail=gateway_detail("provider_gateway_contract_invalid")
+                )
             now = int(datetime.now(UTC).timestamp())
             try:
                 identity = AccessIdentity(
@@ -1014,7 +1107,9 @@ def create_app(
                     resource=str(principal["resource"]),
                 )
             except (TypeError, ValueError) as exc:
-                raise HTTPException(status_code=422, detail={"code": "provider_gateway_principal_invalid"}) from exc
+                raise HTTPException(
+                    status_code=422, detail=gateway_detail("provider_gateway_principal_invalid")
+                ) from exc
             contract = TOOL_CONTRACTS[tool]
             if (
                 not identity.subject
@@ -1023,7 +1118,9 @@ def create_app(
                 or identity.expires_at <= now
                 or contract.scope not in identity.scopes
             ):
-                raise HTTPException(status_code=403, detail={"code": "provider_gateway_principal_denied"})
+                raise HTTPException(
+                    status_code=403, detail=gateway_detail("provider_gateway_principal_denied")
+                )
 
             forbidden = {"authorization", "database_url", "dsn", "password", "private_key", "secret", "token"}
 
@@ -1031,7 +1128,10 @@ def create_app(
                 if isinstance(value, dict):
                     for key, nested in value.items():
                         if str(key).casefold() in forbidden:
-                            raise HTTPException(status_code=422, detail={"code": "provider_gateway_secret_forbidden"})
+                            raise HTTPException(
+                                status_code=422,
+                                detail=gateway_detail("provider_gateway_secret_forbidden"),
+                            )
                         reject_secrets(nested)
                 elif isinstance(value, list):
                     for nested in value:
@@ -1041,15 +1141,53 @@ def create_app(
             assert provider_control is not None
             try:
                 result = await asyncio.to_thread(provider_control.invoke_control, tool, arguments, identity)
-            except PermissionError as exc:
-                raise HTTPException(status_code=403, detail={"code": "provider_gateway_policy_denied"}) from exc
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail={"code": "provider_gateway_request_invalid"}) from exc
+            except (PermissionError, KagglePolicyError) as exc:
+                code, status_code = "provider_gateway_policy_denied", 403
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
+            except KaggleAmbiguousMutation as exc:
+                code, status_code = "provider_gateway_effect_ambiguous", 409
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
+            except KaggleNotFound as exc:
+                code, status_code = "provider_gateway_not_found", 404
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
+            except ProviderUploadConflict as exc:
+                code, status_code = "provider_gateway_upload_conflict", 409
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
+            except (ValueError, KaggleContractError) as exc:
+                code, status_code = "provider_gateway_request_invalid", 422
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
+            except KaggleProviderError as exc:
+                code, status_code = "provider_gateway_effect_failed", 502
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
             except Exception as exc:
-                raise HTTPException(status_code=502, detail={"code": "provider_gateway_effect_failed"}) from exc
+                code, status_code = "provider_gateway_internal_failure", 502
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
             encoded = canonical_json_bytes(result)
             if len(encoded) > 2 * 1024 * 1024:
-                raise HTTPException(status_code=502, detail={"code": "provider_gateway_response_too_large"})
+                raise HTTPException(
+                    status_code=502, detail=gateway_detail("provider_gateway_response_too_large")
+                )
             return result
 
     @app.get("/control/v1/master")
@@ -1074,6 +1212,19 @@ def create_app(
                 else "provider_unavailable"
             )
             raise HTTPException(status_code=503, detail={"code": code})
+        active_service = control_ledger.resolve_service("postgres-master")
+        if active_service is not None:
+            active_operation = control_ledger.operation_for_attempt(
+                active_service.run_id,
+                active_service.attempt_id,
+            )
+            if active_operation is not None and active_operation.state == "ACTIVE":
+                return {
+                    "operation_id": active_operation.operation_id,
+                    "master_state": active_operation.state,
+                    "duplicate": True,
+                    "terminal": True,
+                }
         try:
             handle, duplicate = master_runtime.ensure(key)
         except Exception as exc:
@@ -1980,7 +2131,7 @@ def create_app(
                     *(["operator"] if operator_credential_enabled else []),
                     *(
                         ["connector", "canonical_committer"]
-                        if runtime.connector_runtime_enabled
+                        if operator_credential_enabled or runtime.connector_runtime_enabled
                         else []
                     ),
                 ]
@@ -2045,7 +2196,8 @@ def create_app(
             *(["operator"] if operation.state == "ACTIVE" and operator_credential_enabled else []),
             *(
                 ["connector", "canonical_committer"]
-                if operation.state == "ACTIVE" and runtime.connector_runtime_enabled
+                if operation.state == "ACTIVE"
+                and (operator_credential_enabled or runtime.connector_runtime_enabled)
                 else []
             ),
         ]
@@ -2116,7 +2268,19 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, Any]:
-        if not runtime.connector_runtime_enabled:
+        # Operator canonical writes use the same task-bound verified-checkpoint
+        # request queue as connector commits.  The queue consumer is the
+        # master notebook itself, so it must remain available for the explicit
+        # operator profile even when the optional connector-intake service is
+        # disabled.  Unified bootstrap also needs this task-bound queue to
+        # create the verified checkpoint that authorizes the subsequent
+        # operator cutover; it still exposes no public canonical write tools.
+        # Provider-only remains unable to open the queue.
+        if not (
+            runtime.connector_runtime_enabled
+            or operator_credential_enabled
+            or runtime.unified_bootstrap_mode
+        ):
             raise HTTPException(status_code=404, detail={"code": "connector_runtime_disabled"})
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=401, detail={"code": "runtime_token_required"})
@@ -2380,6 +2544,46 @@ def create_app(
             "connector_kind": connector_kind,
             "state": state,
             "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+        }
+
+    @app.post("/internal/runtime/security-evidence/{run_id}/{attempt_id}")
+    async def runtime_security_evidence(
+        run_id: str,
+        attempt_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        raw = await request.body()
+        if len(raw) > 16 * 1024:
+            raise HTTPException(status_code=413, detail={"code": "master_security_evidence_too_large"})
+        try:
+            body = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail={"code": "master_security_evidence_invalid"}) from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=422, detail={"code": "master_security_evidence_invalid"})
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            allowed_states=frozenset({"ACTIVE"}),
+        )
+        try:
+            stored = control_ledger.record_master_security_evidence(
+                operation_id=operation.operation_id,
+                evidence=body,
+            )
+        except (ValueError, ControlLedgerError) as exc:
+            raise HTTPException(status_code=409, detail={"code": "master_security_evidence_rejected"}) from exc
+        return {
+            "recorded": True,
+            "evidence_sha256": stored["evidence_sha256"],
+            "role_verification_sha256": stored["role_verification_sha256"],
+            "security_test_receipt_sha256": stored["security_test_receipt_sha256"],
         }
 
     @app.post("/internal/provider-journal/intents")
@@ -2675,7 +2879,10 @@ def create_app(
         return {"claim": claim}
 
     def _broker_runtime_authority(
-        operation: _ProviderOperationAuthority, *, checkpoint_id: str | None = None
+        operation: _ProviderOperationAuthority,
+        *,
+        checkpoint_id: str | None = None,
+        allow_expired_read: bool = False,
     ) -> RuntimeUploadAuthority:
         if checkpoint_upload_broker is None:
             raise HTTPException(status_code=503, detail={"code": "checkpoint_upload_broker_unavailable"})
@@ -2729,7 +2936,15 @@ def create_app(
             master_instance_id=str(identity.get("master_instance_id", "")),
             epoch=int(identity.get("epoch", 0)),
         )
-        if snapshot is None:
+        operation_record = control_ledger.get_operation(operation.operation_id)
+        expired_read = (
+            allow_expired_read
+            and snapshot is None
+            and operation_record is not None
+            and operation_record.state in {"CHECKPOINTING", "CHECKPOINT_FAILED"}
+            and control_ledger.current_epoch("postgres-master") == int(identity.get("epoch", 0))
+        )
+        if snapshot is None and not expired_read:
             raise HTTPException(status_code=409, detail={"code": "checkpoint_runtime_lease_invalid"})
         return RuntimeUploadAuthority(
             operation_id=operation.operation_id,
@@ -2739,7 +2954,11 @@ def create_app(
             service_instance_id=str(identity["service_instance_id"]),
             epoch=int(identity["epoch"]),
             master_run_ref=run.provider_run_ref,
-            lease_until=datetime.fromisoformat(str(snapshot["lease_until"]).replace("Z", "+00:00")),
+            lease_until=(
+                datetime.fromisoformat(str(snapshot["lease_until"]).replace("Z", "+00:00"))
+                if snapshot is not None
+                else control_ledger.clock.now()
+            ),
         )
 
     @app.get("/internal/checkpoints/{checkpoint_id}/runtime-upload-authority")
@@ -2759,8 +2978,13 @@ def create_app(
             attempt_id=attempt_id,
             master_instance_id=master_instance_id,
             epoch=epoch,
+            allowed_states=frozenset({"ACTIVE", "DRAINING", "CHECKPOINTING", "CHECKPOINT_FAILED"}),
         )
-        authority = _broker_runtime_authority(operation, checkpoint_id=checkpoint_id)
+        authority = _broker_runtime_authority(
+            operation,
+            checkpoint_id=checkpoint_id,
+            allow_expired_read=True,
+        )
         return {
             "master_run_ref": authority.master_run_ref,
             "epoch": authority.epoch,
@@ -2784,10 +3008,11 @@ def create_app(
             attempt_id=attempt_id,
             master_instance_id=master_instance_id,
             epoch=epoch,
+            allowed_states=frozenset({"ACTIVE", "DRAINING", "CHECKPOINTING", "CHECKPOINT_FAILED"}),
         )
         if operation.acceptance is not None:
             raise HTTPException(status_code=409, detail={"code": "acceptance_checkpoint_required"})
-        authority = _broker_runtime_authority(operation)
+        authority = _broker_runtime_authority(operation, allow_expired_read=True)
         return {"master_run_ref": authority.master_run_ref}
 
     @app.post("/internal/checkpoints/{checkpoint_id}/blob-uploads/prepare")
@@ -2905,8 +3130,13 @@ def create_app(
             attempt_id=attempt_id,
             master_instance_id=master_instance_id,
             epoch=epoch,
+            allowed_states=frozenset({"ACTIVE", "DRAINING", "CHECKPOINTING", "CHECKPOINT_FAILED"}),
         )
-        _broker_runtime_authority(operation, checkpoint_id=checkpoint_id)
+        _broker_runtime_authority(
+            operation,
+            checkpoint_id=checkpoint_id,
+            allow_expired_read=True,
+        )
         publication = checkpoint_upload_broker.status(UUID(checkpoint_id))  # type: ignore[union-attr]
         if publication["operation_id"] != operation.operation_id:
             raise HTTPException(status_code=403, detail={"code": "checkpoint_publication_forbidden"})

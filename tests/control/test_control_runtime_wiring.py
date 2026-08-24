@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -25,9 +26,11 @@ from my_data_hub.control_plane.runtime import (
     MasterRuntimeSettings,
     ProductionRuntimeBuild,
     TunnelCertificate,
+    _historical_checkpoint_verifier_assets,
     build_production_runtime,
 )
 from my_data_hub.embeddings.production import EmbeddingProductionRequest
+from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.orchestrator.master import FakeKaggleRuntime, MasterCoordinator
 from my_data_hub.providers.kaggle import (
     ControlLedgerKaggleJournal,
@@ -258,7 +261,51 @@ def test_checkpoint_verifier_factory_uses_exact_verified_master_asset_claim(
     monkeypatch.setenv("MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE", str(key))
     base = assets()
     wheel_name = "my_data_hub-0.1.0-py3-none-any.whl"
-    launch = replace(base, dataset_files={**base.dataset_files, wheel_name: b"exact-wheel"})
+    psycopg = b"psycopg-wheel"
+    psycopg_binary = b"psycopg-binary-wheel"
+    dependency_manifest = {
+        "schema_version": "my-data-hub-embedding-worker-dependencies.v1",
+        "source_lock_sha256": "1" * 64,
+        "index_url": "https://pypi.org/simple",
+        "runtime": {
+            "image_identity": base.runtime_image_identity,
+            "source_commit": base.runtime_image_source_commit,
+            "python_abi": "cp312",
+            "platform": "manylinux2014_x86_64",
+        },
+        "install_order": [
+            "psycopg-3.3.4-py3-none-any.whl",
+            "psycopg_binary-3.3.4-cp312.whl",
+        ],
+        "required_image_distributions": [],
+        "wheels": [
+            {
+                "distribution": "psycopg",
+                "filename": "psycopg-3.3.4-py3-none-any.whl",
+                "sha256": hashlib.sha256(psycopg).hexdigest(),
+                "byte_size": len(psycopg),
+                "version": "3.3.4",
+            },
+            {
+                "distribution": "psycopg-binary",
+                "filename": "psycopg_binary-3.3.4-cp312.whl",
+                "sha256": hashlib.sha256(psycopg_binary).hexdigest(),
+                "byte_size": len(psycopg_binary),
+                "version": "3.3.4",
+            },
+        ],
+        "smoke_requirement": {},
+    }
+    launch = replace(
+        base,
+        dataset_files={
+            **base.dataset_files,
+            wheel_name: b"exact-wheel",
+            "embedding-worker-dependencies.json": canonical_json_bytes(dependency_manifest),
+            "embedding-worker-wheelhouse/psycopg-3.3.4-py3-none-any.whl": psycopg,
+            "embedding-worker-wheelhouse/psycopg_binary-3.3.4-cp312.whl": psycopg_binary,
+        },
+    )
     ledger = ControlLedger(tmp_path / "verified-assets.sqlite3")
     journal = ControlLedgerKaggleJournal(ledger)
     operation_id = uuid4()
@@ -315,12 +362,189 @@ def test_checkpoint_verifier_factory_uses_exact_verified_master_asset_claim(
         adapter_factory=lambda _journal: adapter,  # type: ignore[arg-type,return-value]
     )
     assert built.checkpoint_broker is not None
-    verifier = built.checkpoint_broker.restore_verifier_factory(uuid4(), uuid4())  # type: ignore[misc]
+    verifier = built.checkpoint_broker.restore_verifier_factory(uuid4(), task_id)  # type: ignore[misc]
     contract = verifier.assets.execution_contract()
     assert contract["runtime_dataset_exact_ref"] == "owner/master-launch/7"
     assert contract["runtime_image_identity"] == launch.runtime_image_identity
     assert contract["wheel_relative_path"] == wheel_name
     assert contract["wheel_sha256"] == hashlib.sha256(b"exact-wheel").hexdigest()
+
+
+def test_checkpoint_verifier_recovers_reused_historical_asset_bundle(tmp_path: Path) -> None:
+    base = assets()
+    provider_ref = "owner/master-assets-0123456789abcdef0123456789abcdef"
+    task_id = uuid4()
+    operation_id = uuid4()
+    creator_task_id = uuid4()
+    creator_operation_id = uuid4()
+    wheel = b"historical-project-wheel"
+    psycopg = b"historical-psycopg"
+    psycopg_binary = b"historical-psycopg-binary"
+    dependency_manifest = {
+        "wheels": [
+            {
+                "distribution": "psycopg",
+                "filename": "psycopg-3.3.4-py3-none-any.whl",
+                "sha256": hashlib.sha256(psycopg).hexdigest(),
+            },
+            {
+                "distribution": "psycopg-binary",
+                "filename": "psycopg_binary-3.3.4-cp312.whl",
+                "sha256": hashlib.sha256(psycopg_binary).hexdigest(),
+            },
+        ]
+    }
+    files = {
+        **base.dataset_files,
+        "my_data_hub-0.1.0-py3-none-any.whl": wheel,
+        "embedding-worker-dependencies.json": canonical_json_bytes(dependency_manifest),
+        "embedding-worker-wheelhouse/psycopg-3.3.4-py3-none-any.whl": psycopg,
+        "embedding-worker-wheelhouse/psycopg_binary-3.3.4-cp312.whl": psycopg_binary,
+    }
+    history = tmp_path / "history"
+    bundle_root = history / ("1" * 40)
+    dataset_root = bundle_root / "dataset"
+    dataset_root.mkdir(parents=True)
+    for relative, body in files.items():
+        target = dataset_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(body)
+    plain_assets = {}
+    dependency_wheels = []
+    for index, (relative, body) in enumerate(sorted(files.items())):
+        item = {
+            "path": f"dataset/{relative}",
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "byte_size": len(body),
+        }
+        if relative.startswith("embedding-worker-wheelhouse/"):
+            dependency_wheels.append(item)
+        else:
+            plain_assets[f"asset_{index}"] = item
+    plain_assets["checkpoint_verifier"] = plain_assets.pop(
+        next(key for key, item in plain_assets.items() if item["path"] == "dataset/checkpoint-verifier.ipynb")
+    )
+    manifest = {
+        "schema_version": "my-data-hub-master-asset-bundle.v1",
+        "source_commit": "1" * 40,
+        "source_identity": f"git:{'1' * 40}",
+        "source_version": "1" * 40,
+        "launch_dataset_ref": provider_ref,
+        "checkpoint_verifier_ref": "owner/checkpoint-verifier",
+        "worker_runtime": {
+            "image_identity": base.runtime_image_identity,
+            "source_commit": base.runtime_image_source_commit,
+            "python_series": base.runtime_python_series,
+        },
+        "assets": plain_assets,
+        "embedding_dependency_wheels": dependency_wheels,
+    }
+    (bundle_root / "master-asset-bundle.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    ledger = ControlLedger(tmp_path / "historical.sqlite3")
+    journal = ControlLedgerKaggleJournal(ledger)
+    effect_key = f"{creator_operation_id}:ensure_dataset"
+    effect_id = uuid5(NAMESPACE_URL, effect_key)
+    fingerprint = ProviderFingerprint(value="b" * 64)
+    journal.persist_intent(
+        ProviderEffectIntent.create(
+            operation_id=creator_operation_id,
+            effect_id=effect_id,
+            idempotency_key=effect_key,
+            task_id=creator_task_id,
+            action=MutationAction.CREATE_DATASET,
+            provider_ref=provider_ref,
+            arguments={
+                "content_tree_sha256": KaggleMasterRuntimeProvider._mapping_sha(files),
+                "control_class": ControlClass.ORCHESTRATOR_PROTECTED.value,
+                "disposable": False,
+            },
+            requested_at=datetime(2026, 8, 12, tzinfo=UTC),
+        )
+    )
+    journal.persist_receipt(
+        ProviderEffectReceipt(
+            operation_id=creator_operation_id,
+            effect_id=effect_id,
+            action=MutationAction.CREATE_DATASET,
+            provider_ref=provider_ref,
+            outcome=EffectOutcome.APPLIED,
+            attempts=1,
+            observed_fingerprint=fingerprint,
+            provider_version=3,
+            observed_at=datetime(2026, 8, 12, tzinfo=UTC),
+            detail_code="dataset_created_private",
+        )
+    )
+    journal.persist_resource_claim(
+        TaskResourceClaim.create(
+            task_id=creator_task_id,
+            effect_id=effect_id,
+            provider_ref=provider_ref,
+            kind=ProviderKind.DATASET,
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+            disposable=False,
+            fingerprint=fingerprint,
+            provider_version=3,
+            registered_at=datetime(2026, 8, 12, tzinfo=UTC),
+        )
+    )
+
+    # A release-scoped immutable asset Dataset is created once and reused by
+    # later cold master operations.  The later task therefore has an exact
+    # APPLIED ensure_dataset receipt, but correctly has no false
+    # "task-created" resource claim of its own.
+    ledger.ensure_operation(
+        operation_id=str(operation_id),
+        idempotency_key=f"master:{operation_id}",
+        operation_kind="ensure_master",
+        intent={"source_version": "1" * 40},
+        initial_state="ACTIVE",
+        identity={"run_id": str(task_id), "epoch": 2},
+    )
+    reused_effect_id = uuid5(NAMESPACE_URL, f"{operation_id}:ensure_dataset")
+    exact_identity = {
+        "provider_ref": provider_ref,
+        "provider_version": 3,
+        "package_sha256": "c" * 64,
+    }
+    ledger.plan_effect(
+        effect_id=str(reused_effect_id),
+        operation_id=str(operation_id),
+        idempotency_key=f"{operation_id}:ensure_dataset",
+        effect_kind="ensure_dataset",
+        exact_identity={
+            "operation_id": str(operation_id),
+            "run_id": str(task_id),
+            "exact_ref": provider_ref,
+            "source_identity": f"git:{'1' * 40}",
+            "source_version": "1" * 40,
+        },
+    )
+    ledger.claim_effect(str(reused_effect_id))
+    ledger.complete_effect(
+        str(reused_effect_id),
+        {
+            "provider": "kaggle",
+            "effect_kind": "ensure_dataset",
+            "exact_ref": provider_ref,
+            "source_identity": f"git:{'1' * 40}",
+            "source_version": "1" * 40,
+            "exact_identity": exact_identity,
+        },
+    )
+
+    recovered = _historical_checkpoint_verifier_assets(
+        ledger,
+        operation_id=operation_id,
+        task_id=task_id,
+        history_root=history,
+        timeout_seconds=1800,
+    )
+    contract = recovered.execution_contract()
+    assert contract["runtime_dataset_exact_ref"] == f"{provider_ref}/3"
+    assert recovered.notebook_source == files["checkpoint-verifier.ipynb"]
+    assert contract["wheel_sha256"] == hashlib.sha256(wheel).hexdigest()
 
 
 def test_production_builder_accepts_central_legacy_kaggle_credentials(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
@@ -386,6 +610,47 @@ def test_provider_only_control_settings_reject_master_or_acceptance_coupling(tmp
             operator_credentials_enabled=True,
             provider_gateway_enabled=True,
             acceptance_scenarios_enabled=True,
+        )
+
+
+def test_unified_bootstrap_readiness_requires_concrete_master_and_provider_gateway(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unified.sqlite3"
+    ledger = ControlLedger(path)
+    wired = runtime(ledger, FakeKaggleRuntime())
+
+    class Gateway:
+        def invoke(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            return {"outcome": "applied"}
+
+    settings = ControlPlaneSettings(
+        ledger_path=path,
+        master_runtime=MasterRuntimeSettings(assets()),
+        provider_gateway_enabled=True,
+        unified_bootstrap_mode=True,
+    )
+    app = create_app(
+        settings,
+        ledger=ledger,
+        master_runtime=wired,
+        provider_gateway=Gateway(),  # type: ignore[arg-type]
+        provider_gateway_token=b"g" * 32,
+    )
+    receipt = TestClient(app).get("/health/ready").json()
+    assert receipt["ok"] is True
+    assert receipt["unified_bootstrap_mode"] is True
+    assert receipt["master_runtime_ready"] is True
+    assert receipt["master_provider_status"] == "available"
+    assert receipt["provider_gateway_ready"] is True
+    assert receipt["master_state"] == "ABSENT"
+    assert receipt["data_plane_ready"] is False
+
+    with pytest.raises(Exception, match="unified bootstrap"):
+        ControlPlaneSettings(
+            ledger_path=path,
+            provider_gateway_enabled=True,
+            unified_bootstrap_mode=True,
         )
 
 
@@ -510,7 +775,58 @@ def test_control_provider_gateway_requires_service_auth_and_uses_injected_single
         headers={"Authorization": "Bearer " + "g" * 32},
     )
     assert rejected.status_code == 422
+    assert rejected.json()["detail"]["code"] == "provider_gateway_secret_forbidden"
+    assert len(rejected.json()["detail"]["correlation_id"]) == 36
     assert len(gateway.calls) == 3
+
+
+def test_control_provider_gateway_redacts_raw_adapter_failure_and_emits_correlation(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "provider-gateway-redaction.sqlite3"
+    ledger = ControlLedger(path)
+
+    class FailingGateway:
+        def invoke(self, *_args):  # type: ignore[no-untyped-def]
+            raise RuntimeError("KAGGLE_API_TOKEN=must-not-cross raw provider body")
+
+    app = create_app(
+        ControlPlaneSettings(
+            ledger_path=path,
+            operator_credentials_enabled=True,
+            provider_gateway_enabled=True,
+        ),
+        ledger=ledger,
+        master_runtime=runtime(ledger, FakeKaggleRuntime()),
+        provider_gateway=FailingGateway(),  # type: ignore[arg-type]
+        provider_gateway_token=b"g" * 32,
+    )
+    now = datetime.now(UTC)
+    response = TestClient(app).post(
+        "/internal/mcp-provider/invoke",
+        headers={"Authorization": "Bearer " + "g" * 32},
+        json={
+            "tool": "provider.inventory.live",
+            "arguments": {"limit": 100},
+            "principal": {
+                "subject": "owner",
+                "client_id": "owner-operator",
+                "scopes": ["provider:write"],
+                "audience": "mcp",
+                "expires_at": int((now + timedelta(minutes=2)).timestamp()),
+                "issuer": "https://issuer.example",
+                "issued_at": int((now - timedelta(minutes=1)).timestamp()),
+                "resource": "https://mcp.example/mcp",
+            },
+        },
+    )
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert detail["code"] == "provider_gateway_internal_failure"
+    assert len(detail["correlation_id"]) == 36
+    assert "KAGGLE_API_TOKEN" not in response.text
+    assert "KAGGLE_API_TOKEN" not in caplog.text
+    assert detail["correlation_id"] in caplog.text
 
 
 def test_control_ensure_runs_one_physical_launch_under_concurrency_and_restart(tmp_path: Path) -> None:
@@ -637,7 +953,12 @@ def test_runtime_callback_reaches_active_through_production_app_wiring(tmp_path:
         headers={"Authorization": f"Bearer {token}"},
     )
     assert activation.status_code == 200
-    assert activation.json()["credential_roles"] == ["reader", "operator"]
+    assert activation.json()["credential_roles"] == [
+        "reader",
+        "operator",
+        "connector",
+        "canonical_committer",
+    ]
 
     key_blob = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20" + b"k" * 32
     public_key = "ssh-ed25519 " + base64.b64encode(key_blob).decode()
@@ -717,6 +1038,17 @@ def test_active_runtime_claims_only_its_exact_blogger_request(tmp_path: Path) ->
         headers={"Authorization": f"Bearer {token}"},
     )
     assert accepted.status_code == 200
+    already_active = client.post(
+        "/control/v1/master/ensure",
+        json={"idempotency_key": "blogger-closure-new-key-after-active"},
+    )
+    assert already_active.status_code == 200
+    assert already_active.json() == {
+        "operation_id": operation.operation_id,
+        "master_state": "ACTIVE",
+        "duplicate": True,
+        "terminal": True,
+    }
     request = BloggerMigrationRequest(
         request_id=uuid4(),
         operation_id=operation.operation_id,

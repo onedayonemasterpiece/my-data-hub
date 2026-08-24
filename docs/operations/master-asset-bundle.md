@@ -11,6 +11,7 @@ checkout:
   --postgres-runtime-sha256 40bf34fb4a97a248537d0221127e38deb98c9b35208d474dd1b93f773c2558b5 \
   --tunnel-known-hosts /private/reviewed/hashed-known-hosts \
   --embedding-wheelhouse /private/reviewed/embedding-worker-wheelhouse \
+  --master-ydb-wheel /private/reviewed/ydb-3.31.2-py3-none-any.whl \
   --output /tmp/my-data-hub-master-assets-$(git rev-parse HEAD)
 ```
 
@@ -23,6 +24,22 @@ digest-pinned, both upstream archives are SHA-256 pinned, pgvector disables host
 `OPTFLAGS`, and the output tar/gzip metadata is deterministic. The artifact bytes stay
 outside Git and must match the explicit CLI digest; the known-host file must already use
 OpenSSH hashed-host syntax.
+
+Each build also derives a release-scoped private Dataset slug
+`mdh-master-assets-<first-32-hex-of-commit>`. This prevents a new reviewed release from
+trying to recreate a different package under the preceding release's immutable Dataset
+ref. The full source commit and every byte hash remain authoritative in the bundle and
+provider receipts; the bounded slug prefix is only the provider locator. Repeated master
+starts for the same release reuse the exact numeric Dataset claim after a fresh private
+readback and never create a duplicate version.
+
+The ACTIVE master also needs the YDB Python SDK for the direct, read-only source scan.
+`scripts/provider/assets/master-ydb-wheel-lock.v1.json` pins the official YDB 3.31.2
+pure-Python wheel URL and SHA-256. The builder accepts those reviewed bytes explicitly,
+stores them under `dataset/master-python-wheelhouse/`, and both the host verifier and
+Notebook bootstrap recheck the canonical lock, hash, CPython 3.12 image source, installed
+version, and import. Runtime installation is offline with `--no-index --no-deps`; the
+devstand never receives source rows.
 
 ## Offline E5/BGE dependency closure
 

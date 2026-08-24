@@ -88,13 +88,23 @@ def normalize_daily_counters(data_product: str, record: dict[str, Any]) -> dict[
 class PostgresConnectorAcceptanceRepository:
     """Atomic PostgreSQL intake boundary; never mutates shared canonical tables."""
 
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, *, session_role: str | None = None) -> None:
         self.database_url = database_url
+        if session_role not in {None, "mdh_connector_intake"}:
+            raise ValueError("connector repository session role is not permitted")
+        self.session_role = session_role
 
     def _connect(self):  # type: ignore[no-untyped-def]
         import psycopg
 
-        return psycopg.connect(self.database_url)
+        connection = psycopg.connect(self.database_url)
+        try:
+            if self.session_role is not None:
+                connection.execute("SET ROLE " + self.session_role)
+        except Exception:
+            connection.close()
+            raise
+        return connection
 
     def accept(self, submission: AcceptanceSubmission) -> RepositoryDecision:
         envelope = submission.validated.envelope
