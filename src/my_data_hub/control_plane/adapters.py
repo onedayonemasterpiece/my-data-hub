@@ -47,7 +47,9 @@ from my_data_hub.providers.exchange import (
 from my_data_hub.providers.kaggle import KaggleProviderAdapter, directory_sha256, mapping_sha256
 from my_data_hub.providers.kaggle.contracts import (
     EffectOutcome,
+    KaggleIdentityError,
     KaggleKernelRunIdentity,
+    KaggleNotFound,
     KernelState,
     MutationAction,
     ProviderEffectIntent,
@@ -1375,9 +1377,7 @@ class KaggleMCPProviderGateway:
             principal=principal.subject,
             now=self.ledger.clock.now(),
         )
-        metadata = self.ledger.provider_resource(provider_ref, str(claim.provider_version))
-        if metadata is None:
-            raise PermissionError("provider resource has no exact registered projection")
+        metadata = self._provider_projection(claim)
         if kind is ProviderKind.DATASET:
             identity = self.adapter.read_private_dataset(
                 provider_ref=provider_ref, version=claim.provider_version
@@ -1398,6 +1398,7 @@ class KaggleMCPProviderGateway:
         )
         run = KaggleKernelRunIdentity.model_validate(metadata["metadata"].get("run", {}))
         status = self.adapter.read_run_status(run)
+        self._record_terminal_observation(claim, run, status)
         return {
             "claim_sha256": claim.claim_sha256,
             "task_id": str(claim.task_id),
@@ -1451,11 +1452,12 @@ class KaggleMCPProviderGateway:
                 principal=principal.subject,
                 now=self.ledger.clock.now(),
             )
-            projection = self.ledger.provider_resource(provider_ref, str(claim.provider_version))
-            metadata = projection.get("metadata", {}) if projection else {}
+            projection = self._provider_projection(claim)
+            metadata = projection["metadata"]
             outputs = self._expected_outputs(metadata.get("expected_outputs", []))
             run = KaggleKernelRunIdentity.model_validate(metadata.get("run", {}))
             status = self.adapter.read_run_status(run)
+            self._record_terminal_observation(claim, run, status)
             page = outputs[cursor : cursor + limit]
             next_cursor = cursor + len(page) if cursor + len(page) < len(outputs) else None
             return {
@@ -1481,6 +1483,7 @@ class KaggleMCPProviderGateway:
             provider_ref, control_class, str(payload["claim_sha256"]), ProviderKind.DATASET
         )
         self._authorize_dataset_read(claim, control_class, principal)
+        self._provider_projection(claim)
         files = self._registered_content_manifest(claim)
         observed = self.adapter.list_private_dataset_files_exact(claim=claim)
         self._verify_provider_file_listing(files, observed, control_class)
@@ -1549,8 +1552,8 @@ class KaggleMCPProviderGateway:
                 principal=principal.subject,
                 now=self.ledger.clock.now(),
             )
-            projection = self.ledger.provider_resource(provider_ref, str(claim.provider_version))
-            metadata = projection.get("metadata", {}) if projection else {}
+            projection = self._provider_projection(claim)
+            metadata = projection["metadata"]
             outputs = self._expected_outputs(metadata.get("expected_outputs", []))
             declaration = next((item for item in outputs if item["path"] == path), None)
             if declaration is None:
@@ -1599,6 +1602,7 @@ class KaggleMCPProviderGateway:
             provider_ref, control_class, str(payload["claim_sha256"]), ProviderKind.DATASET
         )
         self._authorize_dataset_read(claim, control_class, principal)
+        self._provider_projection(claim)
         files = self._registered_content_manifest(claim)
         observed = self.adapter.list_private_dataset_files_exact(claim=claim)
         self._verify_provider_file_listing(files, observed, control_class)
@@ -1755,6 +1759,16 @@ class KaggleMCPProviderGateway:
                 result = self.adapter.delete_task_created_resource(intent=intent, claim=claim)
             finally:
                 self.ledger.release_resource_lease(str(lease.lease_id), principal.subject, lease.fencing_token)
+        projection = self._provider_projection(claim, allow_absent=True)
+        self.ledger.record_provider_resource_absence(
+            provider=str(projection["provider"]),
+            resource_ref=str(projection["resource_ref"]),
+            resource_kind=str(projection["resource_kind"]),
+            source_identity=str(projection["source_identity"]),
+            source_version=str(projection["source_version"]),
+            control_class=str(projection["control_class"]),
+            private=projection["private"],
+        )
         response = {
             "operation_id": str(result.operation_id),
             "effect_id": str(result.effect_id),
@@ -1857,6 +1871,40 @@ class KaggleMCPProviderGateway:
             fingerprint=claim.fingerprint,
             state=state,
             observed_at=self.ledger.clock.now(),
+        )
+
+    def _provider_projection(
+        self, claim: TaskResourceClaim, *, allow_absent: bool = False
+    ) -> dict[str, Any]:
+        projection = self.ledger.provider_resource(
+            claim.provider_ref, str(claim.provider_version)
+        )
+        if projection is None:
+            raise PermissionError("provider resource has no exact registered projection")
+        if projection["state"] == "absent" and not allow_absent:
+            raise KaggleNotFound("exact provider resource is durably absent")
+        return projection
+
+    def _record_terminal_observation(
+        self,
+        claim: TaskResourceClaim,
+        run: KaggleKernelRunIdentity,
+        status: Any,
+    ) -> None:
+        if status.run != run:
+            raise KaggleIdentityError("provider status differs from the exact registered run")
+        if status.state not in {KernelState.COMPLETE, KernelState.FAILED}:
+            return
+        projection = self._provider_projection(claim)
+        self.ledger.record_provider_resource_terminal_observation(
+            provider=str(projection["provider"]),
+            resource_ref=str(projection["resource_ref"]),
+            resource_kind=str(projection["resource_kind"]),
+            source_identity=str(projection["source_identity"]),
+            source_version=str(projection["source_version"]),
+            control_class=str(projection["control_class"]),
+            private=projection["private"],
+            state=status.state.value,
         )
 
     def _intent(

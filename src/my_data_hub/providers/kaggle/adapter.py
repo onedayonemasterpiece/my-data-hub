@@ -50,6 +50,7 @@ from .contracts import (
     KaggleNotFound,
     KagglePolicyError,
     KagglePollingTimeout,
+    KaggleProviderError,
     KaggleProviderIdentity,
     KaggleTerminalFailure,
     KernelState,
@@ -1755,7 +1756,9 @@ class KaggleProviderAdapter:
         ref = _normalized_ref(provider_ref)
         hook = getattr(self.api, "get_kernel_latest_response", None)
         if callable(hook):
-            response, _attempts = self.retry.call("kernel_latest_identity", lambda: hook(ref))
+            response, _attempts = self._provider_read_call(
+                "kernel_latest_identity", lambda: hook(ref)
+            )
         else:
             builder = getattr(self.api, "build_kaggle_client", None)
             if not callable(builder):
@@ -1774,7 +1777,7 @@ class KaggleProviderAdapter:
                 with builder() as client:
                     return client.kernels.kernels_api_client.get_kernel(request)
 
-            response, _attempts = self.retry.call("kernel_latest_identity", read)
+            response, _attempts = self._provider_read_call("kernel_latest_identity", read)
         metadata = _field(response, "metadata") or response
         if expected_docker_image is not None:
             observed_image = str(_field(metadata, "docker_image", "dockerImage") or "").strip()
@@ -1912,7 +1915,9 @@ class KaggleProviderAdapter:
     ) -> KaggleKernelStatus:
         if require_source_readback:
             self._assert_current_run(run)
-        response, _ = self.retry.call("kernels_status", lambda: self.api.kernels_status(run.provider_ref))
+        response, _ = self._provider_read_call(
+            "kernels_status", lambda: self.api.kernels_status(run.provider_ref)
+        )
         raw = _field(response, "status")
         raw_name = str(getattr(raw, "name", raw) or "unknown").strip().casefold()
         if raw_name in _QUEUED:
@@ -1933,6 +1938,19 @@ class KaggleProviderAdapter:
             failure_message=failure,
             observed_at=self.clock(),
         )
+
+    def _provider_read_call(self, operation: str, fn: Any) -> tuple[Any, int]:
+        """Normalize raw SDK/HTTP read failures into redacted domain errors."""
+
+        try:
+            return self.retry.call(operation, fn)
+        except KaggleProviderError:
+            raise
+        except Exception as exc:
+            failure = classify_failure(exc, now=self.clock())
+            if failure.retry_class is RetryClass.NOT_FOUND:
+                raise KaggleNotFound("Kaggle provider resource was not found") from exc
+            raise KaggleDependencyError("Kaggle provider read failed") from exc
 
     def reconcile_private_notebook_run(
         self,
