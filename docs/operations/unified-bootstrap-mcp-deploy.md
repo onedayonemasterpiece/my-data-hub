@@ -23,7 +23,7 @@ session.
 The MCP resource scopes are exactly:
 
 ```text
-platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,provider:write
+platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,region-talk:read,provider:write
 ```
 
 Acceptance scenario request/status tools are not advertised unless their concrete
@@ -46,7 +46,7 @@ the unified scope string:
   "url": "https://mcp-datahub.kenigevents.ru/mcp",
   "oauth": {
     "clientId": "opencode-my-data-hub-unified",
-    "scope": "openid offline_access platform:read master:read operation:read checkpoint:read embedding:read provider:read bloggers:read provider:write",
+    "scope": "openid offline_access platform:read master:read operation:read checkpoint:read embedding:read provider:read bloggers:read region-talk:read provider:write",
     "callbackPort": 19876,
     "redirectUri": "http://127.0.0.1:19876/mcp/oauth/callback"
   }

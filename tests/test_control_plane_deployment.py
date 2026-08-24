@@ -263,9 +263,9 @@ def test_operator_profile_keeps_chatgpt_cimd_with_exact_operator_scopes() -> Non
     operator_override = source[start:end]
     exact_scopes = (
         "openid,offline_access,platform:read,master:read,operation:read,checkpoint:read,"
-        "embedding:read,provider:read,bloggers:read,data:read,master:ensure,master:rotate,"
+        "embedding:read,provider:read,bloggers:read,region-talk:read,data:read,master:ensure,master:rotate,"
         "recovery:request,acceptance:probe,data:write,"
-        "bloggers:write,provider:write"
+        "bloggers:write,region-talk:operate,provider:write"
     )
     assert 'MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED: "true"' in operator_override
     assert f"MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: {exact_scopes}" in operator_override
@@ -423,7 +423,7 @@ def test_unified_bootstrap_action_combines_master_runtime_provider_and_bounded_r
     override = source[start:end]
     exact_scopes = (
         "platform:read,master:read,operation:read,checkpoint:read,embedding:read,"
-        "provider:read,bloggers:read,provider:write"
+        "provider:read,bloggers:read,region-talk:read,provider:write"
     )
     assert 'MY_DATA_HUB_UNIFIED_BOOTSTRAP_MODE: "true"' in override
     assert 'MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED: "false"' in override
@@ -451,6 +451,7 @@ def test_unified_bootstrap_opencode_client_requires_exact_scopes_and_loopback(tm
         "provider:read",
         "provider:write",
         "bloggers:read",
+        "region-talk:read",
     ]
     valid = run_unified_oauth_client_probe(
         tmp_path,
