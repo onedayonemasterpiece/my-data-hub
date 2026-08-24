@@ -14,6 +14,7 @@ import pytest
 from my_data_hub.control_plane.adapters import KaggleMCPProviderGateway, LedgerControlReader, LedgerWriteGate
 from my_data_hub.control_plane.clock import DeterministicClock
 from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.hashing import sha256_value
 from my_data_hub.mcp.contracts import MasterSnapshot, MasterState
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.mcp.service import HubService
@@ -361,6 +362,8 @@ class FakeAdapter:
         self.create_calls = 0
         self.version_calls = 0
         self.run_dataset_sources: tuple[str, ...] | None = None
+        self.run_intent_arguments_sha256: str | None = None
+        self.run_runtime_options: tuple[bool, str] | None = None
         self.run_calls = 0
         self.delete_calls = 0
         self.delete_receipts: dict[str, ProviderEffectReceipt] = {}
@@ -478,7 +481,12 @@ class FakeAdapter:
 
     def push_private_notebook(self, *, intent, task_run_id, source, control_class, disposable, **kwargs):  # type: ignore[no-untyped-def]
         self.run_calls += 1
+        self.run_intent_arguments_sha256 = intent.arguments_sha256
         self.run_dataset_sources = tuple(kwargs.get("dataset_sources", ()))
+        self.run_runtime_options = (
+            bool(kwargs.get("enable_internet", False)),
+            str(kwargs.get("accelerator", "none")),
+        )
         source_identity = KaggleKernelSourceIdentity(
             provider_ref=intent.provider_ref,
             source_version=1,
@@ -551,6 +559,14 @@ class FakeAdapter:
 
     def poll_run(self, run, policy):  # type: ignore[no-untyped-def]
         assert policy.max_polls >= 1
+        return KaggleKernelStatus(
+            run=run,
+            state=KernelState.COMPLETE,
+            provider_status="complete",
+            observed_at=self.now(),
+        )
+
+    def read_run_status(self, run):  # type: ignore[no-untyped-def]
         return KaggleKernelStatus(
             run=run,
             state=KernelState.COMPLETE,
@@ -675,6 +691,9 @@ def _run_request(
     dataset_inputs: list[dict[str, object]],
     notebook_ref: str = "owner/mcp-notebook",
     idempotency_key: str | None = None,
+    enable_internet: bool = False,
+    accelerator: str = "none",
+    expected_outputs: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     task_run_id = uuid4()
     return {
@@ -694,6 +713,9 @@ def _run_request(
             "source_utf8": f"# {task_run_id}\nprint('ok')\n",
             "dataset_inputs": dataset_inputs,
             "disposable": True,
+            "enable_internet": enable_internet,
+            "accelerator": accelerator,
+            "expected_outputs": expected_outputs or [],
         },
     }
 
@@ -758,6 +780,22 @@ def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_
     run_request["payload"]["task_run_id"] = str(task_run_id)  # type: ignore[index]
     notebook = gateway.invoke("provider.resources.run", run_request, principal())
     assert adapter.run_dataset_sources == ("owner/mcp-data/1",)
+    # The gateway resolves claim-bound inputs into exact numeric Kaggle
+    # sources.  The provider adapter's effect contract deliberately contains
+    # only those provider-facing sources; control-plane claim metadata must
+    # not be added as an extra adapter argument or every real run is rejected
+    # before the mutation journal is written.
+    assert adapter.run_intent_arguments_sha256 == sha256_value(
+        {
+            "task_run_id": str(task_run_id),
+            "source_sha256": hashlib.sha256(
+                str(run_request["payload"]["source_utf8"]).encode("utf-8")  # type: ignore[index]
+            ).hexdigest(),
+            "dataset_sources": ("owner/mcp-data/1",),
+            "control_class": "mcp_managed",
+            "disposable": True,
+        }
+    )
     notebook_read = gateway.invoke(
         "provider.resources.read",
         {
@@ -770,6 +808,8 @@ def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_
     )
     assert notebook_read["task_run_id"] == str(task_run_id)
     assert notebook_read["provider_kernel_id"] == 123
+    assert notebook_read["run_state"] == "complete"
+    assert notebook_read["terminal"] is True
     deleted = gateway.invoke(
         "provider.resources.delete",
         {
@@ -787,6 +827,126 @@ def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_
         principal(),
     )
     assert deleted["outcome"] == "applied"
+
+
+def test_provider_run_exposes_bounded_runtime_options_status_and_declared_outputs(
+    tmp_path: Path,
+) -> None:
+    ledger = ControlLedger(tmp_path / "provider-runtime.sqlite3")
+    adapter = FakeAdapter(ledger)
+    gateway = KaggleMCPProviderGateway(ledger, adapter)  # type: ignore[arg-type]
+    task_id = uuid4()
+    request = _run_request(
+        task_id=task_id,
+        dataset_inputs=[],
+        notebook_ref="owner/internet-notebook",
+        idempotency_key="provider-internet-run-1",
+        enable_internet=True,
+        accelerator="gpu",
+        expected_outputs=[
+            {
+                "path": "transcript.srt",
+                "max_bytes": 1_048_576,
+                "media_type": "application/x-subrip",
+            }
+        ],
+    )
+
+    notebook = gateway.invoke("provider.resources.run", request, principal())
+    assert adapter.run_runtime_options == (True, "gpu")
+    payload = request["payload"]
+    assert isinstance(payload, dict)
+    assert adapter.run_intent_arguments_sha256 == sha256_value(
+        {
+            "task_run_id": payload["task_run_id"],
+            "source_sha256": hashlib.sha256(str(payload["source_utf8"]).encode()).hexdigest(),
+            "dataset_sources": (),
+            "control_class": "mcp_managed",
+            "disposable": True,
+            "enable_internet": True,
+            "accelerator": "gpu",
+        }
+    )
+
+    listing = gateway.invoke(
+        "provider.resources.list",
+        {
+            "resource_ref": "owner/internet-notebook",
+            "control_class": "mcp_managed",
+            "private": True,
+            "payload": {
+                "kind": "notebook",
+                "claim_sha256": notebook["claim_sha256"],
+                "cursor": 0,
+                "limit": 50,
+            },
+        },
+        principal(),
+    )
+    assert listing["contract_version"] == "my-data-hub-mcp-notebook-outputs.v1"
+    assert listing["run_state"] == "complete"
+    assert listing["outputs"] == [
+        {
+            "path": "transcript.srt",
+            "max_bytes": 1_048_576,
+            "media_type": "application/x-subrip",
+        }
+    ]
+
+    chunk = gateway.invoke(
+        "provider.resources.download",
+        {
+            "resource_ref": "owner/internet-notebook",
+            "control_class": "mcp_managed",
+            "private": True,
+            "payload": {
+                "kind": "notebook",
+                "claim_sha256": notebook["claim_sha256"],
+                "path": "transcript.srt",
+                "offset": 0,
+                "max_bytes": 131_072,
+            },
+        },
+        principal(),
+    )
+    assert chunk["contract_version"] == "my-data-hub-mcp-notebook-output-chunk.v1"
+    assert b64decode(chunk["content_base64"], validate=True) == adapter.output_bytes
+    assert chunk["complete"] is True
+
+
+def test_provider_run_denies_internet_when_private_dataset_inputs_are_attached(
+    tmp_path: Path,
+) -> None:
+    ledger = ControlLedger(tmp_path / "provider-internet-denied.sqlite3")
+    adapter = FakeAdapter(ledger)
+    gateway = KaggleMCPProviderGateway(ledger, adapter)  # type: ignore[arg-type]
+    task_id = uuid4()
+    created = gateway.invoke(
+        "provider.resources.create",
+        {
+            "resource_ref": "owner/private-input",
+            "control_class": "mcp_managed",
+            "private": True,
+            "payload": {
+                "kind": "dataset",
+                "task_id": str(task_id),
+                "effect_id": str(uuid4()),
+                "idempotency_key": "private-input-create-1",
+                "title": "Private input",
+                "disposable": True,
+                "files": {"input.txt": "private"},
+            },
+        },
+        principal(),
+    )
+    request = _run_request(
+        task_id=task_id,
+        dataset_inputs=[_dataset_input(created)],
+        enable_internet=True,
+    )
+    with pytest.raises(PermissionError, match=r"internet.*dataset inputs"):
+        gateway.invoke("provider.resources.run", request, principal())
+    assert adapter.run_calls == 0
 
 
 def test_chunked_upload_finalize_uses_single_adapter_and_durable_manifest(tmp_path: Path) -> None:

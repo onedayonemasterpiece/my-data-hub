@@ -34,6 +34,27 @@ class ProviderBinaryFile(_ExactProviderPayload):
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class ProviderExpectedOutput(_ExactProviderPayload):
+    """One caller-declared, top-level file expected from a notebook run."""
+
+    path: str = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$",
+        description="Top-level /kaggle/working output basename; directories are forbidden.",
+    )
+    max_bytes: int = Field(
+        ge=1,
+        le=8_388_608,
+        description="Hard maximum accepted size for this output file.",
+    )
+    media_type: str = Field(
+        min_length=3,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+$",
+    )
+
+
 class ProviderCreatePayload(_ExactProviderPayload):
     kind: Literal["dataset"]
     task_id: UUID
@@ -62,13 +83,38 @@ class ProviderRunPayload(_ExactProviderPayload):
     effect_id: UUID
     idempotency_key: str = Field(min_length=8, max_length=300)
     task_run_id: UUID
-    title: str = Field(min_length=1, max_length=200)
-    code_file: str = Field(min_length=1, max_length=300)
+    title: str = Field(
+        min_length=5,
+        max_length=80,
+        description="Kaggle notebook title; must equal the slug part of resource_ref exactly.",
+    )
+    code_file: str = Field(
+        min_length=1,
+        max_length=300,
+        description="Relative executable path, for example main.py; traversal is forbidden.",
+    )
     kernel_type: Literal["script", "notebook"]
     language: Literal["python", "r", "julia"]
-    source_utf8: str = Field(min_length=1, max_length=262_144)
+    source_utf8: str = Field(
+        min_length=1,
+        max_length=262_144,
+        description="Executable UTF-8 source that must embed the exact task_run_id string.",
+    )
     dataset_inputs: list[ProviderDatasetInput] = Field(max_length=16)
     disposable: bool
+    enable_internet: bool = Field(
+        default=False,
+        description="Enable Kaggle internet only for disposable runs with no attached Dataset inputs.",
+    )
+    accelerator: Literal["none", "gpu"] = Field(
+        default="none",
+        description="Bounded compute class; gpu requests Kaggle's provider-selected GPU and does not promise a model.",
+    )
+    expected_outputs: list[ProviderExpectedOutput] = Field(
+        default_factory=list,
+        max_length=32,
+        description="Declared top-level outputs that list/download may expose after the run.",
+    )
     timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
 
 
@@ -78,14 +124,14 @@ class ProviderReadPayload(_ExactProviderPayload):
 
 
 class ProviderListPayload(_ExactProviderPayload):
-    kind: Literal["dataset"]
+    kind: Literal["dataset", "notebook"]
     claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     cursor: int = Field(default=0, ge=0)
     limit: int = Field(default=50, ge=1, le=50)
 
 
 class ProviderDownloadPayload(_ExactProviderPayload):
-    kind: Literal["dataset"]
+    kind: Literal["dataset", "notebook"]
     claim_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     path: str = Field(min_length=1, max_length=1000)
     offset: int = Field(default=0, ge=0)

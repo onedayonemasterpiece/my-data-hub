@@ -624,6 +624,16 @@ def create_server(
         private: Literal[True],
         payload: ProviderRunPayload,
     ) -> dict[str, Any]:
+        """Create and start one private disposable Kaggle notebook.
+
+        Use a new ``owner/slug`` resource_ref, set ``title`` to that exact
+        slug, generate unique UUIDs, and embed the exact ``task_run_id`` text
+        in ``source_utf8``. Dataset inputs may be empty. Internet is allowed
+        only for disposable runs without Dataset inputs. Declare deterministic
+        top-level expected outputs so they can later be listed and downloaded.
+        Poll with ``provider.resources.read`` using the returned claim, then
+        use ``provider.resources.list`` / ``provider.resources.download``.
+        """
         return await service.invoke(
             "provider.resources.run",
             provider_arguments(resource_ref, control_class, private, payload),
@@ -635,6 +645,7 @@ def create_server(
         private: Literal[True],
         payload: ProviderReadPayload,
     ) -> dict[str, Any]:
+        """Read an exact claim-bound Dataset identity or live notebook run status."""
         return await service.invoke(
             "provider.resources.read",
             provider_arguments(resource_ref, control_class, private, payload),
@@ -646,6 +657,7 @@ def create_server(
         private: Literal[True],
         payload: ProviderListPayload,
     ) -> dict[str, Any]:
+        """List exact Dataset files or the declared outputs of a notebook run."""
         return await service.invoke(
             "provider.resources.list",
             provider_arguments(resource_ref, control_class, private, payload),
@@ -657,6 +669,7 @@ def create_server(
         private: Literal[True],
         payload: ProviderDownloadPayload,
     ) -> dict[str, Any]:
+        """Download a bounded chunk of an exact Dataset file or declared notebook output."""
         return await service.invoke(
             "provider.resources.download",
             provider_arguments(resource_ref, control_class, private, payload),

@@ -347,6 +347,12 @@ async def test_provider_tools_advertise_closed_action_specific_input_schemas() -
     ]
     assert dataset_inputs["maxItems"] == 16
     assert dataset_inputs["items"] == {"$ref": "#/$defs/ProviderDatasetInput"}
+    run_properties = run_schema["$defs"]["ProviderRunPayload"]["properties"]
+    assert run_properties["enable_internet"]["default"] is False
+    assert run_properties["accelerator"]["default"] == "none"
+    assert run_properties["accelerator"]["enum"] == ["none", "gpu"]
+    assert run_properties["expected_outputs"]["maxItems"] == 32
+    assert "task_run_id" in run_properties["source_utf8"]["description"]
     assert run_schema["$defs"]["ProviderDatasetInput"] == {
         "additionalProperties": False,
         "properties": {
@@ -388,6 +394,15 @@ async def test_provider_tools_advertise_closed_action_specific_input_schemas() -
     assert download.input_schema["$defs"]["ProviderDownloadPayload"]["properties"][
         "max_bytes"
     ]["maximum"] == 131_072
+    assert download.input_schema["$defs"]["ProviderDownloadPayload"]["properties"][
+        "kind"
+    ]["enum"] == ["dataset", "notebook"]
+    assert tools["provider.resources.list"].input_schema["$defs"]["ProviderListPayload"][
+        "properties"
+    ]["kind"]["enum"] == ["dataset", "notebook"]
+    assert "private disposable Kaggle notebook" in tools[
+        "provider.resources.run"
+    ].description
 
 
 @pytest.mark.asyncio

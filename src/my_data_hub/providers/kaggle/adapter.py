@@ -1338,6 +1338,7 @@ class KaggleProviderAdapter:
         disposable: bool,
         dataset_sources: Sequence[str] = (),
         enable_internet: bool = False,
+        accelerator: str = "none",
         timeout_seconds: int | None = None,
     ) -> NotebookMutationResult:
         return self._push_private_notebook(
@@ -1352,6 +1353,7 @@ class KaggleProviderAdapter:
             disposable=disposable,
             dataset_sources=dataset_sources,
             enable_internet=enable_internet,
+            accelerator=accelerator,
             timeout_seconds=timeout_seconds,
             pending_runtime_attestation=False,
         )
@@ -1370,6 +1372,7 @@ class KaggleProviderAdapter:
         disposable: bool,
         dataset_sources: Sequence[str] = (),
         enable_internet: bool = False,
+        accelerator: str = "none",
         timeout_seconds: int | None = None,
         docker_image: str | None = None,
         docker_image_pinning_type: str | None = None,
@@ -1396,6 +1399,7 @@ class KaggleProviderAdapter:
             disposable=disposable,
             dataset_sources=dataset_sources,
             enable_internet=enable_internet,
+            accelerator=accelerator,
             timeout_seconds=timeout_seconds,
             docker_image=docker_image,
             docker_image_pinning_type=docker_image_pinning_type,
@@ -1416,6 +1420,7 @@ class KaggleProviderAdapter:
         disposable: bool,
         dataset_sources: Sequence[str] = (),
         enable_internet: bool = False,
+        accelerator: str = "none",
         timeout_seconds: int | None = None,
         docker_image: str | None = None,
         docker_image_pinning_type: str | None = None,
@@ -1432,6 +1437,7 @@ class KaggleProviderAdapter:
             disposable=disposable,
             dataset_sources=dataset_sources,
             enable_internet=enable_internet,
+            accelerator=accelerator,
             timeout_seconds=timeout_seconds,
             docker_image=docker_image,
             docker_image_pinning_type=docker_image_pinning_type,
@@ -1470,6 +1476,7 @@ class KaggleProviderAdapter:
         disposable: bool,
         dataset_sources: Sequence[str] = (),
         enable_internet: bool = False,
+        accelerator: str = "none",
         timeout_seconds: int | None = None,
         pending_runtime_attestation: bool,
         docker_image: str | None = None,
@@ -1483,6 +1490,8 @@ class KaggleProviderAdapter:
             raise KaggleContractError("kernel_type must be script or notebook")
         if language not in {"python", "r", "rmarkdown", "sqlite", "julia"}:
             raise KaggleContractError("unsupported Kaggle kernel language")
+        if accelerator not in {"none", "gpu"}:
+            raise KaggleContractError("Kaggle notebook accelerator must be none or gpu")
         if not 5 <= len(title) <= 80:
             raise KaggleContractError("Kaggle notebook title must contain 5 to 80 characters")
         if title != intent.provider_ref.split("/", 1)[1]:
@@ -1507,6 +1516,14 @@ class KaggleProviderAdapter:
                 "control_class": control_class.value,
                 "disposable": disposable,
         }
+        # Existing orchestrator-protected launch intents intentionally predate
+        # remote runtime options and bind their network/image policy in the
+        # launcher contract.  Only the new MCP-managed surface adds these
+        # values to the provider effect hash.
+        if control_class is ControlClass.MCP_MANAGED and enable_internet:
+            intent_arguments["enable_internet"] = True
+        if control_class is ControlClass.MCP_MANAGED and accelerator != "none":
+            intent_arguments["accelerator"] = accelerator
         if pending_runtime_attestation:
             intent_arguments.update({"docker_image": docker_image,
                                      "docker_image_pinning_type": docker_image_pinning_type})
@@ -1523,7 +1540,7 @@ class KaggleProviderAdapter:
                 "language": language,
                 "kernel_type": kernel_type,
                 "is_private": True,
-                "enable_gpu": False,
+                "enable_gpu": accelerator == "gpu",
                 "enable_tpu": False,
                 "enable_internet": bool(enable_internet),
                 "dataset_sources": list(normalized_sources),

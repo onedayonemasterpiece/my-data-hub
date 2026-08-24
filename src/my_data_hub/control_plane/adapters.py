@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
+import tempfile
 import time
 from base64 import b64decode, b64encode, urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Callable, Mapping
@@ -45,11 +47,14 @@ from my_data_hub.providers.exchange import (
 from my_data_hub.providers.kaggle import KaggleProviderAdapter, directory_sha256, mapping_sha256
 from my_data_hub.providers.kaggle.contracts import (
     EffectOutcome,
+    KaggleKernelRunIdentity,
+    KernelState,
     MutationAction,
     ProviderEffectIntent,
     ProviderEffectReceipt,
     TaskResourceClaim,
 )
+from my_data_hub.providers.kaggle.source_attestation import executable_source_sha256
 from my_data_hub.providers.models import (
     ControlClass,
     Origin,
@@ -1250,7 +1255,7 @@ class KaggleMCPProviderGateway:
             "kind", "task_id", "effect_id", "idempotency_key", "task_run_id", "title",
             "code_file", "kernel_type", "language", "source_utf8", "dataset_inputs", "disposable",
         }
-        optional = {"timeout_seconds"}
+        optional = {"timeout_seconds", "enable_internet", "accelerator", "expected_outputs"}
         if set(payload) - optional != required or not required <= set(payload):
             raise ValueError("provider run payload fields differ from the exact contract")
         if payload["kind"] != "notebook" or control_class is not ControlClass.MCP_MANAGED:
@@ -1260,21 +1265,39 @@ class KaggleMCPProviderGateway:
             raise ValueError("provider notebook source exceeds the bounded contract")
         task_id = UUID(str(payload["task_id"]))
         task_run_id = UUID(str(payload["task_run_id"]))
-        source_sha256 = hashlib.sha256(source).hexdigest()
-        sources, input_claims = self._authorize_run_inputs(
+        kernel_type = str(payload["kernel_type"])
+        source_sha256 = executable_source_sha256(source, kernel_type=kernel_type)
+        sources, _input_claims = self._authorize_run_inputs(
             notebook_ref=provider_ref,
             task_id=task_id,
             value=payload["dataset_inputs"],
             principal=principal,
         )
+        enable_internet = payload.get("enable_internet", False)
+        accelerator = payload.get("accelerator", "none")
+        disposable = payload["disposable"]
+        if not isinstance(enable_internet, bool):
+            raise ValueError("provider notebook enable_internet must be boolean")
+        if accelerator not in {"none", "gpu"}:
+            raise ValueError("provider notebook accelerator must be none or gpu")
+        if not isinstance(disposable, bool):
+            raise ValueError("provider notebook disposable must be boolean")
+        if enable_internet and sources:
+            raise PermissionError("provider notebook internet is forbidden with private dataset inputs")
+        if (enable_internet or accelerator != "none") and not disposable:
+            raise PermissionError("networked or accelerated MCP notebooks must be disposable")
+        expected_outputs = self._expected_outputs(payload.get("expected_outputs", []))
         arguments = {
             "task_run_id": str(task_run_id),
             "source_sha256": source_sha256,
             "dataset_sources": sources,
-            "dataset_inputs": input_claims,
             "control_class": control_class.value,
-            "disposable": bool(payload["disposable"]),
+            "disposable": disposable,
         }
+        if enable_internet:
+            arguments["enable_internet"] = True
+        if accelerator != "none":
+            arguments["accelerator"] = accelerator
         intent = self._intent(payload, provider_ref, MutationAction.PUSH_NOTEBOOK, arguments=arguments)
         result = self.adapter.push_private_notebook(
             intent=intent,
@@ -1282,11 +1305,13 @@ class KaggleMCPProviderGateway:
             source=source,
             title=str(payload["title"]),
             code_file=str(payload["code_file"]),
-            kernel_type=str(payload["kernel_type"]),
+            kernel_type=kernel_type,
             language=str(payload["language"]),
             control_class=control_class,
-            disposable=bool(payload["disposable"]),
+            disposable=disposable,
             dataset_sources=sources,
+            enable_internet=enable_internet,
+            accelerator=str(accelerator),
             timeout_seconds=(int(payload["timeout_seconds"]) if "timeout_seconds" in payload else None),
         )
         metadata = {
@@ -1294,6 +1319,11 @@ class KaggleMCPProviderGateway:
             "source": result.source.model_dump(mode="json"),
             "run": result.run.model_dump(mode="json"),
             "mcp_access": {"created_by": principal.subject},
+            "runtime_options": {
+                "enable_internet": enable_internet,
+                "accelerator": accelerator,
+            },
+            "expected_outputs": list(expected_outputs),
         }
         self.ledger.register_provider_resource(
             provider="kaggle",
@@ -1320,6 +1350,8 @@ class KaggleMCPProviderGateway:
             "claim_sha256": result.claim.claim_sha256,
             "outcome": result.effect.outcome.value,
             "attempts": result.effect.attempts,
+            "runtime_options": metadata["runtime_options"],
+            "expected_outputs": metadata["expected_outputs"],
         }
 
     def _read(
@@ -1364,18 +1396,26 @@ class KaggleMCPProviderGateway:
             source_version=claim.provider_version,
             expected_source_sha256=None,
         )
-        run = dict(metadata["metadata"].get("run", {}))
+        run = KaggleKernelRunIdentity.model_validate(metadata["metadata"].get("run", {}))
+        status = self.adapter.read_run_status(run)
         return {
             "claim_sha256": claim.claim_sha256,
             "task_id": str(claim.task_id),
-            "task_run_id": run.get("task_run_id"),
+            "task_run_id": str(run.task_run_id),
             "provider_ref": provider_ref,
-            "provider_run_ref": run.get("provider_run_ref"),
-            "provider_kernel_id": run.get("provider_kernel_id"),
+            "provider_run_ref": run.provider_run_ref,
+            "provider_kernel_id": run.provider_kernel_id,
             "source_version": source.source_version,
             "source_sha256": source.source_sha256,
             "fingerprint": source.fingerprint.model_dump(mode="json"),
             "private": True,
+            "run_state": status.state.value,
+            "provider_status": status.provider_status,
+            "failure_message": status.failure_message,
+            "terminal": status.state in {KernelState.COMPLETE, KernelState.FAILED},
+            "status_observed_at": status.observed_at.isoformat(),
+            "runtime_options": metadata["metadata"].get("runtime_options", {}),
+            "expected_outputs": metadata["metadata"].get("expected_outputs", []),
         }
 
     def _list(
@@ -1386,8 +1426,7 @@ class KaggleMCPProviderGateway:
         principal: AccessIdentity,
     ) -> dict[str, Any]:
         self._exact_keys(payload, {"kind", "claim_sha256", "cursor", "limit"})
-        if payload["kind"] != "dataset":
-            raise ValueError("provider file listing supports exact private datasets")
+        kind = ProviderKind(str(payload["kind"]))
         cursor = payload["cursor"]
         limit = payload["limit"]
         if (
@@ -1399,6 +1438,45 @@ class KaggleMCPProviderGateway:
             or not 1 <= limit <= 50
         ):
             raise ValueError("provider file listing cursor or limit is invalid")
+        if kind is ProviderKind.NOTEBOOK:
+            if control_class is not ControlClass.MCP_MANAGED:
+                raise PermissionError("notebook outputs are limited to mcp_managed resources")
+            claim = self._claim(
+                provider_ref, control_class, str(payload["claim_sha256"]), ProviderKind.NOTEBOOK
+            )
+            self._authorize_mcp_access(claim, principal)
+            self.policy.authorize(
+                self._resource(claim, state="recorded"),
+                ProviderAction.READ_OUTPUT,
+                principal=principal.subject,
+                now=self.ledger.clock.now(),
+            )
+            projection = self.ledger.provider_resource(provider_ref, str(claim.provider_version))
+            metadata = projection.get("metadata", {}) if projection else {}
+            outputs = self._expected_outputs(metadata.get("expected_outputs", []))
+            run = KaggleKernelRunIdentity.model_validate(metadata.get("run", {}))
+            status = self.adapter.read_run_status(run)
+            page = outputs[cursor : cursor + limit]
+            next_cursor = cursor + len(page) if cursor + len(page) < len(outputs) else None
+            return {
+                "contract_version": "my-data-hub-mcp-notebook-outputs.v1",
+                "claim_sha256": claim.claim_sha256,
+                "task_id": str(claim.task_id),
+                "task_run_id": str(run.task_run_id),
+                "provider_ref": provider_ref,
+                "provider_run_ref": run.provider_run_ref,
+                "source_version": run.source_version,
+                "run_state": status.state.value,
+                "terminal": status.state in {KernelState.COMPLETE, KernelState.FAILED},
+                "outputs": list(page),
+                "output_count": len(outputs),
+                "cursor": cursor,
+                "next_cursor": next_cursor,
+                "complete": next_cursor is None,
+                "bounded": True,
+            }
+        if kind is not ProviderKind.DATASET:
+            raise ValueError("provider file listing kind is unsupported")
         claim = self._claim(
             provider_ref, control_class, str(payload["claim_sha256"]), ProviderKind.DATASET
         )
@@ -1436,8 +1514,7 @@ class KaggleMCPProviderGateway:
         self._exact_keys(
             payload, {"kind", "claim_sha256", "path", "offset", "max_bytes"}
         )
-        if payload["kind"] != "dataset":
-            raise ValueError("provider file download supports exact private datasets")
+        kind = ProviderKind(str(payload["kind"]))
         path = payload["path"]
         offset = payload["offset"]
         max_bytes = payload["max_bytes"]
@@ -1457,6 +1534,67 @@ class KaggleMCPProviderGateway:
             or not 1 <= max_bytes <= 131_072
         ):
             raise ValueError("provider file download offset or size is invalid")
+        if kind is ProviderKind.NOTEBOOK:
+            if control_class is not ControlClass.MCP_MANAGED:
+                raise PermissionError("notebook outputs are limited to mcp_managed resources")
+            if Path(path).name != path or "/" in path or "\\" in path:
+                raise ValueError("notebook output path must be one top-level basename")
+            claim = self._claim(
+                provider_ref, control_class, str(payload["claim_sha256"]), ProviderKind.NOTEBOOK
+            )
+            self._authorize_mcp_access(claim, principal)
+            self.policy.authorize(
+                self._resource(claim, state="recorded"),
+                ProviderAction.READ_OUTPUT,
+                principal=principal.subject,
+                now=self.ledger.clock.now(),
+            )
+            projection = self.ledger.provider_resource(provider_ref, str(claim.provider_version))
+            metadata = projection.get("metadata", {}) if projection else {}
+            outputs = self._expected_outputs(metadata.get("expected_outputs", []))
+            declaration = next((item for item in outputs if item["path"] == path), None)
+            if declaration is None:
+                raise PermissionError("notebook output was not declared by the exact run")
+            run = KaggleKernelRunIdentity.model_validate(metadata.get("run", {}))
+            with tempfile.TemporaryDirectory(prefix="my-data-hub-mcp-output-") as temporary:
+                destination = Path(temporary) / "exact"
+                downloaded = self.adapter.download_exact_run_output_file(
+                    run,
+                    destination=destination,
+                    file_name=path,
+                    max_bytes=int(declaration["max_bytes"]),
+                )
+                output_path = destination / path
+                content_all = output_path.read_bytes()
+            if offset > len(content_all):
+                raise ValueError("notebook output offset exceeds exact file size")
+            content = content_all[offset : offset + max_bytes]
+            next_offset = offset + len(content)
+            complete = next_offset == len(content_all)
+            return {
+                "contract_version": "my-data-hub-mcp-notebook-output-chunk.v1",
+                "claim_sha256": claim.claim_sha256,
+                "task_id": str(claim.task_id),
+                "task_run_id": str(run.task_run_id),
+                "provider_ref": provider_ref,
+                "provider_run_ref": run.provider_run_ref,
+                "source_version": run.source_version,
+                "output_tree_sha256": downloaded.output_tree_sha256,
+                "path": path,
+                "media_type": declaration["media_type"],
+                "file_byte_size": len(content_all),
+                "file_sha256": hashlib.sha256(content_all).hexdigest(),
+                "encoding": "base64",
+                "offset": offset,
+                "content_base64": b64encode(content).decode("ascii"),
+                "content_byte_size": len(content),
+                "content_sha256": hashlib.sha256(content).hexdigest(),
+                "next_offset": None if complete else next_offset,
+                "complete": complete,
+                "bounded": True,
+            }
+        if kind is not ProviderKind.DATASET:
+            raise ValueError("provider file download kind is unsupported")
         claim = self._claim(
             provider_ref, control_class, str(payload["claim_sha256"]), ProviderKind.DATASET
         )
@@ -2054,6 +2192,39 @@ class KaggleMCPProviderGateway:
             raise ValueError("provider files exceed the bounded request contract")
         mapping_sha256(result)
         return result
+
+    @staticmethod
+    def _expected_outputs(value: Any) -> tuple[dict[str, Any], ...]:
+        if not isinstance(value, list) or len(value) > 32:
+            raise ValueError("provider notebook expected outputs must be a bounded list")
+        result: list[dict[str, Any]] = []
+        observed: set[str] = set()
+        for item in value:
+            if not isinstance(item, Mapping) or set(item) != {
+                "path",
+                "max_bytes",
+                "media_type",
+            }:
+                raise ValueError("provider notebook expected output differs from the exact contract")
+            path = item["path"]
+            max_bytes = item["max_bytes"]
+            media_type = item["media_type"]
+            if (
+                not isinstance(path, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", path)
+                or path in observed
+                or not isinstance(max_bytes, int)
+                or isinstance(max_bytes, bool)
+                or not 1 <= max_bytes <= 8_388_608
+                or not isinstance(media_type, str)
+                or not re.fullmatch(r"[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+", media_type)
+            ):
+                raise ValueError("provider notebook expected output declaration is invalid")
+            observed.add(path)
+            result.append(
+                {"path": path, "max_bytes": max_bytes, "media_type": media_type}
+            )
+        return tuple(sorted(result, key=lambda item: str(item["path"])))
 
     @staticmethod
     def _exact_keys(payload: Mapping[str, Any], expected: set[str]) -> None:

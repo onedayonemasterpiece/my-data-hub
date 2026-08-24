@@ -655,6 +655,8 @@ def test_notebook_source_run_and_output_are_bound_to_exact_version() -> None:
             "dataset_sources": (),
             "control_class": "mcp_managed",
             "disposable": True,
+            "enable_internet": True,
+            "accelerator": "gpu",
         },
     )
     result = client.push_private_notebook(
@@ -667,10 +669,15 @@ def test_notebook_source_run_and_output_are_bound_to_exact_version() -> None:
         language="python",
         control_class=ControlClass.MCP_MANAGED,
         disposable=True,
+        enable_internet=True,
+        accelerator="gpu",
     )
     assert result.run.provider_run_ref == "owner/private-kernel/1"
     assert result.run.provider_kernel_id == 1000
     assert result.source.source_sha256 == source_sha
+    assert api.kernel_metadata[result.run.provider_ref]["enable_internet"] is True
+    assert api.kernel_metadata[result.run.provider_ref]["enable_gpu"] is True
+    assert api.kernel_metadata[result.run.provider_ref]["enable_tpu"] is False
     assert client.read_run_status(result.run).state == KernelState.COMPLETE
 
     runtime_receipt = {
