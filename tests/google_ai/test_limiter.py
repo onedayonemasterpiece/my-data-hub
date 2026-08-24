@@ -162,15 +162,22 @@ async def test_unavailable_limiter_is_retryable_and_never_returns_service_key() 
 
 @pytest.mark.asyncio
 async def test_selected_secret_must_exist_and_is_read_only_after_reserve() -> None:
-    requester = Requester(preflight_responses() + [ok({
-        "ok": True,
-        "api_key_id": "key-b-id",
-        "env_var_name": "GOOGLE_KEY_B",
-        "key_alias": "key-b",
-        "quota_scope": "google:project-shared",
-        "limiter_contract": LIMITER_CONTRACT,
-        "bucket_strategy": BUCKET_STRATEGY,
-    })])
+    requester = Requester(
+        [
+            *preflight_responses(),
+            ok(
+                {
+                    "ok": True,
+                    "api_key_id": "key-b-id",
+                    "env_var_name": "GOOGLE_KEY_B",
+                    "key_alias": "key-b",
+                    "quota_scope": "google:project-shared",
+                    "limiter_contract": LIMITER_CONTRACT,
+                    "bucket_strategy": BUCKET_STRATEGY,
+                }
+            ),
+        ]
+    )
     adapter = limiter(requester, environment={"GOOGLE_KEY_A": "api-secret-a"})
     preflight = await adapter.preflight("gemini-3.6-flash")
     lease = await adapter.reserve(
@@ -188,15 +195,25 @@ async def test_selected_secret_must_exist_and_is_read_only_after_reserve() -> No
 
 @pytest.mark.asyncio
 async def test_mark_finalize_release_and_provider_429_use_exact_attempt() -> None:
-    requester = Requester(preflight_responses() + [ok({
-        "ok": True,
-        "api_key_id": "key-a-id",
-        "env_var_name": "GOOGLE_KEY_A",
-        "key_alias": "key-a",
-        "quota_scope": "google:project-shared",
-        "limiter_contract": LIMITER_CONTRACT,
-        "bucket_strategy": BUCKET_STRATEGY,
-    }), ok(None), ok(None), ok(None)])
+    requester = Requester(
+        [
+            *preflight_responses(),
+            ok(
+                {
+                    "ok": True,
+                    "api_key_id": "key-a-id",
+                    "env_var_name": "GOOGLE_KEY_A",
+                    "key_alias": "key-a",
+                    "quota_scope": "google:project-shared",
+                    "limiter_contract": LIMITER_CONTRACT,
+                    "bucket_strategy": BUCKET_STRATEGY,
+                }
+            ),
+            ok(None),
+            ok(None),
+            ok(None),
+        ]
+    )
     adapter = limiter(requester)
     preflight = await adapter.preflight("gemini-3.6-flash")
     lease = await adapter.reserve(
