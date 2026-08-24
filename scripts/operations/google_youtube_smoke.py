@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import sys
 from uuid import uuid4
 
 from my_data_hub.config import Settings
