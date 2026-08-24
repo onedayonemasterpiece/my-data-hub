@@ -9,6 +9,7 @@ import hmac
 import json
 import os
 import re
+import sqlite3
 import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -73,6 +74,46 @@ def _unsigned(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if key != "signature"}
 
 
+def _ledger_authority(path: Path, *, commit: str) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode) & 0o077:
+        raise OperatorGateError("control ledger must be a private regular non-symlink file")
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        evidence = connection.execute(
+            "SELECT * FROM master_security_evidence WHERE source_commit=? ORDER BY observed_at DESC LIMIT 1",
+            (commit,),
+        ).fetchone()
+        head = connection.execute(
+            "SELECT h.current_checkpoint_id,c.* FROM checkpoint_heads h "
+            "JOIN checkpoint_candidates c ON c.checkpoint_id=h.current_checkpoint_id "
+            "WHERE h.service_kind='postgres-master'",
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise OperatorGateError("control ledger lacks master security/checkpoint authority") from exc
+    finally:
+        connection.close()
+    if evidence is None or head is None or head["status"] != "VERIFIED" or not head["verified_at"]:
+        raise OperatorGateError("operator gate requires current verified security and checkpoint evidence")
+    try:
+        manifest = json.loads(str(head["manifest_json"]))
+        checkpoint_revision = int(manifest["canonical_revision"])
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise OperatorGateError("current checkpoint manifest is invalid") from exc
+    if (
+        head["master_instance_id"] != evidence["master_instance_id"]
+        or int(head["epoch"]) != int(evidence["epoch"])
+        or checkpoint_revision < int(evidence["canonical_revision"])
+    ):
+        raise OperatorGateError("security evidence is not protected by the current verified checkpoint")
+    return {
+        "checkpoint_id": str(head["checkpoint_id"]),
+        "checkpoint_revision": checkpoint_revision,
+        "role_verification_sha256": str(evidence["role_verification_sha256"]),
+        "security_test_receipt_sha256": str(evidence["security_test_receipt_sha256"]),
+    }
+
+
 def _validate_contract(payload: dict[str, Any], *, commit: str, now: datetime) -> None:
     if set(payload) != _FIELDS:
         raise OperatorGateError("operator gate fields differ from the exact contract")
@@ -98,7 +139,14 @@ def _validate_contract(payload: dict[str, Any], *, commit: str, now: datetime) -
         raise OperatorGateError("operator gate is not currently valid")
 
 
-def verify(receipt: Path, signing_key: Path, *, commit: str, now: datetime | None = None) -> dict[str, Any]:
+def verify(
+    receipt: Path,
+    signing_key: Path,
+    *,
+    commit: str,
+    now: datetime | None = None,
+    control_ledger: Path | None = None,
+) -> dict[str, Any]:
     key = _private_bytes(signing_key, "operator write-gate signing key")
     if receipt.is_symlink() or not receipt.is_file() or receipt.stat().st_size > 16 * 1024:
         raise OperatorGateError("operator gate receipt must be a bounded regular non-symlink file")
@@ -113,6 +161,10 @@ def verify(receipt: Path, signing_key: Path, *, commit: str, now: datetime | Non
     expected = hmac.new(key, canonical_json_bytes(_unsigned(payload)), hashlib.sha256).hexdigest()
     if not _SHA.fullmatch(supplied) or not hmac.compare_digest(supplied, expected):
         raise OperatorGateError("operator gate signature is invalid")
+    if control_ledger is not None:
+        authority = _ledger_authority(control_ledger, commit=commit)
+        if any(payload[key] != authority[key] for key in authority):
+            raise OperatorGateError("operator gate differs from current ledger security/checkpoint authority")
     return payload
 
 
@@ -145,6 +197,13 @@ def issue(args: argparse.Namespace) -> None:
     print(f"issued_operator_gate_commit={args.commit}")
 
 
+def issue_from_ledger(args: argparse.Namespace) -> None:
+    authority = _ledger_authority(args.control_ledger, commit=args.commit)
+    for key, value in authority.items():
+        setattr(args, key, value)
+    issue(args)
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
     commands = root.add_subparsers(dest="command", required=True)
@@ -152,6 +211,7 @@ def parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("--commit", required=True)
     verify_parser.add_argument("--receipt", type=Path, required=True)
     verify_parser.add_argument("--signing-key-file", type=Path, required=True)
+    verify_parser.add_argument("--control-ledger", type=Path)
     issue_parser = commands.add_parser("issue")
     issue_parser.add_argument("--commit", required=True)
     issue_parser.add_argument("--checkpoint-id", required=True)
@@ -161,6 +221,12 @@ def parser() -> argparse.ArgumentParser:
     issue_parser.add_argument("--expires-at", required=True)
     issue_parser.add_argument("--signing-key-file", type=Path, required=True)
     issue_parser.add_argument("--output", type=Path, required=True)
+    ledger_parser = commands.add_parser("issue-from-ledger")
+    ledger_parser.add_argument("--commit", required=True)
+    ledger_parser.add_argument("--control-ledger", type=Path, required=True)
+    ledger_parser.add_argument("--expires-at", required=True)
+    ledger_parser.add_argument("--signing-key-file", type=Path, required=True)
+    ledger_parser.add_argument("--output", type=Path, required=True)
     return root
 
 
@@ -168,8 +234,15 @@ def main() -> None:
     args = parser().parse_args()
     try:
         if args.command == "verify":
-            verify(args.receipt, args.signing_key_file, commit=args.commit)
+            verify(
+                args.receipt,
+                args.signing_key_file,
+                commit=args.commit,
+                control_ledger=args.control_ledger,
+            )
             print(f"verified_operator_gate_commit={args.commit}")
+        elif args.command == "issue-from-ledger":
+            issue_from_ledger(args)
         else:
             issue(args)
     except OperatorGateError as exc:

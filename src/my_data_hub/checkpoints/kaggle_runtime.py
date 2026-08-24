@@ -27,7 +27,6 @@ from my_data_hub.db.migrations import discover_migrations
 from my_data_hub.hashing import canonical_json_bytes, sha256_value
 from my_data_hub.providers.kaggle.adapter import (
     KaggleProviderAdapter,
-    _canonical_notebook_source,
     directory_sha256,
     tree_sha256,
 )
@@ -46,6 +45,7 @@ from my_data_hub.providers.kaggle.control_journal import (
     AuthenticatedControlPlaneClient,
     ControlPlaneRuntimeIdentity,
 )
+from my_data_hub.providers.kaggle.source_attestation import executable_source_sha256
 from my_data_hub.providers.models import ControlClass, ProviderKind
 from my_data_hub.runtime_sdk.lifetime import (
     CHECKPOINT_ARCHIVE_COMMAND_TIMEOUT_SECONDS,
@@ -60,6 +60,7 @@ from .manifest import (
     load_and_verify,
     write_manifest,
 )
+from .provider_storage import checkpoint_materializer_source
 from .publisher import PublishError, PublishReceipt
 from .registry import CheckpointHead, CheckpointRegistryContract
 from .restore_probe import collect_restore_probe
@@ -67,6 +68,9 @@ from .restore_probe import collect_restore_probe
 CHECKPOINT_MANIFEST_NAME = "checkpoint-manifest.json"
 CHECKPOINT_RESTORE_RECEIPT_NAME = "checkpoint-restore-receipt.json"
 RESTORE_RECEIPT_CONTRACT = "my-data-hub-checkpoint-restore-smoke.v2"
+# Bump whenever the centrally rendered verifier bootstrap changes in a way that
+# must create a new provider run rather than replaying an older failed intent.
+CHECKPOINT_VERIFIER_RENDERER_REVISION = "offline-psycopg-unprivileged-runtime-v6"
 _KAGGLE_WORKING_ROOT = Path("/kaggle/working")
 
 
@@ -680,6 +684,10 @@ class KaggleCheckpointVerifierAssets:
     postgres_runtime_archive_sha256: str | None = None
     postgres_runtime_manifest_relative_path: str | None = None
     postgres_runtime_manifest_sha256: str | None = None
+    psycopg_wheel_relative_path: str | None = None
+    psycopg_wheel_sha256: str | None = None
+    psycopg_binary_wheel_relative_path: str | None = None
+    psycopg_binary_wheel_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if len(self.notebook_ref.split("/")) != 2 or not self.notebook_source:
@@ -701,6 +709,10 @@ class KaggleCheckpointVerifierAssets:
             "postgres_runtime_archive_sha256": self.postgres_runtime_archive_sha256,
             "postgres_runtime_manifest_relative_path": self.postgres_runtime_manifest_relative_path,
             "postgres_runtime_manifest_sha256": self.postgres_runtime_manifest_sha256,
+            "psycopg_wheel_relative_path": self.psycopg_wheel_relative_path,
+            "psycopg_wheel_sha256": self.psycopg_wheel_sha256,
+            "psycopg_binary_wheel_relative_path": self.psycopg_binary_wheel_relative_path,
+            "psycopg_binary_wheel_sha256": self.psycopg_binary_wheel_sha256,
         }
         if any(not isinstance(value, str) or not value for value in values.values()):
             raise CheckpointRuntimeError("checkpoint verifier exact runtime assets are incomplete")
@@ -716,6 +728,8 @@ class KaggleCheckpointVerifierAssets:
                     "wheel_sha256",
                     "postgres_runtime_archive_sha256",
                     "postgres_runtime_manifest_sha256",
+                    "psycopg_wheel_sha256",
+                    "psycopg_binary_wheel_sha256",
                 )
             )
         ):
@@ -724,6 +738,8 @@ class KaggleCheckpointVerifierAssets:
             "wheel_relative_path",
             "postgres_runtime_archive_relative_path",
             "postgres_runtime_manifest_relative_path",
+            "psycopg_wheel_relative_path",
+            "psycopg_binary_wheel_relative_path",
         ):
             path = Path(contract[name])
             if path.is_absolute() or ".." in path.parts or not 1 <= len(path.parts) <= 8:
@@ -766,6 +782,19 @@ class KaggleCheckpointRestoreVerifier:
         if self.poll_policy.timeout_seconds > CHECKPOINT_VERIFIER_TIMEOUT_SECONDS:
             raise ValueError("checkpoint verifier polling exceeds its attempt allocation")
 
+    @property
+    def revision_sha256(self) -> str:
+        """Immutable verifier identity used for bounded failed-run recovery."""
+
+        return sha256_value(
+            {
+                "schema_version": "my-data-hub-checkpoint-verifier-revision.v1",
+                "renderer_revision": CHECKPOINT_VERIFIER_RENDERER_REVISION,
+                "notebook_source_sha256": hashlib.sha256(self.assets.notebook_source).hexdigest(),
+                "execution_contract": self.assets.execution_contract(),
+            }
+        )
+
     def verify_restore(
         self,
         *,
@@ -782,7 +811,8 @@ class KaggleCheckpointRestoreVerifier:
             if self.run_id_factory is not None
             else uuid5(
                 NAMESPACE_URL,
-                f"my-data-hub:checkpoint-verifier-run:{manifest.checkpoint_id}:{version}",
+                "my-data-hub:checkpoint-verifier-run:"
+                f"{manifest.checkpoint_id}:{version}:{self.revision_sha256}",
             )
         )
         source, execution_pins_sha256 = _render_verifier_source(
@@ -792,8 +822,7 @@ class KaggleCheckpointRestoreVerifier:
             manifest=manifest,
             execution=execution,
         )
-        canonical_source = _canonical_notebook_source(source, kernel_type=self.assets.kernel_type)
-        source_sha = hashlib.sha256(canonical_source).hexdigest()
+        source_sha = executable_source_sha256(source, kernel_type=self.assets.kernel_type)
         dataset_source = f"{provider_ref}/{version}"
         dataset_sources = (execution["runtime_dataset_exact_ref"], dataset_source)
         if len(dataset_sources) != len(set(dataset_sources)):
@@ -1367,15 +1396,25 @@ def _reject_notebook_kaggle_credentials() -> None:
     a checkpoint or contacting the control plane.
     """
 
+    # Kaggle itself exposes the account name as non-secret runtime metadata.
+    # A username alone cannot authenticate the SDK and must not make every
+    # official Notebook fail before bootstrap.  Reject every secret-bearing
+    # half of the supported credential modes (and credential files) instead.
     forbidden_environment = (
-        "KAGGLE_USERNAME",
         "KAGGLE_KEY",
         "KAGGLE_API_TOKEN",
         "KAGGLE_API_V1_TOKEN",
         "KAGGLE_ACCESS_TOKEN",
     )
-    if any(os.environ.get(name, "").strip() for name in forbidden_environment):
-        raise CheckpointRuntimeError("Kaggle lifecycle credentials are forbidden in the master Notebook")
+    present_environment = sorted(
+        name for name in forbidden_environment if os.environ.get(name, "").strip()
+    )
+    if present_environment:
+        # Names are public contract identifiers; values remain undisclosed.
+        raise CheckpointRuntimeError(
+            "Kaggle lifecycle credential environment is forbidden in the master Notebook: "
+            + ",".join(present_environment)
+        )
     home = Path(os.environ.get("HOME", "~")).expanduser()
     forbidden_files = (home / ".kaggle" / "kaggle.json", home / ".kaggle" / "access_token")
     if any(path.exists() for path in forbidden_files):
@@ -1556,16 +1595,22 @@ def _render_verifier_source(
         "wheel": execution["wheel_relative_path"],
         "archive": execution["postgres_runtime_archive_relative_path"],
         "manifest": execution["postgres_runtime_manifest_relative_path"],
+        "psycopg": execution["psycopg_wheel_relative_path"],
+        "psycopg_binary": execution["psycopg_binary_wheel_relative_path"],
     }
     runtime_hashes = {
         "wheel": execution["wheel_sha256"],
         "archive": execution["postgres_runtime_archive_sha256"],
         "manifest": execution["postgres_runtime_manifest_sha256"],
+        "psycopg": execution["psycopg_wheel_sha256"],
+        "psycopg_binary": execution["psycopg_binary_wheel_sha256"],
     }
     bootstrap = (
         "import hashlib as _mdh_hashlib, json as _mdh_json, os as _mdh_os, "
-        "pathlib as _mdh_pathlib, platform as _mdh_platform\n"
-        f"_mdh_values = {json.dumps(values, sort_keys=True)}\n"
+        "pathlib as _mdh_pathlib, platform as _mdh_platform, "
+        "subprocess as _mdh_subprocess, sys as _mdh_sys\n"
+        + checkpoint_materializer_source()
+        + f"_mdh_values = {json.dumps(values, sort_keys=True)}\n"
         f"_mdh_pins_body = {pins_body!r}\n"
         f"_mdh_runtime_names = {runtime_names!r}\n"
         f"_mdh_runtime_hashes = {runtime_hashes!r}\n"
@@ -1598,18 +1643,12 @@ def _render_verifier_source(
         "for path in _mdh_runtime_files.values()}\n"
         "if len(_mdh_runtime_mounts) != 1: raise RuntimeError('runtime Dataset file set differs')\n"
         "_mdh_runtime_root=next(iter(_mdh_runtime_mounts))\n"
-        f"_mdh_checkpoint_manifests=[path for path in _mdh_files if path.name == {CHECKPOINT_MANIFEST_NAME!r}]\n"
-        "_mdh_checkpoint_matches=[]\n"
-        "for _mdh_checkpoint_manifest in _mdh_checkpoint_manifests:\n"
-        "    try: _mdh_checkpoint_payload=_mdh_json.loads(_mdh_checkpoint_manifest.read_bytes())\n"
-        "    except (OSError,ValueError): continue\n"
-        "    if _mdh_checkpoint_payload.get('manifest_sha256') == "
-        "_mdh_values['MY_DATA_HUB_CHECKPOINT_MANIFEST_SHA256']:\n"
-        "        _mdh_checkpoint_matches.append(_mdh_checkpoint_manifest.parent)\n"
-        "if len(_mdh_checkpoint_matches) != 1: raise RuntimeError('exact checkpoint Dataset mount is ambiguous')\n"
-        "_mdh_checkpoint_root=_mdh_checkpoint_matches[0]\n"
-        "if _mdh_input/_mdh_checkpoint_root.relative_to(_mdh_input).parts[0] == _mdh_runtime_root:\n"
-        "    raise RuntimeError('runtime and checkpoint claims resolve to one mount')\n"
+        "for _mdh_dependency_key in ('psycopg','psycopg_binary'):\n"
+        "    _mdh_subprocess.run([_mdh_sys.executable,'-m','pip','install','--no-index','--no-deps',"
+        "'--disable-pip-version-check',str(_mdh_runtime_files[_mdh_dependency_key])],check=True)\n"
+        "_mdh_checkpoint_root,_mdh_checkpoint_source_root=_mdh_materialize_checkpoint(\n"
+        "    _mdh_input,_mdh_values['MY_DATA_HUB_CHECKPOINT_MANIFEST_SHA256'],\n"
+        "    _mdh_pathlib.Path('/kaggle/working/checkpoint-verifier-package'))\n"
         f"_mdh_values['MY_DATA_HUB_CHECKPOINT_DIRECTORY'] = str(_mdh_checkpoint_root)\n"
         f"_mdh_values['MY_DATA_HUB_CHECKPOINT_MANIFEST'] = str(_mdh_checkpoint_root / {CHECKPOINT_MANIFEST_NAME!r})\n"
         "_mdh_values['MY_DATA_HUB_WHEEL_PATH'] = str(_mdh_runtime_files['wheel'])\n"
@@ -1649,6 +1688,64 @@ def _render_verifier_source(
             "metadata": {},
             "outputs": [],
             "source": bootstrap,
+        },
+    )
+    if not body["cells"] or "globals()['main']" not in str(body["cells"][-1].get("source", "")):
+        raise CheckpointRuntimeError("verifier notebook lacks its fixed terminal entrypoint")
+    body["cells"].insert(
+        len(body["cells"]) - 1,
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "id": "my-data-hub-postgres-privilege-boundary",
+            "metadata": {},
+            "outputs": [],
+            "source": (
+                "import os as _mdh_priv_os\n"
+                "from pathlib import Path as _mdh_priv_Path\n"
+                "from my_data_hub.master_runtime.postgres import (\n"
+                "    KAGGLE_POSTGRES_GID as _mdh_pg_gid,\n"
+                "    KAGGLE_POSTGRES_UID as _mdh_pg_uid,\n"
+                "    SubprocessRunner as _mdh_pg_runner,\n"
+                ")\n"
+                "class _MdhCheckpointRestoreRunner:\n"
+                "    def run(self, arguments, *, timeout_seconds):\n"
+                "        try:\n"
+                "            pgdata=_mdh_priv_Path(arguments[arguments.index('--pgdata')+1])\n"
+                "        except (ValueError,IndexError) as exc:\n"
+                "            raise RuntimeError('pg_ctl command lacks exact PGDATA') from exc\n"
+                "        root=pgdata.parent\n"
+                "        if not pgdata.is_absolute() or root.is_symlink() or not root.is_dir():\n"
+                "            raise RuntimeError('isolated restore root is unsafe')\n"
+                "        if _mdh_priv_os.geteuid()==0:\n"
+                "            working_root=root.parent\n"
+                "            if working_root.is_symlink() or not working_root.is_dir():\n"
+                "                raise RuntimeError('isolated restore working root is unsafe')\n"
+                "            _mdh_priv_os.chown(working_root,_mdh_pg_uid,_mdh_pg_gid)\n"
+                "            working_root.chmod(0o700)\n"
+                "            runtime_root=_mdh_priv_Path('/kaggle/working/checkpoint-postgresql-runtime')\n"
+                "            try: _mdh_priv_Path(arguments[0]).relative_to(runtime_root)\n"
+                "            except ValueError: runtime_root=None\n"
+                "            if runtime_root is not None:\n"
+                "                if runtime_root.is_symlink() or not runtime_root.is_dir():\n"
+                "                    raise RuntimeError('PostgreSQL runtime ownership root is unsafe')\n"
+                "                _mdh_priv_os.chown(runtime_root,_mdh_pg_uid,_mdh_pg_gid)\n"
+                "                runtime_root.chmod(0o700)\n"
+                "            _mdh_priv_os.chown(root,_mdh_pg_uid,_mdh_pg_gid)\n"
+                "            for directory,names,files in _mdh_priv_os.walk(root,followlinks=False):\n"
+                "                base=_mdh_priv_Path(directory)\n"
+                "                for name in (*names,*files):\n"
+                "                    child=base/name\n"
+                "                    if child.is_symlink():\n"
+                "                        raise RuntimeError('isolated restore tree contains a symlink')\n"
+                "                    _mdh_priv_os.chown(child,_mdh_pg_uid,_mdh_pg_gid)\n"
+                "        _mdh_pg_runner().run(arguments,timeout_seconds=timeout_seconds)\n"
+                "_mdh_original_restore_verifier=globals()['IsolatedPostgresRestoreVerifier']\n"
+                "def _mdh_restore_verifier_factory(*args,**kwargs):\n"
+                "    kwargs['runner']=_MdhCheckpointRestoreRunner()\n"
+                "    return _mdh_original_restore_verifier(*args,**kwargs)\n"
+                "globals()['IsolatedPostgresRestoreVerifier']=_mdh_restore_verifier_factory\n"
+            ),
         },
     )
     return json.dumps(body).encode(), pins_sha256

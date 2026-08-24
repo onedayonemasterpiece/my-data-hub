@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-data-hub.invalid/schemas/region-talk-direct-snapshot.v2.schema.json",
+  "title": "Region Talk direct two-pass snapshot v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "export_batch_id", "task_run_id", "master_instance_id",
+    "master_epoch", "source_database", "request_sha256", "logical_sha256",
+    "manifest_sha256", "expected_row_count", "tables", "row_kind_counts",
+    "publication_effects_enabled", "created_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "region-talk-direct-snapshot.v2"},
+    "export_batch_id": {"type": "string", "format": "uuid"},
+    "task_run_id": {"type": "string", "format": "uuid"},
+    "master_instance_id": {"type": "string", "format": "uuid"},
+    "master_epoch": {"type": "integer", "minimum": 1},
+    "source_database": {"type": "string", "minLength": 1, "maxLength": 500},
+    "request_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "logical_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "expected_row_count": {"type": "integer", "minimum": 0},
+    "tables": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "prefixItems": [
+        {"$ref": "#/$defs/tableOpportunity"},
+        {"$ref": "#/$defs/tableRun"},
+        {"$ref": "#/$defs/tableSurface"},
+        {"$ref": "#/$defs/tableCompact"},
+        {"$ref": "#/$defs/tableBlogger"}
+      ],
+      "items": false
+    },
+    "row_kind_counts": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[A-Za-z0-9_./:-]+$"},
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "publication_effects_enabled": {"const": false},
+    "created_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "table": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_table", "row_count", "logical_sha256"],
+      "properties": {
+        "source_table": {"type": "string"},
+        "row_count": {"type": "integer", "minimum": 0},
+        "logical_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "tableOpportunity": {"allOf": [{"$ref": "#/$defs/table"}, {"properties": {"source_table": {"const": "acq_discovery_opportunities"}}}]},
+    "tableRun": {"allOf": [{"$ref": "#/$defs/table"}, {"properties": {"source_table": {"const": "acq_discovery_runs"}}}]},
+    "tableSurface": {"allOf": [{"$ref": "#/$defs/table"}, {"properties": {"source_table": {"const": "acq_discovery_surfaces"}}}]},
+    "tableCompact": {"allOf": [{"$ref": "#/$defs/table"}, {"properties": {"source_table": {"const": "region_talk_compact_state_kv"}}}]},
+    "tableBlogger": {"allOf": [{"$ref": "#/$defs/table"}, {"properties": {"source_table": {"const": "region_talk_external_blogger_evidence"}}}]}
+  }
+}

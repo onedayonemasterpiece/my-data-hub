@@ -14,6 +14,7 @@ from my_data_hub.providers import BoundedInventory, ControlClass, ProviderKind, 
 from my_data_hub.providers.kaggle import (
     RUN_RECEIPT_NAME,
     EffectOutcome,
+    KaggleAmbiguousMutation,
     KaggleContractError,
     KaggleIdentityError,
     KaggleKernelRunIdentity,
@@ -26,6 +27,7 @@ from my_data_hub.providers.kaggle import (
     TaskResourceClaim,
 )
 from my_data_hub.providers.kaggle.adapter import _canonical_notebook_source
+from my_data_hub.providers.kaggle.source_attestation import executable_source_sha256
 
 NOW = datetime(2026, 8, 10, 12, tzinfo=UTC)
 TEST_RUNTIME_IMAGE = "gcr.io/kaggle-images/python@sha256:" + "a" * 64
@@ -259,8 +261,32 @@ class FakeKaggleApi:
                 current_version_number=version,
                 is_private=True,
                 docker_image=self.kernel_metadata.get(ref, {}).get("docker_image"),
+                kernel_type=self.kernel_metadata.get(ref, {}).get("kernel_type"),
+                kernel_data_sources=self.kernel_metadata.get(ref, {}).get("kernel_sources", []),
+                model_data_sources=self.kernel_metadata.get(ref, {}).get("model_sources", []),
             ),
             blob=SimpleNamespace(source=self.kernels[ref][version].decode("utf-8")),
+        )
+
+    def model_instance_versions_list(
+        self, model_instance: str, page_size: int = 20, page_token: str | None = None
+    ) -> object:
+        assert page_size == 20 and page_token is None
+        owner, model, framework, variation = model_instance.split("/")
+        return SimpleNamespace(
+            version_list=SimpleNamespace(
+                versions=[
+                    SimpleNamespace(
+                        owner_slug=owner,
+                        model_slug=model,
+                        framework=f"MODEL_FRAMEWORK_{framework.upper()}",
+                        variation_slug=variation,
+                        version_number=7,
+                        url=f"/models/{model_instance}/7",
+                    )
+                ]
+            ),
+            next_page_token=None,
         )
 
     def kernels_pull(self, kernel: str, path: str, metadata: bool = False, quiet: bool = True) -> str:
@@ -744,7 +770,60 @@ def test_master_legacy_push_persists_numeric_response_pending_runtime_attestatio
     assert not any(call[0] == "kernels_pull" for call in api.calls)
 
 
-def test_master_pending_attestation_reconciles_lost_push_response_without_retry(
+def test_master_notebook_push_is_bound_to_the_runtime_executable_source_hash() -> None:
+    client, _api, journal = adapter()
+    run_id = uuid4()
+    source = json.dumps(
+        {
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "execution_count": None,
+                    "metadata": {},
+                    "outputs": [{"output_type": "stream", "text": "mutable"}],
+                    "source": f'RUN_ID = "{run_id}"\n',
+                }
+            ],
+            "metadata": {"mutable_provider_metadata": True},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+    ).encode()
+    source_sha = executable_source_sha256(source, kernel_type="notebook")
+    intent = effect(
+        MutationAction.PUSH_NOTEBOOK,
+        "owner/postgres-master-notebook",
+        task_id=run_id,
+        arguments={
+            "task_run_id": str(run_id),
+            "source_sha256": source_sha,
+            "dataset_sources": (),
+            "control_class": "orchestrator_protected",
+            "disposable": False,
+            "docker_image": TEST_RUNTIME_IMAGE,
+            "docker_image_pinning_type": "original",
+        },
+    )
+
+    result = client.push_private_master_notebook_pending_attestation(
+        intent=intent,
+        task_run_id=run_id,
+        source=source,
+        title="postgres-master-notebook",
+        code_file="worker.ipynb",
+        kernel_type="notebook",
+        language="python",
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=False,
+        docker_image=TEST_RUNTIME_IMAGE,
+        docker_image_pinning_type="original",
+    )
+
+    assert result.run.source_sha256 == source_sha
+    assert journal.intents == [intent]
+
+
+def test_dependency_smoke_reconciles_model_sources_after_lost_push_response_without_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, api, journal = adapter()
@@ -758,8 +837,9 @@ def test_master_pending_attestation_reconciles_lost_push_response_without_retry(
             "task_run_id": str(run_id),
             "source_sha256": hashlib.sha256(source).hexdigest(),
             "dataset_sources": (),
+            "model_sources": ("owner/model/Transformers/default/7",),
             "control_class": "orchestrator_protected",
-            "disposable": False,
+            "disposable": True,
             "docker_image": TEST_RUNTIME_IMAGE,
             "docker_image_pinning_type": "original",
         },
@@ -775,7 +855,7 @@ def test_master_pending_attestation_reconciles_lost_push_response_without_retry(
 
     monkeypatch.setattr(api, "kernels_push", lost_response)
     with pytest.raises(Exception, match="exact SaveKernel response"):
-        client.push_private_master_notebook_pending_attestation(
+        client.push_private_dependency_smoke_notebook(
         intent=intent,
         task_run_id=run_id,
         source=source,
@@ -784,7 +864,9 @@ def test_master_pending_attestation_reconciles_lost_push_response_without_retry(
         kernel_type="script",
         language="python",
         control_class=ControlClass.ORCHESTRATOR_PROTECTED,
-        disposable=False,
+        disposable=True,
+        model_sources=("owner/model/Transformers/default/7",),
+        enable_internet=False,
         docker_image=TEST_RUNTIME_IMAGE,
         docker_image_pinning_type="original",
         )
@@ -792,6 +874,55 @@ def test_master_pending_attestation_reconciles_lost_push_response_without_retry(
     assert journal.intents == [intent]
     assert len(journal.receipts) >= 1
     assert len(journal.claims) == 0
+
+    # A fresh central launcher must reconcile the exact committed version and
+    # rebuild its receipt/claim without issuing a second non-idempotent push.
+    recovered = client.reconcile_private_notebook_mutation(
+        intent=intent,
+        task_run_id=run_id,
+        expected_source_sha256=hashlib.sha256(source).hexdigest(),
+        dataset_sources=(),
+        model_sources=("owner/model/Transformers/default/7",),
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=True,
+        docker_image=TEST_RUNTIME_IMAGE,
+        docker_image_pinning_type="original",
+    )
+    assert recovered is not None
+    assert recovered.run.provider_run_ref == "owner/ambiguous-master/1"
+    assert calls == 1
+    assert journal.claims[recovered.claim.claim_sha256] == recovered.claim
+    api.kernel_metadata[recovered.run.provider_ref]["model_sources"] = [
+        "owner/model/Transformers/default/8"
+    ]
+    with pytest.raises(KaggleAmbiguousMutation, match="differs"):
+        client.reconcile_private_notebook_mutation(
+            intent=intent,
+            task_run_id=run_id,
+            expected_source_sha256=hashlib.sha256(source).hexdigest(),
+            dataset_sources=(),
+            model_sources=("owner/model/Transformers/default/7",),
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+            disposable=True,
+            docker_image=TEST_RUNTIME_IMAGE,
+            docker_image_pinning_type="original",
+        )
+
+
+def test_exact_model_source_prelaunch_fence_binds_numeric_version_and_url() -> None:
+    client, api, _journal = adapter()
+    source = "owner/model/Transformers/default/7"
+    assert client.assert_exact_model_source_available(source) == source
+    original = api.model_instance_versions_list
+
+    def drifted(model_instance: str, page_size: int = 20, page_token: str | None = None):
+        response = original(model_instance, page_size=page_size, page_token=page_token)
+        response.version_list.versions[0].url = "/models/owner/model/Transformers/default/8"
+        return response
+
+    api.model_instance_versions_list = drifted  # type: ignore[method-assign]
+    with pytest.raises(KaggleIdentityError, match="unavailable"):
+        client.assert_exact_model_source_available(source)
 
 
 def test_master_legacy_empty_push_response_uses_exact_latest_get_kernel() -> None:
@@ -947,6 +1078,7 @@ def test_fm08_termination_reconciles_lost_delete_response_without_second_delete(
     task_run_id = uuid4()
     provider_ref = "owner/fm08-old-master"
     api.kernels[provider_ref] = {1: b"source"}
+    api.kernel_metadata[provider_ref] = {"kernel_type": "script"}
     source_sha256 = hashlib.sha256(b"source").hexdigest()
     run = KaggleKernelRunIdentity(
         provider_ref=provider_ref,
@@ -1453,6 +1585,7 @@ def test_dependency_smoke_disposable_push_uses_exact_offline_image_contract() ->
     client, api, journal = adapter()
     run_id = uuid4()
     source = f'TASK_RUN_ID = "{run_id}"\n'.encode()
+    model_source = "upstream/model/Transformers/default/7"
     intent = effect(
         MutationAction.PUSH_NOTEBOOK,
         "owner/dependency-smoke",
@@ -1461,6 +1594,7 @@ def test_dependency_smoke_disposable_push_uses_exact_offline_image_contract() ->
             "task_run_id": str(run_id),
             "source_sha256": hashlib.sha256(source).hexdigest(),
             "dataset_sources": ("owner/runtime/12",),
+            "model_sources": (model_source,),
             "control_class": "orchestrator_protected",
             "disposable": True,
             "docker_image": TEST_RUNTIME_IMAGE,
@@ -1472,6 +1606,7 @@ def test_dependency_smoke_disposable_push_uses_exact_offline_image_contract() ->
         code_file="smoke.py", kernel_type="script", language="python",
         control_class=ControlClass.ORCHESTRATOR_PROTECTED, disposable=True,
         dataset_sources=("owner/runtime/12",), enable_internet=False,
+        model_sources=(model_source,),
         docker_image=TEST_RUNTIME_IMAGE, docker_image_pinning_type="original",
     )
     metadata = api.kernel_metadata[result.run.provider_ref]
@@ -1479,4 +1614,115 @@ def test_dependency_smoke_disposable_push_uses_exact_offline_image_contract() ->
     assert metadata["docker_image"] == TEST_RUNTIME_IMAGE
     assert metadata["docker_image_pinning_type"] == "original"
     assert metadata["dataset_sources"] == ["owner/runtime/12"]
+    assert metadata["model_sources"] == [model_source]
     assert len(journal.claims) == 1
+
+
+@pytest.mark.parametrize(
+    "model_source",
+    (
+        "owner/model/Transformers/default/latest",
+        "owner/model/Transformers/default/0",
+        "owner/model/Transformers/default",
+        "owner/model/Transformers/default/1/extra",
+    ),
+)
+def test_notebook_model_source_must_be_exact_version(model_source: str) -> None:
+    client, _api, _journal = adapter()
+    run_id = uuid4()
+    source = f'TASK_RUN_ID = "{run_id}"\n'.encode()
+    intent = effect(
+        MutationAction.PUSH_NOTEBOOK,
+        "owner/model-source-denial",
+        task_id=run_id,
+        arguments={
+            "task_run_id": str(run_id),
+            "source_sha256": hashlib.sha256(source).hexdigest(),
+            "dataset_sources": (),
+            "model_sources": (model_source,),
+            "control_class": "orchestrator_protected",
+            "disposable": True,
+            "docker_image": TEST_RUNTIME_IMAGE,
+            "docker_image_pinning_type": "original",
+        },
+    )
+    with pytest.raises(KaggleIdentityError, match="model source"):
+        client.push_private_dependency_smoke_notebook(
+            intent=intent,
+            task_run_id=run_id,
+            source=source,
+            title="model-source-denial",
+            code_file="smoke.py",
+            kernel_type="script",
+            language="python",
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+            disposable=True,
+            model_sources=(model_source,),
+            enable_internet=False,
+            docker_image=TEST_RUNTIME_IMAGE,
+            docker_image_pinning_type="original",
+        )
+
+
+def test_worker_kernel_source_is_exactly_read_back_during_response_loss_reconciliation() -> None:
+    client, api, _journal = adapter()
+    run_id = uuid4()
+    source = f'TASK_RUN_ID = "{run_id}"\n'.encode()
+    kernel_source = "owner/frozen-e5-assets-v1"
+    arguments = {
+        "task_run_id": str(run_id),
+        "source_sha256": hashlib.sha256(source).hexdigest(),
+        "dataset_sources": (),
+        "kernel_sources": (kernel_source,),
+        "control_class": "orchestrator_protected",
+        "disposable": True,
+        "docker_image": TEST_RUNTIME_IMAGE,
+        "docker_image_pinning_type": "original",
+    }
+    intent = effect(
+        MutationAction.PUSH_NOTEBOOK,
+        "owner/kernel-source-worker",
+        task_id=run_id,
+        arguments=arguments,
+    )
+    pushed = client.push_private_worker_notebook_pending_attestation(
+        intent=intent,
+        task_run_id=run_id,
+        source=source,
+        title="kernel-source-worker",
+        code_file="worker.py",
+        kernel_type="script",
+        language="python",
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=True,
+        kernel_sources=(kernel_source,),
+        enable_internet=False,
+        docker_image=TEST_RUNTIME_IMAGE,
+        docker_image_pinning_type="original",
+    )
+    assert api.kernel_metadata[pushed.run.provider_ref]["kernel_sources"] == [kernel_source]
+    recovered = client.reconcile_private_notebook_mutation(
+        intent=intent,
+        task_run_id=run_id,
+        expected_source_sha256=hashlib.sha256(source).hexdigest(),
+        dataset_sources=(),
+        kernel_sources=(kernel_source,),
+        control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+        disposable=True,
+        docker_image=TEST_RUNTIME_IMAGE,
+        docker_image_pinning_type="original",
+    )
+    assert recovered is not None
+    api.kernel_metadata[pushed.run.provider_ref]["kernel_sources"] = ["owner/drifted"]
+    with pytest.raises(KaggleAmbiguousMutation, match="differs"):
+        client.reconcile_private_notebook_mutation(
+            intent=intent,
+            task_run_id=run_id,
+            expected_source_sha256=hashlib.sha256(source).hexdigest(),
+            dataset_sources=(),
+            kernel_sources=(kernel_source,),
+            control_class=ControlClass.ORCHESTRATOR_PROTECTED,
+            disposable=True,
+            docker_image=TEST_RUNTIME_IMAGE,
+            docker_image_pinning_type="original",
+        )

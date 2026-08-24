@@ -42,6 +42,16 @@ _READ = (
     ("bloggers.provenance", "bloggers:read"),
     ("bloggers.statistics", "bloggers:read"),
     ("bloggers.migration.accounting", "bloggers:read"),
+    ("region_talk.inventory", "region-talk:read"),
+    ("region_talk.articles.list", "region-talk:read"),
+    ("region_talk.articles.get", "region-talk:read"),
+    ("region_talk.articles.search", "region-talk:read"),
+    ("region_talk.posts.list", "region-talk:read"),
+    ("region_talk.posts.get", "region-talk:read"),
+    ("region_talk.posts.search", "region-talk:read"),
+    ("region_talk.queue.list", "region-talk:read"),
+    ("region_talk.queue.summary", "region-talk:read"),
+    ("region_talk.pipeline.status", "region-talk:read"),
     ("data.query", "data:read"),
     ("data.change.status", "operation:read"),
 )
@@ -72,13 +82,44 @@ _WRITES = (
     ),
     ToolContract("data.change.preview", "data:write", False, role="operator"),
     ToolContract("data.change.apply", "data:write", False, destructive=True, role="operator"),
-    ToolContract("bloggers.import.preview", "migration:operate", False, role="migration_operator"),
     ToolContract(
-        "bloggers.import.apply", "migration:operate", False, destructive=True, role="migration_operator"
+        "submit_discovery_batch", "bloggers:write", False, role="connector"
+    ),
+    ToolContract(
+        "bloggers.import.preview", "bloggers:write", False, role="canonical_committer"
+    ),
+    ToolContract(
+        "bloggers.import.apply",
+        "bloggers:write",
+        False,
+        destructive=True,
+        role="canonical_committer",
+    ),
+    ToolContract(
+        "bloggers.import.status", "bloggers:write", True, role="canonical_committer"
+    ),
+    ToolContract(
+        "region_talk.pipeline.run",
+        "region-talk:operate",
+        False,
+        idempotent=True,
+        role="operator",
     ),
     ToolContract("provider.resources.create", "provider:write", False, open_world=True, role="provider_operator"),
     ToolContract("provider.resources.version", "provider:write", False, open_world=True, role="provider_operator"),
     ToolContract("provider.resources.run", "provider:write", False, open_world=True, role="provider_operator"),
+    ToolContract("provider.upload.start", "provider:write", False, open_world=True, role="provider_operator"),
+    ToolContract("provider.upload.put_chunk", "provider:write", False, open_world=True, role="provider_operator"),
+    ToolContract("provider.upload.status", "provider:write", True, open_world=True, role="provider_operator"),
+    ToolContract("provider.upload.finalize", "provider:write", False, open_world=True, role="provider_operator"),
+    ToolContract(
+        "provider.upload.abort",
+        "provider:write",
+        False,
+        destructive=True,
+        open_world=True,
+        role="provider_operator",
+    ),
     ToolContract("provider.resources.read", "provider:write", True, open_world=True, role="provider_operator"),
     ToolContract("provider.resources.list", "provider:write", True, open_world=True, role="provider_operator"),
     ToolContract("provider.resources.download", "provider:write", True, open_world=True, role="provider_operator"),
@@ -147,6 +188,11 @@ READER_PROFILE_SCOPES = frozenset(
         "embedding:read",
         "provider:read",
         "bloggers:read",
+        "region-talk:read",
+        # Legacy OAuth reader registrations may still carry this scope.  The
+        # operational reader/unified tool allowlist excludes ``data.query``;
+        # retaining the scope here avoids reclassifying an existing reader as
+        # an owner/operator during issuer reconciliation.
         "data:read",
     }
 )

@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from my_data_hub.workloads.region_talk.constants import DIRECT_SOURCE_TABLES
+
 _SHA256_RE = r"^[a-f0-9]{64}$"
 _IDENTIFIER_RE = r"^[A-Za-z0-9_./:-]+$"
 
@@ -271,3 +273,98 @@ class MigrationReconciliationReport(BaseModel):
         if self.passed != (not self.blocking_findings):
             raise ValueError("passed contradicts blocking findings")
         return self
+
+
+class DirectSnapshotTableReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_table: str = Field(min_length=1, max_length=128)
+    row_count: int = Field(ge=0)
+    logical_sha256: str = Field(pattern=_SHA256_RE)
+
+
+class DirectSnapshotManifest(BaseModel):
+    """Pass-A inventory bound to one ACTIVE-master task."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["region-talk-direct-snapshot.v2"]
+    export_batch_id: UUID
+    task_run_id: UUID
+    master_instance_id: UUID
+    master_epoch: int = Field(ge=1)
+    source_database: str = Field(min_length=1, max_length=500)
+    request_sha256: str = Field(pattern=_SHA256_RE)
+    logical_sha256: str = Field(pattern=_SHA256_RE)
+    manifest_sha256: str = Field(pattern=_SHA256_RE)
+    expected_row_count: int = Field(ge=0)
+    tables: list[DirectSnapshotTableReceipt]
+    row_kind_counts: dict[str, int]
+    publication_effects_enabled: Literal[False] = False
+    created_at: datetime
+
+    @model_validator(mode="after")
+    def exact_scope_and_counts(self) -> DirectSnapshotManifest:
+        expected_tables = [item.name for item in DIRECT_SOURCE_TABLES]
+        actual_tables = [item.source_table for item in self.tables]
+        if actual_tables != expected_tables:
+            raise ValueError("direct snapshot must contain the five ordered source tables")
+        if sum(item.row_count for item in self.tables) != self.expected_row_count:
+            raise ValueError("table row counts must equal expected_row_count")
+        if any(not kind or count < 0 for kind, count in self.row_kind_counts.items()):
+            raise ValueError("row kinds must be non-empty and counts non-negative")
+        if sum(self.row_kind_counts.values()) != self.expected_row_count:
+            raise ValueError("row-kind counts must equal expected_row_count")
+        return self
+
+
+class DirectSnapshotRow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    raw_record_id: UUID
+    source_table: str = Field(min_length=1, max_length=128)
+    source_pk: str = Field(min_length=1, max_length=4000)
+    row_kind: str = Field(pattern=_IDENTIFIER_RE)
+    source_updated_at: datetime | None = None
+    payload_json: str = Field(min_length=2, max_length=8_388_608)
+    payload_sha256: str = Field(pattern=_SHA256_RE)
+    logical_sha256: str = Field(pattern=_SHA256_RE)
+
+
+class DirectSnapshotPage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["region-talk-direct-page.v2"]
+    source_table: str = Field(min_length=1, max_length=128)
+    page_number: int = Field(ge=1)
+    first_source_pk: str = Field(min_length=1, max_length=4000)
+    last_source_pk: str = Field(min_length=1, max_length=4000)
+    logical_sha256: str = Field(pattern=_SHA256_RE)
+    rows: list[DirectSnapshotRow] = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def ordered_one_table(self) -> DirectSnapshotPage:
+        keys = [row.source_pk for row in self.rows]
+        if any(row.source_table != self.source_table for row in self.rows):
+            raise ValueError("page rows must belong to source_table")
+        if keys != sorted(keys) or len(keys) != len(set(keys)):
+            raise ValueError("page source keys must be strictly ordered")
+        if self.first_source_pk != keys[0] or self.last_source_pk != keys[-1]:
+            raise ValueError("page key bounds contradict rows")
+        return self
+
+
+class DirectSnapshotReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["region-talk-direct-snapshot-receipt.v2"]
+    export_batch_id: UUID
+    task_run_id: UUID
+    status: Literal["complete", "complete_with_quarantine", "failed"]
+    expected_row_count: int = Field(ge=0)
+    landed_row_count: int = Field(ge=0)
+    dispositioned_row_count: int = Field(ge=0)
+    quarantined_row_count: int = Field(ge=0)
+    logical_sha256: str = Field(pattern=_SHA256_RE)
+    publication_effects_enabled: Literal[False] = False
+    completed_at: datetime

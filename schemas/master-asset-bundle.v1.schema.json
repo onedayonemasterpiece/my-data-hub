@@ -44,6 +44,32 @@
         "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "byte_size": {"type": "integer", "minimum": 1, "maximum": 67108864}
       }
+    },
+    "master_ydb_wheel_asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "byte_size"],
+      "properties": {
+        "path": {
+          "const": "dataset/master-python-wheelhouse/ydb-3.31.2-py3-none-any.whl"
+        },
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "byte_size": {"type": "integer", "minimum": 1, "maximum": 67108864}
+      }
+    },
+    "master_ydb_dependency_wheel_asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "byte_size"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^dataset/master-python-wheelhouse/[A-Za-z0-9_.+-]+\\.whl$",
+          "maxLength": 300
+        },
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "byte_size": {"type": "integer", "minimum": 1, "maximum": 67108864}
+      }
     }
   },
   "required": [
@@ -58,7 +84,8 @@
     "probe_relations",
     "worker_runtime",
     "assets",
-    "embedding_dependency_wheels"
+    "embedding_dependency_wheels",
+    "master_ydb_dependency_wheels"
   ],
   "properties": {
     "schema_version": {
@@ -115,7 +142,9 @@
         "embedding_e5_worker",
         "embedding_bge_worker",
         "embedding_dependency_manifest",
-        "embedding_dependency_smoke_runner"
+        "embedding_dependency_smoke_runner",
+        "master_ydb_dependency_manifest",
+        "master_ydb_wheel"
       ],
       "properties": {
         "master_notebook": {"$ref": "#/$defs/asset"},
@@ -127,7 +156,9 @@
         "embedding_e5_worker": {"$ref": "#/$defs/asset"},
         "embedding_bge_worker": {"$ref": "#/$defs/asset"},
         "embedding_dependency_manifest": {"$ref": "#/$defs/asset"},
-        "embedding_dependency_smoke_runner": {"$ref": "#/$defs/asset"}
+        "embedding_dependency_smoke_runner": {"$ref": "#/$defs/asset"},
+        "master_ydb_dependency_manifest": {"$ref": "#/$defs/asset"},
+        "master_ydb_wheel": {"$ref": "#/$defs/master_ydb_wheel_asset"}
       }
     },
     "embedding_dependency_wheels": {
@@ -135,6 +166,12 @@
       "minItems": 4,
       "maxItems": 16,
       "items": {"$ref": "#/$defs/dependency_wheel_asset"}
+    },
+    "master_ydb_dependency_wheels": {
+      "type": "array",
+      "minItems": 14,
+      "maxItems": 14,
+      "items": {"$ref": "#/$defs/master_ydb_dependency_wheel_asset"}
     }
   }
 }

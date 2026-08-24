@@ -8,13 +8,44 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+from uuid import UUID, uuid4
 
 from my_data_hub.mcp.contracts import ControlPlaneReader
 from my_data_hub.mcp.oauth import AccessIdentity
 
 
 class ProviderControlGatewayError(RuntimeError):
-    """The authenticated control authority did not return bounded metadata."""
+    """Bounded redacted failure from the authenticated provider authority."""
+
+    def __init__(self, code: str, correlation_id: str, *, status: int | None = None) -> None:
+        self.code = code
+        self.correlation_id = correlation_id
+        self.status = status
+        super().__init__(f"provider control gateway failed: {code} (correlation {correlation_id})")
+
+
+_SAFE_GATEWAY_CODES = frozenset(
+    {
+        "provider_gateway_token_invalid",
+        "provider_gateway_request_too_large",
+        "provider_gateway_json_invalid",
+        "provider_gateway_envelope_invalid",
+        "provider_gateway_contract_invalid",
+        "provider_gateway_principal_invalid",
+        "provider_gateway_principal_denied",
+        "provider_gateway_secret_forbidden",
+        "provider_gateway_policy_denied",
+        "provider_gateway_request_invalid",
+        "provider_gateway_effect_ambiguous",
+        "provider_gateway_not_found",
+        "provider_gateway_upload_conflict",
+        "provider_gateway_effect_failed",
+        "provider_gateway_internal_failure",
+        "provider_gateway_response_too_large",
+        "provider_gateway_unavailable",
+        "provider_gateway_response_invalid",
+    }
+)
 
 
 _REMOTE_PROVIDER_TOOLS = frozenset(
@@ -26,14 +57,33 @@ _REMOTE_PROVIDER_TOOLS = frozenset(
         "provider.resources.list",
         "provider.resources.download",
         "provider.resources.delete",
+        "provider.inventory.live",
+        "provider.upload.start",
+        "provider.upload.put_chunk",
+        "provider.upload.status",
+        "provider.upload.finalize",
+        "provider.upload.abort",
         "provider.acceptance.dataset.lifecycle",
         "provider.acceptance.notebook.lifecycle",
         "provider.acceptance.claim.get",
         "provider.acceptance.claim.cleanup",
         "acceptance.scenario.request",
         "acceptance.scenario.status",
+        "region_talk.pipeline.run",
     }
 )
+
+
+class RemoteRegionTalkPipelineController:
+    """Operator facade over the authenticated internal control gateway."""
+
+    def __init__(self, client: AuthenticatedProviderControlClient) -> None:
+        self.client = client
+
+    async def request_supervised_run(self, *, request: Any, principal: AccessIdentity) -> Mapping[str, Any]:
+        return await self.client.invoke_control(
+            "region_talk.pipeline.run", request.model_dump(mode="json"), principal
+        )
 
 
 class AuthenticatedProviderControlClient(ControlPlaneReader):
@@ -93,7 +143,7 @@ class AuthenticatedProviderControlClient(ControlPlaneReader):
             separators=(",", ":"),
         ).encode()
         if len(body) > 512 * 1024:
-            raise ProviderControlGatewayError("provider control request exceeds the bound")
+            raise ProviderControlGatewayError("provider_gateway_request_too_large", str(uuid4()))
         request = Request(
             self.endpoint,
             data=body,
@@ -107,16 +157,43 @@ class AuthenticatedProviderControlClient(ControlPlaneReader):
         try:
             with urlopen(request, timeout=3660) as response:
                 encoded = response.read(2 * 1024 * 1024 + 1)
-        except (HTTPError, URLError, TimeoutError, OSError) as exc:
-            raise ProviderControlGatewayError("provider control gateway request failed") from exc
+        except HTTPError as exc:
+            try:
+                encoded_error = exc.read(16 * 1024 + 1)
+            except OSError:
+                encoded_error = b""
+            code = "provider_gateway_internal_failure"
+            correlation_id = str(uuid4())
+            if len(encoded_error) <= 16 * 1024:
+                try:
+                    error = json.loads(encoded_error)
+                    detail = error.get("detail") if isinstance(error, dict) else None
+                    candidate_code = detail.get("code") if isinstance(detail, dict) else None
+                    candidate_correlation = (
+                        detail.get("correlation_id") if isinstance(detail, dict) else None
+                    )
+                    if candidate_code in _SAFE_GATEWAY_CODES:
+                        code = candidate_code
+                    if isinstance(candidate_correlation, str):
+                        UUID(candidate_correlation)
+                        correlation_id = candidate_correlation
+                except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+                    pass
+            raise ProviderControlGatewayError(code, correlation_id, status=exc.code) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise ProviderControlGatewayError(
+                "provider_gateway_unavailable", str(uuid4())
+            ) from exc
         if len(encoded) > 2 * 1024 * 1024:
-            raise ProviderControlGatewayError("provider control response exceeds the bound")
+            raise ProviderControlGatewayError(
+                "provider_gateway_response_too_large", str(uuid4())
+            )
         try:
             result = json.loads(encoded)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ProviderControlGatewayError("provider control response is invalid") from exc
+            raise ProviderControlGatewayError("provider_gateway_response_invalid", str(uuid4())) from exc
         if not isinstance(result, dict):
-            raise ProviderControlGatewayError("provider control response is not an object")
+            raise ProviderControlGatewayError("provider_gateway_response_invalid", str(uuid4()))
         return result
 
 

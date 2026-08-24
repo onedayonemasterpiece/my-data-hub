@@ -1,0 +1,22 @@
+{
+  "contract": "my-data-hub.provider-chunked-upload-live-evidence.v1",
+  "status": "PASS",
+  "observed_at": "2026-08-16T17:01:00Z",
+  "deployed_commit": "412dff86a44e6eda776b839add1d2b6b6fdd292c",
+  "integration_equivalent_commit": "24a4186",
+  "transport": "public-oauth-mcp",
+  "oauth_client": "opencode-my-data-hub",
+  "master_state": "ABSENT",
+  "canonical_database_used": false,
+  "single_central_kaggle_adapter": true,
+  "file_count": 10,
+  "total_bytes": 2025000,
+  "upload_chunk_calls": 87,
+  "download_chunk_calls": 20,
+  "provider_version": 1,
+  "hash_verified_downloads": 10,
+  "delete_outcome": "applied",
+  "resource_absent_after_cleanup": true,
+  "protected_receipt_sha256": "676274a8e489564d913d31f72a9c08e6e56b98947fd792ffe445d7be508d90fc",
+  "credentials_or_file_bytes_recorded": false
+}

@@ -1,0 +1,636 @@
+{
+  "$defs": {
+    "CriticResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "decision": {
+          "enum": [
+            "pass",
+            "rewrite",
+            "reject"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "defects": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "title": "Defects",
+          "type": "array"
+        }
+      },
+      "required": [
+        "decision"
+      ],
+      "title": "CriticResponse",
+      "type": "object"
+    },
+    "EditorialStrategy": {
+      "additionalProperties": false,
+      "properties": {
+        "angle": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Angle",
+          "type": "string"
+        },
+        "current_hook_fact_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "minItems": 1,
+          "title": "Current Hook Fact Ids",
+          "type": "array"
+        },
+        "source_value_fact_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "minItems": 1,
+          "title": "Source Value Fact Ids",
+          "type": "array"
+        },
+        "visual_hook_media_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 6,
+          "title": "Visual Hook Media Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "angle",
+        "current_hook_fact_ids",
+        "source_value_fact_ids"
+      ],
+      "title": "EditorialStrategy",
+      "type": "object"
+    },
+    "FinalVerifierResult": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_revision_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Candidate Revision Fingerprint",
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "accept",
+            "reject",
+            "needs_review"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "fact_pack_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Fact Pack Sha256",
+          "type": "string"
+        },
+        "grounding": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/GroundingReference"
+          },
+          "maxItems": 20,
+          "title": "Grounding",
+          "type": "array"
+        },
+        "image_result_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Image Result Sha256",
+          "type": "string"
+        },
+        "input_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Input Fingerprint",
+          "type": "string"
+        },
+        "model_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Model Id",
+          "type": "string"
+        },
+        "notification_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Notification Dispatch",
+          "type": "boolean"
+        },
+        "producer_exact_id": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Producer Exact Id",
+          "type": "string"
+        },
+        "publication_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Publication Dispatch",
+          "type": "boolean"
+        },
+        "reason_codes": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Reason Codes",
+          "type": "array"
+        },
+        "request_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Request Fingerprint",
+          "type": "string"
+        },
+        "result_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Result Sha256",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "region-talk-final-verifier-result.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Fingerprint",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "input_fingerprint",
+        "candidate_revision_fingerprint",
+        "fact_pack_sha256",
+        "source_fingerprint",
+        "image_result_sha256",
+        "producer_exact_id",
+        "decision",
+        "reason_codes",
+        "request_fingerprint",
+        "model_id",
+        "result_sha256"
+      ],
+      "title": "FinalVerifierResult",
+      "type": "object"
+    },
+    "GroundingReference": {
+      "additionalProperties": false,
+      "properties": {
+        "claim": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Claim",
+          "type": "string"
+        },
+        "fact_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Fact Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "claim",
+        "fact_ids"
+      ],
+      "title": "GroundingReference",
+      "type": "object"
+    },
+    "ImageFrameScores": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Artifact Sha256",
+          "type": "string"
+        },
+        "clip_visual_fit_score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Clip Visual Fit Score",
+          "type": "number"
+        },
+        "content_text_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Content Text Sha256",
+          "type": "string"
+        },
+        "cv_overall_media_score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Cv Overall Media Score",
+          "type": "number"
+        },
+        "laion_aesthetic_score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Laion Aesthetic Score",
+          "type": "number"
+        },
+        "media_id": {
+          "pattern": "^[A-Za-z0-9_.:-]{1,300}$",
+          "title": "Media Id",
+          "type": "string"
+        },
+        "model_bundle_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Model Bundle Sha256",
+          "type": "string"
+        },
+        "nima_quality_score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Nima Quality Score",
+          "type": "number"
+        },
+        "overall_media_score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Overall Media Score",
+          "type": "number"
+        },
+        "scorer_request_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Scorer Request Fingerprint",
+          "type": "string"
+        },
+        "technical_quality_score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Technical Quality Score",
+          "type": "number"
+        }
+      },
+      "required": [
+        "media_id",
+        "artifact_sha256",
+        "content_text_sha256",
+        "scorer_request_fingerprint",
+        "cv_overall_media_score",
+        "technical_quality_score",
+        "clip_visual_fit_score",
+        "laion_aesthetic_score",
+        "nima_quality_score",
+        "overall_media_score",
+        "model_bundle_sha256"
+      ],
+      "title": "ImageFrameScores",
+      "type": "object"
+    },
+    "ImageScoringResult": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_revision_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Candidate Revision Fingerprint",
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "legacy_auto_accept",
+            "vlm_visual_accept",
+            "needs_visual_review"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "frames": {
+          "items": {
+            "$ref": "#/$defs/ImageFrameScores"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Frames",
+          "type": "array"
+        },
+        "input_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Input Fingerprint",
+          "type": "string"
+        },
+        "media_manifest_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Media Manifest Sha256",
+          "type": "string"
+        },
+        "notification_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Notification Dispatch",
+          "type": "boolean"
+        },
+        "producer_exact_id": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Producer Exact Id",
+          "type": "string"
+        },
+        "publication_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Publication Dispatch",
+          "type": "boolean"
+        },
+        "reason_codes": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Reason Codes",
+          "type": "array"
+        },
+        "result_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Result Sha256",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "region-talk-image-scoring-result.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "selected_media_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 6,
+          "title": "Selected Media Ids",
+          "type": "array"
+        },
+        "visual_adjudication": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VisualAdjudication"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "schema_version",
+        "input_fingerprint",
+        "candidate_revision_fingerprint",
+        "media_manifest_sha256",
+        "producer_exact_id",
+        "decision",
+        "reason_codes",
+        "frames",
+        "result_sha256"
+      ],
+      "title": "ImageScoringResult",
+      "type": "object"
+    },
+    "VisualAdjudication": {
+      "additionalProperties": false,
+      "properties": {
+        "article_association_supported": {
+          "title": "Article Association Supported",
+          "type": "boolean"
+        },
+        "decision": {
+          "enum": [
+            "accept",
+            "reject",
+            "review"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "model_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Model Id",
+          "type": "string"
+        },
+        "producer_exact_id": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Producer Exact Id",
+          "type": "string"
+        },
+        "reason_code": {
+          "pattern": "^[a-z][a-z0-9_]{0,99}$",
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "request_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Request Fingerprint",
+          "type": "string"
+        },
+        "selected_media_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 6,
+          "title": "Selected Media Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "decision",
+        "article_association_supported",
+        "reason_code",
+        "request_fingerprint",
+        "model_id",
+        "producer_exact_id"
+      ],
+      "title": "VisualAdjudication",
+      "type": "object"
+    },
+    "WriterResult": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_revision_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Candidate Revision Fingerprint",
+          "type": "string"
+        },
+        "critic": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CriticResponse"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "fact_pack_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Fact Pack Sha256",
+          "type": "string"
+        },
+        "final_result_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Final Result Sha256",
+          "type": "string"
+        },
+        "grounding": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/GroundingReference"
+          },
+          "maxItems": 30,
+          "title": "Grounding",
+          "type": "array"
+        },
+        "input_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Input Fingerprint",
+          "type": "string"
+        },
+        "model_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Model Id",
+          "type": "string"
+        },
+        "notification_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Notification Dispatch",
+          "type": "boolean"
+        },
+        "paragraph_one": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Paragraph One",
+          "type": "string"
+        },
+        "paragraph_two": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Paragraph Two",
+          "type": "string"
+        },
+        "producer_exact_id": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Producer Exact Id",
+          "type": "string"
+        },
+        "publication_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Publication Dispatch",
+          "type": "boolean"
+        },
+        "request_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Request Fingerprint",
+          "type": "string"
+        },
+        "result_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Result Sha256",
+          "type": "string"
+        },
+        "rewrite_count": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Rewrite Count",
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": "region-talk-writer-result.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_profile_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Profile Fingerprint",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "ready_for_operator_review",
+            "needs_facts",
+            "needs_source_profile",
+            "needs_grounding_review",
+            "rejected"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "strategy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EditorialStrategy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "title": {
+          "default": "",
+          "maxLength": 500,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "input_fingerprint",
+        "candidate_revision_fingerprint",
+        "fact_pack_sha256",
+        "source_profile_fingerprint",
+        "final_result_sha256",
+        "producer_exact_id",
+        "status",
+        "rewrite_count",
+        "request_fingerprint",
+        "model_id",
+        "result_sha256"
+      ],
+      "title": "WriterResult",
+      "type": "object"
+    }
+  },
+  "$id": "https://my-data-hub.invalid/schemas/region-talk-heavy-stage-result.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "discriminator": {
+    "mapping": {
+      "region-talk-final-verifier-result.v1": "#/$defs/FinalVerifierResult",
+      "region-talk-image-scoring-result.v1": "#/$defs/ImageScoringResult",
+      "region-talk-writer-result.v1": "#/$defs/WriterResult"
+    },
+    "propertyName": "schema_version"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ImageScoringResult"
+    },
+    {
+      "$ref": "#/$defs/FinalVerifierResult"
+    },
+    {
+      "$ref": "#/$defs/WriterResult"
+    }
+  ],
+  "title": "Region Talk closed heavy-stage result contracts"
+}

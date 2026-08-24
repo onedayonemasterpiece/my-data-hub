@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ from my_data_hub.checkpoints.kaggle_runtime import (
     _render_verifier_source,
 )
 from my_data_hub.checkpoints.manifest import RestoreProbe, build_manifest, load_and_verify, write_manifest
+from my_data_hub.checkpoints.provider_storage import CHECKPOINT_PROVIDER_FILE_NAMES
 from my_data_hub.checkpoints.publisher import PublishReceipt
 from my_data_hub.checkpoints.registry import CheckpointHead
 from my_data_hub.hashing import canonical_json_bytes
@@ -51,6 +53,7 @@ from my_data_hub.providers.kaggle import (
     ProviderEffectReceipt,
     TaskResourceClaim,
 )
+from my_data_hub.providers.kaggle.source_attestation import executable_source_sha256
 from my_data_hub.providers.models import ControlClass, ProviderFingerprint, ProviderKind
 from my_data_hub.runtime_sdk import CHECKPOINT_VERIFIER_TIMEOUT_SECONDS
 
@@ -83,6 +86,10 @@ def _verifier_assets(**updates: object) -> KaggleCheckpointVerifierAssets:
         "postgres_runtime_archive_sha256": "e" * 64,
         "postgres_runtime_manifest_relative_path": "postgresql-18-runtime.json",
         "postgres_runtime_manifest_sha256": "f" * 64,
+        "psycopg_wheel_relative_path": "embedding-worker-wheelhouse/psycopg.whl",
+        "psycopg_wheel_sha256": "1" * 64,
+        "psycopg_binary_wheel_relative_path": "embedding-worker-wheelhouse/psycopg_binary.whl",
+        "psycopg_binary_wheel_sha256": "2" * 64,
     }
     values.update(updates)
     return KaggleCheckpointVerifierAssets(**values)  # type: ignore[arg-type]
@@ -90,15 +97,26 @@ def _verifier_assets(**updates: object) -> KaggleCheckpointVerifierAssets:
 
 @pytest.mark.parametrize(
     "name",
-    ["KAGGLE_USERNAME", "KAGGLE_KEY", "KAGGLE_API_TOKEN", "KAGGLE_API_V1_TOKEN", "KAGGLE_ACCESS_TOKEN"],
+    ["KAGGLE_KEY", "KAGGLE_API_TOKEN", "KAGGLE_API_V1_TOKEN", "KAGGLE_ACCESS_TOKEN"],
 )
 def test_master_checkpoint_runtime_rejects_every_kaggle_lifecycle_credential(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv(name, "must-not-enter-master")
-    with pytest.raises(CheckpointRuntimeError, match="forbidden in the master Notebook"):
+    with pytest.raises(CheckpointRuntimeError, match=rf"forbidden in the master Notebook: {name}"):
         _reject_notebook_kaggle_credentials()
+
+
+def test_master_checkpoint_runtime_accepts_kaggle_platform_username_without_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KAGGLE_USERNAME", "platform-account-metadata")
+    for name in ("KAGGLE_KEY", "KAGGLE_API_TOKEN", "KAGGLE_API_V1_TOKEN", "KAGGLE_ACCESS_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+    _reject_notebook_kaggle_credentials()
 
 
 @pytest.mark.parametrize("relative", [".kaggle/kaggle.json", ".kaggle/access_token"])
@@ -277,7 +295,7 @@ class FakeVerifierAdapter:
             task_run_id=run_id,
             provider_ref="owner/checkpoint-verifier",
             source_version=4,
-            source_sha256=hashlib.sha256(source).hexdigest(),
+            source_sha256=executable_source_sha256(source, kernel_type="notebook"),
             provider_kernel_id=77,
             provider_run_ref="owner/checkpoint-verifier/4",
             started_at=NOW,
@@ -628,12 +646,15 @@ def test_rendered_verifier_discovers_normalized_mounts_and_rejects_ambiguity(
     wheel = b"wheel"
     archive = b"archive"
     runtime_manifest = b"runtime-manifest"
+    psycopg_wheel = b"psycopg-wheel"
+    psycopg_binary_wheel = b"psycopg-binary-wheel"
     (runtime_root / "project.whl").write_bytes(wheel)
     (runtime_root / "postgres.bundle").write_bytes(archive)
     (runtime_root / "postgres.json").write_bytes(runtime_manifest)
-    (checkpoint_root / "checkpoint-manifest.json").write_bytes(
-        canonical_json_bytes(manifest.payload())
-    )
+    (runtime_root / "psycopg.whl").write_bytes(psycopg_wheel)
+    (runtime_root / "psycopg_binary.whl").write_bytes(psycopg_binary_wheel)
+    for logical_name, provider_name in CHECKPOINT_PROVIDER_FILE_NAMES.items():
+        (checkpoint_root / provider_name).write_bytes((package / logical_name).read_bytes())
     if duplicate_runtime_file:
         duplicate = input_root / "unrelated-provider-mount"
         duplicate.mkdir()
@@ -645,6 +666,10 @@ def test_rendered_verifier_discovers_normalized_mounts_and_rejects_ambiguity(
         postgres_runtime_archive_sha256=hashlib.sha256(archive).hexdigest(),
         postgres_runtime_manifest_relative_path="runtime/postgres.json",
         postgres_runtime_manifest_sha256=hashlib.sha256(runtime_manifest).hexdigest(),
+        psycopg_wheel_relative_path="dependencies/psycopg.whl",
+        psycopg_wheel_sha256=hashlib.sha256(psycopg_wheel).hexdigest(),
+        psycopg_binary_wheel_relative_path="dependencies/psycopg_binary.whl",
+        psycopg_binary_wheel_sha256=hashlib.sha256(psycopg_binary_wheel).hexdigest(),
     )
     source, _pins_sha = _render_verifier_source(
         assets,
@@ -659,6 +684,9 @@ def test_rendered_verifier_discovers_normalized_mounts_and_rejects_ambiguity(
     image_commit = tmp_path / "git_commit"
     image_commit.write_text("c" * 40)
     bootstrap = bootstrap.replace("/kaggle/input", str(input_root)).replace(
+        "/kaggle/working/checkpoint-verifier-package",
+        str(working / "checkpoint-package"),
+    ).replace(
         "/kaggle/working/checkpoint-verifier-execution-pins.json",
         str(working / "execution-pins.json"),
     ).replace("/etc/git_commit", str(image_commit))
@@ -667,8 +695,20 @@ def test_rendered_verifier_discovers_normalized_mounts_and_rejects_ambiguity(
             exec(compile(bootstrap, "<verifier-bootstrap>", "exec"), {})
     else:
         monkeypatch.delenv("MY_DATA_HUB_CHECKPOINT_DIRECTORY", raising=False)
+        installs: list[tuple[str, ...]] = []
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda arguments, **_kwargs: installs.append(tuple(str(item) for item in arguments)),
+        )
         exec(compile(bootstrap, "<verifier-bootstrap>", "exec"), {})
-        assert Path(os.environ["MY_DATA_HUB_CHECKPOINT_DIRECTORY"]) == checkpoint_root
+        assert [Path(arguments[-1]).name for arguments in installs] == [
+            "psycopg.whl",
+            "psycopg_binary.whl",
+        ]
+        assert all("--no-index" in arguments and "--no-deps" in arguments for arguments in installs)
+        assert Path(os.environ["MY_DATA_HUB_CHECKPOINT_DIRECTORY"]) == working / "checkpoint-package"
+        assert (working / "checkpoint-package/physical/base.tar.gz").read_bytes() == b"base"
         assert Path(os.environ["MY_DATA_HUB_WHEEL_PATH"]) == runtime_root / "project.whl"
         assert json.loads(os.environ["MY_DATA_HUB_INPUT_DATASET_VERSIONS_JSON"]) == [
             "owner/master-assets/3",

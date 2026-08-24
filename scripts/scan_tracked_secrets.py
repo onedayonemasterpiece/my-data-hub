@@ -42,12 +42,48 @@ _SAFE_ASSIGNMENT_FRAGMENTS = (
     "runtime-secret-long-enough",
 )
 
+# A historical unit-test patch used this exact deliberately invalid three-line
+# value to exercise TLS file plumbing. Keep the reachable-history scan strict
+# for every real PEM body while allowing only that byte-for-byte sentinel.
+_INVALID_TEST_PEM_SENTINEL = (
+    "-----BEGIN " + "PRIVATE KEY-----\nTEST\n-----END PRIVATE " + "KEY-----"
+)
+_INVALID_TEST_PEM_SOURCE_SENTINEL = _INVALID_TEST_PEM_SENTINEL.replace("\n", "\\n")
+
+# Region Talk's supervisor serialization test used this deliberately incomplete
+# OpenSSH marker to prove that private capability material stays out of the
+# generated public source.  It is not a usable key; allow only the exact
+# historical runtime/source spellings so the reachable-history scan remains
+# strict for every complete or altered private-key value.
+_INVALID_OPENSSH_TEST_SENTINEL = "-----BEGIN " + "OPENSSH PRIVATE KEY-----\nkey"
+_INVALID_OPENSSH_TEST_SOURCE_SENTINEL = _INVALID_OPENSSH_TEST_SENTINEL.replace("\n", "\\n")
+
+# One PostgreSQL integration fixture predates the tracked-secret scanner and is
+# present in reachable history.  Match the complete synthetic value rather than
+# weakening the assignment rule with a broad ``fixture`` substring exemption.
+_INVALID_TEST_ASSIGNMENT_SENTINELS = frozenset(
+    {"region-talk-fixture-password-long-enough"}
+)
+
 
 def findings(text: str) -> list[str]:
-    found = [name for name, pattern in _STRONG_PATTERNS if pattern.search(text)]
-    for match in _ASSIGNMENT.finditer(text):
+    scanned = text.replace(_INVALID_TEST_PEM_SENTINEL, "test-only-invalid-pem-sentinel")
+    scanned = scanned.replace(_INVALID_TEST_PEM_SOURCE_SENTINEL, "test-only-invalid-pem-sentinel")
+    for sentinel in (
+        _INVALID_OPENSSH_TEST_SENTINEL,
+        _INVALID_OPENSSH_TEST_SOURCE_SENTINEL,
+    ):
+        scanned = re.sub(
+            re.escape(sentinel) + r"(?=$|[\r\n'\"),])",
+            "test-only-invalid-openssh-sentinel",
+            scanned,
+        )
+    found = [name for name, pattern in _STRONG_PATTERNS if pattern.search(scanned)]
+    for match in _ASSIGNMENT.finditer(scanned):
         value = match.group(1)
         lowered = value.casefold()
+        if value in _INVALID_TEST_ASSIGNMENT_SENTINELS:
+            continue
         if len(value) < 16 or any(fragment in lowered for fragment in _SAFE_ASSIGNMENT_FRAGMENTS):
             continue
         if len(set(value)) == 1:

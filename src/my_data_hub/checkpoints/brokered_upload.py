@@ -33,6 +33,7 @@ from my_data_hub.providers.kaggle.contracts import (
 )
 
 from .manifest import CheckpointManifest, canonical_json, load_and_verify
+from .provider_storage import checkpoint_provider_file_name
 from .publisher import PublishReceipt
 from .registry import ControlLedgerCheckpointRegistry
 
@@ -178,6 +179,9 @@ class BrokeredKaggleAdapter(Protocol):
 
 
 class BrokeredRestoreVerifier(Protocol):
+    @property
+    def revision_sha256(self) -> str: ...
+
     def verify_restore(
         self,
         *,
@@ -583,6 +587,31 @@ class BrokeredCheckpointUploadService:
         self.restore_verifier_factory = restore_verifier_factory
         self.forced_failure_verifier_factory = forced_failure_verifier_factory
 
+    def _restore_verifier_for(self, publication: dict[str, Any]) -> BrokeredRestoreVerifier:
+        verifier = self.restore_verifier
+        if verifier is None and self.restore_verifier_factory is not None:
+            verifier = self.restore_verifier_factory(
+                UUID(str(publication["operation_id"])),
+                UUID(str(publication["run_id"])),
+            )
+        if verifier is None:
+            raise BrokeredCheckpointError("independent restore verifier is unavailable")
+        return verifier
+
+    @staticmethod
+    def _verifier_revision(verifier: BrokeredRestoreVerifier) -> str:
+        revision = getattr(verifier, "revision_sha256", None)
+        if isinstance(revision, str) and _SHA256.fullmatch(revision):
+            return revision
+        # Compatibility for injected test verifiers. Production verifiers expose
+        # an exact asset/source-bound revision above.
+        return sha256_value(
+            {
+                "schema_version": "my-data-hub-checkpoint-verifier-revision.v1",
+                "verifier_type": f"{type(verifier).__module__}.{type(verifier).__qualname__}",
+            }
+        )
+
     def prepare(self, spec: CheckpointBlobSpec, authority: RuntimeUploadAuthority) -> CheckpointBlobGrant:
         try:
             candidate, manifest = self._validate(spec, authority)
@@ -643,7 +672,7 @@ class BrokeredCheckpointUploadService:
         self.ledger.claim_start(str(claim_id))
         try:
             grant = self.adapter.start_brokered_dataset_blob(
-                file_name=spec.file_name,
+                file_name=checkpoint_provider_file_name(spec.file_name),
                 content_length=spec.content_length,
                 content_type=spec.content_type,
                 last_modified_epoch_seconds=int(manifest.created_at.timestamp()),
@@ -687,10 +716,25 @@ class BrokeredCheckpointUploadService:
     def finalize(self, checkpoint_id: UUID, authority: RuntimeUploadAuthority) -> dict[str, Any]:
         """Finalize, independently verify, and CAS-promote one exact publication."""
 
+        return self._finalize(checkpoint_id, authority, durable_recovery=False)
+
+    def _finalize(
+        self,
+        checkpoint_id: UUID,
+        authority: RuntimeUploadAuthority,
+        *,
+        durable_recovery: bool,
+    ) -> dict[str, Any]:
+        """Finalize normally or recover centrally after every blob is durable."""
+
         publication = self.ledger.publication(str(checkpoint_id))
         if publication is None:
             raise BrokeredCheckpointError("checkpoint publication is absent")
-        _candidate, manifest = self._validate_publication(publication, authority)
+        _candidate, manifest = self._validate_publication(
+            publication,
+            authority,
+            durable_recovery=durable_recovery,
+        )
         if authority.authority_kind == "acceptance":
             return self._finalize_acceptance(checkpoint_id, publication, manifest, authority)
         if publication["state"] == "PROMOTED":
@@ -702,7 +746,15 @@ class BrokeredCheckpointUploadService:
             claims=claims,
         )
         persisted_expected = publication.get("expected_provider_version")
-        if persisted_expected is not None:
+        reset = self.control.checkpoint_dataset_incarnation_retirement(str(checkpoint_id))
+        dataset_incarnation_reset = reset is not None
+        source_head_checkpoint_id = (
+            str(reset["source_head_checkpoint_id"]) if reset is not None else None
+        )
+        if reset is not None:
+            expected_version = 1
+            expected_previous_version = None
+        elif persisted_expected is not None:
             expected_version = int(persisted_expected)
             expected_previous_version = expected_version - 1 or None
         else:
@@ -720,10 +772,30 @@ class BrokeredCheckpointUploadService:
                 current_ref, version_text = str(current["version_ref"]).rsplit("/", 1)
                 if current_ref != publication["dataset_ref"] or not version_text.isdigit():
                     raise BrokeredCheckpointError("current checkpoint Dataset identity is invalid")
-                expected_previous_version = int(version_text)
-                if current_version != expected_previous_version:
+                durable_previous_version = int(version_text)
+                if current_version is None:
+                    # The provider Dataset may have been externally removed even
+                    # though the control ledger still retains its exact HEAD.
+                    # A fully uploaded child checkpoint is a complete replacement
+                    # snapshot, so recreate the same private slug from version 1.
+                    # ``begin_finalize`` persists this reset as expected version 1
+                    # before the provider effect; interrupted replay therefore
+                    # never guesses whether create already happened.
+                    expected_previous_version = None
+                    expected_version = 1
+                    dataset_incarnation_reset = True
+                    source_head_checkpoint_id = head.current_checkpoint_id
+                    self.control.prepare_missing_checkpoint_dataset_incarnation(
+                        str(checkpoint_id),
+                        dataset_ref=str(publication["dataset_ref"]),
+                        source_head_checkpoint_id=source_head_checkpoint_id,
+                        source_head_generation=int(publication["source_head_generation"]),
+                    )
+                elif current_version != durable_previous_version:
                     raise BrokeredCheckpointQuarantined("checkpoint Dataset advanced beyond the exact current HEAD")
-                expected_version = expected_previous_version + 1
+                else:
+                    expected_previous_version = durable_previous_version
+                    expected_version = expected_previous_version + 1
 
         original_state = str(publication["state"])
         publication = self.ledger.begin_finalize(str(checkpoint_id), expected_provider_version=expected_version)
@@ -769,6 +841,16 @@ class BrokeredCheckpointUploadService:
                 raise BrokeredCheckpointError("interrupted checkpoint Dataset finalization is not yet reconciled")
             publication = self.ledger.resolve_dataset(str(checkpoint_id), exact_version_ref=exact_ref)
 
+        if dataset_incarnation_reset:
+            if source_head_checkpoint_id is None:
+                raise BrokeredCheckpointError("checkpoint Dataset reset lacks its source HEAD")
+            self.control.retire_missing_checkpoint_dataset_incarnation(
+                str(checkpoint_id),
+                dataset_ref=str(publication["dataset_ref"]),
+                source_head_checkpoint_id=source_head_checkpoint_id,
+                source_head_generation=int(publication["source_head_generation"]),
+            )
+
         registry = ControlLedgerCheckpointRegistry(
             self.control,
             operation_id=str(publication["operation_id"]),
@@ -777,23 +859,17 @@ class BrokeredCheckpointUploadService:
         try:
             registry.uploaded(checkpoint_id, exact_ref)
             registry.package_uploaded(checkpoint_id, package_sha256)
+            verifier: BrokeredRestoreVerifier | None = None
+            if publication["state"] in {"DATASET_RESOLVED", "VERIFYING"}:
+                verifier = self._restore_verifier_for(publication)
             if publication["state"] == "DATASET_RESOLVED":
-                publication = self.ledger.transition(
+                assert verifier is not None
+                publication = self.ledger.start_verification(
                     str(checkpoint_id),
-                    expected_states=frozenset({"DATASET_RESOLVED"}),
-                    state="VERIFYING",
-                    event_type="verifier.started",
-                    evidence={"exact_version_ref": exact_ref},
+                    verifier_revision_sha256=self._verifier_revision(verifier),
                 )
             if publication["state"] == "VERIFYING":
-                verifier = self.restore_verifier
-                if verifier is None and self.restore_verifier_factory is not None:
-                    verifier = self.restore_verifier_factory(
-                        UUID(str(publication["operation_id"])),
-                        UUID(str(publication["run_id"])),
-                    )
-                if verifier is None:
-                    raise BrokeredCheckpointError("independent restore verifier is unavailable")
+                assert verifier is not None
                 dataset_identity = KaggleDatasetIdentity(
                     provider_ref=str(publication["dataset_ref"]),
                     version=expected_version,
@@ -844,7 +920,11 @@ class BrokeredCheckpointUploadService:
                 master_run_ref=str(refreshed["master_run_ref"]),
                 lease_until=datetime.fromisoformat(str(refreshed["lease_until"]).replace("Z", "+00:00")),
             )
-            self._validate_publication(publication, current_authority)
+            self._validate_publication(
+                publication,
+                current_authority,
+                durable_recovery=durable_recovery,
+            )
             if publication["state"] == "VERIFIED":
                 promoted = registry.promote(
                     checkpoint_id,
@@ -1066,6 +1146,25 @@ class BrokeredCheckpointUploadService:
 
     def reconcile_pending_once(self) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
+        for checkpoint_value in self.ledger.failed_verifier_publications():
+            publication = self.ledger.publication(checkpoint_value)
+            if publication is None:
+                continue
+            try:
+                verifier = self._restore_verifier_for(publication)
+                reopened = self.ledger.retry_failed_verification(
+                    checkpoint_value,
+                    verifier_revision_sha256=self._verifier_revision(verifier),
+                )
+            except Exception:
+                # A historical failed verifier may depend on assets that are
+                # no longer present in the current release.  It must not block
+                # a newer fully uploaded checkpoint from reaching its durable
+                # provider/HEAD reconciliation.  Each failed publication is
+                # independently retryable on a later compatible release.
+                continue
+            if reopened is None:
+                continue
         for checkpoint_value in self.ledger.pending_publications():
             checkpoint_id = UUID(checkpoint_value)
             raw = self.ledger.publication_runtime_authority(checkpoint_value)
@@ -1083,7 +1182,7 @@ class BrokeredCheckpointUploadService:
                 lease_until=datetime.fromisoformat(str(raw["lease_until"]).replace("Z", "+00:00")),
             )
             try:
-                results.append(self.finalize(checkpoint_id, authority))
+                results.append(self._finalize(checkpoint_id, authority, durable_recovery=True))
             except BrokeredCheckpointError:
                 continue
         return results
@@ -1113,7 +1212,8 @@ class BrokeredCheckpointUploadService:
                     "total_bytes": int(row["content_length"]),
                 }
             ).decode()
-            expected.append((str(row["file_name"]), int(row["content_length"]), description))
+            provider_name = checkpoint_provider_file_name(str(row["file_name"]))
+            expected.append((provider_name, int(row["content_length"]), description))
             entries.append(
                 {
                     "path": str(row["file_name"]),
@@ -1127,7 +1227,7 @@ class BrokeredCheckpointUploadService:
                     raise BrokeredCheckpointError("checkpoint provider blob token is unavailable")
                 provider_files.append(
                     BrokeredDatasetFile(
-                        name=str(row["file_name"]),
+                        name=provider_name,
                         total_bytes=int(row["content_length"]),
                         description=description,
                         blob_token=self.secret_box.open(
@@ -1141,7 +1241,11 @@ class BrokeredCheckpointUploadService:
         return tuple(expected), tuple(provider_files), package_sha256
 
     def _validate_publication(
-        self, publication: dict[str, Any], authority: RuntimeUploadAuthority
+        self,
+        publication: dict[str, Any],
+        authority: RuntimeUploadAuthority,
+        *,
+        durable_recovery: bool = False,
     ) -> tuple[dict[str, Any], CheckpointManifest]:
         if (
             publication["operation_id"] != authority.operation_id
@@ -1168,7 +1272,7 @@ class BrokeredCheckpointUploadService:
             content_sha256=hashlib.sha256(canonical_json(manifest.payload()) + b"\n").hexdigest(),
             manifest_sha256=manifest.manifest_sha256,
         )
-        return self._validate(probe, authority)
+        return self._validate(probe, authority, durable_recovery=durable_recovery)
 
     def _fail(self, checkpoint_id: UUID, code: str, *, quarantine: bool) -> None:
         state = "QUARANTINED" if quarantine else "FAILED"
@@ -1241,10 +1345,29 @@ class BrokeredCheckpointUploadService:
         }
 
     def _validate(
-        self, spec: CheckpointBlobSpec, authority: RuntimeUploadAuthority
+        self,
+        spec: CheckpointBlobSpec,
+        authority: RuntimeUploadAuthority,
+        *,
+        durable_recovery: bool = False,
     ) -> tuple[dict[str, Any], CheckpointManifest]:
         if authority.authority_kind == "acceptance":
+            if durable_recovery:
+                raise LeaseRejected("checkpoint acceptance authority cannot use central recovery")
             self._validate_acceptance_authority(spec, authority)
+        elif durable_recovery:
+            recovered = self.ledger.publication_runtime_authority(str(spec.checkpoint_id))
+            if not (
+                recovered is not None
+                and str(spec.operation_id) == authority.operation_id == str(recovered["operation_id"])
+                and authority.run_id == str(recovered["run_id"])
+                and authority.attempt_id == str(recovered["attempt_id"])
+                and authority.master_instance_id == str(recovered["master_instance_id"])
+                and authority.service_instance_id == str(recovered["service_instance_id"])
+                and spec.master_run_ref == authority.master_run_ref == str(recovered["master_run_ref"])
+                and spec.epoch == authority.epoch == int(recovered["epoch"])
+            ):
+                raise LeaseRejected("checkpoint central recovery authority is unavailable")
         elif (
             str(spec.operation_id) != authority.operation_id
             or spec.master_run_ref != authority.master_run_ref
@@ -1264,7 +1387,11 @@ class BrokeredCheckpointUploadService:
         allowed_operation_states = (
             {"INTENT_COMMITTED", "RUNNING"}
             if authority.authority_kind == "acceptance"
-            else {"DRAINING", "CHECKPOINTING", "ACTIVE"}
+            else (
+                {"DRAINING", "CHECKPOINTING", "CHECKPOINT_FAILED", "ACTIVE"}
+                if durable_recovery
+                else {"DRAINING", "CHECKPOINTING", "ACTIVE"}
+            )
         )
         if operation is None or operation.state not in allowed_operation_states:
             raise BrokeredCheckpointError("checkpoint operation is not in an upload-capable phase")

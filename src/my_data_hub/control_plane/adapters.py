@@ -6,8 +6,10 @@ import json
 import time
 from base64 import b64decode, b64encode, urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import asdict
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -16,8 +18,10 @@ from my_data_hub.auth.control import (
     OAuthClientRecord,
     OAuthRevocationQuery,
 )
+from my_data_hub.connectors.checkpoint_control import ControlLedgerVerifiedCheckpointCoordinator
 from my_data_hub.control_plane.acceptance_evidence import AcceptanceEvidenceController
-from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.control_plane.ledger import ControlLedger, ControlLedgerError
+from my_data_hub.control_plane.provider_uploads import ProviderChunkedUploadStore
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.contracts import (
     ControlPlaneReader,
@@ -38,7 +42,7 @@ from my_data_hub.providers.exchange import (
     ExchangeManifest,
     validate_exchange_manifest_for_mutation,
 )
-from my_data_hub.providers.kaggle import KaggleProviderAdapter, mapping_sha256
+from my_data_hub.providers.kaggle import KaggleProviderAdapter, directory_sha256, mapping_sha256
 from my_data_hub.providers.kaggle.contracts import (
     EffectOutcome,
     MutationAction,
@@ -55,6 +59,7 @@ from my_data_hub.providers.models import (
     ResourceLease,
 )
 from my_data_hub.providers.policy import PolicyDenied
+from my_data_hub.workloads.bloggers.discovery import blogger_import_request_sha256
 
 
 def _revocation_reference(query: OAuthRevocationQuery) -> str:
@@ -81,6 +86,7 @@ class LedgerWriteGate(WriteGate):
         if not 30 <= permit_ttl_seconds <= 300:
             raise ValueError("write permit TTL must be between 30 and 300 seconds")
         self.ledger = ledger
+        self.blogger_checkpoint_coordinator = ControlLedgerVerifiedCheckpointCoordinator(ledger)
         self.signing_secret = signing_secret
         self.clock = clock
         self.permit_ttl_seconds = permit_ttl_seconds
@@ -93,38 +99,64 @@ class LedgerWriteGate(WriteGate):
         arguments: Mapping[str, Any],
         master: MasterSnapshot,
     ) -> WritePermit:
+        provider_mutations = {
+            "provider.resources.create",
+            "provider.resources.version",
+            "provider.resources.run",
+            "provider.resources.delete",
+            "provider.upload.start",
+            "provider.upload.put_chunk",
+            "provider.upload.finalize",
+            "provider.upload.abort",
+            "provider.acceptance.dataset.lifecycle",
+            "provider.acceptance.notebook.lifecycle",
+            "provider.acceptance.claim.cleanup",
+        }
+        if tool in provider_mutations:
+            if "provider:write" not in principal.scopes:
+                raise PermissionError("provider mutation requires provider:write")
+            acceptance_tool = tool.startswith("provider.acceptance.")
+            resource_class = (
+                "mcp_managed" if acceptance_tool else str(arguments.get("control_class", ""))
+            )
+            if resource_class not in {"mcp_managed", "mcp_exchange"}:
+                raise PermissionError("provider resource class is not MCP-controlled")
+            if not acceptance_tool and arguments.get("private") is not True:
+                raise PermissionError("provider mutations require a private resource")
+            return WritePermit(
+                permit_id=self._digest(
+                    {
+                        "tool": tool,
+                        "principal": principal.subject,
+                        "client_id": principal.client_id,
+                        "arguments": dict(arguments),
+                    }
+                ),
+                tool=tool,
+                principal=principal.subject,
+                client_id=principal.client_id,
+                master_epoch=0,
+                canonical_revision=0,
+                expires_at=int(self.clock()) + self.permit_ttl_seconds,
+                preview_bound=True,
+                checkpoint_lifecycle_bound=False,
+                pre_change_checkpoint_verified=False,
+                allowed_resource_class=resource_class,
+                private_resource_only=True,
+                canonical_data_independent=True,
+            )
         if master.state is not MasterState.ACTIVE or not master.instance_id or not master.epoch:
             raise PermissionError("operator writes require an exact ACTIVE master epoch")
         if master.canonical_revision is None:
             raise PermissionError("operator writes require an observed canonical revision")
         checkpoint = self._verified_checkpoint(master.canonical_revision)
-        if tool.startswith("provider.resources.") or tool in {
-            "provider.acceptance.dataset.lifecycle",
-            "provider.acceptance.notebook.lifecycle",
-            "provider.acceptance.claim.cleanup",
-        }:
-            resource_class = (
-                "mcp_managed"
-                if tool.startswith("provider.acceptance.")
-                else str(arguments.get("control_class", ""))
-            )
-            if resource_class not in {"mcp_managed", "mcp_exchange"}:
-                raise PermissionError("provider resource class is not MCP-controlled")
-            return WritePermit(
-                permit_id=self._digest(
-                    {"tool": tool, "principal": principal.subject, "arguments": dict(arguments), "epoch": master.epoch}
-                ),
+        if tool in {"bloggers.import.preview", "bloggers.import.apply"}:
+            return self._authorize_blogger_import(
+                principal=principal,
                 tool=tool,
-                principal=principal.subject,
-                client_id=principal.client_id,
-                master_epoch=master.epoch,
-                canonical_revision=master.canonical_revision,
-                expires_at=int(self.clock()) + self.permit_ttl_seconds,
-                preview_bound=True,
-                checkpoint_lifecycle_bound=True,
-                pre_change_checkpoint_verified=True,
-                allowed_resource_class=resource_class,
-                private_resource_only=True,
+                arguments=arguments,
+                master=master,
+                checkpoint=checkpoint,
             )
         if tool not in {"data.change.preview", "data.change.apply"}:
             raise PermissionError("write gate does not authorize this tool")
@@ -192,6 +224,8 @@ class LedgerWriteGate(WriteGate):
         permit: WritePermit,
         result: Mapping[str, Any],
     ) -> dict[str, Any]:
+        if permit.tool.startswith("bloggers.import."):
+            return self._record_blogger_import_result(permit=permit, result=result)
         if permit.tool == "data.change.preview":
             affected = int(result.get("affected_rows", -1))
             payload = {
@@ -228,6 +262,277 @@ class LedgerWriteGate(WriteGate):
                 "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
             }
         return dict(result)
+
+    def prepare_blogger_import(
+        self, *, principal: AccessIdentity, arguments: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Persist only owner/request hashes before an automatic master ensure."""
+
+        request_sha256 = blogger_import_request_sha256(
+            batch_id=str(arguments.get("batch_id", "")),
+            expected_revision=int(arguments.get("expected_revision", -1)),
+            idempotency_key=str(arguments.get("idempotency_key", "")),
+        )
+        operation_id = self._digest(
+            {
+                "kind": "mcp-blogger-import-v1",
+                "principal": principal.subject,
+                "client_id": principal.client_id,
+                "idempotency_key": str(arguments["idempotency_key"]),
+            }
+        )
+        record, _created = self.ledger.ensure_blogger_import_operation(
+            operation_id=operation_id,
+            batch_id=str(arguments["batch_id"]),
+            idempotency_key=str(arguments["idempotency_key"]),
+            principal_id=principal.subject,
+            client_id=principal.client_id,
+            master_instance_id=None,
+            epoch=None,
+            expected_revision=int(arguments["expected_revision"]),
+            request_sha256=request_sha256,
+            pre_change_checkpoint_id=None,
+        )
+        return record
+
+    def mark_blogger_import_waiting_master(self, *, operation_id: str) -> dict[str, Any]:
+        return self.ledger.mark_blogger_import_waiting_master(operation_id)
+
+    def _authorize_blogger_import(
+        self,
+        *,
+        principal: AccessIdentity,
+        tool: str,
+        arguments: Mapping[str, Any],
+        master: MasterSnapshot,
+        checkpoint: Mapping[str, Any],
+    ) -> WritePermit:
+        request_sha256 = blogger_import_request_sha256(
+            batch_id=str(arguments.get("batch_id", "")),
+            expected_revision=int(arguments.get("expected_revision", -1)),
+            idempotency_key=str(arguments.get("idempotency_key", "")),
+        )
+        if arguments.get("expected_revision") != master.canonical_revision:
+            raise PermissionError("blogger request revision differs from ACTIVE canonical state")
+        if tool == "bloggers.import.preview":
+            record = self.prepare_blogger_import(principal=principal, arguments=arguments)
+            if record["state"] == "PREVIEWED" and (
+                record["master_instance_id"] != master.instance_id
+                or record["epoch"] != master.epoch
+            ):
+                record = self.ledger.restart_blogger_import_after_preview_epoch_loss(
+                    str(record["operation_id"]),
+                    failed_master_instance_id=str(record["master_instance_id"]),
+                    failed_epoch=int(record["epoch"]),
+                )
+            if record["state"] not in {"REQUESTED", "WAITING_MASTER", "PREVIEWED"}:
+                raise PermissionError("blogger preview operation is no longer previewable")
+            if record["state"] != "PREVIEWED":
+                record = self.ledger.bind_blogger_import_active_master(
+                    str(record["operation_id"]),
+                    master_instance_id=str(master.instance_id),
+                    epoch=int(master.epoch),
+                    pre_change_checkpoint_id=str(checkpoint["checkpoint_id"]),
+                )
+            operation_id = str(record["operation_id"])
+            preview_bound = False
+        else:
+            receipt = self._verify_blogger_preview(str(arguments.get("preview_receipt", "")))
+            operation_id = str(receipt.get("operation_id", ""))
+            record = self.ledger.blogger_import_operation(operation_id)
+            if (
+                record is None
+                or record["principal_id"] != principal.subject
+                or record["client_id"] != principal.client_id
+                or record["batch_id"] != str(UUID(str(arguments.get("batch_id", ""))))
+                or record["master_instance_id"] != master.instance_id
+                or record["epoch"] != master.epoch
+                or record["expected_revision"] != master.canonical_revision
+                or record["request_sha256"] != request_sha256
+                or record["plan_sha256"] != receipt.get("plan_sha256")
+                or record["pre_change_checkpoint_id"] != checkpoint["checkpoint_id"]
+            ):
+                raise PermissionError("blogger apply does not bind the durable preview")
+            self.ledger.begin_blogger_import_apply(
+                operation_id,
+                preview_receipt=str(arguments["preview_receipt"]),
+                plan_sha256=str(record["plan_sha256"]),
+            )
+            preview_bound = True
+        return WritePermit(
+            permit_id=operation_id,
+            tool=tool,
+            principal=principal.subject,
+            client_id=principal.client_id,
+            master_epoch=int(master.epoch),
+            canonical_revision=int(master.canonical_revision),
+            expires_at=int(self.clock()) + self.permit_ttl_seconds,
+            preview_bound=preview_bound,
+            checkpoint_lifecycle_bound=True,
+            pre_change_checkpoint_verified=True,
+        )
+
+    def blogger_broker_arguments(
+        self,
+        *,
+        permit: WritePermit,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        record = self.ledger.blogger_import_operation(permit.permit_id)
+        if record is None:
+            raise PermissionError("blogger import operation disappeared")
+        result = {
+            "operation_id": permit.permit_id,
+            "batch_id": record["batch_id"],
+            "request_sha256": record["request_sha256"],
+            "expected_revision": record["expected_revision"],
+            "principal_id": record["principal_id"],
+            "client_id": record["client_id"],
+            "_write_permit": {
+                "permit_id": permit.permit_id,
+                "tool": permit.tool,
+                "master_epoch": permit.master_epoch,
+                "canonical_revision": permit.canonical_revision,
+                "expires_at": permit.expires_at,
+            },
+        }
+        if permit.tool == "bloggers.import.apply":
+            result["plan_sha256"] = record["plan_sha256"]
+        return result
+
+    def blogger_apply_replay(
+        self, *, principal: AccessIdentity, arguments: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """Return an already committed exact outcome without another data-plane effect."""
+
+        # A committed result is immutable and remains replayable after the
+        # admission receipt TTL. Signature and full body binding are still
+        # mandatory; only the clock check is deferred until we know whether
+        # this is an exact durable replay or a new effect.
+        supplied_receipt = str(arguments.get("preview_receipt", ""))
+        preview = self._verify_blogger_preview(supplied_receipt, allow_expired=True)
+        operation_id = str(preview.get("operation_id", ""))
+        record = self.ledger.blogger_import_operation(operation_id)
+        if record is None:
+            return None
+        request_sha256 = blogger_import_request_sha256(
+            batch_id=str(arguments.get("batch_id", "")),
+            expected_revision=int(arguments.get("expected_revision", -1)),
+            idempotency_key=str(arguments.get("idempotency_key", "")),
+        )
+        try:
+            batch_id = str(UUID(str(arguments.get("batch_id", ""))))
+        except ValueError as exc:
+            raise PermissionError("blogger apply replay batch identity is invalid") from exc
+        if (
+            record["preview_receipt"] != supplied_receipt
+            or preview.get("principal") != principal.subject
+            or preview.get("client_id") != principal.client_id
+            or preview.get("master_epoch") != record["epoch"]
+            or preview.get("canonical_revision") != record["expected_revision"]
+            or record["principal_id"] != principal.subject
+            or record["client_id"] != principal.client_id
+            or record["batch_id"] != batch_id
+            or record["request_sha256"] != request_sha256
+            or record["plan_sha256"] != preview.get("plan_sha256")
+        ):
+            raise PermissionError("blogger apply replay differs from immutable identity")
+        durable_states = {
+            "COMMITTED_PENDING_CHECKPOINT",
+            "CHECKPOINTING",
+            "CHECKPOINT_VERIFIED",
+            "DURABLE_COMPLETE",
+        }
+        if record["state"] not in durable_states:
+            return None
+        checkpoint = self._blogger_checkpoint_status(record, request_if_missing=True)
+        record = checkpoint["record"]
+        return {
+            "operation_id": operation_id,
+            "batch_id": record["batch_id"],
+            "status": record["state"],
+            "affected_rows": record["affected_rows"],
+            "master_epoch": record["epoch"],
+            "canonical_revision": record["committed_revision"],
+            "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
+            "post_change_checkpoint_id": record["post_change_checkpoint_id"],
+            "duplicate": True,
+            "checkpoint_request_id": checkpoint["request_id"],
+            "checkpoint_request_state": checkpoint["state"],
+        }
+
+    def _record_blogger_import_result(
+        self, *, permit: WritePermit, result: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        if permit.tool == "bloggers.import.preview":
+            summary = result.get("summary")
+            if not isinstance(summary, Mapping):
+                raise PermissionError("blogger preview omitted its bounded summary")
+            plan_sha256 = str(result.get("plan_sha256", ""))
+            existing = self.ledger.blogger_import_operation(permit.permit_id)
+            if existing is not None and existing["state"] == "PREVIEWED":
+                if (
+                    existing["plan_sha256"] != plan_sha256
+                    or existing["preview_summary"]
+                    != {key: int(value) for key, value in summary.items()}
+                ):
+                    raise PermissionError("blogger preview replay differs from immutable plan")
+                return {
+                    **result,
+                    "operation_id": permit.permit_id,
+                    "status": existing["state"],
+                    "preview_receipt": existing["preview_receipt"],
+                    "pre_change_checkpoint_id": existing["pre_change_checkpoint_id"],
+                    "duplicate": True,
+                }
+            payload = {
+                "kind": "mcp-blogger-preview-v1",
+                "operation_id": permit.permit_id,
+                "principal": permit.principal,
+                "client_id": permit.client_id,
+                "master_epoch": permit.master_epoch,
+                "canonical_revision": permit.canonical_revision,
+                "plan_sha256": plan_sha256,
+                "expires_at": int(self.clock()) + 300,
+            }
+            receipt = self._sign(payload)
+            record = self.ledger.record_blogger_import_preview(
+                permit.permit_id,
+                preview_receipt=receipt,
+                plan_sha256=plan_sha256,
+                summary={key: int(value) for key, value in summary.items()},
+            )
+            return {
+                **result,
+                "operation_id": permit.permit_id,
+                "status": record["state"],
+                "preview_receipt": receipt,
+                "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
+            }
+        record = self.ledger.record_blogger_import_commit(
+            permit.permit_id,
+            affected_rows=int(result.get("affected_rows", -1)),
+            committed_revision=int(result.get("committed_revision", -1)),
+        )
+        checkpoint = self._blogger_checkpoint_status(record, request_if_missing=True)
+        record = checkpoint["record"]
+        return {
+            **result,
+            "operation_id": permit.permit_id,
+            "status": record["state"],
+            "canonical_revision": record["committed_revision"],
+            "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
+            "checkpoint_request_id": checkpoint["request_id"],
+            "checkpoint_request_state": checkpoint["state"],
+        }
+
+    def _verify_blogger_preview(
+        self, token: str, *, allow_expired: bool = False
+    ) -> dict[str, Any]:
+        payload = self._verify_signed_payload(token, allow_expired=allow_expired)
+        if payload.get("kind") != "mcp-blogger-preview-v1":
+            raise PermissionError("blogger preview receipt has the wrong contract")
+        return payload
 
     def reconciliation_request(
         self,
@@ -271,6 +576,190 @@ class LedgerWriteGate(WriteGate):
             "principal_id": record["principal_id"],
             "client_id": record["client_id"],
         }
+
+    def blogger_reconciliation_request(
+        self,
+        *,
+        principal: AccessIdentity,
+        master: MasterSnapshot,
+        operation_id: str | None = None,
+        arguments: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if master.state is not MasterState.ACTIVE or not master.instance_id or not master.epoch:
+            return None
+        if arguments is not None:
+            preview = self._verify_blogger_preview(str(arguments.get("preview_receipt", "")))
+            requested_operation_id = str(preview.get("operation_id", ""))
+        else:
+            requested_operation_id = str(operation_id or "")
+        record = self.ledger.blogger_import_operation(requested_operation_id)
+        if record is None:
+            return None
+        if (
+            record["principal_id"] != principal.subject
+            or record["client_id"] != principal.client_id
+        ):
+            raise PermissionError("blogger reconciliation differs from durable identity")
+        if arguments is not None:
+            request_sha256 = blogger_import_request_sha256(
+                batch_id=str(arguments.get("batch_id", "")),
+                expected_revision=int(arguments.get("expected_revision", -1)),
+                idempotency_key=str(arguments.get("idempotency_key", "")),
+            )
+            if record["request_sha256"] != request_sha256:
+                raise PermissionError("blogger retry differs from original exact request")
+        if record["state"] == "PREVIEWED":
+            return None
+        if record["state"] != "APPLYING":
+            raise PermissionError("blogger apply was already admitted; use bloggers.import.status")
+        if not record["master_instance_id"] or not record["epoch"]:
+            raise PermissionError("blogger reconciliation lacks its immutable receipt epoch")
+        return {
+            "operation_id": record["operation_id"],
+            "batch_id": record["batch_id"],
+            "request_sha256": record["request_sha256"],
+            "plan_sha256": record["plan_sha256"],
+            "master_instance_id": record["master_instance_id"],
+            "master_epoch": record["epoch"],
+            "expected_revision": record["expected_revision"],
+            "principal_id": record["principal_id"],
+            "client_id": record["client_id"],
+        }
+
+    def record_reconciled_blogger_import(
+        self, *, operation_id: str, receipt: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        if receipt.get("found") is not True or str(receipt.get("operation_id", "")) != operation_id:
+            raise PermissionError("canonical blogger receipt was not found")
+        record = self.ledger.reconcile_blogger_import_commit(
+            operation_id,
+            request_sha256=str(receipt.get("request_sha256", "")),
+            plan_sha256=str(receipt.get("plan_sha256", "")),
+            master_instance_id=str(receipt.get("receipt_master_instance_id", "")),
+            epoch=int(receipt.get("receipt_master_epoch", 0)),
+            expected_revision=int(receipt.get("expected_revision", -1)),
+            principal_id=str(receipt.get("principal_id", "")),
+            client_id=str(receipt.get("client_id", "")),
+            affected_rows=int(receipt.get("affected_rows", -1)),
+            committed_revision=int(receipt.get("committed_revision", -1)),
+            committed_at=str(receipt.get("committed_at", "")),
+        )
+        checkpoint = self._blogger_checkpoint_status(record, request_if_missing=True)
+        record = checkpoint["record"]
+        return {
+            "operation_id": operation_id,
+            "status": record["state"],
+            "affected_rows": record["affected_rows"],
+            "master_epoch": record["epoch"],
+            "canonical_revision": record["committed_revision"],
+            "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
+            "reconciled": True,
+            "checkpoint_request_id": checkpoint["request_id"],
+            "checkpoint_request_state": checkpoint["state"],
+        }
+
+    def blogger_import_status(
+        self, operation_id: str, principal: AccessIdentity
+    ) -> dict[str, Any]:
+        record = self.ledger.blogger_import_operation(operation_id)
+        if record is None or (
+            record["principal_id"] != principal.subject
+            or record["client_id"] != principal.client_id
+        ):
+            return {"found": False}
+        checkpoint = self._blogger_checkpoint_status(record, request_if_missing=True)
+        record = checkpoint["record"]
+        return {
+            "found": True,
+            "operation_id": operation_id,
+            "batch_id": record["batch_id"],
+            "state": record["state"],
+            "master_epoch": record["epoch"],
+            "expected_revision": record["expected_revision"],
+            "committed_revision": record["committed_revision"],
+            "pre_change_checkpoint_id": record["pre_change_checkpoint_id"],
+            "post_change_checkpoint_id": record["post_change_checkpoint_id"],
+            "retry_allowed": record["state"] in {"REQUESTED", "WAITING_MASTER", "PREVIEWED"},
+            "reconciliation_required": record["state"] == "APPLYING",
+            "checkpoint_request_id": checkpoint["request_id"],
+            "checkpoint_request_state": checkpoint["state"],
+        }
+
+    @staticmethod
+    def _blogger_checkpoint_request_id(record: Mapping[str, Any]) -> str:
+        identity = {
+            "kind": "mcp-blogger-import-checkpoint-v1",
+            "operation_id": str(record["operation_id"]),
+            "batch_id": str(record["batch_id"]),
+            "canonical_revision": int(record["committed_revision"]),
+        }
+        return hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
+
+    def _blogger_checkpoint_status(
+        self, record: dict[str, Any], *, request_if_missing: bool
+    ) -> dict[str, Any]:
+        """Project only the task-bound production checkpoint request/receipt.
+
+        The canonical transaction's outbox row is an audit intent, not proof
+        that a checkpoint was requested.  The shared control-ledger request is
+        claimed by the ACTIVE notebook runtime and is the only source allowed
+        to advance this public lifecycle.
+        """
+
+        if record["state"] not in {
+            "COMMITTED_PENDING_CHECKPOINT",
+            "CHECKPOINTING",
+            "CHECKPOINT_VERIFIED",
+            "DURABLE_COMPLETE",
+        }:
+            return {"record": record, "request_id": None, "state": "NOT_REQUIRED"}
+        request_id = self._blogger_checkpoint_request_id(record)
+        operation_id = f"connector-checkpoint:{request_id}"
+        request = self.ledger.connector_checkpoint_request(operation_id)
+        if (
+            request is None
+            and request_if_missing
+            and record["state"] in {"COMMITTED_PENDING_CHECKPOINT", "CHECKPOINTING"}
+        ):
+            # A canonical commit may race the end of its ACTIVE lease.
+            # Preserve the honest pending result; a later status/replay can
+            # bind the same deterministic request to a live successor.
+            with suppress(ControlLedgerError):
+                self.blogger_checkpoint_coordinator.request_verified_checkpoint(
+                    operation_id=operation_id,
+                    canonical_revision=int(record["committed_revision"]),
+                    idempotency_key=request_id,
+                )
+            request = self.ledger.connector_checkpoint_request(operation_id)
+        if request is None:
+            return {"record": record, "request_id": request_id, "state": "NOT_REQUESTED"}
+
+        observed = self.blogger_checkpoint_coordinator.checkpoint_status(operation_id)
+        state = str(observed["state"])
+        if state == "CHECKPOINTING" and record["state"] == "COMMITTED_PENDING_CHECKPOINT":
+            record = self.ledger.advance_blogger_import_checkpoint(
+                str(record["operation_id"]), state="CHECKPOINTING"
+            )
+        if state == "DURABLE_COMPLETE" and record["state"] in {
+            "COMMITTED_PENDING_CHECKPOINT",
+            "CHECKPOINTING",
+        }:
+            if record["state"] == "COMMITTED_PENDING_CHECKPOINT":
+                record = self.ledger.advance_blogger_import_checkpoint(
+                    str(record["operation_id"]), state="CHECKPOINTING"
+                )
+            checkpoint_id = str(observed["checkpoint_id"])
+            record = self.ledger.advance_blogger_import_checkpoint(
+                str(record["operation_id"]),
+                state="CHECKPOINT_VERIFIED",
+                post_change_checkpoint_id=checkpoint_id,
+            )
+            record = self.ledger.advance_blogger_import_checkpoint(
+                str(record["operation_id"]),
+                state="DURABLE_COMPLETE",
+                post_change_checkpoint_id=checkpoint_id,
+            )
+        return {"record": record, "request_id": request_id, "state": state}
 
     def record_reconciled_write(
         self,
@@ -372,6 +861,14 @@ class LedgerWriteGate(WriteGate):
         return f"{_b64(raw)}.{_b64(hmac.new(self.signing_secret, raw, hashlib.sha256).digest())}"
 
     def _verify_preview(self, token: str) -> dict[str, Any]:
+        payload = self._verify_signed_payload(token)
+        if payload.get("kind") != "mcp-write-preview-v1":
+            raise PermissionError("preview receipt has the wrong contract")
+        return payload
+
+    def _verify_signed_payload(
+        self, token: str, *, allow_expired: bool = False
+    ) -> dict[str, Any]:
         try:
             encoded, signature = token.split(".", 1)
             raw = urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
@@ -382,7 +879,7 @@ class LedgerWriteGate(WriteGate):
             raise PermissionError("preview receipt is invalid") from exc
         if not hmac.compare_digest(supplied, expected) or not isinstance(payload, dict):
             raise PermissionError("preview receipt is invalid")
-        if payload.get("kind") != "mcp-write-preview-v1" or int(payload.get("expires_at", 0)) <= int(self.clock()):
+        if not allow_expired and int(payload.get("expires_at", 0)) <= int(self.clock()):
             raise PermissionError("preview receipt is expired or has the wrong contract")
         return payload
 
@@ -415,6 +912,26 @@ class ControlLedgerOAuthAuthority:
             allowed_scopes=frozenset(row["allowed_scopes"]),
         )
 
+    def register_resolved_client(
+        self,
+        record: OAuthClientRecord,
+        *,
+        principal_id: str,
+    ) -> OAuthClientRecord:
+        """Persist a validated CIMD client without re-enabling a disabled one."""
+
+        self.ledger.register_configured_oauth_client(
+            issuer=record.issuer,
+            client_id=record.client_id,
+            principal_id=principal_id,
+            allowed_scopes=record.allowed_scopes,
+            profile_kind="owner_operator",
+        )
+        persisted = self.get_client(record.issuer, record.client_id)
+        if persisted is None:
+            raise RuntimeError("resolved OAuth client was not persisted")
+        return persisted
+
     def record_oauth_audit(self, event: OAuthAuditEvent) -> None:
         self.ledger.append_audit(
             action=f"oauth:{event.event}:{event.outcome}",
@@ -434,14 +951,28 @@ class ControlLedgerOAuthAuthority:
 class KaggleMCPProviderGateway:
     """Exact metadata gateway over the repository's single Kaggle adapter."""
 
-    def __init__(self, ledger: ControlLedger, adapter: KaggleProviderAdapter) -> None:
+    def __init__(
+        self,
+        ledger: ControlLedger,
+        adapter: KaggleProviderAdapter,
+        *,
+        upload_root: Path | None = None,
+        upload_clock: Callable[[], float] = time.time,
+    ) -> None:
         self.ledger = ledger
         self.adapter = adapter
         self.policy = ProviderPolicy()
+        self.uploads = (
+            ProviderChunkedUploadStore(upload_root, clock=upload_clock)
+            if upload_root is not None
+            else None
+        )
 
     def invoke(self, tool: str, arguments: Mapping[str, Any], principal: AccessIdentity) -> dict[str, Any]:
         if tool == "provider.inventory.live":
             return self._live_inventory(arguments, principal)
+        if tool.startswith("provider.upload."):
+            return self._upload(tool, arguments, principal)
         provider_ref = str(arguments.get("resource_ref", ""))
         control_class = ControlClass(str(arguments.get("control_class", "")))
         if control_class not in {ControlClass.MCP_MANAGED, ControlClass.MCP_EXCHANGE}:
@@ -466,6 +997,63 @@ class KaggleMCPProviderGateway:
         if tool == "provider.resources.delete":
             return self._delete(provider_ref, control_class, payload, principal)
         raise ValueError("unsupported provider gateway tool")
+
+    def _upload(
+        self, tool: str, arguments: Mapping[str, Any], principal: AccessIdentity
+    ) -> dict[str, Any]:
+        if self.uploads is None:
+            raise PermissionError("provider chunked upload staging is not configured")
+        if tool == "provider.upload.start":
+            return self.uploads.start(arguments, principal)
+        if tool == "provider.upload.put_chunk":
+            return self.uploads.put_chunk(arguments, principal)
+        if tool == "provider.upload.status":
+            return self.uploads.status(arguments, principal)
+        if tool == "provider.upload.abort":
+            return self.uploads.abort(arguments, principal)
+        if tool == "provider.upload.finalize":
+            return self.uploads.finalize(arguments, principal, self._finalize_upload)
+        raise ValueError("unsupported provider upload tool")
+
+    def _finalize_upload(
+        self, state: Mapping[str, Any], assembled: Path, principal: AccessIdentity
+    ) -> dict[str, Any]:
+        if (
+            state.get("control_class") != ControlClass.MCP_MANAGED.value
+            or state.get("private") is not True
+            or state.get("principal") != principal.subject
+            or state.get("client_id") != principal.client_id
+        ):
+            raise PermissionError("upload finalization binding is invalid")
+        arguments = {
+            "content_tree_sha256": directory_sha256(assembled),
+            "control_class": ControlClass.MCP_MANAGED.value,
+            "disposable": bool(state["disposable"]),
+        }
+        intent = self._intent(
+            state,
+            str(state["resource_ref"]),
+            MutationAction.CREATE_DATASET,
+            arguments=arguments,
+        )
+        result = self.adapter.create_private_dataset_from_directory(
+            intent=intent,
+            source_directory=assembled,
+            title=str(state["title"]),
+            control_class=ControlClass.MCP_MANAGED,
+            disposable=bool(state["disposable"]),
+        )
+        manifest = [
+            {key: item[key] for key in ("path", "byte_size", "sha256")}
+            for item in state["files"]
+        ]
+        self._register_dataset_manifest(result, created_by=principal.subject, manifest=manifest)
+        return self._dataset_response(result)
+
+    def reap_uploads(self) -> dict[str, int]:
+        if self.uploads is None:
+            return {"expired_uploads": 0, "receipts_removed": 0}
+        return self.uploads.reap_expired()
 
     def _live_inventory(
         self, arguments: Mapping[str, Any], principal: AccessIdentity
@@ -1154,6 +1742,27 @@ class KaggleMCPProviderGateway:
             requested_at=self.ledger.clock.now(),
         )
 
+    def _register_dataset_manifest(
+        self, result: Any, *, created_by: str, manifest: list[dict[str, Any]]
+    ) -> None:
+        metadata = {
+            "claim": result.claim.model_dump(mode="json"),
+            "identity": result.identity.model_dump(mode="json"),
+            "mcp_access": {"created_by": created_by},
+            "content_manifest": sorted(manifest, key=lambda item: str(item["path"])),
+        }
+        self.ledger.register_provider_resource(
+            provider="kaggle",
+            resource_ref=result.identity.provider_ref,
+            resource_kind=ProviderKind.DATASET.value,
+            source_identity=str(result.claim.task_id),
+            source_version=str(result.identity.version),
+            control_class=result.claim.control_class.value,
+            private=True,
+            state="complete",
+            metadata=metadata,
+        )
+
     def _register_dataset(
         self,
         result: Any,
@@ -1471,6 +2080,21 @@ class LedgerControlReader(ControlPlaneReader):
         self.acceptance_scenarios = acceptance_scenarios
 
     def invoke_control(self, tool: str, arguments: dict[str, Any], principal: AccessIdentity) -> dict[str, Any]:
+        if tool == "region_talk.pipeline.status":
+            if arguments:
+                raise ValueError("Region Talk pipeline status accepts no arguments")
+            from my_data_hub.workloads.region_talk.pipeline_runtime import (
+                RegionTalkPipelineStore,
+            )
+            from my_data_hub.workloads.region_talk.production_assembly import (
+                RegionTalkMCPController,
+            )
+
+            # This is a SQLite-only metadata read.  It neither resolves nor
+            # ensures an ACTIVE master and requires no provider/write gateway.
+            return RegionTalkMCPController._public(
+                RegionTalkPipelineStore.latest_read_only(self.ledger.path)
+            )
         if tool in {"acceptance.scenario.request", "acceptance.scenario.status"}:
             adapter = self.acceptance_scenarios
             if adapter is None:
@@ -1487,8 +2111,26 @@ class LedgerControlReader(ControlPlaneReader):
             }
         if tool == "data.change.status" and self.write_gate is not None:
             return self.write_gate.write_status(str(arguments.get("operation_id", "")), principal)
+        if tool == "bloggers.import.status" and self.write_gate is not None:
+            return self.write_gate.blogger_import_status(
+                str(arguments.get("operation_id", "")), principal
+            )
         if tool in {"operation.get", "data.change.status"}:
             record = self.ledger.get_operation(str(arguments.get("operation_id", "")))
+            if record is None and tool == "operation.get":
+                request = self.ledger.master_request_by_operation_id(
+                    str(arguments.get("operation_id", ""))
+                )
+                if request is not None:
+                    return {
+                        "found": True,
+                        "operation_id": str(request["operation_id"]),
+                        "operation_kind": "ensure_master",
+                        "state": "REQUESTED",
+                        "outcome": "WAITING_FOR_MASTER",
+                        "retryable": True,
+                        "updated_at": str(request["updated_at"]),
+                    }
             return (
                 {"found": False}
                 if record is None
@@ -1633,6 +2275,11 @@ class LedgerControlReader(ControlPlaneReader):
             "provider.resources.download",
             "provider.inventory.live",
             "provider.resources.delete",
+            "provider.upload.start",
+            "provider.upload.put_chunk",
+            "provider.upload.status",
+            "provider.upload.finalize",
+            "provider.upload.abort",
         }:
             if self.provider_gateway is None:
                 raise PermissionError("provider MCP gateway is not configured")
@@ -1861,7 +2508,15 @@ class LedgerMasterResolver(MasterResolver):
         return MasterSnapshot(state=MasterState.ABSENT)
 
     def ensure_master(self, principal: AccessIdentity, *, intent: str) -> EnsureMasterReceipt:
-        key = f"mcp:{principal.subject}:{intent}"
+        # A cold-start request is idempotent only for the epoch it is trying
+        # to allocate.  Reusing the bare semantic key after a terminal
+        # provider failure would replay the historical DONE bridge request
+        # and its FAILED operation forever while falsely reporting REQUESTED.
+        # The ledger epoch is allocated atomically by ensure_master_operation;
+        # until that happens concurrent callers observe the same target and
+        # therefore still collapse to one exact request.
+        target_epoch = self.ledger.current_epoch("postgres-master") + 1
+        key = f"mcp:{principal.subject}:{intent}:epoch:{target_epoch}"
         identity = MasterCoordinator.identity_for(key)
         request, created = self.ledger.request_master(
             request_id=hashlib.sha256(f"request:{key}".encode()).hexdigest(),

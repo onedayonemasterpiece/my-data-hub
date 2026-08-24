@@ -58,6 +58,8 @@ def test_postgres_config_is_tls_loopback_bounded_and_paths_stay_in_working(tmp_p
     assert "listen_addresses = '127.0.0.1'" in rendered
     assert "ssl_min_protocol_version = 'TLSv1.3'" in rendered
     assert "log_parameter_max_length = 0" in rendered
+    assert "local replication postgres trust" in hba
+    assert hba.index("local replication postgres trust") < hba.index("local all postgres trust")
     assert "hostnossl all all 0.0.0.0/0 reject" in hba
     assert "hostssl all all 127.0.0.1/32 scram-sha-256" in hba
     escaped = MasterPaths(
@@ -172,6 +174,8 @@ def test_reverse_tunnel_is_loopback_only_and_disables_shell_agent_and_unknown_ho
     arguments = spec.arguments(now=NOW)
     joined = " ".join(arguments)
     assert "-N -T" in joined
+    assert arguments[:4] == ["ssh", "-F", "/dev/null", "-N"]
+    assert "ClearAllForwardings=yes" not in joined
     assert "StrictHostKeyChecking=yes" in joined
     assert "ForwardAgent=no" in joined
     assert f"CertificateFile={certificate}" in joined

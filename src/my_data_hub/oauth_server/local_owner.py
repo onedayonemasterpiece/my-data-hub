@@ -16,7 +16,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Request
@@ -27,6 +27,43 @@ from .models import OwnerAuthenticationChallenge, OwnerIdentity
 
 class LocalOwnerError(RuntimeError):
     """The local owner ceremony was malformed, expired, or denied."""
+
+
+def _form_action_callback_origin(return_to: str, *, issuer_origin: str) -> str:
+    """Return the one validated browser callback origin for form redirects.
+
+    Chromium applies ``form-action`` to the full redirect chain initiated by a
+    form submission.  The owner form posts to the issuer, then the OAuth
+    authorization endpoint redirects to the client callback.  Permit only the
+    two callback origin classes admitted by this service: the exact native
+    IPv4 loopback origin and ChatGPT's exact HTTPS origin.  Same-origin
+    callbacks need no duplicate source.
+    """
+
+    pairs = parse_qsl(urlsplit(return_to).query, keep_blank_values=True)
+    redirects = [value for name, value in pairs if name == "redirect_uri"]
+    if len(redirects) != 1:
+        raise LocalOwnerError("owner request has no unique redirect URI")
+    parsed = urlsplit(redirects[0])
+    if parsed.username is not None or parsed.password is not None or parsed.fragment:
+        raise LocalOwnerError("owner callback origin is invalid")
+    try:
+        callback_port = parsed.port
+    except ValueError as exc:
+        raise LocalOwnerError("owner callback port is invalid") from exc
+    callback_origin = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    if callback_origin == issuer_origin:
+        return issuer_origin
+    if (
+        parsed.scheme == "http"
+        and parsed.hostname == "127.0.0.1"
+        and callback_port is not None
+        and parsed.netloc == f"127.0.0.1:{callback_port}"
+    ):
+        return callback_origin
+    if parsed.scheme == "https" and parsed.netloc == "chatgpt.com":
+        return callback_origin
+    raise LocalOwnerError("owner callback origin is outside the browser allowlist")
 
 
 def _no_store() -> dict[str, str]:
@@ -213,6 +250,19 @@ class LocalOwnerTokenPortal:
 
     def begin(self, request: Request, *, return_to: str) -> Response:
         sealed = self.authenticator.seal_request(return_to)
+        issuer = urlsplit(self.authenticator.issuer)
+        issuer_origin = urlunsplit((issuer.scheme, issuer.netloc, "", "", ""))
+        callback_origin = _form_action_callback_origin(
+            return_to,
+            issuer_origin=issuer_origin,
+        )
+        form_action_sources = issuer_origin
+        if callback_origin != issuer_origin:
+            form_action_sources += f" {callback_origin}"
+        # Use the already-validated absolute issuer endpoint both in the form
+        # and CSP.  Some Chrome launch contexts reject ``'self'`` for an OAuth
+        # popup even though the visible top-level URL is same-origin.
+        login_url = html.escape(self.authenticator.login_url, quote=True)
         body = f"""<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
 <title>my-data-hub — авторизация</title>
@@ -222,7 +272,7 @@ input{{width:100%;box-sizing:border-box;padding:.7rem;margin:.5rem 0 1rem}}
 button{{padding:.7rem 1rem}}.muted{{color:#666}}</style></head><body><main>
 <h1>my-data-hub</h1><p>Подтвердите подключение OpenCode или ChatGPT к MCP.</p>
 <p class=\"muted\">Токен используется только этой формой и не передаётся MCP или Kaggle.</p>
-<form method=\"post\" action=\"/owner/login\" autocomplete=\"off\">
+<form method=\"post\" action=\"{login_url}\" autocomplete=\"off\">
 <input type=\"hidden\" name=\"owner_request\" value=\"{html.escape(sealed, quote=True)}\">
 <label>Операторский токен<br>
 <input type=\"password\" name=\"operator_token\" required autofocus autocomplete=\"off\"></label>
@@ -232,9 +282,15 @@ button{{padding:.7rem 1rem}}.muted{{color:#666}}</style></head><body><main>
             status_code=200,
             headers={
                 **_no_store(),
+                # ``no-referrer`` can serialize the Origin of a basic form
+                # POST as ``null``.  Preserve only the issuer origin so the
+                # admission boundary can enforce the exact same-origin POST
+                # without disclosing the sealed return URL.
+                "Referrer-Policy": "origin",
                 "Content-Security-Policy": (
                     "default-src 'none'; style-src 'unsafe-inline'; "
-                    "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+                    f"form-action {form_action_sources}; base-uri 'none'; "
+                    "frame-ancestors 'none'"
                 ),
             },
         )

@@ -163,14 +163,26 @@ def create_authorization_app(
         except OAuthProtocolError as exc:
             return _error(exc)
         try:
+            return_to = service.owner_login_return_to(validated)
             result = owner_authenticator.authenticate_owner(
                 request,
-                return_to=service.owner_login_return_to(validated),
+                return_to=return_to,
             )
             owner = await result if inspect.isawaitable(result) else result
         except Exception:
             return _error(OAuthProtocolError("access_denied", status_code=401))
         if isinstance(owner, OwnerAuthenticationChallenge):
+            # When the login portal is mounted on this authorization server,
+            # render/start it directly.  The former extra 303 to /owner/login
+            # added no security boundary and could leave some real browsers
+            # waiting on the intermediate navigation.  Standalone/external
+            # authenticators without a mounted portal retain their redirect.
+            if owner_login_portal is not None:
+                try:
+                    result = owner_login_portal.begin(request, return_to=return_to)
+                    return await result if inspect.isawaitable(result) else result
+                except Exception:
+                    return _error(OAuthProtocolError("access_denied", status_code=401))
             return RedirectResponse(owner.location, status_code=303, headers=_no_store())
         if not isinstance(owner, OwnerIdentity):
             return _error(OAuthProtocolError("access_denied", status_code=401))
@@ -251,4 +263,8 @@ def create_authorization_app(
         allowed_origins=policy.allowed_origins,
         trusted_proxy_ips=policy.trusted_proxy_ips,
         limits=policy.limits,
+        # A basic HTML form POST may serialize Origin as ``null`` under
+        # ``no-referrer``.  ``origin`` exposes no path/query while preserving
+        # the exact issuer origin required by transport admission.
+        referrer_policy="origin",
     )

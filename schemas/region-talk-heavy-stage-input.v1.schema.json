@@ -1,0 +1,1470 @@
+{
+  "$defs": {
+    "ContentEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "body_text": {
+          "default": "",
+          "maxLength": 200000,
+          "title": "Body Text",
+          "type": "string"
+        },
+        "canonical_source_key": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Canonical Source Key",
+          "type": "string"
+        },
+        "canonical_url": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Canonical Url",
+          "type": "string"
+        },
+        "content_type": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Content Type",
+          "type": "string"
+        },
+        "summary": {
+          "default": "",
+          "maxLength": 20000,
+          "title": "Summary",
+          "type": "string"
+        },
+        "text_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Text Sha256",
+          "type": "string"
+        },
+        "title": {
+          "default": "",
+          "maxLength": 4000,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text_sha256",
+        "canonical_url",
+        "canonical_source_key",
+        "content_type"
+      ],
+      "title": "ContentEvidence",
+      "type": "object"
+    },
+    "FactEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "claim": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Claim",
+          "type": "string"
+        },
+        "fact_id": {
+          "pattern": "^[A-Za-z0-9_.:-]{1,160}$",
+          "title": "Fact Id",
+          "type": "string"
+        },
+        "source_url": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Source Url",
+          "type": "string"
+        },
+        "support_excerpt": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Support Excerpt",
+          "type": "string"
+        },
+        "support_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Support Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fact_id",
+        "claim",
+        "support_excerpt",
+        "source_url",
+        "support_sha256"
+      ],
+      "title": "FactEvidence",
+      "type": "object"
+    },
+    "FactPack": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_revision_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Candidate Revision Fingerprint",
+          "type": "string"
+        },
+        "fact_pack_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Fact Pack Sha256",
+          "type": "string"
+        },
+        "facts": {
+          "items": {
+            "$ref": "#/$defs/FactEvidence"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Facts",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": "region-talk-fact-pack.v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "candidate_revision_fingerprint",
+        "facts",
+        "fact_pack_sha256"
+      ],
+      "title": "FactPack",
+      "type": "object"
+    },
+    "FinalVerifierInput": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_revision_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Candidate Revision Fingerprint",
+          "type": "string"
+        },
+        "content": {
+          "$ref": "#/$defs/ContentEvidence"
+        },
+        "fact_pack": {
+          "$ref": "#/$defs/FactPack"
+        },
+        "image_result": {
+          "$ref": "#/$defs/ImageScoringResult"
+        },
+        "image_result_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Image Result Sha256",
+          "type": "string"
+        },
+        "input_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Input Fingerprint",
+          "type": "string"
+        },
+        "notification_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Notification Dispatch",
+          "type": "boolean"
+        },
+        "policy": {
+          "$ref": "#/$defs/FinalVerifierPolicy"
+        },
+        "publication_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Publication Dispatch",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": "region-talk-final-verifier-input.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceEvidence"
+        },
+        "upstream_results": {
+          "items": {
+            "$ref": "#/$defs/UpstreamResultReceipt"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Upstream Results",
+          "type": "array"
+        },
+        "vector_result_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Vector Result Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "input_fingerprint",
+        "candidate_revision_fingerprint",
+        "content",
+        "fact_pack",
+        "source",
+        "vector_result_sha256",
+        "image_result_sha256",
+        "image_result",
+        "upstream_results",
+        "policy"
+      ],
+      "title": "FinalVerifierInput",
+      "type": "object"
+    },
+    "FinalVerifierPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "eligibility_gate_version": {
+          "const": "region_talk_publication_eligibility_v5",
+          "title": "Eligibility Gate Version",
+          "type": "string"
+        },
+        "model_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Model Id",
+          "type": "string"
+        },
+        "prompt_version": {
+          "const": "region_talk_final_verifier_v7_grounded_draft",
+          "title": "Prompt Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "eligibility_gate_version",
+        "prompt_version",
+        "model_id"
+      ],
+      "title": "FinalVerifierPolicy",
+      "type": "object"
+    },
+    "FinalVerifierResult": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_revision_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Candidate Revision Fingerprint",
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "accept",
+            "reject",
+            "needs_review"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "fact_pack_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Fact Pack Sha256",
+          "type": "string"
+        },
+        "grounding": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/GroundingReference"
+          },
+          "maxItems": 20,
+          "title": "Grounding",
+          "type": "array"
+        },
+        "image_result_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Image Result Sha256",
+          "type": "string"
+        },
+        "input_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Input Fingerprint",
+          "type": "string"
+        },
+        "model_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Model Id",
+          "type": "string"
+        },
+        "notification_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Notification Dispatch",
+          "type": "boolean"
+        },
+        "producer_exact_id": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Producer Exact Id",
+          "type": "string"
+        },
+        "publication_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Publication Dispatch",
+          "type": "boolean"
+        },
+        "reason_codes": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Reason Codes",
+          "type": "array"
+        },
+        "request_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Request Fingerprint",
+          "type": "string"
+        },
+        "result_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Result Sha256",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "region-talk-final-verifier-result.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Fingerprint",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "input_fingerprint",
+        "candidate_revision_fingerprint",
+        "fact_pack_sha256",
+        "source_fingerprint",
+        "image_result_sha256",
+        "producer_exact_id",
+        "decision",
+        "reason_codes",
+        "request_fingerprint",
+        "model_id",
+        "result_sha256"
+      ],
+      "title": "FinalVerifierResult",
+      "type": "object"
+    },
+    "GroundingReference": {
+      "additionalProperties": false,
+      "properties": {
+        "claim": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Claim",
+          "type": "string"
+        },
+        "fact_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Fact Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "claim",
+        "fact_ids"
+      ],
+      "title": "GroundingReference",
+      "type": "object"
+    },
+    "ImageFrameScores": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Artifact Sha256",
+          "type": "string"
+        },
+        "clip_visual_fit_score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Clip Visual Fit Score",
+          "type": "number"
+        },
+        "content_text_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Content Text Sha256",
+          "type": "string"
+        },
+        "cv_overall_media_score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Cv Overall Media Score",
+          "type": "number"
+        },
+        "laion_aesthetic_score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Laion Aesthetic Score",
+          "type": "number"
+        },
+        "media_id": {
+          "pattern": "^[A-Za-z0-9_.:-]{1,300}$",
+          "title": "Media Id",
+          "type": "string"
+        },
+        "model_bundle_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Model Bundle Sha256",
+          "type": "string"
+        },
+        "nima_quality_score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Nima Quality Score",
+          "type": "number"
+        },
+        "overall_media_score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Overall Media Score",
+          "type": "number"
+        },
+        "scorer_request_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Scorer Request Fingerprint",
+          "type": "string"
+        },
+        "technical_quality_score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Technical Quality Score",
+          "type": "number"
+        }
+      },
+      "required": [
+        "media_id",
+        "artifact_sha256",
+        "content_text_sha256",
+        "scorer_request_fingerprint",
+        "cv_overall_media_score",
+        "technical_quality_score",
+        "clip_visual_fit_score",
+        "laion_aesthetic_score",
+        "nima_quality_score",
+        "overall_media_score",
+        "model_bundle_sha256"
+      ],
+      "title": "ImageFrameScores",
+      "type": "object"
+    },
+    "ImagePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "acquisition_version": {
+          "const": "region_talk_http_article_image_evidence_v4",
+          "title": "Acquisition Version",
+          "type": "string"
+        },
+        "decision_contract_version": {
+          "const": "region_talk_article_image_association_v4",
+          "title": "Decision Contract Version",
+          "type": "string"
+        },
+        "model_bundle_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Model Bundle Sha256",
+          "type": "string"
+        },
+        "scorer_version": {
+          "const": "region_talk_cv_clip_laion_nima_legacy_v1",
+          "title": "Scorer Version",
+          "type": "string"
+        },
+        "vlm_model_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Vlm Model Id",
+          "type": "string"
+        },
+        "vlm_prompt_version": {
+          "const": "region_talk_visual_article_association_v3",
+          "title": "Vlm Prompt Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "decision_contract_version",
+        "acquisition_version",
+        "scorer_version",
+        "vlm_prompt_version",
+        "model_bundle_sha256",
+        "vlm_model_id"
+      ],
+      "title": "ImagePolicy",
+      "type": "object"
+    },
+    "ImageScoringInput": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_manifest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MediaArtifactManifest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "availability": {
+          "enum": [
+            "AVAILABLE",
+            "UNAVAILABLE"
+          ],
+          "title": "Availability",
+          "type": "string"
+        },
+        "candidate_revision_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Candidate Revision Fingerprint",
+          "type": "string"
+        },
+        "content": {
+          "$ref": "#/$defs/ContentEvidence"
+        },
+        "eligibility_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Eligibility Fingerprint",
+          "type": "string"
+        },
+        "input_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Input Fingerprint",
+          "type": "string"
+        },
+        "notification_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Notification Dispatch",
+          "type": "boolean"
+        },
+        "policy": {
+          "$ref": "#/$defs/ImagePolicy"
+        },
+        "publication_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Publication Dispatch",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": "region-talk-image-input.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "unavailable_reason": {
+          "default": "",
+          "maxLength": 500,
+          "title": "Unavailable Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "input_fingerprint",
+        "candidate_revision_fingerprint",
+        "content",
+        "eligibility_fingerprint",
+        "availability",
+        "policy"
+      ],
+      "title": "ImageScoringInput",
+      "type": "object"
+    },
+    "ImageScoringResult": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_revision_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Candidate Revision Fingerprint",
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "legacy_auto_accept",
+            "vlm_visual_accept",
+            "needs_visual_review"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "frames": {
+          "items": {
+            "$ref": "#/$defs/ImageFrameScores"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Frames",
+          "type": "array"
+        },
+        "input_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Input Fingerprint",
+          "type": "string"
+        },
+        "media_manifest_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Media Manifest Sha256",
+          "type": "string"
+        },
+        "notification_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Notification Dispatch",
+          "type": "boolean"
+        },
+        "producer_exact_id": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Producer Exact Id",
+          "type": "string"
+        },
+        "publication_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Publication Dispatch",
+          "type": "boolean"
+        },
+        "reason_codes": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Reason Codes",
+          "type": "array"
+        },
+        "result_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Result Sha256",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "region-talk-image-scoring-result.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "selected_media_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 6,
+          "title": "Selected Media Ids",
+          "type": "array"
+        },
+        "visual_adjudication": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VisualAdjudication"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "schema_version",
+        "input_fingerprint",
+        "candidate_revision_fingerprint",
+        "media_manifest_sha256",
+        "producer_exact_id",
+        "decision",
+        "reason_codes",
+        "frames",
+        "result_sha256"
+      ],
+      "title": "ImageScoringResult",
+      "type": "object"
+    },
+    "MediaAcquisitionReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "acquisition_evidence_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Acquisition Evidence Sha256",
+          "type": "string"
+        },
+        "acquisition_id": {
+          "format": "uuid",
+          "title": "Acquisition Id",
+          "type": "string"
+        },
+        "artifact_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Artifact Sha256",
+          "type": "string"
+        },
+        "asset_id": {
+          "format": "uuid",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "byte_size": {
+          "maximum": 25000000,
+          "minimum": 1,
+          "title": "Byte Size",
+          "type": "integer"
+        },
+        "candidate_id": {
+          "format": "uuid",
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "candidate_revision": {
+          "minimum": 1,
+          "title": "Candidate Revision",
+          "type": "integer"
+        },
+        "candidate_revision_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Candidate Revision Fingerprint",
+          "type": "string"
+        },
+        "canonical_revision": {
+          "minimum": 1,
+          "title": "Canonical Revision",
+          "type": "integer"
+        },
+        "content_id": {
+          "format": "uuid",
+          "title": "Content Id",
+          "type": "string"
+        },
+        "content_type": {
+          "enum": [
+            "image/jpeg",
+            "image/png",
+            "image/webp"
+          ],
+          "title": "Content Type",
+          "type": "string"
+        },
+        "epoch": {
+          "minimum": 1,
+          "title": "Epoch",
+          "type": "integer"
+        },
+        "export_batch_id": {
+          "format": "uuid",
+          "title": "Export Batch Id",
+          "type": "string"
+        },
+        "height": {
+          "anyOf": [
+            {
+              "maximum": 50000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Height"
+        },
+        "master_instance_id": {
+          "format": "uuid",
+          "title": "Master Instance Id",
+          "type": "string"
+        },
+        "normalized_source_url": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Normalized Source Url",
+          "type": "string"
+        },
+        "notification_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Notification Dispatch",
+          "type": "boolean"
+        },
+        "object_ref": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Object Ref",
+          "type": "string"
+        },
+        "publication_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Publication Dispatch",
+          "type": "boolean"
+        },
+        "receipt_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Receipt Sha256",
+          "type": "string"
+        },
+        "registered": {
+          "const": true,
+          "title": "Registered",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": "region-talk-media-artifact-acquisition-receipt.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_media_id": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Source Media Id",
+          "type": "string"
+        },
+        "source_url_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Url Sha256",
+          "type": "string"
+        },
+        "stage_run_id": {
+          "format": "uuid",
+          "title": "Stage Run Id",
+          "type": "string"
+        },
+        "task_readable": {
+          "const": true,
+          "title": "Task Readable",
+          "type": "boolean"
+        },
+        "task_run_id": {
+          "format": "uuid",
+          "title": "Task Run Id",
+          "type": "string"
+        },
+        "width": {
+          "anyOf": [
+            {
+              "maximum": 50000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Width"
+        }
+      },
+      "required": [
+        "schema_version",
+        "registered",
+        "acquisition_id",
+        "task_run_id",
+        "export_batch_id",
+        "stage_run_id",
+        "canonical_revision",
+        "master_instance_id",
+        "epoch",
+        "candidate_id",
+        "candidate_revision",
+        "candidate_revision_fingerprint",
+        "content_id",
+        "asset_id",
+        "source_media_id",
+        "normalized_source_url",
+        "source_url_sha256",
+        "object_ref",
+        "artifact_sha256",
+        "byte_size",
+        "content_type",
+        "acquisition_evidence_sha256",
+        "task_readable",
+        "receipt_sha256"
+      ],
+      "title": "MediaAcquisitionReceipt",
+      "type": "object"
+    },
+    "MediaArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Artifact Sha256",
+          "type": "string"
+        },
+        "asset_id": {
+          "pattern": "^[A-Za-z0-9_.:-]{1,200}$",
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "byte_size": {
+          "maximum": 25000000,
+          "minimum": 1,
+          "title": "Byte Size",
+          "type": "integer"
+        },
+        "content_type": {
+          "enum": [
+            "image/jpeg",
+            "image/png",
+            "image/webp"
+          ],
+          "title": "Content Type",
+          "type": "string"
+        },
+        "height": {
+          "anyOf": [
+            {
+              "maximum": 50000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Height"
+        },
+        "normalized_source_url": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Normalized Source Url",
+          "type": "string"
+        },
+        "object_ref": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Object Ref",
+          "type": "string"
+        },
+        "source_media_id": {
+          "pattern": "^[A-Za-z0-9_.:-]{1,300}$",
+          "title": "Source Media Id",
+          "type": "string"
+        },
+        "source_url_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Url Sha256",
+          "type": "string"
+        },
+        "width": {
+          "anyOf": [
+            {
+              "maximum": 50000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Width"
+        }
+      },
+      "required": [
+        "asset_id",
+        "source_media_id",
+        "normalized_source_url",
+        "source_url_sha256",
+        "object_ref",
+        "artifact_sha256",
+        "byte_size",
+        "content_type"
+      ],
+      "title": "MediaArtifact",
+      "type": "object"
+    },
+    "MediaArtifactManifest": {
+      "additionalProperties": false,
+      "properties": {
+        "acquisition_receipts": {
+          "items": {
+            "$ref": "#/$defs/MediaAcquisitionReceipt"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Acquisition Receipts",
+          "type": "array"
+        },
+        "candidate_revision_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Candidate Revision Fingerprint",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/MediaArtifact"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Items",
+          "type": "array"
+        },
+        "manifest_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Manifest Sha256",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "region-talk-media-artifact-manifest.v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "candidate_revision_fingerprint",
+        "acquisition_receipts",
+        "items",
+        "manifest_sha256"
+      ],
+      "title": "MediaArtifactManifest",
+      "type": "object"
+    },
+    "PublicationHistoryItem": {
+      "additionalProperties": false,
+      "properties": {
+        "body_text": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Body Text",
+          "type": "string"
+        },
+        "draft_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Draft Fingerprint",
+          "type": "string"
+        },
+        "history_id": {
+          "pattern": "^[A-Za-z0-9_.:-]{1,160}$",
+          "title": "History Id",
+          "type": "string"
+        },
+        "published_revision_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Published Revision Fingerprint",
+          "type": "string"
+        }
+      },
+      "required": [
+        "history_id",
+        "published_revision_fingerprint",
+        "draft_fingerprint",
+        "body_text"
+      ],
+      "title": "PublicationHistoryItem",
+      "type": "object"
+    },
+    "PublisherDimensions": {
+      "additionalProperties": false,
+      "properties": {
+        "distinctive_value": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Distinctive Value",
+          "type": "string"
+        },
+        "intended_audience": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Intended Audience",
+          "type": "string"
+        },
+        "publisher_identity": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Publisher Identity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "publisher_identity",
+        "intended_audience",
+        "distinctive_value"
+      ],
+      "title": "PublisherDimensions",
+      "type": "object"
+    },
+    "SourceEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_revision_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Candidate Revision Fingerprint",
+          "type": "string"
+        },
+        "canonical_source_key": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Canonical Source Key",
+          "type": "string"
+        },
+        "externality_status": {
+          "enum": [
+            "verified",
+            "unknown",
+            "local"
+          ],
+          "title": "Externality Status",
+          "type": "string"
+        },
+        "source_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Fingerprint",
+          "type": "string"
+        },
+        "source_scope": {
+          "enum": [
+            "external",
+            "mixed",
+            "regional",
+            "unknown"
+          ],
+          "title": "Source Scope",
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate_revision_fingerprint",
+        "canonical_source_key",
+        "externality_status",
+        "source_scope",
+        "source_fingerprint"
+      ],
+      "title": "SourceEvidence",
+      "type": "object"
+    },
+    "SourceProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_revision_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Candidate Revision Fingerprint",
+          "type": "string"
+        },
+        "canonical_source_key": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Canonical Source Key",
+          "type": "string"
+        },
+        "dimensions": {
+          "$ref": "#/$defs/PublisherDimensions"
+        },
+        "entity_type": {
+          "enum": [
+            "person",
+            "collective",
+            "journal",
+            "media_brand",
+            "professional_platform",
+            "thematic_channel"
+          ],
+          "title": "Entity Type",
+          "type": "string"
+        },
+        "externality_status": {
+          "enum": [
+            "verified",
+            "unknown",
+            "local"
+          ],
+          "title": "Externality Status",
+          "type": "string"
+        },
+        "profile_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Profile Fingerprint",
+          "type": "string"
+        },
+        "source_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Fingerprint",
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate_revision_fingerprint",
+        "canonical_source_key",
+        "source_fingerprint",
+        "profile_fingerprint",
+        "entity_type",
+        "externality_status",
+        "dimensions"
+      ],
+      "title": "SourceProfile",
+      "type": "object"
+    },
+    "UpstreamResultReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "input_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Input Fingerprint",
+          "type": "string"
+        },
+        "result_metadata_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Result Metadata Sha256",
+          "type": "string"
+        },
+        "result_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Result Sha256",
+          "type": "string"
+        },
+        "stage": {
+          "enum": [
+            "vector_fusion",
+            "image_scoring",
+            "final_verifier"
+          ],
+          "title": "Stage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stage",
+        "input_fingerprint",
+        "result_sha256",
+        "result_metadata_sha256"
+      ],
+      "title": "UpstreamResultReceipt",
+      "type": "object"
+    },
+    "VisualAdjudication": {
+      "additionalProperties": false,
+      "properties": {
+        "article_association_supported": {
+          "title": "Article Association Supported",
+          "type": "boolean"
+        },
+        "decision": {
+          "enum": [
+            "accept",
+            "reject",
+            "review"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "model_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Model Id",
+          "type": "string"
+        },
+        "producer_exact_id": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Producer Exact Id",
+          "type": "string"
+        },
+        "reason_code": {
+          "pattern": "^[a-z][a-z0-9_]{0,99}$",
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "request_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Request Fingerprint",
+          "type": "string"
+        },
+        "selected_media_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 6,
+          "title": "Selected Media Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "decision",
+        "article_association_supported",
+        "reason_code",
+        "request_fingerprint",
+        "model_id",
+        "producer_exact_id"
+      ],
+      "title": "VisualAdjudication",
+      "type": "object"
+    },
+    "WriterInput": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_revision_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Candidate Revision Fingerprint",
+          "type": "string"
+        },
+        "content": {
+          "$ref": "#/$defs/ContentEvidence"
+        },
+        "fact_pack": {
+          "$ref": "#/$defs/FactPack"
+        },
+        "final_result": {
+          "$ref": "#/$defs/FinalVerifierResult"
+        },
+        "final_result_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Final Result Sha256",
+          "type": "string"
+        },
+        "history": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PublicationHistoryItem"
+          },
+          "maxItems": 5,
+          "title": "History",
+          "type": "array"
+        },
+        "image_result": {
+          "$ref": "#/$defs/ImageScoringResult"
+        },
+        "image_result_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Image Result Sha256",
+          "type": "string"
+        },
+        "input_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Input Fingerprint",
+          "type": "string"
+        },
+        "notification_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Notification Dispatch",
+          "type": "boolean"
+        },
+        "policy": {
+          "$ref": "#/$defs/WriterPolicy"
+        },
+        "publication_dispatch": {
+          "const": false,
+          "default": false,
+          "title": "Publication Dispatch",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "const": "region-talk-writer-input.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_profile": {
+          "$ref": "#/$defs/SourceProfile"
+        },
+        "upstream_results": {
+          "items": {
+            "$ref": "#/$defs/UpstreamResultReceipt"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Upstream Results",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "input_fingerprint",
+        "candidate_revision_fingerprint",
+        "content",
+        "fact_pack",
+        "source_profile",
+        "image_result_sha256",
+        "final_result_sha256",
+        "image_result",
+        "final_result",
+        "upstream_results",
+        "policy"
+      ],
+      "title": "WriterInput",
+      "type": "object"
+    },
+    "WriterPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "input_contract": {
+          "const": "region_talk_editorial_input_v3_source_profile",
+          "title": "Input Contract",
+          "type": "string"
+        },
+        "media_materialization_contract": {
+          "const": "region_talk_media_materialization_v1",
+          "title": "Media Materialization Contract",
+          "type": "string"
+        },
+        "model_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Model Id",
+          "type": "string"
+        },
+        "output_contract": {
+          "const": "region_talk_editorial_output_v6_publisher_reader_brief",
+          "title": "Output Contract",
+          "type": "string"
+        },
+        "stage_execution_version": {
+          "const": "region_talk_writer_v12_publisher_reader_brief_v2",
+          "title": "Stage Execution Version",
+          "type": "string"
+        },
+        "writer_version": {
+          "const": "region_talk_editorial_writer_v12_publisher_reader_brief",
+          "title": "Writer Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "writer_version",
+        "output_contract",
+        "input_contract",
+        "stage_execution_version",
+        "media_materialization_contract",
+        "model_id"
+      ],
+      "title": "WriterPolicy",
+      "type": "object"
+    }
+  },
+  "$id": "https://my-data-hub.invalid/schemas/region-talk-heavy-stage-input.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "discriminator": {
+    "mapping": {
+      "region-talk-final-verifier-input.v1": "#/$defs/FinalVerifierInput",
+      "region-talk-image-input.v1": "#/$defs/ImageScoringInput",
+      "region-talk-writer-input.v1": "#/$defs/WriterInput"
+    },
+    "propertyName": "schema_version"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ImageScoringInput"
+    },
+    {
+      "$ref": "#/$defs/FinalVerifierInput"
+    },
+    {
+      "$ref": "#/$defs/WriterInput"
+    }
+  ],
+  "title": "Region Talk closed heavy-stage input contracts"
+}

@@ -65,6 +65,7 @@ from .contracts import (
     UnauthenticatedDatasetProbe,
 )
 from .retry import BoundedRetry, RetryPolicy, classify_failure
+from .source_attestation import executable_source_sha256
 
 MAX_EXACT_OUTPUT_PROVIDER_LOG_BYTES = 1024 * 1024
 MAX_BROKERED_BLOB_BYTES = 10 * 1024**3
@@ -135,6 +136,36 @@ def _normalized_dataset_source(value: object) -> str:
     if len(parts) == 3 and (not parts[2].isdigit() or int(parts[2]) < 1):
         raise KaggleIdentityError("Kaggle dataset source version must be an exact positive integer")
     return source
+
+
+def _normalized_model_source(value: object) -> str:
+    source = str(value or "").strip().removeprefix("/")
+    parts = source.split("/")
+    if len(parts) != 5 or any(not part for part in parts):
+        raise KaggleIdentityError(
+            "Kaggle model source must be exact owner/model/framework/variation/version"
+        )
+    _normalized_ref("/".join(parts[:2]))
+    for part in parts[2:4]:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", part):
+            raise KaggleIdentityError("Kaggle model source contains an invalid identity segment")
+    if not parts[4].isdigit() or int(parts[4]) < 1:
+        raise KaggleIdentityError("Kaggle model source version must be an exact positive integer")
+    return source
+
+
+def _normalized_kernel_source(value: object) -> str:
+    """Normalize the only kernel-source shape supported by Kaggle metadata.
+
+    Kaggle consumer metadata has no numeric source-version field.  Callers
+    that need immutable output must separately fence the producer's current
+    exact source/version and content-address the mounted files.
+    """
+
+    source = str(value or "").strip().removeprefix("/")
+    if source.count("/") != 1:
+        raise KaggleIdentityError("Kaggle kernel source must be exact owner/slug")
+    return _normalized_ref(source)
 
 
 def _version(value: object) -> int | None:
@@ -954,6 +985,72 @@ class KaggleProviderAdapter:
             raise KaggleIdentityError("current private dataset version is unavailable")
         return version
 
+    def current_private_notebook_version(self, *, provider_ref: str) -> int | None:
+        """Return the exact owned/private current notebook version without mutation."""
+
+        try:
+            observed, version, _provider_id = self._find_resource(
+                provider_ref, ProviderKind.NOTEBOOK
+            )
+        except KaggleNotFound:
+            return None
+        if observed.private is not True:
+            raise KagglePolicyError("notebook privacy was not explicitly proven private")
+        if version is None:
+            raise KaggleIdentityError("current private notebook version is unavailable")
+        return version
+
+    def assert_exact_model_source_available(self, model_source: str) -> str:
+        """Fail closed unless the exact numeric Kaggle Model version is readable.
+
+        This is a metadata-only prelaunch fence.  The consumer still verifies
+        every mounted model byte against its committed manifest before import;
+        this check prevents dispatch when the requested provider identity or
+        numeric version has disappeared or resolves to a different instance.
+        """
+
+        source = _normalized_model_source(model_source)
+        owner, model, framework, variation, version_text = source.split("/")
+        exact_instance = "/".join((owner, model, framework, variation))
+        wanted_version = int(version_text)
+        list_versions = getattr(self.api, "model_instance_versions_list", None)
+        if not callable(list_versions):
+            raise KaggleDependencyError("official Kaggle Model version readback is unavailable")
+        token: str | None = None
+        matches = 0
+        for _page in range(20):
+            response, _attempts = self.retry.call(
+                "model_instance_versions_list",
+                lambda page_token=token: list_versions(
+                    exact_instance, page_size=20, page_token=page_token
+                ),
+            )
+            version_list = _field(response, "version_list", "versionList")
+            for item in (_field(version_list, "versions") or ()):
+                observed_framework = str(_field(item, "framework") or "")
+                if observed_framework.startswith("MODEL_FRAMEWORK_"):
+                    observed_framework = observed_framework.removeprefix("MODEL_FRAMEWORK_")
+                if (
+                    str(_field(item, "owner_slug", "ownerSlug") or "") == owner
+                    and str(_field(item, "model_slug", "modelSlug") or "") == model
+                    and observed_framework.casefold() == framework.casefold()
+                    and str(_field(item, "variation_slug", "variationSlug") or "") == variation
+                    and _version(_field(item, "version_number", "versionNumber")) == wanted_version
+                    and str(_field(item, "url") or "") == f"/models/{source}"
+                ):
+                    matches += 1
+            next_token = str(_field(response, "next_page_token", "nextPageToken") or "").strip()
+            if not next_token:
+                break
+            if next_token == token:
+                raise KaggleIdentityError("Kaggle Model version pagination did not advance")
+            token = next_token
+        else:
+            raise KaggleIdentityError("Kaggle Model version readback exceeded its bounded pages")
+        if matches != 1:
+            raise KaggleIdentityError("exact Kaggle Model source/version is unavailable")
+        return source
+
     def reconcile_private_dataset_directory_mutation(
         self,
         *,
@@ -1336,6 +1433,8 @@ class KaggleProviderAdapter:
         control_class: ControlClass,
         disposable: bool,
         dataset_sources: Sequence[str] = (),
+        kernel_sources: Sequence[str] = (),
+        model_sources: Sequence[str] = (),
         enable_internet: bool = False,
         timeout_seconds: int | None = None,
     ) -> NotebookMutationResult:
@@ -1350,6 +1449,8 @@ class KaggleProviderAdapter:
             control_class=control_class,
             disposable=disposable,
             dataset_sources=dataset_sources,
+            kernel_sources=kernel_sources,
+            model_sources=model_sources,
             enable_internet=enable_internet,
             timeout_seconds=timeout_seconds,
             pending_runtime_attestation=False,
@@ -1368,10 +1469,13 @@ class KaggleProviderAdapter:
         control_class: ControlClass,
         disposable: bool,
         dataset_sources: Sequence[str] = (),
+        kernel_sources: Sequence[str] = (),
+        model_sources: Sequence[str] = (),
         enable_internet: bool = False,
         timeout_seconds: int | None = None,
         docker_image: str | None = None,
         docker_image_pinning_type: str | None = None,
+        expected_previous_version: int | None = None,
     ) -> NotebookMutationResult:
         """Persist an exact protected push pending authenticated runtime source proof.
 
@@ -1394,10 +1498,13 @@ class KaggleProviderAdapter:
             control_class=control_class,
             disposable=disposable,
             dataset_sources=dataset_sources,
+            kernel_sources=kernel_sources,
+            model_sources=model_sources,
             enable_internet=enable_internet,
             timeout_seconds=timeout_seconds,
             docker_image=docker_image,
             docker_image_pinning_type=docker_image_pinning_type,
+            expected_previous_version=expected_previous_version,
             pending_runtime_attestation=True,
         )
 
@@ -1418,6 +1525,7 @@ class KaggleProviderAdapter:
         timeout_seconds: int | None = None,
         docker_image: str | None = None,
         docker_image_pinning_type: str | None = None,
+        expected_previous_version: int | None = None,
     ) -> NotebookMutationResult:
         return self.push_private_notebook_pending_runtime_attestation(
             intent=intent,
@@ -1434,6 +1542,7 @@ class KaggleProviderAdapter:
             timeout_seconds=timeout_seconds,
             docker_image=docker_image,
             docker_image_pinning_type=docker_image_pinning_type,
+            expected_previous_version=expected_previous_version,
         )
 
     def push_private_worker_notebook_pending_attestation(self, **kwargs: Any) -> NotebookMutationResult:
@@ -1468,11 +1577,14 @@ class KaggleProviderAdapter:
         control_class: ControlClass,
         disposable: bool,
         dataset_sources: Sequence[str] = (),
+        kernel_sources: Sequence[str] = (),
+        model_sources: Sequence[str] = (),
         enable_internet: bool = False,
         timeout_seconds: int | None = None,
         pending_runtime_attestation: bool,
         docker_image: str | None = None,
         docker_image_pinning_type: str | None = None,
+        expected_previous_version: int | None = None,
     ) -> NotebookMutationResult:
         if intent.action != MutationAction.PUSH_NOTEBOOK:
             raise KaggleContractError("effect intent action does not authorize notebook push/run")
@@ -1491,8 +1603,10 @@ class KaggleProviderAdapter:
         canonical_source = _canonical_notebook_source(source, kernel_type=kernel_type)
         if str(task_run_id).encode("ascii") not in canonical_source:
             raise KaggleContractError("notebook source must embed the exact task_run_id")
-        source_sha = hashlib.sha256(canonical_source).hexdigest()
+        source_sha = executable_source_sha256(canonical_source, kernel_type=kernel_type)
         normalized_sources = tuple(_normalized_dataset_source(item) for item in dataset_sources)
+        normalized_kernel_sources = tuple(_normalized_kernel_source(item) for item in kernel_sources)
+        normalized_model_sources = tuple(_normalized_model_source(item) for item in model_sources)
         if pending_runtime_attestation and (
             not isinstance(docker_image, str)
             or not _IMMUTABLE_IMAGE.fullmatch(docker_image)
@@ -1506,10 +1620,30 @@ class KaggleProviderAdapter:
                 "control_class": control_class.value,
                 "disposable": disposable,
         }
+        if normalized_model_sources:
+            intent_arguments["model_sources"] = normalized_model_sources
+        if normalized_kernel_sources:
+            intent_arguments["kernel_sources"] = normalized_kernel_sources
         if pending_runtime_attestation:
-            intent_arguments.update({"docker_image": docker_image,
-                                     "docker_image_pinning_type": docker_image_pinning_type})
+            intent_arguments.update(
+                {
+                    "docker_image": docker_image,
+                    "docker_image_pinning_type": docker_image_pinning_type,
+                }
+            )
+        if expected_previous_version is not None:
+            if expected_previous_version < 1:
+                raise KaggleContractError("expected previous notebook version must be positive")
+            intent_arguments["expected_previous_version"] = expected_previous_version
         self._validate_intent(intent, arguments=intent_arguments)
+        if expected_previous_version is not None:
+            current_version = self.current_private_notebook_version(
+                provider_ref=intent.provider_ref
+            )
+            if current_version != expected_previous_version:
+                raise KaggleAmbiguousMutation(
+                    "notebook version changed after the persisted effect intent"
+                )
         with tempfile.TemporaryDirectory(prefix="my-data-hub-kaggle-kernel-") as temporary:
             folder = Path(temporary)
             code_path = folder.joinpath(*code_file.split("/"))
@@ -1526,9 +1660,9 @@ class KaggleProviderAdapter:
                 "enable_tpu": False,
                 "enable_internet": bool(enable_internet),
                 "dataset_sources": list(normalized_sources),
-                "kernel_sources": [],
+                "kernel_sources": list(normalized_kernel_sources),
                 "competition_sources": [],
-                "model_sources": [],
+                "model_sources": list(normalized_model_sources),
             }
             if pending_runtime_attestation:
                 metadata.update({"docker_image": docker_image,
@@ -1729,12 +1863,16 @@ class KaggleProviderAdapter:
             source_path = folder.joinpath(*code_file.split("/"))
             if not source_path.is_file() or folder not in source_path.parents:
                 raise KaggleContractError("Kaggle source pull did not return a bounded local file")
-            source_sha = sha256_file(source_path)
+            source_sha = executable_source_sha256(
+                source_path.read_bytes(), kernel_type=str(metadata.get("kernel_type") or "")
+            )
         return source_sha, provider_id
 
     def _read_latest_private_notebook_identity(
         self, provider_ref: str, *, expected_source_sha256: str | None,
         expected_docker_image: str | None = None,
+        expected_kernel_sources: Sequence[str] | None = None,
+        expected_model_sources: Sequence[str] | None = None,
     ) -> tuple[KaggleKernelSourceIdentity, int]:
         """Read exact latest identity through the pinned official GetKernel API.
 
@@ -1772,6 +1910,22 @@ class KaggleProviderAdapter:
             observed_image = str(_field(metadata, "docker_image", "dockerImage") or "").strip()
             if observed_image != expected_docker_image:
                 raise KaggleIdentityError("Kaggle runtime image readback differs from the exact digest")
+        if expected_kernel_sources is not None:
+            wanted = tuple(_normalized_kernel_source(item) for item in expected_kernel_sources)
+            observed_sources = tuple(
+                _normalized_kernel_source(item)
+                for item in (_field(metadata, "kernel_data_sources", "kernelDataSources") or ())
+            )
+            if observed_sources != wanted:
+                raise KaggleIdentityError("Kaggle kernel-source readback differs")
+        if expected_model_sources is not None:
+            wanted_models = tuple(_normalized_model_source(item) for item in expected_model_sources)
+            observed_models = tuple(
+                _normalized_model_source(item)
+                for item in (_field(metadata, "model_data_sources", "modelDataSources") or ())
+            )
+            if observed_models != wanted_models:
+                raise KaggleIdentityError("Kaggle model-source readback differs")
 
         metadata = _field(response, "metadata")
         blob = _field(response, "blob")
@@ -1787,7 +1941,11 @@ class KaggleProviderAdapter:
             or not isinstance(source, str)
         ):
             raise KaggleIdentityError("Kaggle latest readback lacks exact private identity")
-        source_sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        kernel_type = str(_field(metadata, "kernel_type", "kernelType") or "")
+        try:
+            source_sha = executable_source_sha256(source.encode("utf-8"), kernel_type=kernel_type)
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+            raise KaggleIdentityError("Kaggle latest readback source contract is invalid") from exc
         if expected_source_sha256 is not None and source_sha != expected_source_sha256:
             raise KaggleIdentityError("Kaggle latest readback differs from the exact pushed source")
         fingerprint = ProviderFingerprint(
@@ -1959,12 +2117,19 @@ class KaggleProviderAdapter:
         task_run_id: UUID,
         expected_source_sha256: str,
         dataset_sources: Sequence[str],
+        kernel_sources: Sequence[str] = (),
+        model_sources: Sequence[str] = (),
         control_class: ControlClass,
         disposable: bool,
+        docker_image: str | None = None,
+        docker_image_pinning_type: str | None = None,
+        expected_previous_version: int | None = None,
     ) -> NotebookMutationResult | None:
         """Repair a pushed exact notebook's remote journal without another push."""
 
         normalized_sources = tuple(_normalized_dataset_source(item) for item in dataset_sources)
+        normalized_kernel_sources = tuple(_normalized_kernel_source(item) for item in kernel_sources)
+        normalized_model_sources = tuple(_normalized_model_source(item) for item in model_sources)
         arguments = {
             "task_run_id": str(task_run_id),
             "source_sha256": expected_source_sha256,
@@ -1972,15 +2137,65 @@ class KaggleProviderAdapter:
             "control_class": control_class.value,
             "disposable": disposable,
         }
+        if normalized_model_sources:
+            arguments["model_sources"] = normalized_model_sources
+        if normalized_kernel_sources:
+            arguments["kernel_sources"] = normalized_kernel_sources
+        if docker_image is not None or docker_image_pinning_type is not None:
+            if (
+                not isinstance(docker_image, str)
+                or not _IMMUTABLE_IMAGE.fullmatch(docker_image)
+                or docker_image_pinning_type != "original"
+            ):
+                raise KaggleContractError(
+                    "runtime-attested reconciliation requires an exact original image digest"
+                )
+            arguments.update(
+                {
+                    "docker_image": docker_image,
+                    "docker_image_pinning_type": docker_image_pinning_type,
+                }
+            )
+        if expected_previous_version is not None:
+            if expected_previous_version < 1:
+                raise KaggleContractError("expected previous notebook version must be positive")
+            arguments["expected_previous_version"] = expected_previous_version
         self._validate_control_class(control_class, kind=ProviderKind.NOTEBOOK)
         self._validate_intent(intent, arguments=arguments)
-        run = self.reconcile_private_notebook_run(
-            task_run_id=task_run_id,
-            provider_ref=intent.provider_ref,
-            expected_source_sha256=expected_source_sha256,
-        )
-        if run is None:
+        try:
+            _observed, current_version, _provider_id = self._find_resource(
+                intent.provider_ref, ProviderKind.NOTEBOOK
+            )
+        except KaggleNotFound:
             return None
+        if expected_previous_version is not None:
+            if current_version == expected_previous_version:
+                return None
+            if current_version != expected_previous_version + 1:
+                raise KaggleAmbiguousMutation(
+                    "current notebook version does not match the exact intended successor"
+                )
+        try:
+            recovered, provider_kernel_id = self._read_latest_private_notebook_identity(
+                intent.provider_ref,
+                expected_source_sha256=expected_source_sha256,
+                expected_docker_image=docker_image,
+                expected_kernel_sources=normalized_kernel_sources,
+                expected_model_sources=normalized_model_sources,
+            )
+        except Exception as exc:
+            raise KaggleAmbiguousMutation(
+                "current notebook differs from the exact reconciled mutation"
+            ) from exc
+        run = KaggleKernelRunIdentity(
+            task_run_id=task_run_id,
+            provider_ref=recovered.provider_ref,
+            source_version=recovered.source_version,
+            source_sha256=recovered.source_sha256,
+            provider_kernel_id=provider_kernel_id,
+            provider_run_ref=f"{recovered.provider_ref}/{recovered.source_version}",
+            started_at=self.clock(),
+        )
         source = self.read_private_notebook_source(
             provider_ref=run.provider_ref,
             source_version=run.source_version,

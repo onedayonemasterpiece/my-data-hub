@@ -35,11 +35,10 @@ advance a queue cursor. The local reconciler validates and commits results.
 They remain marked `production_ready=false` until an exact real-provider receipt proves the
 source, input versions, privacy and terminal output. `00-platform-smoke` and
 `80-region-talk-migration-reconciliation` have implemented legacy typed-worker adapters.
-Other Region Talk notebooks contain complete contract, accounting, error and atomic-output
-plumbing; their `process_item()` adapters intentionally fail with
-`PROCESSOR_ADAPTER_NOT_PORTED` until code is adapted from an exact donor revision and covered
-by golden fixtures. A placeholder notebook therefore cannot be mistaken for a working
-production stage.
+The queue-formation E5, BGE-M3, image, final-verifier and writer notebooks validate the exact
+typed work-request contract and return `HEAVY_RUNTIME_NOT_ATTACHED` until their verified model
+runtime is present. Discovery and source-profile adapters remain explicitly unported. Neither
+state can be mistaken for successful heavyweight evidence.
 
 Every operational notebook also fails before installing or executing code unless a hashed
 `my-data-hub-notebook-execution-pins/v1` manifest binds the exact CPython patch version,
@@ -65,7 +64,9 @@ class NotebookSpec:
     purpose: str
     contracts: dict[str, str]
     model: dict[str, str]
-    adapter: Literal["smoke", "migration_reconciliation", "pending"] = "pending"
+    adapter: Literal[
+        "smoke", "migration_reconciliation", "stage_contract", "pending"
+    ] = "pending"
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,9 +201,10 @@ SPECS: tuple[NotebookSpec, ...] = (
         {
             "provider": "intfloat",
             "name": "multilingual-e5-base",
-            "version": "pin-at-deployment",
+            "version": "d128750597153bb5987e10b1c3493a34e5a4502a",
             "task": "embedding",
         },
+        "stage_contract",
     ),
     NotebookSpec(
         "30-region-talk-bge-m3-enrichment",
@@ -215,9 +217,23 @@ SPECS: tuple[NotebookSpec, ...] = (
         {
             "provider": "BAAI",
             "name": "bge-m3",
-            "version": "pin-at-deployment",
+            "version": "5617a9f61b028005a4858fdac845db406aefb181",
             "task": "embedding",
         },
+        "stage_contract",
+    ),
+    NotebookSpec(
+        "35-region-talk-vector-fusion",
+        "35 Region Talk vector fusion",
+        "Execute deterministic fusion of exact-current E5 and BGE-M3 evidence.",
+        {"vector_fusion": "region-talk.vector-fusion.v1"},
+        {
+            "provider": "my-data-hub",
+            "name": "region-talk-vector-fusion",
+            "version": "region-talk.vector-fusion.v1",
+            "task": "vector-fusion",
+        },
+        "stage_contract",
     ),
     NotebookSpec(
         "40-region-talk-image-diagnostic",
@@ -230,6 +246,7 @@ SPECS: tuple[NotebookSpec, ...] = (
             "version": "adapter-pending",
             "task": "image-analysis",
         },
+        "stage_contract",
     ),
     NotebookSpec(
         "50-region-talk-final-verifier",
@@ -242,6 +259,7 @@ SPECS: tuple[NotebookSpec, ...] = (
             "version": "adapter-pending",
             "task": "verification",
         },
+        "stage_contract",
     ),
     NotebookSpec(
         "60-region-talk-source-profile",
@@ -266,6 +284,7 @@ SPECS: tuple[NotebookSpec, ...] = (
             "version": "adapter-pending",
             "task": "editorial-draft",
         },
+        "stage_contract",
     ),
     NotebookSpec(
         "80-region-talk-migration-reconciliation",
@@ -326,6 +345,22 @@ def process_item(work_item: dict) -> dict:
             actual_rows=pairs,
         )
     }'''
+    if spec.adapter == "stage_contract":
+        return '''from my_data_hub.workloads.region_talk.notebook_stages import (
+    attached_stage_runtime_from_env,
+    process_region_talk_stage_item,
+)
+
+attached_runtime = attached_stage_runtime_from_env(manifest.stage)
+
+
+def process_item(work_item: dict) -> dict:
+    return process_region_talk_stage_item(
+        work_item,
+        stage=manifest.stage,
+        contract_version=manifest.stage_contract_version,
+        runtime=attached_runtime,
+    )'''
     return '''def process_item(_work_item: dict) -> dict:
     raise NotImplementedError(
         "stage adapter has not been ported and shadow-validated from the Region Talk donor"
@@ -333,6 +368,34 @@ def process_item(work_item: dict) -> dict:
 
 
 def build_notebook(spec: NotebookSpec):  # type: ignore[no-untyped-def]
+    stage_runtime_note = (
+        "Heavy stages validate exact work requests and fail closed until their model runtime "
+        "and shadow equivalence have been recorded."
+        if spec.adapter == "stage_contract"
+        else "Adapter-pending stages fail closed per item until donor code, model revisions and "
+        "shadow equivalence have been recorded."
+    )
+    unavailable_handler = (
+        ""
+        if spec.adapter == "stage_contract"
+        else "    except NotImplementedError as exc:\n"
+        "        builder.add_failure(\n"
+        "            work_item_id=item.work_item_id,\n"
+        "            code=\"PROCESSOR_ADAPTER_NOT_PORTED\",\n"
+        "            message=str(exc),\n"
+        "            retryable=False,\n"
+        "        )\n"
+    )
+    processor_error_code = (
+        'getattr(exc, "code", "PROCESSOR_FAILURE")'
+        if spec.adapter == "stage_contract"
+        else '"PROCESSOR_FAILURE"'
+    )
+    processor_retryable = (
+        'getattr(exc, "retryable", True)'
+        if spec.adapter == "stage_contract"
+        else "True"
+    )
     nb = nbformat.v4.new_notebook()
     nb.nbformat = 4
     nb.nbformat_minor = 5
@@ -348,7 +411,13 @@ def build_notebook(spec: NotebookSpec):  # type: ignore[no-untyped-def]
             "canonical_write_allowed": False,
             "external_side_effects_allowed": False,
             "output_contract": "my-data-hub-notebook-result.v1",
-            "adapter_status": "implemented" if spec.adapter != "pending" else "pending",
+            "adapter_status": (
+                "contract_ready"
+                if spec.adapter == "stage_contract"
+                else "pending"
+                if spec.adapter == "pending"
+                else "implemented"
+            ),
         },
     }
     nb.cells = [
@@ -358,8 +427,7 @@ def build_notebook(spec: NotebookSpec):  # type: ignore[no-untyped-def]
             "This notebook is a **typed producer**, not a database client. It reads one exact "
             "input manifest and writes one immutable result envelope. It must never mutate "
             "canonical PostgreSQL, YDB, a shared SQLite file or a publication target.\n\n"
-            "Adapter-pending stages fail closed per item until donor code, model revisions and "
-            "shadow equivalence have been recorded.",
+            f"{stage_runtime_note}",
             "intro",
         ),
         _cell(
@@ -409,19 +477,13 @@ def build_notebook(spec: NotebookSpec):  # type: ignore[no-untyped-def]
             "    work_item = item.model_dump(mode=\"json\")\n"
             "    try:\n"
             "        result = process_item(work_item)\n"
-            "    except NotImplementedError as exc:\n"
-            "        builder.add_failure(\n"
-            "            work_item_id=item.work_item_id,\n"
-            "            code=\"PROCESSOR_ADAPTER_NOT_PORTED\",\n"
-            "            message=str(exc),\n"
-            "            retryable=False,\n"
-            "        )\n"
+            f"{unavailable_handler}"
             "    except Exception as exc:\n"
             "        builder.add_failure(\n"
             "            work_item_id=item.work_item_id,\n"
-            "            code=\"PROCESSOR_FAILURE\",\n"
+            f"            code={processor_error_code},\n"
             "            message=str(exc),\n"
-            "            retryable=True,\n"
+            f"            retryable={processor_retryable},\n"
             "            details={\"exception_type\": type(exc).__name__},\n"
             "        )\n"
             "    else:\n"
@@ -485,7 +547,13 @@ def kernel_metadata(spec: NotebookSpec) -> str:
         "kernel_sources": [],
         "my_data_hub": {
             "contracts": spec.contracts,
-            "adapter_status": "implemented" if spec.adapter != "pending" else "pending",
+            "adapter_status": (
+                "contract_ready"
+                if spec.adapter == "stage_contract"
+                else "pending"
+                if spec.adapter == "pending"
+                else "implemented"
+            ),
             "production_ready": False,
         },
     }

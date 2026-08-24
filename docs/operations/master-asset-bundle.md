@@ -11,6 +11,7 @@ checkout:
   --postgres-runtime-sha256 40bf34fb4a97a248537d0221127e38deb98c9b35208d474dd1b93f773c2558b5 \
   --tunnel-known-hosts /private/reviewed/hashed-known-hosts \
   --embedding-wheelhouse /private/reviewed/embedding-worker-wheelhouse \
+  --master-ydb-wheelhouse /private/reviewed/master-ydb-wheelhouse \
   --output /tmp/my-data-hub-master-assets-$(git rev-parse HEAD)
 ```
 
@@ -23,6 +24,31 @@ digest-pinned, both upstream archives are SHA-256 pinned, pgvector disables host
 `OPTFLAGS`, and the output tar/gzip metadata is deterministic. The artifact bytes stay
 outside Git and must match the explicit CLI digest; the known-host file must already use
 OpenSSH hashed-host syntax.
+
+Each build also derives a release-scoped private Dataset slug
+`mdh-master-assets-<first-32-hex-of-commit>`. This prevents a new reviewed release from
+trying to recreate a different package under the preceding release's immutable Dataset
+ref. The full source commit and every byte hash remain authoritative in the bundle and
+provider receipts; the bounded slug prefix is only the provider locator. Repeated master
+starts for the same release reuse the exact numeric Dataset claim after a fresh private
+readback and never create a duplicate version.
+
+The ACTIVE master also needs the YDB Python SDK for the direct, read-only source scan.
+`scripts/provider/assets/master-ydb-wheel-lock.v2.json` pins the official YDB 3.31.2
+wheel and its complete CPython 3.12/manylinux x86-64 runtime closure: exact PyPI file
+URLs, filenames, versions, and SHA-256 values for all 14 files. Materialize exactly that
+inventory into the reviewed wheelhouse; do not add a source distribution, extra wheel,
+or network-resolved package. The builder rejects missing, extra, symlinked, or
+hash-mismatched files and stores the closure under
+`dataset/master-python-wheelhouse/`. The host verifier repeats the canonical lock,
+inventory, per-file size/hash, runtime-image commit, and named root-wheel checks.
+
+Both generated master bootstraps and the Region Talk supervisor locate the exact pinned
+manifest and each wheel in one private asset Dataset, verify every SHA-256 before import,
+and install every file individually with `pip --no-index --no-deps`. They then attest the
+installed distribution versions and the exact `ydb==3.31.2` import. Runtime never relies
+on an image-preinstalled YDB SDK or a package-index/network fallback; the devstand never
+receives source rows.
 
 ## Offline E5/BGE dependency closure
 

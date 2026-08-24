@@ -29,6 +29,26 @@ source commits and hashes are pinned:
 Do not wholesale copy unrelated `events-bot-new` runtime or any environment/session/data
 file.
 
+## Pinned transformation-slice review (2026-08-19)
+
+The pure queue-formation slice is adapted from
+`onedayonemasterpiece/events-bot-new@5bbdb681623d5e4e0bff2133e487a6663c1a838a`.
+The review used Git object bytes at that exact revision, not the donor working tree:
+
+| Source path | Blob | SHA-256 | Target behaviour |
+| --- | --- | --- | --- |
+| `scripts/region_talk_external_publication_import.py` | `2f50d386ecab172f4c64b6eb4c0f39681772fd16` | `8259e342408192d2cf5eb191bc56dc400a09cc3bb57fabdca77208058ece868b` | conservative URL/DOI identity, grounded evidence and rights validation |
+| `kaggle/RegionTalkCandidateReport/region_talk_candidate_report.py` | `7bc15d6175264cd3bfad242f4838c00bd2526394` | `f24a954f2213286ff7cf3ffe3d23706a4cee2d8b94f1421939c4a2f1e12f26c8` | current dual-vector evidence and eligibility v5 |
+| `scripts/region_talk_publication_finalizer.py` | `76e928989585d05d2de2291b36109fba6df78dde` | `1cf78a6ff6b2df21475587a83de1b4c4790080f55b84491939f96e9e8ab901fe` | current-evidence fencing and candidate lifecycle |
+| `scripts/region_talk_publisher_profile.py` | `649b2327f228e646793ec96dd99485605fccf776` | `3d35075594fd554f5e127ad6d12cc34ce4c5ab5e249e0efbeb13c8f01f82b975` | monotonic dossier merge |
+| `scripts/region_talk_review_queue.py` | `d1b7bef64abb4fcc814732c7034a69fed473b534` | `b350bc6c8c74581a443523d5cf4a8bf927d06cad4a7625434a50368ea89acbf1` | disclosed vector/fallback MMR ordering |
+| `scripts/region_talk_publication_plan.py` | `020894297aa61d46d0640dba47d3ad11a5e4b4e8` | `73e801fe380cb9b850df7980366263e783359fcc2d6a85be930bcf035d87a2e4` | current-review-bound publication slots |
+| `tests/test_region_talk_external_publication_import.py` | `a9b9bc82c059e716f79f87359ff2258f4c118760` | `5f4b09e2d9e5e1ce0059b6a7c2770040927ba45be002fea8ed3d1fb79b920e28` | sanitized structural golden fixture |
+
+The target code is an adaptation, not a copy of the 1.2 MB donor Notebook. No donor
+credential, provider client, YDB access, PostgreSQL access or publication side effect was
+ported into the transformation package.
+
 ## Bounded status and safety claims
 
 The verified target-vision source is pinned separately at

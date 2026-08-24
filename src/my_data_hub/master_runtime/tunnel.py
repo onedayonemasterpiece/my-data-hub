@@ -58,6 +58,8 @@ class ReverseTunnelSpec:
         reverse = f"{self.remote_bind_host}:{self.remote_bind_port}:127.0.0.1:{self.local_postgres_port}"
         return [
             "ssh",
+            "-F",
+            "/dev/null",
             "-N",
             "-T",
             "-p",
@@ -76,8 +78,6 @@ class ReverseTunnelSpec:
             f"UserKnownHostsFile={self.known_hosts_file.resolve()}",
             "-o",
             "ExitOnForwardFailure=yes",
-            "-o",
-            "ClearAllForwardings=yes",
             "-o",
             "ForwardAgent=no",
             "-o",

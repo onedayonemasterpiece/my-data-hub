@@ -222,6 +222,39 @@ def _manifest(tmp_path: Path):  # type: ignore[no-untyped-def]
     )
 
 
+def test_runtime_security_evidence_is_bounded_fenced_and_idempotent(tmp_path: Path) -> None:
+    app, ledger, headers = _app(tmp_path)
+    client = TestClient(app)
+    evidence = {
+        "contract": "my-data-hub-master-security-evidence.v1",
+        "source_commit": "a" * 40,
+        "master_instance_id": str(MASTER),
+        "epoch": 1,
+        "schema_version": 18,
+        "canonical_revision": 1,
+        "outcome": "PASSED",
+        "role_probe_count": 16,
+        "security_probe_count": 61,
+        "role_verification_sha256": "b" * 64,
+        "security_test_receipt_sha256": "c" * 64,
+        "observed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    }
+    path = f"/internal/runtime/security-evidence/{RUN}/{ATTEMPT}"
+
+    first = client.post(path, json=evidence, headers=headers)
+    assert first.status_code == 200, first.text
+    assert first.json()["role_verification_sha256"] == "b" * 64
+    assert client.post(path, json=evidence, headers=headers).json() == first.json()
+    assert ledger.latest_master_security_evidence(source_commit="a" * 40) is not None
+
+    wrong_epoch = client.post(path, json=evidence, headers={**headers, "X-MDH-Epoch": "2"})
+    assert wrong_epoch.status_code == 409
+    conflict = client.post(path, json={**evidence, "security_probe_count": 60}, headers=headers)
+    assert conflict.status_code == 409
+    oversized = client.post(path, content=b"{" + b"x" * (16 * 1024), headers=headers)
+    assert oversized.status_code == 413
+
+
 def test_broker_api_is_metadata_only_fenced_and_secret_redacted(tmp_path: Path) -> None:
     _unused, ledger, headers = _app(tmp_path)
     manifest = _manifest(tmp_path)
@@ -281,6 +314,73 @@ def test_broker_api_is_metadata_only_fenced_and_secret_redacted(tmp_path: Path) 
 
     fenced = {**headers, "X-MDH-Epoch": "2"}
     assert client.post(path, json=payload, headers=fenced).status_code == 409
+
+
+def test_expired_checkpoint_runtime_can_only_read_recovery_status(tmp_path: Path) -> None:
+    _unused, ledger, headers = _app(tmp_path)
+    manifest = _manifest(tmp_path)
+    ControlLedgerCheckpointRegistry(
+        ledger,
+        operation_id=str(OPERATION),
+        dataset_ref="owner/checkpoints",
+    ).add_candidate(manifest)
+    broker = BrokeredCheckpointUploadService(
+        ledger,
+        _BlobOnlyAdapter(),  # type: ignore[arg-type]
+        CheckpointUploadSecretBox(b"k" * 32),
+    )
+    client = TestClient(
+        create_app(
+            ControlPlaneSettings(ledger_path=ledger.path),
+            ledger=ledger,
+            master_runtime=_runtime(ledger),
+            checkpoint_upload_broker=broker,
+        )
+    )
+    item = manifest.files[0]
+    payload = {
+        "operation_id": str(OPERATION),
+        "checkpoint_id": str(CHECKPOINT),
+        "master_run_ref": "owner/master/17",
+        "epoch": 1,
+        "file_name": item.path,
+        "content_length": item.byte_size,
+        "content_type": "application/octet-stream",
+        "content_sha256": item.sha256,
+        "manifest_sha256": manifest.manifest_sha256,
+    }
+    path = f"/internal/checkpoints/{CHECKPOINT}/blob-uploads/prepare"
+    assert client.post(path, json=payload, headers=headers).status_code == 200
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="ACTIVE",
+        operation_state="DRAINING",
+        service_state="DRAINING",
+        event_id="draining-event",
+    )
+    ledger.project_master_lifecycle(
+        operation_id=str(OPERATION),
+        service_instance_id=str(SERVICE),
+        epoch=1,
+        expected_operation_state="DRAINING",
+        operation_state="CHECKPOINTING",
+        service_state="DRAINING",
+        event_id="checkpoint-event",
+    )
+    with ledger._transaction() as connection:
+        connection.execute(
+            "UPDATE services SET lease_until=? WHERE service_instance_id=?",
+            ("2020-01-01T00:00:00.000000Z", str(SERVICE)),
+        )
+
+    assert client.get("/internal/checkpoints/runtime-upload-authority", headers=headers).status_code == 200
+    publication = client.get(f"/internal/checkpoints/{CHECKPOINT}/publication", headers=headers)
+    assert publication.status_code == 200
+    assert publication.json()["operation_id"] == str(OPERATION)
+    # Recovery reads never renew admission or issue another provider URL.
+    assert client.post(path, json=payload, headers=headers).status_code == 409
 
 
 def test_remote_journal_requires_exact_runtime_identity(tmp_path: Path) -> None:

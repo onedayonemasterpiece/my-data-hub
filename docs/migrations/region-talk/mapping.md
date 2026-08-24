@@ -78,3 +78,146 @@ history/receipts are imported as events where available. New PostgreSQL operatio
 append-audited from cutover onward. Imported current state is written under an exact
 namespaced Region Talk scope and mapped to a normalized cross-pipeline class; it is not
 collapsed into `orchestration.work_item.status` or a platform policy decision.
+
+## Direct canonical apply v3 coverage
+
+The append-only 0024 mapper makes the business-critical subset executable after the
+snapshot integrity gate:
+
+| Legacy family | Canonical v3 effect |
+|---|---|
+| external articles and live/processed posts | exact-URL/source-identity dedupe into `hub.content_item`, `hub.content_identity`, Region Talk project membership, provenance, external-publication/post intake |
+| source candidates/status/edges/frontier | canonical `region_talk.source` identity, candidate/status/edge evidence, plus paused-but-executable `orchestration.work_item` and `source_work_projection` rows |
+| publication candidates | one candidate per canonical content/project and an immutable revision keyed by candidate plus exact payload hash |
+| publication schedule | `region_talk.publication_plan` for the Region Talk new-channel target, with `publication_dispatch=false` and no attempt |
+| review state/events | `review_decision` only when the exact legacy decision is approve/reject/revise/revoke; unrecognized values remain evidence and are not guessed |
+
+The field aliases accepted by this mapper include `canonical_url`,
+`source_queue_status`/`queue_status`, `image_queue_status`, and
+`publication_status`; the original payload is still the authoritative evidence.
+Statuses outside a target table's enum are preserved verbatim in JSON evidence and use
+an explicitly neutral import lifecycle state. This neutral state is not a reconstructed
+model verdict or a claim that missing legacy history occurred.
+
+Metric snapshots, heartbeats, model request/budget records, embeddings, image diagnostic
+history, and other unsupported historical kinds remain terminally `retained_raw` (or
+`quarantined` when malformed). They are losslessly migrated and accounted, but are not
+claimed as canonical executable semantics in v3. A later append-only mapper with a proven
+target contract is required to promote them.
+
+## Ordered current state across accepted snapshots
+
+Migration 0025 retains `migration.raw_record` and an immutable canonical-state
+observation for every supported current-state source row. A separate explicit head is
+allowed to move only when the incoming source timestamp is not older and the accepted
+canonical revision advances; the exact payload hash makes replay and conflicting state
+observable. This updates existing source candidates, source status/history, work items
+and their events, publication plans, and review decisions rather than silently keeping
+the first snapshot forever. Source status and review/work transitions append history;
+mutable projection tables update in place while continuing to reference the immutable
+raw row and export batch.
+
+Migration 0026 makes exact-payload replay monotonic: replay may refresh the accepted
+revision/raw pointer, but it retains the greatest observed non-null source timestamp.
+A later changed payload with an older timestamp is therefore recorded as `stale` and
+cannot overwrite the head. The first `source_status_item` also updates the mutable
+`region_talk.source.status` projection while reusing the immutable status row already
+created by 0024.
+
+The same migration registers the versioned `region-talk-main` definition and all fixed
+stages during database bootstrap. The pipeline remains `paused`; its
+`publication_dispatch` stage is disabled. Missing heavy post-import evidence is emitted
+only through the fixed task-bound `execute_region_talk_post_import_stages` contract as
+durable typed work. Review queue rows and work payloads constrain both publication and
+notification dispatch to `false`.
+
+The database task authority is also no longer established by the first page. The master
+registers the generated credential against the exact task and generation before worker
+handoff, and every direct-snapshot procedure verifies that registration for the LOGIN.
+
+## Verified stage dispatch and non-regressing replay
+
+Migration 0027 makes identical-payload replay an immutable observation only: it cannot
+move the current revision, batch, raw-record pointer, source clock, or projection.
+Changed stale observations remain denied.
+
+The database now selects eligible heavy-stage work through a fixed claim function and
+binds the lease and deterministic effect identity to the registered task and ACTIVE
+epoch. Only bounded, server-hash-verified metadata enters the immutable result landing;
+exact matching landed success is the sole source for `CURRENT` preparation evidence.
+Provider-specific launch state, arbitrary SQL, raw model artifacts, publication, and
+notification are outside these functions.
+
+The canonical publication queue includes an exact-current publication plan or durable
+post-import review row once per candidate revision. Rows from stale batches/revisions
+are excluded and publication remains disabled.
+
+## Private worker payload split
+
+Migration 0028 removes business payloads and raw lease material from the supervised
+control path. The supervisor claims only an immutable metadata receipt containing task,
+batch, stage, work/effect/dispatch identities, policy, timestamps, and hashes. The full
+bounded execution payload and raw lease remain in PostgreSQL.
+
+The master registers a separate deterministic worker task and credential, then the
+supervisor binds that exact credential, generation, master instance, and epoch to one
+dispatch. Only that worker LOGIN can fetch the payload directly from PostgreSQL and land
+the exact result through the fixed direct-submit function. Wrong supervisor/worker task,
+credential, generation, epoch, effect, binding hash, attempt, or lease fails closed. The
+supervisor status receipt exposes only identities, counts/status, and result hashes.
+Legacy 0027 payload-returning claim/submit/status functions are revoked from the pipeline
+role; publication and notification remain disabled.
+
+## Long-running worker credential rotation
+
+Migration 0029 keeps the deterministic worker task, dispatch, effect, work item, attempt,
+input fingerprint, and database lease stable while allowing the supervisor to bind the
+next separately registered short-lived credential generation. Binding history is
+append-only; the highest exact generation is `ACTIVE` and every prior generation is
+`FENCED` by the fetch/submit functions.
+
+Rotation requires the current binding hash, exact next generation, current supervisor
+authority, a live child credential for the same worker task/master/epoch, and the original
+work/effect/dispatch identity. Exact response-loss replay returns the same rotation
+receipt. Prior or cross-worker LOGINs cannot fetch or submit after rotation. No payload,
+raw lease, task token, database URL, or publication effect enters the rotation receipt.
+
+## Dependency-ready DAG materialization
+
+Migration 0030 makes every PREPARE/reprepare a deterministic database-side DAG
+reconciliation. E5 and BGE work appears only with an ACTIVE-revision runtime pin;
+vector fusion appears only after both exact score receipts validate; image, verifier,
+and writer work appears in order only after each exact predecessor is current. The
+private input row and work UUID are immutable and replaying PREPARE creates no duplicate.
+
+Vector input is `region-talk-vector-fusion-input.v1`; every sorted score row identifies
+its E5/BGE stage and immutable result SHA. Image work is not executable from historical
+queue/frame-score rows or a public URL. It requires a current candidate-associated
+`region-talk-media-artifact-manifest.v1` whose task-private object reference, media ID,
+normalized source URL, byte size, content type, artifact SHA, and acquisition receipt
+cross-check the accepted `hub.content_asset`. Missing verified media leaves image work
+unmaterialized rather than fabricating availability.
+
+Successful evidence is also stage-specific. The database recomputes the canonical
+result-metadata SHA, requires the output SHA to equal it, validates bounded typed metrics,
+and matches an append-only owner/master-registered runtime pin for the exact canonical
+revision and ACTIVE epoch. Runtime pin generations supersede only the exact current
+receipt; workers cannot register or choose pins. Arbitrary producers, empty generic
+success, forged result hashes, and stale pin/result combinations fail closed.
+
+## Supersession-safe identities and media acquisition authority
+
+Migration 0031 includes the complete private stage input (including the exact runtime-pin
+receipt and immutable upstream receipts) in the work fingerprint. Superseding an E5 or BGE
+runtime pin therefore creates one new deterministic work identity on the next PREPARE. Exact
+replay creates no additional row. Results made against the prior pin are no longer current,
+cannot satisfy a downstream dependency, and cannot be accepted again through direct submit.
+Pending stale-pin or stale-dependency work is fenced before claim.
+
+Image readiness no longer trusts the mutable `hub.content_asset.metadata` manifest. An owner or
+master-controller must register an append-only
+`region-talk-media-artifact-acquisition-receipt.v1` for the exact accepted task, batch, stage run,
+candidate revision, ACTIVE epoch, content asset, normalized source/media identity, private object
+reference, byte size/type, and artifact SHA. Registration and PREPARE both cross-check the current
+canonical asset columns. Without that receipt, even legacy metadata containing plausible hashes
+cannot materialize image work. Publication and notification remain false.

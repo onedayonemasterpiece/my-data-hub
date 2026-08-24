@@ -5,8 +5,10 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import tempfile
+from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -15,7 +17,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 
 from my_data_hub.acceptance.master_lifecycle import MasterAcceptanceReceipt
 from my_data_hub.checkpoints import CheckpointManifest, ControlLedgerCheckpointRegistry
@@ -40,6 +42,7 @@ from my_data_hub.control_plane.ledger import (
     MasterAdmissionRejected,
     StaleRuntimeEvent,
 )
+from my_data_hub.control_plane.provider_uploads import ProviderUploadConflict
 from my_data_hub.control_plane.runtime import (
     ControlPlaneMasterRuntime,
     MasterRuntimeSettings,
@@ -75,7 +78,12 @@ from my_data_hub.providers.kaggle import (
     KaggleProviderAdapter,
 )
 from my_data_hub.providers.kaggle.contracts import (
+    KaggleAmbiguousMutation,
+    KaggleContractError,
     KaggleKernelRunIdentity,
+    KaggleNotFound,
+    KagglePolicyError,
+    KaggleProviderError,
     MutationAction,
     ProviderEffectIntent,
     ProviderEffectReceipt,
@@ -93,6 +101,44 @@ from my_data_hub.workloads.bloggers.master_stage import (
     BloggerQuarantineReceipt,
     resolution_matches_quarantine,
 )
+from my_data_hub.workloads.region_talk.central_launcher import (
+    RegionTalkStageDispatchCallback,
+    RegionTalkStageSupervisorRotationPoll,
+    RegionTalkStageWorkerAttestation,
+    RegionTalkStageWorkerRotationActivation,
+    RegionTalkStageWorkerRotationCheckpoint,
+    RegionTalkStageWorkerTerminal,
+)
+from my_data_hub.workloads.region_talk.pipeline_contracts import (
+    ActiveMasterBinding,
+    RegionTalkCredentialActivation,
+    RegionTalkCredentialRefreshRequest,
+    RegionTalkRuntimeAttestation,
+    RegionTalkTerminalReceipt,
+    TaskWorkerCredentialRegistration,
+    TaskWorkerCredentialRegistrationResponse,
+    TaskWorkerCredentialRevocation,
+)
+from my_data_hub.workloads.region_talk.pipeline_runtime import (
+    RegionTalkPipelineCoordinator,
+    RegionTalkPipelineStore,
+    RegionTalkRuntimePins,
+)
+from my_data_hub.workloads.region_talk.production_assembly import (
+    CentralRegionTalkNotebookAdapter,
+    CentralRegionTalkStageCredentialBroker,
+    CentralRegionTalkStageNotebookAdapter,
+    DirectoryRegionTalkTaskAuthority,
+    RegionTalkAssemblySettings,
+    RegionTalkAssemblyUnavailable,
+    RegionTalkMCPController,
+)
+from my_data_hub.workloads.region_talk.stage_dispatch import (
+    RegionTalkStageDispatcher,
+    StageWorkMetadataClaimReceipt,
+)
+
+LOGGER = logging.getLogger(__name__)
 
 DATABASE_ENVIRONMENT_NAMES = (
     "MY_DATA_HUB_DATABASE_URL",
@@ -251,6 +297,8 @@ class ControlPlaneSettings:
     operator_credentials_enabled: bool = False
     provider_gateway_enabled: bool = False
     provider_only_mode: bool = False
+    unified_bootstrap_mode: bool = False
+    provider_upload_root: Path | None = None
     acceptance_scenarios_enabled: bool = False
     connector_runtime_enabled: bool = False
 
@@ -259,11 +307,19 @@ class ControlPlaneSettings:
             raise ControlPlaneConfigurationError("control-plane listener is invalid")
         if self.scheduler_enabled or self.production_publish_enabled or self.remote_mcp_writes_enabled:
             raise ControlPlaneConfigurationError("PR-A control-plane write and publication gates must remain false")
-        if self.provider_gateway_enabled and not self.operator_credentials_enabled:
+        if self.provider_gateway_enabled and not (
+            self.operator_credentials_enabled or self.unified_bootstrap_mode
+        ):
             raise ControlPlaneConfigurationError("provider gateway requires the explicit operator credential gate")
         if self.acceptance_scenarios_enabled and not self.provider_gateway_enabled:
             raise ControlPlaneConfigurationError(
                 "acceptance scenarios require the authenticated single control gateway"
+            )
+        if self.provider_upload_root is not None and (
+            not self.provider_upload_root.is_absolute() or self.provider_upload_root.is_symlink()
+        ):
+            raise ControlPlaneConfigurationError(
+                "provider upload staging root must be an absolute non-symlink path"
             )
         if self.provider_only_mode and (
             not self.provider_gateway_enabled
@@ -274,6 +330,18 @@ class ControlPlaneSettings:
         ):
             raise ControlPlaneConfigurationError(
                 "provider-only control requires only the authenticated provider gateway"
+            )
+        if self.unified_bootstrap_mode and (
+            self.provider_only_mode
+            or self.operator_credentials_enabled
+            or not self.provider_gateway_enabled
+            or self.master_runtime is None
+            or self.acceptance_scenarios_enabled
+            or self.connector_runtime_enabled
+        ):
+            raise ControlPlaneConfigurationError(
+                "unified bootstrap control requires the master runtime and provider gateway "
+                "without operator, acceptance, or connector authority"
             )
 
     @classmethod
@@ -303,6 +371,10 @@ class ControlPlaneSettings:
             operator_credentials_enabled=_boolean("MY_DATA_HUB_MCP_OPERATOR_CREDENTIALS_ENABLED"),
             provider_gateway_enabled=_boolean("MY_DATA_HUB_MCP_PROVIDER_GATEWAY_ENABLED"),
             provider_only_mode=_boolean("MY_DATA_HUB_PROVIDER_ONLY_MODE"),
+            unified_bootstrap_mode=_boolean("MY_DATA_HUB_UNIFIED_BOOTSTRAP_MODE"),
+            provider_upload_root=Path(
+                os.getenv("MY_DATA_HUB_PROVIDER_UPLOAD_ROOT", "/uploads")
+            ).expanduser(),
             acceptance_scenarios_enabled=_boolean("MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED"),
             connector_runtime_enabled=_boolean("MY_DATA_HUB_CONNECTOR_RUNTIME_ENABLED"),
         )
@@ -326,6 +398,8 @@ def create_app(
     checkpoint_upload_broker: BrokeredCheckpointUploadService | None = None,
     embedding_direct_plane_launcher: CentralEmbeddingWorkerLauncher | None = None,
     embedding_credential_authority: DirectoryEmbeddingCredentialAuthority | None = None,
+    region_talk_coordinator: RegionTalkPipelineCoordinator | None = None,
+    region_talk_task_authority: DirectoryRegionTalkTaskAuthority | None = None,
 ) -> FastAPI:
     runtime = settings or ControlPlaneSettings.from_env()
     if operator_credential_enabled is None:
@@ -342,6 +416,12 @@ def create_app(
         raise ControlPlaneConfigurationError("tunnel listen port is outside 1024..65535")
     ledger_path = runtime.ledger_path or Path(tempfile.mkdtemp(prefix="mdh-control-")) / "control.sqlite3"
     control_ledger = ledger or ControlLedger(ledger_path)
+    region_talk_settings = RegionTalkAssemblySettings.from_env()
+    region_talk_settings.validate()
+    if region_talk_settings.enabled and not runtime.provider_gateway_enabled:
+        raise ControlPlaneConfigurationError(
+            "Region Talk pipeline requires the authenticated single control gateway"
+        )
     provider_adapter: KaggleProviderAdapter | None = None
     if master_runtime is None:
         production = build_production_runtime(
@@ -365,7 +445,17 @@ def create_app(
             raise ControlPlaneConfigurationError("master runtime and app must share one control ledger")
         provider_status = "available"
     if provider_gateway is None and provider_adapter is not None:
-        provider_gateway = KaggleMCPProviderGateway(control_ledger, provider_adapter)
+        provider_gateway = KaggleMCPProviderGateway(
+            control_ledger,
+            provider_adapter,
+            upload_root=runtime.provider_upload_root if runtime.provider_gateway_enabled else None,
+        )
+    if runtime.unified_bootstrap_mode and (
+        master_runtime is None or provider_gateway is None or provider_status != "available"
+    ):
+        raise ControlPlaneConfigurationError(
+            "unified bootstrap runtime requires the concrete master and central provider adapter"
+        )
     def _exact_master_asset_claim(settings: MasterRuntimeSettings | None) -> dict[str, Any] | None:
         if settings is None or not hasattr(settings, "assets"):
             return None
@@ -377,7 +467,7 @@ def create_app(
         if claim is None:
             return None
         authority = control_ledger.provider_effect_authority(str(claim["effect_id"]))
-        receipt = control_ledger.latest_provider_effect_receipt(str(claim["effect_id"]))
+        receipt = control_ledger.latest_successful_provider_effect_receipt(str(claim["effect_id"]))
         expected_content_tree_sha256 = KaggleMasterRuntimeProvider._mapping_sha(settings.assets.dataset_files)
         expected_arguments_sha256 = sha256_value(
             {
@@ -408,7 +498,7 @@ def create_app(
     # Provider mutations are deferred to the lifespan reconciler; app
     # construction remains side-effect free and embedding admission closed.
     if runtime.provider_gateway_enabled:
-        if not operator_credential_enabled or provider_gateway is None:
+        if not (operator_credential_enabled or runtime.unified_bootstrap_mode) or provider_gateway is None:
             raise ControlPlaneConfigurationError("provider gateway requires the single authenticated control adapter")
         if provider_gateway_token is None:
             token_path = Path(os.getenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE", "")).expanduser()
@@ -510,27 +600,167 @@ def create_app(
         else None
     )
 
+    def _active_region_talk_master() -> ActiveMasterBinding | None:
+        service = control_ledger.resolve_service("postgres-master")
+        if service is None:
+            return None
+        operation = control_ledger.operation_for_attempt(service.run_id, service.attempt_id)
+        if operation is None or operation.state != "ACTIVE":
+            return None
+        return ActiveMasterBinding(
+            run_id=UUID(service.run_id),
+            attempt_id=UUID(service.attempt_id),
+            master_instance_id=UUID(service.master_instance_id),
+            epoch=service.epoch,
+        )
+
+    def _assemble_region_talk(exact_runtime_ref: str) -> None:
+        nonlocal region_talk_coordinator, region_talk_task_authority
+        if region_talk_coordinator is not None or not region_talk_settings.enabled:
+            return
+        if provider_adapter is None or not isinstance(tunnel_certificate_broker, TunnelBrokerClient):
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_CENTRAL_ADAPTER_OR_BROKER_UNAVAILABLE")
+        tls_path = Path(os.getenv("MY_DATA_HUB_MASTER_TLS_CA_PATH", ""))
+        known_path = Path(os.getenv("MY_DATA_HUB_MASTER_TUNNEL_KNOWN_HOSTS_PATH", ""))
+        gateway_host = os.getenv("MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_HOST", "").strip()
+        try:
+            gateway_port = int(os.getenv("MY_DATA_HUB_MASTER_TUNNEL_GATEWAY_PORT", "0"))
+        except ValueError as exc:
+            raise RegionTalkAssemblyUnavailable("REGION_TALK_TUNNEL_ENDPOINT_INVALID") from exc
+        authority = DirectoryRegionTalkTaskAuthority(
+            region_talk_settings.capability_root,
+            broker=tunnel_certificate_broker,
+            tls_ca_path=tls_path,
+            known_hosts_path=known_path,
+            gateway_host=gateway_host,
+            gateway_port=gateway_port,
+        )
+        launch_adapter = CentralRegionTalkNotebookAdapter(
+            adapter=provider_adapter,
+            authority=authority,
+            owner=region_talk_settings.owner,
+            callback_base_url=region_talk_settings.callback_base_url,
+        )
+        stage_credentials = CentralRegionTalkStageCredentialBroker(
+            authority=authority,
+            image_identity=region_talk_settings.runtime_image_identity,
+            image_source_commit=region_talk_settings.runtime_image_source_commit,
+            source_sha256_by_stage={},
+        )
+        stage_adapter = CentralRegionTalkStageNotebookAdapter(
+            adapter=provider_adapter,
+            authority=authority,
+            credential_broker=stage_credentials,
+            owner=region_talk_settings.owner,
+            callback_base_url=region_talk_settings.callback_base_url,
+            runtime_dataset_exact_ref=exact_runtime_ref,
+            runtime_image_identity=region_talk_settings.runtime_image_identity,
+            runtime_image_source_commit=(
+                region_talk_settings.runtime_image_source_commit
+            ),
+            wheel_relative_path=region_talk_settings.wheel_relative_path,
+            wheel_sha256=region_talk_settings.wheel_sha256,
+            dependency_manifest_sha256=(
+                region_talk_settings.worker_dependency_manifest_sha256
+            ),
+        )
+        stage_credentials.source_factory = stage_adapter.source_for_claim
+        stage_dispatcher = RegionTalkStageDispatcher(
+            adapter=stage_adapter,
+            notebook_owner=region_talk_settings.owner,
+            journal_path=region_talk_settings.capability_root
+            / "stage-dispatch-metadata.json",
+        )
+        coordinator = RegionTalkPipelineCoordinator(
+            store=RegionTalkPipelineStore(control_ledger.path),
+            launcher=launch_adapter,
+            cleanup=launch_adapter,
+            pins=RegionTalkRuntimePins(
+                runtime_dataset_exact_ref=exact_runtime_ref,
+                runtime_image_identity=region_talk_settings.runtime_image_identity,
+                runtime_image_source_commit=region_talk_settings.runtime_image_source_commit,
+                wheel_relative_path=region_talk_settings.wheel_relative_path,
+                wheel_sha256=region_talk_settings.wheel_sha256,
+                ydb_endpoint=region_talk_settings.ydb_endpoint,
+                ydb_database=region_talk_settings.ydb_database,
+                ydb_viewer_secret_label=region_talk_settings.ydb_viewer_secret_label,
+                ydb_dependency_manifest_sha256=(
+                    region_talk_settings.ydb_dependency_manifest_sha256
+                ),
+                # The worker obtains a fresh <=4 minute generation after
+                # attestation whenever provider scheduling consumed the
+                # launch-time credential.  The proved DB session itself owns
+                # the bounded long migration; publication remains disabled.
+                # The first cycle imports once. Later cycles only re-PREPARE
+                # post-import stages while central private workers advance the
+                # DB-owned DAG; WAITING_WORK is never terminal success.
+                max_cycles=96,
+                max_runtime_seconds=7200,
+            ),
+            instance_id=f"control:{app.state.control_boot_id}",
+        )
+        region_talk_task_authority = authority
+        region_talk_coordinator = coordinator
+        app.state.region_talk_task_authority = authority
+        app.state.region_talk_stage_credentials = stage_credentials
+        app.state.region_talk_stage_adapter = stage_adapter
+        app.state.region_talk_stage_dispatcher = stage_dispatcher
+        app.state.region_talk_coordinator = coordinator
+        app.state.region_talk_mcp_controller = RegionTalkMCPController(coordinator)
+        app.state.region_talk_readiness_code = "READY"
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         stopped = asyncio.Event()
         task: asyncio.Task[None] | None = None
+        upload_reaper_task: asyncio.Task[None] | None = None
+
+        async def reconcile_upload_expiry() -> None:
+            while not stopped.is_set():
+                if provider_gateway is not None:
+                    with suppress(Exception):
+                        await asyncio.to_thread(provider_gateway.reap_uploads)
+                try:
+                    await asyncio.wait_for(stopped.wait(), timeout=30.0)
+                except TimeoutError:
+                    continue
 
         async def reconcile_requests() -> None:
             while not stopped.is_set():
+                if checkpoint_upload_broker is not None:
+                    with suppress(Exception):
+                        await asyncio.to_thread(checkpoint_upload_broker.reconcile_pending_once)
+                        # A draining runtime cannot safely wait behind the
+                        # slower provider-run poll below.  The same central
+                        # adapter is kept serial: checkpoint recovery has
+                        # priority, then ordinary master reconciliation runs.
                 if master_runtime is not None:
                     with suppress(Exception):
                         await asyncio.to_thread(master_runtime.reconcile_requested_once)
+                        reconcile_incomplete = getattr(
+                            master_runtime, "reconcile_incomplete_once", None
+                        )
+                        if reconcile_incomplete is not None:
+                            await asyncio.to_thread(reconcile_incomplete)
                         reconcile_acceptance = getattr(master_runtime, "reconcile_acceptance_once", None)
                         if reconcile_acceptance is not None:
                             await asyncio.to_thread(reconcile_acceptance)
                         reconcile_status_cleanup = getattr(master_runtime, "reconcile_status_cleanup_once", None)
                         if reconcile_status_cleanup is not None:
                             await asyncio.to_thread(reconcile_status_cleanup)
-                if checkpoint_upload_broker is not None:
-                    with suppress(Exception):
-                        await asyncio.to_thread(checkpoint_upload_broker.reconcile_pending_once)
-                        # The durable request remains PENDING; provider details
-                        # never enter logs/responses and bounded retry resumes.
+                if (
+                    region_talk_settings.enabled
+                    and app.state.region_talk_coordinator is None
+                    and provider_adapter is not None
+                ):
+                    claim = _exact_master_asset_claim(runtime.master_runtime)
+                    if claim is not None:
+                        try:
+                            _assemble_region_talk(
+                                f"{claim['provider_ref']}/{claim['provider_version']}"
+                            )
+                        except RegionTalkAssemblyUnavailable as exc:
+                            app.state.region_talk_readiness_code = exc.code
                 if app.state.embedding_direct_plane_launcher is None and provider_adapter is not None:
                     settings = runtime.master_runtime
                     claim = _exact_master_asset_claim(settings)
@@ -573,19 +803,44 @@ def create_app(
                 if launcher is not None:
                     with suppress(Exception):
                         await asyncio.to_thread(launcher.reconcile_timeouts)
+                stage_adapter = app.state.region_talk_stage_adapter
+                if stage_adapter is not None:
+                    with suppress(Exception):
+                        await asyncio.to_thread(stage_adapter.reconcile_terminal_runs)
+                coordinator = app.state.region_talk_coordinator
+                if coordinator is not None:
+                    active = _active_region_talk_master()
+                    latest = coordinator.status()
+                    if latest is not None and latest.state.value == "WAITING_MASTER" and active is None:
+                        with suppress(Exception):
+                            await asyncio.to_thread(
+                                master_runtime.ensure,
+                                f"region-talk-pipeline:{latest.request.request_id}",
+                            )
+                    if region_talk_settings.schedule_enabled:
+                        now = datetime.now(UTC)
+                        slot = now.replace(minute=0, second=0, microsecond=0)
+                        with suppress(Exception):
+                            coordinator.schedule(slot)
+                    with suppress(Exception):
+                        await asyncio.to_thread(coordinator.tick, active)
                 try:
-                    await asyncio.wait_for(stopped.wait(), timeout=5.0)
+                    await asyncio.wait_for(stopped.wait(), timeout=30.0)
                 except TimeoutError:
                     continue
 
         if master_runtime is not None:
             task = asyncio.create_task(reconcile_requests())
+        if provider_gateway is not None and getattr(provider_gateway, "uploads", None) is not None:
+            upload_reaper_task = asyncio.create_task(reconcile_upload_expiry())
         try:
             yield
         finally:
             stopped.set()
             if task is not None:
                 await task
+            if upload_reaper_task is not None:
+                await upload_reaper_task
 
     app = FastAPI(
         title="my-data-hub lightweight control plane",
@@ -612,6 +867,26 @@ def create_app(
     )
     app.state.embedding_credential_authority = embedding_credential_authority
     app.state.embedding_launch_tasks = set()
+    app.state.region_talk_coordinator = region_talk_coordinator
+    app.state.region_talk_task_authority = region_talk_task_authority
+    app.state.region_talk_stage_credentials = None
+    app.state.region_talk_stage_adapter = None
+    app.state.region_talk_stage_dispatcher = None
+    app.state.region_talk_mcp_controller = (
+        RegionTalkMCPController(region_talk_coordinator)
+        if region_talk_coordinator is not None
+        else None
+    )
+    app.state.region_talk_readiness_code = (
+        "READY"
+        if (
+            region_talk_coordinator is not None
+            and region_talk_task_authority is not None
+        )
+        else "REGION_TALK_DISABLED"
+        if not region_talk_settings.enabled
+        else "REGION_TALK_EXACT_RUNTIME_CLAIM_PENDING"
+    )
     app.state.provider_gateway = provider_gateway if runtime.provider_gateway_enabled else None
     app.state.acceptance_scenario_adapter = acceptance_scenario_adapter
     # Process invocation identity, not the host/kernel boot ID. A real control
@@ -870,11 +1145,27 @@ def create_app(
             "lifecycle_implementation": "durable_control_ledger_v1",
             "production_publication": runtime.production_publish_enabled,
             "remote_mcp_writes": runtime.remote_mcp_writes_enabled,
+            "master_runtime_ready": app.state.master_runtime is not None,
+            "master_provider_status": app.state.master_provider_status,
+            "provider_gateway_ready": app.state.provider_gateway is not None,
+            "unified_bootstrap_mode": runtime.unified_bootstrap_mode,
         }
+        if region_talk_settings.enabled:
+            region_talk_ready = (
+                app.state.region_talk_coordinator is not None
+                and app.state.region_talk_task_authority is not None
+                and app.state.region_talk_mcp_controller is not None
+            )
+            result.update(
+                region_talk_pipeline_enabled=True,
+                region_talk_pipeline_ready=region_talk_ready,
+                region_talk_pipeline_readiness_code=app.state.region_talk_readiness_code,
+                region_talk_schedule_enabled=region_talk_settings.schedule_enabled,
+                region_talk_publication_dispatch=False,
+            )
         if runtime.provider_only_mode:
             result.update(
                 provider_only_mode=True,
-                provider_gateway_ready=app.state.provider_gateway is not None,
             )
         return result
 
@@ -903,6 +1194,18 @@ def create_app(
 
     @app.get("/health/ready")
     def ready() -> dict[str, Any]:
+        if region_talk_settings.enabled and not (
+            app.state.region_talk_coordinator is not None
+            and app.state.region_talk_task_authority is not None
+            and app.state.region_talk_mcp_controller is not None
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": app.state.region_talk_readiness_code,
+                    **snapshot(),
+                },
+            )
         return {"ok": True, "control_boot_id": str(app.state.control_boot_id), **snapshot()}
 
     if runtime.provider_gateway_enabled:
@@ -917,6 +1220,11 @@ def create_app(
                     "provider.resources.download",
                     "provider.inventory.live",
                     "provider.resources.delete",
+                    "provider.upload.start",
+                    "provider.upload.put_chunk",
+                    "provider.upload.status",
+                    "provider.upload.finalize",
+                    "provider.upload.abort",
                     "provider.acceptance.claim.get",
                     "provider.acceptance.claim.cleanup",
                 }
@@ -932,6 +1240,11 @@ def create_app(
                     "provider.resources.download",
                     "provider.inventory.live",
                     "provider.resources.delete",
+                    "provider.upload.start",
+                    "provider.upload.put_chunk",
+                    "provider.upload.status",
+                    "provider.upload.finalize",
+                    "provider.upload.abort",
                     "provider.acceptance.dataset.lifecycle",
                     "provider.acceptance.notebook.lifecycle",
                     "provider.acceptance.claim.get",
@@ -939,6 +1252,11 @@ def create_app(
                     *(
                         {"acceptance.scenario.request", "acceptance.scenario.status"}
                         if runtime.acceptance_scenarios_enabled
+                        else set()
+                    ),
+                    *(
+                        {"region_talk.pipeline.status", "region_talk.pipeline.run"}
+                        if region_talk_settings.enabled or region_talk_coordinator is not None
                         else set()
                     ),
                 }
@@ -950,6 +1268,11 @@ def create_app(
             request: Request,
             authorization: str | None = Header(default=None),
         ) -> dict[str, Any]:
+            correlation_id = str(uuid4())
+
+            def gateway_detail(code: str) -> dict[str, str]:
+                return {"code": code, "correlation_id": correlation_id}
+
             supplied = (
                 authorization.removeprefix("Bearer ").strip()
                 if authorization and authorization.startswith("Bearer ")
@@ -957,16 +1280,22 @@ def create_app(
             )
             expected = provider_gateway_token.decode("ascii") if provider_gateway_token else ""
             if not supplied or not hmac.compare_digest(supplied, expected):
-                raise HTTPException(status_code=401, detail={"code": "provider_gateway_token_invalid"})
+                raise HTTPException(status_code=401, detail=gateway_detail("provider_gateway_token_invalid"))
             raw = await request.body()
             if len(raw) > 512 * 1024:
-                raise HTTPException(status_code=413, detail={"code": "provider_gateway_request_too_large"})
+                raise HTTPException(
+                    status_code=413, detail=gateway_detail("provider_gateway_request_too_large")
+                )
             try:
                 body = json.loads(raw)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise HTTPException(status_code=400, detail={"code": "provider_gateway_json_invalid"}) from exc
+                raise HTTPException(
+                    status_code=400, detail=gateway_detail("provider_gateway_json_invalid")
+                ) from exc
             if not isinstance(body, dict) or set(body) != {"tool", "arguments", "principal"}:
-                raise HTTPException(status_code=422, detail={"code": "provider_gateway_envelope_invalid"})
+                raise HTTPException(
+                    status_code=422, detail=gateway_detail("provider_gateway_envelope_invalid")
+                )
             tool = body["tool"]
             arguments = body["arguments"]
             principal = body["principal"]
@@ -999,7 +1328,9 @@ def create_app(
                 or not isinstance(principal["issued_at"], int)
                 or isinstance(principal["issued_at"], bool)
             ):
-                raise HTTPException(status_code=422, detail={"code": "provider_gateway_contract_invalid"})
+                raise HTTPException(
+                    status_code=422, detail=gateway_detail("provider_gateway_contract_invalid")
+                )
             now = int(datetime.now(UTC).timestamp())
             try:
                 identity = AccessIdentity(
@@ -1014,7 +1345,9 @@ def create_app(
                     resource=str(principal["resource"]),
                 )
             except (TypeError, ValueError) as exc:
-                raise HTTPException(status_code=422, detail={"code": "provider_gateway_principal_invalid"}) from exc
+                raise HTTPException(
+                    status_code=422, detail=gateway_detail("provider_gateway_principal_invalid")
+                ) from exc
             contract = TOOL_CONTRACTS[tool]
             if (
                 not identity.subject
@@ -1023,7 +1356,9 @@ def create_app(
                 or identity.expires_at <= now
                 or contract.scope not in identity.scopes
             ):
-                raise HTTPException(status_code=403, detail={"code": "provider_gateway_principal_denied"})
+                raise HTTPException(
+                    status_code=403, detail=gateway_detail("provider_gateway_principal_denied")
+                )
 
             forbidden = {"authorization", "database_url", "dsn", "password", "private_key", "secret", "token"}
 
@@ -1031,7 +1366,10 @@ def create_app(
                 if isinstance(value, dict):
                     for key, nested in value.items():
                         if str(key).casefold() in forbidden:
-                            raise HTTPException(status_code=422, detail={"code": "provider_gateway_secret_forbidden"})
+                            raise HTTPException(
+                                status_code=422,
+                                detail=gateway_detail("provider_gateway_secret_forbidden"),
+                            )
                         reject_secrets(nested)
                 elif isinstance(value, list):
                     for nested in value:
@@ -1040,16 +1378,72 @@ def create_app(
             reject_secrets(arguments)
             assert provider_control is not None
             try:
-                result = await asyncio.to_thread(provider_control.invoke_control, tool, arguments, identity)
-            except PermissionError as exc:
-                raise HTTPException(status_code=403, detail={"code": "provider_gateway_policy_denied"}) from exc
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail={"code": "provider_gateway_request_invalid"}) from exc
+                if tool == "region_talk.pipeline.status":
+                    controller = app.state.region_talk_mcp_controller
+                    if controller is None:
+                        raise PermissionError("Region Talk pipeline assembly is not ready")
+                    result = controller.status()
+                elif tool == "region_talk.pipeline.run":
+                    from my_data_hub.mcp.region_talk_schemas import RegionTalkPipelineRunRequest
+
+                    controller = app.state.region_talk_mcp_controller
+                    if controller is None:
+                        raise PermissionError("Region Talk pipeline assembly is not ready")
+                    result = controller.request_supervised_run(
+                        request=RegionTalkPipelineRunRequest.model_validate(arguments),
+                        principal=identity,
+                    )
+                else:
+                    result = await asyncio.to_thread(
+                        provider_control.invoke_control, tool, arguments, identity
+                    )
+            except (PermissionError, KagglePolicyError) as exc:
+                code, status_code = "provider_gateway_policy_denied", 403
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
+            except KaggleAmbiguousMutation as exc:
+                code, status_code = "provider_gateway_effect_ambiguous", 409
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
+            except KaggleNotFound as exc:
+                code, status_code = "provider_gateway_not_found", 404
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
+            except ProviderUploadConflict as exc:
+                code, status_code = "provider_gateway_upload_conflict", 409
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
+            except (ValueError, KaggleContractError) as exc:
+                code, status_code = "provider_gateway_request_invalid", 422
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
+            except KaggleProviderError as exc:
+                code, status_code = "provider_gateway_effect_failed", 502
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
             except Exception as exc:
-                raise HTTPException(status_code=502, detail={"code": "provider_gateway_effect_failed"}) from exc
+                code, status_code = "provider_gateway_internal_failure", 502
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
             encoded = canonical_json_bytes(result)
             if len(encoded) > 2 * 1024 * 1024:
-                raise HTTPException(status_code=502, detail={"code": "provider_gateway_response_too_large"})
+                raise HTTPException(
+                    status_code=502, detail=gateway_detail("provider_gateway_response_too_large")
+                )
             return result
 
     @app.get("/control/v1/master")
@@ -1074,6 +1468,19 @@ def create_app(
                 else "provider_unavailable"
             )
             raise HTTPException(status_code=503, detail={"code": code})
+        active_service = control_ledger.resolve_service("postgres-master")
+        if active_service is not None:
+            active_operation = control_ledger.operation_for_attempt(
+                active_service.run_id,
+                active_service.attempt_id,
+            )
+            if active_operation is not None and active_operation.state == "ACTIVE":
+                return {
+                    "operation_id": active_operation.operation_id,
+                    "master_state": active_operation.state,
+                    "duplicate": True,
+                    "terminal": True,
+                }
         try:
             handle, duplicate = master_runtime.ensure(key)
         except Exception as exc:
@@ -1980,7 +2387,7 @@ def create_app(
                     *(["operator"] if operator_credential_enabled else []),
                     *(
                         ["connector", "canonical_committer"]
-                        if runtime.connector_runtime_enabled
+                        if operator_credential_enabled or runtime.connector_runtime_enabled
                         else []
                     ),
                 ]
@@ -2045,7 +2452,8 @@ def create_app(
             *(["operator"] if operation.state == "ACTIVE" and operator_credential_enabled else []),
             *(
                 ["connector", "canonical_committer"]
-                if operation.state == "ACTIVE" and runtime.connector_runtime_enabled
+                if operation.state == "ACTIVE"
+                and (operator_credential_enabled or runtime.connector_runtime_enabled)
                 else []
             ),
         ]
@@ -2108,6 +2516,562 @@ def create_app(
         reference = authority.store(registration)
         return {"registered": True, "credential_ref": reference.name}
 
+    def _task_credential_runtime(
+        run_id: str, attempt_id: str, authorization: str | None
+    ) -> tuple[Any, DirectoryRegionTalkTaskAuthority]:
+        authority = app.state.region_talk_task_authority
+        if authority is None:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": app.state.region_talk_readiness_code},
+            )
+        if (
+            not authorization
+            or not authorization.startswith("Bearer ")
+            or not control_ledger.runtime_token_valid(
+                run_id, attempt_id, authorization.removeprefix("Bearer ").strip()
+            )
+        ):
+            raise HTTPException(status_code=401, detail={"code": "runtime_token_invalid"})
+        operation = control_ledger.operation_for_attempt(run_id, attempt_id)
+        active = _active_region_talk_master()
+        if (
+            operation is None
+            or operation.state != "ACTIVE"
+            or active is None
+            or str(active.run_id) != run_id
+            or str(active.attempt_id) != attempt_id
+        ):
+            raise HTTPException(status_code=409, detail={"code": "active_epoch_mismatch"})
+        return operation, authority
+
+    @app.get("/internal/runtime/task-worker-credentials/{run_id}/{attempt_id}/commands")
+    def task_worker_credential_commands(
+        run_id: str,
+        attempt_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        operation, authority = _task_credential_runtime(run_id, attempt_id, authorization)
+        identity = operation.identity
+        return authority.batch(
+            master_instance_id=UUID(str(identity["master_instance_id"])),
+            epoch=int(identity["epoch"]),
+        ).model_dump(mode="json")
+
+    @app.post("/internal/runtime/task-worker-credentials/{run_id}/{attempt_id}")
+    async def register_task_worker_credential(
+        run_id: str,
+        attempt_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        operation, authority = _task_credential_runtime(run_id, attempt_id, authorization)
+        body = await _bounded_json(request)
+        try:
+            registration = TaskWorkerCredentialRegistration.model_validate(body)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail={"code": "task_credential_registration_invalid"}
+            ) from exc
+        identity = operation.identity
+        if (
+            registration.worker_kind != "region_talk"
+            or str(registration.master_instance_id) != str(identity["master_instance_id"])
+            or registration.epoch != int(identity["epoch"])
+        ):
+            raise HTTPException(status_code=409, detail={"code": "active_epoch_mismatch"})
+        try:
+            return authority.register(registration).model_dump(mode="json")
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+
+    @app.post(
+        "/internal/runtime/task-worker-credentials/{run_id}/{attempt_id}/registration-acknowledgements"
+    )
+    async def acknowledge_task_worker_registrations(
+        run_id: str,
+        attempt_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _operation, authority = _task_credential_runtime(
+            run_id, attempt_id, authorization
+        )
+        body = await _bounded_json(request)
+        if set(body) != {"schema_version", "registrations"} or body.get(
+            "schema_version"
+        ) != "my-data-hub-task-registration-ack.v1" or not isinstance(
+            body.get("registrations"), list
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "task_registration_ack_invalid"},
+            )
+        try:
+            registrations = tuple(
+                TaskWorkerCredentialRegistrationResponse.model_validate(item)
+                for item in body["registrations"]
+            )
+            authority.acknowledge_registrations(registrations)
+        except (ValueError, RegionTalkAssemblyUnavailable) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "task_registration_ack_rejected"},
+            ) from exc
+        return {"acknowledged": True, "count": len(registrations)}
+
+    @app.post(
+        "/internal/runtime/task-worker-credentials/{run_id}/{attempt_id}/acknowledgements"
+    )
+    async def acknowledge_task_worker_revocations(
+        run_id: str,
+        attempt_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _operation, authority = _task_credential_runtime(
+            run_id, attempt_id, authorization
+        )
+        body = await _bounded_json(request)
+        if set(body) != {"schema_version", "revocations"} or body.get(
+            "schema_version"
+        ) != "my-data-hub-task-credential-ack.v1" or not isinstance(
+            body.get("revocations"), list
+        ):
+            raise HTTPException(
+                status_code=422, detail={"code": "task_credential_ack_invalid"}
+            )
+        try:
+            revocations = tuple(
+                TaskWorkerCredentialRevocation.model_validate(item)
+                for item in body["revocations"]
+            )
+            authority.acknowledge_revocations(revocations)
+        except (ValueError, RegionTalkAssemblyUnavailable) as exc:
+            raise HTTPException(
+                status_code=409, detail={"code": "task_credential_ack_rejected"}
+            ) from exc
+        return {"acknowledged": True, "count": len(revocations)}
+
+    def _region_talk_callback_authority(
+        *, task_run_id: UUID, authorization: str | None
+    ) -> tuple[RegionTalkPipelineCoordinator, Mapping[str, Any]]:
+        coordinator = app.state.region_talk_coordinator
+        authority = app.state.region_talk_task_authority
+        if coordinator is None or authority is None:
+            raise HTTPException(status_code=503, detail={"code": app.state.region_talk_readiness_code})
+        supplied = (
+            authorization.removeprefix("Bearer ").strip()
+            if authorization and authorization.startswith("Bearer ")
+            else ""
+        )
+        try:
+            task = authority.validate_token(task_run_id, supplied)
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=401, detail={"code": exc.code}) from exc
+        return coordinator, task
+
+    def _assert_region_talk_stage_active(*, master_instance_id: UUID, epoch: int) -> None:
+        active = _active_region_talk_master()
+        if (
+            active is None
+            or active.master_instance_id != master_instance_id
+            or active.epoch != epoch
+        ):
+            raise HTTPException(status_code=409, detail={"code": "active_epoch_mismatch"})
+
+    @app.post("/internal/region-talk-pipeline/stage/prepare")
+    async def prepare_region_talk_stage_worker(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            claim = StageWorkMetadataClaimReceipt.model_validate(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_stage_claim_invalid"}) from exc
+        _region_talk_callback_authority(
+            task_run_id=claim.supervisor_task_run_id, authorization=authorization
+        )
+        _assert_region_talk_stage_active(
+            master_instance_id=claim.master_instance_id, epoch=claim.epoch
+        )
+        broker = app.state.region_talk_stage_credentials
+        if broker is None:
+            raise HTTPException(status_code=503, detail={"code": "region_talk_stage_unavailable"})
+        try:
+            result = broker.prepare(claim)
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        return result.model_dump(mode="json")
+
+    @app.post("/internal/region-talk-pipeline/stage/dispatch")
+    async def dispatch_region_talk_stage_worker(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            callback = RegionTalkStageDispatchCallback.model_validate(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_stage_dispatch_invalid"}) from exc
+        claim = callback.claim
+        _region_talk_callback_authority(
+            task_run_id=claim.supervisor_task_run_id, authorization=authorization
+        )
+        _assert_region_talk_stage_active(
+            master_instance_id=claim.master_instance_id, epoch=claim.epoch
+        )
+        dispatcher = app.state.region_talk_stage_dispatcher
+        if dispatcher is None:
+            raise HTTPException(status_code=503, detail={"code": "region_talk_stage_unavailable"})
+        try:
+            result = await asyncio.to_thread(
+                dispatcher.dispatch_bound, claim, callback.binding
+            )
+        except (ValueError, RuntimeError, RegionTalkAssemblyUnavailable) as exc:
+            code = exc.code if isinstance(exc, RegionTalkAssemblyUnavailable) else "REGION_TALK_STAGE_DISPATCH_REJECTED"
+            raise HTTPException(status_code=409, detail={"code": code}) from exc
+        return result.model_dump(mode="json")
+
+    @app.post("/internal/region-talk-pipeline/stage/attestation")
+    async def attest_region_talk_stage_worker(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            attestation = RegionTalkStageWorkerAttestation.model_validate(body)
+            worker = UUID(attestation.worker_task_run_id)
+            master = UUID(attestation.master_instance_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_stage_attestation_invalid"}) from exc
+        _region_talk_callback_authority(task_run_id=worker, authorization=authorization)
+        _assert_region_talk_stage_active(master_instance_id=master, epoch=attestation.epoch)
+        adapter = app.state.region_talk_stage_adapter
+        if adapter is None:
+            raise HTTPException(status_code=503, detail={"code": "region_talk_stage_unavailable"})
+        try:
+            adapter.record_attestation(attestation)
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        return {"accepted": True, "publication_dispatch": False, "notification_dispatch": False}
+
+    @app.post("/internal/region-talk-pipeline/stage/rotation/checkpoint")
+    async def checkpoint_region_talk_stage_rotation(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            checkpoint = RegionTalkStageWorkerRotationCheckpoint.model_validate(body)
+            worker = UUID(checkpoint.worker_task_run_id)
+            claim = app.state.region_talk_task_authority.stage_worker_claim(worker)
+        except (AttributeError, TypeError, ValueError, RegionTalkAssemblyUnavailable) as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_stage_rotation_invalid"}) from exc
+        _region_talk_callback_authority(task_run_id=worker, authorization=authorization)
+        _assert_region_talk_stage_active(
+            master_instance_id=claim.master_instance_id, epoch=claim.epoch
+        )
+        try:
+            return app.state.region_talk_stage_adapter.request_rotation(checkpoint)
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+
+    @app.post("/internal/region-talk-pipeline/stage/rotation/poll")
+    async def poll_region_talk_stage_rotations(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            poll = RegionTalkStageSupervisorRotationPoll.model_validate(body)
+            supervisor = UUID(poll.supervisor_task_run_id)
+            master = UUID(poll.master_instance_id)
+            export_batch = UUID(poll.export_batch_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_stage_rotation_poll_invalid"}) from exc
+        _region_talk_callback_authority(task_run_id=supervisor, authorization=authorization)
+        _assert_region_talk_stage_active(master_instance_id=master, epoch=poll.epoch)
+        requests = app.state.region_talk_stage_adapter.rotation_requests(
+            supervisor, export_batch
+        )
+        return {
+            "requests": [item.model_dump(mode="json") for item in requests],
+            "publication_dispatch": False,
+            "notification_dispatch": False,
+        }
+
+    @app.post("/internal/region-talk-pipeline/stage/rotation/activate")
+    async def activate_region_talk_stage_rotation(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            activation = RegionTalkStageWorkerRotationActivation.model_validate(body)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "region_talk_stage_rotation_activation_invalid"},
+            ) from exc
+        receipt = activation.receipt
+        _region_talk_callback_authority(
+            task_run_id=receipt.supervisor_task_run_id, authorization=authorization
+        )
+        _assert_region_talk_stage_active(
+            master_instance_id=receipt.master_instance_id, epoch=receipt.epoch
+        )
+        try:
+            app.state.region_talk_stage_adapter.activate_rotation(activation)
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        return {"activated": True, "publication_dispatch": False, "notification_dispatch": False}
+
+    @app.post("/internal/region-talk-pipeline/stage/rotation/access")
+    async def access_region_talk_stage_rotation(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> Response:
+        body = await _bounded_json(request)
+        try:
+            checkpoint = RegionTalkStageWorkerRotationCheckpoint.model_validate(body)
+            worker = UUID(checkpoint.worker_task_run_id)
+            claim = app.state.region_talk_task_authority.stage_worker_claim(worker)
+        except (AttributeError, TypeError, ValueError, RegionTalkAssemblyUnavailable) as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_stage_rotation_invalid"}) from exc
+        _region_talk_callback_authority(task_run_id=worker, authorization=authorization)
+        _assert_region_talk_stage_active(
+            master_instance_id=claim.master_instance_id, epoch=claim.epoch
+        )
+        try:
+            content = app.state.region_talk_stage_adapter.rotation_access(checkpoint)
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
+        )
+
+    @app.post("/internal/region-talk-pipeline/stage/terminal")
+    async def complete_region_talk_stage_worker(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            terminal = RegionTalkStageWorkerTerminal.model_validate(body)
+            worker = UUID(terminal.worker_task_run_id)
+            master = UUID(terminal.master_instance_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_stage_terminal_invalid"}) from exc
+        _region_talk_callback_authority(task_run_id=worker, authorization=authorization)
+        _assert_region_talk_stage_active(master_instance_id=master, epoch=terminal.epoch)
+        try:
+            await asyncio.to_thread(app.state.region_talk_stage_adapter.complete, terminal)
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        return {"accepted": True, "cleaned": True, "publication_dispatch": False, "notification_dispatch": False}
+
+    @app.post("/internal/region-talk-pipeline/attest")
+    async def attest_region_talk_pipeline(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            attestation = RegionTalkRuntimeAttestation.model_validate(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_attestation_invalid"}) from exc
+        coordinator, task = _region_talk_callback_authority(
+            task_run_id=attestation.task_run_id, authorization=authorization
+        )
+        if str(attestation.request_id) != str(task.get("request_id")):
+            raise HTTPException(status_code=409, detail={"code": "region_talk_task_binding_mismatch"})
+        try:
+            snapshot = coordinator.store.attest(attestation)
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail={"code": "region_talk_attestation_rejected"}) from exc
+        return {"accepted": True, "state": snapshot.state.value}
+
+    @app.post("/internal/region-talk-pipeline/running")
+    async def mark_region_talk_pipeline_running(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        if set(body) != {"task_run_id", "master_instance_id", "epoch", "publication_dispatch"}:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_running_invalid"})
+        try:
+            task_id = UUID(str(body["task_run_id"]))
+            master_id = UUID(str(body["master_instance_id"]))
+            epoch = int(body["epoch"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_running_invalid"}) from exc
+        if body["publication_dispatch"] is not False:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_publication_forbidden"})
+        coordinator, _task = _region_talk_callback_authority(
+            task_run_id=task_id, authorization=authorization
+        )
+        active = _active_region_talk_master()
+        if active is None or active.master_instance_id != master_id or active.epoch != epoch:
+            raise HTTPException(status_code=409, detail={"code": "active_epoch_mismatch"})
+        try:
+            snapshot = coordinator.store.mark_running(task_run_id=task_id, master=active, now=datetime.now(UTC))
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail={"code": "region_talk_running_rejected"}) from exc
+        return {"accepted": True, "state": snapshot.state.value}
+
+    def _assert_region_talk_refresh_state(
+        *,
+        coordinator: RegionTalkPipelineCoordinator,
+        task: Mapping[str, Any],
+        task_run_id: UUID,
+        request_id: UUID,
+        master_instance_id: UUID,
+        epoch: int,
+        source_sha256: str,
+    ) -> None:
+        active = _active_region_talk_master()
+        snapshot = coordinator.status(request_id)
+        if (
+            active is None
+            or active.master_instance_id != master_instance_id
+            or active.epoch != epoch
+            or snapshot is None
+            or snapshot.task_run_id != task_run_id
+            or snapshot.master != active
+            or snapshot.source_sha256 != source_sha256
+            or snapshot.state.value not in {"ATTESTED", "RUNNING"}
+            or str(task.get("request_id")) != str(request_id)
+        ):
+            coordinator.store.expire_and_fence(
+                now=datetime.now(UTC), active_master=active
+            )
+            raise HTTPException(
+                status_code=409, detail={"code": "active_epoch_mismatch"}
+            )
+
+    @app.post("/internal/region-talk-pipeline/access/refresh")
+    async def refresh_region_talk_pipeline_access(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> Response:
+        body = await _bounded_json(request)
+        try:
+            refresh = RegionTalkCredentialRefreshRequest.model_validate(body)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail={"code": "region_talk_refresh_invalid"}
+            ) from exc
+        coordinator, task = _region_talk_callback_authority(
+            task_run_id=refresh.task_run_id, authorization=authorization
+        )
+        _assert_region_talk_refresh_state(
+            coordinator=coordinator,
+            task=task,
+            task_run_id=refresh.task_run_id,
+            request_id=refresh.request_id,
+            master_instance_id=refresh.master_instance_id,
+            epoch=refresh.epoch,
+            source_sha256=refresh.source_sha256,
+        )
+        try:
+            access = await asyncio.to_thread(
+                app.state.region_talk_task_authority.refresh, refresh
+            )
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        # This is a private capability response, not a metadata callback.  It
+        # is never model-logged or cached and contains no business rows.
+        return Response(
+            content=app.state.region_talk_task_authority.private_access_bytes(access),
+            media_type="application/json",
+            headers={
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.post("/internal/region-talk-pipeline/access/activate")
+    async def activate_region_talk_pipeline_access(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            activation = RegionTalkCredentialActivation.model_validate(body)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail={"code": "region_talk_activation_invalid"}
+            ) from exc
+        coordinator, task = _region_talk_callback_authority(
+            task_run_id=activation.task_run_id, authorization=authorization
+        )
+        _assert_region_talk_refresh_state(
+            coordinator=coordinator,
+            task=task,
+            task_run_id=activation.task_run_id,
+            request_id=activation.request_id,
+            master_instance_id=activation.master_instance_id,
+            epoch=activation.epoch,
+            source_sha256=activation.source_sha256,
+        )
+        try:
+            app.state.region_talk_task_authority.activate(activation)
+            # Authority activation is the external effect.  Persist the new
+            # non-secret binding only afterwards; exact replay repairs the
+            # SQLite projection if the prior HTTP response was lost.
+            coordinator.store.activate_access(activation)
+        except RegionTalkAssemblyUnavailable as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "region_talk_activation_projection_rejected"},
+            ) from exc
+        return {
+            "activated": True,
+            "task_run_id": str(activation.task_run_id),
+            "generation": activation.replacement.generation,
+        }
+
+    @app.post("/internal/region-talk-pipeline/terminal")
+    async def complete_region_talk_pipeline(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
+        body = await _bounded_json(request)
+        try:
+            receipt = RegionTalkTerminalReceipt.model_validate(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail={"code": "region_talk_terminal_invalid"}) from exc
+        coordinator, task = _region_talk_callback_authority(
+            task_run_id=receipt.task_run_id, authorization=authorization
+        )
+        existing = coordinator.status(receipt.request_id)
+        receipt_sha256 = hashlib.sha256(
+            canonical_json_bytes(receipt.model_dump(mode="json"))
+        ).hexdigest()
+        if existing is not None and existing.state.value in {
+            "TERMINAL",
+            "CLEANUP_PENDING",
+            "CLEANED",
+        }:
+            if (
+                existing.task_run_id == receipt.task_run_id
+                and existing.terminal_status is not None
+                and existing.terminal_status.value == receipt.status
+                and existing.terminal_receipt_sha256 == receipt_sha256
+            ):
+                return {"accepted": True, "state": existing.state.value}
+            raise HTTPException(
+                status_code=409, detail={"code": "region_talk_terminal_rejected"}
+            )
+        _assert_region_talk_refresh_state(
+            coordinator=coordinator,
+            task=task,
+            task_run_id=receipt.task_run_id,
+            request_id=receipt.request_id,
+            master_instance_id=receipt.master_instance_id,
+            epoch=receipt.epoch,
+            source_sha256=str(task.get("source_sha256", "")),
+        )
+        try:
+            snapshot = coordinator.store.record_terminal(receipt)
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail={"code": "region_talk_terminal_rejected"}) from exc
+        return {"accepted": True, "state": snapshot.state.value}
+
     @app.get("/internal/runtime/connector-checkpoint/{run_id}/{attempt_id}")
     def runtime_connector_checkpoint(
         run_id: str,
@@ -2116,7 +3080,19 @@ def create_app(
         master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
         epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
     ) -> dict[str, Any]:
-        if not runtime.connector_runtime_enabled:
+        # Operator canonical writes use the same task-bound verified-checkpoint
+        # request queue as connector commits.  The queue consumer is the
+        # master notebook itself, so it must remain available for the explicit
+        # operator profile even when the optional connector-intake service is
+        # disabled.  Unified bootstrap also needs this task-bound queue to
+        # create the verified checkpoint that authorizes the subsequent
+        # operator cutover; it still exposes no public canonical write tools.
+        # Provider-only remains unable to open the queue.
+        if not (
+            runtime.connector_runtime_enabled
+            or operator_credential_enabled
+            or runtime.unified_bootstrap_mode
+        ):
             raise HTTPException(status_code=404, detail={"code": "connector_runtime_disabled"})
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=401, detail={"code": "runtime_token_required"})
@@ -2380,6 +3356,46 @@ def create_app(
             "connector_kind": connector_kind,
             "state": state,
             "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+        }
+
+    @app.post("/internal/runtime/security-evidence/{run_id}/{attempt_id}")
+    async def runtime_security_evidence(
+        run_id: str,
+        attempt_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        master_instance_id: str | None = Header(default=None, alias="X-MDH-Master-Instance-ID"),
+        epoch: str | None = Header(default=None, alias="X-MDH-Epoch"),
+    ) -> dict[str, Any]:
+        raw = await request.body()
+        if len(raw) > 16 * 1024:
+            raise HTTPException(status_code=413, detail={"code": "master_security_evidence_too_large"})
+        try:
+            body = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail={"code": "master_security_evidence_invalid"}) from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=422, detail={"code": "master_security_evidence_invalid"})
+        operation = _runtime_authority(
+            authorization=authorization,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            master_instance_id=master_instance_id,
+            epoch=epoch,
+            allowed_states=frozenset({"ACTIVE"}),
+        )
+        try:
+            stored = control_ledger.record_master_security_evidence(
+                operation_id=operation.operation_id,
+                evidence=body,
+            )
+        except (ValueError, ControlLedgerError) as exc:
+            raise HTTPException(status_code=409, detail={"code": "master_security_evidence_rejected"}) from exc
+        return {
+            "recorded": True,
+            "evidence_sha256": stored["evidence_sha256"],
+            "role_verification_sha256": stored["role_verification_sha256"],
+            "security_test_receipt_sha256": stored["security_test_receipt_sha256"],
         }
 
     @app.post("/internal/provider-journal/intents")
@@ -2675,7 +3691,10 @@ def create_app(
         return {"claim": claim}
 
     def _broker_runtime_authority(
-        operation: _ProviderOperationAuthority, *, checkpoint_id: str | None = None
+        operation: _ProviderOperationAuthority,
+        *,
+        checkpoint_id: str | None = None,
+        allow_expired_read: bool = False,
     ) -> RuntimeUploadAuthority:
         if checkpoint_upload_broker is None:
             raise HTTPException(status_code=503, detail={"code": "checkpoint_upload_broker_unavailable"})
@@ -2729,7 +3748,15 @@ def create_app(
             master_instance_id=str(identity.get("master_instance_id", "")),
             epoch=int(identity.get("epoch", 0)),
         )
-        if snapshot is None:
+        operation_record = control_ledger.get_operation(operation.operation_id)
+        expired_read = (
+            allow_expired_read
+            and snapshot is None
+            and operation_record is not None
+            and operation_record.state in {"CHECKPOINTING", "CHECKPOINT_FAILED"}
+            and control_ledger.current_epoch("postgres-master") == int(identity.get("epoch", 0))
+        )
+        if snapshot is None and not expired_read:
             raise HTTPException(status_code=409, detail={"code": "checkpoint_runtime_lease_invalid"})
         return RuntimeUploadAuthority(
             operation_id=operation.operation_id,
@@ -2739,7 +3766,11 @@ def create_app(
             service_instance_id=str(identity["service_instance_id"]),
             epoch=int(identity["epoch"]),
             master_run_ref=run.provider_run_ref,
-            lease_until=datetime.fromisoformat(str(snapshot["lease_until"]).replace("Z", "+00:00")),
+            lease_until=(
+                datetime.fromisoformat(str(snapshot["lease_until"]).replace("Z", "+00:00"))
+                if snapshot is not None
+                else control_ledger.clock.now()
+            ),
         )
 
     @app.get("/internal/checkpoints/{checkpoint_id}/runtime-upload-authority")
@@ -2759,8 +3790,13 @@ def create_app(
             attempt_id=attempt_id,
             master_instance_id=master_instance_id,
             epoch=epoch,
+            allowed_states=frozenset({"ACTIVE", "DRAINING", "CHECKPOINTING", "CHECKPOINT_FAILED"}),
         )
-        authority = _broker_runtime_authority(operation, checkpoint_id=checkpoint_id)
+        authority = _broker_runtime_authority(
+            operation,
+            checkpoint_id=checkpoint_id,
+            allow_expired_read=True,
+        )
         return {
             "master_run_ref": authority.master_run_ref,
             "epoch": authority.epoch,
@@ -2784,10 +3820,11 @@ def create_app(
             attempt_id=attempt_id,
             master_instance_id=master_instance_id,
             epoch=epoch,
+            allowed_states=frozenset({"ACTIVE", "DRAINING", "CHECKPOINTING", "CHECKPOINT_FAILED"}),
         )
         if operation.acceptance is not None:
             raise HTTPException(status_code=409, detail={"code": "acceptance_checkpoint_required"})
-        authority = _broker_runtime_authority(operation)
+        authority = _broker_runtime_authority(operation, allow_expired_read=True)
         return {"master_run_ref": authority.master_run_ref}
 
     @app.post("/internal/checkpoints/{checkpoint_id}/blob-uploads/prepare")
@@ -2905,8 +3942,13 @@ def create_app(
             attempt_id=attempt_id,
             master_instance_id=master_instance_id,
             epoch=epoch,
+            allowed_states=frozenset({"ACTIVE", "DRAINING", "CHECKPOINTING", "CHECKPOINT_FAILED"}),
         )
-        _broker_runtime_authority(operation, checkpoint_id=checkpoint_id)
+        _broker_runtime_authority(
+            operation,
+            checkpoint_id=checkpoint_id,
+            allow_expired_read=True,
+        )
         publication = checkpoint_upload_broker.status(UUID(checkpoint_id))  # type: ignore[union-attr]
         if publication["operation_id"] != operation.operation_id:
             raise HTTPException(status_code=403, detail={"code": "checkpoint_publication_forbidden"})

@@ -67,6 +67,16 @@
       "path": "dataset/embedding-dependency-smoke.py",
       "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "byte_size": 8192
+    },
+    "master_ydb_dependency_manifest": {
+      "path": "dataset/master-ydb-dependency.json",
+      "sha256": "1212121212121212121212121212121212121212121212121212121212121212",
+      "byte_size": 512
+    },
+    "master_ydb_wheel": {
+      "path": "dataset/master-python-wheelhouse/ydb-3.31.2-py3-none-any.whl",
+      "sha256": "043b91af7dab122e9ee24cb1948576f324dc9b6dbb45952d2e7c58d99e2c5ddb",
+      "byte_size": 1513106
     }
   },
   "embedding_dependency_wheels": [
@@ -89,6 +99,78 @@
       "path": "dataset/embedding-worker-wheelhouse/psycopg_binary-3.3.4-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
       "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
       "byte_size": 4444444
+    }
+  ],
+  "master_ydb_dependency_wheels": [
+    {
+      "path": "dataset/master-python-wheelhouse/aiohappyeyeballs-2.7.1-py3-none-any.whl",
+      "sha256": "9243213661e29250eb41368e5daa826fc017156c3b8a11440826b2e3ed376472",
+      "byte_size": 1024
+    },
+    {
+      "path": "dataset/master-python-wheelhouse/aiohttp-3.14.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "543906c127fb1d929b95076db19b83fa2d46751006ff1e23b093aa5ac4d8db42",
+      "byte_size": 1024
+    },
+    {
+      "path": "dataset/master-python-wheelhouse/aiosignal-1.4.0-py3-none-any.whl",
+      "sha256": "053243f8b92b990551949e63930a839ff0cf0b0ebbe0597b0f3fb19e1a0fe82e",
+      "byte_size": 1024
+    },
+    {
+      "path": "dataset/master-python-wheelhouse/attrs-26.1.0-py3-none-any.whl",
+      "sha256": "c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309",
+      "byte_size": 1024
+    },
+    {
+      "path": "dataset/master-python-wheelhouse/frozenlist-1.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl",
+      "sha256": "494a5952b1c597ba44e0e78113a7266e656b9794eec897b19ead706bd7074383",
+      "byte_size": 1024
+    },
+    {
+      "path": "dataset/master-python-wheelhouse/grpcio-1.83.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "sha256": "aeb339838db07600481ef869507279b75326c75eac6d10f7afa62a0da1d2bcdd",
+      "byte_size": 1024
+    },
+    {
+      "path": "dataset/master-python-wheelhouse/idna-3.19-py3-none-any.whl",
+      "sha256": "815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4",
+      "byte_size": 1024
+    },
+    {
+      "path": "dataset/master-python-wheelhouse/multidict-6.7.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "bfde23ef6ed9db7eaee6c37dcec08524cb43903c60b285b172b6c094711b3961",
+      "byte_size": 1024
+    },
+    {
+      "path": "dataset/master-python-wheelhouse/packaging-26.3-py3-none-any.whl",
+      "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
+      "byte_size": 1024
+    },
+    {
+      "path": "dataset/master-python-wheelhouse/propcache-0.5.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "6f328175a2cde1f0ff2c4ed8ce968b9dcfb55f3a7153f39e2957ed994da13476",
+      "byte_size": 1024
+    },
+    {
+      "path": "dataset/master-python-wheelhouse/protobuf-6.33.6-cp39-abi3-manylinux2014_x86_64.whl",
+      "sha256": "e9db7e292e0ab79dd108d7f1a94fe31601ce1ee3f7b79e0692043423020b0593",
+      "byte_size": 1024
+    },
+    {
+      "path": "dataset/master-python-wheelhouse/typing_extensions-4.16.0-py3-none-any.whl",
+      "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+      "byte_size": 1024
+    },
+    {
+      "path": "dataset/master-python-wheelhouse/yarl-1.24.5-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "f08c7513ecef5aad65687bfdf6bc601ae9fccd04a42904501f8f7141abad9eb9",
+      "byte_size": 1024
+    },
+    {
+      "path": "dataset/master-python-wheelhouse/ydb-3.31.2-py3-none-any.whl",
+      "sha256": "043b91af7dab122e9ee24cb1948576f324dc9b6dbb45952d2e7c58d99e2c5ddb",
+      "byte_size": 1024
     }
   ]
 }

@@ -40,6 +40,16 @@ class Ledger:
         scopes = self.clients.get(client_id)
         return None if scopes is None else OAuthClientRecord(issuer, client_id, True, scopes)
 
+    def register_resolved_client(
+        self,
+        record: OAuthClientRecord,
+        *,
+        principal_id: str,
+    ) -> OAuthClientRecord:
+        assert principal_id == "datahub-owner"
+        self.clients[record.client_id] = record.allowed_scopes
+        return record
+
     def is_revoked(self, query: OAuthRevocationQuery) -> bool:
         return False
 
@@ -117,10 +127,20 @@ def _params(client_id: str, redirect_uri: str) -> dict[str, str]:
 
 
 def _login(client: TestClient, params: dict[str, str]) -> str:
-    challenged = client.get("/authorize", params=params, follow_redirects=False)
-    assert challenged.status_code == 303
-    login = client.get(challenged.headers["location"], follow_redirects=False)
+    login = client.get("/authorize", params=params, follow_redirects=False)
     assert login.status_code == 200
+    assert "location" not in login.headers
+    assert login.headers["referrer-policy"] == "origin"
+    callback = urlsplit(params["redirect_uri"])
+    callback_origin = f"{callback.scheme}://{callback.netloc}"
+    assert (
+        login.headers["content-security-policy"]
+        == "default-src 'none'; style-src 'unsafe-inline'; "
+        "form-action https://identity.example.test "
+        f"{callback_origin}; base-uri 'none'; "
+        "frame-ancestors 'none'"
+    )
+    assert '<form method="post" action="https://identity.example.test/owner/login"' in login.text
     assert "Операторский токен" in login.text
     assert TOKEN not in login.text
     import re
@@ -130,6 +150,7 @@ def _login(client: TestClient, params: dict[str, str]) -> str:
     granted = client.post(
         "/owner/login",
         data={"owner_request": sealed.group(1), "operator_token": TOKEN},
+        headers={"Origin": ISSUER},
         follow_redirects=False,
     )
     assert granted.status_code == 303
@@ -148,6 +169,22 @@ def test_local_owner_form_completes_opencode_loopback_pkce_authorization() -> No
     )
     assert callback.startswith("http://127.0.0.1:19876/mcp/oauth/callback?")
     assert parse_qs(urlsplit(callback).query)["state"] == ["state-opencode-my-data-hub"]
+
+
+def test_local_owner_form_csp_allows_exact_chatgpt_callback_origin() -> None:
+    client = _client()
+    login = client.get(
+        "/authorize",
+        params=_params("chatgpt-public", "https://chatgpt.com/connector/oauth/callback-1"),
+        follow_redirects=False,
+    )
+    assert login.status_code == 200
+    assert (
+        login.headers["content-security-policy"]
+        == "default-src 'none'; style-src 'unsafe-inline'; "
+        "form-action https://identity.example.test https://chatgpt.com; "
+        "base-uri 'none'; frame-ancestors 'none'"
+    )
 
 
 def test_same_local_owner_form_completes_chatgpt_public_callback() -> None:
@@ -233,8 +270,8 @@ def test_local_owner_form_completes_chatgpt_cimd_public_client() -> None:
 def test_local_owner_rejects_wrong_token_and_tampered_request_without_cookie() -> None:
     client = _client()
     params = _params("opencode-my-data-hub", "http://127.0.0.1:19876/mcp/oauth/callback")
-    challenged = client.get("/authorize", params=params, follow_redirects=False)
-    login = client.get(challenged.headers["location"], follow_redirects=False)
+    login = client.get("/authorize", params=params, follow_redirects=False)
+    assert login.status_code == 200
     import re
 
     sealed = re.search(r'name="owner_request" value="([^"]+)"', login.text)
@@ -253,3 +290,12 @@ def test_local_owner_rejects_wrong_token_and_tampered_request_without_cookie() -
     )
     assert tampered.status_code == 403
     assert "mdh_owner_session=" not in tampered.headers.get("set-cookie", "")
+
+    foreign_origin = client.post(
+        "/owner/login",
+        data={"owner_request": sealed.group(1), "operator_token": TOKEN},
+        headers={"Origin": "https://mcp.example.test"},
+        follow_redirects=False,
+    )
+    assert foreign_origin.status_code == 403
+    assert foreign_origin.json() == {"error": "origin_not_allowed"}

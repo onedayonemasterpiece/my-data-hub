@@ -82,13 +82,22 @@ def _clients(raw: str) -> tuple[StaticClient, ...]:
     return tuple(clients)
 
 
-def _csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+def _csv(
+    name: str,
+    default: tuple[str, ...],
+    *,
+    maximum_values: int = 16,
+) -> tuple[str, ...]:
+    if not 1 <= maximum_values <= 64:
+        raise ValueError("CSV value bound is invalid")
     raw = os.getenv(name, "")
     if not raw.strip():
         return default
     values = tuple(value.strip() for value in raw.split(",") if value.strip())
-    if not values or len(values) > 16:
-        raise ValueError(f"{name} must contain one to sixteen comma-separated values")
+    if not values or len(values) > maximum_values:
+        raise ValueError(
+            f"{name} must contain one to {maximum_values} comma-separated values"
+        )
     return values
 
 
@@ -150,7 +159,13 @@ def build_authorization_runtime() -> AuthorizationRuntime:
         )
     client_metadata_resolver = None
     if _boolean("MY_DATA_HUB_OAUTH_CHATGPT_CIMD_ENABLED"):
-        cimd_scopes = frozenset(_csv("MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES", ()))
+        cimd_scopes = frozenset(
+            _csv(
+                "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES",
+                (),
+                maximum_values=len(ALL_SCOPES | {"openid", "offline_access"}),
+            )
+        )
         if not cimd_scopes or not cimd_scopes.issubset(ALL_SCOPES | {"openid", "offline_access"}):
             raise RuntimeError("ChatGPT CIMD scopes must be an explicit bounded OAuth subset")
         client_metadata_resolver = ChatGPTClientMetadataResolver(allowed_scopes=cimd_scopes)

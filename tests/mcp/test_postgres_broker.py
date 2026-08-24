@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import pytest
 
+from my_data_hub.control_plane.runtime import SessionCredential
 from my_data_hub.mcp.contracts import ExecutionLimits, SessionRequest
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.mcp.postgres_broker import (
@@ -15,6 +17,7 @@ from my_data_hub.mcp.postgres_broker import (
     PostgresMasterSessionBroker,
     SessionBrokerError,
 )
+from my_data_hub.workloads.bloggers.discovery_postgres import BloggerImportApplyReceipt
 
 
 def identity() -> AccessIdentity:
@@ -66,6 +69,26 @@ def test_private_epoch_credential_round_trip_and_exact_binding(tmp_path) -> None
         source.load(request(epoch=8))
     with pytest.raises(SessionBrokerError, match="absent"):
         PostgresMasterSessionBroker(source).issue_session(request(role="operator"))
+
+
+def test_production_registrar_accepts_control_plane_session_credential(tmp_path) -> None:
+    """The runtime endpoint and the on-disk registrar share one validation contract."""
+
+    root = tmp_path / "sessions"
+    source = DirectoryEpochCredentialSource(root)
+    value = credential()
+    stored = source.store(
+        SessionCredential(
+            master_instance_id=value.master_instance_id,
+            epoch=value.epoch,
+            role=value.role,
+            database_url=value.database_url,
+            expires_at=value.expires_at,
+        )
+    )
+
+    assert stored.stat().st_mode & 0o077 == 0
+    assert source.load(request()).database_url == value.database_url
 
 
 def test_epoch_credential_rejects_expiry_non_tls_and_non_loopback(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -128,8 +151,9 @@ def test_restricted_login_rejects_superuser_or_wrong_group() -> None:
         def __init__(self, row):  # type: ignore[no-untyped-def]
             self.row = row
 
-        def execute(self, _statement, parameters=()):  # type: ignore[no-untyped-def]
+        def execute(self, statement, parameters=()):  # type: ignore[no-untyped-def]
             assert parameters == ("mdh_mcp_editor",)
+            assert "mdh_role_admin" not in statement
             return self
 
         def fetchone(self):  # type: ignore[no-untyped-def]
@@ -143,13 +167,78 @@ def test_restricted_login_rejects_superuser_or_wrong_group() -> None:
         "rolbypassrls": False,
         "requested_member": True,
         "owner_member": False,
-        "role_admin_member": False,
     }
     session._assert_restricted_login(Cursor(safe))
     with pytest.raises(SessionBrokerError, match="restricted role login"):
         session._assert_restricted_login(Cursor({**safe, "rolsuper": True}))
     with pytest.raises(SessionBrokerError, match="restricted role login"):
         session._assert_restricted_login(Cursor({**safe, "requested_member": False}))
+
+
+def test_session_timeouts_use_set_config_with_text_values() -> None:
+    session = PostgresMasterSession(request(), credential())
+
+    class Cursor:
+        def __init__(self) -> None:
+            self.queries: list[tuple[str, tuple[str, ...]]] = []
+
+        def execute(self, statement, parameters=()):  # type: ignore[no-untyped-def]
+            self.queries.append((statement, parameters))
+            return self
+
+    cursor = Cursor()
+    session._set_local_timeouts(cursor)
+
+    assert cursor.queries == [
+        (
+            "SELECT pg_catalog.set_config('statement_timeout', %s, true)",
+            (f"{session.request.limits.timeout_ms}ms",),
+        ),
+        (
+            "SELECT pg_catalog.set_config('lock_timeout', %s, true)",
+            (f"{min(2_000, session.request.limits.timeout_ms)}ms",),
+        ),
+        (
+            "SELECT pg_catalog.set_config('idle_in_transaction_session_timeout', %s, true)",
+            (f"{session.request.limits.timeout_ms}ms",),
+        ),
+    ]
+
+
+def test_session_revision_does_not_require_master_control_access() -> None:
+    session = PostgresMasterSession(request(), credential())
+
+    class Cursor:
+        statement = ""
+
+        def execute(self, statement, parameters=()):  # type: ignore[no-untyped-def]
+            assert not parameters
+            self.statement = statement
+            return self
+
+        def fetchone(self):  # type: ignore[no-untyped-def]
+            return {"canonical_revision": 13}
+
+    cursor = Cursor()
+    assert session._canonical_revision(cursor) == 13
+    assert "hub.canonical_state" in cursor.statement
+    assert "master_control" not in cursor.statement
+
+
+def test_connector_session_uses_resolved_revision_without_canonical_table_access() -> None:
+    connector_request = replace(
+        request(), role="connector", tool="submit_discovery_batch", canonical_revision=17
+    )
+    session = PostgresMasterSession(
+        connector_request,
+        replace(credential(), role="connector"),
+    )
+
+    class Cursor:
+        def execute(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("connector must not query canonical or epoch-control tables")
+
+    assert session._canonical_revision(Cursor()) == 17
 
 
 @pytest.mark.asyncio
@@ -227,3 +316,71 @@ def test_blogger_migration_accounting_rejects_non_uuid_without_query() -> None:
 
     with pytest.raises(SessionBrokerError, match="exact UUID"):
         session._dispatch(Cursor(), {"export_batch_id": "not-a-uuid"})
+
+
+def test_current_epoch_committer_can_reconcile_exact_old_epoch_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_master = "22222222-2222-4222-8222-222222222222"
+    old_master = "11111111-1111-4111-8111-111111111111"
+    reconcile_request = replace(
+        request(),
+        master_instance_id=current_master,
+        epoch=8,
+        role="canonical_committer",
+        tool="bloggers.import.reconcile",
+    )
+    session = PostgresMasterSession(
+        reconcile_request,
+        replace(
+            credential(),
+            master_instance_id=current_master,
+            epoch=8,
+            role="canonical_committer",
+        ),
+    )
+    observed: dict[str, object] = {}
+    committed_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=UTC)
+
+    def reconcile(_cursor, _identity, *, plan_sha256, master_instance_id, master_epoch):  # type: ignore[no-untyped-def]
+        observed.update(
+            plan_sha256=plan_sha256,
+            master_instance_id=str(master_instance_id),
+            master_epoch=master_epoch,
+        )
+        return BloggerImportApplyReceipt(
+            operation_id="a" * 64,
+            batch_id=UUID("33333333-3333-4333-8333-333333333333"),
+            plan_sha256="c" * 64,
+            affected_rows=2,
+            revision_after=13,
+            duplicate=True,
+            committed_at=committed_at,
+        )
+
+    monkeypatch.setattr(
+        "my_data_hub.workloads.bloggers.discovery_postgres.BloggerDiscoveryPostgres.reconcile",
+        reconcile,
+    )
+    result = session._dispatch_blogger_import(
+        object(),
+        {
+            "operation_id": "a" * 64,
+            "batch_id": "33333333-3333-4333-8333-333333333333",
+            "request_sha256": "b" * 64,
+            "plan_sha256": "c" * 64,
+            "master_instance_id": old_master,
+            "master_epoch": 7,
+            "expected_revision": 12,
+            "principal_id": identity().subject,
+            "client_id": identity().client_id,
+        },
+    )
+    assert observed == {
+        "plan_sha256": "c" * 64,
+        "master_instance_id": old_master,
+        "master_epoch": 7,
+    }
+    assert result["receipt_master_instance_id"] == old_master
+    assert result["receipt_master_epoch"] == 7
+    assert result["committed_at"] == committed_at

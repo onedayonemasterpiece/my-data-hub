@@ -491,6 +491,27 @@ def test_cli_exits_78_before_control_or_receipt_mutation_without_modern_token(tm
     assert not (tmp_path / "control.sqlite3").exists()
 
 
+def test_live_blogger_failure_codes_are_bounded_and_data_free() -> None:
+    from my_data_hub.workloads.bloggers.importer import DuplicateResolutionConflict
+    from my_data_hub.workloads.bloggers.master_stage import blogger_failure_code
+
+    assert (
+        blogger_failure_code(
+            ValueError("streamed ACTIVE-master YDB scan differs before transaction commit")
+        )
+        == "BLOGGER_STREAMED_SOURCE_EVIDENCE_MISMATCH"
+    )
+    assert (
+        blogger_failure_code(ValueError("canonical accounting failed: (266, 0, 1)"))
+        == "BLOGGER_CANONICAL_ACCOUNTING_INCOMPLETE"
+    )
+    assert (
+        blogger_failure_code(DuplicateResolutionConflict("source record id must not escape"))
+        == "BLOGGER_DUPLICATE_RESOLUTION_CONFLICT"
+    )
+    assert blogger_failure_code(ValueError("unclassified source value")) == "ValueError"
+
+
 def test_in_master_stage_uses_epoch_bound_migration_login_and_drops_it(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     import sys
     from types import SimpleNamespace

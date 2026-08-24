@@ -9,7 +9,8 @@ BEGIN
         'mdh_owner', 'mdh_migrator', 'mdh_application', 'mdh_orchestrator',
         'mdh_connector_intake', 'mdh_mcp_reader', 'mdh_mcp_editor',
         'mdh_migration_operator', 'mdh_canonical_committer', 'mdh_backup', 'mdh_monitoring',
-        'mdh_authenticator', 'mdh_master_controller', 'mdh_checkpoint', 'mdh_embedding_worker'
+        'mdh_authenticator', 'mdh_master_controller', 'mdh_checkpoint', 'mdh_embedding_worker',
+        'mdh_blogger_materializer', 'mdh_region_talk_pipeline'
     ] LOOP
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
             EXECUTE format('CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS', role_name);
@@ -29,7 +30,7 @@ GRANT mdh_owner TO mdh_migrator;
 DO $$
 BEGIN
     EXECUTE format('REVOKE ALL ON DATABASE %I FROM PUBLIC', current_database());
-    EXECUTE format('GRANT CONNECT ON DATABASE %I TO mdh_migrator, mdh_application, mdh_orchestrator, mdh_connector_intake, mdh_mcp_reader, mdh_mcp_editor, mdh_migration_operator, mdh_canonical_committer, mdh_backup, mdh_monitoring, mdh_authenticator, mdh_master_controller, mdh_checkpoint, mdh_embedding_worker', current_database());
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO mdh_migrator, mdh_application, mdh_orchestrator, mdh_connector_intake, mdh_mcp_reader, mdh_mcp_editor, mdh_migration_operator, mdh_canonical_committer, mdh_backup, mdh_monitoring, mdh_authenticator, mdh_master_controller, mdh_checkpoint, mdh_embedding_worker, mdh_blogger_materializer, mdh_region_talk_pipeline', current_database());
     EXECUTE format('GRANT CREATE, TEMPORARY ON DATABASE %I TO mdh_migrator', current_database());
     EXECUTE format('GRANT TEMPORARY ON DATABASE %I TO mdh_application, mdh_orchestrator', current_database());
 END
@@ -38,6 +39,11 @@ $$;
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+-- The owner-only deterministic UUIDv5 helper uses pgcrypto SHA-1.  Keep the
+-- extension schema closed while granting only that exact primitive to the
+-- SECURITY DEFINER owner; no service role receives public-schema access.
+GRANT USAGE ON SCHEMA public TO mdh_owner;
+GRANT EXECUTE ON FUNCTION public.digest(bytea,text) TO mdh_owner;
 
 -- The production API is an intake/readiness process, not a generic application writer.
 -- Converge installations that applied the earlier broad scaffold before re-granting only
@@ -96,8 +102,25 @@ GRANT SELECT, INSERT, UPDATE ON search.document, search.embedding_job,
 GRANT SELECT, INSERT ON search.embedding_768, search.embedding_1024 TO mdh_canonical_committer;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA integration, sync TO mdh_canonical_committer;
 GRANT EXECUTE ON FUNCTION hub.advance_canonical_revision(bigint) TO mdh_canonical_committer;
+GRANT SELECT ON hub.bloggers_v1 TO mdh_mcp_reader;
+GRANT USAGE ON SCHEMA integration TO mdh_blogger_materializer;
+GRANT EXECUTE ON FUNCTION integration.materialize_blogger_discovery_artifact(uuid,text,jsonb,text)
+    TO mdh_blogger_materializer;
+GRANT EXECUTE ON FUNCTION
+    integration.preview_blogger_discovery(uuid,text,text,bigint,text,text),
+    integration.apply_blogger_discovery(uuid,text,text,text,bigint,text,text),
+    integration.reconcile_blogger_discovery(text,text,text,uuid,bigint,bigint,text,text)
+    TO mdh_canonical_committer;
 GRANT SELECT ON ALL TABLES IN SCHEMA hub, analysis, orchestration, sync, region_talk, joplin
     TO mdh_mcp_reader;
+-- Region Talk v2 remains reader-visible only through fixed sanitized views.
+-- Re-running this role contract must not expose the typed landing tables.
+REVOKE ALL ON region_talk.imported_content_v2, region_talk.imported_queue_v2,
+    region_talk.imported_llm_request_v2, region_talk.imported_discovery_run_v2
+    FROM mdh_mcp_reader, mdh_mcp_editor;
+GRANT SELECT ON region_talk.snapshot_inventory_v2, region_talk.articles_v2,
+    region_talk.posts_v2, region_talk.queue_v2, region_talk.queue_summary_v2,
+    region_talk.funnel_current TO mdh_mcp_reader;
 -- Raw migration payloads and exact artifact locators are migration-owner-only.
 -- Reader-visible migration evidence is an explicit sanitized accounting surface.
 GRANT SELECT ON migration.export_batch, migration.export_batch_kind,
@@ -173,6 +196,16 @@ REVOKE UPDATE, DELETE ON migration.export_batch_kind, migration.export_file,
 REVOKE INSERT, UPDATE, DELETE ON migration.cutover_receipt FROM mdh_migration_operator;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA migration TO mdh_migration_operator;
 
+-- The Region Talk pipeline receives no table DML.  Its short-lived LOGIN can
+-- execute only the four task/epoch-checked direct-snapshot procedures.
+GRANT USAGE ON SCHEMA migration, region_talk, master_control TO mdh_region_talk_pipeline;
+REVOKE ALL ON ALL TABLES IN SCHEMA migration, region_talk FROM mdh_region_talk_pipeline;
+GRANT EXECUTE ON FUNCTION migration.begin_region_talk_direct_snapshot(jsonb),
+    migration.land_region_talk_direct_page(uuid,uuid,jsonb),
+    migration.finalize_region_talk_direct_snapshot(uuid,uuid,jsonb),
+    migration.fail_region_talk_direct_snapshot(uuid,uuid,text)
+    TO mdh_region_talk_pipeline;
+
 GRANT CONNECT ON DATABASE postgres TO mdh_backup;
 GRANT pg_read_all_data TO mdh_backup;
 -- Group roles are deliberately NOINHERIT, so pg_read_all_data membership is not relied
@@ -223,6 +256,9 @@ ALTER ROLE mdh_migration_operator SET statement_timeout = '2min';
 ALTER ROLE mdh_migration_operator SET lock_timeout = '10s';
 ALTER ROLE mdh_canonical_committer SET statement_timeout = '2min';
 ALTER ROLE mdh_canonical_committer SET lock_timeout = '10s';
+ALTER ROLE mdh_region_talk_pipeline SET statement_timeout = '5min';
+ALTER ROLE mdh_region_talk_pipeline SET lock_timeout = '10s';
+ALTER ROLE mdh_region_talk_pipeline SET idle_in_transaction_session_timeout = '30s';
 
 -- New objects fail closed. Re-running this explicit contract after a migration is required
 -- before a new object is visible to any service role.

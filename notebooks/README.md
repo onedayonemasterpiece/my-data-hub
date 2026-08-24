@@ -15,11 +15,10 @@ advance a queue cursor. The local reconciler validates and commits results.
 They remain marked `production_ready=false` until an exact real-provider receipt proves the
 source, input versions, privacy and terminal output. `00-platform-smoke` and
 `80-region-talk-migration-reconciliation` have implemented legacy typed-worker adapters.
-Other Region Talk notebooks contain complete contract, accounting, error and atomic-output
-plumbing; their `process_item()` adapters intentionally fail with
-`PROCESSOR_ADAPTER_NOT_PORTED` until code is adapted from an exact donor revision and covered
-by golden fixtures. A placeholder notebook therefore cannot be mistaken for a working
-production stage.
+The queue-formation E5, BGE-M3, image, final-verifier and writer notebooks validate the exact
+typed work-request contract and return `HEAVY_RUNTIME_NOT_ATTACHED` until their verified model
+runtime is present. Discovery and source-profile adapters remain explicitly unported. Neither
+state can be mistaken for successful heavyweight evidence.
 
 Every operational notebook also fails before installing or executing code unless a hashed
 `my-data-hub-notebook-execution-pins/v1` manifest binds the exact CPython patch version,

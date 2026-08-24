@@ -6,11 +6,13 @@ import hashlib
 import json
 from dataclasses import dataclass
 
+import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from my_data_hub.auth.control import OAuthClientRecord, OAuthRevocationQuery
+from my_data_hub.mcp.oauth import OAuthBearerValidator, OAuthValidationPolicy
 from my_data_hub.oauth_server import (
     AuthorizationServerSettings,
     AuthorizationService,
@@ -38,7 +40,13 @@ def metadata(**changes: object) -> bytes:
         "redirect_uris": [REDIRECT_URI],
         "response_types": ["code"],
         "grant_types": ["authorization_code", "refresh_token"],
+        # ChatGPT currently publishes private_key_jwt as its preferred method
+        # while also declaring that it can operate as a public ``none`` client.
+        # Our AS advertises only ``none`` and must select that common method.
+        "token_endpoint_auth_method": "private_key_jwt",
         "token_endpoint_auth_methods_supported": ["none", "private_key_jwt"],
+        "token_endpoint_auth_signing_alg": "RS256",
+        "jwks_uri": "https://chatgpt.com/oauth/jwks.json",
     }
     payload.update(changes)
     return json.dumps(payload).encode()
@@ -72,6 +80,18 @@ def test_resolver_accepts_exact_chatgpt_public_client_and_caches_nonsecret_metad
     assert first.allowed_scopes == SCOPES
     assert calls == [CLIENT_ID]
     assert not hasattr(first, "client_secret")
+
+
+def test_resolver_accepts_current_live_chatgpt_cimd_method_negotiation() -> None:
+    resolver = ChatGPTClientMetadataResolver(
+        allowed_scopes=SCOPES,
+        fetcher=lambda _client_id: response(),
+    )
+
+    client = resolver.resolve(CLIENT_ID)
+
+    assert client.client_id == CLIENT_ID
+    assert client.redirect_uris == (REDIRECT_URI,)
 
 
 def test_resolver_never_caches_invalid_or_error_metadata() -> None:
@@ -180,6 +200,7 @@ def test_resolver_rejects_every_nonexact_client_identifier_before_fetch(client_i
         response(body=b"x" * (32 * 1024 + 1)),
         response(body=metadata(client_id="https://chatgpt.com/oauth/other/client.json")),
         response(body=metadata(client_secret="forbidden")),
+        response(body=metadata(token_endpoint_auth_method="client_secret_post")),
         response(body=metadata(token_endpoint_auth_methods_supported=["client_secret_post"])),
         response(body=metadata(token_endpoint_auth_methods_supported=[{}])),
         response(body=metadata(redirect_uris=["https://evil.example/callback"])),
@@ -202,13 +223,38 @@ def test_resolver_rejects_redirects_secrets_oversize_and_malformed_metadata(
 
 
 class Ledger:
+    def __init__(self) -> None:
+        self.clients = {
+            "static-client": OAuthClientRecord(
+                ISSUER,
+                "static-client",
+                True,
+                frozenset({"platform:read"}),
+            )
+        }
+
     def is_revoked(self, query: OAuthRevocationQuery) -> bool:
         return False
 
     def get_client(self, issuer: str, client_id: str) -> OAuthClientRecord | None:
-        if client_id == "static-client":
-            return OAuthClientRecord(issuer, client_id, True, frozenset({"platform:read"}))
-        return None
+        return self.clients.get(client_id)
+
+    def register_resolved_client(
+        self,
+        record: OAuthClientRecord,
+        *,
+        principal_id: str,
+    ) -> OAuthClientRecord:
+        assert principal_id == "owner"
+        current = self.clients.get(record.client_id)
+        persisted = OAuthClientRecord(
+            record.issuer,
+            record.client_id,
+            True if current is None else current.enabled,
+            record.allowed_scopes,
+        )
+        self.clients[record.client_id] = persisted
+        return persisted
 
     def record_oauth_audit(self, event: object) -> None:
         return None
@@ -292,6 +338,31 @@ def test_cimd_authorization_uses_exact_resource_redirect_scope_and_pkce(
     assert service_harness.resolver_calls == [CLIENT_ID]
 
 
+def test_current_chatgpt_code_flow_is_valid_without_nonce(
+    service_harness: ServiceHarness,
+) -> None:
+    verifier = "A" * 43
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+
+    request = asyncio.run(
+        service_harness.service.validate_authorization_request(
+            {
+                "response_type": "code",
+                "client_id": CLIENT_ID,
+                "redirect_uri": REDIRECT_URI,
+                "resource": RESOURCE,
+                "scope": "openid offline_access platform:read provider:read provider:write",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "state": "oauth_s_exact",
+                "ui_locales": "ru-RU",
+            }
+        )
+    )
+
+    assert request.nonce is None
+
+
 def test_cimd_public_client_exchanges_pkce_code_and_rotates_refresh_token(
     service_harness: ServiceHarness,
 ) -> None:
@@ -341,6 +412,75 @@ def test_cimd_public_client_exchanges_pkce_code_and_rotates_refresh_token(
     assert rotated["access_token"]
     assert rotated["refresh_token"] != tokens["refresh_token"]
     assert service_harness.resolver_calls == [CLIENT_ID]
+
+
+def test_cimd_resolution_registers_client_for_resource_server_admission(
+    service_harness: ServiceHarness,
+) -> None:
+    configured, record = asyncio.run(service_harness.service._enabled_client(CLIENT_ID))
+
+    assert configured.client_id == CLIENT_ID
+    assert record == OAuthClientRecord(ISSUER, CLIENT_ID, True, SCOPES)
+    assert service_harness.service.control_ledger.get_client(ISSUER, CLIENT_ID) == record
+
+
+def test_cimd_access_token_is_accepted_by_shared_resource_server_ledger(
+    service_harness: ServiceHarness,
+) -> None:
+    verifier = "A" * 43
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    request = asyncio.run(
+        service_harness.service.validate_authorization_request(
+            {
+                "response_type": "code",
+                "client_id": CLIENT_ID,
+                "redirect_uri": REDIRECT_URI,
+                "resource": RESOURCE,
+                "scope": "openid offline_access provider:read provider:write",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            }
+        )
+    )
+    code = asyncio.run(
+        service_harness.service.complete_authorization(
+            request,
+            OwnerIdentity("owner", 1_899_999_900),
+        )
+    )
+    tokens = asyncio.run(
+        service_harness.service.exchange_authorization_code(
+            {
+                "code": code,
+                "code_verifier": verifier,
+                "redirect_uri": REDIRECT_URI,
+                "client_id": CLIENT_ID,
+                "resource": RESOURCE,
+            }
+        )
+    )
+    validator = OAuthBearerValidator(
+        decoder=lambda token: jwt.decode(
+            token,
+            options={"verify_signature": False, "verify_aud": False},
+        ),
+        policy=OAuthValidationPolicy(
+            issuer=ISSUER,
+            audience=RESOURCE,
+            resource=RESOURCE,
+            allowed_scopes=SCOPES,
+            max_token_lifetime_seconds=300,
+        ),
+        control_ledger=service_harness.service.control_ledger,
+        clock=lambda: 1_900_000_000,
+    )
+
+    identity = asyncio.run(validator.validate_token(str(tokens["access_token"])))
+
+    assert identity.client_id == CLIENT_ID
+    assert identity.scopes == frozenset(
+        {"openid", "offline_access", "provider:read", "provider:write"}
+    )
 
 
 def test_static_clients_remain_ledger_gated_and_do_not_fetch_cimd(

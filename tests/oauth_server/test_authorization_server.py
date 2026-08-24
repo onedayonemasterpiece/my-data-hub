@@ -326,7 +326,7 @@ def test_jwks_rotation_publishes_bounded_overlap_but_signs_only_with_active_key(
         ({"scope": None}, "invalid_request"),
         ({"scope": "openid unknown"}, "invalid_scope"),
         ({"scope": "openid openid"}, "invalid_scope"),
-        ({"scope": "openid", "nonce": None}, "invalid_request"),
+        ({"nonce": ""}, "invalid_request"),
     ],
 )
 def test_authorization_request_rejects_missing_or_inexact_security_values(
@@ -337,6 +337,24 @@ def test_authorization_request_rejects_missing_or_inexact_security_values(
     assert response.status_code == 400
     assert response.json() == {"error": error}
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_oidc_authorization_code_flow_accepts_optional_nonce(harness: Harness) -> None:
+    code, authorization = harness.authorize(nonce=None)
+
+    assert authorization.status_code == 303
+    assert code
+    payload = harness.exchange(code).json()
+    public_key = RSAAlgorithm.from_jwk(harness.service.jwt.jwks()["keys"][0])
+    id_claims = jwt.decode(
+        payload["id_token"],
+        public_key,
+        algorithms=["RS256"],
+        audience=CLIENT_ID,
+        issuer=ISSUER,
+        options={"verify_exp": False},
+    )
+    assert "nonce" not in id_claims
 
 
 def test_authorization_code_issues_exact_short_lived_access_and_id_tokens(harness: Harness) -> None:

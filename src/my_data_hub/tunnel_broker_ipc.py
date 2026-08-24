@@ -16,6 +16,7 @@ from typing import NoReturn, cast
 try:  # Installed package / repository execution.
     from my_data_hub.tunnel_broker import (
         ActiveTunnelLease,
+        TaskWorkerTunnelCertificate,
         TunnelBroker,
         TunnelBrokerError,
         TunnelCertificate,
@@ -24,6 +25,7 @@ try:  # Installed package / repository execution.
 except ModuleNotFoundError:  # Root installer copies both scripts beside each other.
     from tunnel_broker import (  # type: ignore[no-redef]
         ActiveTunnelLease,
+        TaskWorkerTunnelCertificate,
         TunnelBroker,
         TunnelBrokerError,
         TunnelCertificate,
@@ -197,6 +199,91 @@ class TunnelBrokerClient:
             account=str(result["account"]),
         )
 
+    def issue_task_worker_public_key(
+        self,
+        *,
+        master_instance_id: str,
+        epoch: int,
+        worker_kind: str,
+        task_run_id: str,
+        credential_id: str,
+        generation: int,
+        binding_sha256: str,
+        public_key: str,
+        valid_before: datetime,
+        now: datetime,
+    ) -> TaskWorkerTunnelCertificate:
+        _format(now)
+        result = self._call(
+            "issue_task_worker_public_key",
+            {
+                "master_instance_id": master_instance_id,
+                "epoch": epoch,
+                "worker_kind": worker_kind,
+                "task_run_id": task_run_id,
+                "credential_id": credential_id,
+                "generation": generation,
+                "binding_sha256": binding_sha256,
+                "public_key": public_key,
+                "valid_before": _format(valid_before),
+            },
+        )
+        expected = {
+            "certificate",
+            "serial",
+            "principal",
+            "valid_before",
+            "master_instance_id",
+            "epoch",
+            "worker_kind",
+            "task_run_id",
+            "credential_id",
+            "generation",
+            "binding_sha256",
+            "connect_host",
+            "connect_port",
+            "account",
+        }
+        if set(result) != expected:
+            raise TunnelBrokerError("task worker certificate response differs from the contract")
+        certificate = TaskWorkerTunnelCertificate(
+            certificate=str(result["certificate"]),
+            serial=int(cast(int, result["serial"])),
+            principal=str(result["principal"]),
+            valid_before=_parse(result["valid_before"]),
+            master_instance_id=str(result["master_instance_id"]),
+            epoch=int(cast(int, result["epoch"])),
+            worker_kind=str(result["worker_kind"]),
+            task_run_id=str(result["task_run_id"]),
+            credential_id=str(result["credential_id"]),
+            generation=int(cast(int, result["generation"])),
+            binding_sha256=str(result["binding_sha256"]),
+            connect_host=str(result["connect_host"]),
+            connect_port=int(cast(int, result["connect_port"])),
+            account=str(result["account"]),
+        )
+        if (
+            certificate.master_instance_id,
+            certificate.epoch,
+            certificate.worker_kind,
+            certificate.task_run_id,
+            certificate.credential_id,
+            certificate.generation,
+            certificate.binding_sha256,
+        ) != (
+            master_instance_id,
+            epoch,
+            worker_kind,
+            task_run_id,
+            credential_id,
+            generation,
+            binding_sha256,
+        ):
+            raise TunnelBrokerError(
+                "task worker certificate response does not bind the exact request"
+            )
+        return certificate
+
     def revoke_worker_certificate(
         self,
         *,
@@ -220,6 +307,36 @@ class TunnelBrokerClient:
         )
         if result != {"revoked": True}:
             raise TunnelBrokerError("worker revocation response differs from the contract")
+
+    def revoke_task_worker_certificate(
+        self,
+        *,
+        master_instance_id: str,
+        epoch: int,
+        worker_kind: str,
+        task_run_id: str,
+        credential_id: str,
+        generation: int,
+        binding_sha256: str,
+        serial: int,
+        reason: str,
+    ) -> None:
+        result = self._call(
+            "revoke_task_worker_certificate",
+            {
+                "master_instance_id": master_instance_id,
+                "epoch": epoch,
+                "worker_kind": worker_kind,
+                "task_run_id": task_run_id,
+                "credential_id": credential_id,
+                "generation": generation,
+                "binding_sha256": binding_sha256,
+                "serial": serial,
+                "reason": reason,
+            },
+        )
+        if result != {"revoked": True}:
+            raise TunnelBrokerError("task worker revocation response differs from the contract")
 
     def deactivate(self, *, master_instance_id: str, run_id: str, attempt_id: str, epoch: int, reason: str) -> None:
         payload = self._identity(master_instance_id, run_id, attempt_id, epoch)
@@ -338,6 +455,33 @@ def _dispatch(broker: TunnelBroker, request: object) -> dict[str, object]:
             valid_before=_parse(payload["valid_before"]),
             now=datetime.now(UTC),
         ).public_response()
+    if action == "issue_task_worker_public_key":
+        payload = _exact(
+            envelope["payload"],
+            {
+                "master_instance_id",
+                "epoch",
+                "worker_kind",
+                "task_run_id",
+                "credential_id",
+                "generation",
+                "binding_sha256",
+                "public_key",
+                "valid_before",
+            },
+        )
+        return broker.issue_task_worker_public_key(
+            master_instance_id=str(payload["master_instance_id"]),
+            epoch=int(cast(int, payload["epoch"])),
+            worker_kind=str(payload["worker_kind"]),
+            task_run_id=str(payload["task_run_id"]),
+            credential_id=str(payload["credential_id"]),
+            generation=int(cast(int, payload["generation"])),
+            binding_sha256=str(payload["binding_sha256"]),
+            public_key=str(payload["public_key"]),
+            valid_before=_parse(payload["valid_before"]),
+            now=datetime.now(UTC),
+        ).public_response()
     if action == "revoke_worker_certificate":
         payload = _exact(
             envelope["payload"],
@@ -355,6 +499,33 @@ def _dispatch(broker: TunnelBroker, request: object) -> dict[str, object]:
             epoch=int(cast(int, payload["epoch"])),
             task_run_id=str(payload["task_run_id"]),
             credential_id=str(payload["credential_id"]),
+            serial=int(cast(int, payload["serial"])),
+            reason=str(payload["reason"]),
+        )
+        return {"revoked": True}
+    if action == "revoke_task_worker_certificate":
+        payload = _exact(
+            envelope["payload"],
+            {
+                "master_instance_id",
+                "epoch",
+                "worker_kind",
+                "task_run_id",
+                "credential_id",
+                "generation",
+                "binding_sha256",
+                "serial",
+                "reason",
+            },
+        )
+        broker.revoke_task_worker_certificate(
+            master_instance_id=str(payload["master_instance_id"]),
+            epoch=int(cast(int, payload["epoch"])),
+            worker_kind=str(payload["worker_kind"]),
+            task_run_id=str(payload["task_run_id"]),
+            credential_id=str(payload["credential_id"]),
+            generation=int(cast(int, payload["generation"])),
+            binding_sha256=str(payload["binding_sha256"]),
             serial=int(cast(int, payload["serial"])),
             reason=str(payload["reason"]),
         )
@@ -454,6 +625,7 @@ def main() -> int:
     parser.add_argument("--ca-private-key", required=True)
     parser.add_argument("--account", required=True)
     parser.add_argument("--worker-account", required=True)
+    parser.add_argument("--region-talk-worker-account", required=True)
     parser.add_argument("--socket", required=True)
     parser.add_argument("--allowed-uid", required=True, type=int)
     parser.add_argument("--socket-gid", required=True, type=int)
@@ -465,6 +637,7 @@ def main() -> int:
         ca_private_key=Path(args.ca_private_key),
         account=args.account,
         worker_account=args.worker_account,
+        region_talk_worker_account=args.region_talk_worker_account,
     )
     serve(
         broker,
