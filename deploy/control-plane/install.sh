@@ -9,6 +9,7 @@ unified_bootstrap=false
 acceptance_supervisor=false
 acceptance_scenarios=false
 connector_runtime=false
+google_youtube_analysis=false
 if [[ "$action" == "INSTALL_MY_DATA_HUB_SAME_HOST" ]]; then
   echo "FORBIDDEN: local PostgreSQL topology is superseded; no local database will be installed" >&2
   exit 78
@@ -162,6 +163,18 @@ if [[ -n "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SUPERVISOR:-}" ]]; then
   fi
   acceptance_supervisor=true
 fi
+if [[ -n "${MY_DATA_HUB_ENABLE_GOOGLE_YOUTUBE_ANALYSIS:-}" ]]; then
+  if [[ "$operator_profile" != true \
+    || "${MY_DATA_HUB_ENABLE_GOOGLE_YOUTUBE_ANALYSIS}" != "I_ACKNOWLEDGE_SHARED_GOOGLE_AI_QUOTA" ]]; then
+    echo "Google YouTube analysis requires operator install and the exact shared-quota acknowledgement" >&2
+    exit 2
+  fi
+  google_youtube_analysis=true
+fi
+if [[ "$google_youtube_analysis" == true && "$acceptance_scenarios" == true ]]; then
+  echo "Google YouTube analysis and protected acceptance scenarios require separate operator installs" >&2
+  exit 2
+fi
 for path_value in "$env_root" "$secret_root" "$ledger_dir" "$provider_upload_dir" "$session_dir" "$asset_dir" \
   "$tls_dir" "$tls_ca_file" "$provider_env" "$mcp_env" "$oauth_env" "$oauth_key" "$oauth_overlap_jwks" \
   "$connector_env" \
@@ -240,6 +253,49 @@ require_private_file "$mcp_env" "remote MCP environment"
 require_private_file "$oauth_env" "OAuth environment"
 if [[ "$connector_runtime" == true ]]; then
   require_private_file "$connector_env" "connector environment"
+fi
+if [[ "$google_youtube_analysis" == true ]]; then
+  python3 - "$mcp_env" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+values = {}
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    if "=" not in stripped:
+        raise SystemExit("Google YouTube profile requires a valid remote MCP environment")
+    key, value = stripped.split("=", 1)
+    key = key.strip()
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        value = value[1:-1]
+    if key in values:
+        raise SystemExit("Google YouTube profile rejects duplicate remote MCP environment keys")
+    values[key] = value
+
+required = (
+    "GOOGLE_AI_LIMITER_SUPABASE_URL",
+    "GOOGLE_AI_LIMITER_SUPABASE_SERVICE_KEY",
+    "GOOGLE_AI_NORMAL_KEY_ENVS",
+)
+if any(not values.get(name, "").strip() for name in required):
+    raise SystemExit("Google YouTube profile requires the complete dedicated limiter configuration")
+candidates = tuple(
+    name.strip()
+    for name in values["GOOGLE_AI_NORMAL_KEY_ENVS"].split(",")
+    if name.strip()
+)
+if (
+    not candidates
+    or len(set(candidates)) != len(candidates)
+    or any(not re.fullmatch(r"[A-Z][A-Z0-9_]{1,127}", name) for name in candidates)
+    or any(not values.get(name, "").strip() for name in candidates)
+):
+    raise SystemExit("Google YouTube profile candidate key configuration is incomplete")
+PY
 fi
 require_private_file "$oauth_key" "OAuth signing key"
 if [[ ! -e "$owner_operator_token" ]]; then
@@ -404,6 +460,8 @@ fi
 
 operator_override=""
 operator_compose_arg=""
+google_youtube_override=""
+google_youtube_compose_arg=""
 provider_only_override=""
 provider_only_compose_arg=""
 unified_bootstrap_override=""
@@ -729,6 +787,7 @@ services:
     environment:
       MY_DATA_HUB_MCP_WRITE_ENABLED: "true"
       MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED: "true"
+      MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED: "false"
       MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE: /run/secrets/mcp-write-gate.key
       MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL: http://127.0.0.1:8080/internal/mcp-provider/invoke
       MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE: /run/secrets/mcp-control-gateway.token
@@ -743,6 +802,21 @@ services:
 YAML
   chmod 600 "$operator_override"
   operator_compose_arg=" -f $operator_override"
+fi
+if [[ "$google_youtube_analysis" == true ]]; then
+  google_youtube_override="$runtime_root/google-youtube.$commit.yaml"
+  cat > "$google_youtube_override" <<'YAML'
+services:
+  remote-mcp:
+    environment:
+      MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED: "true"
+      MY_DATA_HUB_MCP_SCOPES: platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,region-talk:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,data:write,bloggers:write,region-talk:operate,provider:write,youtube:analyze
+  oauth-server:
+    environment:
+      MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access,platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,region-talk:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,data:write,bloggers:write,region-talk:operate,provider:write,youtube:analyze
+YAML
+  chmod 600 "$google_youtube_override"
+  google_youtube_compose_arg=" -f $google_youtube_override"
 fi
 
 acceptance_scenarios_override=""
@@ -851,6 +925,9 @@ compose_files=(-f "$release/compose.control-plane.yaml")
 if [[ -n "$operator_override" ]]; then
   compose_files+=(-f "$operator_override")
 fi
+if [[ -n "$google_youtube_override" ]]; then
+  compose_files+=(-f "$google_youtube_override")
+fi
 if [[ -n "$provider_only_override" ]]; then
   compose_files+=(-f "$provider_only_override")
 fi
@@ -918,9 +995,9 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=$compose_env
 ExecStartPre=$docker_path info
-ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$provider_only_compose_arg$unified_bootstrap_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up --remove-orphans control-plane remote-mcp oauth-server$connector_service
-ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$provider_only_compose_arg$unified_bootstrap_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up -d --wait --remove-orphans control-plane remote-mcp oauth-server$connector_service
-ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$provider_only_compose_arg$unified_bootstrap_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg down --remove-orphans
+ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$google_youtube_compose_arg$provider_only_compose_arg$unified_bootstrap_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up --remove-orphans control-plane remote-mcp oauth-server$connector_service
+ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$google_youtube_compose_arg$provider_only_compose_arg$unified_bootstrap_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up -d --wait --remove-orphans control-plane remote-mcp oauth-server$connector_service
+ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$google_youtube_compose_arg$provider_only_compose_arg$unified_bootstrap_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg down --remove-orphans
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=300

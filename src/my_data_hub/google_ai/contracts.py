@@ -119,6 +119,7 @@ class ProviderInteraction:
     retry_after_ms: int | None = None
     provider_error_code: str | None = None
     provider_error_category: str | None = None
+    provider_error_diagnostic: str | None = None
 
 
 @runtime_checkable

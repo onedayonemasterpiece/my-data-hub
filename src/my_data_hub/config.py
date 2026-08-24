@@ -107,7 +107,7 @@ class Settings:
         "gemini-3.6-flash",
         "gemini-3.7-flash",
     )
-    google_youtube_timeout_seconds: int = 120
+    google_youtube_timeout_seconds: int = 300
     google_youtube_max_response_bytes: int = 524_288
     google_youtube_max_output_tokens: int = 8192
     google_youtube_default_store: bool = False
@@ -233,7 +233,7 @@ class Settings:
                 )
             ),
             google_youtube_timeout_seconds=_int(
-                "MY_DATA_HUB_GOOGLE_YOUTUBE_TIMEOUT_SECONDS", 120
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_TIMEOUT_SECONDS", 300
             ),
             google_youtube_max_response_bytes=_int(
                 "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_RESPONSE_BYTES", 524_288

@@ -123,7 +123,7 @@ class GeminiYouTubeAnalyzer:
             await self._finalize_or_raise(
                 lease,
                 interaction_id=None,
-                provider_terminal_status="failed",
+                provider_terminal_status="incomplete",
                 semantic_status="not_evaluated",
                 usage=None,
                 duration_ms=duration_ms,
@@ -135,6 +135,9 @@ class GeminiYouTubeAnalyzer:
                 code,
                 retryable=retryable,
                 request_uid=request_uid,
+                provider_status="incomplete",
+                reconciliation_required=True,
+                warnings=("provider_outcome_ambiguous_no_retry",),
             ) from exc
 
         duration_ms = int((self._clock() - started) * 1000)
@@ -267,7 +270,7 @@ class GeminiYouTubeAnalyzer:
             duration_ms=duration_ms,
             error_type="provider",
             error_code=interaction.provider_error_code or category,
-            error_message=category,
+            error_message=interaction.provider_error_diagnostic or category,
         )
         if cooldown_error is not None:
             raise GoogleAIError(
@@ -290,6 +293,11 @@ class GeminiYouTubeAnalyzer:
             request_uid=lease.request_uid,
             interaction_id=interaction.interaction_id,
             provider_status="failed",
+            warnings=(
+                (f"provider_diagnostic:{interaction.provider_error_diagnostic}",)
+                if interaction.provider_error_diagnostic
+                else ()
+            ),
         )
 
     async def _semantic_failure(

@@ -230,14 +230,18 @@ async def test_missing_selected_secret_releases_unsent_and_never_calls_provider(
         ("malformed_json", GoogleAIErrorCode.RESPONSE_SCHEMA_INVALID),
     ],
 )
-async def test_transport_failure_after_send_is_finalized_without_retry(kind: str, expected: GoogleAIErrorCode) -> None:
+async def test_transport_failure_after_send_is_finalized_ambiguous_without_retry(
+    kind: str, expected: GoogleAIErrorCode
+) -> None:
     shared = Limiter()
     provider = Interactions(ProviderTransportFailure(kind))
     with pytest.raises(GoogleAIError) as caught:
         await analyzer(shared, provider).analyze(arguments())
     assert caught.value.code is expected
+    assert caught.value.reconciliation_required is True
+    assert caught.value.warnings == ("provider_outcome_ambiguous_no_retry",)
     assert len(provider.calls) == 1
-    assert shared.finalized[0]["provider_terminal_status"] == "failed"
+    assert shared.finalized[0]["provider_terminal_status"] == "incomplete"
 
 
 @pytest.mark.asyncio

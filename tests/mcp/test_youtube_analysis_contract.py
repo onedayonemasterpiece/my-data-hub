@@ -200,6 +200,29 @@ async def test_reader_profile_never_lists_youtube_tool() -> None:
     assert YOUTUBE_TOOL_NAME not in {tool.name for tool in await server.list_tools()}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "profile_flag",
+    ("provider_only_profile_enabled", "unified_bootstrap_profile_enabled"),
+)
+async def test_bounded_non_operator_profiles_never_list_youtube_tool(
+    profile_flag: str,
+) -> None:
+    analyzer = Analyzer()
+    owner = identity(YOUTUBE_SCOPE)
+    profile = {profile_flag: True}
+    server = create_server(
+        settings(),  # type: ignore[arg-type]
+        dependencies=YouTubeMCPDependencies(
+            base=MCPDependencies(**profile),
+            analyzer=analyzer,
+            feature_enabled=True,
+        ),
+        default_identity=owner,
+    )
+    assert YOUTUBE_TOOL_NAME not in {tool.name for tool in await server.list_tools()}
+
+
 def test_oauth_metadata_adds_scope_only_for_enabled_operator_profile() -> None:
     analyzer = Analyzer()
     base = MCPDependencies()

@@ -39,6 +39,24 @@ def test_cimd_scope_parser_accepts_the_complete_bounded_catalog(monkeypatch) -> 
     ) == values
 
 
+def test_oauth_catalog_accepts_the_bounded_youtube_operator_scope() -> None:
+    clients = runtime_module._clients(
+        json.dumps(
+            [
+                {
+                    "client_id": "youtube-operator",
+                    "redirect_uris": ["https://chatgpt.example.test/oauth/callback"],
+                    "allowed_scopes": ["openid", "offline_access", "youtube:analyze"],
+                }
+            ]
+        )
+    )
+
+    assert clients[0].allowed_scopes == frozenset(
+        {"openid", "offline_access", "youtube:analyze"}
+    )
+
+
 def test_production_oauth_runtime_uses_durable_ledger_and_external_owner_login(
     monkeypatch, tmp_path: Path
 ) -> None:  # type: ignore[no-untyped-def]

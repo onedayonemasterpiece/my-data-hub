@@ -136,6 +136,31 @@ async def test_payload_uses_video_before_text_store_false_and_exact_revision() -
     assert "secret-never-returned" not in repr(result)
 
 
+def test_payload_schema_uses_only_provider_supported_json_schema_keywords() -> None:
+    payload = GeminiInteractionsClient.build_payload(
+        canonical_youtube_url="https://www.youtube.com/watch?v=6V2stDksGI8",
+        request=request(mode="transcript"),
+        model="gemini-3.7-flash",
+    )
+
+    unsupported = {"const", "maxLength", "pattern"}
+
+    def visit(value: object) -> None:
+        if isinstance(value, Mapping):
+            assert unsupported.isdisjoint(value)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    schema = payload["response_format"]["schema"]
+    visit(schema)
+    assert schema["properties"]["transcript_source"]["enum"] == [
+        "gemini_media_transcription"
+    ]
+
+
 @pytest.mark.asyncio
 async def test_provider_error_is_returned_without_hidden_retry_or_secret_echo() -> None:
     requester = Requester(
@@ -157,6 +182,36 @@ async def test_provider_error_is_returned_without_hidden_retry_or_secret_echo() 
     assert len(requester.calls) == 1
     assert result.provider_error_category == "provider_429"
     assert result.retry_after_ms == 2000
+    assert "secret-key" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_top_level_provider_error_returns_only_bounded_safe_diagnostic() -> None:
+    requester = Requester(
+        [
+            response(
+                {
+                    "status": "INVALID_ARGUMENT",
+                    "message": (
+                        "Invalid JSON payload received. Unknown name maxLength at "
+                        "response_format.schema"
+                    ),
+                },
+                status=400,
+            )
+        ]
+    )
+    client = GeminiInteractionsClient(requester=requester)
+    result = await client.create(
+        api_key="secret-key",
+        canonical_youtube_url="https://www.youtube.com/watch?v=6V2stDksGI8",
+        request=request(),
+        model="gemini-3.7-flash",
+    )
+    assert result.provider_error_code == "INVALID_ARGUMENT"
+    assert result.provider_error_category == "provider_rejected_video"
+    assert result.provider_error_diagnostic == "provider_response_schema_invalid"
+    assert "maxLength" not in repr(result)
     assert "secret-key" not in repr(result)
 
 

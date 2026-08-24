@@ -273,6 +273,30 @@ def test_operator_profile_keeps_chatgpt_cimd_with_exact_operator_scopes() -> Non
     assert "migration:operate" not in operator_override
 
 
+def test_google_youtube_operator_profile_is_separate_explicit_and_rollbackable() -> None:
+    source = installer_source()
+    assert "MY_DATA_HUB_ENABLE_GOOGLE_YOUTUBE_ANALYSIS" in source
+    assert "I_ACKNOWLEDGE_SHARED_GOOGLE_AI_QUOTA" in source
+    assert 'google_youtube_override="$runtime_root/google-youtube.$commit.yaml"' in source
+    operator_start = source.index('cat > "$operator_override"')
+    operator_end = source.index('chmod 600 "$operator_override"', operator_start)
+    operator_override = source[operator_start:operator_end]
+    assert 'MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED: "false"' in operator_override
+    start = source.index('cat > "$google_youtube_override"')
+    end = source.index('chmod 600 "$google_youtube_override"', start)
+    youtube_override = source[start:end]
+    assert 'MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED: "true"' in youtube_override
+    assert "MY_DATA_HUB_MCP_SCOPES:" in youtube_override
+    assert "youtube:analyze" in youtube_override
+    assert "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES:" in youtube_override
+    assert 'google_youtube_compose_arg=" -f $google_youtube_override"' in source
+    assert source.count("$google_youtube_compose_arg") >= 3
+    assert (
+        "Google YouTube analysis and protected acceptance scenarios require separate operator installs"
+        in source
+    )
+
+
 def test_remote_mcp_host_network_uses_only_loopback_control_gateway() -> None:
     source = installer_source()
     compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))

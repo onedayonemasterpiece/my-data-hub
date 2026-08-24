@@ -36,6 +36,7 @@ def test_feature_is_disabled_by_default_and_generic_supabase_is_not_fallback(mon
     assert settings.google_ai_limiter_supabase_url == ""
     assert settings.google_ai_limiter_supabase_service_key == ""
     assert settings.google_ai_normal_key_envs == ()
+    assert settings.google_youtube_timeout_seconds == 300
 
 
 @pytest.mark.parametrize(

@@ -18,7 +18,11 @@ from my_data_hub.google_ai.http import (
     BoundedHTTPError,
     BoundedJSONRequester,
 )
-from my_data_hub.google_ai.youtube import mode_prompt, response_schema, system_instruction
+from my_data_hub.google_ai.youtube import (
+    mode_prompt,
+    provider_response_schema,
+    system_instruction,
+)
 
 INTERACTIONS_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
 API_REVISION = "2026-05-20"
@@ -56,20 +60,21 @@ def _retry_after_ms(value: str | None) -> int | None:
     return min(93_600_000, max(0, int(seconds * 1000)))
 
 
-def _provider_error(body: Any, http_status: int) -> tuple[str | None, str]:
+def _provider_error(body: Any, http_status: int) -> tuple[str | None, str, str | None]:
     code: str | None = None
     message = ""
     if isinstance(body, Mapping):
         error = body.get("error")
-        if isinstance(error, Mapping):
-            raw_code = error.get("status") or error.get("code")
+        envelope = error if isinstance(error, Mapping) else body
+        if isinstance(envelope, Mapping):
+            raw_code = envelope.get("status") or envelope.get("code")
             if isinstance(raw_code, str) and _SAFE_PROVIDER_CODE.fullmatch(raw_code):
                 code = raw_code
-            raw_message = error.get("message")
+            raw_message = envelope.get("message")
             if isinstance(raw_message, str):
                 message = raw_message.casefold()[:2000]
     if http_status == 429:
-        return code, "provider_429"
+        return code, "provider_429", "provider_quota_rejected"
     public_markers = (
         "not public",
         "private video",
@@ -80,8 +85,31 @@ def _provider_error(body: Any, http_status: int) -> tuple[str | None, str]:
         "youtube video",
     )
     if http_status in {400, 403, 404} and any(marker in message for marker in public_markers):
-        return code, "youtube_video_not_public"
-    return code, "provider_rejected_video"
+        return code, "youtube_video_not_public", "video_not_public"
+    diagnostic: str | None = None
+    if http_status == 400:
+        if any(
+            marker in message
+            for marker in (
+                "response_format",
+                "json payload",
+                "json schema",
+                "unknown name",
+                "structured output",
+            )
+        ):
+            diagnostic = "provider_response_schema_invalid"
+        elif "model" in message and any(
+            marker in message for marker in ("not found", "not supported", "unavailable")
+        ):
+            diagnostic = "provider_model_unavailable"
+        elif "resolution" in message:
+            diagnostic = "provider_media_resolution_invalid"
+        elif any(marker in message for marker in ("url", "uri", "video")):
+            diagnostic = "provider_video_reference_invalid"
+        else:
+            diagnostic = "provider_request_invalid"
+    return code, "provider_rejected_video", diagnostic
 
 
 def _extract_output_text(body: Mapping[str, Any]) -> str | None:
@@ -178,7 +206,7 @@ class GeminiInteractionsClient:
             "response_format": {
                 "type": "text",
                 "mime_type": "application/json",
-                "schema": response_schema(request.mode),
+                "schema": provider_response_schema(request.mode),
             },
             "store": False,
         }
@@ -215,7 +243,7 @@ class GeminiInteractionsClient:
 
         body = response.json_body
         if not 200 <= response.status < 300:
-            code, category = _provider_error(body, response.status)
+            code, category, diagnostic = _provider_error(body, response.status)
             return ProviderInteraction(
                 interaction_id=None,
                 model=model,
@@ -227,6 +255,7 @@ class GeminiInteractionsClient:
                 retry_after_ms=_retry_after_ms(response.retry_after),
                 provider_error_code=code,
                 provider_error_category=category,
+                provider_error_diagnostic=diagnostic,
             )
         if not isinstance(body, Mapping):
             raise ProviderTransportFailure("malformed_json")

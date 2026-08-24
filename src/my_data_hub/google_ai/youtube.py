@@ -218,3 +218,30 @@ def response_schema(mode: YouTubeMode) -> Mapping[str, Any]:
         "required": list(properties),
         "properties": properties,
     }
+
+
+def provider_response_schema(mode: YouTubeMode) -> Mapping[str, Any]:
+    """Return the bounded schema using only Gemini-supported JSON Schema keywords.
+
+    ``response_schema`` remains the stricter server-side validator.  Gemini's
+    structured-output contract supports ``enum`` but not ``const``, ``pattern``
+    or ``maxLength``; sending those keywords can reject the interaction before
+    the video is evaluated.
+    """
+
+    def normalize(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            normalized = {
+                key: normalize(child)
+                for key, child in value.items()
+                if key not in {"const", "pattern", "maxLength"}
+            }
+            constant = value.get("const")
+            if "const" in value:
+                normalized["enum"] = [normalize(constant)]
+            return normalized
+        if isinstance(value, list):
+            return [normalize(child) for child in value]
+        return value
+
+    return normalize(response_schema(mode))
