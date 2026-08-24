@@ -19,9 +19,9 @@ from my_data_hub.mcp.server import (
     _configured_security_schemes,
     _local_identity,
     _profile_tool_names,
-    create_server as create_base_server,
     oauth_resource_metadata_url,
 )
+from my_data_hub.mcp.server import create_server as create_base_server
 from my_data_hub.mcp.youtube_catalog import (
     TOOL_CONTRACTS,
     YOUTUBE_SCOPE,
