@@ -17,7 +17,6 @@ from my_data_hub.google_ai.contracts import (
 from my_data_hub.google_ai.errors import GoogleAIError, GoogleAIErrorCode
 from my_data_hub.google_ai.interactions import ProviderTransportFailure
 
-
 LEASE = LimiterLease(
     request_uid="00000000-0000-4000-8000-000000000001",
     attempt_no=1,
