@@ -616,7 +616,7 @@ async def test_live_inventory_uses_only_injected_control_adapter_and_operator_sc
         scopes=principal().scopes,
     )
 
-    result = await service.invoke("provider.inventory.live", {"limit": 100})
+    result = await service.invoke("provider.inventory.live", {"limit": 10})
 
     assert result["bounded"] is True
     assert result["complete"] is True
@@ -626,6 +626,7 @@ async def test_live_inventory_uses_only_injected_control_adapter_and_operator_sc
         "owner/master",
     ]
     assert [call[0] for call in adapter.calls] == [ProviderKind.DATASET, ProviderKind.NOTEBOOK]
+    assert [call[2] for call in adapter.calls] == [20, 20]
     with pytest.raises(PermissionError, match="provider operator scope"):
         gateway.invoke(
             "provider.inventory.live",
