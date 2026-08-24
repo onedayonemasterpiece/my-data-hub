@@ -16,6 +16,10 @@ def test_secret_scan_allows_only_the_exact_invalid_historical_test_pem() -> None
     assert findings(sentinel) == []
     assert "private-key" in findings(sentinel.replace("TEST", "QUJDREVGR0g="))
 
+    openssh_sentinel = "-----BEGIN " + "OPENSSH PRIVATE KEY-----\nkey"
+    assert findings(openssh_sentinel) == []
+    assert "private-key" in findings(openssh_sentinel.replace("\nkey", "\nkey-material"))
+
 
 def test_secret_scan_detects_nonplaceholder_sensitive_assignment() -> None:
     assignment = "KAGGLE_API_" + "TOKEN=" + "sensitive-value-123456789"
@@ -27,3 +31,9 @@ def test_secret_scan_detects_nonplaceholder_sensitive_assignment() -> None:
 def test_secret_scan_allows_ci_and_documentation_placeholders() -> None:
     assert findings("PASSWORD=integration-only-password") == []
     assert findings("KAGGLE_API_TOKEN=${{ secrets.KAGGLE_API_TOKEN }}") == []
+
+
+def test_secret_scan_allows_only_exact_historical_region_talk_password_fixture() -> None:
+    sentinel = "region-talk-fixture-password-long-enough"
+    assert findings(f'PASSWORD="{sentinel}"') == []
+    assert findings(f'PASSWORD="{sentinel}-changed"') == ["credential-assignment"]
