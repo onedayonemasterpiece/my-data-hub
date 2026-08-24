@@ -61,6 +61,8 @@ from my_data_hub.providers.models import (
 from my_data_hub.providers.policy import PolicyDenied
 from my_data_hub.workloads.bloggers.discovery import blogger_import_request_sha256
 
+_PROVIDER_INVENTORY_PAGE_SIZE = 20
+
 
 def _revocation_reference(query: OAuthRevocationQuery) -> str:
     return json.dumps(asdict(query), sort_keys=True, separators=(",", ":"))
@@ -1076,7 +1078,11 @@ class KaggleMCPProviderGateway:
                 page = self.adapter.list_resources(
                     kind=kind,
                     cursor=cursor,
-                    limit=min(50, max(1, limit + 1 - len(resources))),
+                    # Kaggle's Dataset listing is a fixed 20-row page even
+                    # though the SDK accepts ``page_size``. Request that exact
+                    # provider page and enforce the caller's smaller bound on
+                    # the accumulated, secret-free result below.
+                    limit=_PROVIDER_INVENTORY_PAGE_SIZE,
                 )
                 for observed in page.resources:
                     identity = (observed.provider, observed.provider_ref)
