@@ -1696,27 +1696,15 @@ class KaggleProviderAdapter:
         expected_source_sha256: str | None = None,
     ) -> KaggleKernelSourceIdentity:
         ref = _normalized_ref(provider_ref)
-        source_sha, _provider_id = self._pull_private_notebook_source(ref, source_version)
-        if expected_source_sha256 is not None and source_sha != expected_source_sha256:
-            raise KaggleIdentityError("Kaggle source readback differs from the exact pushed bytes")
-        fingerprint = ProviderFingerprint(
-            value=sha256_value(
-                {
-                    "provider_ref": ref,
-                    "source_version": source_version,
-                    "privacy": "private",
-                    "source_sha256": source_sha,
-                }
+        current, _provider_id = self._read_latest_private_notebook_identity(
+            ref,
+            expected_source_sha256=expected_source_sha256,
+        )
+        if current.source_version != source_version:
+            raise KaggleIdentityError(
+                "Kaggle source readback is latest-by-slug and source version has advanced"
             )
-        )
-        return KaggleKernelSourceIdentity(
-            provider_ref=ref,
-            source_version=source_version,
-            privacy="private",
-            source_sha256=source_sha,
-            fingerprint=fingerprint,
-            observed_at=self.clock(),
-        )
+        return current
 
     def _pull_private_notebook_source(self, ref: str, source_version: int | None) -> tuple[str, int]:
         with tempfile.TemporaryDirectory(prefix="my-data-hub-kaggle-source-") as temporary:

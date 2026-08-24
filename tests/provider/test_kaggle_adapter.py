@@ -697,6 +697,50 @@ def test_notebook_source_run_and_output_are_bound_to_exact_version() -> None:
     assert ("kernels_output", "owner/private-kernel/1") in api.calls
 
 
+def test_notebook_source_read_uses_exact_latest_identity_when_versioned_pull_is_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, api, _journal = adapter()
+    run_id = uuid4()
+    source = f'RUN_ID = "{run_id}"\nprint(RUN_ID)\n'.encode()
+    source_sha = hashlib.sha256(source).hexdigest()
+    result = client.push_private_notebook(
+        intent=effect(
+            MutationAction.PUSH_NOTEBOOK,
+            "owner/private-kernel-readback",
+            task_id=run_id,
+            arguments={
+                "task_run_id": str(run_id),
+                "source_sha256": source_sha,
+                "dataset_sources": (),
+                "control_class": "mcp_managed",
+                "disposable": True,
+            },
+        ),
+        task_run_id=run_id,
+        source=source,
+        title="private-kernel-readback",
+        code_file="run.py",
+        kernel_type="script",
+        language="python",
+        control_class=ControlClass.MCP_MANAGED,
+        disposable=True,
+    )
+    monkeypatch.setattr(
+        api,
+        "kernels_pull",
+        lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("versioned GetKernel denied")),
+    )
+
+    observed = client.read_private_notebook_source(
+        provider_ref=result.run.provider_ref,
+        source_version=result.run.source_version,
+        expected_source_sha256=source_sha,
+    )
+
+    assert observed == result.source
+
+
 def test_master_legacy_push_persists_numeric_response_pending_runtime_attestation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
