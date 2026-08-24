@@ -10,6 +10,7 @@ class GoogleAIErrorCode(StrEnum):
     UNSUPPORTED_YOUTUBE_HOST = "unsupported_youtube_host"
     INVALID_VIDEO_ID = "invalid_video_id"
     UNSUPPORTED_MODEL = "unsupported_model"
+    UNSUPPORTED_THINKING_LEVEL = "unsupported_thinking_level"
     SHARED_LIMITER_UNAVAILABLE = "shared_limiter_unavailable"
     LIMITER_CONTRACT_MISMATCH = "limiter_contract_mismatch"
     LIMITER_BUCKET_STRATEGY_MISMATCH = "limiter_bucket_strategy_mismatch"
@@ -38,6 +39,7 @@ _DEFAULT_MESSAGES: dict[GoogleAIErrorCode, str] = {
     GoogleAIErrorCode.UNSUPPORTED_YOUTUBE_HOST: "The YouTube host is not supported.",
     GoogleAIErrorCode.INVALID_VIDEO_ID: "The YouTube video ID is invalid.",
     GoogleAIErrorCode.UNSUPPORTED_MODEL: "The requested Gemini model is not allowed.",
+    GoogleAIErrorCode.UNSUPPORTED_THINKING_LEVEL: "The selected thinking level is not supported by the requested model.",
     GoogleAIErrorCode.SHARED_LIMITER_UNAVAILABLE: "The shared Google AI limiter is unavailable.",
     GoogleAIErrorCode.LIMITER_CONTRACT_MISMATCH: "The shared limiter contract is incompatible.",
     GoogleAIErrorCode.LIMITER_BUCKET_STRATEGY_MISMATCH: "The shared limiter bucket strategy is incompatible.",
