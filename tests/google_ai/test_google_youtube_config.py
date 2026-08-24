@@ -6,7 +6,6 @@ import pytest
 
 from my_data_hub.config import ConfigurationError, Settings
 
-
 GOOGLE_ENV_NAMES = {
     "MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED",
     "MY_DATA_HUB_GOOGLE_YOUTUBE_MODEL",
