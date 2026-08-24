@@ -811,23 +811,23 @@ def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_
     assert notebook_read["provider_kernel_id"] == 123
     assert notebook_read["run_state"] == "complete"
     assert notebook_read["terminal"] is True
-    deleted = gateway.invoke(
-        "provider.resources.delete",
-        {
-            "resource_ref": "owner/mcp-notebook",
-            "control_class": "mcp_managed",
-            "private": True,
-            "payload": {
-                "kind": "notebook",
-                "task_id": notebook["task_id"],
-                "effect_id": str(uuid4()),
-                "idempotency_key": "provider-delete-1",
-                "claim_sha256": notebook["claim_sha256"],
-            },
+    delete_arguments = {
+        "resource_ref": "owner/mcp-notebook",
+        "control_class": "mcp_managed",
+        "private": True,
+        "payload": {
+            "kind": "notebook",
+            "task_id": notebook["task_id"],
+            "effect_id": str(uuid4()),
+            "idempotency_key": "provider-delete-1",
+            "claim_sha256": notebook["claim_sha256"],
         },
-        principal(),
-    )
+    }
+    deleted = gateway.invoke("provider.resources.delete", delete_arguments, principal())
     assert deleted["outcome"] == "applied"
+    replayed_delete = gateway.invoke("provider.resources.delete", delete_arguments, principal())
+    assert replayed_delete == deleted
+    assert adapter.delete_calls == 1
 
 
 def test_provider_run_exposes_bounded_runtime_options_status_and_declared_outputs(

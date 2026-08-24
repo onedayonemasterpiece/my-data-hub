@@ -2233,10 +2233,20 @@ class ControlLedger:
                 )
             except sqlite3.IntegrityError:
                 row = connection.execute(
-                    "SELECT intent_json FROM provider_effect_intents WHERE effect_id=? OR idempotency_key=?",
+                    "SELECT effect_id,operation_id,idempotency_key,task_id,action,provider_ref,request_sha256 "
+                    "FROM provider_effect_intents WHERE effect_id=? OR idempotency_key=?",
                     (str(payload["effect_id"]), str(payload["idempotency_key"])),
                 ).fetchone()
-                if row is None or row["intent_json"] != intent_json:
+                identity = {
+                    "effect_id": str(payload["effect_id"]),
+                    "operation_id": str(payload["operation_id"]),
+                    "idempotency_key": str(payload["idempotency_key"]),
+                    "task_id": str(payload["task_id"]),
+                    "action": str(payload["action"]),
+                    "provider_ref": str(payload["provider_ref"]),
+                    "request_sha256": str(payload["request_sha256"]),
+                }
+                if row is None or any(str(row[key]) != value for key, value in identity.items()):
                     raise IdempotencyConflict("provider effect identity was reused for a different intent") from None
 
     def ensure_mcp_write_operation(
