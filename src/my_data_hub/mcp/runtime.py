@@ -1,9 +1,9 @@
 """Production construction for the lightweight remote MCP resource server.
 
-This process owns no canonical state and receives no PostgreSQL credentials.  It
-shares only the bounded control ledger with the control API.  The data-plane
-broker is deliberately absent until an epoch-bound tunnel broker is injected;
-status and cold-start requests remain useful while ACTIVE data reads fail closed.
+This process owns no canonical state and receives no PostgreSQL credentials. It
+shares only the bounded control ledger with the control API and the dedicated
+Google AI quota ledger. The Google ledger contains quota metadata, never API-key
+secrets or business data.
 """
 
 from __future__ import annotations
@@ -26,6 +26,10 @@ from my_data_hub.control_plane.adapters import (
 )
 from my_data_hub.control_plane.app import assert_no_database_environment
 from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.google_ai.analyzer import GeminiYouTubeAnalyzer, YouTubeAnalyzerConfig
+from my_data_hub.google_ai.config import GoogleYouTubeSettings
+from my_data_hub.google_ai.interactions import GeminiInteractionsClient
+from my_data_hub.google_ai.limiter import SupabaseGoogleAILimiter
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.contracts import MasterSnapshot, MasterState, WriteGate, WritePermit
 from my_data_hub.mcp.control_gateway import (
@@ -43,8 +47,12 @@ from my_data_hub.mcp.postgres_broker import (
     DirectoryEpochCredentialSource,
     PostgresMasterSessionBroker,
 )
-from my_data_hub.mcp.server import MCPDependencies, create_streamable_http_app
+from my_data_hub.mcp.server import MCPDependencies
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
+from my_data_hub.mcp.youtube_server import (
+    YouTubeMCPDependencies,
+    create_streamable_http_app,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +77,20 @@ _PROVIDER_ONLY_MUTATIONS = frozenset(
     }
 )
 _OAUTH_PROTOCOL_SCOPES = frozenset({"openid", "offline_access"})
+_GUARDED_WRITE_SCOPES = frozenset(
+    {
+        "master:ensure",
+        "master:rotate",
+        "recovery:request",
+        "acceptance:probe",
+        "acceptance:operate",
+        "data:write",
+        "migration:operate",
+        "bloggers:write",
+        "region-talk:operate",
+        "provider:write",
+    }
+)
 
 
 class ProviderOnlyWriteGate:
@@ -167,9 +189,6 @@ class UnifiedBootstrapWriteGate(ProviderOnlyWriteGate):
         arguments: Mapping[str, object],
         master: MasterSnapshot,
     ) -> WritePermit:
-        # The provider Dataset API is a separate control surface.  It must stay
-        # usable before, during, and after a canonical master epoch, but this
-        # gate never authorizes a canonical data-plane mutation.
         if tool not in _PROVIDER_ONLY_MUTATIONS or "provider:write" not in principal.scopes:
             raise PermissionError("unified bootstrap write gate rejects this tool or scope")
         resource_class = (
@@ -181,14 +200,37 @@ class UnifiedBootstrapWriteGate(ProviderOnlyWriteGate):
             raise PermissionError("unified bootstrap accepts only MCP-controlled resources")
         if tool != "provider.acceptance.claim.cleanup" and arguments.get("private") is not True:
             raise PermissionError("unified bootstrap accepts only private resources")
-        # Reuse the signed, canonical-data-independent permit construction by
-        # presenting the only state accepted by the provider-only base gate.
         return super().authorize_write(
             principal=principal,
             tool=tool,
             arguments=arguments,
             master=MasterSnapshot(MasterState.ABSENT),
         )
+
+
+def _build_youtube_analyzer(settings: Settings):  # type: ignore[no-untyped-def]
+    feature = GoogleYouTubeSettings.from_settings(settings)
+    if not feature.enabled:
+        return None
+    limiter = SupabaseGoogleAILimiter(
+        supabase_url=feature.limiter_supabase_url,
+        service_key=feature.limiter_supabase_service_key,
+        candidate_env_names=feature.normal_key_envs,
+    )
+    interactions = GeminiInteractionsClient(
+        timeout_seconds=feature.timeout_seconds,
+        max_response_bytes=feature.max_response_bytes,
+    )
+    return GeminiYouTubeAnalyzer(
+        config=YouTubeAnalyzerConfig(
+            enabled=True,
+            default_model=feature.model,
+            allowed_models=frozenset(feature.allowed_models),
+            max_output_tokens=feature.max_output_tokens,
+        ),
+        limiter=limiter,
+        interactions=interactions,
+    )
 
 
 def build_remote_runtime(
@@ -200,10 +242,8 @@ def build_remote_runtime(
     provider_control: object | None = None,
     sql_policy: BoundedSQLPolicy | None = None,
 ) -> RemoteMCPRuntime:
-    """Build the remote reader profile from explicit, fail-closed dependencies."""
+    """Build the remote profile with explicit, fail-closed dependencies."""
 
-    # Reuse the control-plane environment guard so libpq variables cannot leak
-    # into this long-running resource-server process.
     assert_no_database_environment()
     if any(name.startswith("KAGGLE_") for name in os.environ):
         raise ConfigurationError("remote MCP must not receive Kaggle provider credentials or configuration")
@@ -213,15 +253,19 @@ def build_remote_runtime(
     control_ledger = ledger or ControlLedger(
         Path(os.getenv("MY_DATA_HUB_CONTROL_LEDGER_PATH", "/state/control.sqlite3")).expanduser()
     )
-    if runtime_settings.mcp_write_enabled:
-        if not (
-            runtime_settings.mcp_operator_profile_enabled
-            or runtime_settings.mcp_provider_profile_enabled
-            or runtime_settings.mcp_unified_bootstrap_profile_enabled
-        ):
-            raise ConfigurationError(
-                "remote MCP writes require an explicit owner/operator, provider-only, or unified bootstrap profile"
-            )
+    if runtime_settings.mcp_write_enabled and not (
+        runtime_settings.mcp_operator_profile_enabled
+        or runtime_settings.mcp_provider_profile_enabled
+        or runtime_settings.mcp_unified_bootstrap_profile_enabled
+    ):
+        raise ConfigurationError(
+            "remote MCP writes require an explicit owner/operator, provider-only, or unified bootstrap profile"
+        )
+    guarded_write_enabled = bool(
+        runtime_settings.mcp_write_enabled
+        and runtime_settings.mcp_scopes.intersection(_GUARDED_WRITE_SCOPES)
+    )
+    if guarded_write_enabled:
         if write_gate is None:
             secret_path = Path(os.getenv("MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE", "")).expanduser()
             if not secret_path.is_absolute() or secret_path.is_symlink() or not secret_path.is_file():
@@ -260,10 +304,6 @@ def build_remote_runtime(
             issuer=runtime_settings.mcp_oauth_issuer,
             audience=runtime_settings.mcp_oauth_audience,
             resource=runtime_settings.mcp_oauth_resource,
-            # ``openid`` selects the identity layer and ``offline_access``
-            # requests a refresh family.  They may therefore be present in a
-            # correctly issued resource access token, but they are not MCP
-            # tool capabilities and must not be advertised as such.
             allowed_scopes=runtime_settings.mcp_scopes | _OAUTH_PROTOCOL_SCOPES,
             max_token_lifetime_seconds=runtime_settings.mcp_token_max_lifetime_seconds,
         ),
@@ -278,10 +318,10 @@ def build_remote_runtime(
     )
     control = (
         SplitControlPlaneReader(local_control, provider_control)  # type: ignore[arg-type]
-        if runtime_settings.mcp_write_enabled and provider_control is not None
+        if guarded_write_enabled and provider_control is not None
         else local_control
     )
-    dependencies = MCPDependencies(
+    base_dependencies = MCPDependencies(
         resolver=LedgerMasterResolver(control_ledger),
         broker=PostgresMasterSessionBroker(
             DirectoryEpochCredentialSource(
@@ -302,6 +342,11 @@ def build_remote_runtime(
             or runtime_settings.mcp_unified_bootstrap_profile_enabled
         ),
     )
+    dependencies = YouTubeMCPDependencies(
+        base=base_dependencies,
+        analyzer=_build_youtube_analyzer(runtime_settings),
+        feature_enabled=runtime_settings.google_youtube_enabled,
+    )
     app = create_streamable_http_app(
         runtime_settings,
         dependencies=dependencies,
@@ -318,7 +363,6 @@ def serve() -> None:
 
 
 def main() -> None:
-    # Refuse accidental CLI arguments such as a development transport flag.
     if len(os.sys.argv) != 1:
         raise SystemExit("remote MCP runtime accepts no command-line configuration")
     serve()

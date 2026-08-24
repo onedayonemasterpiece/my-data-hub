@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -100,6 +101,19 @@ class Settings:
     connector_intake_database_url: str = ""
     orchestrator_database_url: str = ""
     canonical_committer_database_url: str = ""
+    google_youtube_enabled: bool = False
+    google_youtube_model: str = "gemini-3.6-flash"
+    google_youtube_allowed_models: tuple[str, ...] = (
+        "gemini-3.6-flash",
+        "gemini-3.7-flash",
+    )
+    google_youtube_timeout_seconds: int = 120
+    google_youtube_max_response_bytes: int = 524_288
+    google_youtube_max_output_tokens: int = 8192
+    google_youtube_default_store: bool = False
+    google_ai_limiter_supabase_url: str = ""
+    google_ai_limiter_supabase_service_key: str = ""
+    google_ai_normal_key_envs: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls, *, require_database: bool = True) -> Settings:
@@ -208,6 +222,35 @@ class Settings:
             canonical_committer_database_url=os.getenv(
                 "MY_DATA_HUB_CANONICAL_COMMITTER_DATABASE_URL", ""
             ).strip(),
+            google_youtube_enabled=_bool("MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED", False),
+            google_youtube_model=os.getenv(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_MODEL", "gemini-3.6-flash"
+            ).strip(),
+            google_youtube_allowed_models=_csv(
+                os.getenv(
+                    "MY_DATA_HUB_GOOGLE_YOUTUBE_ALLOWED_MODELS",
+                    "gemini-3.6-flash,gemini-3.7-flash",
+                )
+            ),
+            google_youtube_timeout_seconds=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_TIMEOUT_SECONDS", 120
+            ),
+            google_youtube_max_response_bytes=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_RESPONSE_BYTES", 524_288
+            ),
+            google_youtube_max_output_tokens=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_OUTPUT_TOKENS", 8192
+            ),
+            google_youtube_default_store=_bool(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_DEFAULT_STORE", False
+            ),
+            google_ai_limiter_supabase_url=os.getenv(
+                "GOOGLE_AI_LIMITER_SUPABASE_URL", ""
+            ).strip(),
+            google_ai_limiter_supabase_service_key=os.getenv(
+                "GOOGLE_AI_LIMITER_SUPABASE_SERVICE_KEY", ""
+            ).strip(),
+            google_ai_normal_key_envs=_csv(os.getenv("GOOGLE_AI_NORMAL_KEY_ENVS", "")),
         )
         settings.validate()
         return settings
@@ -310,8 +353,6 @@ class Settings:
             "embedding:read",
             "bloggers:read",
             "data:read",
-            # Retained only for local compatibility with the pre-reset semantic
-            # catalog. Operational MCP tools use the explicit scopes above.
             "hub:read",
             "orchestrator:read",
             "region-talk:read",
@@ -330,6 +371,7 @@ class Settings:
             "bloggers:write",
             "region-talk:operate",
             "provider:write",
+            "youtube:analyze",
         }
         if self.mcp_remote_enabled and (
             (not self.mcp_write_enabled and not self.mcp_scopes <= remote_read_scopes)
@@ -431,7 +473,61 @@ class Settings:
             "bloggers:write",
             "region-talk:operate",
             "provider:write",
+            "youtube:analyze",
         }.intersection(self.mcp_scopes):
             raise ConfigurationError("MCP write mode requires an explicit write scope")
         if self.production_publish_enabled and self.environment not in {"prod", "production"}:
             raise ConfigurationError("production publication may be enabled only in production")
+        self._validate_google_youtube()
+
+    def _validate_google_youtube(self) -> None:
+        if not self.google_youtube_allowed_models or len(set(self.google_youtube_allowed_models)) != len(
+            self.google_youtube_allowed_models
+        ):
+            raise ConfigurationError("YouTube model allowlist must be non-empty and unique")
+        if self.google_youtube_model not in self.google_youtube_allowed_models:
+            raise ConfigurationError("default YouTube model must be in the server allowlist")
+        if not 10 <= self.google_youtube_timeout_seconds <= 300:
+            raise ConfigurationError("YouTube timeout must be between 10 and 300 seconds")
+        if not 65_536 <= self.google_youtube_max_response_bytes <= 2_097_152:
+            raise ConfigurationError("YouTube response limit must be between 64 KiB and 2 MiB")
+        if not 256 <= self.google_youtube_max_output_tokens <= 65_536:
+            raise ConfigurationError("YouTube output-token cap must be between 256 and 65536")
+        if self.google_youtube_default_store:
+            raise ConfigurationError("the first YouTube release requires store=false")
+        env_name = re.compile(r"^[A-Z][A-Z0-9_]{1,127}$")
+        if any(not env_name.fullmatch(name) for name in self.google_ai_normal_key_envs):
+            raise ConfigurationError("GOOGLE_AI_NORMAL_KEY_ENVS contains an invalid ENV variable name")
+        if len(set(self.google_ai_normal_key_envs)) != len(self.google_ai_normal_key_envs):
+            raise ConfigurationError("GOOGLE_AI_NORMAL_KEY_ENVS must not contain duplicates")
+        dedicated = (
+            bool(self.google_ai_limiter_supabase_url),
+            bool(self.google_ai_limiter_supabase_service_key),
+            bool(self.google_ai_normal_key_envs),
+        )
+        if any(dedicated) and not all(dedicated):
+            raise ConfigurationError("dedicated Google AI limiter configuration is partial")
+        if self.google_ai_limiter_supabase_url:
+            limiter = urlsplit(self.google_ai_limiter_supabase_url)
+            if (
+                limiter.scheme != "https"
+                or not limiter.hostname
+                or limiter.username is not None
+                or limiter.password is not None
+                or limiter.query
+                or limiter.fragment
+            ):
+                raise ConfigurationError("Google AI limiter URL must be a canonical HTTPS origin")
+        if self.google_youtube_enabled and (
+            not all(dedicated)
+            or not self.mcp_remote_enabled
+            or not self.mcp_write_enabled
+            or not self.mcp_operator_profile_enabled
+            or self.mcp_provider_profile_enabled
+            or self.mcp_unified_bootstrap_profile_enabled
+            or "youtube:analyze" not in self.mcp_scopes
+        ):
+            raise ConfigurationError(
+                "YouTube analysis requires the exclusive remote operator profile, youtube:analyze, "
+                "write opt-in, and the dedicated shared limiter"
+            )
