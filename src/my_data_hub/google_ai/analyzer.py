@@ -71,7 +71,7 @@ class GeminiYouTubeAnalyzer:
         if request.max_output_tokens > self._config.max_output_tokens:
             raise GoogleAIError(GoogleAIErrorCode.RESPONSE_SCHEMA_INVALID)
         if model == "gemini-3.7-flash" and request.thinking_level is ThinkingLevel.MINIMAL:
-            raise GoogleAIError(GoogleAIErrorCode.UNSUPPORTED_MODEL)
+            raise GoogleAIError(GoogleAIErrorCode.UNSUPPORTED_THINKING_LEVEL)
 
         request_uid = str(uuid4())
         attempt_no = 1
