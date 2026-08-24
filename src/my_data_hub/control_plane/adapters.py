@@ -1261,7 +1261,7 @@ class KaggleMCPProviderGateway:
         task_id = UUID(str(payload["task_id"]))
         task_run_id = UUID(str(payload["task_run_id"]))
         source_sha256 = hashlib.sha256(source).hexdigest()
-        sources, input_claims = self._authorize_run_inputs(
+        sources, _input_claims = self._authorize_run_inputs(
             notebook_ref=provider_ref,
             task_id=task_id,
             value=payload["dataset_inputs"],
@@ -1271,7 +1271,6 @@ class KaggleMCPProviderGateway:
             "task_run_id": str(task_run_id),
             "source_sha256": source_sha256,
             "dataset_sources": sources,
-            "dataset_inputs": input_claims,
             "control_class": control_class.value,
             "disposable": bool(payload["disposable"]),
         }

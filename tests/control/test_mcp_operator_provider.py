@@ -14,6 +14,7 @@ import pytest
 from my_data_hub.control_plane.adapters import KaggleMCPProviderGateway, LedgerControlReader, LedgerWriteGate
 from my_data_hub.control_plane.clock import DeterministicClock
 from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.hashing import sha256_value
 from my_data_hub.mcp.contracts import MasterSnapshot, MasterState
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.mcp.service import HubService
@@ -361,6 +362,7 @@ class FakeAdapter:
         self.create_calls = 0
         self.version_calls = 0
         self.run_dataset_sources: tuple[str, ...] | None = None
+        self.run_intent_arguments_sha256: str | None = None
         self.run_calls = 0
         self.delete_calls = 0
         self.delete_receipts: dict[str, ProviderEffectReceipt] = {}
@@ -478,6 +480,7 @@ class FakeAdapter:
 
     def push_private_notebook(self, *, intent, task_run_id, source, control_class, disposable, **kwargs):  # type: ignore[no-untyped-def]
         self.run_calls += 1
+        self.run_intent_arguments_sha256 = intent.arguments_sha256
         self.run_dataset_sources = tuple(kwargs.get("dataset_sources", ()))
         source_identity = KaggleKernelSourceIdentity(
             provider_ref=intent.provider_ref,
@@ -758,6 +761,22 @@ def test_single_provider_gateway_uses_exact_claims_and_metadata_only_ledger(tmp_
     run_request["payload"]["task_run_id"] = str(task_run_id)  # type: ignore[index]
     notebook = gateway.invoke("provider.resources.run", run_request, principal())
     assert adapter.run_dataset_sources == ("owner/mcp-data/1",)
+    # The gateway resolves claim-bound inputs into exact numeric Kaggle
+    # sources.  The provider adapter's effect contract deliberately contains
+    # only those provider-facing sources; control-plane claim metadata must
+    # not be added as an extra adapter argument or every real run is rejected
+    # before the mutation journal is written.
+    assert adapter.run_intent_arguments_sha256 == sha256_value(
+        {
+            "task_run_id": str(task_run_id),
+            "source_sha256": hashlib.sha256(
+                str(run_request["payload"]["source_utf8"]).encode("utf-8")  # type: ignore[index]
+            ).hexdigest(),
+            "dataset_sources": ("owner/mcp-data/1",),
+            "control_class": "mcp_managed",
+            "disposable": True,
+        }
+    )
     notebook_read = gateway.invoke(
         "provider.resources.read",
         {
