@@ -2,6 +2,29 @@
 
 Status: `CORE IMPLEMENTED / REAL OPERATIONAL MATRIX BLOCKED`
 
+## 2026-08-25 durable research amendment
+
+For agent-operated Dataset research, the canonical implementation design is
+[`23-kaggle-research-workflow.md`](23-kaggle-research-workflow.md). It refines the older
+`external_read_only` wording in sections 3.4 and 4 below:
+
+- `control_class` governs mutation/deletion authority;
+- metadata, file-manifest, content-read and Notebook-attach rights are evaluated
+  separately from control class;
+- public Datasets and owner-private or explicitly granted Datasets may be inspected,
+  read and attached provider-natively when provider rights and license/terms allow it,
+  without adoption merely to manufacture an internal claim;
+- mutation of `external_read_only` resources remains forbidden until explicit adoption;
+- `orchestrator_protected` remains status-only and cannot be used as a user research
+  input;
+- durable research orchestration uses the existing SQLite-WAL control ledger and must
+  work with `master_state=ABSENT`, without `master.ensure`, a master session,
+  `data.query` or the Kaggle PostgreSQL master.
+
+Where the preserved historical text below conflicts with those research rules, this
+amendment and ADR-0011 as amended on 2026-08-25 take precedence. The remaining detailed
+provider, exchange, protection and lifecycle contracts continue to apply.
+
 Kaggle has two distinct roles:
 
 1. the master Notebook hosts the single ACTIVE writable PostgreSQL-primary;
