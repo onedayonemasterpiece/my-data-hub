@@ -97,6 +97,15 @@ class Limiter:
     async def mark_sent(self, lease: LimiterLease) -> None:
         self.events.append(("sent", lease.request_uid))
 
+    async def mark_interaction_started(
+        self,
+        lease: LimiterLease,
+        *,
+        interaction_id: str,
+        provider_status: str,
+    ) -> None:
+        self.events.append(("interaction_started", (interaction_id, provider_status)))
+
     async def release_unsent(self, lease: LimiterLease, *, reason: str) -> None:
         self.events.append(("release", reason))
 
@@ -128,6 +137,8 @@ class Interactions:
         self.calls.append(kwargs)
         if isinstance(self.result, BaseException):
             raise self.result
+        if self.result.interaction_id is not None:
+            await kwargs["on_interaction_started"](self.result.interaction_id, "created")
         return self.result
 
 
@@ -185,7 +196,14 @@ async def test_success_orders_reserve_secret_sent_one_post_finalize_and_returns_
     provider = Interactions(completed(summary_output()))
     result = await analyzer(shared, provider).analyze(arguments())
 
-    assert [event[0] for event in shared.events] == ["preflight", "reserve", "secret", "sent", "finalize"]
+    assert [event[0] for event in shared.events] == [
+        "preflight",
+        "reserve",
+        "secret",
+        "sent",
+        "interaction_started",
+        "finalize",
+    ]
     assert len(provider.calls) == 1
     assert provider.calls[0]["api_key"] == "provider-secret"
     assert result["canonical_youtube_url"] == "https://www.youtube.com/watch?v=6V2stDksGI8"
@@ -293,6 +311,71 @@ async def test_cancel_after_send_finalizes_attempt() -> None:
         await analyzer(shared, provider).analyze(arguments())  # type: ignore[arg-type]
     assert provider.calls == 1
     assert shared.finalized[0]["provider_terminal_status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_after_created_preserves_started_id_in_finalize() -> None:
+    class CancelledAfterCreated:
+        async def create(self, **kwargs: Any) -> ProviderInteraction:
+            await kwargs["on_interaction_started"]("interaction-started", "created")
+            raise asyncio.CancelledError
+
+    shared = Limiter()
+    with pytest.raises(asyncio.CancelledError):
+        await analyzer(shared, CancelledAfterCreated()).analyze(arguments())  # type: ignore[arg-type]
+    assert shared.finalized[0]["interaction_id"] == "interaction-started"
+    assert [event[0] for event in shared.events][-2:] == ["interaction_started", "finalize"]
+
+
+@pytest.mark.asyncio
+async def test_disconnect_after_created_preserves_id_and_requires_reconciliation() -> None:
+    shared = Limiter()
+    failure = ProviderTransportFailure(
+        "idle_timeout", interaction_id="interaction-started", provider_status="in_progress"
+    )
+    with pytest.raises(GoogleAIError) as caught:
+        await analyzer(shared, Interactions(failure)).analyze(arguments())
+    assert caught.value.interaction_id == "interaction-started"
+    assert caught.value.reconciliation_required is True
+    assert shared.finalized[0]["interaction_id"] == "interaction-started"
+
+
+@pytest.mark.asyncio
+async def test_started_marker_failure_requires_reconciliation_without_unsafe_finalize() -> None:
+    shared = Limiter()
+    failure = ProviderTransportFailure(
+        "interaction_started_accounting_failed",
+        interaction_id="provider-interaction",
+        provider_status="created",
+    )
+    with pytest.raises(GoogleAIError) as caught:
+        await analyzer(shared, Interactions(failure)).analyze(arguments())
+    assert caught.value.code is GoogleAIErrorCode.RECONCILIATION_REQUIRED
+    assert caught.value.interaction_id == "provider-interaction"
+    assert caught.value.reconciliation_required is True
+    assert shared.finalized == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_started_marker_is_ambiguous_and_never_finalized() -> None:
+    class CancelledMarkerLimiter(Limiter):
+        async def mark_interaction_started(
+            self,
+            lease: LimiterLease,
+            *,
+            interaction_id: str,
+            provider_status: str,
+        ) -> None:
+            self.events.append(("interaction_started", (interaction_id, provider_status)))
+            raise asyncio.CancelledError
+
+    shared = CancelledMarkerLimiter()
+    with pytest.raises(GoogleAIError) as caught:
+        await analyzer(shared, Interactions(completed(summary_output()))).analyze(arguments())
+    assert caught.value.code is GoogleAIErrorCode.RECONCILIATION_REQUIRED
+    assert caught.value.interaction_id == "interaction-1"
+    assert caught.value.reconciliation_required is True
+    assert shared.finalized == []
 
 
 @pytest.mark.asyncio

@@ -268,7 +268,7 @@ def create_streamable_http_app(
             max_concurrency=8,
             requests_per_window=60,
             rate_window_seconds=60,
-            request_timeout_seconds=max(30, settings.google_youtube_timeout_seconds + 15),
+            request_timeout_seconds=settings.google_youtube_total_timeout_seconds + 15,
         ),
         metadata_path=metadata_path,
         resource_metadata_url=metadata_url,

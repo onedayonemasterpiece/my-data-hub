@@ -23,7 +23,8 @@ from my_data_hub.google_ai.http import (
 LIMITER_CONTRACT = "google_ai_project_model_atomic_v1"
 BUCKET_STRATEGY = "rolling_60s_pacific_day_v2"
 QUOTA_DIMENSION = "quota_scope/model"
-INTERACTION_ACCOUNTING = "google_ai_interaction_usage_v2"
+INTERACTION_ACCOUNTING = "google_ai_interaction_usage_v3"
+INTERACTION_STARTED_RPC = "google_ai_mark_interaction_started_v1"
 
 
 def _positive_int(value: Any) -> int | None:
@@ -207,6 +208,35 @@ class SupabaseGoogleAILimiter:
             allow_empty=True,
         )
 
+    async def mark_interaction_started(
+        self,
+        lease: LimiterLease,
+        *,
+        interaction_id: str,
+        provider_status: str,
+    ) -> None:
+        result = await self._rpc(
+            INTERACTION_STARTED_RPC,
+            {
+                "p_request_uid": lease.request_uid,
+                "p_attempt_no": lease.attempt_no,
+                "p_provider_interaction_id": interaction_id,
+                "p_provider_status": provider_status,
+            },
+            attempts=3,
+        )
+        if not isinstance(result, Mapping) or result.get("ok") is not True:
+            raise GoogleAIError(
+                GoogleAIErrorCode.SHARED_LIMITER_UNAVAILABLE,
+                retryable=True,
+            )
+        if (
+            result.get("interaction_accounting") != INTERACTION_ACCOUNTING
+            or result.get("interaction_started_supported") is not True
+            or result.get("interaction_started_rpc") != INTERACTION_STARTED_RPC
+        ):
+            raise GoogleAIError(GoogleAIErrorCode.LIMITER_CONTRACT_MISMATCH)
+
     async def release_unsent(self, lease: LimiterLease, *, reason: str) -> None:
         await self._rpc(
             "google_ai_release_unsent_v2",
@@ -293,6 +323,10 @@ class SupabaseGoogleAILimiter:
         if value.get("interaction_accounting") != INTERACTION_ACCOUNTING:
             raise GoogleAIError(GoogleAIErrorCode.LIMITER_CONTRACT_MISMATCH)
         if value.get("unsent_release_supported") is not True:
+            raise GoogleAIError(GoogleAIErrorCode.LIMITER_CONTRACT_MISMATCH)
+        if value.get("interaction_started_supported") is not True:
+            raise GoogleAIError(GoogleAIErrorCode.LIMITER_CONTRACT_MISMATCH)
+        if value.get("interaction_started_rpc") != INTERACTION_STARTED_RPC:
             raise GoogleAIError(GoogleAIErrorCode.LIMITER_CONTRACT_MISMATCH)
 
     @staticmethod

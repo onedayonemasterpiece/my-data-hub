@@ -17,6 +17,7 @@ from my_data_hub.config import Settings
 from my_data_hub.google_ai.analyzer import GeminiYouTubeAnalyzer, YouTubeAnalyzerConfig
 from my_data_hub.google_ai.config import GoogleYouTubeSettings
 from my_data_hub.google_ai.errors import GoogleAIError
+from my_data_hub.google_ai.http import StreamTimeouts
 from my_data_hub.google_ai.interactions import GeminiInteractionsClient
 from my_data_hub.google_ai.limiter import SupabaseGoogleAILimiter
 
@@ -49,12 +50,18 @@ async def run(args: argparse.Namespace) -> int:
             default_model=feature.model,
             allowed_models=frozenset(feature.allowed_models),
             max_output_tokens=feature.max_output_tokens,
-            max_result_bytes=feature.max_response_bytes,
+            max_result_bytes=feature.max_result_bytes,
         ),
         limiter=limiter,
         interactions=GeminiInteractionsClient(
-            timeout_seconds=feature.timeout_seconds,
-            max_response_bytes=feature.max_response_bytes,
+            timeouts=StreamTimeouts(
+                connect_seconds=feature.connect_timeout_seconds,
+                first_event_seconds=feature.first_event_timeout_seconds,
+                idle_seconds=feature.idle_timeout_seconds,
+                total_seconds=feature.total_timeout_seconds,
+            ),
+            max_raw_sse_bytes=feature.max_raw_sse_bytes,
+            max_output_bytes=feature.max_model_output_bytes,
         ),
     )
     payload = {

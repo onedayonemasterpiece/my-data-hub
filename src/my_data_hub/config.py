@@ -107,8 +107,13 @@ class Settings:
         "gemini-3.6-flash",
         "gemini-3.7-flash",
     )
-    google_youtube_timeout_seconds: int = 300
-    google_youtube_max_response_bytes: int = 524_288
+    google_youtube_connect_timeout_seconds: int = 30
+    google_youtube_first_event_timeout_seconds: int = 120
+    google_youtube_idle_timeout_seconds: int = 300
+    google_youtube_total_timeout_seconds: int = 1800
+    google_youtube_max_raw_sse_bytes: int = 4_194_304
+    google_youtube_max_model_output_bytes: int = 1_048_576
+    google_youtube_max_result_bytes: int = 2_097_152
     google_youtube_max_output_tokens: int = 8192
     google_youtube_default_store: bool = False
     google_ai_limiter_supabase_url: str = ""
@@ -232,11 +237,26 @@ class Settings:
                     "gemini-3.6-flash,gemini-3.7-flash",
                 )
             ),
-            google_youtube_timeout_seconds=_int(
-                "MY_DATA_HUB_GOOGLE_YOUTUBE_TIMEOUT_SECONDS", 300
+            google_youtube_connect_timeout_seconds=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_CONNECT_TIMEOUT_SECONDS", 30
             ),
-            google_youtube_max_response_bytes=_int(
-                "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_RESPONSE_BYTES", 524_288
+            google_youtube_first_event_timeout_seconds=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_FIRST_EVENT_TIMEOUT_SECONDS", 120
+            ),
+            google_youtube_idle_timeout_seconds=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_IDLE_TIMEOUT_SECONDS", 300
+            ),
+            google_youtube_total_timeout_seconds=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_TOTAL_TIMEOUT_SECONDS", 1800
+            ),
+            google_youtube_max_raw_sse_bytes=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_RAW_SSE_BYTES", 4_194_304
+            ),
+            google_youtube_max_model_output_bytes=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_MODEL_OUTPUT_BYTES", 1_048_576
+            ),
+            google_youtube_max_result_bytes=_int(
+                "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_RESULT_BYTES", 2_097_152
             ),
             google_youtube_max_output_tokens=_int(
                 "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_OUTPUT_TOKENS", 8192
@@ -487,10 +507,26 @@ class Settings:
             raise ConfigurationError("YouTube model allowlist must be non-empty and unique")
         if self.google_youtube_model not in self.google_youtube_allowed_models:
             raise ConfigurationError("default YouTube model must be in the server allowlist")
-        if not 10 <= self.google_youtube_timeout_seconds <= 300:
-            raise ConfigurationError("YouTube timeout must be between 10 and 300 seconds")
-        if not 65_536 <= self.google_youtube_max_response_bytes <= 2_097_152:
-            raise ConfigurationError("YouTube response limit must be between 64 KiB and 2 MiB")
+        timeout_values = (
+            self.google_youtube_connect_timeout_seconds,
+            self.google_youtube_first_event_timeout_seconds,
+            self.google_youtube_idle_timeout_seconds,
+        )
+        if any(not 1 <= value <= 900 for value in timeout_values):
+            raise ConfigurationError("YouTube stream timeouts must be between 1 and 900 seconds")
+        if not 60 <= self.google_youtube_total_timeout_seconds <= 3600 or (
+            self.google_youtube_total_timeout_seconds < max(timeout_values)
+        ):
+            raise ConfigurationError(
+                "YouTube total operation deadline must be between 60 and 3600 seconds "
+                "and cover each stream timeout"
+            )
+        if not 65_536 <= self.google_youtube_max_raw_sse_bytes <= 8_388_608:
+            raise ConfigurationError("YouTube raw SSE limit must be between 64 KiB and 8 MiB")
+        if not 65_536 <= self.google_youtube_max_model_output_bytes <= self.google_youtube_max_raw_sse_bytes:
+            raise ConfigurationError("YouTube model-output limit must be between 64 KiB and the raw SSE limit")
+        if not self.google_youtube_max_model_output_bytes <= self.google_youtube_max_result_bytes <= 2_097_152:
+            raise ConfigurationError("YouTube MCP result limit must cover model output and not exceed 2 MiB")
         if not 256 <= self.google_youtube_max_output_tokens <= 65_536:
             raise ConfigurationError("YouTube output-token cap must be between 256 and 65536")
         if self.google_youtube_default_store:

@@ -59,9 +59,13 @@ Optional:
 
 URL processing does not fetch the supplied URL. The service extracts and validates the 11-character video ID, removes only known tracking/start parameters, builds `https://www.youtube.com/watch?v=<id>`, and passes that URI to Google as a video data reference. HTTP, credentials, non-standard ports, fragments, IP addresses, localhost, arbitrary domains, redirects, playlists, and unknown query parameters are rejected.
 
-## Provider request
+## Provider request and streaming
 
-The transport is direct asynchronous REST over `aiohttp`, not `google-genai`. One call to the transport performs exactly one physical `POST https://generativelanguage.googleapis.com/v1beta/interactions`; redirects and automatic retries are disabled. The request uses `Api-Revision: 2026-05-20`, places the video block before the text block, places `resolution` on the video block when supplied, requests bounded structured JSON, and always sends `store=false`.
+The transport is direct asynchronous REST over `aiohttp`, not `google-genai`. One call to the transport performs exactly one physical `POST https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse`; redirects and automatic retries are disabled. The request uses `Api-Revision: 2026-05-20`, places the video block before the text block, places `resolution` on the video block when supplied, requests bounded structured JSON, and always sends `stream=true`, `background=false`, and `store=false`.
+
+The incremental parser accepts arbitrary network chunk boundaries, LF/CRLF, comments, named `event` fields, multiline `data`, and `[DONE]`. It recognizes interaction lifecycle and step events. On `interaction.created`, the bounded interaction ID is written immediately to the shared ledger before later stream events are consumed. Only text deltas belonging to a `model_output` step are assembled; thought deltas are never exposed. Structured JSON and terminal usage are interpreted only after a terminal interaction event.
+
+The local service budgets are connect 30 seconds, first complete SSE event 120 seconds, idle between events 300 seconds, and total operation deadline 1800 seconds. They are operational bounds, not a Google SLA. Raw SSE bytes, assembled model-output bytes, and the final MCP response have separate configurable caps.
 
 There is no stateful continuation in this release. `previous_interaction_id`, `store=true`, key/project binding state, and provider GET reconciliation are intentionally absent until a separate durable privacy/idempotency design exists.
 
@@ -82,8 +86,10 @@ Required capabilities:
 - `quota_dimension=quota_scope/model`;
 - `lock_dimension=quota_scope/model`;
 - `quota_scope_enforced=true`;
-- `interaction_accounting=google_ai_interaction_usage_v2`;
-- `unsent_release_supported=true`.
+- `interaction_accounting=google_ai_interaction_usage_v3`;
+- `unsent_release_supported=true`;
+- `interaction_started_supported=true`;
+- `interaction_started_rpc=google_ai_mark_interaction_started_v1`.
 
 Production fails closed before any provider send when the ledger, capabilities, model row, candidate-key metadata, selected key environment, or exact accounting RPCs are unavailable.
 
@@ -96,9 +102,12 @@ The enforced order is:
 3. read only the secret named by the limiter-selected `env_var_name`;
 4. mark the exact attempt sent;
 5. perform exactly one provider POST;
-6. shield finalization on success, provider rejection, timeout, network failure, oversized/malformed response, or cancellation;
-7. record provider interaction ID/status, duration, input/output/thought/total tokens, and typed error;
-8. report provider 429 through the shared `quota_scope/model` cooldown.
+6. on `interaction.created`, call `google_ai_mark_interaction_started_v1` for the exact attempt without changing usage, reserve, or terminal accounting;
+7. shield terminal finalization through `google_ai_finalize_interaction_v2` on success, provider rejection, timeout, network failure, oversized/malformed response, or cancellation;
+8. record provider terminal status, duration, input/output/thought/total tokens, input modality breakdown, and typed error;
+9. report provider 429 through the shared `quota_scope/model` cooldown.
+
+A disconnect before `interaction.created` is ambiguous and is finalized as incomplete with reconciliation required. A disconnect after it preserves the known interaction ID, is also reconciliation-required, and never repeats the provider POST. Replaying the same ID to the start-marker RPC is idempotent; a different ID for the same attempt fails closed for reconciliation.
 
 A limiter-selected key is metadata for one lease, not an independent quota claim. Multiple ENV keys may share one `quota_scope`; the ledger locks and accounts by `quota_scope/model`, so adding keys does not multiply project quota.
 
@@ -140,7 +149,7 @@ No long quota sleep occurs inside an MCP call. Quota failures return `retryable`
 3. Confirm `gemini-3.6-flash` and `gemini-3.7-flash` are each `RPM=5, TPM=250000, RPD=20` for every candidate quota scope to which the owner matrix applies. If scopes have different tiers, stop: the current global model table needs scoped overrides before traffic.
 4. Run compileall, full pytest, Ruff, repository validation, and targeted Google/YouTube tests.
 5. Run `scripts/operations/google_youtube_smoke.py` through the production adapter only. Direct curl/SDK probes with a key are forbidden.
-6. Verify reserve → sent → finalize and actual usage in the ledger.
+6. Verify reserve → sent → interaction_started → finalize and actual usage in the ledger.
 7. Enable `MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED=true` and add `youtube:analyze` only to the intended owner/operator OAuth profile.
 8. Restart the existing remote MCP service, verify discovery, call the MCP tool, verify bounded output, MCP audit, and ledger evidence.
 
@@ -152,7 +161,7 @@ Immediate rollback/block conditions are capability mismatch, uncertain quota-sco
 
 ## Diagnosis
 
-- `limiter_contract_mismatch`: deployed ledger lacks the exact atomic project/model contract or interaction-accounting v2 marker.
+- `limiter_contract_mismatch`: deployed ledger lacks the exact atomic project/model contract, interaction-accounting v3 marker, or interaction-start RPC capability.
 - `limiter_bucket_strategy_mismatch`: deployed ledger is not the rolling-60-second/Pacific-day contract.
 - `model_limit_not_found`: requested stable model ID is absent or has non-positive limits.
 - `key_metadata_missing`: a candidate ENV name is not registered with key alias and quota scope, or reserve selected an unconfigured ENV name.

@@ -96,18 +96,42 @@ class GeminiYouTubeAnalyzer:
             raise
 
         started = self._clock()
+        started_interaction_id: str | None = None
+        interaction_started_confirmed = False
+
+        async def interaction_started(interaction_id: str, provider_status: str) -> None:
+            nonlocal interaction_started_confirmed, started_interaction_id
+            started_interaction_id = interaction_id
+            await self._limiter.mark_interaction_started(
+                lease,
+                interaction_id=interaction_id,
+                provider_status=provider_status,
+            )
+            interaction_started_confirmed = True
+
         try:
             interaction = await self._interactions.create(
                 api_key=api_key,
                 canonical_youtube_url=normalized.canonical_url,
                 request=request,
                 model=model,
+                on_interaction_started=interaction_started,
             )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            if started_interaction_id is not None and not interaction_started_confirmed:
+                raise GoogleAIError(
+                    GoogleAIErrorCode.RECONCILIATION_REQUIRED,
+                    retryable=False,
+                    request_uid=request_uid,
+                    interaction_id=started_interaction_id,
+                    provider_status="created",
+                    reconciliation_required=True,
+                    warnings=("interaction_started_accounting_requires_reconciliation",),
+                ) from exc
             duration_ms = int((self._clock() - started) * 1000)
             await self._finalize_or_raise(
                 lease,
-                interaction_id=None,
+                interaction_id=started_interaction_id,
                 provider_terminal_status="cancelled",
                 semantic_status="not_evaluated",
                 usage=None,
@@ -120,9 +144,20 @@ class GeminiYouTubeAnalyzer:
         except ProviderTransportFailure as exc:
             duration_ms = int((self._clock() - started) * 1000)
             code, retryable = self._transport_error(exc.kind)
+            interaction_id = exc.interaction_id or started_interaction_id
+            if exc.kind == "interaction_started_accounting_failed":
+                raise GoogleAIError(
+                    GoogleAIErrorCode.RECONCILIATION_REQUIRED,
+                    retryable=False,
+                    request_uid=request_uid,
+                    interaction_id=interaction_id,
+                    provider_status=exc.provider_status,
+                    reconciliation_required=True,
+                    warnings=("interaction_started_accounting_requires_reconciliation",),
+                ) from exc
             await self._finalize_or_raise(
                 lease,
-                interaction_id=None,
+                interaction_id=interaction_id,
                 provider_terminal_status="incomplete",
                 semantic_status="not_evaluated",
                 usage=None,
@@ -135,6 +170,7 @@ class GeminiYouTubeAnalyzer:
                 code,
                 retryable=retryable,
                 request_uid=request_uid,
+                interaction_id=interaction_id,
                 provider_status="incomplete",
                 reconciliation_required=True,
                 warnings=("provider_outcome_ambiguous_no_retry",),
@@ -377,8 +413,15 @@ class GeminiYouTubeAnalyzer:
     def _transport_error(kind: str) -> tuple[GoogleAIErrorCode, bool]:
         mapping = {
             "timeout": (GoogleAIErrorCode.PROVIDER_TIMEOUT, False),
+            "connect_timeout": (GoogleAIErrorCode.PROVIDER_TIMEOUT, False),
+            "first_event_timeout": (GoogleAIErrorCode.PROVIDER_TIMEOUT, False),
+            "idle_timeout": (GoogleAIErrorCode.PROVIDER_TIMEOUT, False),
+            "total_timeout": (GoogleAIErrorCode.PROVIDER_TIMEOUT, False),
+            "stream_disconnected": (GoogleAIErrorCode.PROVIDER_NETWORK_ERROR, False),
             "network": (GoogleAIErrorCode.PROVIDER_NETWORK_ERROR, False),
             "response_too_large": (GoogleAIErrorCode.RESPONSE_TOO_LARGE, False),
+            "output_too_large": (GoogleAIErrorCode.RESPONSE_TOO_LARGE, False),
+            "malformed_sse": (GoogleAIErrorCode.RESPONSE_SCHEMA_INVALID, False),
             "malformed_json": (GoogleAIErrorCode.RESPONSE_SCHEMA_INVALID, False),
             "output_not_json": (GoogleAIErrorCode.RESPONSE_SCHEMA_INVALID, False),
         }

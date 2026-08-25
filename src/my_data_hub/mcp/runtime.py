@@ -28,6 +28,7 @@ from my_data_hub.control_plane.app import assert_no_database_environment
 from my_data_hub.control_plane.ledger import ControlLedger
 from my_data_hub.google_ai.analyzer import GeminiYouTubeAnalyzer, YouTubeAnalyzerConfig
 from my_data_hub.google_ai.config import GoogleYouTubeSettings
+from my_data_hub.google_ai.http import StreamTimeouts
 from my_data_hub.google_ai.interactions import GeminiInteractionsClient
 from my_data_hub.google_ai.limiter import SupabaseGoogleAILimiter
 from my_data_hub.hashing import canonical_json_bytes
@@ -218,8 +219,14 @@ def _build_youtube_analyzer(settings: Settings):  # type: ignore[no-untyped-def]
         candidate_env_names=feature.normal_key_envs,
     )
     interactions = GeminiInteractionsClient(
-        timeout_seconds=feature.timeout_seconds,
-        max_response_bytes=feature.max_response_bytes,
+        timeouts=StreamTimeouts(
+            connect_seconds=feature.connect_timeout_seconds,
+            first_event_seconds=feature.first_event_timeout_seconds,
+            idle_seconds=feature.idle_timeout_seconds,
+            total_seconds=feature.total_timeout_seconds,
+        ),
+        max_raw_sse_bytes=feature.max_raw_sse_bytes,
+        max_output_bytes=feature.max_model_output_bytes,
     )
     return GeminiYouTubeAnalyzer(
         config=YouTubeAnalyzerConfig(
@@ -227,6 +234,7 @@ def _build_youtube_analyzer(settings: Settings):  # type: ignore[no-untyped-def]
             default_model=feature.model,
             allowed_models=frozenset(feature.allowed_models),
             max_output_tokens=feature.max_output_tokens,
+            max_result_bytes=feature.max_result_bytes,
         ),
         limiter=limiter,
         interactions=interactions,

@@ -10,8 +10,13 @@ GOOGLE_ENV_NAMES = {
     "MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED",
     "MY_DATA_HUB_GOOGLE_YOUTUBE_MODEL",
     "MY_DATA_HUB_GOOGLE_YOUTUBE_ALLOWED_MODELS",
-    "MY_DATA_HUB_GOOGLE_YOUTUBE_TIMEOUT_SECONDS",
-    "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_RESPONSE_BYTES",
+    "MY_DATA_HUB_GOOGLE_YOUTUBE_CONNECT_TIMEOUT_SECONDS",
+    "MY_DATA_HUB_GOOGLE_YOUTUBE_FIRST_EVENT_TIMEOUT_SECONDS",
+    "MY_DATA_HUB_GOOGLE_YOUTUBE_IDLE_TIMEOUT_SECONDS",
+    "MY_DATA_HUB_GOOGLE_YOUTUBE_TOTAL_TIMEOUT_SECONDS",
+    "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_RAW_SSE_BYTES",
+    "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_MODEL_OUTPUT_BYTES",
+    "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_RESULT_BYTES",
     "MY_DATA_HUB_GOOGLE_YOUTUBE_MAX_OUTPUT_TOKENS",
     "MY_DATA_HUB_GOOGLE_YOUTUBE_DEFAULT_STORE",
     "GOOGLE_AI_LIMITER_SUPABASE_URL",
@@ -36,7 +41,13 @@ def test_feature_is_disabled_by_default_and_generic_supabase_is_not_fallback(mon
     assert settings.google_ai_limiter_supabase_url == ""
     assert settings.google_ai_limiter_supabase_service_key == ""
     assert settings.google_ai_normal_key_envs == ()
-    assert settings.google_youtube_timeout_seconds == 300
+    assert settings.google_youtube_connect_timeout_seconds == 30
+    assert settings.google_youtube_first_event_timeout_seconds == 120
+    assert settings.google_youtube_idle_timeout_seconds == 300
+    assert settings.google_youtube_total_timeout_seconds == 1800
+    assert settings.google_youtube_max_raw_sse_bytes == 4_194_304
+    assert settings.google_youtube_max_model_output_bytes == 1_048_576
+    assert settings.google_youtube_max_result_bytes == 2_097_152
 
 
 @pytest.mark.parametrize(
@@ -85,3 +96,15 @@ def test_feature_requires_exact_remote_operator_scope_and_store_false(monkeypatc
         replace(configured, google_youtube_default_store=True).validate()
     with pytest.raises(ConfigurationError, match="youtube:analyze"):
         replace(configured, mcp_scopes=frozenset({"data:write"})).validate()
+
+
+def test_stream_budgets_are_separate_and_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    clear(monkeypatch)
+    settings = Settings.from_env(require_database=False)
+    with pytest.raises(ConfigurationError, match="total operation deadline"):
+        replace(settings, google_youtube_total_timeout_seconds=100).validate()
+    with pytest.raises(ConfigurationError, match="model-output"):
+        replace(
+            settings,
+            google_youtube_max_model_output_bytes=settings.google_youtube_max_raw_sse_bytes + 1,
+        ).validate()

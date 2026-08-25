@@ -11,6 +11,7 @@ from my_data_hub.google_ai.http import BoundedHTTPError, BoundedHTTPResponse
 from my_data_hub.google_ai.limiter import (
     BUCKET_STRATEGY,
     INTERACTION_ACCOUNTING,
+    INTERACTION_STARTED_RPC,
     LIMITER_CONTRACT,
     QUOTA_DIMENSION,
     SupabaseGoogleAILimiter,
@@ -52,6 +53,8 @@ def capabilities(**changes: object) -> dict[str, object]:
         "quota_scope_enforced": True,
         "interaction_accounting": INTERACTION_ACCOUNTING,
         "unsent_release_supported": True,
+        "interaction_started_supported": True,
+        "interaction_started_rpc": INTERACTION_STARTED_RPC,
     }
     value.update(changes)
     return value
@@ -137,6 +140,8 @@ async def test_preflight_and_reserve_use_full_model_tpm_and_same_scope_keys_do_n
         ("limiter_contract", "old", GoogleAIErrorCode.LIMITER_CONTRACT_MISMATCH),
         ("bucket_strategy", "fixed_minute", GoogleAIErrorCode.LIMITER_BUCKET_STRATEGY_MISMATCH),
         ("interaction_accounting", "v1", GoogleAIErrorCode.LIMITER_CONTRACT_MISMATCH),
+        ("interaction_started_supported", False, GoogleAIErrorCode.LIMITER_CONTRACT_MISMATCH),
+        ("interaction_started_rpc", "wrong", GoogleAIErrorCode.LIMITER_CONTRACT_MISMATCH),
     ],
 )
 async def test_capability_mismatch_blocks_before_reserve(marker: str, value: object, code: GoogleAIErrorCode) -> None:
@@ -210,6 +215,15 @@ async def test_mark_finalize_release_and_provider_429_use_exact_attempt() -> Non
                 }
             ),
             ok(None),
+            ok(
+                {
+                    "ok": True,
+                    "idempotent": False,
+                    "interaction_accounting": INTERACTION_ACCOUNTING,
+                    "interaction_started_supported": True,
+                    "interaction_started_rpc": INTERACTION_STARTED_RPC,
+                }
+            ),
             ok(None),
             ok(None),
         ]
@@ -225,6 +239,7 @@ async def test_mark_finalize_release_and_provider_429_use_exact_attempt() -> Non
         account_name="test",
     )
     await adapter.mark_sent(lease)
+    await adapter.mark_interaction_started(lease, interaction_id="interaction-3", provider_status="created")
     await adapter.report_provider_429(lease, retry_after_ms=3000)
     await adapter.finalize_interaction(
         lease,
@@ -236,8 +251,67 @@ async def test_mark_finalize_release_and_provider_429_use_exact_attempt() -> Non
         error_type="provider",
         error_code="RESOURCE_EXHAUSTED",
     )
-    paths = [call["url"].rsplit("/", 1)[-1] for call in requester.calls[-3:]]
-    assert paths == ["google_ai_mark_sent", "google_ai_report_provider_429", "google_ai_finalize_interaction_v2"]
+    paths = [call["url"].rsplit("/", 1)[-1] for call in requester.calls[-4:]]
+    assert paths == [
+        "google_ai_mark_sent",
+        INTERACTION_STARTED_RPC,
+        "google_ai_report_provider_429",
+        "google_ai_finalize_interaction_v2",
+    ]
+    assert requester.calls[-3]["json"] == {
+        "p_request_uid": lease.request_uid,
+        "p_attempt_no": 1,
+        "p_provider_interaction_id": "interaction-3",
+        "p_provider_status": "created",
+    }
     finalize = requester.calls[-1]["json"]
     assert finalize["p_usage_thought_tokens"] == 5
     assert finalize["p_usage_total_tokens"] == 125
+
+
+@pytest.mark.asyncio
+async def test_started_marker_same_id_replay_is_idempotent_and_conflict_fails_closed() -> None:
+    started = {
+        "ok": True,
+        "idempotent": False,
+        "interaction_accounting": INTERACTION_ACCOUNTING,
+        "interaction_started_supported": True,
+        "interaction_started_rpc": INTERACTION_STARTED_RPC,
+    }
+    requester = Requester(
+        [
+            *preflight_responses(),
+            ok(
+                {
+                    "ok": True,
+                    "api_key_id": "key-a-id",
+                    "env_var_name": "GOOGLE_KEY_A",
+                    "key_alias": "key-a",
+                    "quota_scope": "google:project-shared",
+                    "limiter_contract": LIMITER_CONTRACT,
+                    "bucket_strategy": BUCKET_STRATEGY,
+                }
+            ),
+            ok(started),
+            ok({**started, "idempotent": True}),
+            BoundedHTTPResponse(409, {"message": "conflict"}, None, "application/json"),
+        ]
+    )
+    adapter = limiter(requester)
+    preflight = await adapter.preflight("gemini-3.6-flash")
+    lease = await adapter.reserve(
+        request_uid="00000000-0000-4000-8000-000000000004",
+        attempt_no=1,
+        model="gemini-3.6-flash",
+        preflight=preflight,
+        consumer="test",
+        account_name="test",
+    )
+    await adapter.mark_interaction_started(lease, interaction_id="interaction-same", provider_status="created")
+    await adapter.mark_interaction_started(lease, interaction_id="interaction-same", provider_status="created")
+    with pytest.raises(GoogleAIError) as caught:
+        await adapter.mark_interaction_started(lease, interaction_id="interaction-conflict", provider_status="created")
+    assert caught.value.code is GoogleAIErrorCode.SHARED_LIMITER_UNAVAILABLE
+    started_calls = [call for call in requester.calls if call["url"].endswith(INTERACTION_STARTED_RPC)]
+    assert len(started_calls) == 3
+    assert started_calls[0]["json"] == started_calls[1]["json"]
