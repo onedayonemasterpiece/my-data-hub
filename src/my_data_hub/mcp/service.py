@@ -10,7 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 from my_data_hub.auth.context import current_identity
 from my_data_hub.auth.control import OAuthAuditEvent
 from my_data_hub.domain.commands import SemanticCommand
-from my_data_hub.mcp.catalog import TOOL_CONTRACTS
+from my_data_hub.mcp.catalog import CATALOG_REVISION, CATALOG_SHA256, TOOL_CONTRACTS
 from my_data_hub.mcp.contracts import (
     ControlPlaneReader,
     EnsureMasterReceipt,
@@ -25,6 +25,7 @@ from my_data_hub.mcp.contracts import (
     WriteGate,
     WritePermit,
 )
+from my_data_hub.mcp.kaggle_schemas import KAGGLE_RESEARCH_REQUESTS, validate_kaggle_research_arguments
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.mcp.postgres_broker import SessionBrokerError
 from my_data_hub.mcp.region_talk_schemas import (
@@ -65,6 +66,22 @@ _CONTROL_TOOLS = frozenset(
         "provider.inventory.live",
         "provider.upload.status",
         "provider.acceptance.claim.get",
+        "datasets.search",
+        "datasets.inspect",
+        "datasets.file.read",
+        "research.create",
+        "research.list",
+        "research.get",
+        "notebooks.find",
+        "notebooks.get",
+        "notebooks.save",
+        "notebooks.inputs.set",
+        "runs.start",
+        "runs.get",
+        "runs.logs",
+        "runs.retry",
+        "artifacts.list",
+        "artifacts.read",
         "runtime.events.history",
         "acceptance.scenario.request",
         "acceptance.scenario.status",
@@ -182,6 +199,8 @@ class HubService:
         )
         if tool.startswith("region_talk."):
             bounded_arguments = validate_region_talk_arguments(tool, bounded_arguments)
+        if tool in KAGGLE_RESEARCH_REQUESTS:
+            bounded_arguments = validate_kaggle_research_arguments(tool, bounded_arguments)
         try:
             if tool == "platform.status":
                 result = await self._platform_status(identity)
@@ -215,6 +234,8 @@ class HubService:
             "control_plane_ready": True,
             **snapshot.public(),
             "canonical_database_location": "kaggle-master-only",
+            "catalog_revision": CATALOG_REVISION,
+            "catalog_sha256": CATALOG_SHA256,
         }
         if self.control is not None:
             observed = await _await(self.control.invoke_control("platform.status", {}, identity))

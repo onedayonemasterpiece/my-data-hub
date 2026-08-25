@@ -63,6 +63,8 @@
     "deployed_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "initial_master_state": "ABSENT",
     "tools": [
+      "artifacts.list",
+      "artifacts.read",
       "bloggers.get",
       "bloggers.list",
       "bloggers.migration.accounting",
@@ -72,9 +74,14 @@
       "checkpoint.status",
       "data.change.status",
       "data.query",
+      "datasets.file.read",
+      "datasets.inspect",
+      "datasets.search",
       "embedding.coverage",
       "embedding.production.capabilities",
       "master.status",
+      "notebooks.find",
+      "notebooks.get",
       "operation.get",
       "platform.status",
       "provider.resources.status",
@@ -87,7 +94,11 @@
       "region_talk.posts.list",
       "region_talk.posts.search",
       "region_talk.queue.list",
-      "region_talk.queue.summary"
+      "region_talk.queue.summary",
+      "research.get",
+      "research.list",
+      "runs.get",
+      "runs.logs"
     ],
     "writes_discoverable": false
   },

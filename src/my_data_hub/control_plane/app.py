@@ -42,6 +42,7 @@ from my_data_hub.control_plane.ledger import (
     StaleRuntimeEvent,
 )
 from my_data_hub.control_plane.provider_uploads import ProviderUploadConflict
+from my_data_hub.control_plane.research import KaggleResearchError, KaggleResearchService
 from my_data_hub.control_plane.runtime import (
     ControlPlaneMasterRuntime,
     MasterRuntimeSettings,
@@ -264,6 +265,8 @@ class ControlPlaneSettings:
     provider_upload_root: Path | None = None
     acceptance_scenarios_enabled: bool = False
     connector_runtime_enabled: bool = False
+    kaggle_research_enabled: bool = False
+    kaggle_research_cache_root: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.host or not 1 <= self.port <= 65535:
@@ -278,6 +281,12 @@ class ControlPlaneSettings:
             raise ControlPlaneConfigurationError(
                 "acceptance scenarios require the authenticated single control gateway"
             )
+        if self.kaggle_research_enabled and not self.provider_gateway_enabled:
+            raise ControlPlaneConfigurationError("Kaggle research requires the existing authenticated provider gateway")
+        if self.kaggle_research_cache_root is not None and (
+            not self.kaggle_research_cache_root.is_absolute() or self.kaggle_research_cache_root.is_symlink()
+        ):
+            raise ControlPlaneConfigurationError("Kaggle research cache root must be an absolute non-symlink path")
         if self.provider_upload_root is not None and (
             not self.provider_upload_root.is_absolute() or self.provider_upload_root.is_symlink()
         ):
@@ -340,6 +349,10 @@ class ControlPlaneSettings:
             ).expanduser(),
             acceptance_scenarios_enabled=_boolean("MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED"),
             connector_runtime_enabled=_boolean("MY_DATA_HUB_CONNECTOR_RUNTIME_ENABLED"),
+            kaggle_research_enabled=_boolean("MY_DATA_HUB_KAGGLE_RESEARCH_ENABLED"),
+            kaggle_research_cache_root=Path(
+                os.getenv("MY_DATA_HUB_KAGGLE_RESEARCH_CACHE_ROOT", "/state/research-artifacts")
+            ).expanduser(),
         )
 
 
@@ -353,6 +366,7 @@ def create_app(
     operator_credential_enabled: bool | None = None,
     tunnel_certificate_broker: TunnelCertificateBroker | None = None,
     provider_gateway: KaggleMCPProviderGateway | None = None,
+    research_service: KaggleResearchService | None = None,
     provider_gateway_token: bytes | None = None,
     acceptance_scenario_adapter: object | None = None,
     checkpoint_acceptance_launcher: object | None = None,
@@ -404,6 +418,18 @@ def create_app(
             control_ledger,
             provider_adapter,
             upload_root=runtime.provider_upload_root if runtime.provider_gateway_enabled else None,
+        )
+    if research_service is None and runtime.kaggle_research_enabled:
+        if provider_adapter is None and provider_gateway is not None:
+            provider_adapter = getattr(provider_gateway, "adapter", None)
+        if provider_adapter is None:
+            raise ControlPlaneConfigurationError(
+                "Kaggle research requires the existing central Kaggle provider adapter"
+            )
+        research_service = KaggleResearchService(
+            control_ledger,
+            provider_adapter,
+            cache_root=runtime.kaggle_research_cache_root,
         )
     if runtime.unified_bootstrap_mode and (
         master_runtime is None or provider_gateway is None or provider_status != "available"
@@ -549,6 +575,7 @@ def create_app(
         LedgerControlReader(
             control_ledger,
             provider_gateway=provider_gateway,
+            research_service=research_service,
             acceptance_scenarios=acceptance_scenario_adapter,
         )
         if runtime.provider_gateway_enabled and provider_gateway is not None
@@ -594,6 +621,9 @@ def create_app(
                         reconcile_status_cleanup = getattr(master_runtime, "reconcile_status_cleanup_once", None)
                         if reconcile_status_cleanup is not None:
                             await asyncio.to_thread(reconcile_status_cleanup)
+                if research_service is not None:
+                    with suppress(Exception):
+                        await asyncio.to_thread(research_service.reconcile_due_once)
                 if app.state.embedding_direct_plane_launcher is None and provider_adapter is not None:
                     settings = runtime.master_runtime
                     claim = _exact_master_asset_claim(settings)
@@ -641,7 +671,7 @@ def create_app(
                 except TimeoutError:
                     continue
 
-        if master_runtime is not None:
+        if master_runtime is not None or research_service is not None:
             task = asyncio.create_task(reconcile_requests())
         if provider_gateway is not None and getattr(provider_gateway, "uploads", None) is not None:
             upload_reaper_task = asyncio.create_task(reconcile_upload_expiry())
@@ -663,6 +693,7 @@ def create_app(
     app.state.control_ledger = control_ledger
     app.state.master_runtime = master_runtime
     app.state.master_coordinator = master_runtime.coordinator if master_runtime is not None else None
+    app.state.kaggle_research = research_service
     app.state.master_provider_status = provider_status
     app.state.session_registrar = session_registrar
     app.state.tunnel_certificate_broker = tunnel_certificate_broker
@@ -994,6 +1025,22 @@ def create_app(
                     "provider.upload.abort",
                     "provider.acceptance.claim.get",
                     "provider.acceptance.claim.cleanup",
+                    "datasets.search",
+                    "datasets.inspect",
+                    "datasets.file.read",
+                    "research.create",
+                    "research.list",
+                    "research.get",
+                    "notebooks.find",
+                    "notebooks.get",
+                    "notebooks.save",
+                    "notebooks.inputs.set",
+                    "runs.start",
+                    "runs.get",
+                    "runs.logs",
+                    "runs.retry",
+                    "artifacts.list",
+                    "artifacts.read",
                 }
             )
             if runtime.provider_only_mode
@@ -1016,6 +1063,22 @@ def create_app(
                     "provider.acceptance.notebook.lifecycle",
                     "provider.acceptance.claim.get",
                     "provider.acceptance.claim.cleanup",
+                    "datasets.search",
+                    "datasets.inspect",
+                    "datasets.file.read",
+                    "research.create",
+                    "research.list",
+                    "research.get",
+                    "notebooks.find",
+                    "notebooks.get",
+                    "notebooks.save",
+                    "notebooks.inputs.set",
+                    "runs.start",
+                    "runs.get",
+                    "runs.logs",
+                    "runs.retry",
+                    "artifacts.list",
+                    "artifacts.read",
                     *(
                         {"acceptance.scenario.request", "acceptance.scenario.status"}
                         if runtime.acceptance_scenarios_enabled
@@ -1141,6 +1204,12 @@ def create_app(
             assert provider_control is not None
             try:
                 result = await asyncio.to_thread(provider_control.invoke_control, tool, arguments, identity)
+            except KaggleResearchError as exc:
+                code, status_code = exc.code, 409
+                LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)
+                raise HTTPException(
+                    status_code=status_code, detail={"code": code, "correlation_id": correlation_id}
+                ) from exc
             except (PermissionError, KagglePolicyError) as exc:
                 code, status_code = "provider_gateway_policy_denied", 403
                 LOGGER.warning("provider gateway rejected correlation_id=%s code=%s", correlation_id, code)

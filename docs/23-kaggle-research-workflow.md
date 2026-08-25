@@ -1,15 +1,22 @@
 # Durable Kaggle research workflow — implementation specification
 
-Status: `READY_FOR_CODEX`
+Status: `IMPLEMENTED_LOCALLY_NOT_DEPLOYED`
 
-Audit date: 2026-08-25  
-Audit base: `main@38d3b19e9825dde265973025ff64c32d6a22ed1a`  
+Audit date: 2026-08-25
+Audit base: `main@38d3b19e9825dde265973025ff64c32d6a22ed1a`
 Observed deployment: `38d3b19e9825dde265973025ff64c32d6a22ed1a`
 
 This is the single canonical implementation specification for lightweight, resumable
 research on Kaggle through the existing my-data-hub MCP endpoint. It is intentionally
 narrow: no second orchestrator, no second database, no Kaggle PostgreSQL master, no
 monolithic analysis tool and no compatibility tunnel hidden inside a legacy tool.
+
+Implementation record (2026-08-25): the additive workflow described below is implemented
+on the feature branch with ledger migration `035_kaggle_research.sql`, the 16 semantic
+tools, central-adapter Dataset reads/native attachment, immutable revisions, idempotent
+runs, restart recovery and verified artifact chunking. It remains disabled by default via
+`MY_DATA_HUB_KAGGLE_RESEARCH_ENABLED`; no deployment, live MCP change, action refresh or
+live Kaggle mutation was performed in this implementation session.
 
 ## 1. Required outcome
 
@@ -29,7 +36,7 @@ find a public or owner-private Kaggle Dataset
 Full Dataset download remains an auxiliary bounded operation. The normal path is compute
 next to the data in Kaggle.
 
-## 2. Verified baseline
+## 2. Verified pre-implementation baseline
 
 ### Repository and deployment
 
@@ -47,7 +54,7 @@ next to the data in Kaggle.
 There is no code/deployment SHA drift. `master_state=ABSENT` is the required healthy state
 for this workflow.
 
-### Existing usable primitives
+### Pre-existing usable primitives
 
 The current implementation already has:
 
@@ -65,7 +72,7 @@ The current implementation already has:
 
 These are low-level primitives, not yet a usable research workflow.
 
-### Confirmed live limitations
+### Confirmed pre-implementation live limitations
 
 The current ChatGPT catalog exposes only low-level provider tools. Public Dataset search,
 public Dataset metadata/files, owner-private external Dataset access, research identity,
@@ -216,7 +223,7 @@ Each input pin contains:
   "visibility": "public|owner_private",
   "license": "observed provider value",
   "terms_acceptance_required": false,
-  "files": [{"path": "file.csv", "size": 123, "provider_hash": null}],
+  "files": [{"path": "file.csv", "byte_size": 123, "provider_hash": null}],
   "files_manifest_sha256": "sha256",
   "attach_mode": "native_exact|native_guarded"
 }
@@ -241,9 +248,11 @@ One durable execution attempt and its current provider projection.
 | `provider_run_ref TEXT` | exact Notebook source/run ref |
 | `provider_kernel_id TEXT` | provider identity |
 | `provider_source_version INTEGER` | exact pushed Notebook version |
+| `provider_source_sha256 TEXT` | exact materialized provider source hash |
 | `last_provider_status TEXT` | normalized bounded status |
 | `failure_summary TEXT` | redacted, maximum 2000 characters |
 | `next_poll_at TEXT` | durable reconciliation schedule |
+| `poll_attempts INTEGER NOT NULL` | durable bounded-backoff counter |
 | `output_manifest_sha256 TEXT` | set after validation |
 | `created_at TEXT NOT NULL` | UTC |
 | `started_at TEXT` | UTC |
@@ -266,7 +275,7 @@ Exact output metadata. Bytes are not stored in SQLite.
 | `artifact_id TEXT PRIMARY KEY` | server-generated UUID |
 | `run_id TEXT NOT NULL` | FK |
 | `path TEXT NOT NULL` | normalized output path |
-| `role TEXT NOT NULL` | `summary`, `metrics`, `manifest`, `provenance`, `log`, `table`, `figure`, `other` |
+| `role TEXT NOT NULL` | `summary`, `metrics`, `manifest`, `provenance`, `diagnostics`, `log`, `table`, `figure`, `other` |
 | `media_type TEXT NOT NULL` | bounded media type |
 | `byte_size INTEGER NOT NULL` | exact size |
 | `sha256 TEXT NOT NULL` | exact hash |
@@ -283,12 +292,13 @@ only relative paths are stored. Incomplete `.part` files are resumable and TTL-r
 
 ```text
 DRAFT → READY → RUNNING → REVIEW_REQUIRED → READY
-                              └────────────→ COMPLETED
 DRAFT|READY|REVIEW_REQUIRED|COMPLETED → ARCHIVED
 ```
 
-A failed run moves research to `REVIEW_REQUIRED`; it does not erase history. A new Notebook
-revision returns it to `READY`.
+Both a successful output collection and a failed run move research to `REVIEW_REQUIRED`;
+neither erases history. A new Notebook revision returns it to `READY`. `COMPLETED` remains
+reserved for a future explicit owner-review mutation: the closed v1 tool list deliberately
+does not auto-complete or expose an implicit review dispatcher.
 
 ### Run
 
@@ -349,9 +359,12 @@ semantic operation. Chat history is not required.
 
 ### Devstand restart
 
-On control-process startup, the in-process reconciler scans non-terminal runs with expired
-leases or due `next_poll_at`, reacquires a fenced lease and resumes exact status/output
-polling. It never starts the PostgreSQL master.
+On control-process startup, the in-process reconciler scans non-terminal runs due by
+`next_poll_at`, acquires a short fenced research lease and resumes exact status/output
+polling. Durable attempt counters drive capped backoff, while the semantic runtime deadline
+bounds unknown-submission and provider polling. The provider call begins only after the
+durable `SUBMITTING` transition; recovery of that state is read-only and a late original
+response may bind the same expected identity. It never starts the PostgreSQL master.
 
 ### Iteration
 
@@ -373,9 +386,10 @@ Mutation authority and read/attach authority are separate.
 No semantic discovery/attach operation creates a `claim_sha256`. Claims remain mutation
 and cleanup authority for resources created/adopted by my-data-hub.
 
-The preferred attachment source is exact `owner/slug/version`. Before enabling it, a
-disposable live canary must prove that the pinned Kaggle SDK and current Kaggle service
-accept and mount that exact source.
+The supported path uses exact `owner/slug/version`: the pinned official Kaggle SDK 2.2.4
+serializes that value into the Notebook `dataset_sources` metadata. Provider contract tests
+verify the exact versioned source. A disposable live canary must still verify the mounted
+manifest against the current Kaggle service before deployment enablement.
 
 If exact-version attachment is not supported, v1 may use `native_guarded` only when:
 
@@ -400,13 +414,19 @@ read-only and may be copied into a new managed research Notebook.
 Each successful run must produce:
 
 ```text
-manifest.json
+research-output-manifest.json
 summary.md
 metrics.json
+provenance.json
+diagnostics.json
+run.log
 ```
 
-`manifest.json` declares every output path, media type, byte size, SHA-256 and semantic
-role. The server validates it and generates `provenance.json` from trusted ledger data:
+`research-output-manifest.json` declares every provider-produced output path, media type,
+byte size, SHA-256 and semantic role. The provider produces `summary.md`, `metrics.json`,
+`diagnostics.json` and `run.log`; extras must also be declared. The server validates the
+manifest and generates the standard `provenance.json` from trusted ledger data (rather
+than trusting a circular provider-declared provenance hash):
 
 - research/run/revision IDs;
 - source SHA and provider source version;
@@ -422,8 +442,9 @@ large artifacts remain on Kaggle until requested. Full Dataset content is never 
 result package.
 
 Artifact reads use `(artifact_id, offset, max_bytes)` and return `next_offset`, total size
-and expected SHA-256. A partial local cache may continue after a lost response or restart;
-completed bytes are verified before exposure.
+and expected SHA-256. Kaggle-backed files are re-read through the existing exact-output
+transport and verified before each chunk is exposed; generated provenance is written
+atomically to the private mode-0700 cache and verified against its recorded final hash.
 
 ## 10. Semantic MCP tools
 
@@ -490,8 +511,8 @@ Initial semantic read tools use existing `provider:read`; source/run mutations u
 remain sufficient.
 
 The server adds native semantic tools, advertises a catalog revision/hash through
-`platform.status`, enables MCP tool-list change notifications where the client supports
-them, and keeps old tools unchanged.
+`platform.status`, explicitly enables the SDK's MCP 2026-07-28 `subscriptions/listen`
+bus (which advertises `tools.listChanged=true`), and keeps old tools unchanged.
 
 ChatGPT keeps an approved action-schema snapshot and does not reliably adopt new actions
 from a deployment alone. Release acceptance therefore includes **Refresh actions on the
@@ -572,29 +593,27 @@ terminal so provider work is not orphaned.
 | `src/my_data_hub/control_plane/adapters.py` | internal gateway methods and capability projection |
 | `src/my_data_hub/mcp/kaggle_schemas.py` | closed semantic request models; no internal IDs |
 | `src/my_data_hub/mcp/catalog.py` | additive tools using current provider scopes |
-| `src/my_data_hub/mcp/server.py` | registrations, profile allowlists and tool-list change capability |
+| `src/my_data_hub/mcp/server.py` | registrations, profile allowlists and explicit tool-list notification bus |
 | `src/my_data_hub/mcp/service.py` | semantic routing to control gateway; old provider routing untouched |
 | `src/my_data_hub/mcp/control_gateway.py` | authenticated internal forwarding |
-| `src/my_data_hub/config.py` | feature flags, poll/backoff, source/log/artifact/cache limits |
-| `scripts/verify_post_deploy.py` | SHA/master-absent/old-tools/catalog/OAuth/recovery probes |
 | `tests/control/test_kaggle_research.py` | migration, state, leases, idempotency, restart and artifact metadata |
-| `tests/provider/test_kaggle_research_adapter.py` | public/private discovery, exact pins, logs/output and attachment capability |
-| `tests/mcp/test_kaggle_research_tools.py` | schemas, scopes, no internal IDs, separate operations and old-tool compatibility |
-| `tests/integration/test_kaggle_research_recovery.py` | lost response, new process, restart, next iteration and chunk resume |
-| `tests/oauth_server/test_chatgpt_cimd.py` | same registration/grant/refresh-family acceptance after catalog expansion |
+| `tests/provider/test_kaggle_adapter.py` | public/private discovery, exact pins and owner-private native attachment |
+| `tests/mcp/test_dynamic_contracts.py` | schemas, scopes, no internal IDs and catalog compatibility |
 
-The migration filename must use the next verified contiguous number at implementation time;
-no migration number is fabricated by this docs-only stage.
+The verified next contiguous migration is `035_kaggle_research.sql`; the root and packaged
+copies are byte-identical and use the existing checksum-protected migration machinery.
 
-## 16. Readiness verdict
+## 16. Implementation verdict
 
 No owner product decision blocks implementation. The exact current Instacart version and
 exact-version attachment behavior are live provider observations and are explicitly covered
 by read-only discovery/capability gates.
 
 ```text
-READY_FOR_CODEX
+IMPLEMENTED_LOCALLY_NOT_DEPLOYED
 ```
 
-This verdict applies to implementation readiness only. Production code, deployment and the
-live end-to-end research workflow are not implemented by this documentation PR.
+Local unit/integration coverage proves the durable state, lost-response/restart path,
+revision history, failure projection, closed tool schemas and chunk/final-hash contract.
+The exact live Instacart numeric version, mounted manifest and existing-app action refresh
+remain deployment acceptance observations; this branch does not fabricate them.

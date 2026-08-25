@@ -44,6 +44,9 @@ _SAFE_GATEWAY_CODES = frozenset(
         "provider_gateway_response_too_large",
         "provider_gateway_unavailable",
         "provider_gateway_response_invalid",
+        "research_request_invalid",
+        "DATASET_VERSION_CHANGED",
+        "TERMS_ACCEPTANCE_REQUIRED",
     }
 )
 
@@ -69,6 +72,22 @@ _REMOTE_PROVIDER_TOOLS = frozenset(
         "provider.acceptance.claim.cleanup",
         "acceptance.scenario.request",
         "acceptance.scenario.status",
+        "datasets.search",
+        "datasets.inspect",
+        "datasets.file.read",
+        "research.create",
+        "research.list",
+        "research.get",
+        "notebooks.find",
+        "notebooks.get",
+        "notebooks.save",
+        "notebooks.inputs.set",
+        "runs.start",
+        "runs.get",
+        "runs.logs",
+        "runs.retry",
+        "artifacts.list",
+        "artifacts.read",
     }
 )
 

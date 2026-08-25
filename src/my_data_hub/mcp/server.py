@@ -17,6 +17,7 @@ from my_data_hub.mcp.contracts import (
     MCPAuditSink,
     WriteGate,
 )
+from my_data_hub.mcp.kaggle_schemas import DatasetSelection, RuntimeOptions
 from my_data_hub.mcp.oauth import AccessIdentity, OAuthBearerValidator
 from my_data_hub.mcp.provider_schemas import (
     ProviderCreatePayload,
@@ -94,6 +95,22 @@ PROVIDER_ONLY_TOOLS = frozenset(
         "provider.upload.abort",
         "provider.acceptance.claim.get",
         "provider.acceptance.claim.cleanup",
+        "datasets.search",
+        "datasets.inspect",
+        "datasets.file.read",
+        "research.create",
+        "research.list",
+        "research.get",
+        "notebooks.find",
+        "notebooks.get",
+        "notebooks.save",
+        "notebooks.inputs.set",
+        "runs.start",
+        "runs.get",
+        "runs.logs",
+        "runs.retry",
+        "artifacts.list",
+        "artifacts.read",
     }
 )
 UNIFIED_BOOTSTRAP_TOOLS = PROVIDER_ONLY_TOOLS | READER_PROFILE_TOOLS
@@ -195,6 +212,7 @@ def create_server(
 ):  # type: ignore[no-untyped-def]
     try:
         from mcp.server import MCPServer
+        from mcp.server.subscriptions import InMemorySubscriptionBus
         from mcp.types import ToolAnnotations
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("install my-data-hub to run the MCP server") from exc
@@ -220,7 +238,9 @@ def create_server(
             allowed = visible_tools(self._identity()) & profile_tools
             visible = [tool for tool in tools if tool.name in allowed]
             for tool in visible:
-                if tool.name.startswith("region_talk."):
+                if tool.name.startswith(
+                    ("region_talk.", "datasets.", "research.", "notebooks.", "runs.", "artifacts.")
+                ):
                     tool.input_schema["additionalProperties"] = False
             return visible
 
@@ -270,6 +290,10 @@ def create_server(
             "MCP 2026-07-28 bounded domain tools. The reader catalog contains no writes. "
             "Writes require an identity-bound preview and checkpoint lifecycle permit."
         ),
+        # MCP 2026-07-28 delivers list-change events through
+        # subscriptions/listen. Keep the bus explicit so `tools.listChanged`
+        # remains an intentional server capability rather than an SDK default.
+        subscriptions=InMemorySubscriptionBus(),
     )
 
     def register(name: str, function):  # type: ignore[no-untyped-def]
@@ -345,6 +369,139 @@ def create_server(
 
     async def provider_status(limit: int = 100) -> dict[str, Any]:
         return await service.invoke("provider.resources.status", {"limit": limit})
+
+    async def datasets_search(
+        query: str,
+        visibility: Literal["public", "owner_private", "all"] = "all",
+        cursor: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Search bounded Kaggle Dataset metadata; Dataset bytes stay at Kaggle."""
+        return await service.invoke("datasets.search", locals())
+
+    async def datasets_inspect(
+        dataset_ref: str,
+        provider_version: int | None = None,
+        file_cursor: str | None = None,
+        file_limit: int = 100,
+    ) -> dict[str, Any]:
+        """Inspect one exact current Dataset pin without creating a mutation claim."""
+        return await service.invoke("datasets.inspect", locals())
+
+    async def datasets_file_read(
+        dataset_ref: str,
+        provider_version: int,
+        path: str,
+        offset: int = 0,
+        max_bytes: int = 131_072,
+    ) -> dict[str, Any]:
+        """Read one optional bounded exact Dataset file chunk."""
+        return await service.invoke("datasets.file.read", locals())
+
+    async def research_create(
+        title: str, goal: str, dataset_ref: str, alias: str | None = None
+    ) -> dict[str, Any]:
+        """Create durable research metadata and an exact initial input pin; never starts a run."""
+        return await service.invoke("research.create", locals())
+
+    async def research_list(cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
+        """List owner research with explicit continuation actions."""
+        return await service.invoke("research.list", locals())
+
+    async def research_get(
+        research_id: UUID | None = None,
+        alias: str | None = None,
+        dataset_ref: str | None = None,
+        revision_cursor: str | None = None,
+        run_cursor: str | None = None,
+        history_limit: int = 20,
+    ) -> dict[str, Any]:
+        """Resume research by public ID, human alias, or exact Dataset ref."""
+        return await service.invoke("research.get", locals())
+
+    async def notebooks_find(
+        research_id: UUID | None = None,
+        alias: str | None = None,
+        dataset_ref: str | None = None,
+        query: str | None = None,
+        cursor: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Find linked managed and read-only owner Notebook candidates."""
+        return await service.invoke("notebooks.find", locals())
+
+    async def notebooks_get(
+        revision_id: UUID | None = None,
+        revision_no: int | None = None,
+        research_id: UUID | None = None,
+        alias: str | None = None,
+        dataset_ref: str | None = None,
+        notebook_ref: str | None = None,
+        source_version: int | None = None,
+    ) -> dict[str, Any]:
+        """Read a saved revision or exact current owner-private Notebook source."""
+        return await service.invoke("notebooks.get", locals())
+
+    async def notebooks_save(
+        source_utf8: str,
+        research_id: UUID | None = None,
+        alias: str | None = None,
+        dataset_ref: str | None = None,
+        revision_id: UUID | None = None,
+        revision_no: int | None = None,
+        code_file: str = "research.py",
+        kernel_type: Literal["script", "notebook"] = "script",
+        runtime: RuntimeOptions | None = None,
+    ) -> dict[str, Any]:
+        """Save revision N+1; it does not call Kaggle or start execution."""
+        arguments = {**locals(), "runtime": (runtime or RuntimeOptions()).model_dump(mode="json")}
+        return await service.invoke("notebooks.save", arguments)
+
+    async def notebooks_inputs_set(
+        inputs: list[DatasetSelection],
+        research_id: UUID | None = None,
+        alias: str | None = None,
+        dataset_ref: str | None = None,
+        revision_id: UUID | None = None,
+        revision_no: int | None = None,
+    ) -> dict[str, Any]:
+        """Replace ordered exact pins on one draft revision without Dataset mutation."""
+        arguments = {**locals(), "inputs": [item.model_dump(mode="json") for item in inputs]}
+        return await service.invoke("notebooks.inputs.set", arguments)
+
+    async def runs_start(
+        research_id: UUID | None = None,
+        alias: str | None = None,
+        dataset_ref: str | None = None,
+        revision_id: UUID | None = None,
+        revision_no: int | None = None,
+    ) -> dict[str, Any]:
+        """Idempotently start or return the initial semantic run for a frozen revision."""
+        return await service.invoke("runs.start", locals())
+
+    async def runs_get(run_id: UUID) -> dict[str, Any]:
+        """Return exact durable semantic/provider state and allowed next actions."""
+        return await service.invoke("runs.get", locals())
+
+    async def runs_logs(
+        run_id: UUID, offset: int = 0, max_bytes: int = 65_536
+    ) -> dict[str, Any]:
+        """Read bounded exact-run provider logs with continuation."""
+        return await service.invoke("runs.logs", locals())
+
+    async def runs_retry(run_id: UUID) -> dict[str, Any]:
+        """Create an explicit new attempt after an exact failed run."""
+        return await service.invoke("runs.retry", locals())
+
+    async def artifacts_list(run_id: UUID) -> dict[str, Any]:
+        """List validated standard outputs, extras, hashes, and compact metadata."""
+        return await service.invoke("artifacts.list", locals())
+
+    async def artifacts_read(
+        artifact_id: UUID, offset: int = 0, max_bytes: int = 131_072
+    ) -> dict[str, Any]:
+        """Read a verified artifact chunk with resumable offset and final SHA-256."""
+        return await service.invoke("artifacts.read", locals())
 
     async def runtime_events_history(
         run_id: str, attempt_id: str, epoch: int, limit: int = 100
@@ -760,6 +917,22 @@ def create_server(
         "embedding.coverage": embedding_coverage,
         "embedding.production.capabilities": embedding_production_capabilities,
         "provider.resources.status": provider_status,
+        "datasets.search": datasets_search,
+        "datasets.inspect": datasets_inspect,
+        "datasets.file.read": datasets_file_read,
+        "research.create": research_create,
+        "research.list": research_list,
+        "research.get": research_get,
+        "notebooks.find": notebooks_find,
+        "notebooks.get": notebooks_get,
+        "notebooks.save": notebooks_save,
+        "notebooks.inputs.set": notebooks_inputs_set,
+        "runs.start": runs_start,
+        "runs.get": runs_get,
+        "runs.logs": runs_logs,
+        "runs.retry": runs_retry,
+        "artifacts.list": artifacts_list,
+        "artifacts.read": artifacts_read,
         "runtime.events.history": runtime_events_history,
         "provider.acceptance.dataset.lifecycle": provider_acceptance_dataset_lifecycle,
         "provider.acceptance.notebook.lifecycle": provider_acceptance_notebook_lifecycle,

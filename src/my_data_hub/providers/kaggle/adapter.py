@@ -38,7 +38,11 @@ from .contracts import (
     KaggleAmbiguousMutation,
     KaggleApiProtocol,
     KaggleContractError,
+    KaggleDatasetFileContent,
+    KaggleDatasetFileObservation,
     KaggleDatasetIdentity,
+    KaggleDatasetInspection,
+    KaggleDatasetSummary,
     KaggleDependencyError,
     KaggleIdentityError,
     KaggleKernelFailureOutputIdentity,
@@ -47,11 +51,14 @@ from .contracts import (
     KaggleKernelRunIdentity,
     KaggleKernelSourceIdentity,
     KaggleKernelStatus,
+    KaggleNotebookSource,
+    KaggleNotebookSummary,
     KaggleNotFound,
     KagglePolicyError,
     KagglePollingTimeout,
     KaggleProviderError,
     KaggleProviderIdentity,
+    KaggleRunLog,
     KaggleTerminalFailure,
     KernelState,
     MutationAction,
@@ -623,6 +630,310 @@ class KaggleProviderAdapter:
             raise KaggleContractError("Kaggle Dataset file metadata exceeded its page bound")
         expected_name_sizes = tuple(sorted((name, size) for name, size, _description in normalized_expected))
         return tuple(sorted(observed)) == expected_name_sizes
+
+    def search_datasets(
+        self,
+        *,
+        query: str,
+        visibility: str,
+        cursor: str | None,
+        limit: int,
+    ) -> tuple[tuple[KaggleDatasetSummary, ...], str | None]:
+        """Search public or authenticated-owner Datasets through the official SDK."""
+
+        if visibility not in {"public", "owner_private"}:
+            raise KaggleContractError("Dataset search visibility must be public or owner_private")
+        if not 1 <= len(query.strip()) <= 200 or not 1 <= limit <= 50:
+            raise KaggleContractError("Dataset search bounds are invalid")
+        response, _attempts = self._provider_read_call(
+            "dataset_search",
+            lambda: self.api.dataset_list_with_response(
+                mine=visibility == "owner_private",
+                page_size=limit,
+                page_token=cursor,
+                search=query.strip(),
+                sort_by="updated",
+            ),
+        )
+        rows = _field(response, "datasets") or []
+        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)) or len(rows) > limit:
+            raise KaggleIdentityError("Kaggle Dataset search returned an invalid page")
+        results: list[KaggleDatasetSummary] = []
+        seen: set[str] = set()
+        for row in rows:
+            ref = _normalized_ref(_field(row, "ref"))
+            if ref in seen:
+                raise KaggleIdentityError("Kaggle Dataset search repeated a resource")
+            seen.add(ref)
+            private = _privacy(_field(row, "is_private", "isPrivate"))
+            expected_private = visibility == "owner_private"
+            if private is not expected_private:
+                continue
+            if expected_private and ref.split("/", 1)[0] != self.identity.username:
+                raise KagglePolicyError("Kaggle Dataset visibility/ownership differs from the requested scope")
+            version = _version(_field(row, "current_version_number", "currentVersionNumber"))
+            if version is None:
+                raise KaggleIdentityError("Kaggle Dataset search omitted the numeric version")
+            title = str(_field(row, "title") or ref.split("/", 1)[1])[:500]
+            license_name = str(_field(row, "license_name", "licenseName") or "unknown")[:500]
+            total_bytes = _field(row, "total_bytes", "totalBytes")
+            if isinstance(total_bytes, bool) or not isinstance(total_bytes, int) or total_bytes < 0:
+                total_bytes = 0
+            results.append(
+                KaggleDatasetSummary(
+                    provider_ref=ref,
+                    title=title,
+                    provider_version=version,
+                    visibility="owner_private" if expected_private else "public",
+                    license=license_name,
+                    total_bytes=total_bytes,
+                    terms_acceptance_required=bool(
+                        _field(
+                            row,
+                            "terms_acceptance_required",
+                            "termsAcceptanceRequired",
+                            "requires_acceptance",
+                            "requiresAcceptance",
+                        )
+                        or False
+                    ),
+                )
+            )
+        next_cursor = str(_field(response, "next_page_token", "nextPageToken") or "").strip() or None
+        return tuple(results), next_cursor
+
+    def inspect_dataset(
+        self, *, provider_ref: str, provider_version: int | None = None
+    ) -> KaggleDatasetInspection:
+        """Inspect one current exact Dataset version without creating a mutation claim."""
+
+        ref = _normalized_ref(provider_ref)
+        observed: KaggleDatasetSummary | None = None
+        for visibility in ("owner_private", "public"):
+            if visibility == "owner_private" and ref.split("/", 1)[0] != self.identity.username:
+                continue
+            cursor: str | None = None
+            for _ in range(20):
+                page, next_cursor = self.search_datasets(
+                    query=ref.split("/", 1)[1], visibility=visibility, cursor=cursor, limit=50
+                )
+                observed = next((item for item in page if item.provider_ref == ref), observed)
+                if observed is not None or next_cursor is None:
+                    break
+                cursor = next_cursor
+            if observed is not None:
+                break
+        if observed is None:
+            raise KaggleNotFound("Kaggle Dataset was not found or is not accessible")
+        version = provider_version or observed.provider_version
+        if version != observed.provider_version:
+            raise KaggleIdentityError(
+                "historical Dataset license/visibility cannot be proven; inspect the current exact version"
+            )
+        files: list[KaggleDatasetFileObservation] = []
+        cursor = None
+        seen_paths: set[str] = set()
+        for _ in range(100):
+            response, _attempts = self._provider_read_call(
+                "dataset_list_files_exact",
+                lambda cursor=cursor: self.api.dataset_list_files(
+                    f"{ref}/{version}", page_token=cursor, page_size=100
+                ),
+            )
+            rows = _field(response, "files", "dataset_files", "datasetFiles") or []
+            if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)) or len(rows) > 100:
+                raise KaggleIdentityError("Kaggle Dataset file page is invalid")
+            for row in rows:
+                path = str(_field(row, "name", "ref") or "")
+                _validate_relative_path(path)
+                if path in seen_paths:
+                    raise KaggleIdentityError("Kaggle Dataset file listing repeated a path")
+                seen_paths.add(path)
+                size = _field(row, "total_bytes", "totalBytes", "size")
+                if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                    raise KaggleIdentityError("Kaggle Dataset file size is invalid")
+                files.append(KaggleDatasetFileObservation(path=path, byte_size=size, provider_hash=None))
+                if len(files) > 10_000:
+                    raise KaggleContractError("Kaggle Dataset file listing exceeds the bounded contract")
+            next_cursor = str(_field(response, "next_page_token", "nextPageToken") or "").strip() or None
+            if next_cursor is None:
+                break
+            if next_cursor == cursor:
+                raise KaggleIdentityError("Kaggle Dataset file listing repeated a cursor")
+            cursor = next_cursor
+        else:
+            raise KaggleContractError("Kaggle Dataset file listing exceeded its page bound")
+        ordered = tuple(sorted(files, key=lambda item: item.path))
+        manifest = [item.model_dump(mode="json") for item in ordered]
+        return KaggleDatasetInspection(
+            **observed.model_dump(),
+            files=ordered,
+            files_manifest_sha256=sha256_value({"files": manifest}),
+            attach_mode="native_exact",
+        )
+
+    def read_dataset_file_exact(
+        self,
+        *,
+        provider_ref: str,
+        provider_version: int,
+        path: str,
+        max_file_bytes: int = 64 * 1024 * 1024,
+    ) -> KaggleDatasetFileContent:
+        """Read one bounded exact public/owner-private Dataset file without a claim."""
+
+        inspection = self.inspect_dataset(provider_ref=provider_ref, provider_version=provider_version)
+        _validate_relative_path(path)
+        declaration = next((item for item in inspection.files if item.path == path), None)
+        if declaration is None:
+            raise KaggleNotFound("exact Dataset file was not found")
+        if declaration.byte_size > max_file_bytes or not 1 <= max_file_bytes <= 64 * 1024 * 1024:
+            raise KaggleContractError("exact Dataset file exceeds the bounded read limit")
+        with tempfile.TemporaryDirectory(prefix="my-data-hub-research-dataset-file-") as temporary:
+            root = Path(temporary)
+            self._provider_read_call(
+                "dataset_download_file_exact",
+                lambda: self.api.dataset_download_file(
+                    f"{inspection.provider_ref}/{inspection.provider_version}",
+                    path,
+                    path=str(root),
+                    force=True,
+                    quiet=True,
+                    licenses=[],
+                ),
+            )
+            target = root / Path(path).name
+            if not target.is_file() or target.is_symlink():
+                raise KaggleIdentityError("Kaggle exact Dataset file download is missing or unsafe")
+            content = target.read_bytes()
+        if len(content) != declaration.byte_size:
+            raise KaggleIdentityError("Kaggle exact Dataset file size changed after inspection")
+        return KaggleDatasetFileContent(
+            provider_ref=inspection.provider_ref,
+            provider_version=inspection.provider_version,
+            path=path,
+            byte_size=len(content),
+            sha256=hashlib.sha256(content).hexdigest(),
+            content=content,
+        )
+
+    def find_owner_notebooks(
+        self, *, query: str | None, cursor: str | None, limit: int
+    ) -> tuple[tuple[KaggleNotebookSummary, ...], str | None]:
+        if not 1 <= limit <= 50 or (query is not None and len(query) > 200):
+            raise KaggleContractError("Kaggle Notebook search bounds are invalid")
+        response, _attempts = self._provider_read_call(
+            "owner_notebook_search",
+            lambda: self.api.kernels_list_with_response(
+                mine=True, page_size=limit, page_token=cursor, search=query
+            ),
+        )
+        rows = _field(response, "kernels") or []
+        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)) or len(rows) > limit:
+            raise KaggleIdentityError("Kaggle Notebook search returned an invalid page")
+        result: list[KaggleNotebookSummary] = []
+        for row in rows:
+            ref = _normalized_ref(_field(row, "ref"))
+            if ref.split("/", 1)[0] != self.identity.username or _privacy(
+                _field(row, "is_private", "isPrivate")
+            ) is not True:
+                raise KagglePolicyError("Kaggle Notebook search returned a non-owner/private resource")
+            version = _version(_field(row, "version_number", "current_version_number", "currentVersionNumber"))
+            if version is None:
+                raise KaggleIdentityError("Kaggle Notebook search omitted a numeric source version")
+            result.append(
+                KaggleNotebookSummary(
+                    provider_ref=ref,
+                    title=str(_field(row, "title") or ref.split("/", 1)[1])[:500],
+                    source_version=version,
+                    provider_status=str(_field(row, "status") or "unknown")[:100],
+                )
+            )
+        next_cursor = str(_field(response, "next_page_token", "nextPageToken") or "").strip() or None
+        return tuple(result), next_cursor
+
+    def assert_research_notebook_target_absent(self, provider_ref: str) -> None:
+        """Fail closed before a first managed research push could version owner work."""
+
+        ref = _normalized_ref(provider_ref)
+        if ref.split("/", 1)[0] != self.identity.username:
+            raise KagglePolicyError("research Notebook target must belong to the authenticated owner")
+        try:
+            self._find_resource(ref, ProviderKind.NOTEBOOK)
+        except KaggleNotFound:
+            return
+        raise KagglePolicyError("research Notebook target already exists and is not adopted")
+
+    def read_owner_notebook_source(
+        self, *, provider_ref: str, source_version: int
+    ) -> KaggleNotebookSource:
+        """Read the exact current source of one authenticated owner-private Notebook."""
+
+        ref = _normalized_ref(provider_ref)
+        if ref.split("/", 1)[0] != self.identity.username:
+            raise KagglePolicyError("only an authenticated owner Notebook may be read")
+        observed, current_version, _provider_id = self._find_resource(ref, ProviderKind.NOTEBOOK)
+        if observed.private is not True or current_version != source_version:
+            raise KaggleIdentityError(
+                "historical Notebook privacy cannot be proven; read the current exact source version"
+            )
+        with tempfile.TemporaryDirectory(prefix="my-data-hub-research-source-") as temporary:
+            root = Path(temporary)
+            pulled, _attempts = self._provider_read_call(
+                "owner_notebook_source",
+                lambda: self.api.kernels_pull(
+                    f"{ref}/{source_version}", path=str(root), metadata=True, quiet=True
+                ),
+            )
+            if Path(str(pulled)).resolve() != root.resolve():
+                raise KaggleContractError("Kaggle source pull escaped the bounded target directory")
+            metadata_path = root / "kernel-metadata.json"
+            if not metadata_path.is_file() or metadata_path.is_symlink():
+                raise KaggleIdentityError("Kaggle source readback omitted exact metadata")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata.get("id") != ref or metadata.get("is_private") is not True:
+                raise KagglePolicyError("Notebook exact owner/private identity was not proven")
+            code_file = str(metadata.get("code_file") or "")
+            _validate_relative_path(code_file)
+            source_path = root.joinpath(*code_file.split("/"))
+            if not source_path.is_file() or source_path.is_symlink():
+                raise KaggleIdentityError("Kaggle source readback omitted its declared code file")
+            source = source_path.read_bytes()
+            if not source or len(source) > 262_144:
+                raise KaggleContractError("Kaggle owner Notebook source is empty or exceeds 262144 bytes")
+            try:
+                source_utf8 = source.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise KaggleContractError("Kaggle owner Notebook source is not UTF-8") from exc
+            kernel_type = str(metadata.get("kernel_type") or "")
+            if kernel_type not in {"script", "notebook"}:
+                raise KaggleIdentityError("Kaggle owner Notebook kernel type is invalid")
+            return KaggleNotebookSource(
+                provider_ref=ref,
+                source_version=source_version,
+                code_file=code_file,
+                kernel_type=kernel_type,
+                language=str(metadata.get("language") or "python"),
+                source_utf8=source_utf8,
+                source_sha256=executable_source_sha256(source, kernel_type=kernel_type),
+            )
+
+    def read_exact_run_logs(self, run: KaggleKernelRunIdentity) -> KaggleRunLog:
+        """Read the latest-session SDK log only after exact source/version fencing."""
+
+        self._assert_current_run(run)
+        value, _attempts = self._provider_read_call(
+            "kernels_logs", lambda: self.api.kernels_logs(run.provider_ref)
+        )
+        content = str(value or "").encode("utf-8")
+        if len(content) > MAX_EXACT_OUTPUT_PROVIDER_LOG_BYTES:
+            content = content[-MAX_EXACT_OUTPUT_PROVIDER_LOG_BYTES:]
+        self._assert_current_run(run)
+        return KaggleRunLog(
+            content=content,
+            byte_size=len(content),
+            sha256=hashlib.sha256(content).hexdigest(),
+        )
 
     def list_resources(self, *, kind: ProviderKind, cursor: str | None, limit: int) -> InventoryPage:
         if not 1 <= limit <= 100:
@@ -1359,6 +1670,46 @@ class KaggleProviderAdapter:
             pending_runtime_attestation=False,
         )
 
+    def push_private_research_notebook(
+        self,
+        *,
+        intent: ProviderEffectIntent,
+        task_run_id: UUID,
+        source: bytes,
+        title: str,
+        code_file: str,
+        kernel_type: str,
+        language: str,
+        dataset_sources: Sequence[str],
+        enable_internet: bool = False,
+        accelerator: str = "none",
+        timeout_seconds: int | None = None,
+    ) -> NotebookMutationResult:
+        """Push one immutable semantic research execution.
+
+        The durable provider intent binds the semantic run to the exact
+        materialized source hash. Unlike legacy worker source, the caller's
+        frozen source need not embed an internal task marker.
+        """
+
+        return self._push_private_notebook(
+            intent=intent,
+            task_run_id=task_run_id,
+            source=source,
+            title=title,
+            code_file=code_file,
+            kernel_type=kernel_type,
+            language=language,
+            control_class=ControlClass.MCP_MANAGED,
+            disposable=False,
+            dataset_sources=dataset_sources,
+            enable_internet=enable_internet,
+            accelerator=accelerator,
+            timeout_seconds=timeout_seconds,
+            pending_runtime_attestation=False,
+            require_task_run_binding=False,
+        )
+
     def push_private_notebook_pending_runtime_attestation(
         self,
         *,
@@ -1482,6 +1833,7 @@ class KaggleProviderAdapter:
         pending_runtime_attestation: bool,
         docker_image: str | None = None,
         docker_image_pinning_type: str | None = None,
+        require_task_run_binding: bool = True,
     ) -> NotebookMutationResult:
         if intent.action != MutationAction.PUSH_NOTEBOOK:
             raise KaggleContractError("effect intent action does not authorize notebook push/run")
@@ -1500,7 +1852,7 @@ class KaggleProviderAdapter:
                 "Kaggle notebook title must equal the exact requested slug to prevent provider-side identity rewrite"
             )
         canonical_source = _canonical_notebook_source(source, kernel_type=kernel_type)
-        if str(task_run_id).encode("ascii") not in canonical_source:
+        if require_task_run_binding and str(task_run_id).encode("ascii") not in canonical_source:
             raise KaggleContractError("notebook source must embed the exact task_run_id")
         source_sha = executable_source_sha256(canonical_source, kernel_type=kernel_type)
         normalized_sources = tuple(_normalized_dataset_source(item) for item in dataset_sources)
@@ -1947,6 +2299,14 @@ class KaggleProviderAdapter:
         except KaggleProviderError:
             raise
         except Exception as exc:
+            message = str(exc).casefold()
+            if (
+                "terms acceptance" in message
+                or "accept the terms" in message
+                or "license acceptance" in message
+                or "consent required" in message
+            ):
+                raise KagglePolicyError("TERMS_ACCEPTANCE_REQUIRED") from exc
             failure = classify_failure(exc, now=self.clock())
             if failure.retry_class is RetryClass.NOT_FOUND:
                 raise KaggleNotFound("Kaggle provider resource was not found") from exc
@@ -1991,6 +2351,8 @@ class KaggleProviderAdapter:
         dataset_sources: Sequence[str],
         control_class: ControlClass,
         disposable: bool,
+        enable_internet: bool = False,
+        accelerator: str = "none",
     ) -> NotebookMutationResult | None:
         """Repair a pushed exact notebook's remote journal without another push."""
 
@@ -2002,6 +2364,10 @@ class KaggleProviderAdapter:
             "control_class": control_class.value,
             "disposable": disposable,
         }
+        if control_class is ControlClass.MCP_MANAGED and enable_internet:
+            arguments["enable_internet"] = True
+        if control_class is ControlClass.MCP_MANAGED and accelerator != "none":
+            arguments["accelerator"] = accelerator
         self._validate_control_class(control_class, kind=ProviderKind.NOTEBOOK)
         self._validate_intent(intent, arguments=arguments)
         run = self.reconcile_private_notebook_run(

@@ -25,6 +25,13 @@ from .models import (
     EffectState,
     EventDisposition,
     EventReceipt,
+    KaggleArtifactRecord,
+    KaggleResearchRecord,
+    KaggleResearchState,
+    KaggleRevisionRecord,
+    KaggleRevisionState,
+    KaggleRunRecord,
+    KaggleRunState,
     OperationRecord,
     ResourceLeaseRecord,
     ServiceRecord,
@@ -5984,6 +5991,23 @@ class ControlLedger:
         value["metadata"] = json.loads(str(value.pop("metadata_json")))
         return value
 
+    def latest_provider_resource(self, provider_ref: str) -> dict[str, Any] | None:
+        """Return the newest control projection for one exact provider ref."""
+
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT provider,resource_ref,resource_kind,source_identity,source_version,control_class,"
+                "private,state,metadata_json,observed_at FROM provider_resources "
+                "WHERE resource_ref=? ORDER BY observed_at DESC,source_version DESC LIMIT 1",
+                (provider_ref,),
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["private"] = None if value["private"] is None else bool(value["private"])
+        value["metadata"] = json.loads(str(value.pop("metadata_json")))
+        return value
+
     def acquire_resource_lease(
         self,
         *,
@@ -7383,6 +7407,765 @@ class ControlLedger:
         if value["claimed_epoch"] is not None:
             value["claimed_epoch"] = int(value["claimed_epoch"])
         return value
+
+    def create_kaggle_research(
+        self,
+        *,
+        research_id: str,
+        owner_subject: str,
+        alias: str | None,
+        title: str,
+        goal: str,
+        primary_dataset_ref: str,
+        revision_id: str,
+        code_file: str,
+        kernel_type: str,
+        source_utf8: str,
+        source_sha256: str,
+        runtime: Mapping[str, Any],
+        inputs: list[dict[str, Any]],
+        inputs_sha256: str,
+    ) -> KaggleResearchRecord:
+        """Create one owner research and its initial exact Dataset-pinned draft."""
+
+        runtime_json = _canonical_json(runtime)
+        inputs_json = _canonical_json(inputs)
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM kaggle_researches WHERE owner_subject=? AND "
+                "(research_id=? OR (? IS NOT NULL AND alias=?))",
+                (owner_subject, research_id, alias, alias),
+            ).fetchone()
+            if existing is not None:
+                return self._kaggle_research_from_row(existing)
+            connection.execute(
+                "INSERT INTO kaggle_researches(research_id,owner_subject,alias,title,goal,state,"
+                "primary_dataset_ref,current_revision_id,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,'DRAFT',?,?,?,?)",
+                (
+                    research_id,
+                    owner_subject,
+                    alias,
+                    title,
+                    goal,
+                    primary_dataset_ref,
+                    revision_id,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO kaggle_notebook_revisions(revision_id,research_id,revision_no,parent_revision_id,"
+                "state,code_file,kernel_type,language,source_utf8,source_sha256,runtime_json,inputs_json,"
+                "inputs_sha256,created_at) VALUES (?,?,1,NULL,'DRAFT',?,?,'python',?,?,?,?,?,?)",
+                (
+                    revision_id,
+                    research_id,
+                    code_file,
+                    kernel_type,
+                    source_utf8,
+                    source_sha256,
+                    runtime_json,
+                    inputs_json,
+                    inputs_sha256,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM kaggle_researches WHERE research_id=?", (research_id,)
+            ).fetchone()
+            assert row is not None
+            return self._kaggle_research_from_row(row)
+
+    def list_kaggle_researches(
+        self, *, owner_subject: str, cursor: int = 0, limit: int = 50
+    ) -> list[KaggleResearchRecord]:
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT * FROM kaggle_researches WHERE owner_subject=? "
+                "ORDER BY updated_at DESC,research_id LIMIT ? OFFSET ?",
+                (owner_subject, limit, cursor),
+            ).fetchall()
+        return [self._kaggle_research_from_row(row) for row in rows]
+
+    def kaggle_research(
+        self,
+        *,
+        owner_subject: str,
+        research_id: str | None = None,
+        alias: str | None = None,
+        dataset_ref: str | None = None,
+    ) -> KaggleResearchRecord | None:
+        selectors = [("research_id", research_id), ("alias", alias), ("primary_dataset_ref", dataset_ref)]
+        active = [(column, value) for column, value in selectors if value is not None]
+        if len(active) != 1:
+            raise ValueError("exactly one Kaggle research selector is required")
+        column, value = active[0]
+        with self._reader() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM kaggle_researches WHERE owner_subject=? AND {column}=? "
+                "ORDER BY updated_at DESC,research_id LIMIT 2",
+                (owner_subject, value),
+            ).fetchall()
+        if len(rows) > 1:
+            raise IdempotencyConflict("Dataset selector matches more than one research; use research_id or alias")
+        return self._kaggle_research_from_row(rows[0]) if rows else None
+
+    def kaggle_revision(
+        self, *, owner_subject: str, research_id: str, revision_id: str | None = None, revision_no: int | None = None
+    ) -> KaggleRevisionRecord | None:
+        if (revision_id is None) == (revision_no is None):
+            raise ValueError("exactly one revision selector is required")
+        clause, value = ("v.revision_id", revision_id) if revision_id is not None else ("v.revision_no", revision_no)
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT v.* FROM kaggle_notebook_revisions v JOIN kaggle_researches r "
+                f"ON r.research_id=v.research_id WHERE r.owner_subject=? AND v.research_id=? AND {clause}=?",
+                (owner_subject, research_id, value),
+            ).fetchone()
+        return self._kaggle_revision_from_row(row) if row else None
+
+    def kaggle_revisions(
+        self,
+        *,
+        owner_subject: str,
+        research_id: str,
+        cursor: int | None = None,
+        limit: int | None = None,
+    ) -> list[KaggleRevisionRecord]:
+        if (cursor is None) != (limit is None) or (cursor is not None and (cursor < 0 or not 1 <= limit <= 100)):
+            raise ValueError("Kaggle revision pagination is invalid")
+        suffix = " LIMIT ? OFFSET ?" if limit is not None else ""
+        params: tuple[Any, ...] = (
+            (owner_subject, research_id, limit, cursor)
+            if limit is not None
+            else (owner_subject, research_id)
+        )
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT v.* FROM kaggle_notebook_revisions v JOIN kaggle_researches r "
+                "ON r.research_id=v.research_id WHERE r.owner_subject=? AND v.research_id=? "
+                "ORDER BY v.revision_no" + suffix,
+                params,
+            ).fetchall()
+        return [self._kaggle_revision_from_row(row) for row in rows]
+
+    def save_kaggle_revision(
+        self,
+        *,
+        owner_subject: str,
+        research_id: str,
+        revision_id: str,
+        parent_revision_id: str,
+        code_file: str,
+        kernel_type: str,
+        source_utf8: str,
+        source_sha256: str,
+        runtime: Mapping[str, Any],
+        inputs: list[dict[str, Any]],
+        inputs_sha256: str,
+    ) -> KaggleRevisionRecord:
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            research = connection.execute(
+                "SELECT * FROM kaggle_researches WHERE research_id=? AND owner_subject=?",
+                (research_id, owner_subject),
+            ).fetchone()
+            parent = connection.execute(
+                "SELECT * FROM kaggle_notebook_revisions WHERE revision_id=? AND research_id=?",
+                (parent_revision_id, research_id),
+            ).fetchone()
+            if research is None or parent is None:
+                raise KeyError(research_id)
+            latest = connection.execute(
+                "SELECT max(revision_no) FROM kaggle_notebook_revisions WHERE research_id=?", (research_id,)
+            ).fetchone()
+            revision_no = int(latest[0] or 0) + 1
+            connection.execute(
+                "INSERT INTO kaggle_notebook_revisions(revision_id,research_id,revision_no,parent_revision_id,"
+                "state,code_file,kernel_type,language,source_utf8,source_sha256,runtime_json,inputs_json,"
+                "inputs_sha256,created_at) VALUES (?,?,?,?, 'DRAFT',?,?,'python',?,?,?,?,?,?)",
+                (
+                    revision_id,
+                    research_id,
+                    revision_no,
+                    parent_revision_id,
+                    code_file,
+                    kernel_type,
+                    source_utf8,
+                    source_sha256,
+                    _canonical_json(runtime),
+                    _canonical_json(inputs),
+                    inputs_sha256,
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE kaggle_researches SET current_revision_id=?,state='READY',active_run_id=NULL,updated_at=? "
+                "WHERE research_id=?",
+                (revision_id, now, research_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM kaggle_notebook_revisions WHERE revision_id=?", (revision_id,)
+            ).fetchone()
+            assert row is not None
+            return self._kaggle_revision_from_row(row)
+
+    def set_kaggle_revision_inputs(
+        self,
+        *,
+        owner_subject: str,
+        research_id: str,
+        revision_id: str,
+        inputs: list[dict[str, Any]],
+        inputs_sha256: str,
+    ) -> KaggleRevisionRecord:
+        now = _format_time(self.clock.now())
+        with self._transaction() as connection:
+            changed = connection.execute(
+                "UPDATE kaggle_notebook_revisions SET inputs_json=?,inputs_sha256=? "
+                "WHERE revision_id=? AND research_id=? AND state='DRAFT' AND EXISTS ("
+                "SELECT 1 FROM kaggle_researches WHERE research_id=? AND owner_subject=?)",
+                (_canonical_json(inputs), inputs_sha256, revision_id, research_id, research_id, owner_subject),
+            ).rowcount
+            if changed != 1:
+                raise StaleRuntimeEvent("only an owner draft revision accepts input changes")
+            connection.execute(
+                "UPDATE kaggle_researches SET state='READY',updated_at=? WHERE research_id=?", (now, research_id)
+            )
+            row = connection.execute(
+                "SELECT * FROM kaggle_notebook_revisions WHERE revision_id=?", (revision_id,)
+            ).fetchone()
+            assert row is not None
+            return self._kaggle_revision_from_row(row)
+
+    def prepare_kaggle_run(
+        self,
+        *,
+        owner_subject: str,
+        client_id: str,
+        research_id: str,
+        revision_id: str,
+        run_id: str,
+        retry_of_run_id: str | None,
+        operation_id: str,
+        effect_id: str,
+        provider_intent: Mapping[str, Any],
+        provider_source_sha256: str,
+        lease_id: str,
+        holder_id: str,
+        lease_until: datetime,
+    ) -> tuple[KaggleRunRecord, ResourceLeaseRecord | None, bool]:
+        """Atomically freeze source and persist run, operation, effect, provider intent and lease."""
+
+        intent_json = _safe_json(provider_intent)
+        now_value = self.clock.now()
+        now = _format_time(now_value)
+        if lease_until <= now_value:
+            raise LeaseRejected("research run lease must expire in the future")
+        with self._transaction() as connection:
+            research = connection.execute(
+                "SELECT * FROM kaggle_researches WHERE research_id=? AND owner_subject=?",
+                (research_id, owner_subject),
+            ).fetchone()
+            revision = connection.execute(
+                "SELECT * FROM kaggle_notebook_revisions WHERE revision_id=? AND research_id=?",
+                (revision_id, research_id),
+            ).fetchone()
+            if research is None or revision is None:
+                raise KeyError(research_id)
+            if retry_of_run_id is None:
+                existing = connection.execute(
+                    "SELECT * FROM kaggle_runs WHERE revision_id=? AND retry_of_run_id IS NULL", (revision_id,)
+                ).fetchone()
+                if existing is not None:
+                    return self._kaggle_run_from_row(existing), None, False
+            else:
+                existing = connection.execute(
+                    "SELECT * FROM kaggle_runs WHERE retry_of_run_id=?", (retry_of_run_id,)
+                ).fetchone()
+                if existing is not None:
+                    return self._kaggle_run_from_row(existing), None, False
+                predecessor = connection.execute(
+                    "SELECT * FROM kaggle_runs WHERE run_id=? AND research_id=? AND state='FAILED'",
+                    (retry_of_run_id, research_id),
+                ).fetchone()
+                if predecessor is None:
+                    raise StaleRuntimeEvent("only an exact failed run may be retried")
+            active = connection.execute(
+                "SELECT * FROM resource_leases WHERE resource_kind='kaggle_research' AND resource_ref=? "
+                "AND released_at IS NULL AND lease_until>? ORDER BY epoch DESC LIMIT 1",
+                (research_id, now),
+            ).fetchone()
+            if active is not None:
+                raise LeaseRejected("research already has an active fenced lease")
+            epoch_row = connection.execute(
+                "SELECT max(epoch) FROM resource_leases WHERE resource_kind='kaggle_research' AND resource_ref=?",
+                (research_id,),
+            ).fetchone()
+            epoch = int(epoch_row[0] or 0) + 1
+            connection.execute(
+                "INSERT INTO resource_leases(lease_id,resource_kind,resource_ref,holder_id,epoch,acquired_at,"
+                "lease_until) VALUES (?,'kaggle_research',?,?,?,?,?)",
+                (lease_id, research_id, holder_id, epoch, now, _format_time(lease_until)),
+            )
+            attempt_row = connection.execute(
+                "SELECT max(attempt_no) FROM kaggle_runs WHERE research_id=?", (research_id,)
+            ).fetchone()
+            attempt_no = int(attempt_row[0] or 0) + 1
+            attempt_key = "initial" if retry_of_run_id is None else run_id
+            operation_key = f"kaggle-research:{research_id}:{revision_id}:{attempt_key}"
+            operation_intent = {
+                "research_id": research_id,
+                "revision_id": revision_id,
+                "provider_source_sha256": provider_source_sha256,
+                "retry_of_run_id": retry_of_run_id,
+            }
+            operation_intent_json = _safe_json(operation_intent)
+            operation_hash = hashlib.sha256(operation_intent_json.encode()).hexdigest()
+            connection.execute(
+                "INSERT INTO operations(operation_id,idempotency_key,operation_kind,intent_hash,state,identity_json,"
+                "created_at,updated_at) VALUES (?,?,'kaggle_research_run',?,'PREPARED',?,?,?)",
+                (operation_id, operation_key, operation_hash, operation_intent_json, now, now),
+            )
+            connection.execute(
+                "INSERT INTO operation_log(operation_id,from_state,to_state,recorded_at,metadata_json) "
+                "VALUES (?,NULL,'PREPARED',?,?)",
+                (operation_id, now, _safe_json({"reason": "research_run_prepared"})),
+            )
+            effect_key = str(provider_intent["idempotency_key"])
+            connection.execute(
+                "INSERT INTO effects(effect_id,operation_id,idempotency_key,effect_kind,exact_identity_json,state,"
+                "planned_at,updated_at) VALUES (?,?,?,'push_research_notebook',?,'PLANNED',?,?)",
+                (effect_id, operation_id, effect_key, intent_json, now, now),
+            )
+            connection.execute(
+                "INSERT INTO effect_log(effect_id,operation_id,state,recorded_at,metadata_json) "
+                "VALUES (?,?,'PLANNED',?,?)",
+                (effect_id, operation_id, now, _safe_json({"reason": "research_run_prepared"})),
+            )
+            connection.execute(
+                "INSERT INTO provider_effect_intents(effect_id,operation_id,idempotency_key,task_id,action,"
+                "provider_ref,request_sha256,intent_json,recorded_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    effect_id,
+                    operation_id,
+                    effect_key,
+                    str(provider_intent["task_id"]),
+                    str(provider_intent["action"]),
+                    str(provider_intent["provider_ref"]),
+                    str(provider_intent["request_sha256"]),
+                    intent_json,
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE kaggle_notebook_revisions SET state='FROZEN',frozen_at=? "
+                "WHERE revision_id=? AND state='DRAFT'",
+                (now, revision_id),
+            )
+            connection.execute(
+                "INSERT INTO kaggle_runs(run_id,research_id,revision_id,attempt_no,retry_of_run_id,operation_id,"
+                "effect_id,state,provider_source_sha256,next_poll_at,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,'PREPARED',?,?,?,?)",
+                (
+                    run_id,
+                    research_id,
+                    revision_id,
+                    attempt_no,
+                    retry_of_run_id,
+                    operation_id,
+                    effect_id,
+                    provider_source_sha256,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE kaggle_researches SET state='RUNNING',active_run_id=?,updated_at=? WHERE research_id=?",
+                (run_id, now, research_id),
+            )
+            connection.execute(
+                "INSERT INTO audit_log(audit_id,principal_id,client_id,action,operation_id,audit_ref,recorded_at,"
+                "metadata_json) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    str(uuid4()),
+                    owner_subject,
+                    client_id,
+                    "kaggle_research:run_prepared",
+                    operation_id,
+                    hashlib.sha256(f"{research_id}:{revision_id}:{run_id}".encode()).hexdigest(),
+                    now,
+                    _safe_json({"research_id": research_id, "revision_id": revision_id}),
+                ),
+            )
+            row = connection.execute("SELECT * FROM kaggle_runs WHERE run_id=?", (run_id,)).fetchone()
+            lease = connection.execute("SELECT * FROM resource_leases WHERE lease_id=?", (lease_id,)).fetchone()
+            assert row is not None and lease is not None
+            return self._kaggle_run_from_row(row), self._resource_lease_from_row(lease), True
+
+    def kaggle_run(self, *, owner_subject: str, run_id: str) -> KaggleRunRecord | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT u.* FROM kaggle_runs u JOIN kaggle_researches r ON r.research_id=u.research_id "
+                "WHERE r.owner_subject=? AND u.run_id=?",
+                (owner_subject, run_id),
+            ).fetchone()
+        return self._kaggle_run_from_row(row) if row else None
+
+    def kaggle_run_internal(self, run_id: str) -> KaggleRunRecord | None:
+        with self._reader() as connection:
+            row = connection.execute("SELECT * FROM kaggle_runs WHERE run_id=?", (run_id,)).fetchone()
+        return self._kaggle_run_from_row(row) if row else None
+
+    def kaggle_provider_intent(self, run_id: str) -> dict[str, Any] | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT i.intent_json FROM kaggle_runs u JOIN provider_effect_intents i ON i.effect_id=u.effect_id "
+                "WHERE u.run_id=?",
+                (run_id,),
+            ).fetchone()
+        return json.loads(str(row["intent_json"])) if row else None
+
+    def kaggle_runs(
+        self,
+        *,
+        owner_subject: str,
+        research_id: str,
+        cursor: int | None = None,
+        limit: int | None = None,
+    ) -> list[KaggleRunRecord]:
+        if (cursor is None) != (limit is None) or (cursor is not None and (cursor < 0 or not 1 <= limit <= 100)):
+            raise ValueError("Kaggle run pagination is invalid")
+        suffix = " LIMIT ? OFFSET ?" if limit is not None else ""
+        params: tuple[Any, ...] = (
+            (owner_subject, research_id, limit, cursor)
+            if limit is not None
+            else (owner_subject, research_id)
+        )
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT u.* FROM kaggle_runs u JOIN kaggle_researches r ON r.research_id=u.research_id "
+                "WHERE r.owner_subject=? AND u.research_id=? ORDER BY u.attempt_no" + suffix,
+                params,
+            ).fetchall()
+        return [self._kaggle_run_from_row(row) for row in rows]
+
+    def transition_kaggle_run(
+        self,
+        *,
+        run_id: str,
+        expected_states: set[str],
+        new_state: str,
+        provider_run_ref: str | None = None,
+        provider_kernel_id: str | None = None,
+        provider_source_version: int | None = None,
+        provider_status: str | None = None,
+        failure_summary: str | None = None,
+        next_poll_at: datetime | None = None,
+        output_manifest_sha256: str | None = None,
+        finished: bool = False,
+        artifacts: list[Mapping[str, Any]] | None = None,
+    ) -> KaggleRunRecord:
+        """Project one fenced/provider observation; history remains in operation/provider logs."""
+
+        if not expected_states:
+            raise ValueError("expected run states are required")
+        now = _format_time(self.clock.now())
+        placeholders = ",".join("?" for _ in expected_states)
+        ordered_states = sorted(expected_states)
+        with self._transaction() as connection:
+            row = connection.execute(
+                f"SELECT * FROM kaggle_runs WHERE run_id=? AND state IN ({placeholders})",
+                (run_id, *ordered_states),
+            ).fetchone()
+            if row is None:
+                current = connection.execute("SELECT state FROM kaggle_runs WHERE run_id=?", (run_id,)).fetchone()
+                actual = current["state"] if current else "missing"
+                raise StaleRuntimeEvent(f"Kaggle run transition expected {ordered_states}, found {actual}")
+            poll_attempts = int(row["poll_attempts"]) + (1 if provider_status is not None else 0)
+            connection.execute(
+                "UPDATE kaggle_runs SET state=?,provider_run_ref=coalesce(?,provider_run_ref),"
+                "provider_kernel_id=coalesce(?,provider_kernel_id),"
+                "provider_source_version=coalesce(?,provider_source_version),"
+                "last_provider_status=coalesce(?,last_provider_status),failure_summary=?,next_poll_at=?,"
+                "poll_attempts=?,output_manifest_sha256=coalesce(?,output_manifest_sha256),"
+                "started_at=CASE WHEN ? IN ('QUEUED','RUNNING','COLLECTING','SUCCEEDED','FAILED') "
+                "THEN coalesce(started_at,?) ELSE started_at END,"
+                "finished_at=CASE WHEN ? THEN ? ELSE finished_at END,updated_at=? WHERE run_id=?",
+                (
+                    new_state,
+                    provider_run_ref,
+                    provider_kernel_id,
+                    provider_source_version,
+                    provider_status,
+                    failure_summary,
+                    _format_time(next_poll_at) if next_poll_at else None,
+                    poll_attempts,
+                    output_manifest_sha256,
+                    new_state,
+                    now,
+                    finished,
+                    now,
+                    now,
+                    run_id,
+                ),
+            )
+            operation_id = str(row["operation_id"])
+            prior_operation = connection.execute(
+                "SELECT state FROM operations WHERE operation_id=?", (operation_id,)
+            ).fetchone()
+            operation_state = (
+                "DURABLE_COMPLETE"
+                if new_state == "SUCCEEDED"
+                else "FAILED"
+                if new_state == "FAILED"
+                else new_state
+            )
+            if prior_operation is not None and prior_operation["state"] != operation_state:
+                connection.execute(
+                    "UPDATE operations SET state=?,updated_at=? WHERE operation_id=?",
+                    (operation_state, now, operation_id),
+                )
+                connection.execute(
+                    "INSERT INTO operation_log(operation_id,from_state,to_state,recorded_at,metadata_json) "
+                    "VALUES (?,?,?,?,?)",
+                    (
+                        operation_id,
+                        str(prior_operation["state"]),
+                        operation_state,
+                        now,
+                        _safe_json({"run_state": new_state, "provider_status": provider_status}),
+                    ),
+                )
+            effect_id = str(row["effect_id"]) if row["effect_id"] is not None else None
+            effect = (
+                connection.execute("SELECT * FROM effects WHERE effect_id=?", (effect_id,)).fetchone()
+                if effect_id is not None
+                else None
+            )
+            if effect is not None and new_state == "SUBMITTING" and effect["state"] == "PLANNED":
+                connection.execute(
+                    "UPDATE effects SET state='IN_PROGRESS',updated_at=? WHERE effect_id=?",
+                    (now, effect_id),
+                )
+                connection.execute(
+                    "INSERT INTO effect_log(effect_id,operation_id,state,recorded_at,metadata_json) "
+                    "VALUES (?,?,'IN_PROGRESS',?,?)",
+                    (effect_id, operation_id, now, _safe_json({"reason": "provider_submission_started"})),
+                )
+                effect = connection.execute("SELECT * FROM effects WHERE effect_id=?", (effect_id,)).fetchone()
+            if effect is not None and provider_source_version is not None and effect["state"] != "APPLIED":
+                if effect["state"] != "IN_PROGRESS":
+                    raise StaleRuntimeEvent("research provider effect is not in progress")
+                receipt_json = _safe_json(
+                    {
+                        "provider_run_ref": provider_run_ref,
+                        "provider_source_version": provider_source_version,
+                        "provider_status": provider_status,
+                    }
+                )
+                connection.execute(
+                    "UPDATE effects SET state='APPLIED',receipt_json=?,updated_at=? WHERE effect_id=?",
+                    (receipt_json, now, effect_id),
+                )
+                connection.execute(
+                    "INSERT INTO effect_log(effect_id,operation_id,state,recorded_at,metadata_json) "
+                    "VALUES (?,?,'APPLIED',?,?)",
+                    (effect_id, operation_id, now, receipt_json),
+                )
+            elif effect is not None and new_state == "FAILED" and effect["state"] == "PLANNED":
+                failure_json = _safe_json(
+                    {"reason": "provider_submission_not_started", "provider_status": provider_status}
+                )
+                connection.execute(
+                    "UPDATE effects SET state='FAILED',updated_at=? WHERE effect_id=?",
+                    (now, effect_id),
+                )
+                connection.execute(
+                    "INSERT INTO effect_log(effect_id,operation_id,state,recorded_at,metadata_json) "
+                    "VALUES (?,?,'FAILED',?,?)",
+                    (effect_id, operation_id, now, failure_json),
+                )
+            elif effect is not None and new_state == "FAILED" and effect["state"] == "IN_PROGRESS":
+                # The provider mutation may have applied despite a lost response.
+                # Keep the generic effect non-terminal and append uncertainty;
+                # the provider-effect intent/receipt journal remains authoritative.
+                unknown_json = _safe_json(
+                    {"reason": "provider_submission_unresolved", "provider_status": provider_status}
+                )
+                connection.execute(
+                    "INSERT INTO effect_log(effect_id,operation_id,state,recorded_at,metadata_json) "
+                    "VALUES (?,?,'SUBMISSION_UNKNOWN',?,?)",
+                    (effect_id, operation_id, now, unknown_json),
+                )
+            if provider_source_version is not None:
+                connection.execute(
+                    "UPDATE kaggle_notebook_revisions SET state='SUBMITTED',provider_source_version=? "
+                    "WHERE revision_id=? AND state='FROZEN'",
+                    (provider_source_version, str(row["revision_id"])),
+                )
+            if artifacts:
+                for item in artifacts:
+                    connection.execute(
+                        "INSERT INTO kaggle_artifacts(artifact_id,run_id,path,role,media_type,byte_size,sha256,"
+                        "storage_mode,cache_relpath,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            str(item["artifact_id"]),
+                            run_id,
+                            str(item["path"]),
+                            str(item["role"]),
+                            str(item["media_type"]),
+                            int(item["byte_size"]),
+                            str(item["sha256"]),
+                            str(item["storage_mode"]),
+                            item.get("cache_relpath"),
+                            now,
+                        ),
+                    )
+            if new_state == "SUCCEEDED":
+                connection.execute(
+                    "UPDATE kaggle_researches SET state='REVIEW_REQUIRED',active_run_id=NULL,last_completed_run_id=?,"
+                    "notebook_ref=?,updated_at=? WHERE research_id=?",
+                    (run_id, provider_run_ref.rsplit("/", 1)[0] if provider_run_ref else None, now, row["research_id"]),
+                )
+            elif new_state == "FAILED":
+                connection.execute(
+                    "UPDATE kaggle_researches SET state='REVIEW_REQUIRED',active_run_id=NULL,updated_at=? "
+                    "WHERE research_id=?",
+                    (now, row["research_id"]),
+                )
+            result = connection.execute("SELECT * FROM kaggle_runs WHERE run_id=?", (run_id,)).fetchone()
+            assert result is not None
+            return self._kaggle_run_from_row(result)
+
+    def due_kaggle_runs(self, *, limit: int = 20) -> list[KaggleRunRecord]:
+        now = _format_time(self.clock.now())
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT * FROM kaggle_runs WHERE state IN "
+                "('PREPARED','SUBMITTING','SUBMISSION_UNKNOWN','QUEUED','RUNNING','COLLECTING') "
+                "AND (next_poll_at IS NULL OR next_poll_at<=?) "
+                "ORDER BY coalesce(next_poll_at,created_at),run_id LIMIT ?",
+                (now, limit),
+            ).fetchall()
+        return [self._kaggle_run_from_row(row) for row in rows]
+
+    def kaggle_artifacts(self, *, owner_subject: str, run_id: str) -> list[KaggleArtifactRecord]:
+        with self._reader() as connection:
+            rows = connection.execute(
+                "SELECT a.* FROM kaggle_artifacts a JOIN kaggle_runs u ON u.run_id=a.run_id "
+                "JOIN kaggle_researches r ON r.research_id=u.research_id "
+                "WHERE r.owner_subject=? AND a.run_id=? ORDER BY a.path",
+                (owner_subject, run_id),
+            ).fetchall()
+        return [self._kaggle_artifact_from_row(row) for row in rows]
+
+    def kaggle_artifact(self, *, owner_subject: str, artifact_id: str) -> KaggleArtifactRecord | None:
+        with self._reader() as connection:
+            row = connection.execute(
+                "SELECT a.* FROM kaggle_artifacts a JOIN kaggle_runs u ON u.run_id=a.run_id "
+                "JOIN kaggle_researches r ON r.research_id=u.research_id "
+                "WHERE r.owner_subject=? AND a.artifact_id=?",
+                (owner_subject, artifact_id),
+            ).fetchone()
+        return self._kaggle_artifact_from_row(row) if row else None
+
+    @staticmethod
+    def _kaggle_research_from_row(row: sqlite3.Row) -> KaggleResearchRecord:
+        return KaggleResearchRecord(
+            research_id=str(row["research_id"]),
+            owner_subject=str(row["owner_subject"]),
+            alias=str(row["alias"]) if row["alias"] is not None else None,
+            title=str(row["title"]),
+            goal=str(row["goal"]),
+            state=KaggleResearchState(str(row["state"])),
+            primary_dataset_ref=str(row["primary_dataset_ref"]),
+            notebook_ref=str(row["notebook_ref"]) if row["notebook_ref"] is not None else None,
+            current_revision_id=(str(row["current_revision_id"]) if row["current_revision_id"] is not None else None),
+            active_run_id=str(row["active_run_id"]) if row["active_run_id"] is not None else None,
+            last_completed_run_id=(
+                str(row["last_completed_run_id"]) if row["last_completed_run_id"] is not None else None
+            ),
+            created_at=_parse_time(str(row["created_at"])),
+            updated_at=_parse_time(str(row["updated_at"])),
+        )
+
+    @staticmethod
+    def _kaggle_revision_from_row(row: sqlite3.Row) -> KaggleRevisionRecord:
+        return KaggleRevisionRecord(
+            revision_id=str(row["revision_id"]),
+            research_id=str(row["research_id"]),
+            revision_no=int(row["revision_no"]),
+            parent_revision_id=(str(row["parent_revision_id"]) if row["parent_revision_id"] is not None else None),
+            state=KaggleRevisionState(str(row["state"])),
+            code_file=str(row["code_file"]),
+            kernel_type=str(row["kernel_type"]),
+            language=str(row["language"]),
+            source_utf8=str(row["source_utf8"]),
+            source_sha256=str(row["source_sha256"]),
+            runtime=json.loads(str(row["runtime_json"])),
+            inputs=json.loads(str(row["inputs_json"])),
+            inputs_sha256=str(row["inputs_sha256"]),
+            provider_source_version=(
+                int(row["provider_source_version"]) if row["provider_source_version"] is not None else None
+            ),
+            created_at=_parse_time(str(row["created_at"])),
+            frozen_at=_parse_time(str(row["frozen_at"])) if row["frozen_at"] is not None else None,
+        )
+
+    @staticmethod
+    def _kaggle_run_from_row(row: sqlite3.Row) -> KaggleRunRecord:
+        return KaggleRunRecord(
+            run_id=str(row["run_id"]),
+            research_id=str(row["research_id"]),
+            revision_id=str(row["revision_id"]),
+            attempt_no=int(row["attempt_no"]),
+            retry_of_run_id=str(row["retry_of_run_id"]) if row["retry_of_run_id"] is not None else None,
+            operation_id=str(row["operation_id"]),
+            effect_id=str(row["effect_id"]) if row["effect_id"] is not None else None,
+            state=KaggleRunState(str(row["state"])),
+            provider_run_ref=(str(row["provider_run_ref"]) if row["provider_run_ref"] is not None else None),
+            provider_kernel_id=(
+                str(row["provider_kernel_id"]) if row["provider_kernel_id"] is not None else None
+            ),
+            provider_source_version=(
+                int(row["provider_source_version"]) if row["provider_source_version"] is not None else None
+            ),
+            provider_source_sha256=(
+                str(row["provider_source_sha256"]) if row["provider_source_sha256"] is not None else None
+            ),
+            last_provider_status=(
+                str(row["last_provider_status"]) if row["last_provider_status"] is not None else None
+            ),
+            failure_summary=str(row["failure_summary"]) if row["failure_summary"] is not None else None,
+            next_poll_at=_parse_time(str(row["next_poll_at"])) if row["next_poll_at"] is not None else None,
+            poll_attempts=int(row["poll_attempts"]),
+            output_manifest_sha256=(
+                str(row["output_manifest_sha256"]) if row["output_manifest_sha256"] is not None else None
+            ),
+            created_at=_parse_time(str(row["created_at"])),
+            started_at=_parse_time(str(row["started_at"])) if row["started_at"] is not None else None,
+            finished_at=_parse_time(str(row["finished_at"])) if row["finished_at"] is not None else None,
+            updated_at=_parse_time(str(row["updated_at"])),
+        )
+
+    @staticmethod
+    def _kaggle_artifact_from_row(row: sqlite3.Row) -> KaggleArtifactRecord:
+        return KaggleArtifactRecord(
+            artifact_id=str(row["artifact_id"]),
+            run_id=str(row["run_id"]),
+            path=str(row["path"]),
+            role=str(row["role"]),
+            media_type=str(row["media_type"]),
+            byte_size=int(row["byte_size"]),
+            sha256=str(row["sha256"]),
+            storage_mode=str(row["storage_mode"]),
+            cache_relpath=str(row["cache_relpath"]) if row["cache_relpath"] is not None else None,
+            created_at=_parse_time(str(row["created_at"])),
+        )
 
     def revoke_oauth_reference(
         self,

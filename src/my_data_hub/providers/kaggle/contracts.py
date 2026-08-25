@@ -304,6 +304,74 @@ class KaggleDatasetIdentity(BaseModel):
     observed_at: datetime
 
 
+class KaggleDatasetFileObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: str = Field(min_length=1, max_length=1000)
+    byte_size: int = Field(ge=0, le=68_719_476_736)
+    provider_hash: str | None = Field(default=None, max_length=200)
+
+
+class KaggleDatasetSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=300)
+    title: str = Field(min_length=1, max_length=500)
+    provider_version: int = Field(ge=1)
+    visibility: Literal["public", "owner_private"]
+    license: str = Field(min_length=1, max_length=500)
+    total_bytes: int = Field(ge=0, le=68_719_476_736)
+    terms_acceptance_required: bool = False
+
+
+class KaggleDatasetInspection(KaggleDatasetSummary):
+    files: tuple[KaggleDatasetFileObservation, ...] = Field(max_length=10_000)
+    files_manifest_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    attach_mode: Literal["native_exact", "native_guarded"]
+
+
+class KaggleDatasetFileContent(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=300)
+    provider_version: int = Field(ge=1)
+    path: str = Field(min_length=1, max_length=1000)
+    byte_size: int = Field(ge=0, le=67_108_864)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    content: bytes = Field(repr=False)
+
+
+class KaggleNotebookSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=300)
+    title: str = Field(min_length=1, max_length=500)
+    source_version: int = Field(ge=1)
+    private: Literal[True] = True
+    provider_status: str = Field(min_length=1, max_length=100)
+
+
+class KaggleNotebookSource(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider_ref: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=300)
+    source_version: int = Field(ge=1)
+    code_file: str = Field(min_length=1, max_length=1000)
+    kernel_type: Literal["script", "notebook"]
+    language: str = Field(min_length=1, max_length=30)
+    source_utf8: str = Field(min_length=1, max_length=262_144)
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    private: Literal[True] = True
+
+
+class KaggleRunLog(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    content: bytes = Field(repr=False)
+    byte_size: int = Field(ge=0, le=1_048_576)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 @dataclass(frozen=True, slots=True)
 class ExactDatasetBatchFile:
     """One verified regular file; content is intentionally absent from repr."""
@@ -472,6 +540,8 @@ class KaggleApiProtocol(Protocol):
         page_size: int = 20,
     ) -> Any: ...
 
+    def dataset_metadata(self, dataset: str, path: str) -> str: ...
+
     def build_kaggle_client(self) -> Any: ...
 
     def dataset_create_new(
@@ -533,6 +603,8 @@ class KaggleApiProtocol(Protocol):
         page_token: str | None = None,
         page_size: int = 20,
     ) -> tuple[list[str], str]: ...
+
+    def kernels_logs(self, kernel: str | None) -> str: ...
 
     def kernels_delete(self, kernel: str, no_confirm: bool = False) -> None: ...
 

@@ -10,7 +10,13 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from my_data_hub.providers import BoundedInventory, ControlClass, ProviderKind, ProviderRegistry
+from my_data_hub.providers import (
+    BoundedInventory,
+    ControlClass,
+    ProviderFingerprint,
+    ProviderKind,
+    ProviderRegistry,
+)
 from my_data_hub.providers.kaggle import (
     RUN_RECEIPT_NAME,
     EffectOutcome,
@@ -388,6 +394,140 @@ def adapter() -> tuple[KaggleProviderAdapter, FakeKaggleApi, FakeJournal]:
         api,
         journal,
     )
+
+
+def test_research_dataset_discovery_inspects_instacart_exact_public_version() -> None:
+    client, api, journal = adapter()
+    ref = "psparks/instacart-market-basket-analysis"
+    api.datasets[ref] = {17: {"aisles.csv": b"aisle_id,aisle\n", "orders.csv": b"order_id\n1\n"}}
+    owner_list = api.dataset_list_with_response
+
+    def list_datasets(**kwargs: object):
+        if kwargs["mine"] is True:
+            return owner_list(**kwargs)
+        return SimpleNamespace(
+            datasets=[
+                SimpleNamespace(
+                    ref=ref,
+                    title="Instacart Market Basket Analysis",
+                    is_private=False,
+                    current_version_number=17,
+                    license_name="CC0: Public Domain",
+                    total_bytes=sum(len(value) for value in api.datasets[ref][17].values()),
+                )
+            ],
+            next_page_token=None,
+        )
+
+    api.dataset_list_with_response = list_datasets  # type: ignore[method-assign]
+
+    found, cursor = client.search_datasets(
+        query="instacart", visibility="public", cursor=None, limit=20
+    )
+    assert cursor is None
+    assert [(item.provider_ref, item.provider_version, item.visibility, item.license) for item in found] == [
+        (ref, 17, "public", "CC0: Public Domain")
+    ]
+    inspected = client.inspect_dataset(provider_ref=ref, provider_version=17)
+    assert inspected.provider_version == 17
+    assert inspected.visibility == "public"
+    assert inspected.license == "CC0: Public Domain"
+    assert [(item.path, item.byte_size) for item in inspected.files] == [
+        (path, len(content)) for path, content in sorted(api.datasets[ref][17].items())
+    ]
+    assert re.fullmatch(r"[a-f0-9]{64}", inspected.files_manifest_sha256)
+    assert inspected.attach_mode == "native_exact"
+    assert journal.intents == []
+    assert journal.claims == {}
+
+
+def test_owner_private_dataset_is_read_and_attached_without_dataset_claim() -> None:
+    client, api, journal = adapter()
+    dataset_ref = "owner/private-research-input"
+    api.datasets[dataset_ref] = {4: {"input.csv": b"value\n1\n"}}
+
+    inspected = client.inspect_dataset(provider_ref=dataset_ref, provider_version=4)
+    exact = client.read_dataset_file_exact(
+        provider_ref=dataset_ref, provider_version=4, path="input.csv"
+    )
+    assert inspected.visibility == "owner_private"
+    assert exact.content == b"value\n1\n"
+    assert journal.claims == {}
+    unadopted_claim = TaskResourceClaim.create(
+        task_id=uuid4(),
+        effect_id=uuid4(),
+        provider_ref=dataset_ref,
+        kind=ProviderKind.DATASET,
+        control_class=ControlClass.MCP_MANAGED,
+        disposable=False,
+        fingerprint=ProviderFingerprint(value="a" * 64),
+        provider_version=4,
+        registered_at=NOW,
+    )
+    denied_intent = effect(
+        MutationAction.VERSION_DATASET,
+        dataset_ref,
+        task_id=unadopted_claim.task_id,
+        expected=unadopted_claim.fingerprint,
+        arguments={"content_tree_sha256": "b" * 64},
+    )
+    with pytest.raises(KagglePolicyError, match="not in the caller-owned ledger"):
+        client.create_private_dataset_version(
+            intent=denied_intent,
+            claim=unadopted_claim,
+            files={"input.csv": b"mutation denied"},
+            version_notes="must not mutate an unadopted Dataset",
+        )
+
+    task_id = uuid4()
+    source = b"print('private native input')\n"
+    notebook_ref = "owner/private-research-run"
+    source_sha = executable_source_sha256(source, kernel_type="script")
+    intent = effect(
+        MutationAction.PUSH_NOTEBOOK,
+        notebook_ref,
+        task_id=task_id,
+        arguments={
+            "task_run_id": str(task_id),
+            "source_sha256": source_sha,
+            "dataset_sources": (f"{dataset_ref}/4",),
+            "control_class": "mcp_managed",
+            "disposable": False,
+        },
+    )
+    result = client.push_private_research_notebook(
+        intent=intent,
+        task_run_id=task_id,
+        source=source,
+        title="private-research-run",
+        code_file="research.py",
+        kernel_type="script",
+        language="python",
+        dataset_sources=[f"{dataset_ref}/4"],
+    )
+    assert result.run.provider_ref == notebook_ref
+    assert api.kernel_metadata[notebook_ref]["dataset_sources"] == [f"{dataset_ref}/4"]
+    assert all(claim.kind == ProviderKind.NOTEBOOK for claim in journal.claims.values())
+    copied = client.read_owner_notebook_source(provider_ref=notebook_ref, source_version=1)
+    assert copied.provider_ref == notebook_ref
+    assert copied.source_version == 1
+    assert copied.source_utf8 == source.decode()
+    assert copied.source_sha256 == source_sha
+
+    collision_ref = "owner/existing-unmanaged-research"
+    api.kernels[collision_ref] = {1: b"print('owner work')\n"}
+    api.kernel_metadata[collision_ref] = {
+        "id": collision_ref,
+        "title": "existing-unmanaged-research",
+        "code_file": "source.py",
+        "language": "python",
+        "kernel_type": "script",
+        "is_private": True,
+    }
+    pushes_before = len([call for call in api.calls if call[0] == "kernels_push"])
+    with pytest.raises(KagglePolicyError, match="already exists"):
+        client.assert_research_notebook_target_absent(collision_ref)
+    assert len([call for call in api.calls if call[0] == "kernels_push"]) == pushes_before
 
 
 def test_official_224_calls_are_private_and_exact(tmp_path: Path) -> None:

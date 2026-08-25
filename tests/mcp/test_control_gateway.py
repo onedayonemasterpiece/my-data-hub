@@ -148,6 +148,30 @@ async def test_control_client_preserves_only_typed_code_and_correlation(
 
 
 @pytest.mark.asyncio
+async def test_control_client_preserves_research_recovery_codes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    correlation = "00000000-0000-4000-8000-000000000002"
+
+    def drift(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        payload = json.dumps(
+            {"detail": {"code": "DATASET_VERSION_CHANGED", "correlation_id": correlation}}
+        ).encode()
+        raise HTTPError("http://control", 409, "conflict", {}, BytesIO(payload))
+
+    monkeypatch.setattr("my_data_hub.mcp.control_gateway.urlopen", drift)
+    client = AuthenticatedProviderControlClient(
+        "http://control-plane:8080/internal/mcp-provider/invoke", b"g" * 32
+    )
+    with pytest.raises(ProviderControlGatewayError) as raised:
+        await client.invoke_control(
+            "datasets.inspect", {"dataset_ref": "owner/input", "provider_version": 1}, identity()
+        )
+    assert raised.value.code == "DATASET_VERSION_CHANGED"
+    assert raised.value.correlation_id == correlation
+
+
+@pytest.mark.asyncio
 async def test_control_client_maps_untrusted_or_transport_failures_to_local_redacted_codes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

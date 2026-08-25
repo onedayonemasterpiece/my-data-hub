@@ -24,6 +24,7 @@ from my_data_hub.connectors.checkpoint_control import ControlLedgerVerifiedCheck
 from my_data_hub.control_plane.acceptance_evidence import AcceptanceEvidenceController
 from my_data_hub.control_plane.ledger import ControlLedger, ControlLedgerError
 from my_data_hub.control_plane.provider_uploads import ProviderChunkedUploadStore
+from my_data_hub.control_plane.research import KaggleResearchService
 from my_data_hub.hashing import canonical_json_bytes
 from my_data_hub.mcp.contracts import (
     ControlPlaneReader,
@@ -2288,6 +2289,7 @@ class LedgerControlReader(ControlPlaneReader):
         deployed_commit: str | None = None,
         write_gate: LedgerWriteGate | None = None,
         provider_gateway: KaggleMCPProviderGateway | None = None,
+        research_service: KaggleResearchService | None = None,
         acceptance_evidence: AcceptanceEvidenceController | None = None,
         acceptance_scenarios: object | None = None,
     ) -> None:
@@ -2299,12 +2301,49 @@ class LedgerControlReader(ControlPlaneReader):
         self.deployed_commit = deployed_commit
         self.write_gate = write_gate
         self.provider_gateway = provider_gateway
+        self.research_service = research_service
         self.acceptance_evidence = acceptance_evidence or (
             AcceptanceEvidenceController(ledger, provider_gateway) if provider_gateway is not None else None
         )
         self.acceptance_scenarios = acceptance_scenarios
 
     def invoke_control(self, tool: str, arguments: dict[str, Any], principal: AccessIdentity) -> dict[str, Any]:
+        if tool.startswith(("datasets.", "research.", "notebooks.", "runs.", "artifacts.")):
+            if self.research_service is None:
+                raise PermissionError("Kaggle research service is not configured")
+            if tool == "datasets.search":
+                return self.research_service.datasets_search(arguments, principal)
+            if tool == "datasets.inspect":
+                return self.research_service.datasets_inspect(arguments, principal)
+            if tool == "datasets.file.read":
+                return self.research_service.datasets_file_read(arguments, principal)
+            if tool == "research.create":
+                return self.research_service.research_create(arguments, principal)
+            if tool == "research.list":
+                return self.research_service.research_list(arguments, principal)
+            if tool == "research.get":
+                return self.research_service.research_get(arguments, principal)
+            if tool == "notebooks.find":
+                return self.research_service.notebooks_find(arguments, principal)
+            if tool == "notebooks.get":
+                return self.research_service.notebooks_get(arguments, principal)
+            if tool == "notebooks.save":
+                return self.research_service.notebooks_save(arguments, principal)
+            if tool == "notebooks.inputs.set":
+                return self.research_service.notebooks_inputs_set(arguments, principal)
+            if tool == "runs.start":
+                return self.research_service.runs_start(arguments, principal)
+            if tool == "runs.get":
+                return self.research_service.runs_get(arguments, principal)
+            if tool == "runs.logs":
+                return self.research_service.runs_logs(arguments, principal)
+            if tool == "runs.retry":
+                return self.research_service.runs_retry(arguments, principal)
+            if tool == "artifacts.list":
+                return self.research_service.artifacts_list(arguments, principal)
+            if tool == "artifacts.read":
+                return self.research_service.artifacts_read(arguments, principal)
+            raise ValueError("unsupported Kaggle research tool")
         if tool in {"acceptance.scenario.request", "acceptance.scenario.status"}:
             adapter = self.acceptance_scenarios
             if adapter is None:

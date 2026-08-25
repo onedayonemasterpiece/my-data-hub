@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +38,17 @@ _READ = (
     ("embedding.coverage", "embedding:read"),
     ("embedding.production.capabilities", "embedding:read"),
     ("provider.resources.status", "provider:read"),
+    ("datasets.search", "provider:read"),
+    ("datasets.inspect", "provider:read"),
+    ("datasets.file.read", "provider:read"),
+    ("research.list", "provider:read"),
+    ("research.get", "provider:read"),
+    ("notebooks.find", "provider:read"),
+    ("notebooks.get", "provider:read"),
+    ("runs.get", "provider:read"),
+    ("runs.logs", "provider:read"),
+    ("artifacts.list", "provider:read"),
+    ("artifacts.read", "provider:read"),
     ("bloggers.list", "bloggers:read"),
     ("bloggers.get", "bloggers:read"),
     ("bloggers.search", "bloggers:read"),
@@ -106,6 +119,15 @@ _WRITES = (
         role="operator",
     ),
     ToolContract("provider.resources.create", "provider:write", False, open_world=True, role="provider_operator"),
+    ToolContract(
+        "research.create", "provider:write", False, idempotent=False, open_world=True, role="provider_operator"
+    ),
+    ToolContract(
+        "notebooks.save", "provider:write", False, idempotent=False, open_world=True, role="provider_operator"
+    ),
+    ToolContract("notebooks.inputs.set", "provider:write", False, open_world=True, role="provider_operator"),
+    ToolContract("runs.start", "provider:write", False, open_world=True, role="provider_operator"),
+    ToolContract("runs.retry", "provider:write", False, open_world=True, role="provider_operator"),
     ToolContract("provider.resources.version", "provider:write", False, open_world=True, role="provider_operator"),
     ToolContract("provider.resources.run", "provider:write", False, open_world=True, role="provider_operator"),
     ToolContract("provider.upload.start", "provider:write", False, open_world=True, role="provider_operator"),
@@ -176,6 +198,22 @@ TOOL_CONTRACTS: dict[str, ToolContract] = {
         *_WRITES,
     )
 }
+CATALOG_REVISION = "2026-08-25.kaggle-research.v1"
+CATALOG_SHA256 = hashlib.sha256(
+    json.dumps(
+        [
+            {
+                "name": name,
+                "scope": contract.scope,
+                "read_only": contract.read_only,
+                "destructive": contract.destructive,
+            }
+            for name, contract in sorted(TOOL_CONTRACTS.items())
+        ],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+).hexdigest()
 
 ALL_SCOPES = frozenset(contract.scope for contract in TOOL_CONTRACTS.values())
 DEFAULT_SECURITY_SCHEMES = [{"type": "oauth2", "scopes": sorted(ALL_SCOPES)}]

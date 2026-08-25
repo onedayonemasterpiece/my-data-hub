@@ -20,6 +20,32 @@ class EventDisposition(StrEnum):
     FENCED = "fenced"
 
 
+class KaggleResearchState(StrEnum):
+    DRAFT = "DRAFT"
+    READY = "READY"
+    RUNNING = "RUNNING"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
+    COMPLETED = "COMPLETED"
+    ARCHIVED = "ARCHIVED"
+
+
+class KaggleRevisionState(StrEnum):
+    DRAFT = "DRAFT"
+    FROZEN = "FROZEN"
+    SUBMITTED = "SUBMITTED"
+
+
+class KaggleRunState(StrEnum):
+    PREPARED = "PREPARED"
+    SUBMITTING = "SUBMITTING"
+    SUBMISSION_UNKNOWN = "SUBMISSION_UNKNOWN"
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    COLLECTING = "COLLECTING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
 @dataclass(frozen=True, slots=True)
 class OperationRecord:
     operation_id: str
@@ -91,3 +117,79 @@ class ResourceLeaseRecord:
     acquired_at: datetime
     lease_until: datetime
     released_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class KaggleResearchRecord:
+    research_id: str
+    owner_subject: str
+    alias: str | None
+    title: str
+    goal: str
+    state: KaggleResearchState
+    primary_dataset_ref: str
+    notebook_ref: str | None
+    current_revision_id: str | None
+    active_run_id: str | None
+    last_completed_run_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class KaggleRevisionRecord:
+    revision_id: str
+    research_id: str
+    revision_no: int
+    parent_revision_id: str | None
+    state: KaggleRevisionState
+    code_file: str
+    kernel_type: str
+    language: str
+    source_utf8: str
+    source_sha256: str
+    runtime: dict[str, Any]
+    inputs: list[dict[str, Any]]
+    inputs_sha256: str
+    provider_source_version: int | None
+    created_at: datetime
+    frozen_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class KaggleRunRecord:
+    run_id: str
+    research_id: str
+    revision_id: str
+    attempt_no: int
+    retry_of_run_id: str | None
+    operation_id: str
+    effect_id: str | None
+    state: KaggleRunState
+    provider_run_ref: str | None
+    provider_kernel_id: str | None
+    provider_source_version: int | None
+    provider_source_sha256: str | None
+    last_provider_status: str | None
+    failure_summary: str | None
+    next_poll_at: datetime | None
+    poll_attempts: int
+    output_manifest_sha256: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class KaggleArtifactRecord:
+    artifact_id: str
+    run_id: str
+    path: str
+    role: str
+    media_type: str
+    byte_size: int
+    sha256: str
+    storage_mode: str
+    cache_relpath: str | None
+    created_at: datetime

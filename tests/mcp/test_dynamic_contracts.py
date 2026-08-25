@@ -12,7 +12,7 @@ from jsonschema import Draft202012Validator
 from my_data_hub.auth.context import current_identity, identity_context
 from my_data_hub.auth.control import OAuthAuditEvent
 from my_data_hub.mcp.admission import HTTPAdmissionSecurity
-from my_data_hub.mcp.catalog import TOOL_CONTRACTS, security_catalog
+from my_data_hub.mcp.catalog import CATALOG_SHA256, TOOL_CONTRACTS, security_catalog
 from my_data_hub.mcp.contracts import (
     EnsureMasterReceipt,
     MasterSnapshot,
@@ -20,6 +20,7 @@ from my_data_hub.mcp.contracts import (
     SessionRequest,
     WritePermit,
 )
+from my_data_hub.mcp.kaggle_schemas import KAGGLE_RESEARCH_REQUESTS
 from my_data_hub.mcp.oauth import AccessIdentity
 from my_data_hub.mcp.postgres_broker import SessionBrokerError
 from my_data_hub.mcp.runtime import UnifiedBootstrapWriteGate
@@ -192,6 +193,8 @@ async def test_status_is_healthy_when_master_is_absent() -> None:
         "lease_expires_at": None,
         "capabilities": [],
         "canonical_database_location": "kaggle-master-only",
+        "catalog_revision": "2026-08-25.kaggle-research.v1",
+        "catalog_sha256": CATALOG_SHA256,
     }
 
 
@@ -312,6 +315,46 @@ async def test_owner_catalog_has_per_tool_security_and_truthful_annotations() ->
         "securitySchemes": [{"type": "oauth2", "scopes": ["data:write"]}]
     }
     assert server.security_schemes[0]["type"] == "oauth2"
+
+
+@pytest.mark.asyncio
+async def test_kaggle_research_tools_are_closed_bounded_and_use_only_provider_scopes() -> None:
+    settings = SimpleNamespace(mcp_remote_enabled=True, mcp_scopes=frozenset(), mcp_oauth_resource=RESOURCE)
+    server = create_server(settings, default_identity=OWNER)  # type: ignore[arg-type]
+    tools = {tool.name: tool for tool in await server.list_tools()}
+    names = set(KAGGLE_RESEARCH_REQUESTS)
+    write_names = {
+        "research.create",
+        "notebooks.save",
+        "notebooks.inputs.set",
+        "runs.start",
+        "runs.retry",
+    }
+    forbidden = {
+        "claim_sha256",
+        "task_id",
+        "effect_id",
+        "task_run_id",
+        "provider_kernel_id",
+    }
+
+    assert names <= tools.keys()
+    for name in names:
+        expected_scope = "provider:write" if name in write_names else "provider:read"
+        assert TOOL_CONTRACTS[name].scope == expected_scope
+        assert tools[name].input_schema["additionalProperties"] is False
+        schema_text = json.dumps(tools[name].input_schema, sort_keys=True)
+        assert forbidden.isdisjoint(schema_text.split('"'))
+        model_schema = KAGGLE_RESEARCH_REQUESTS[name].model_json_schema()
+        assert model_schema["additionalProperties"] is False
+    assert tools["research.create"].annotations.idempotent_hint is False
+    assert tools["notebooks.save"].annotations.idempotent_hint is False
+    assert tools["runs.start"].annotations.idempotent_hint is True
+    capabilities = server._lowlevel_server.get_capabilities(  # type: ignore[attr-defined]
+        protocol_version="2026-07-28"
+    )
+    assert capabilities.tools is not None
+    assert capabilities.tools.list_changed is True
 
 
 @pytest.mark.asyncio

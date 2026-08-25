@@ -21,6 +21,7 @@ from my_data_hub.control_plane.app import (
     create_app,
 )
 from my_data_hub.control_plane.ledger import ControlLedger
+from my_data_hub.control_plane.research import KaggleResearchError
 from my_data_hub.control_plane.runtime import (
     ControlPlaneMasterRuntime,
     MasterRuntimeSettings,
@@ -827,6 +828,54 @@ def test_control_provider_gateway_redacts_raw_adapter_failure_and_emits_correlat
     assert "KAGGLE_API_TOKEN" not in response.text
     assert "KAGGLE_API_TOKEN" not in caplog.text
     assert detail["correlation_id"] in caplog.text
+
+
+def test_control_provider_gateway_preserves_bounded_research_error_code(tmp_path: Path) -> None:
+    path = tmp_path / "provider-gateway-research-error.sqlite3"
+    ledger = ControlLedger(path)
+
+    class Gateway:
+        def invoke(self, *_args):  # type: ignore[no-untyped-def]
+            return {"unused": True}
+
+    class Research:
+        def datasets_inspect(self, *_args):  # type: ignore[no-untyped-def]
+            raise KaggleResearchError("DATASET_VERSION_CHANGED")
+
+    app = create_app(
+        ControlPlaneSettings(
+            ledger_path=path,
+            operator_credentials_enabled=True,
+            provider_gateway_enabled=True,
+            kaggle_research_enabled=True,
+        ),
+        ledger=ledger,
+        master_runtime=runtime(ledger, FakeKaggleRuntime()),
+        provider_gateway=Gateway(),  # type: ignore[arg-type]
+        research_service=Research(),  # type: ignore[arg-type]
+        provider_gateway_token=b"g" * 32,
+    )
+    now = datetime.now(UTC)
+    response = TestClient(app).post(
+        "/internal/mcp-provider/invoke",
+        headers={"Authorization": "Bearer " + "g" * 32},
+        json={
+            "tool": "datasets.inspect",
+            "arguments": {"dataset_ref": "owner/input", "provider_version": 1},
+            "principal": {
+                "subject": "owner",
+                "client_id": "owner-operator",
+                "scopes": ["provider:read"],
+                "audience": "mcp",
+                "expires_at": int((now + timedelta(minutes=2)).timestamp()),
+                "issuer": "https://issuer.example",
+                "issued_at": int((now - timedelta(minutes=1)).timestamp()),
+                "resource": "https://mcp.example/mcp",
+            },
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "DATASET_VERSION_CHANGED"
 
 
 def test_control_ensure_runs_one_physical_launch_under_concurrency_and_restart(tmp_path: Path) -> None:
