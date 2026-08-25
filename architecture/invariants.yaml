@@ -11,6 +11,7 @@ canonical_source:
   sha256: c7efb28231223caa6fd02fcc001a38e0f16bcc3fa4c4cd53e744721b2eac0852
 corrective_adr: docs/adr/0016-kaggle-postgresql-master-architecture-reset.md
 operational_state_adr: docs/adr/0017-operational-mvp-gated-profiles.md
+research_workflow_design: docs/23-kaggle-research-workflow.md
 architecture:
   final_project_name: my-data-hub
   legacy_alias: content-platform
@@ -18,6 +19,7 @@ architecture:
   canonical_database_runtime: kaggle_notebook
   active_writable_primary_max: 1
   devstand_role: lightweight_control_plane
+  operational_control_ledger: sqlite_wal
   persistent_local_postgresql: forbidden
   persistent_local_pgdata: forbidden
   canonical_business_data_on_devstand: forbidden
@@ -36,6 +38,32 @@ safety:
 remote_mcp:
   default_profile: read_only
   owner_operator_profile: enabled_after_all_write_checkpoint_security_gates
+  stable_endpoint: required
+  stable_oauth_issuer_resource_audience: required
+  manual_reconnect_after_deploy: forbidden
+  existing_tools_and_valid_payloads: backward_compatible
+  existing_provider_write_scope: research_owner_superset
+research:
+  durable_user_object: research_session
+  orchestration_store: existing_sqlite_wal_control_ledger
+  canonical_business_data_in_control_ledger: forbidden
+  full_dataset_in_control_ledger: forbidden
+  large_notebook_outputs_in_control_ledger: forbidden
+  kaggle_credentials_in_control_ledger: forbidden
+  production_postgresql_dumps_in_control_ledger: forbidden
+  independent_shadow_domain_catalog: forbidden
+  provider_native_dataset_attachment_default: required
+  complete_dataset_download_default: forbidden
+  exact_input_version_and_manifest_pin: required
+  source_revision_run_and_output_provenance: required
+  background_reconciliation_without_mcp_client: required
+  master_state_absent_supported: required
+  master_ensure_dependency: forbidden
+  master_session_broker_dependency: forbidden
+  data_query_dependency: forbidden
+  kaggle_postgresql_master_dependency: forbidden
+  competition_terms_auto_acceptance: forbidden
+  provider_credentials_returned_to_client: forbidden
 region_talk:
   production_pipeline: paused
   production_publication: disabled
