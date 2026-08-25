@@ -50,6 +50,9 @@ Supporting architecture documents:
 - [`20-remote-mcp-endpoint.md`](20-remote-mcp-endpoint.md) —
   `mcp-datahub.kenigevents.ru`, DevCoveer local edge, OAuth and ChatGPT acceptance.
 - [`21-infrastructure-addendum-delivery.md`](21-infrastructure-addendum-delivery.md) — scope, accepted decisions, validation and implementation boundary.
+- [`23-kaggle-research-workflow.md`](23-kaggle-research-workflow.md) — canonical
+  implementation design for durable Dataset discovery, research sessions, Notebook
+  revisions/runs, recovery, compact outputs and MCP compatibility without reconnect.
 
 Associated decisions:
 
