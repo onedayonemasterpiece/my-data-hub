@@ -313,6 +313,18 @@ def test_google_youtube_analysis_can_use_bounded_unified_profile_without_operato
     assert "MY_DATA_HUB_MCP_SCOPES: $youtube_mcp_scopes" in youtube_block
     assert "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: $youtube_oauth_scopes" in youtube_block
 
+    compose_start = source.index('compose_files=(-f "$release/compose.control-plane.yaml")')
+    compose_end = source.index('compose=("$docker_path" compose', compose_start)
+    compose_block = source[compose_start:compose_end]
+    assert compose_block.index('if [[ -n "$unified_bootstrap_override" ]]') < compose_block.index(
+        'if [[ -n "$google_youtube_override" ]]'
+    )
+
+    exec_start = next(line for line in source.splitlines() if line.startswith("ExecStart="))
+    assert exec_start.index("$unified_bootstrap_compose_arg") < exec_start.index(
+        "$google_youtube_compose_arg"
+    )
+
 
 def test_remote_mcp_host_network_uses_only_loopback_control_gateway() -> None:
     source = installer_source()

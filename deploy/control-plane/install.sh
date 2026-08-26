@@ -931,14 +931,14 @@ compose_files=(-f "$release/compose.control-plane.yaml")
 if [[ -n "$operator_override" ]]; then
   compose_files+=(-f "$operator_override")
 fi
-if [[ -n "$google_youtube_override" ]]; then
-  compose_files+=(-f "$google_youtube_override")
-fi
 if [[ -n "$provider_only_override" ]]; then
   compose_files+=(-f "$provider_only_override")
 fi
 if [[ -n "$unified_bootstrap_override" ]]; then
   compose_files+=(-f "$unified_bootstrap_override")
+fi
+if [[ -n "$google_youtube_override" ]]; then
+  compose_files+=(-f "$google_youtube_override")
 fi
 if [[ -n "$acceptance_override" ]]; then
   compose_files+=(-f "$acceptance_override")
@@ -1001,9 +1001,9 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=$compose_env
 ExecStartPre=$docker_path info
-ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$google_youtube_compose_arg$provider_only_compose_arg$unified_bootstrap_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up --remove-orphans control-plane remote-mcp oauth-server$connector_service
-ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$google_youtube_compose_arg$provider_only_compose_arg$unified_bootstrap_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up -d --wait --remove-orphans control-plane remote-mcp oauth-server$connector_service
-ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$google_youtube_compose_arg$provider_only_compose_arg$unified_bootstrap_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg down --remove-orphans
+ExecStart=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$provider_only_compose_arg$unified_bootstrap_compose_arg$google_youtube_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up --remove-orphans control-plane remote-mcp oauth-server$connector_service
+ExecReload=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$provider_only_compose_arg$unified_bootstrap_compose_arg$google_youtube_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg up -d --wait --remove-orphans control-plane remote-mcp oauth-server$connector_service
+ExecStop=$docker_path compose --env-file $compose_env --profile remote-mcp$connector_profile_arg --project-directory $release -f $release/compose.control-plane.yaml$operator_compose_arg$provider_only_compose_arg$unified_bootstrap_compose_arg$google_youtube_compose_arg$acceptance_compose_arg$acceptance_scenarios_compose_arg$connector_compose_arg down --remove-orphans
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=300
