@@ -352,6 +352,8 @@ class Settings:
                 "region-talk:read",
             }
         )
+        if self.google_youtube_enabled:
+            unified_bootstrap_scopes |= {"youtube:analyze"}
         if self.mcp_unified_bootstrap_profile_enabled and (
             self.mcp_operator_profile_enabled
             or self.mcp_provider_profile_enabled
@@ -558,12 +560,14 @@ class Settings:
             not all(dedicated)
             or not self.mcp_remote_enabled
             or not self.mcp_write_enabled
-            or not self.mcp_operator_profile_enabled
+            or not (
+                self.mcp_operator_profile_enabled
+                or self.mcp_unified_bootstrap_profile_enabled
+            )
             or self.mcp_provider_profile_enabled
-            or self.mcp_unified_bootstrap_profile_enabled
             or "youtube:analyze" not in self.mcp_scopes
         ):
             raise ConfigurationError(
-                "YouTube analysis requires the exclusive remote operator profile, youtube:analyze, "
+                "YouTube analysis requires an exclusive remote owner profile, youtube:analyze, "
                 "write opt-in, and the dedicated shared limiter"
             )

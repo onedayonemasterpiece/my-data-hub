@@ -71,7 +71,7 @@ def test_partial_dedicated_limiter_configuration_is_invalid(
         Settings.from_env(require_database=False)
 
 
-def test_feature_requires_exact_remote_operator_scope_and_store_false(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_feature_requires_exact_remote_owner_scope_and_store_false(monkeypatch: pytest.MonkeyPatch) -> None:
     clear(monkeypatch)
     base = Settings.from_env(require_database=False)
     configured = replace(
@@ -92,6 +92,27 @@ def test_feature_requires_exact_remote_operator_scope_and_store_false(monkeypatc
         mcp_allowed_hosts=("mcp.example",),
     )
     configured.validate()
+    replace(
+        configured,
+        mcp_operator_profile_enabled=False,
+        mcp_unified_bootstrap_profile_enabled=True,
+        mcp_scopes=frozenset(
+            {
+                "platform:read",
+                "master:read",
+                "operation:read",
+                "checkpoint:read",
+                "embedding:read",
+                "provider:read",
+                "provider:write",
+                "bloggers:read",
+                "region-talk:read",
+                "youtube:analyze",
+            }
+        ),
+        mcp_control_gateway_url="http://127.0.0.1:8080/internal/mcp-provider/invoke",
+        mcp_control_gateway_token_file=base.artifact_root / "gateway.token",
+    ).validate()
     with pytest.raises(ConfigurationError, match="store=false"):
         replace(configured, google_youtube_default_store=True).validate()
     with pytest.raises(ConfigurationError, match="youtube:analyze"):
