@@ -127,7 +127,22 @@ def create_server(
         max_output_tokens: OutputTokens = 4096,
         thinking_level: Literal["minimal", "low", "medium", "high"] = "low",
     ) -> dict[str, Any]:
-        return await service.invoke(locals())
+        return await service.invoke(
+            {
+                "youtube_url": youtube_url,
+                "idempotency_key": idempotency_key,
+                "mode": mode,
+                "question": question,
+                "prompt": prompt,
+                "language": language,
+                "include_timestamps": include_timestamps,
+                "include_visual_observations": include_visual_observations,
+                "model": model,
+                "media_resolution": media_resolution,
+                "max_output_tokens": max_output_tokens,
+                "thinking_level": thinking_level,
+            }
+        )
 
     annotations = ToolAnnotations(**YOUTUBE_TOOL_CONTRACT.annotations())
     server.tool(

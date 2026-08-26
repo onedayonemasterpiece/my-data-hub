@@ -185,6 +185,53 @@ async def test_server_discovery_is_closed_operator_only_and_truthfully_annotated
 
 
 @pytest.mark.asyncio
+async def test_server_call_forwards_only_declared_youtube_arguments() -> None:
+    analyzer = Analyzer()
+    owner = identity(YOUTUBE_SCOPE)
+    server = create_server(
+        settings(),  # type: ignore[arg-type]
+        dependencies=YouTubeMCPDependencies(
+            base=MCPDependencies(),
+            analyzer=analyzer,
+            feature_enabled=True,
+        ),
+        default_identity=owner,
+    )
+
+    result = await server.call_tool(
+        YOUTUBE_TOOL_NAME,
+        {
+            "youtube_url": "https://youtu.be/6V2stDksGI8",
+            "idempotency_key": "mcp-server-call-0001",
+            "mode": "question",
+            "question": "Какие пять основных тезисов формулирует автор?",
+            "model": "gemini-3.7-flash",
+            "media_resolution": "low",
+            "max_output_tokens": 8192,
+            "thinking_level": "low",
+        },
+    )
+
+    assert result.structured_content is not None
+    assert result.structured_content["status"] == "completed"
+    assert len(analyzer.calls) == 1
+    assert set(analyzer.calls[0]) == {
+        "youtube_url",
+        "mode",
+        "question",
+        "prompt",
+        "language",
+        "include_timestamps",
+        "include_visual_observations",
+        "model",
+        "media_resolution",
+        "max_output_tokens",
+        "thinking_level",
+        "idempotency_key",
+    }
+
+
+@pytest.mark.asyncio
 async def test_reader_profile_never_lists_youtube_tool() -> None:
     analyzer = Analyzer()
     reader = identity("platform:read", subject="reader")
