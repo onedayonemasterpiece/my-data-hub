@@ -88,7 +88,7 @@ def test_contract_is_quota_consuming_non_idempotent_and_operator_scoped() -> Non
     assert YOUTUBE_TOOL_CONTRACT.role == "operator"
 
 
-def test_exposure_requires_feature_analyzer_operator_and_scope() -> None:
+def test_exposure_requires_feature_analyzer_owner_profile_and_scope() -> None:
     analyzer = Analyzer()
     base = MCPDependencies()
     assert _youtube_exposed(
@@ -102,6 +102,14 @@ def test_exposure_requires_feature_analyzer_operator_and_scope() -> None:
     assert not _youtube_exposed(
         settings(operator=False),
         YouTubeMCPDependencies(base=base, analyzer=analyzer, feature_enabled=True),
+    )
+    assert _youtube_exposed(
+        settings(operator=False),
+        YouTubeMCPDependencies(
+            base=MCPDependencies(unified_bootstrap_profile_enabled=True),
+            analyzer=analyzer,
+            feature_enabled=True,
+        ),
     )
     assert not _youtube_exposed(
         settings(scopes=frozenset({"platform:read"})),
@@ -248,26 +256,35 @@ async def test_reader_profile_never_lists_youtube_tool() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "profile_flag",
-    ("provider_only_profile_enabled", "unified_bootstrap_profile_enabled"),
-)
-async def test_bounded_non_operator_profiles_never_list_youtube_tool(
-    profile_flag: str,
-) -> None:
+async def test_provider_only_profile_never_lists_youtube_tool() -> None:
     analyzer = Analyzer()
     owner = identity(YOUTUBE_SCOPE)
-    profile = {profile_flag: True}
     server = create_server(
         settings(),  # type: ignore[arg-type]
         dependencies=YouTubeMCPDependencies(
-            base=MCPDependencies(**profile),
+            base=MCPDependencies(provider_only_profile_enabled=True),
             analyzer=analyzer,
             feature_enabled=True,
         ),
         default_identity=owner,
     )
     assert YOUTUBE_TOOL_NAME not in {tool.name for tool in await server.list_tools()}
+
+
+@pytest.mark.asyncio
+async def test_bounded_unified_owner_profile_lists_youtube_tool_without_operator_writes() -> None:
+    analyzer = Analyzer()
+    owner = identity(YOUTUBE_SCOPE)
+    server = create_server(
+        settings(operator=False),  # type: ignore[arg-type]
+        dependencies=YouTubeMCPDependencies(
+            base=MCPDependencies(unified_bootstrap_profile_enabled=True),
+            analyzer=analyzer,
+            feature_enabled=True,
+        ),
+        default_identity=owner,
+    )
+    assert YOUTUBE_TOOL_NAME in {tool.name for tool in await server.list_tools()}
 
 
 def test_oauth_metadata_adds_scope_only_for_enabled_operator_profile() -> None:

@@ -29,13 +29,13 @@ Annotations:
 The tool is registered only when all of these are true:
 
 1. `MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED=true`;
-2. the remote MCP owner/operator profile is selected;
+2. the remote MCP owner/operator profile or bounded unified-bootstrap profile is selected;
 3. `MY_DATA_HUB_MCP_WRITE_ENABLED=true`;
 4. `youtube:analyze` is present in `MY_DATA_HUB_MCP_SCOPES`;
 5. the dedicated shared-limiter configuration is complete;
 6. a fail-closed `YouTubeVideoAnalyzer` dependency is injected.
 
-Reader, provider-only, and unified-bootstrap profiles never expose this tool. The input schema is closed (`additionalProperties=false`). Prompt, question, URL, output-token count, response bytes, and result bytes are bounded. The tool has an isolated injected service and never enters the canonical `HubService._write` path; a YouTube-only operator scope therefore does not require a canonical data write permit or provider gateway.
+Reader and provider-only profiles never expose this tool. The bounded unified-bootstrap profile may expose it only under the explicit shared-quota acknowledgement and only to an OAuth identity that receives `youtube:analyze`; this path does not enable the operator write profile or require its checkpoint-protected security gate. The input schema is closed (`additionalProperties=false`). Prompt, question, URL, output-token count, response bytes, and result bytes are bounded. The tool has an isolated injected service and never enters the canonical `HubService._write` path; a YouTube-only owner scope therefore does not require a canonical data write permit or provider gateway.
 
 ## Input
 
@@ -150,12 +150,12 @@ No long quota sleep occurs inside an MCP call. Quota failures return `retryable`
 4. Run compileall, full pytest, Ruff, repository validation, and targeted Google/YouTube tests.
 5. Run `scripts/operations/google_youtube_smoke.py` through the production adapter only. Direct curl/SDK probes with a key are forbidden.
 6. Verify reserve → sent → interaction_started → finalize and actual usage in the ledger.
-7. Enable `MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED=true` and add `youtube:analyze` only to the intended owner/operator OAuth profile.
+7. Enable `MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED=true` and add `youtube:analyze` only to the intended owner OAuth profile. Use the bounded unified-bootstrap install when no canonical write tools are needed.
 8. Restart the existing remote MCP service, verify discovery, call the MCP tool, verify bounded output, MCP audit, and ledger evidence.
 
 ## Rollback
 
-Set `MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED=false`, remove `youtube:analyze` from the operator profile, and restart the remote MCP service. This leaves the Kaggle/provider pipeline untouched. The canonical migration is additive; use the migration document in `events-bot-new` to restore model-limit rows from the mandatory pre-apply snapshot. Do not delete shared-ledger audit rows for attempts already sent.
+Set `MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED=false`, remove `youtube:analyze` from the owner profile, and restart the remote MCP service. This leaves the Kaggle/provider pipeline untouched. The canonical migration is additive; use the migration document in `events-bot-new` to restore model-limit rows from the mandatory pre-apply snapshot. Do not delete shared-ledger audit rows for attempts already sent.
 
 Immediate rollback/block conditions are capability mismatch, uncertain quota-scope ownership, missing model limit, unleased provider send, unconfirmed finalization, secret exposure, or broader-than-intended MCP scope.
 

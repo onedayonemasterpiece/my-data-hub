@@ -53,13 +53,16 @@ class YouTubeMCPDependencies:
 
 
 def _youtube_exposed(settings: Settings, dependencies: YouTubeMCPDependencies) -> bool:
+    owner_profile = bool(
+        settings.mcp_operator_profile_enabled
+        or dependencies.base.unified_bootstrap_profile_enabled
+    )
     return bool(
         dependencies.feature_enabled
         and dependencies.analyzer is not None
-        and settings.mcp_operator_profile_enabled
+        and owner_profile
         and not dependencies.base.reader_profile_enabled
         and not dependencies.base.provider_only_profile_enabled
-        and not dependencies.base.unified_bootstrap_profile_enabled
         and YOUTUBE_SCOPE in settings.mcp_scopes
     )
 

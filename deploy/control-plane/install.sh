@@ -164,9 +164,8 @@ if [[ -n "${MY_DATA_HUB_ENABLE_ACCEPTANCE_SUPERVISOR:-}" ]]; then
   acceptance_supervisor=true
 fi
 if [[ -n "${MY_DATA_HUB_ENABLE_GOOGLE_YOUTUBE_ANALYSIS:-}" ]]; then
-  if [[ "$operator_profile" != true \
-    || "${MY_DATA_HUB_ENABLE_GOOGLE_YOUTUBE_ANALYSIS}" != "I_ACKNOWLEDGE_SHARED_GOOGLE_AI_QUOTA" ]]; then
-    echo "Google YouTube analysis requires operator install and the exact shared-quota acknowledgement" >&2
+  if [[ ( "$operator_profile" != true && "$unified_bootstrap" != true ) || "${MY_DATA_HUB_ENABLE_GOOGLE_YOUTUBE_ANALYSIS}" != "I_ACKNOWLEDGE_SHARED_GOOGLE_AI_QUOTA" ]]; then
+    echo "Google YouTube analysis requires an operator or bounded unified install and the exact shared-quota acknowledgement" >&2
     exit 2
   fi
   google_youtube_analysis=true
@@ -805,15 +804,22 @@ YAML
 fi
 if [[ "$google_youtube_analysis" == true ]]; then
   google_youtube_override="$runtime_root/google-youtube.$commit.yaml"
-  cat > "$google_youtube_override" <<'YAML'
+  if [[ "$unified_bootstrap" == true ]]; then
+    youtube_mcp_scopes="platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,region-talk:read,provider:write,youtube:analyze"
+    youtube_oauth_scopes="openid,offline_access,$youtube_mcp_scopes"
+  else
+    youtube_mcp_scopes="platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,region-talk:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,data:write,bloggers:write,region-talk:operate,provider:write,youtube:analyze"
+    youtube_oauth_scopes="openid,offline_access,$youtube_mcp_scopes"
+  fi
+  cat > "$google_youtube_override" <<YAML
 services:
   remote-mcp:
     environment:
       MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED: "true"
-      MY_DATA_HUB_MCP_SCOPES: platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,region-talk:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,data:write,bloggers:write,region-talk:operate,provider:write,youtube:analyze
+      MY_DATA_HUB_MCP_SCOPES: $youtube_mcp_scopes
   oauth-server:
     environment:
-      MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: openid,offline_access,platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,bloggers:read,region-talk:read,data:read,master:ensure,master:rotate,recovery:request,acceptance:probe,data:write,bloggers:write,region-talk:operate,provider:write,youtube:analyze
+      MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: $youtube_oauth_scopes
 YAML
   chmod 600 "$google_youtube_override"
   google_youtube_compose_arg=" -f $google_youtube_override"

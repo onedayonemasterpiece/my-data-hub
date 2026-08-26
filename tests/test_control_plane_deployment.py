@@ -287,7 +287,7 @@ def test_google_youtube_operator_profile_is_separate_explicit_and_rollbackable()
     youtube_override = source[start:end]
     assert 'MY_DATA_HUB_GOOGLE_YOUTUBE_ENABLED: "true"' in youtube_override
     assert "MY_DATA_HUB_MCP_SCOPES:" in youtube_override
-    assert "youtube:analyze" in youtube_override
+    assert "youtube:analyze" in source
     assert "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES:" in youtube_override
     assert 'google_youtube_compose_arg=" -f $google_youtube_override"' in source
     assert source.count("$google_youtube_compose_arg") >= 3
@@ -295,6 +295,23 @@ def test_google_youtube_operator_profile_is_separate_explicit_and_rollbackable()
         "Google YouTube analysis and protected acceptance scenarios require separate operator installs"
         in source
     )
+
+
+def test_google_youtube_analysis_can_use_bounded_unified_profile_without_operator_gate() -> None:
+    source = installer_source()
+    assert '"$operator_profile" != true && "$unified_bootstrap" != true' in source
+    start = source.index('if [[ "$google_youtube_analysis" == true ]]; then')
+    end = source.index('acceptance_scenarios_override=""', start)
+    youtube_block = source[start:end]
+    assert 'if [[ "$unified_bootstrap" == true ]]; then' in youtube_block
+    bounded_scopes = (
+        "platform:read,master:read,operation:read,checkpoint:read,embedding:read,provider:read,"
+        "bloggers:read,region-talk:read,provider:write,youtube:analyze"
+    )
+    assert f'youtube_mcp_scopes="{bounded_scopes}"' in youtube_block
+    assert 'youtube_oauth_scopes="openid,offline_access,$youtube_mcp_scopes"' in youtube_block
+    assert "MY_DATA_HUB_MCP_SCOPES: $youtube_mcp_scopes" in youtube_block
+    assert "MY_DATA_HUB_OAUTH_CHATGPT_CIMD_SCOPES: $youtube_oauth_scopes" in youtube_block
 
 
 def test_remote_mcp_host_network_uses_only_loopback_control_gateway() -> None:
