@@ -21,7 +21,7 @@ from my_data_hub.google_ai.youtube import mode_prompt, provider_response_schema,
 
 INTERACTIONS_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse"
 API_REVISION = "2026-05-20"
-_SAFE_PROVIDER_CODE = re.compile(r"^[A-Z0-9_.-]{1,80}$")
+_SAFE_PROVIDER_CODE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 _SAFE_INTERACTION_ID = re.compile(r"^[^\s\x00-\x1f\x7f]{1,1024}$")
 _TERMINAL_EVENTS = {
     "interaction.completed": "completed",
@@ -188,7 +188,7 @@ def _interaction_id(value: Mapping[str, Any]) -> str | None:
     else:
         candidates.append(value.get("id"))
     candidates.append(value.get("interaction_id"))
-    present = [candidate for candidate in candidates if candidate is not None]
+    present = [candidate for candidate in candidates if candidate not in {None, ""}]
     if not present:
         return None
     if any(
@@ -213,6 +213,7 @@ class _InteractionStreamAccumulator:
         self.model = model
         self.max_output_bytes = max_output_bytes
         self.on_interaction_started = on_interaction_started
+        self.created_seen = False
         self.interaction_id: str | None = None
         self.status = "incomplete"
         self.step_types: dict[int, str] = {}
@@ -249,12 +250,12 @@ class _InteractionStreamAccumulator:
             raise ProviderTransportFailure("interaction_id_conflict", self.interaction_id, self.status)
 
         if event_type == "interaction.created":
-            if candidate_id is None:
-                raise ProviderTransportFailure("interaction_id_invalid", None, "created")
+            self.created_seen = True
             first = self.interaction_id is None
-            self.interaction_id = candidate_id
             self.status = "created"
-            if first:
+            if candidate_id is not None:
+                self.interaction_id = candidate_id
+            if first and candidate_id is not None:
                 try:
                     await self.on_interaction_started(candidate_id, "created")
                 except asyncio.CancelledError:
@@ -266,19 +267,29 @@ class _InteractionStreamAccumulator:
             return
 
         if candidate_id is not None:
-            if self.interaction_id is None:
+            if not self.created_seen:
                 raise ProviderTransportFailure("interaction_created_missing", None, self.status)
+            first = self.interaction_id is None
             self.interaction_id = candidate_id
+            if first:
+                try:
+                    await self.on_interaction_started(candidate_id, "in_progress")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    raise ProviderTransportFailure(
+                        "interaction_started_accounting_failed", candidate_id, "in_progress"
+                    ) from exc
 
         if event_type in {"interaction.in_progress", "interaction.status_update"}:
-            if self.interaction_id is None:
+            if not self.created_seen:
                 raise ProviderTransportFailure("interaction_created_missing", None, self.status)
             status = _interaction(payload).get("status")
             if isinstance(status, str) and 1 <= len(status) <= 80:
                 self.status = status
             return
         if event_type == "step.start":
-            if self.interaction_id is None:
+            if not self.created_seen:
                 raise ProviderTransportFailure("interaction_created_missing", None, self.status)
             index = _nonnegative_int(payload.get("index"))
             step = payload.get("step")
@@ -288,7 +299,7 @@ class _InteractionStreamAccumulator:
             self.step_types[index] = step_type
             return
         if event_type == "step.delta":
-            if self.interaction_id is None:
+            if not self.created_seen:
                 raise ProviderTransportFailure("interaction_created_missing", None, self.status)
             index = _nonnegative_int(payload.get("index"))
             delta = payload.get("delta")
@@ -304,14 +315,14 @@ class _InteractionStreamAccumulator:
                 self.output.append(text)
             return
         if event_type == "step.stop":
-            if self.interaction_id is None:
+            if not self.created_seen:
                 raise ProviderTransportFailure("interaction_created_missing", None, self.status)
             index = _nonnegative_int(payload.get("index"))
             if index is None or index not in self.step_types:
                 raise ProviderTransportFailure("malformed_sse", self.interaction_id, self.status)
             return
         if event_type in _TERMINAL_EVENTS:
-            if self.interaction_id is None and event_type != "error":
+            if not self.created_seen and event_type != "error":
                 raise ProviderTransportFailure("interaction_created_missing", None, self.status)
             self.terminal = payload
             self.terminal_event = event_type
@@ -439,6 +450,8 @@ class GeminiInteractionsClient:
             raise
         except BoundedHTTPError as exc:
             raise ProviderTransportFailure(exc.kind, accumulator.interaction_id, accumulator.status) from exc
+        if response.event_count:
+            return accumulator.result(http_status=response.status, retry_after=response.retry_after)
         if not 200 <= response.status < 300:
             code, category, diagnostic = _provider_error(response.json_body, response.status)
             return ProviderInteraction(

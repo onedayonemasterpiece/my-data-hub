@@ -225,8 +225,10 @@ def provider_response_schema(mode: YouTubeMode) -> Mapping[str, Any]:
 
     ``response_schema`` remains the stricter server-side validator.  Gemini's
     structured-output contract supports ``enum`` but not ``const``, ``pattern``
-    or ``maxLength``; sending those keywords can reject the interaction before
-    the video is evaluated.
+    or ``maxLength``.  Its backend also rejects this full schema as too complex
+    when every server-side array/object bound is repeated in the provider
+    schema.  Keep the provider shape and required fields, while enforcing
+    ``maxItems`` and closed objects with the stricter server-side validator.
     """
 
     def normalize(value: Any) -> Any:
@@ -234,7 +236,7 @@ def provider_response_schema(mode: YouTubeMode) -> Mapping[str, Any]:
             normalized = {
                 key: normalize(child)
                 for key, child in value.items()
-                if key not in {"const", "pattern", "maxLength"}
+                if key not in {"const", "pattern", "maxLength", "maxItems", "additionalProperties"}
             }
             constant = value.get("const")
             if "const" in value:

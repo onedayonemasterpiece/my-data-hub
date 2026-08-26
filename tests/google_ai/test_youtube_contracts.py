@@ -5,7 +5,12 @@ from pydantic import ValidationError
 
 from my_data_hub.google_ai.contracts import YouTubeAnalyzeRequest, YouTubeMode
 from my_data_hub.google_ai.errors import GoogleAIError, GoogleAIErrorCode
-from my_data_hub.google_ai.youtube import mode_prompt, normalize_youtube_url, response_schema
+from my_data_hub.google_ai.youtube import (
+    mode_prompt,
+    normalize_youtube_url,
+    provider_response_schema,
+    response_schema,
+)
 
 
 @pytest.mark.parametrize(
@@ -84,6 +89,17 @@ def test_transcript_schema_has_explicit_model_source_and_no_nullable_union() -> 
     speaker = schema["properties"]["segments"]["items"]["properties"]["speaker"]
     assert speaker["type"] == "string"
     assert "youtube_captions" not in repr(schema)
+
+
+def test_provider_schema_preserves_shape_without_server_only_complexity_bounds() -> None:
+    strict = response_schema(YouTubeMode.SUMMARY)
+    provider = provider_response_schema(YouTubeMode.SUMMARY)
+
+    assert provider["required"] == strict["required"]
+    assert provider["properties"].keys() == strict["properties"].keys()
+    rendered = repr(provider)
+    for keyword in ("additionalProperties", "maxItems", "maxLength", "pattern", "const"):
+        assert keyword not in rendered
 
 
 @pytest.mark.parametrize("mode", list(YouTubeMode))

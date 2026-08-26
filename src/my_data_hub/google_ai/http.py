@@ -270,6 +270,8 @@ class AiohttpBoundedSSERequester:
         raw = bytearray()
         event_count = 0
         event_deadline = first_event_deadline
+        content_type = response.headers.get("Content-Type")
+        is_sse = (content_type or "").lower().startswith("text/event-stream")
         while not response.content.at_eof() and not parser.done:
             now = loop.time()
             deadline = min(total_deadline, event_deadline)
@@ -298,7 +300,7 @@ class AiohttpBoundedSSERequester:
             raw.extend(chunk)
             if len(raw) > max_raw_bytes:
                 raise BoundedHTTPError("response_too_large")
-            if not 200 <= response.status < 300:
+            if not is_sse:
                 continue
             for event in parser.feed(chunk):
                 await on_event(event)
@@ -306,11 +308,11 @@ class AiohttpBoundedSSERequester:
                 event_deadline = loop.time() + timeouts.idle_seconds
         if loop.time() >= total_deadline:
             raise BoundedHTTPError("total_timeout")
-        if 200 <= response.status < 300:
+        if is_sse:
             parser.finish()
-            if not (response.headers.get("Content-Type") or "").lower().startswith("text/event-stream"):
-                raise BoundedHTTPError("malformed_sse")
             body: Any = None
+        elif 200 <= response.status < 300:
+            raise BoundedHTTPError("malformed_sse")
         else:
             try:
                 body = json.loads(raw.decode("utf-8")) if raw else None
@@ -320,7 +322,7 @@ class AiohttpBoundedSSERequester:
             status=response.status,
             json_body=body,
             retry_after=response.headers.get("Retry-After"),
-            content_type=response.headers.get("Content-Type"),
+            content_type=content_type,
             event_count=event_count,
             done=parser.done,
         )

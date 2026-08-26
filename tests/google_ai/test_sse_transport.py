@@ -165,3 +165,43 @@ async def test_raw_sse_limit_is_enforced_incrementally() -> None:
     async with _server(oversized) as url:
         with pytest.raises(BoundedHTTPError, match="response_too_large"):
             await _call(url, StreamTimeouts(0.2, 0.2, 0.2, 0.5), max_raw_bytes=16)
+
+
+@pytest.mark.asyncio
+async def test_non_success_streaming_error_is_delivered_as_sse_event() -> None:
+    async def rejected(_request: web.Request) -> web.StreamResponse:
+        return web.Response(
+            status=400,
+            body=(
+                b"event: error\n"
+                b'data: {"event_type":"error","error":{"code":"invalid_argument",'
+                b'"message":"invalid request"}}\n\n'
+            ),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    events: list[SSEEvent] = []
+
+    async def record(event: SSEEvent) -> None:
+        events.append(event)
+
+    async with _server(rejected) as url:
+        response = await AiohttpBoundedSSERequester().request_sse(
+            "POST",
+            url,
+            headers={"Accept": "text/event-stream"},
+            json_body={"stream": True},
+            timeouts=StreamTimeouts(0.2, 0.2, 0.2, 0.5),
+            max_raw_bytes=1024,
+            on_event=record,
+        )
+
+    assert response.status == 400
+    assert response.json_body is None
+    assert response.event_count == 1
+    assert [(event.event, event.data) for event in events] == [
+        (
+            "error",
+            '{"event_type":"error","error":{"code":"invalid_argument","message":"invalid request"}}',
+        )
+    ]

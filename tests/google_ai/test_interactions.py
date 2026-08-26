@@ -191,6 +191,70 @@ async def test_disconnect_preserves_started_id_and_never_retries() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stateless_stream_with_empty_provider_id_still_completes() -> None:
+    output = json.dumps(
+        {
+            "summary": "ok",
+            "timeline": [],
+            "key_points": [],
+            "claims_to_verify": [],
+            "visual_observations": [],
+            "warnings": [],
+            "incomplete": False,
+            "truncated": False,
+        }
+    )
+    events = completed_events(output)
+    events[0][1]["interaction"]["id"] = ""  # type: ignore[index]
+    events[1][1]["interaction"]["id"] = ""  # type: ignore[index]
+    events[-1][1]["interaction"]["id"] = ""  # type: ignore[index]
+    started: list[tuple[str, str]] = []
+
+    result = await GeminiInteractionsClient(requester=Requester(events)).create(
+        api_key="secret-key",
+        canonical_youtube_url="https://www.youtube.com/watch?v=6V2stDksGI8",
+        request=request(),
+        model="gemini-3.7-flash",
+        on_interaction_started=lambda interaction_id, status: _record(started, interaction_id, status),
+    )
+
+    assert result.status == "completed"
+    assert result.interaction_id is None
+    assert result.structured_output is not None
+    assert started == []
+
+
+@pytest.mark.asyncio
+async def test_empty_created_id_is_recorded_when_status_update_supplies_it() -> None:
+    output = json.dumps(
+        {
+            "summary": "ok",
+            "timeline": [],
+            "key_points": [],
+            "claims_to_verify": [],
+            "visual_observations": [],
+            "warnings": [],
+            "incomplete": False,
+            "truncated": False,
+        }
+    )
+    events = completed_events(output)
+    events[0][1]["interaction"]["id"] = ""  # type: ignore[index]
+    started: list[tuple[str, str]] = []
+
+    result = await GeminiInteractionsClient(requester=Requester(events)).create(
+        api_key="secret-key",
+        canonical_youtube_url="https://www.youtube.com/watch?v=6V2stDksGI8",
+        request=request(),
+        model="gemini-3.7-flash",
+        on_interaction_started=lambda interaction_id, status: _record(started, interaction_id, status),
+    )
+
+    assert result.interaction_id == "interaction-1"
+    assert started == [("interaction-1", "in_progress")]
+
+
+@pytest.mark.asyncio
 async def test_started_callback_failure_preserves_id_and_stops_stream() -> None:
     async def fail_started(_interaction_id: str, _status: str) -> None:
         raise RuntimeError("ledger conflict")
@@ -332,6 +396,27 @@ async def test_terminal_error_event_without_type_is_explicit_provider_failure() 
     assert result.status == "failed"
     assert result.interaction_id is None
     assert result.provider_error_code == "INVALID_ARGUMENT"
+    assert result.provider_error_category == "provider_rejected_video"
+    assert "bad request" not in repr(result)
+    assert "secret-key" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_non_success_sse_error_uses_terminal_event_diagnostic() -> None:
+    requester = Requester(
+        [("error", {"event_type": "error", "error": {"code": "invalid_argument", "message": "bad request"}})],
+        response=BoundedSSEResponse(400, None, None, "text/event-stream", 1, False),
+    )
+    result = await GeminiInteractionsClient(requester=requester).create(
+        api_key="secret-key",
+        canonical_youtube_url="https://www.youtube.com/watch?v=6V2stDksGI8",
+        request=request(),
+        model="gemini-3.7-flash",
+        on_interaction_started=lambda interaction_id, status: _record([], interaction_id, status),
+    )
+    assert result.status == "failed"
+    assert result.http_status == 400
+    assert result.provider_error_code == "invalid_argument"
     assert result.provider_error_category == "provider_rejected_video"
     assert "bad request" not in repr(result)
     assert "secret-key" not in repr(result)
