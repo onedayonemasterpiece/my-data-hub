@@ -21,7 +21,9 @@ Scope: `youtube:analyze`
 
 Annotations:
 
-- `readOnlyHint=false`, because an external quota is consumed;
+- `readOnlyHint=true`, because analysis does not mutate provider or canonical data;
+- quota consumption remains explicit through `idempotentHint=false`, the owner-only
+  `youtube:analyze` scope, and the shared Supabase limiter;
 - `destructiveHint=false`;
 - `openWorldHint=true`;
 - `idempotentHint=false` in the first release. `idempotency_key` is a correlation key only; there is no durable provider-side deduplication proof, so callers must not assume replay safety.

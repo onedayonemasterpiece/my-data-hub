@@ -78,10 +78,10 @@ def settings(*, enabled: bool = True, operator: bool = True, scopes: frozenset[s
     )
 
 
-def test_contract_is_quota_consuming_non_idempotent_and_operator_scoped() -> None:
+def test_contract_is_read_only_quota_consuming_non_idempotent_and_operator_scoped() -> None:
     assert TOOL_CONTRACTS[YOUTUBE_TOOL_NAME] is YOUTUBE_TOOL_CONTRACT
     assert YOUTUBE_SCOPE in ALL_SCOPES
-    assert YOUTUBE_TOOL_CONTRACT.read_only is False
+    assert YOUTUBE_TOOL_CONTRACT.read_only is True
     assert YOUTUBE_TOOL_CONTRACT.destructive is False
     assert YOUTUBE_TOOL_CONTRACT.idempotent is False
     assert YOUTUBE_TOOL_CONTRACT.open_world is True
@@ -185,7 +185,7 @@ async def test_server_discovery_is_closed_operator_only_and_truthfully_annotated
     tool = tools[YOUTUBE_TOOL_NAME]
     assert tool.input_schema["additionalProperties"] is False
     assert set(tool.input_schema["required"]) == {"youtube_url", "idempotency_key"}
-    assert tool.annotations.read_only_hint is False
+    assert tool.annotations.read_only_hint is True
     assert tool.annotations.destructive_hint is False
     assert tool.annotations.idempotent_hint is False
     assert tool.annotations.open_world_hint is True
