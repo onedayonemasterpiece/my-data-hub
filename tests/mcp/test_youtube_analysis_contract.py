@@ -287,6 +287,44 @@ async def test_bounded_unified_owner_profile_lists_youtube_tool_without_operator
     assert YOUTUBE_TOOL_NAME in {tool.name for tool in await server.list_tools()}
 
 
+@pytest.mark.asyncio
+async def test_unified_profile_advertises_youtube_scope_before_incremental_authorization() -> None:
+    analyzer = Analyzer()
+    audit = Audit()
+    old_grant = identity("platform:read", "provider:read", "provider:write")
+    server = create_server(
+        settings(operator=False),  # type: ignore[arg-type]
+        dependencies=YouTubeMCPDependencies(
+            base=MCPDependencies(
+                unified_bootstrap_profile_enabled=True,
+                audit=audit,
+            ),
+            analyzer=analyzer,
+            feature_enabled=True,
+        ),
+        default_identity=old_grant,
+    )
+
+    tools = {tool.name: tool for tool in await server.list_tools()}
+    assert tools[YOUTUBE_TOOL_NAME].meta == {
+        "securitySchemes": [{"type": "oauth2", "scopes": [YOUTUBE_SCOPE]}]
+    }
+
+    result = await server.call_tool(
+        YOUTUBE_TOOL_NAME,
+        {
+            "youtube_url": "https://youtu.be/6V2stDksGI8",
+            "idempotency_key": "mcp-incremental-auth-0001",
+        },
+    )
+
+    assert result.is_error is True
+    assert result.meta is not None
+    assert "insufficient_scope" in result.meta["mcp/www_authenticate"][0]
+    assert analyzer.calls == []
+    assert [event.outcome for event in audit.events] == ["scope_denied"]
+
+
 def test_oauth_metadata_adds_scope_only_for_enabled_operator_profile() -> None:
     analyzer = Analyzer()
     base = MCPDependencies()

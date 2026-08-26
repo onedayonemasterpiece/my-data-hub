@@ -166,12 +166,7 @@ def create_server(
 
     async def list_tools(self):  # type: ignore[no-untyped-def]
         base_tools = list(await original_list_tools())
-        identity = self._identity()
-        if (
-            not _youtube_exposed(settings, dependencies)
-            or identity is None
-            or YOUTUBE_SCOPE not in identity.scopes
-        ):
+        if not _youtube_exposed(settings, dependencies):
             return base_tools
         raw_tools = await super(base_class, self).list_tools()
         for tool in raw_tools:
