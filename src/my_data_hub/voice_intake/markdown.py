@@ -26,6 +26,10 @@ def _section(title: str, values: list[str]) -> str:
     return f"## {title}\n\n" + "\n".join(f"- {value.strip()}" for value in values) + "\n"
 
 
+def _markdown_cell(value: object) -> str:
+    return str(value or "").replace("\n", " ").replace("|", "\\|").strip()
+
+
 def paths_for(session_id: str) -> tuple[str, str]:
     stamp = session_id.removeprefix("voice-").split("-", 1)[0]
     year = stamp[:4]
@@ -42,6 +46,9 @@ def render_source_packet(
     summary: SummaryPayload,
     model: str,
     registered_at: str,
+    terminology_version: str = "unavailable",
+    terminology_path: str = "config/voice-terminology.yaml",
+    terminology_commit_sha: str | None = None,
 ) -> str:
     frontmatter: dict[str, Any] = {
         "schema_version": "1.0.0",
@@ -59,8 +66,11 @@ def render_source_packet(
         "language": "ru-RU",
         "transcription_model": model,
         "synthesis_model": model,
-        "transcription_prompt_version": "voice-transcribe-v1",
-        "synthesis_prompt_version": "voice-summary-v1",
+        "transcription_prompt_version": "voice-transcribe-v2",
+        "synthesis_prompt_version": "voice-summary-v2",
+        "terminology_card_version": terminology_version,
+        "terminology_card_path": terminology_path,
+        "terminology_card_commit": terminology_commit_sha,
         "registered_at": registered_at,
         "audio_retention": "phone_deletes_after_github_readback",
         "chunk_sha256": [chunk.sha256 for chunk in request.chunks],
@@ -139,10 +149,73 @@ def render_source_packet(
             "- Аудиофайлы не сохраняются в GitHub и не удерживаются my-data-hub после ответа.",
             "- Телефон удаляет локальные чанки только после подтверждённого GitHub readback.",
             "- Текст идеи отсутствует в сообщении commit.",
+            "- Все голосовые записи: [актуальный индекс ветки `main`](../../README.md).",
             "",
         ]
     )
     return "\n".join(body).rstrip() + "\n"
+
+
+def render_voice_index(registry_text: str) -> str:
+    parsed = yaml.safe_load(registry_text)
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("sessions"), list):
+        raise ValueError("registry/intake-sessions.yaml has an unexpected shape")
+    records: list[dict[str, str]] = []
+    for entry in parsed["sessions"]:
+        if not isinstance(entry, dict):
+            continue
+        source = entry.get("source")
+        if not isinstance(source, dict) or source.get("platform") != "record-idea-hub-android":
+            continue
+        routes = entry.get("routes")
+        destinations = routes.get("destinations") if isinstance(routes, dict) else None
+        source_path = ""
+        if isinstance(destinations, list):
+            for destination in destinations:
+                if (
+                    isinstance(destination, dict)
+                    and destination.get("role") == "source_packet"
+                    and isinstance(destination.get("path"), str)
+                ):
+                    source_path = destination["path"]
+                    break
+        if not source_path.startswith("inbox/voice/") or not source_path.endswith(".md"):
+            continue
+        occurred = entry.get("occurred_at")
+        status = entry.get("status")
+        records.append(
+            {
+                "registered_at": str(entry.get("registered_at") or ""),
+                "captured_at": str(occurred.get("start") or "")
+                if isinstance(occurred, dict)
+                else "",
+                "title": str(entry.get("title") or entry.get("session_id") or ""),
+                "session_id": str(entry.get("session_id") or ""),
+                "path": source_path.removeprefix("inbox/voice/"),
+                "status": str(status.get("overall") or "") if isinstance(status, dict) else "",
+            }
+        )
+    records.sort(key=lambda item: (item["registered_at"], item["session_id"]), reverse=True)
+    lines = [
+        "# Голосовые записи IdeaHub",
+        "",
+        "> Стабильный хронологический индекс записей из актуальной ветки `main`. "
+        "Он обновляется атомарно вместе с каждой новой записью.",
+        "",
+        "| Записано | Заголовок | Сессия | Статус |",
+        "|---|---|---|---|",
+    ]
+    lines.extend(
+        "| {captured_at} | [{title}]({path}) | `{session_id}` | `{status}` |".format(
+            captured_at=_markdown_cell(item["captured_at"]),
+            title=_markdown_cell(item["title"]),
+            path=item["path"],
+            session_id=_markdown_cell(item["session_id"]),
+            status=_markdown_cell(item["status"]),
+        )
+        for item in records
+    )
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def render_session_detail(

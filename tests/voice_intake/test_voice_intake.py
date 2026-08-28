@@ -23,15 +23,17 @@ from my_data_hub.voice_intake.contracts import (
 )
 from my_data_hub.voice_intake.errors import VoiceIntakeError
 from my_data_hub.voice_intake.gemini import GeminiVoiceService
-from my_data_hub.voice_intake.github import PublicationReceipt
+from my_data_hub.voice_intake.github import IdeaHubPublisher, PublicationReceipt
 from my_data_hub.voice_intake.markdown import (
     build_registry_entry,
     insert_registry_entry,
     paths_for,
     render_session_detail,
     render_source_packet,
+    render_voice_index,
 )
 from my_data_hub.voice_intake.settings import VoiceIntakeSettings
+from my_data_hub.voice_intake.terminology import parse_terminology_card
 
 TOKEN = "x" * 40
 SESSION_ID = "voice-20260828-123456-abcdef12"
@@ -93,7 +95,7 @@ class FakeService:
             limiter={},
         )
 
-    async def summarize(self, _chunks: object) -> SessionSummaryResponse:
+    async def summarize(self, _chunks: object, **_kwargs: Any) -> SessionSummaryResponse:
         return SessionSummaryResponse(
             model="gemini-3.1-flash-lite",
             prompt_version="voice-summary-v1",
@@ -114,6 +116,22 @@ class FakeService:
 
 
 class FakePublisher:
+    async def terminology(self) -> object:
+        return parse_terminology_card(
+            """
+schema_version: 1.0.0
+card_id: idea-hub-voice-terminology
+rules:
+  - Use canonical project names only when acoustically compatible.
+entries:
+  - canonical: KenigEvents
+    kind: product
+    common_misrecognitions: [tionicavents]
+""",
+            source_path="config/voice-terminology.yaml",
+            source_commit_sha="b" * 40,
+        )
+
     async def status(self, _session_id: str) -> RemoteProgress:
         return RemoteProgress(state="processing", recording_finished=True)
 
@@ -226,6 +244,9 @@ def test_markdown_and_registry_are_idempotent() -> None:
         summary=summary,
         model="gemini-3.1-flash-lite",
         registered_at="2026-08-28T10:00:00Z",
+        terminology_version="1.0.0",
+        terminology_path="config/voice-terminology.yaml",
+        terminology_commit_sha="c" * 40,
     )
     detail = render_session_detail(
         session_id=SESSION_ID,
@@ -235,6 +256,9 @@ def test_markdown_and_registry_are_idempotent() -> None:
         registered_at="2026-08-28T10:00:00Z",
     )
     assert f"packet_id: {SESSION_ID}" in source
+    assert "transcription_prompt_version: voice-transcribe-v2" in source
+    assert "terminology_card_version: 1.0.0" in source
+    assert "terminology_card_commit: " + "c" * 40 in source
     assert f"session_id: {SESSION_ID}" in detail
     entry = build_registry_entry(
         session_id=SESSION_ID,
@@ -264,6 +288,81 @@ def test_markdown_and_registry_are_idempotent() -> None:
         )
         == updated
     )
+
+
+def test_terminology_card_is_bounded_and_rendered_for_prompts() -> None:
+    context = parse_terminology_card(
+        """
+schema_version: 1.0.0
+card_id: idea-hub-voice-terminology
+rules:
+  - Correct only when audio and context support the canonical term.
+entries:
+  - canonical: KenigEvents / «Полюбить Калининград Анонсы»
+    kind: product
+    aliases: [KenigEvents]
+    common_misrecognitions: [tionicavents.ru]
+    notes: Canonical domain is kenigevents.ru.
+  - canonical: Penpot
+    kind: design_tool
+    common_misrecognitions: [Pinpod, Пинпод]
+""",
+        source_path="config/voice-terminology.yaml",
+        source_commit_sha="c" * 40,
+    )
+    assert context.schema_version == "1.0.0"
+    assert "KenigEvents / «Полюбить Калининград Анонсы»" in context.prompt
+    assert "tionicavents.ru" in context.prompt
+    assert "Penpot" in context.prompt
+    assert context.source_commit_sha == "c" * 40
+
+
+def test_voice_index_lists_all_main_records_newest_first() -> None:
+    registry = """
+schema_version: 1.0.0
+registry_id: idea-hub-intake-sessions
+updated_at: '2026-08-28T10:00:00Z'
+sessions:
+- session_id: voice-20260828-100000-aaaaaaaa
+  title: Первая запись
+  registered_at: '2026-08-28T08:00:00Z'
+  source: {platform: record-idea-hub-android}
+  routes:
+    destinations:
+    - role: source_packet
+      path: inbox/voice/2026/08/voice-20260828-100000-aaaaaaaa.md
+  status: {overall: open}
+- session_id: voice-20260828-110000-bbbbbbbb
+  title: Новая запись
+  registered_at: '2026-08-28T09:00:00Z'
+  source: {platform: record-idea-hub-android}
+  routes:
+    destinations:
+    - role: source_packet
+      path: inbox/voice/2026/08/voice-20260828-110000-bbbbbbbb.md
+  status: {overall: open}
+"""
+    index = render_voice_index(registry)
+    assert index.index("Новая запись") < index.index("Первая запись")
+    assert "2026/08/voice-20260828-110000-bbbbbbbb.md" in index
+    assert "ветки `main`" in index
+
+
+def test_github_navigation_url_is_stable_main_not_commit_snapshot() -> None:
+    publisher = IdeaHubPublisher(
+        settings(),
+        requester=FakeRequester(
+            BoundedHTTPResponse(
+                status=200,
+                json_body={},
+                retry_after=None,
+                content_type="application/json",
+            )
+        ),
+    )
+    url = publisher._branch_url("inbox/voice/2026/08/example.md")
+    assert url.endswith("/blob/main/inbox/voice/2026/08/example.md")
+    assert "/blob/" + "a" * 40 not in url
 
 
 class FakeLimiter:
@@ -381,6 +480,7 @@ def test_gemini_success_has_one_accounted_provider_send() -> None:
             chunk_index=0,
             duration_ms=1000,
             audio=wav_bytes(),
+            terminology="- KenigEvents [product]; частая ошибка: tionicavents",
         )
     )
     assert result.transcript.transcript == "Привет"
@@ -398,6 +498,10 @@ def test_gemini_success_has_one_accounted_provider_send() -> None:
     generation = requester.last_json_body["generationConfig"]
     assert "temperature" not in generation
     assert generation["responseMimeType"] == "application/json"
+    prompt = requester.last_json_body["contents"][0]["parts"][0]["text"]
+    assert "АВТОРИТЕТНАЯ КАРТОЧКА ТЕРМИНОЛОГИИ" in prompt
+    assert "KenigEvents" in prompt
+    assert result.prompt_version == "voice-transcribe-v2"
     assert limiter.events[-1] == ("finalize", "succeeded")
 
 

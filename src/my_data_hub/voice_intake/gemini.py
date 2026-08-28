@@ -49,6 +49,8 @@ AUDIO_TOKENS_PER_SECOND = 35
 # characters per token is intentionally conservative without adding a second
 # provider countTokens request to every recording operation.
 TEXT_CHARACTERS_PER_TOKEN = 2
+TRANSCRIPTION_PROMPT_VERSION = "voice-transcribe-v2"
+SUMMARY_PROMPT_VERSION = "voice-summary-v2"
 
 TRANSCRIBE_PROMPT = """Ты выполняешь максимально точную расшифровку русского голосового фрагмента владельца IdeaHub.
 Верни только JSON по заданной схеме.
@@ -57,6 +59,9 @@ TRANSCRIBE_PROMPT = """Ты выполняешь максимально точн
 - передай все содержательные слова, перечисления и самокоррекции;
 - не превращай расшифровку в пересказ;
 - сохраняй названия продуктов, репозиториев, организаций, фамилии, даты и числа;
+- сверяй распознанные собственные имена с приложенной авторитетной карточкой терминологии;
+- исправляй на канонический термин только при акустической и контекстной совместимости;
+- не подменяй услышанное термином из карточки только из-за тематической близости;
 - не добавляй фактов, которых нет в аудио;
 - сомнительное место оставь как [неразборчиво] и перечисли в uncertain_fragments;
 - это один чанк более длинной сессии: не придумывай вступление или завершение;
@@ -74,12 +79,24 @@ SUMMARY_PROMPT = """Ниже находится полная упорядоче�
 - owner и deadline в tasks оставляй null, если они не были явно названы;
 - explicitly_stated=true только для прямо сформулированной задачи;
 - сохраняй противоречия и неуверенность;
+- используй канонические названия из приложенной карточки терминологии во всех полях;
+- очевидную ошибку распознавания исправляй только при совместимости с текстом; иначе сохраняй неопределённость;
 - title должен быть конкретным и пригодным как заголовок Markdown;
 - detailed_summary должен позволять следующему агенту понять ход мысли без аудио;
 - язык ответа — русский.
-
-ПОЛНАЯ РАСШИФРОВКА:
 """
+
+
+def _with_terminology(prompt: str, terminology: str) -> str:
+    bounded = terminology.strip()
+    if not bounded:
+        return prompt
+    return (
+        prompt.rstrip()
+        + "\n\nАВТОРИТЕТНАЯ КАРТОЧКА ТЕРМИНОЛОГИИ:\n"
+        + bounded
+        + "\n"
+    )
 
 
 class VoiceLimiter(SupabaseGoogleAILimiter):
@@ -213,14 +230,15 @@ class GeminiVoiceService:
         chunk_index: int,
         duration_ms: int,
         audio: bytes,
+        terminology: str = "",
     ) -> ChunkTranscriptResponse:
         value, usage, request_uid, public_limiter = await self._generate(
-            prompt=TRANSCRIBE_PROMPT,
+            prompt=_with_terminology(TRANSCRIBE_PROMPT, terminology),
             response_schema=TRANSCRIPT_JSON_SCHEMA,
             output_type=TranscriptPayload,
             audio=audio,
             max_output_tokens=8_192,
-            prompt_version="voice-transcribe-v1",
+            prompt_version=TRANSCRIPTION_PROMPT_VERSION,
             duration_ms=duration_ms,
             consumer="my-data-hub.voice-intake.transcribe.v1",
         )
@@ -228,28 +246,36 @@ class GeminiVoiceService:
             session_id=session_id,
             chunk_index=chunk_index,
             model=self._settings.model,
-            prompt_version="voice-transcribe-v1",
+            prompt_version=TRANSCRIPTION_PROMPT_VERSION,
             transcript=value,
             usage=usage,
             request_uid=request_uid,
             limiter=public_limiter,
         )
 
-    async def summarize(self, chunks: list[TranscriptChunk]) -> SessionSummaryResponse:
+    async def summarize(
+        self,
+        chunks: list[TranscriptChunk],
+        terminology: str = "",
+    ) -> SessionSummaryResponse:
         transcript = self._render_transcript(chunks)
         value, usage, request_uid, public_limiter = await self._generate(
-            prompt=SUMMARY_PROMPT + transcript,
+            prompt=(
+                _with_terminology(SUMMARY_PROMPT, terminology)
+                + "\nПОЛНАЯ РАСШИФРОВКА:\n"
+                + transcript
+            ),
             response_schema=SUMMARY_JSON_SCHEMA,
             output_type=SummaryPayload,
             audio=None,
             max_output_tokens=16_384,
-            prompt_version="voice-summary-v1",
+            prompt_version=SUMMARY_PROMPT_VERSION,
             duration_ms=None,
             consumer="my-data-hub.voice-intake.summarize.v1",
         )
         return SessionSummaryResponse(
             model=self._settings.model,
-            prompt_version="voice-summary-v1",
+            prompt_version=SUMMARY_PROMPT_VERSION,
             summary=value,
             usage=usage,
             request_uid=request_uid,

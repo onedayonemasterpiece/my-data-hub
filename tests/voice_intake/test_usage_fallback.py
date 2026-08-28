@@ -146,5 +146,5 @@ def test_success_without_usage_retains_conservative_reservation() -> None:
         "actual_tpm": None,
         "usage_accounting": "provider_usage_missing_reserved_tpm_retained",
         "audio_duration_ms": 1000,
-        "prompt_version": "voice-transcribe-v1",
+        "prompt_version": "voice-transcribe-v2",
     }

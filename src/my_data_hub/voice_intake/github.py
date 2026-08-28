@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -25,9 +26,11 @@ from .markdown import (
     paths_for,
     render_session_detail,
     render_source_packet,
+    render_voice_index,
     utc_now,
 )
 from .settings import VoiceIntakeSettings
+from .terminology import TerminologyContext, parse_terminology_card
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +44,9 @@ class PublicationReceipt:
 class IdeaHubPublisher:
     REGISTRY_PATH = "registry/intake-sessions.yaml"
     REGISTRY_SCHEMA_PATH = "schemas/intake-session.schema.json"
+    TERMINOLOGY_PATH = "config/voice-terminology.yaml"
+    VOICE_INDEX_PATH = "inbox/voice/README.md"
+    TERMINOLOGY_CACHE_SECONDS = 300.0
 
     def __init__(
         self,
@@ -57,6 +63,36 @@ class IdeaHubPublisher:
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "my-data-hub-record-idea-hub/1.0",
         }
+        self._terminology_cache: TerminologyContext | None = None
+        self._terminology_cache_loaded_at = 0.0
+
+    def _branch_url(self, path: str) -> str:
+        branch = quote(self._settings.github_branch, safe="-._~")
+        encoded_path = quote(path, safe="/-._~")
+        return f"https://github.com/{self._settings.github_repository}/blob/{branch}/{encoded_path}"
+
+    async def terminology(self) -> TerminologyContext:
+        now = time.monotonic()
+        if (
+            self._terminology_cache is not None
+            and now - self._terminology_cache_loaded_at < self.TERMINOLOGY_CACHE_SECONDS
+        ):
+            return self._terminology_cache
+        try:
+            head_sha, _ = await self._head()
+            text, _ = await self._content(self.TERMINOLOGY_PATH, head_sha)
+            context = parse_terminology_card(
+                text,
+                source_path=self.TERMINOLOGY_PATH,
+                source_commit_sha=head_sha,
+            )
+        except VoiceIntakeError:
+            if self._terminology_cache is not None:
+                return self._terminology_cache
+            raise
+        self._terminology_cache = context
+        self._terminology_cache_loaded_at = now
+        return context
 
     async def status(self, session_id: str) -> RemoteProgress:
         source_path, _detail_path = paths_for(session_id)
@@ -74,12 +110,7 @@ class IdeaHubPublisher:
             recording_finished=True,
             github_verified=verified,
             github_commit_sha=head[0] if verified else None,
-            github_url=(
-                f"https://github.com/{self._settings.github_repository}/blob/"
-                f"{head[0]}/{source_path}"
-                if verified
-                else None
-            ),
+            github_url=self._branch_url(source_path) if verified else None,
         )
 
     async def publish(
@@ -89,6 +120,7 @@ class IdeaHubPublisher:
         request: SessionCompleteRequest,
         summary: SummaryPayload,
         model: str,
+        terminology: TerminologyContext | None = None,
     ) -> PublicationReceipt:
         source_path, detail_path = paths_for(session_id)
         existing = await self.status(session_id)
@@ -101,6 +133,7 @@ class IdeaHubPublisher:
                 github_url=existing.github_url,
             )
 
+        terminology = terminology or await self.terminology()
         registered_at = utc_now()
         source = render_source_packet(
             session_id=session_id,
@@ -108,6 +141,9 @@ class IdeaHubPublisher:
             summary=summary,
             model=model,
             registered_at=registered_at,
+            terminology_version=terminology.schema_version,
+            terminology_path=terminology.source_path,
+            terminology_commit_sha=terminology.source_commit_sha,
         )
         detail = render_session_detail(
             session_id=session_id,
@@ -145,9 +181,11 @@ class IdeaHubPublisher:
                 registry_text, entry=entry, updated_at=registered_at
             )
             self._validate_registry(updated_registry, schema_text)
+            voice_index = render_voice_index(updated_registry)
             source_blob = await self._blob(source)
             detail_blob = await self._blob(detail)
             registry_blob = await self._blob(updated_registry)
+            voice_index_blob = await self._blob(voice_index)
             tree = await self._json(
                 "POST",
                 "/git/trees",
@@ -161,6 +199,12 @@ class IdeaHubPublisher:
                             "mode": "100644",
                             "type": "blob",
                             "sha": registry_blob,
+                        },
+                        {
+                            "path": self.VOICE_INDEX_PATH,
+                            "mode": "100644",
+                            "type": "blob",
+                            "sha": voice_index_blob,
                         },
                     ],
                 },
@@ -211,16 +255,14 @@ class IdeaHubPublisher:
                 detail_path=detail_path,
                 expected_source=source,
                 expected_detail=detail,
+                expected_voice_index=voice_index,
                 session_id=session_id,
             )
             return PublicationReceipt(
                 source_path=source_path,
                 detail_path=detail_path,
                 commit_sha=commit_sha,
-                github_url=(
-                    f"https://github.com/{self._settings.github_repository}/blob/"
-                    f"{commit_sha}/{source_path}"
-                ),
+                github_url=self._branch_url(source_path),
             )
         raise GitHubPublicationConflict("idea_hub_main_moved_repeatedly")
 
@@ -232,21 +274,32 @@ class IdeaHubPublisher:
         detail_path: str,
         expected_source: str,
         expected_detail: str,
+        expected_voice_index: str,
         session_id: str,
     ) -> None:
         source, _ = await self._content(source_path, commit_sha)
         detail, _ = await self._content(detail_path, commit_sha)
         registry, _ = await self._content(self.REGISTRY_PATH, commit_sha)
+        voice_index, _ = await self._content(self.VOICE_INDEX_PATH, commit_sha)
         if hashlib.sha256(source.encode()).digest() != hashlib.sha256(expected_source.encode()).digest():
             raise GitHubPublicationConflict("github_source_readback_hash_mismatch")
         if hashlib.sha256(detail.encode()).digest() != hashlib.sha256(expected_detail.encode()).digest():
             raise GitHubPublicationConflict("github_detail_readback_hash_mismatch")
         if f"session_id: {session_id}" not in registry:
             raise GitHubPublicationConflict("github_registry_readback_missing_session")
+        if hashlib.sha256(voice_index.encode()).digest() != hashlib.sha256(
+            expected_voice_index.encode()
+        ).digest():
+            raise GitHubPublicationConflict("github_voice_index_readback_hash_mismatch")
         current_sha, _ = await self._head()
         current_source, _ = await self._content(source_path, current_sha)
         current_registry, _ = await self._content(self.REGISTRY_PATH, current_sha)
-        if f"packet_id: {session_id}" not in current_source or f"session_id: {session_id}" not in current_registry:
+        current_voice_index, _ = await self._content(self.VOICE_INDEX_PATH, current_sha)
+        if (
+            f"packet_id: {session_id}" not in current_source
+            or f"session_id: {session_id}" not in current_registry
+            or f"`{session_id}`" not in current_voice_index
+        ):
             raise GitHubPublicationConflict("github_main_readback_missing_session")
 
     @staticmethod

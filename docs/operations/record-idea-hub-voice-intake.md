@@ -26,10 +26,12 @@ All routes require `Authorization: Bearer <device token>`.
 - `GET /voice-intake/v1/health` — authenticated readiness and resolved model.
 - `POST /voice-intake/v1/sessions` — validate/open one client-owned session.
 - `PUT /voice-intake/v1/sessions/{session_id}/chunks/{chunk_index}` — validate
-  RIFF/WAVE and SHA-256, perform one accounted Gemini transcription request and
-  return structured transcript JSON.
+  RIFF/WAVE and SHA-256, read the versioned IdeaHub terminology card, perform
+  one accounted Gemini transcription request and return structured transcript
+  JSON.
 - `POST /voice-intake/v1/sessions/{session_id}/complete` — summarize ordered
-  client transcripts and publish one IdeaHub intake transaction.
+  client transcripts with the same terminology card and publish one IdeaHub
+  intake transaction.
 - `GET /voice-intake/v1/sessions/{session_id}` — reconcile deterministic GitHub
   publication after a timeout or process restart.
 
@@ -66,7 +68,14 @@ One completed voice session creates one non-force Git transaction:
 inbox/voice/YYYY/MM/<session_id>.md
 registry/sessions/YYYY/MM/<session_id>.md
 registry/intake-sessions.yaml
+inbox/voice/README.md
 ```
+
+`config/voice-terminology.yaml` in `idea-hub/main` is the canonical bounded
+project/domain vocabulary. It is cached for at most five minutes and included
+in both transcription and synthesis prompts. The generated packet records the
+card version and source commit. The user-facing URL is branch-stable
+`/blob/main/...`; the exact publication SHA remains a separate receipt field.
 
 Before updating `main`, the current registry is validated against the current
 `schemas/intake-session.schema.json`. The operation uses the current tree as a

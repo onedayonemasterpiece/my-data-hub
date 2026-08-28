@@ -148,11 +148,15 @@ def attach_voice_intake_routes(
         if not hmac.compare_digest(hashlib.sha256(audio).hexdigest(), chunk_sha256):
             raise HTTPException(status_code=409, detail={"code": "chunk_sha256_mismatch"})
         try:
+            if idea_hub is None:
+                raise HTTPException(status_code=503, detail={"code": "voice_intake_disabled"})
+            terminology = await idea_hub.terminology()
             return await voice_service.transcribe(
                 session_id=session_id,
                 chunk_index=chunk_index,
                 duration_ms=duration_ms,
                 audio=audio,
+                terminology=terminology.prompt,
             )
         except VoiceIntakeError as exc:
             return _safe_error(exc)
@@ -182,12 +186,17 @@ def attach_voice_intake_routes(
                 existing.chunks_uploaded = payload.chunk_count
                 existing.chunks_transcribed = payload.chunk_count
                 return existing
-            summary = await voice_service.summarize(payload.chunks)
+            terminology = await idea_hub.terminology()
+            summary = await voice_service.summarize(
+                payload.chunks,
+                terminology=terminology.prompt,
+            )
             receipt = await idea_hub.publish(
                 session_id=session_id,
                 request=payload,
                 summary=summary.summary,
                 model=runtime.model,
+                terminology=terminology,
             )
             return RemoteProgress(
                 state="published_verified",
