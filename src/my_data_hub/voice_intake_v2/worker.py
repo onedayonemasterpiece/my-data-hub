@@ -4,10 +4,13 @@ import asyncio
 import json
 import os
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
+
+from my_data_hub.voice_intake.errors import VoiceIntakeError
 
 from .contracts import InferenceReceipt, PublicationReceipt
 from .media import BoundedMediaTools, MediaError
@@ -76,7 +79,7 @@ class VoiceIntakeV2Worker:
         inference: AggregateInference,
         publisher: SessionPublisher,
         owner: str | None = None,
-        clock=time.time,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self.store = store
         self.settings = settings
@@ -124,6 +127,20 @@ class VoiceIntakeV2Worker:
                 session.session_id, self.owner, code=exc.code,
                 retryable=exc.retryable and not ambiguous, retry_at=retry_at,
                 reconciliation_required=ambiguous,
+            )
+        except VoiceIntakeError as exc:
+            retry_at = (
+                self._clock() + exc.retry_after_seconds
+                if exc.retryable and exc.retry_after_seconds
+                else None
+            )
+            self.store.mark_error(
+                session.session_id,
+                self.owner,
+                code=exc.code,
+                retryable=exc.retryable and not exc.reconciliation_required,
+                retry_at=retry_at,
+                reconciliation_required=exc.reconciliation_required,
             )
         except (MediaError, StoreError) as exc:
             self.store.mark_error(
