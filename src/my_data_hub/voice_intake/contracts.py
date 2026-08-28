@@ -154,6 +154,11 @@ class RemoteProgress(StrictModel):
     github_commit_sha: str | None = None
     last_error: str | None = None
     retry_after_seconds: int | None = None
+    terminology_card_status: str | None = None
+    terminology_card_path: str | None = None
+    terminology_card_version: str | None = None
+    terminology_card_commit: str | None = None
+    terminology_card_blob_sha: str | None = None
 
 
 TRANSCRIPT_JSON_SCHEMA: dict[str, Any] = {

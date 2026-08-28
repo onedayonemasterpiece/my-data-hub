@@ -24,9 +24,11 @@ introduced. Request bytes live only for the duration of the HTTP handler.
 All routes require `Authorization: Bearer <device token>`.
 
 - `GET /voice-intake/v1/health` — authenticated readiness and resolved model.
-- `POST /voice-intake/v1/sessions` — validate/open one client-owned session.
+- `POST /voice-intake/v1/sessions` — validate/open one client-owned session,
+  resolve the current `idea-hub/main` revision, and pin exactly one terminology
+  snapshot to that session.
 - `PUT /voice-intake/v1/sessions/{session_id}/chunks/{chunk_index}` — validate
-  RIFF/WAVE and SHA-256, read the versioned IdeaHub terminology card, perform
+  RIFF/WAVE and SHA-256, require the pinned IdeaHub terminology snapshot, perform
   one accounted Gemini transcription request and return structured transcript
   JSON.
 - `POST /voice-intake/v1/sessions/{session_id}/complete` — summarize ordered
@@ -72,9 +74,27 @@ inbox/voice/README.md
 ```
 
 `config/voice-terminology.yaml` in `idea-hub/main` is the canonical bounded
-project/domain vocabulary. It is cached for at most five minutes and included
-in both transcription and synthesis prompts. The generated packet records the
-card version and source commit. The user-facing URL is branch-stable
+project/domain vocabulary. At the start of every new session the runtime reads
+the current branch head and then reads the card at that exact commit. It does
+not use an image-embedded copy, a startup-only copy, a process-global TTL cache,
+or a stale fallback. The resulting snapshot is held in bounded process memory
+and included unchanged in every transcription and the synthesis request for
+that session. `terminology_card_version` is the card schema version and is not
+used as a freshness key; exact freshness and identity come from the Git commit
+and blob SHA.
+
+If GitHub or the current card cannot be read at session start, session creation
+fails with a typed retryable error. An older snapshot is never relabelled as
+current. If the control-plane restarts during an active recording, subsequent
+chunk/complete calls fail closed with
+`voice_session_terminology_not_initialized` rather than mixing snapshots; the
+client must not complete that recording from transcripts produced under an
+unknown combination of cards.
+
+The generated packet records `terminology_card_path`,
+`terminology_card_version`, `terminology_card_commit`,
+`terminology_card_blob_sha`, and `terminology_card_status: current`. The
+user-facing URL is branch-stable
 `/blob/main/...`; the exact publication SHA remains a separate receipt field.
 
 Before updating `main`, the current registry is validated against the current
@@ -176,8 +196,8 @@ Apply the same request-size and timeout bounds at the reverse proxy:
 5. Run shared-limiter preflight for the configured Lite model.
 6. Send one short synthetic Russian WAV and verify one reserve/sent/finalize
    attempt in the limiter ledger.
-7. Complete one disposable session and verify the three-file commit and
-   current-main readback in `idea-hub`.
+7. Complete one disposable session and verify the four-file commit (source,
+   detail, registry and voice index) and current-main readback in `idea-hub`.
 8. Mark the disposable IdeaHub intake as excluded or remove it only through an
    explicit follow-up commit; never rewrite Git history.
 9. Confirm application logs contain no token, audio bytes, transcript text or

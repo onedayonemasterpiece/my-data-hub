@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -46,7 +45,6 @@ class IdeaHubPublisher:
     REGISTRY_SCHEMA_PATH = "schemas/intake-session.schema.json"
     TERMINOLOGY_PATH = "config/voice-terminology.yaml"
     VOICE_INDEX_PATH = "inbox/voice/README.md"
-    TERMINOLOGY_CACHE_SECONDS = 300.0
 
     def __init__(
         self,
@@ -63,47 +61,39 @@ class IdeaHubPublisher:
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "my-data-hub-record-idea-hub/1.0",
         }
-        self._terminology_cache: TerminologyContext | None = None
-        self._terminology_cache_loaded_at = 0.0
 
     def _branch_url(self, path: str) -> str:
         branch = quote(self._settings.github_branch, safe="-._~")
         encoded_path = quote(path, safe="/-._~")
         return f"https://github.com/{self._settings.github_repository}/blob/{branch}/{encoded_path}"
 
-    async def terminology(self) -> TerminologyContext:
-        now = time.monotonic()
-        if (
-            self._terminology_cache is not None
-            and now - self._terminology_cache_loaded_at < self.TERMINOLOGY_CACHE_SECONDS
-        ):
-            return self._terminology_cache
-        try:
-            head_sha, _ = await self._head()
-            text, _ = await self._content(self.TERMINOLOGY_PATH, head_sha)
-            context = parse_terminology_card(
-                text,
-                source_path=self.TERMINOLOGY_PATH,
-                source_commit_sha=head_sha,
-            )
-        except VoiceIntakeError:
-            if self._terminology_cache is not None:
-                return self._terminology_cache
-            raise
-        self._terminology_cache = context
-        self._terminology_cache_loaded_at = now
-        return context
+    async def resolve_terminology(self) -> TerminologyContext:
+        """Resolve one current main snapshot; never return cached or stale content."""
+        head_sha, _ = await self._head()
+        text, blob_sha = await self._content(self.TERMINOLOGY_PATH, head_sha)
+        return parse_terminology_card(
+            text,
+            source_path=self.TERMINOLOGY_PATH,
+            source_commit_sha=head_sha,
+            source_blob_sha=blob_sha,
+        )
 
     async def status(self, session_id: str) -> RemoteProgress:
-        source_path, _detail_path = paths_for(session_id)
+        source_path, detail_path = paths_for(session_id)
         head = await self._head()
         source = await self._content_optional(source_path, head[0])
+        detail = await self._content_optional(detail_path, head[0])
         registry = await self._content_optional(self.REGISTRY_PATH, head[0])
+        voice_index = await self._content_optional(self.VOICE_INDEX_PATH, head[0])
         verified = bool(
             source
+            and detail
             and registry
+            and voice_index
             and f"packet_id: {session_id}" in source[0]
+            and f"session_id: {session_id}" in detail[0]
             and f"session_id: {session_id}" in registry[0]
+            and f"`{session_id}`" in voice_index[0]
         )
         return RemoteProgress(
             state="published_verified" if verified else "processing",
@@ -133,7 +123,12 @@ class IdeaHubPublisher:
                 github_url=existing.github_url,
             )
 
-        terminology = terminology or await self.terminology()
+        if terminology is None or terminology.status != "current":
+            raise VoiceIntakeError(
+                "idea_hub_terminology_not_current",
+                retryable=True,
+                status_code=503,
+            )
         registered_at = utc_now()
         source = render_source_packet(
             session_id=session_id,
@@ -144,6 +139,8 @@ class IdeaHubPublisher:
             terminology_version=terminology.schema_version,
             terminology_path=terminology.source_path,
             terminology_commit_sha=terminology.source_commit_sha,
+            terminology_blob_sha=terminology.source_blob_sha,
+            terminology_status=terminology.status,
         )
         detail = render_session_detail(
             session_id=session_id,

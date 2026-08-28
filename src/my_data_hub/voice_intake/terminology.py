@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,7 +20,78 @@ class TerminologyContext:
     schema_version: str
     source_path: str
     source_commit_sha: str
+    source_blob_sha: str
+    status: str
     prompt: str
+
+
+class SessionTerminologySnapshots:
+    """Pin one freshly resolved terminology snapshot to each active voice session."""
+
+    def __init__(self, *, maximum_sessions: int = 512) -> None:
+        if maximum_sessions < 1:
+            raise ValueError("maximum_sessions must be positive")
+        self._maximum_sessions = maximum_sessions
+        self._snapshots: dict[str, TerminologyContext] = {}
+        self._inflight: dict[str, asyncio.Future[TerminologyContext]] = {}
+        self._guard = asyncio.Lock()
+
+    async def begin(
+        self,
+        session_id: str,
+        resolver: Callable[[], Awaitable[TerminologyContext]],
+    ) -> TerminologyContext:
+        async with self._guard:
+            existing = self._snapshots.get(session_id)
+            if existing is not None:
+                return existing
+            task = self._inflight.get(session_id)
+            if task is None:
+                if len(self._snapshots) + len(self._inflight) >= self._maximum_sessions:
+                    raise VoiceIntakeError(
+                        "voice_session_terminology_capacity_exceeded",
+                        retryable=True,
+                        status_code=503,
+                    )
+                task = asyncio.ensure_future(resolver())
+                self._inflight[session_id] = task
+        try:
+            snapshot = await asyncio.shield(task)
+        except BaseException:
+            async with self._guard:
+                if self._inflight.get(session_id) is task:
+                    self._inflight.pop(session_id, None)
+            raise
+        if snapshot.status != "current":
+            async with self._guard:
+                if self._inflight.get(session_id) is task:
+                    self._inflight.pop(session_id, None)
+            raise VoiceIntakeError(
+                "idea_hub_terminology_not_current",
+                retryable=True,
+                status_code=503,
+            )
+        async with self._guard:
+            self._snapshots[session_id] = snapshot
+            if self._inflight.get(session_id) is task:
+                self._inflight.pop(session_id, None)
+        return snapshot
+
+    async def require(self, session_id: str) -> TerminologyContext:
+        async with self._guard:
+            snapshot = self._snapshots.get(session_id)
+        if snapshot is None:
+            raise VoiceIntakeError(
+                "voice_session_terminology_not_initialized",
+                retryable=True,
+                status_code=409,
+            )
+        return snapshot
+
+    async def discard(self, session_id: str) -> None:
+        async with self._guard:
+            self._snapshots.pop(session_id, None)
+            self._inflight.pop(session_id, None)
 
 
 def _bounded_string(value: Any, *, field: str, maximum: int = 500) -> str:
@@ -47,6 +121,7 @@ def parse_terminology_card(
     *,
     source_path: str,
     source_commit_sha: str,
+    source_blob_sha: str,
 ) -> TerminologyContext:
     if len(text.encode("utf-8")) > MAX_CARD_BYTES:
         raise VoiceIntakeError(
@@ -69,6 +144,18 @@ def parse_terminology_card(
             status_code=503,
         )
     schema_version = _bounded_string(value.get("schema_version"), field="version", maximum=32)
+    if not re.fullmatch(r"[0-9a-f]{40,64}", source_commit_sha):
+        raise VoiceIntakeError(
+            "idea_hub_terminology_commit_invalid",
+            retryable=False,
+            status_code=503,
+        )
+    if not re.fullmatch(r"[0-9a-f]{40,64}", source_blob_sha):
+        raise VoiceIntakeError(
+            "idea_hub_terminology_blob_invalid",
+            retryable=False,
+            status_code=503,
+        )
     _bounded_string(value.get("card_id"), field="card_id", maximum=120)
     rules = _bounded_strings(value.get("rules"), field="rules", maximum_items=30)
     entries = value.get("entries")
@@ -133,8 +220,14 @@ def parse_terminology_card(
         schema_version=schema_version,
         source_path=source_path,
         source_commit_sha=source_commit_sha,
+        source_blob_sha=source_blob_sha,
+        status="current",
         prompt=prompt,
     )
 
 
-__all__ = ["TerminologyContext", "parse_terminology_card"]
+__all__ = [
+    "SessionTerminologySnapshots",
+    "TerminologyContext",
+    "parse_terminology_card",
+]

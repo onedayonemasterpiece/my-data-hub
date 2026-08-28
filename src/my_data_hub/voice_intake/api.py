@@ -19,6 +19,7 @@ from .errors import VoiceIntakeError
 from .gemini import GeminiVoiceService
 from .github import IdeaHubPublisher
 from .settings import VoiceIntakeSettings
+from .terminology import SessionTerminologySnapshots, TerminologyContext
 
 
 def _safe_error(exc: VoiceIntakeError) -> JSONResponse:
@@ -71,6 +72,20 @@ def _validate_wav(audio: bytes) -> None:
         raise HTTPException(status_code=422, detail={"code": "wav_chunks_missing"})
 
 
+def _receiving_progress(snapshot: TerminologyContext) -> RemoteProgress:
+    return RemoteProgress(
+        state="receiving",
+        recording_finished=False,
+        chunks_uploaded=0,
+        chunks_transcribed=0,
+        terminology_card_status=snapshot.status,
+        terminology_card_path=snapshot.source_path,
+        terminology_card_version=snapshot.schema_version,
+        terminology_card_commit=snapshot.source_commit_sha,
+        terminology_card_blob_sha=snapshot.source_blob_sha,
+    )
+
+
 def attach_voice_intake_routes(
     app: FastAPI,
     *,
@@ -81,6 +96,7 @@ def attach_voice_intake_routes(
     runtime = settings or VoiceIntakeSettings.from_env()
     voice_service = service or (GeminiVoiceService(runtime) if runtime.enabled else None)
     idea_hub = publisher or (IdeaHubPublisher(runtime) if runtime.enabled else None)
+    terminology_snapshots = SessionTerminologySnapshots()
     router = APIRouter(prefix="/voice-intake/v1", tags=["record-idea-hub"])
 
     @router.get("/health")
@@ -99,19 +115,23 @@ def attach_voice_intake_routes(
     async def create_session(
         request: Request,
         authorization: str | None = Header(default=None),
-    ) -> RemoteProgress:
+    ) -> RemoteProgress | JSONResponse:
         _require_token(runtime, authorization)
         body = await _bounded_body(request, 64 * 1024)
         try:
-            SessionCreateRequest.model_validate_json(body)
+            payload = SessionCreateRequest.model_validate_json(body)
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail={"code": "session_invalid"}) from exc
-        return RemoteProgress(
-            state="receiving",
-            recording_finished=False,
-            chunks_uploaded=0,
-            chunks_transcribed=0,
-        )
+        if idea_hub is None:
+            raise HTTPException(status_code=503, detail={"code": "voice_intake_disabled"})
+        try:
+            snapshot = await terminology_snapshots.begin(
+                payload.session_id,
+                idea_hub.resolve_terminology,
+            )
+            return _receiving_progress(snapshot)
+        except VoiceIntakeError as exc:
+            return _safe_error(exc)
 
     @router.put(
         "/sessions/{session_id}/chunks/{chunk_index}",
@@ -150,7 +170,7 @@ def attach_voice_intake_routes(
         try:
             if idea_hub is None:
                 raise HTTPException(status_code=503, detail={"code": "voice_intake_disabled"})
-            terminology = await idea_hub.terminology()
+            terminology = await terminology_snapshots.require(session_id)
             return await voice_service.transcribe(
                 session_id=session_id,
                 chunk_index=chunk_index,
@@ -182,11 +202,12 @@ def attach_voice_intake_routes(
         try:
             existing = await idea_hub.status(session_id)
             if existing.github_verified:
+                await terminology_snapshots.discard(session_id)
                 existing.chunks_expected = payload.chunk_count
                 existing.chunks_uploaded = payload.chunk_count
                 existing.chunks_transcribed = payload.chunk_count
                 return existing
-            terminology = await idea_hub.terminology()
+            terminology = await terminology_snapshots.require(session_id)
             summary = await voice_service.summarize(
                 payload.chunks,
                 terminology=terminology.prompt,
@@ -198,6 +219,7 @@ def attach_voice_intake_routes(
                 model=runtime.model,
                 terminology=terminology,
             )
+            await terminology_snapshots.discard(session_id)
             return RemoteProgress(
                 state="published_verified",
                 recording_finished=True,
@@ -242,6 +264,7 @@ def attach_voice_intake_routes(
     )
     app.router.routes[catch_index:catch_index] = added
     app.state.voice_intake_settings = runtime
+    app.state.voice_terminology_snapshots = terminology_snapshots
     return app
 
 

@@ -74,7 +74,12 @@ def wav_bytes() -> bytes:
 
 
 class FakeService:
+    def __init__(self) -> None:
+        self.transcription_terminology: list[str] = []
+        self.summary_terminology: list[str] = []
+
     async def transcribe(self, **kwargs: Any) -> ChunkTranscriptResponse:
+        self.transcription_terminology.append(str(kwargs.get("terminology") or ""))
         return ChunkTranscriptResponse(
             session_id=kwargs["session_id"],
             chunk_index=kwargs["chunk_index"],
@@ -96,6 +101,7 @@ class FakeService:
         )
 
     async def summarize(self, _chunks: object, **_kwargs: Any) -> SessionSummaryResponse:
+        self.summary_terminology.append(str(_kwargs.get("terminology") or ""))
         return SessionSummaryResponse(
             model="gemini-3.1-flash-lite",
             prompt_version="voice-summary-v1",
@@ -116,7 +122,12 @@ class FakeService:
 
 
 class FakePublisher:
-    async def terminology(self) -> object:
+    def __init__(self) -> None:
+        self.terminology_calls = 0
+        self.published_terminology: list[object] = []
+
+    async def resolve_terminology(self) -> object:
+        self.terminology_calls += 1
         return parse_terminology_card(
             """
 schema_version: 1.0.0
@@ -130,12 +141,14 @@ entries:
 """,
             source_path="config/voice-terminology.yaml",
             source_commit_sha="b" * 40,
+            source_blob_sha="d" * 40,
         )
 
     async def status(self, _session_id: str) -> RemoteProgress:
         return RemoteProgress(state="processing", recording_finished=True)
 
     async def publish(self, **_kwargs: Any) -> PublicationReceipt:
+        self.published_terminology.append(_kwargs["terminology"])
         return PublicationReceipt(
             source_path="inbox/voice/2026/08/test.md",
             detail_path="registry/sessions/2026/08/test.md",
@@ -157,6 +170,15 @@ def build_app() -> FastAPI:
         service=FakeService(),  # type: ignore[arg-type]
         publisher=FakePublisher(),  # type: ignore[arg-type]
     )
+
+
+def create_payload(session_id: str = SESSION_ID) -> dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "started_at": "2026-08-28T12:34:56+02:00",
+        "timezone": "Europe/Kaliningrad",
+        "device_label": "Samsung S21 Ultra",
+    }
 
 
 def complete_payload() -> dict[str, Any]:
@@ -185,6 +207,12 @@ def complete_payload() -> dict[str, Any]:
 
 def test_voice_routes_precede_control_plane_catch_all() -> None:
     client = TestClient(build_app())
+    created = client.post(
+        "/voice-intake/v1/sessions",
+        json=create_payload(),
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert created.status_code == 200
     audio = wav_bytes()
     response = client.put(
         f"/voice-intake/v1/sessions/{SESSION_ID}/chunks/0",
@@ -202,12 +230,7 @@ def test_voice_routes_precede_control_plane_catch_all() -> None:
 
 def test_voice_api_requires_device_token() -> None:
     client = TestClient(build_app())
-    payload = {
-        "session_id": SESSION_ID,
-        "started_at": "2026-08-28T12:34:56+02:00",
-        "timezone": "Europe/Kaliningrad",
-        "device_label": "Samsung S21 Ultra",
-    }
+    payload = create_payload()
     assert client.post("/voice-intake/v1/sessions", json=payload).status_code == 401
     accepted = client.post(
         "/voice-intake/v1/sessions",
@@ -216,10 +239,19 @@ def test_voice_api_requires_device_token() -> None:
     )
     assert accepted.status_code == 200
     assert accepted.json()["state"] == "receiving"
+    assert accepted.json()["terminology_card_status"] == "current"
+    assert accepted.json()["terminology_card_commit"] == "b" * 40
+    assert accepted.json()["terminology_card_blob_sha"] == "d" * 40
 
 
 def test_complete_returns_only_after_github_readback() -> None:
     client = TestClient(build_app())
+    created = client.post(
+        "/voice-intake/v1/sessions",
+        json=create_payload(),
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert created.status_code == 200
     response = client.post(
         f"/voice-intake/v1/sessions/{SESSION_ID}/complete",
         json=complete_payload(),
@@ -228,6 +260,173 @@ def test_complete_returns_only_after_github_readback() -> None:
     assert response.status_code == 200
     assert response.json()["github_verified"] is True
     assert response.json()["github_commit_sha"] == "a" * 40
+
+
+def test_one_fresh_terminology_snapshot_is_pinned_for_the_entire_session() -> None:
+    service = FakeService()
+    publisher = FakePublisher()
+    app = attach_voice_intake_routes(
+        FastAPI(),
+        settings=settings(),
+        service=service,  # type: ignore[arg-type]
+        publisher=publisher,  # type: ignore[arg-type]
+    )
+    client = TestClient(app)
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    first = client.post("/voice-intake/v1/sessions", json=create_payload(), headers=auth)
+    second = client.post("/voice-intake/v1/sessions", json=create_payload(), headers=auth)
+    assert first.status_code == second.status_code == 200
+    assert publisher.terminology_calls == 1
+
+    audio = wav_bytes()
+    upload_headers = {
+        **auth,
+        "Content-Type": "audio/wav",
+        "X-Chunk-SHA256": hashlib.sha256(audio).hexdigest(),
+        "X-Chunk-Duration-Ms": "1000",
+    }
+    for chunk_index in (0, 1):
+        response = client.put(
+            f"/voice-intake/v1/sessions/{SESSION_ID}/chunks/{chunk_index}",
+            content=audio,
+            headers=upload_headers,
+        )
+        assert response.status_code == 200
+    completed = client.post(
+        f"/voice-intake/v1/sessions/{SESSION_ID}/complete",
+        json=complete_payload(),
+        headers=auth,
+    )
+    assert completed.status_code == 200
+    assert publisher.terminology_calls == 1
+    assert len(set(service.transcription_terminology + service.summary_terminology)) == 1
+    assert publisher.published_terminology[0].source_commit_sha == "b" * 40
+
+
+def test_chunk_without_successful_session_snapshot_is_rejected() -> None:
+    client = TestClient(build_app())
+    audio = wav_bytes()
+    response = client.put(
+        f"/voice-intake/v1/sessions/{SESSION_ID}/chunks/0",
+        content=audio,
+        headers={
+            "Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "audio/wav",
+            "X-Chunk-SHA256": hashlib.sha256(audio).hexdigest(),
+            "X-Chunk-Duration-Ms": "1000",
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "voice_session_terminology_not_initialized"
+
+
+def test_new_session_never_falls_back_to_previous_snapshot_on_github_error() -> None:
+    class FailingSecondPublisher(FakePublisher):
+        async def resolve_terminology(self) -> object:
+            if self.terminology_calls:
+                self.terminology_calls += 1
+                raise VoiceIntakeError(
+                    "github_network_error", retryable=True, status_code=503
+                )
+            return await super().resolve_terminology()
+
+    publisher = FailingSecondPublisher()
+    app = attach_voice_intake_routes(
+        FastAPI(),
+        settings=settings(),
+        service=FakeService(),  # type: ignore[arg-type]
+        publisher=publisher,  # type: ignore[arg-type]
+    )
+    client = TestClient(app)
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    assert client.post(
+        "/voice-intake/v1/sessions", json=create_payload(), headers=auth
+    ).status_code == 200
+    another = client.post(
+        "/voice-intake/v1/sessions",
+        json=create_payload("voice-20260828-123457-abcdef13"),
+        headers=auth,
+    )
+    assert another.status_code == 503
+    assert another.json()["detail"]["code"] == "github_network_error"
+
+
+def test_each_new_session_resolves_fresh_commit_not_schema_version() -> None:
+    class ChangingPublisher(FakePublisher):
+        async def resolve_terminology(self) -> object:
+            self.terminology_calls += 1
+            marker = "a" if self.terminology_calls == 1 else "b"
+            return parse_terminology_card(
+                f"""
+schema_version: 1.0.0
+card_id: idea-hub-voice-terminology
+rules: [Use the current snapshot.]
+entries:
+  - canonical: card-{marker}
+    kind: test
+""",
+                source_path="config/voice-terminology.yaml",
+                source_commit_sha=marker * 40,
+                source_blob_sha=marker * 40,
+            )
+
+    publisher = ChangingPublisher()
+    app = attach_voice_intake_routes(
+        FastAPI(),
+        settings=settings(),
+        service=FakeService(),  # type: ignore[arg-type]
+        publisher=publisher,  # type: ignore[arg-type]
+    )
+    client = TestClient(app)
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    first = client.post("/voice-intake/v1/sessions", json=create_payload(), headers=auth)
+    second = client.post(
+        "/voice-intake/v1/sessions",
+        json=create_payload("voice-20260828-123457-abcdef13"),
+        headers=auth,
+    )
+    assert first.status_code == second.status_code == 200
+    assert first.json()["terminology_card_version"] == "1.0.0"
+    assert second.json()["terminology_card_version"] == "1.0.0"
+    assert first.json()["terminology_card_commit"] == "a" * 40
+    assert second.json()["terminology_card_commit"] == "b" * 40
+    assert publisher.terminology_calls == 2
+
+
+def test_github_current_resolver_has_no_cache_or_stale_fallback() -> None:
+    card = """
+schema_version: 1.0.0
+card_id: idea-hub-voice-terminology
+rules: [Use canonical terms only when supported.]
+entries:
+  - canonical: IdeaHub
+    kind: product
+"""
+
+    class DirectPublisher(IdeaHubPublisher):
+        def __init__(self) -> None:
+            self.calls = 0
+            self.fail = False
+
+        async def _head(self) -> tuple[str, str]:
+            self.calls += 1
+            if self.fail:
+                raise VoiceIntakeError("github_network_error", retryable=True, status_code=503)
+            marker = "a" if self.calls == 1 else "b"
+            return marker * 40, "f" * 40
+
+        async def _content(self, _path: str, ref: str) -> tuple[str, str]:
+            return card, ref
+
+    publisher = DirectPublisher()
+    first = asyncio.run(publisher.resolve_terminology())
+    second = asyncio.run(publisher.resolve_terminology())
+    assert first.source_commit_sha == "a" * 40
+    assert second.source_commit_sha == "b" * 40
+    publisher.fail = True
+    with pytest.raises(VoiceIntakeError) as caught:
+        asyncio.run(publisher.resolve_terminology())
+    assert caught.value.code == "github_network_error"
 
 
 def test_markdown_and_registry_are_idempotent() -> None:
@@ -247,6 +446,8 @@ def test_markdown_and_registry_are_idempotent() -> None:
         terminology_version="1.0.0",
         terminology_path="config/voice-terminology.yaml",
         terminology_commit_sha="c" * 40,
+        terminology_blob_sha="d" * 40,
+        terminology_status="current",
     )
     detail = render_session_detail(
         session_id=SESSION_ID,
@@ -259,6 +460,8 @@ def test_markdown_and_registry_are_idempotent() -> None:
     assert "transcription_prompt_version: voice-transcribe-v2" in source
     assert "terminology_card_version: 1.0.0" in source
     assert "terminology_card_commit: " + "c" * 40 in source
+    assert "terminology_card_blob_sha: " + "d" * 40 in source
+    assert "terminology_card_status: current" in source
     assert f"session_id: {SESSION_ID}" in detail
     entry = build_registry_entry(
         session_id=SESSION_ID,
@@ -309,12 +512,15 @@ entries:
 """,
         source_path="config/voice-terminology.yaml",
         source_commit_sha="c" * 40,
+        source_blob_sha="d" * 40,
     )
     assert context.schema_version == "1.0.0"
     assert "KenigEvents / «Полюбить Калининград Анонсы»" in context.prompt
     assert "tionicavents.ru" in context.prompt
     assert "Penpot" in context.prompt
     assert context.source_commit_sha == "c" * 40
+    assert context.source_blob_sha == "d" * 40
+    assert context.status == "current"
 
 
 def test_voice_index_lists_all_main_records_newest_first() -> None:

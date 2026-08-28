@@ -49,6 +49,8 @@ def render_source_packet(
     terminology_version: str = "unavailable",
     terminology_path: str = "config/voice-terminology.yaml",
     terminology_commit_sha: str | None = None,
+    terminology_blob_sha: str | None = None,
+    terminology_status: str = "error",
 ) -> str:
     frontmatter: dict[str, Any] = {
         "schema_version": "1.0.0",
@@ -71,6 +73,8 @@ def render_source_packet(
         "terminology_card_version": terminology_version,
         "terminology_card_path": terminology_path,
         "terminology_card_commit": terminology_commit_sha,
+        "terminology_card_blob_sha": terminology_blob_sha,
+        "terminology_card_status": terminology_status,
         "registered_at": registered_at,
         "audio_retention": "phone_deletes_after_github_readback",
         "chunk_sha256": [chunk.sha256 for chunk in request.chunks],
