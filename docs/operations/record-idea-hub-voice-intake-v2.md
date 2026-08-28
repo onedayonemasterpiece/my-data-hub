@@ -172,6 +172,7 @@ Reuse the verified IdeaHub publisher. One atomic non-force update to
 inbox/voice/YYYY/MM/<session_id>.md
 registry/sessions/YYYY/MM/<session_id>.md
 registry/intake-sessions.yaml
+inbox/voice/README.md
 ```
 
 The source packet records `client_version`,

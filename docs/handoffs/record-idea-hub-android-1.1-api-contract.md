@@ -107,9 +107,11 @@ Content-Type: application/json
 }
 ```
 
-`vad` is required for `voice_activity_auto_pause_v1` and must be `null` for
-`continuous_v1`. All request fields are immutable session metadata. The server
-durably commits the session and its terminology/context identity before
+`vad` is required for `voice_activity_auto_pause_v1` and may be omitted or
+`null` for `continuous_v1`; when a continuous-mode client still supplies it,
+the server retains it only as provenance. All request fields are immutable
+session metadata. The server durably commits the session and its
+terminology/context identity before
 responding. An exact repeat is successful and has `duplicate:true`; the same
 `session_id` with any changed immutable value is a typed `409` conflict. The
 receipt survives process and container restart.
