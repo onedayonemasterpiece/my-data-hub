@@ -5,7 +5,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PYTHONPATH=/app
 
-RUN useradd --create-home --uid 10001 mdh \
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && command -v ffmpeg >/dev/null \
+    && command -v ffprobe >/dev/null \
+    && useradd --create-home --uid 10001 mdh \
     # Production Compose deliberately replaces the image user with the
     # owning host UID and mounts private 0700 state directories below this
     # path.  The mount-point parent must therefore be traversable without
