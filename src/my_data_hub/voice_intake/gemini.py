@@ -410,7 +410,7 @@ class GeminiVoiceService:
             ) from exc
 
         assert response is not None
-        usage = self._usage(response.json_body)
+        provider_usage = self._usage(response.json_body)
         if response.status == 429:
             retry_seconds = self._retry_after_seconds(response)
             try:
@@ -420,7 +420,7 @@ class GeminiVoiceService:
             finally:
                 await self._finalize_or_reconcile(
                     lease,
-                    usage=usage,
+                    usage=provider_usage,
                     started=started,
                     provider_status="failed",
                     error_type="provider",
@@ -435,7 +435,7 @@ class GeminiVoiceService:
         if not 200 <= response.status < 300:
             await self._finalize_or_reconcile(
                 lease,
-                usage=usage,
+                usage=provider_usage,
                 started=started,
                 provider_status="failed",
                 error_type="provider",
@@ -453,7 +453,7 @@ class GeminiVoiceService:
         except (ValueError, TypeError, ValidationError) as exc:
             await self._finalize_or_reconcile(
                 lease,
-                usage=usage,
+                usage=provider_usage,
                 started=started,
                 provider_status="failed",
                 error_type="schema",
@@ -461,17 +461,28 @@ class GeminiVoiceService:
             )
             raise VoiceIntakeError("response_schema_invalid", retryable=False, status_code=502) from exc
 
+        accounted_usage = provider_usage or ModelUsage(
+            input_tokens=0,
+            output_tokens=0,
+            thought_tokens=0,
+            total_tokens=lease.reserved_tpm,
+        )
         await self._finalize_or_reconcile(
             lease,
-            usage=usage,
+            usage=accounted_usage,
             started=started,
             provider_status="succeeded",
         )
-        public_limiter = self._limiter.public_lease(lease, actual_tpm=usage.total_tokens)
+        public_limiter = self._limiter.public_lease(
+            lease,
+            actual_tpm=provider_usage.total_tokens if provider_usage else None,
+        )
+        if provider_usage is None:
+            public_limiter["usage_accounting"] = "provider_usage_missing_reserved_tpm_retained"
         if duration_ms is not None:
             public_limiter["audio_duration_ms"] = max(0, duration_ms)
         public_limiter["prompt_version"] = prompt_version
-        return value, usage, request_uid, public_limiter
+        return value, accounted_usage, request_uid, public_limiter
 
     async def _release_or_reconcile(self, lease: LimiterLease, reason: str) -> None:
         try:
@@ -571,10 +582,12 @@ class GeminiVoiceService:
         return text
 
     @staticmethod
-    def _usage(body: Any) -> ModelUsage:
-        metadata = body.get("usageMetadata", {}) if isinstance(body, Mapping) else {}
+    def _usage(body: Any) -> ModelUsage | None:
+        if not isinstance(body, Mapping):
+            return None
+        metadata = body.get("usageMetadata")
         if not isinstance(metadata, Mapping):
-            metadata = {}
+            return None
 
         def integer(*names: str) -> int:
             for name in names:
@@ -589,6 +602,8 @@ class GeminiVoiceService:
         total_tokens = integer("totalTokenCount", "total_token_count")
         if total_tokens == 0:
             total_tokens = input_tokens + output_tokens + thought_tokens
+        if total_tokens <= 0:
+            return None
         return ModelUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
