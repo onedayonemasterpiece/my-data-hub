@@ -82,12 +82,10 @@ intake(voice): register <session_id>
 
 ## Devstand configuration
 
-Create the private file from the template:
-
-```bash
-install -m 600 deploy/control-plane/voice-intake.env.example \
-  .state/control-plane/voice-intake.env
-```
+The existing control-plane already receives the private provider environment
+file selected by `MY_DATA_HUB_CONTROL_PROVIDER_ENV_FILE`. Add the voice settings
+to that same private file; no Compose overlay or additional service is needed.
+The file must remain mode `0600` and outside Git.
 
 Generate a device credential without printing it into shell history:
 
@@ -99,14 +97,40 @@ PY
 chmod 600 .state/control-plane/.voice-device-token
 ```
 
-Populate `MY_DATA_HUB_VOICE_DEVICE_TOKEN` from that file. Use the host's
-existing GitHub CLI authorization only to bootstrap the container credential:
+Add these values to the existing private provider env. Preserve the already
+configured Google limiter URL, service key, key pool and Google key variables:
+
+```dotenv
+MY_DATA_HUB_VOICE_INTAKE_ENABLED=true
+MY_DATA_HUB_VOICE_DEVICE_TOKEN=<value from .voice-device-token>
+MY_DATA_HUB_VOICE_MODEL=gemini-3.1-flash-lite
+MY_DATA_HUB_VOICE_ALLOWED_MODELS=gemini-3.1-flash-lite
+MY_DATA_HUB_VOICE_PROVIDER_TIMEOUT_SECONDS=180
+MY_DATA_HUB_VOICE_MAX_AUDIO_BYTES=8388608
+MY_DATA_HUB_VOICE_MAX_JSON_BYTES=2097152
+MY_DATA_HUB_VOICE_GITHUB_TOKEN=<private token from gh auth token>
+MY_DATA_HUB_VOICE_GITHUB_REPOSITORY=onedayonemasterpiece/idea-hub
+MY_DATA_HUB_VOICE_GITHUB_BRANCH=main
+```
+
+The following existing provider variables are mandatory and must remain in the
+same effective container environment:
+
+```dotenv
+GOOGLE_AI_LIMITER_SUPABASE_URL=...
+GOOGLE_AI_LIMITER_SUPABASE_SERVICE_KEY=...
+GOOGLE_AI_NORMAL_KEY_ENVS=GOOGLE_API_KEY,...
+GOOGLE_API_KEY=...
+```
+
+Use the host's existing GitHub CLI authorization only to bootstrap the
+container credential:
 
 ```bash
 gh auth status
 TOKEN="$(gh auth token)"
 test -n "$TOKEN"
-# Write TOKEN into MY_DATA_HUB_VOICE_GITHUB_TOKEN in the private env file
+# Write TOKEN into MY_DATA_HUB_VOICE_GITHUB_TOKEN in the private provider env
 # without echoing it to logs or chat.
 unset TOKEN
 ```
@@ -115,18 +139,12 @@ The control-plane container cannot rely on the host's interactive `gh` config
 unless it is deliberately mounted. A private environment value is simpler and
 keeps the container read-only.
 
-Deploy the existing service with the opt-in overlay:
+Rebuild and restart the existing service through its current deployment
+mechanism; the normal Compose equivalent remains unchanged:
 
 ```bash
-docker compose \
-  -f compose.control-plane.yaml \
-  -f compose.voice-intake.yaml \
-  build control-plane
-
-docker compose \
-  -f compose.control-plane.yaml \
-  -f compose.voice-intake.yaml \
-  up -d control-plane
+docker compose -f compose.control-plane.yaml build control-plane
+docker compose -f compose.control-plane.yaml up -d control-plane
 ```
 
 The public reverse proxy should route only `/voice-intake/v1/` to the existing
@@ -158,7 +176,7 @@ Apply the same request-size and timeout bounds at the reverse proxy:
 
 ## Rollback
 
-Remove `compose.voice-intake.yaml` from the compose command or set
-`MY_DATA_HUB_VOICE_INTAKE_ENABLED=false`, rebuild the existing control-plane
-container and verify `/voice-intake/v1/health` returns 503. Existing
-control-plane, MCP and provider state remains unchanged.
+Set `MY_DATA_HUB_VOICE_INTAKE_ENABLED=false` or remove the voice variables,
+rebuild the existing control-plane container and verify
+`/voice-intake/v1/health` returns 503. Existing control-plane, MCP and provider
+state remains unchanged.
