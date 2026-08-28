@@ -51,7 +51,7 @@ class VoiceIntakeSettings:
     normal_key_envs: tuple[str, ...]
 
     @classmethod
-    def from_env(cls) -> "VoiceIntakeSettings":
+    def from_env(cls) -> VoiceIntakeSettings:
         settings = cls(
             enabled=_bool("MY_DATA_HUB_VOICE_INTAKE_ENABLED", False),
             device_token=os.getenv("MY_DATA_HUB_VOICE_DEVICE_TOKEN", "").strip(),
