@@ -3,14 +3,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from my_data_hub.google_ai.contracts import LimiterLease
+from my_data_hub.google_ai.contracts import LimiterLease, LimiterPreflight, ModelLimit
 from my_data_hub.google_ai.http import BoundedHTTPResponse
 from my_data_hub.voice_intake.api import attach_voice_intake_routes
 from my_data_hub.voice_intake.contracts import (
@@ -271,12 +270,25 @@ class FakeLimiter:
     def __init__(self) -> None:
         self.events: list[tuple[str, object]] = []
 
-    async def preflight(self, model: str) -> object:
+    async def preflight(self, model: str) -> LimiterPreflight:
         self.events.append(("preflight", model))
-        return SimpleNamespace()
+        return LimiterPreflight(
+            limit=ModelLimit(
+                model=model,
+                rpm=13,
+                tpm=240000,
+                rpd=450,
+                tpm_reserve_extra=1000,
+            ),
+            candidate_key_ids=("key-id",),
+            candidate_env_names=frozenset({"GOOGLE_API_KEY"}),
+            contract="google_ai_project_model_atomic_v1",
+            bucket_strategy="rolling_60s_pacific_day_v2",
+        )
 
-    async def reserve(self, **kwargs: Any) -> LimiterLease:
-        self.events.append(("reserve", kwargs["consumer"]))
+    async def reserve_generate_content(self, **kwargs: Any) -> LimiterLease:
+        reserved_tpm = int(kwargs["reserved_tpm"])
+        self.events.append(("reserve", reserved_tpm))
         return LimiterLease(
             request_uid=kwargs["request_uid"],
             attempt_no=1,
@@ -284,7 +296,7 @@ class FakeLimiter:
             env_var_name="GOOGLE_API_KEY",
             key_alias="primary",
             quota_scope="google:project",
-            reserved_tpm=240000,
+            reserved_tpm=reserved_tpm,
             contract="google_ai_project_model_atomic_v1",
             bucket_strategy="rolling_60s_pacific_day_v2",
         )
@@ -315,9 +327,12 @@ class FakeRequester:
     def __init__(self, response: BoundedHTTPResponse) -> None:
         self.response = response
         self.calls = 0
+        self.last_json_body: dict[str, Any] | None = None
 
-    async def request_json(self, *_args: Any, **_kwargs: Any) -> BoundedHTTPResponse:
+    async def request_json(self, *_args: Any, **kwargs: Any) -> BoundedHTTPResponse:
         self.calls += 1
+        body = kwargs.get("json_body")
+        self.last_json_body = dict(body) if isinstance(body, dict) else None
         return self.response
 
 
@@ -376,7 +391,38 @@ def test_gemini_success_has_one_accounted_provider_send() -> None:
         "sent",
         "finalize",
     ]
+    reserved_tpm = int(limiter.events[1][1])
+    assert 8_192 < reserved_tpm < 20_000
+    assert reserved_tpm < 240_000
+    assert requester.last_json_body is not None
+    generation = requester.last_json_body["generationConfig"]
+    assert "temperature" not in generation
+    assert generation["responseMimeType"] == "application/json"
     assert limiter.events[-1] == ("finalize", "succeeded")
+
+
+def test_oversized_summary_is_rejected_before_reservation() -> None:
+    preflight = LimiterPreflight(
+        limit=ModelLimit(
+            model="gemini-3.1-flash-lite",
+            rpm=13,
+            tpm=240000,
+            rpd=450,
+            tpm_reserve_extra=1000,
+        ),
+        candidate_key_ids=("key-id",),
+        candidate_env_names=frozenset({"GOOGLE_API_KEY"}),
+        contract="google_ai_project_model_atomic_v1",
+        bucket_strategy="rolling_60s_pacific_day_v2",
+    )
+    with pytest.raises(VoiceIntakeError) as caught:
+        GeminiVoiceService._reservation_tpm(
+            preflight=preflight,
+            prompt="я" * 500_000,
+            duration_ms=None,
+            max_output_tokens=16_384,
+        )
+    assert caught.value.code == "voice_request_exceeds_model_tpm"
 
 
 def test_provider_429_is_reported_and_finalized() -> None:
