@@ -37,8 +37,9 @@ evidence, not contract constants:
   readback succeeded before audio purge; disposable-session closure is
   follow-up commit `54e5a26f856c4eebdccf7a8c3edcfcc01e9259de`
 
-Do not replace these placeholders with a branch name, image tag, healthy
-container, or an unverified reported SHA.
+These values were filled only from immutable image/source and live GitHub
+readback evidence; a branch name, mutable image tag, healthy container, or
+unverified reported SHA would not be sufficient.
 
 ## Routes
 

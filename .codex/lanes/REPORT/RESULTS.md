@@ -12,7 +12,7 @@ Status: **completed** on 2026-08-28 UTC.
 | R05 aggregate summary | Done | Durable transcript preceded one distinct text-summary UID; terminal total two of two. |
 | R06 shared limiter | Done | Two request-specific receipts finalized; recorded-duration transcription reserve read back as 266 TPM. |
 | R07 IdeaHub publication/readback/purge | Done | Atomic four-file commit `fb142c92ff15b8bfaf22ae9e4983a83e273c9d36`, exact/current readback, then audio purge. |
-| R08 tests | Done | Final gates: 1704 passed, 4 skipped; focused final receipt suite 97 passed; Ruff, strict mypy, compileall, repository validator (4820 checks) and tracked-secret scan passed; both PR checks passed. |
+| R08 tests | Done | Final gates: 1704 passed, 4 skipped; focused final receipt suite 97 passed; Ruff, strict mypy, compileall, final-tree repository validator (4822 checks) and tracked-secret scan passed; both PR checks passed. |
 | R09 Android handoff | Done | `docs/handoffs/record-idea-hub-android-1.1-api-contract.md` contains the frozen 1.1 boundary and deployed evidence. |
 | R10 deployment/live acceptance | Done | Attested image, healthy existing containers, public route, restart replay, v1 smoke, two-POST v2 flow, readback, purge and safe-log scan recorded in `DEPLOY-LIVE/RESULTS.md`. |
 | R11 rollback | Done | V2-only route/feature/image rollback preserves v1 and unfinished spool; prior image is identified. |
