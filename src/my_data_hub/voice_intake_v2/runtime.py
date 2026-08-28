@@ -16,7 +16,7 @@ from .worker import SessionPublisher, VoiceIntakeV2Worker
 
 
 class RuntimePublisher(SessionPublisher, Protocol):
-    async def resolve_terminology(self) -> dict[str, Any]: ...
+    async def resolve_terminology_snapshot(self) -> dict[str, Any]: ...
 
 
 def attach_configured_voice_intake_v2(
@@ -47,7 +47,7 @@ def attach_configured_voice_intake_v2(
     )
     return attach_voice_intake_v2_routes(
         app, auth_settings=auth, settings=config, store=store, media=media,
-        terminology_resolver=runtime_publisher.resolve_terminology, worker=worker,
+        terminology_resolver=runtime_publisher.resolve_terminology_snapshot, worker=worker,
     )
 
 

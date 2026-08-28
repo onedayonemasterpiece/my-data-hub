@@ -130,6 +130,48 @@ def test_changed_chunk_conflict_removes_unreferenced_final(
     assert sorted(path.name for path in chunk_dir.iterdir()) == [f"00000-{first_sha}.m4a"]
 
 
+def test_complete_rejects_unaccounted_wall_elapsed(
+    tmp_path, auth_settings, terminology, create_request, complete_payload
+):
+    client, _media, _app = build(tmp_path, auth_settings, terminology)
+    auth = {"Authorization": f"Bearer {'x' * 32}"}
+    client.post("/voice-intake/v2/sessions", json=create_request.model_dump(mode="json"), headers=auth)
+    audio = b"independent-m4a"
+    sha = hashlib.sha256(audio).hexdigest()
+    client.put(f"/voice-intake/v2/sessions/{SESSION_ID}/chunks/0", content=audio, headers=headers(sha))
+    complete_payload["chunks"][0]["sha256"] = sha
+    complete_payload["wall_elapsed_ms"] += 10_000
+    response = client.post(
+        f"/voice-intake/v2/sessions/{SESSION_ID}/complete", json=complete_payload, headers=auth
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "complete_manifest_invalid"
+
+
+def test_upload_rejects_traversal_and_cleans_oversized_stream_temporary_file(
+    tmp_path, auth_settings, terminology, create_request
+):
+    client, _media, app = build(tmp_path, auth_settings, terminology)
+    auth = {"Authorization": f"Bearer {'x' * 32}"}
+    response = client.put(
+        "/voice-intake/v2/sessions/voice-..%2Fescape/chunks/0",
+        content=b"audio",
+        headers=headers(hashlib.sha256(b"audio").hexdigest()),
+    )
+    assert response.status_code in {404, 422}
+
+    client.post("/voice-intake/v2/sessions", json=create_request.model_dump(mode="json"), headers=auth)
+    audio = b"x" * (1024 * 1024 + 1)
+    upload_headers = headers(hashlib.sha256(audio).hexdigest())
+    upload_headers["Content-Length"] = "1"
+    response = client.put(
+        f"/voice-intake/v2/sessions/{SESSION_ID}/chunks/0", content=audio, headers=upload_headers
+    )
+    assert response.status_code == 413
+    directory = app.state.voice_intake_v2_store.session_directory(SESSION_ID) / "chunks"
+    assert list(directory.iterdir()) == []
+
+
 def test_router_lifespan_composes_with_existing_application_lifespan(
     tmp_path, auth_settings, terminology
 ):

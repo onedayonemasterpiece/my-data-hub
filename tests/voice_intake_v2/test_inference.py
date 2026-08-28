@@ -6,7 +6,7 @@ import pytest
 
 from my_data_hub.google_ai.contracts import LimiterLease, LimiterPreflight, ModelLimit
 from my_data_hub.google_ai.errors import GoogleAIError, GoogleAIErrorCode
-from my_data_hub.google_ai.http import BoundedHTTPResponse
+from my_data_hub.google_ai.http import BoundedHTTPError, BoundedHTTPResponse
 from my_data_hub.voice_intake_v2.inference import AggregateGeminiInference
 from my_data_hub.voice_intake_v2.worker import StageFailure
 
@@ -18,6 +18,8 @@ class Limiter:
         self.deny = deny
         self.reserves = []
         self.finalized = []
+        self.sent = []
+        self.provider_429 = []
 
     async def preflight(self, model):
         return LimiterPreflight(
@@ -40,12 +42,14 @@ class Limiter:
         return "secret"
 
     async def mark_sent(self, _lease):
+        self.sent.append(_lease.request_uid)
         return None
 
     async def release_unsent(self, _lease, *, reason):
         return None
 
     async def report_provider_429(self, _lease, *, retry_after_ms):
+        self.provider_429.append((_lease.request_uid, retry_after_ms))
         return None
 
     async def finalize_generate_content(self, lease, **kwargs):
@@ -90,6 +94,7 @@ async def test_two_stages_make_exactly_two_physical_posts_with_mp3_and_recorded_
     summary = await service.summarize(transcript=transcript.value, terminology=terminology)
     assert len(requester.calls) == 2
     assert all(call[0] == "POST" and call[1].endswith(":generateContent") for call in requester.calls)
+    assert all("countTokens" not in call[1] for call in requester.calls)
     first_parts = requester.calls[0][2]["json_body"]["contents"][0]["parts"]
     assert first_parts[1]["inlineData"]["mimeType"] == "audio/mpeg"
     assert "один чанк" not in first_parts[0]["text"]
@@ -108,3 +113,46 @@ async def test_quota_denial_before_send_makes_zero_physical_posts(tmp_path, auth
         await service.transcribe(audio_path=audio, recorded_audio_ms=20_000, terminology=terminology)
     assert not raised.value.sent and raised.value.retryable
     assert requester.calls == []
+
+
+@pytest.mark.asyncio
+async def test_provider_429_makes_one_physical_post_and_no_hidden_retry(
+    tmp_path, auth_settings, terminology
+):
+    class TooManyRequests(Requester):
+        async def request_json(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            return BoundedHTTPResponse(429, {}, "1", "application/json")
+
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"mp3")
+    limiter, requester = Limiter(), TooManyRequests()
+    service = AggregateGeminiInference(auth_settings, limiter=limiter, requester=requester)
+    with pytest.raises(StageFailure) as raised:
+        await service.transcribe(audio_path=audio, recorded_audio_ms=20_000, terminology=terminology)
+    assert raised.value.code == "provider_429"
+    assert raised.value.sent and raised.value.retryable and not raised.value.ambiguous
+    assert len(requester.calls) == 1
+    assert len(limiter.sent) == 1 and len(limiter.provider_429) == 1
+    assert len(limiter.finalized) == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_timeout_makes_one_physical_post_and_fences_ambiguity(
+    tmp_path, auth_settings, terminology
+):
+    class TimeoutRequester(Requester):
+        async def request_json(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            raise BoundedHTTPError("total_timeout")
+
+    audio = tmp_path / "session.mp3"
+    audio.write_bytes(b"mp3")
+    limiter, requester = Limiter(), TimeoutRequester()
+    service = AggregateGeminiInference(auth_settings, limiter=limiter, requester=requester)
+    with pytest.raises(StageFailure) as raised:
+        await service.transcribe(audio_path=audio, recorded_audio_ms=20_000, terminology=terminology)
+    assert raised.value.code == "provider_timeout"
+    assert raised.value.sent and raised.value.ambiguous and not raised.value.retryable
+    assert len(requester.calls) == 1
+    assert len(limiter.sent) == 1 and len(limiter.finalized) == 1

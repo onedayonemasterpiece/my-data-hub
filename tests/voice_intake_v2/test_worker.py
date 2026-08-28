@@ -6,11 +6,15 @@ import pytest
 
 from my_data_hub.voice_intake.contracts import TranscriptPayload
 from my_data_hub.voice_intake.errors import GitHubPublicationConflict, VoiceIntakeError
-from my_data_hub.voice_intake_v2.contracts import InferenceReceipt, PublicationReceipt
+from my_data_hub.voice_intake_v2.contracts import (
+    InferenceReceipt,
+    PublicationReceipt,
+    SessionCompleteRequest,
+)
 from my_data_hub.voice_intake_v2.media import MediaProbe
 from my_data_hub.voice_intake_v2.settings import VoiceIntakeV2Settings
-from my_data_hub.voice_intake_v2.store import ChunkReceipt, VoiceIntakeV2Store
-from my_data_hub.voice_intake_v2.worker import VoiceIntakeV2Worker
+from my_data_hub.voice_intake_v2.store import ChunkReceipt, StoreError, VoiceIntakeV2Store
+from my_data_hub.voice_intake_v2.worker import StageFailure, VoiceIntakeV2Worker
 
 from .conftest import SESSION_ID, SHA, summary_value
 
@@ -92,9 +96,31 @@ def queued(tmp_path, create_request, complete_request, terminology):
 
 @pytest.mark.asyncio
 async def test_n_chunks_result_in_exactly_two_aggregate_calls_and_purge_after_readback(
-    tmp_path, create_request, complete_request, terminology
+    tmp_path, create_request, terminology
 ):
-    store = queued(tmp_path, create_request, complete_request, terminology)
+    store = VoiceIntakeV2Store(tmp_path / "spool")
+    store.create_session(create_request, terminology=terminology)
+    chunks = []
+    for index, digest in enumerate((SHA, "d" * 64)):
+        path = store.session_directory(SESSION_ID) / "chunks" / f"{index:05d}-{digest}.m4a"
+        path.write_bytes(b"m4a")
+        start = index * 240000
+        store.record_chunk(ChunkReceipt(
+            session_id=SESSION_ID, chunk_index=index, sha256=digest, duration_ms=240000,
+            audio_start_ms=start, audio_end_ms=start + 240000,
+            wall_start_ms=start, wall_end_ms=start + 240000,
+            size_bytes=3, path=str(path),
+        ))
+        chunks.append({
+            "chunk_index": index, "sha256": digest, "duration_ms": 240000,
+            "audio_start_ms": start, "audio_end_ms": start + 240000,
+            "wall_start_ms": start, "wall_end_ms": start + 240000,
+        })
+    store.complete(SESSION_ID, SessionCompleteRequest.model_validate({
+        "ended_at": "2026-08-28T12:42:56+02:00", "wall_elapsed_ms": 480000,
+        "manual_pause_ms": 0, "recorded_audio_ms": 480000,
+        "auto_silence_skipped_ms": 0, "chunk_count": 2, "chunks": chunks,
+    }))
     inference, publisher = Inference(), Publisher()
     worker = VoiceIntakeV2Worker(
         store, settings(store.root), media=Media(), inference=inference, publisher=publisher,
@@ -111,6 +137,7 @@ async def test_n_chunks_result_in_exactly_two_aggregate_calls_and_purge_after_re
     assert (store.session_directory(SESSION_ID) / "transcript.json").is_file()
     projection = publisher.projections[0]
     assert projection.create["client_version"] == "1.1.0"
+    assert len(projection.transport_chunks) == 2
     assert projection.transcription_request_uid != projection.summary_request_uid
 
 
@@ -171,8 +198,62 @@ async def test_github_retry_reuses_durable_inference_without_new_provider_calls(
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_github_outcome_is_fenced_without_purge_or_inference_replay(
+async def test_summary_retry_reuses_durable_transcript_without_new_transcription(
     tmp_path, create_request, complete_request, terminology
+):
+    class RetrySummaryInference(Inference):
+        async def summarize(self, **kwargs):
+            self.calls.append(("summarize", kwargs["transcript"], kwargs["terminology"]))
+            if len([call for call in self.calls if call[0] == "summarize"]) == 1:
+                raise StageFailure("summary_pre_send_retry", sent=False, retryable=True)
+            return InferenceReceipt(
+                value=summary_value(), request_uid="summary-uid", limiter={"reserved_tpm": 12345},
+            )
+
+    store = queued(tmp_path, create_request, complete_request, terminology)
+    inference = RetrySummaryInference()
+    worker = VoiceIntakeV2Worker(
+        store, settings(store.root), media=Media(), inference=inference, publisher=Publisher(),
+        owner="worker",
+    )
+    assert await worker.process_once()
+    failed = store.status(SESSION_ID)
+    assert failed.state == "retryable_error"
+    assert failed.transcription_complete and not failed.summary_complete
+    assert (store.session_directory(SESSION_ID) / "transcript.json").is_file()
+    assert (store.session_directory(SESSION_ID) / "chunks").is_dir()
+
+    store.complete(SESSION_ID, complete_request)
+    assert await worker.process_once()
+    assert store.status(SESSION_ID).state == "published_verified"
+    assert [call[0] for call in inference.calls] == ["transcribe", "summarize", "summarize"]
+
+
+@pytest.mark.asyncio
+async def test_failed_audio_deletion_never_marks_server_audio_purged(
+    tmp_path, create_request, complete_request, terminology, monkeypatch
+):
+    store = queued(tmp_path, create_request, complete_request, terminology)
+
+    def fail_purge(_session_id):
+        raise StoreError("server_audio_purge_failed", status_code=500)
+
+    monkeypatch.setattr(store, "purge_audio", fail_purge)
+    worker = VoiceIntakeV2Worker(
+        store, settings(store.root), media=Media(), inference=Inference(), publisher=Publisher(),
+        owner="worker",
+    )
+    assert await worker.process_once()
+    status = store.status(SESSION_ID)
+    assert status.github_verified
+    assert not status.server_audio_purged
+    assert status.error_code == "server_audio_purge_failed"
+    assert (store.session_directory(SESSION_ID) / "chunks").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_github_outcome_is_fenced_without_purge_or_inference_replay(
+    tmp_path, create_request, complete_request, terminology, caplog
 ):
     class AmbiguousPublisher(Publisher):
         async def publish_and_verify(self, projection):
@@ -196,3 +277,6 @@ async def test_ambiguous_github_outcome_is_fenced_without_purge_or_inference_rep
     assert not status.github_verified and not status.server_audio_purged
     assert [call[0] for call in inference.calls] == ["transcribe", "summarize"]
     assert not await worker.process_once()
+    rendered_logs = caplog.text
+    for forbidden in ("full session", "canonical terms", "mp3", "Detailed"):
+        assert forbidden not in rendered_logs

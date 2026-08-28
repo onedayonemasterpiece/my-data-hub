@@ -22,7 +22,7 @@ def _same(left: str, right: str) -> bool:
     ).digest()
 
 
-class V2IdeaHubPublisher(IdeaHubPublisher):  # type: ignore[misc]
+class V2IdeaHubPublisher(IdeaHubPublisher):
     """V2 projection adapter over the already bounded v1 GitHub transport.
 
     Inference artifacts are durable before this object is invoked. Therefore
@@ -33,7 +33,7 @@ class V2IdeaHubPublisher(IdeaHubPublisher):  # type: ignore[misc]
     def __init__(self, settings: VoiceIntakeSettings, **kwargs: Any) -> None:
         super().__init__(settings, **kwargs)
 
-    async def resolve_terminology(self) -> dict[str, Any]:
+    async def resolve_terminology_snapshot(self) -> dict[str, Any]:
         """Convert the verified v1 transport result into the durable v2 value."""
         return asdict(await super().resolve_terminology())
 

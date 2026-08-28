@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from my_data_hub.voice_intake.contracts import SESSION_ID_PATTERN, SHA256_PATTERN
 
-API_VERSION = "2.0"
+API_VERSION: Final = "2.0"
 CAPTURE_POLICIES = ("continuous_v1", "voice_activity_auto_pause_v1")
 SESSION_STATES = (
     "receiving",
@@ -21,6 +21,19 @@ SESSION_STATES = (
     "reconciliation_required",
     "published_verified",
 )
+type VoiceSessionState = Literal[
+    "receiving",
+    "queued",
+    "normalizing",
+    "transcribing",
+    "summarizing",
+    "publishing",
+    "verifying",
+    "waiting_quota",
+    "retryable_error",
+    "reconciliation_required",
+    "published_verified",
+]
 
 
 class StrictModel(BaseModel):
@@ -103,6 +116,11 @@ class SessionCompleteRequest(StrictModel):
             raise ValueError("audio timeline does not match recorded duration")
         if self.chunks[-1].wall_end_ms > self.wall_elapsed_ms + 2_000:
             raise ValueError("wall timeline exceeds elapsed duration")
+        accounted_wall_ms = (
+            self.recorded_audio_ms + self.manual_pause_ms + self.auto_silence_skipped_ms
+        )
+        if abs(accounted_wall_ms - self.wall_elapsed_ms) > 2_000:
+            raise ValueError("wall elapsed does not match recorded, manual pause, and silence durations")
         return self
 
 
@@ -119,9 +137,9 @@ class PublicationReceipt(StrictModel):
 
 
 class StatusResponse(StrictModel):
-    api_version: Literal["2.0"] = API_VERSION
+    api_version: Literal["2.0"] = "2.0"
     session_id: str = Field(pattern=SESSION_ID_PATTERN)
-    state: Literal[*SESSION_STATES]
+    state: VoiceSessionState
     recording_finished: bool = False
     chunks_expected: int | None = None
     chunks_received: int = 0

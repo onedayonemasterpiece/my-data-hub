@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import yaml
 
@@ -104,7 +104,7 @@ def _legacy_registry_entry(
             "aggregate_summary_single_request",
         ]
     )
-    return cast(dict[str, Any], entry)
+    return entry
 
 
 def render_publication(projection: PublicationProjection) -> RenderedPublication:

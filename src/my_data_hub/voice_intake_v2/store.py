@@ -5,7 +5,7 @@ import os
 import shutil
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,7 +68,7 @@ class PublicationProjection:
 class VoiceIntakeV2Store:
     """Small SQLite control ledger plus a private temporary audio spool."""
 
-    def __init__(self, root: Path, *, clock=time.time) -> None:
+    def __init__(self, root: Path, *, clock: Callable[[], float] = time.time) -> None:
         self.root = root.resolve()
         self.db_path = self.root / "voice-intake-v2.sqlite3"
         self.sessions_root = self.root / "sessions"
@@ -247,8 +247,6 @@ class VoiceIntakeV2Store:
             ).fetchone()
             if session is None:
                 raise StoreError("session_not_created")
-            if session["state"] != "receiving":
-                raise StoreError("session_not_receiving")
             existing = connection.execute(
                 "SELECT * FROM chunks WHERE session_id=? AND chunk_index=?",
                 (receipt.session_id, receipt.chunk_index),
@@ -268,6 +266,8 @@ class VoiceIntakeV2Store:
                     wall_start_ms=current.wall_start_ms, wall_end_ms=current.wall_end_ms,
                     size_bytes=current.size_bytes, path=current.path, duplicate=True,
                 ), self.status(receipt.session_id, connection=connection)
+            if session["state"] != "receiving":
+                raise StoreError("session_not_receiving")
             connection.execute(
                 """INSERT INTO chunks(
                     session_id,chunk_index,sha256,duration_ms,audio_start_ms,audio_end_ms,
@@ -512,18 +512,22 @@ class VoiceIntakeV2Store:
     def purge_audio(self, session_id: str) -> None:
         directory = self.session_directory(session_id)
         for child in (directory / "chunks", directory / "normalized"):
-            shutil.rmtree(child, ignore_errors=True)
+            if child.exists():
+                try:
+                    shutil.rmtree(child)
+                except OSError as exc:
+                    raise StoreError("server_audio_purge_failed", status_code=500) from exc
+            if child.exists():
+                raise StoreError("server_audio_purge_failed", status_code=500)
 
     def reap_expired(self, ttl_seconds: int) -> int:
-        cutoff = self._clock() - ttl_seconds
-        with self._transaction() as connection:
-            rows = connection.execute(
-                """SELECT session_id FROM sessions
-                   WHERE updated_at<? AND state IN ('receiving','retryable_error','reconciliation_required')""",
-                (cutoff,),
-            ).fetchall()
-            for row in rows:
-                connection.execute("DELETE FROM sessions WHERE session_id=?", (row["session_id"],))
-        for row in rows:
-            shutil.rmtree(self.session_directory(row["session_id"]), ignore_errors=True)
-        return len(rows)
+        """Retain every durable session until publication readback and purge.
+
+        The configured TTL is an admission/operations retention floor, not
+        authority to destroy recoverable recordings. Small reconciliation
+        receipts may remain indefinitely; only exact GitHub readback permits
+        audio deletion through :meth:`purge_audio`.
+        """
+        if ttl_seconds < 0:
+            raise ValueError("ttl_seconds must be non-negative")
+        return 0

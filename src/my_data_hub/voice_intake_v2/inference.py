@@ -6,6 +6,7 @@ import base64
 import json
 import math
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -13,6 +14,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 
+from my_data_hub.google_ai.contracts import LimiterLease, LimiterPreflight
 from my_data_hub.google_ai.errors import GoogleAIError
 from my_data_hub.google_ai.http import (
     AiohttpBoundedJSONRequester,
@@ -54,7 +56,7 @@ class AggregateGeminiInference:
         *,
         limiter: VoiceLimiter | None = None,
         requester: BoundedJSONRequester | None = None,
-        clock=time.monotonic,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.settings = settings
         self.limiter = limiter or VoiceLimiter(
@@ -98,7 +100,7 @@ class AggregateGeminiInference:
             preflight=preflight,
         )
 
-    async def _preflight(self):
+    async def _preflight(self) -> LimiterPreflight:
         try:
             return await self.limiter.preflight(self.settings.model)
         except GoogleAIError as exc:
@@ -118,14 +120,14 @@ class AggregateGeminiInference:
         reserved_tpm: int,
         max_output_tokens: int,
         consumer: str,
-        preflight=None,
+        preflight: LimiterPreflight | None = None,
     ) -> InferenceReceipt:
         model = self.settings.model
         if model not in self.settings.allowed_models or "flash-lite" not in model.lower():
             raise StageFailure("unsupported_voice_model", sent=False)
         request_uid = str(uuid4())
         preflight = preflight or await self._preflight()
-        lease = None
+        lease: LimiterLease | None = None
         marked_sent = False
         try:
             lease = await self.limiter.reserve_generate_content(
@@ -199,7 +201,7 @@ class AggregateGeminiInference:
         return InferenceReceipt(value=value.model_dump(mode="json"), request_uid=request_uid, limiter=public)
 
     async def _finalize(
-        self, lease, started: float, usage: ModelUsage | None, status: str, error: str | None
+        self, lease: LimiterLease, started: float, usage: ModelUsage | None, status: str, error: str | None
     ) -> None:
         try:
             await asyncio.shield(self.limiter.finalize_generate_content(

@@ -158,7 +158,7 @@ async def test_atomic_four_file_publication_and_repeat_reconciles_without_new_co
 @pytest.mark.asyncio
 async def test_runtime_terminology_resolver_returns_durable_json_value(auth_settings) -> None:
     publisher = MemoryPublisher(auth_settings)
-    value = await publisher.resolve_terminology()
+    value = await publisher.resolve_terminology_snapshot()
     assert value["status"] == "current"
     assert value["source_path"] == publisher.TERMINOLOGY_PATH
     assert value["source_commit_sha"] == publisher.head_sha
