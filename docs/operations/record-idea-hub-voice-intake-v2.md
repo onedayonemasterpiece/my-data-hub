@@ -29,18 +29,18 @@ integration. A healthy container or mutable image tag is not sufficient.
 
 | Evidence | Verified value |
 |---|---|
-| reconciled authoritative v1 base SHA | **PENDING INTEGRATOR EVIDENCE** |
-| v2 source/branch SHA | **PENDING INTEGRATOR EVIDENCE** |
-| prior deployed image digest | **PENDING INTEGRATOR EVIDENCE** |
-| new deployed image digest and source attestation | **PENDING INTEGRATOR DEPLOYMENT EVIDENCE** |
-| public v2 URL readback | **PENDING INTEGRATOR LIVE EVIDENCE** |
-| v1 live WAV regression receipt | **PENDING INTEGRATOR LIVE EVIDENCE** |
-| v2 live session ID | **PENDING INTEGRATOR LIVE EVIDENCE** |
-| transcription request UID / physical POST | **PENDING INTEGRATOR LIVE EVIDENCE** |
-| summary request UID / physical POST | **PENDING INTEGRATOR LIVE EVIDENCE** |
-| limiter reserve/sent/finalize receipts | **PENDING INTEGRATOR LIVE EVIDENCE** |
-| IdeaHub publication commit and exact/current-main readback | **PENDING INTEGRATOR LIVE EVIDENCE** |
-| server audio purge readback | **PENDING INTEGRATOR LIVE EVIDENCE** |
+| reconciled authoritative v1 base SHA | `491b2ba55b8c7ec30fbcc97a9839ad874fbdeba0` |
+| v2 deployed source SHA | `455f5a836eba29544c5f533f3f173f7639107914` |
+| prior deployed image digest | `sha256:d3cbaa197f1d1b8b9e6180ca733af7428625d693c1908144a29834610dc01af4` |
+| new deployed image digest and source attestation | `sha256:56c09e25940ab43defac8e2289e3be4b09ee5d868c3e178f46a1445bcd248a3c`, source/release `455f5a836eba29544c5f533f3f173f7639107914` |
+| public v2 URL readback | authenticated `GET https://mcp-datahub.kenigevents.ru/voice-intake/v2/capabilities` = `200`, `status=ready`, `api_version=2.0`, `typical_gemini_requests=2`; unauthenticated = `401` |
+| v1 live WAV regression receipt | session `voice-20260828-163612-28516afe`, transcription UID `514ccbb2-8c13-4ea8-adf7-19b5737ea5f0`, publication/readback `ed070f0fafd89f885b3e9aeba972f396a846abe1` |
+| v2 live session ID | `voice-20260828-163102-f5645802`; two independent AAC-LC/M4A receipts survived a full control-plane restart and replayed as duplicates |
+| transcription request UID / physical POST | `289c6883-db01-4c43-b705-38319b852395`; one durable aggregate transcription result |
+| summary request UID / physical POST | `37cd6bc0-2cbe-46ae-9d19-ca972d0f2d1f`; one durable text-summary result |
+| limiter reserve/sent/finalize receipts | both UIDs completed; transcription `reserved_tpm=266`, `actual_tpm=3045`; summary `reserved_tpm=23156`, `actual_tpm=3321`; shared limiter contract `google_ai_project_model_atomic_v1` |
+| IdeaHub publication commit and exact/current-main readback | atomic four-file commit `fb142c92ff15b8bfaf22ae9e4983a83e273c9d36`; exact and then-current `main` blob `35fcb109d5ea43f674c1cb9b38a82b7b9002ef0f`; disposable v1/v2 sessions closed by follow-up `54e5a26f856c4eebdccf7a8c3edcfcc01e9259de` |
+| server audio purge readback | status `published_verified`, `github_verified=true`, `server_audio_purged=true`; spool retains only `transcript.json` and `summary.json` for the acceptance session |
 
 Do not turn a reported checkpoint such as `68bb5bf...`, a branch head, Draft PR
 number or image label into verified evidence without reconciling actual
@@ -246,6 +246,13 @@ only from the frozen, deployed and read-backed contract.
 
 Exclude or close a disposable IdeaHub session only with a follow-up commit;
 never rewrite history. Fill the evidence table above from these readbacks.
+
+The 2026-08-28 rollout followed that rule: publication commits were retained,
+and follow-up commit `54e5a26f856c4eebdccf7a8c3edcfcc01e9259de`
+atomically marked both disposable v1/v2 sessions `excluded` /
+`closed_with_exception`, reconciled their ledger counts, and updated the
+chronological README. The current-main readback confirmed all six follow-up
+paths.
 
 ## Android operational boundary
 

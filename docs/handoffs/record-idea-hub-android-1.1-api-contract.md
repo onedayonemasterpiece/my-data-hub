@@ -28,9 +28,14 @@ input.
 The deployed image/source SHA and live-readback receipt are operational
 evidence, not contract constants:
 
-- deployed my-data-hub SHA: **PENDING INTEGRATOR DEPLOYMENT EVIDENCE**
-- deployed image digest: **PENDING INTEGRATOR DEPLOYMENT EVIDENCE**
-- live v2 acceptance session/commit: **PENDING INTEGRATOR LIVE EVIDENCE**
+- deployed my-data-hub SHA: `455f5a836eba29544c5f533f3f173f7639107914`
+- deployed image digest:
+  `sha256:56c09e25940ab43defac8e2289e3be4b09ee5d868c3e178f46a1445bcd248a3c`
+- live v2 acceptance session/commit:
+  `voice-20260828-163102-f5645802` /
+  `fb142c92ff15b8bfaf22ae9e4983a83e273c9d36`; exact and current-main
+  readback succeeded before audio purge; disposable-session closure is
+  follow-up commit `54e5a26f856c4eebdccf7a8c3edcfcc01e9259de`
 
 Do not replace these placeholders with a branch name, image tag, healthy
 container, or an unverified reported SHA.
