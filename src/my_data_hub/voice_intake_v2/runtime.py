@@ -29,6 +29,12 @@ def attach_configured_voice_intake_v2(
     """Compose the real single worker while preserving the app's lifespan."""
     auth = auth_settings or VoiceIntakeSettings.from_env()
     config = settings or VoiceIntakeV2Settings.from_env()
+    if not config.enabled:
+        return attach_voice_intake_v2_routes(
+            app,
+            auth_settings=auth,
+            settings=config,
+        )
     runtime_publisher = publisher or V2IdeaHubPublisher(auth)
     store = VoiceIntakeV2Store(config.spool_root)
     media = BoundedMediaTools(
