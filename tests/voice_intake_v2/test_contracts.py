@@ -57,3 +57,31 @@ def test_complete_cannot_end_before_durable_session_start(
                 }],
             }),
         )
+
+
+def test_complete_offset_must_match_durable_session_timezone(
+    tmp_path, create_request, terminology
+) -> None:
+    store = VoiceIntakeV2Store(tmp_path / "spool")
+    store.create_session(create_request, terminology=terminology)
+    with pytest.raises(StoreError, match="complete_time_invalid"):
+        store.complete(
+            SESSION_ID,
+            SessionCompleteRequest.model_validate({
+                "ended_at": "2026-08-28T13:38:56+03:00",
+                "wall_elapsed_ms": 240000,
+                "manual_pause_ms": 0,
+                "recorded_audio_ms": 240000,
+                "auto_silence_skipped_ms": 0,
+                "chunk_count": 1,
+                "chunks": [{
+                    "chunk_index": 0,
+                    "sha256": "a" * 64,
+                    "duration_ms": 240000,
+                    "audio_start_ms": 0,
+                    "audio_end_ms": 240000,
+                    "wall_start_ms": 0,
+                    "wall_end_ms": 240000,
+                }],
+            }),
+        )

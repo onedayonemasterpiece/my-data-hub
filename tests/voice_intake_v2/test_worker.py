@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,7 @@ from my_data_hub.voice_intake_v2.settings import VoiceIntakeV2Settings
 from my_data_hub.voice_intake_v2.store import ChunkReceipt, StoreError, VoiceIntakeV2Store
 from my_data_hub.voice_intake_v2.worker import StageFailure, VoiceIntakeV2Worker
 
-from .conftest import SESSION_ID, SHA, summary_value
+from .conftest import SESSION_ID, summary_value
 
 
 class Media:
@@ -84,15 +85,27 @@ def settings(root: Path) -> VoiceIntakeV2Settings:
 def queued(tmp_path, create_request, complete_request, terminology):
     store = VoiceIntakeV2Store(tmp_path / "spool")
     store.create_session(create_request, terminology=terminology)
-    path = store.session_directory(SESSION_ID) / "chunks" / f"00000-{SHA}.m4a"
-    path.write_bytes(b"m4a")
+    audio = b"m4a"
+    digest = hashlib.sha256(audio).hexdigest()
+    path = store.session_directory(SESSION_ID) / "chunks" / f"00000-{digest}.m4a"
+    path.write_bytes(audio)
     store.record_chunk(ChunkReceipt(
-        session_id=SESSION_ID, chunk_index=0, sha256=SHA, duration_ms=240000,
+        session_id=SESSION_ID, chunk_index=0, sha256=digest, duration_ms=240000,
         audio_start_ms=0, audio_end_ms=240000, wall_start_ms=0, wall_end_ms=240000,
-        size_bytes=3, path=str(path),
+        size_bytes=len(audio), path=str(path),
     ))
-    store.complete(SESSION_ID, complete_request)
+    complete_value = complete_request.model_dump(mode="json")
+    complete_value["chunks"][0]["sha256"] = digest
+    store.complete(SESSION_ID, SessionCompleteRequest.model_validate(complete_value))
     return store
+
+
+def matching_complete(store, complete_request) -> SessionCompleteRequest:
+    value = complete_request.model_dump(mode="json")
+    chunk = store.get_chunk(SESSION_ID, 0)
+    assert chunk is not None
+    value["chunks"][0]["sha256"] = chunk.sha256
+    return SessionCompleteRequest.model_validate(value)
 
 
 @pytest.mark.asyncio
@@ -102,15 +115,17 @@ async def test_n_chunks_result_in_exactly_two_aggregate_calls_and_purge_after_re
     store = VoiceIntakeV2Store(tmp_path / "spool")
     store.create_session(create_request, terminology=terminology)
     chunks = []
-    for index, digest in enumerate((SHA, "d" * 64)):
+    for index in range(2):
+        audio = f"m4a-{index}".encode()
+        digest = hashlib.sha256(audio).hexdigest()
         path = store.session_directory(SESSION_ID) / "chunks" / f"{index:05d}-{digest}.m4a"
-        path.write_bytes(b"m4a")
+        path.write_bytes(audio)
         start = index * 240000
         store.record_chunk(ChunkReceipt(
             session_id=SESSION_ID, chunk_index=index, sha256=digest, duration_ms=240000,
             audio_start_ms=start, audio_end_ms=start + 240000,
             wall_start_ms=start, wall_end_ms=start + 240000,
-            size_bytes=3, path=str(path),
+            size_bytes=len(audio), path=str(path),
         ))
         chunks.append({
             "chunk_index": index, "sha256": digest, "duration_ms": 240000,
@@ -167,7 +182,7 @@ async def test_real_two_m4a_worker_pipeline_normalizes_once_and_runs_two_stages(
         )
         assert await process.wait() == 0
         probe = await media.probe(path)
-        digest = f"{index + 1:064x}"
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
         start = audio_cursor
         audio_cursor += probe.duration_ms
         store.record_chunk(ChunkReceipt(
@@ -202,14 +217,18 @@ async def test_verified_receipt_is_durable_before_audio_purge(
 ):
     store = TrackingStore(tmp_path / "spool")
     store.create_session(create_request, terminology=terminology)
-    path = store.session_directory(SESSION_ID) / "chunks" / f"00000-{SHA}.m4a"
-    path.write_bytes(b"m4a")
+    audio = b"m4a"
+    digest = hashlib.sha256(audio).hexdigest()
+    path = store.session_directory(SESSION_ID) / "chunks" / f"00000-{digest}.m4a"
+    path.write_bytes(audio)
     store.record_chunk(ChunkReceipt(
-        session_id=SESSION_ID, chunk_index=0, sha256=SHA, duration_ms=240000,
+        session_id=SESSION_ID, chunk_index=0, sha256=digest, duration_ms=240000,
         audio_start_ms=0, audio_end_ms=240000, wall_start_ms=0, wall_end_ms=240000,
-        size_bytes=3, path=str(path),
+        size_bytes=len(audio), path=str(path),
     ))
-    store.complete(SESSION_ID, complete_request)
+    complete_value = complete_request.model_dump(mode="json")
+    complete_value["chunks"][0]["sha256"] = digest
+    store.complete(SESSION_ID, SessionCompleteRequest.model_validate(complete_value))
     inference = Inference()
     worker = VoiceIntakeV2Worker(
         store, settings(store.root), media=Media(), inference=inference, publisher=Publisher(),
@@ -246,7 +265,7 @@ async def test_github_retry_reuses_durable_inference_without_new_provider_calls(
     assert failed.transcription_complete and failed.summary_complete
     assert (store.session_directory(SESSION_ID) / "chunks").is_dir()
 
-    store.complete(SESSION_ID, complete_request)
+    store.complete(SESSION_ID, matching_complete(store, complete_request))
     assert await worker.process_once()
     assert store.status(SESSION_ID).state == "published_verified"
     assert [call[0] for call in inference.calls] == ["transcribe", "summarize"]
@@ -279,7 +298,7 @@ async def test_summary_retry_reuses_durable_transcript_without_new_transcription
     assert (store.session_directory(SESSION_ID) / "transcript.json").is_file()
     assert (store.session_directory(SESSION_ID) / "chunks").is_dir()
 
-    store.complete(SESSION_ID, complete_request)
+    store.complete(SESSION_ID, matching_complete(store, complete_request))
     assert await worker.process_once()
     assert store.status(SESSION_ID).state == "published_verified"
     assert [call[0] for call in inference.calls] == ["transcribe", "summarize", "summarize"]
@@ -308,7 +327,7 @@ async def test_failed_audio_deletion_never_marks_server_audio_purged(
     assert status.retryable
     assert (store.session_directory(SESSION_ID) / "chunks").is_dir()
     monkeypatch.undo()
-    store.complete(SESSION_ID, complete_request)
+    store.complete(SESSION_ID, matching_complete(store, complete_request))
     assert await worker.process_once()
     recovered = store.status(SESSION_ID)
     assert recovered.state == "published_verified" and recovered.server_audio_purged
@@ -345,3 +364,22 @@ async def test_ambiguous_github_outcome_is_fenced_without_purge_or_inference_rep
     rendered_logs = caplog.text
     for forbidden in ("full session", "canonical terms", "mp3", "Detailed"):
         assert forbidden not in rendered_logs
+
+
+@pytest.mark.asyncio
+async def test_spool_bytes_must_still_match_durable_sha_and_size_before_inference(
+    tmp_path, create_request, complete_request, terminology
+):
+    store = queued(tmp_path, create_request, complete_request, terminology)
+    chunk = next((store.session_directory(SESSION_ID) / "chunks").glob("*.m4a"))
+    chunk.write_bytes(b"tampered-after-durable-upload")
+    inference, publisher = Inference(), Publisher()
+    worker = VoiceIntakeV2Worker(
+        store, settings(store.root), media=Media(), inference=inference, publisher=publisher,
+        owner="worker",
+    )
+    assert await worker.process_once()
+    status = store.status(SESSION_ID)
+    assert status.error_code == "audio_receipt_mismatch"
+    assert not status.transcription_complete and not status.github_verified
+    assert inference.calls == [] and publisher.projections == []

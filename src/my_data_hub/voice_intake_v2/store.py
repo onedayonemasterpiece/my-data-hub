@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .contracts import SessionCompleteRequest, SessionCreateRequest, StatusResponse
 
@@ -315,7 +316,11 @@ class VoiceIntakeV2Store:
                     )
                 return self.status(session_id, connection=connection), True
             create = json.loads(session["create_json"])
-            if datetime.fromisoformat(request.ended_at) < datetime.fromisoformat(create["started_at"]):
+            ended = datetime.fromisoformat(request.ended_at)
+            if (
+                ended < datetime.fromisoformat(create["started_at"])
+                or ended.utcoffset() != ended.astimezone(ZoneInfo(create["timezone"])).utcoffset()
+            ):
                 raise StoreError("complete_time_invalid", status_code=422)
             rows = connection.execute(
                 "SELECT * FROM chunks WHERE session_id=? ORDER BY chunk_index", (session_id,)

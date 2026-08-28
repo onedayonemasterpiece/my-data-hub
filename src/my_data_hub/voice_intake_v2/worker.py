@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -169,6 +170,19 @@ class VoiceIntakeV2Worker:
                 path = Path(chunk.path)
                 if path.resolve().parent != (directory / "chunks").resolve():
                     raise MediaError("audio_path_invalid")
+                digest = hashlib.sha256()
+                observed_size = 0
+                try:
+                    with path.open("rb") as handle:
+                        while block := handle.read(1024 * 1024):
+                            observed_size += len(block)
+                            if observed_size > self.settings.max_chunk_bytes:
+                                raise MediaError("audio_receipt_mismatch")
+                            digest.update(block)
+                except OSError as exc:
+                    raise MediaError("audio_receipt_mismatch") from exc
+                if observed_size != chunk.size_bytes or digest.hexdigest() != chunk.sha256:
+                    raise MediaError("audio_receipt_mismatch")
                 probe = await self.media.probe(path)
                 if abs(probe.duration_ms - chunk.duration_ms) > self.settings.duration_tolerance_ms:
                     raise MediaError("audio_duration_mismatch")
