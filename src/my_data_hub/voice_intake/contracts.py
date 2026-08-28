@@ -82,7 +82,7 @@ class TranscriptChunk(StrictModel):
     transcript: TranscriptPayload
 
     @model_validator(mode="after")
-    def validate_range(self) -> "TranscriptChunk":
+    def validate_range(self) -> TranscriptChunk:
         if self.end_ms <= self.start_ms:
             raise ValueError("chunk end must be after start")
         if self.end_ms - self.start_ms > 15 * 60 * 1000:
@@ -100,7 +100,7 @@ class SessionCompleteRequest(StrictModel):
     chunks: list[TranscriptChunk] = Field(min_length=1, max_length=10_000)
 
     @model_validator(mode="after")
-    def validate_chunks(self) -> "SessionCompleteRequest":
+    def validate_chunks(self) -> SessionCompleteRequest:
         if self.chunk_count != len(self.chunks):
             raise ValueError("chunk_count does not match chunks")
         indices = [chunk.chunk_index for chunk in self.chunks]
