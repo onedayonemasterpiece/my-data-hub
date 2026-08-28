@@ -1,0 +1,141 @@
+mode: worktree_worker
+repo: onedayonemasterpiece/my-data-hub
+base_ref: 491b2ba55b8c7ec30fbcc97a9839ad874fbdeba0
+base_branch: feat/record-idea-hub-voice-proxy
+integration_branch: integration/record-idea-hub-voice-intake-v2
+global_constraints:
+  - preserve public voice-intake v1 semantics
+  - no new service, Redis, PostgreSQL, queue, Fly app, or GitHub contour
+  - no credentials, audio, transcript, or summary in logs or Git
+  - one transcription plus one summary physical Gemini POST on the priority path
+  - exact IdeaHub main readback before audio purge
+verification_owner: REPORT
+stop_conditions:
+  - any v1 regression
+  - ambiguous deployed source that cannot be reconciled
+  - more than two physical Gemini POSTs on the priority acceptance path
+  - purge before verified GitHub readback
+lanes:
+  - id: AUDIT-DRIFT
+    role: planner
+    effort: high
+    primary_requirement_ids: [R00]
+    target: deployed v1 image/source/Git ancestry reconciliation
+    depends_on: []
+    execution_mode: parallel
+    branch: null
+    worktree: /home/dev/.codex/worktrees/my-data-hub/record-idea-hub-voice-intake-v2
+    writable_files: []
+    forbidden_files: ['**']
+    expected_output: read-only evidence and safe base recommendation
+    verification_scope: inspection_only
+    status: completed
+  - id: CORE-V2
+    role: worker
+    effort: high
+    primary_requirement_ids: [R02, R03, R04, R05, R06]
+    target: v2 contracts, durable spool, worker, media aggregation, Gemini stages and limiter
+    depends_on: [AUDIT-DRIFT]
+    execution_mode: parallel
+    branch: agent/voice-intake-v2/core-v2
+    worktree: /home/dev/.codex/worktrees/my-data-hub/voice-intake-v2-core
+    writable_files:
+      - src/my_data_hub/voice_intake_v2/**
+      - src/my_data_hub/voice_intake/runtime.py
+      - src/my_data_hub/voice_intake/settings.py
+      - compose.control-plane.yaml
+      - tests/voice_intake_v2/**
+      - .codex/lanes/CORE-V2/RESULTS.md
+    forbidden_files:
+      - src/my_data_hub/voice_intake/api.py
+      - src/my_data_hub/voice_intake/github.py
+      - src/my_data_hub/voice_intake/markdown.py
+      - docs/**
+    expected_output: committed implementation and targeted tests
+    verification_scope: targeted
+    status: completed
+  - id: PUBLISH-V2
+    role: worker
+    effort: high
+    primary_requirement_ids: [R07]
+    target: v2 IdeaHub render/publish/readback/purge integration
+    depends_on: [CORE-V2]
+    execution_mode: read_only_until_dependency
+    branch: agent/voice-intake-v2/publish-v2
+    worktree: /home/dev/.codex/worktrees/my-data-hub/voice-intake-v2-publish
+    writable_files:
+      - src/my_data_hub/voice_intake_v2/**
+      - tests/voice_intake_v2/**
+      - .codex/lanes/PUBLISH-V2/RESULTS.md
+    forbidden_files:
+      - src/my_data_hub/voice_intake/api.py
+      - src/my_data_hub/voice_intake/contracts.py
+    expected_output: mapping first, committed integration after core contract freezes
+    verification_scope: targeted
+    status: completed
+  - id: TEST-V2
+    role: worker
+    effort: high
+    primary_requirement_ids: [R01, R08]
+    target: full v1 regression and v2 failure/security/accounting matrix
+    depends_on: [CORE-V2, PUBLISH-V2]
+    execution_mode: serial_after_dependency
+    branch: agent/voice-intake-v2/test-v2
+    worktree: /home/dev/.codex/worktrees/my-data-hub/voice-intake-v2-tests
+    writable_files:
+      - tests/voice_intake/**
+      - tests/voice_intake_v2/**
+      - .codex/lanes/TEST-V2/RESULTS.md
+    forbidden_files:
+      - src/**
+    expected_output: committed regression suite and gap report
+    verification_scope: full_local
+    status: completed
+  - id: DOCS-V2
+    role: worker
+    effort: high
+    primary_requirement_ids: [R09, R11]
+    target: Android 1.1 handoff, v2 runbook and rollback
+    depends_on: [CORE-V2]
+    execution_mode: parallel
+    branch: agent/voice-intake-v2/docs-v2
+    worktree: /home/dev/.codex/worktrees/my-data-hub/voice-intake-v2-docs
+    writable_files:
+      - docs/handoffs/record-idea-hub-android-1.1-api-contract.md
+      - docs/operations/record-idea-hub-voice-intake-v2.md
+      - .codex/lanes/DOCS-V2/RESULTS.md
+    forbidden_files:
+      - src/**
+      - tests/**
+    expected_output: committed authoritative handoff and rollback runbook
+    verification_scope: inspection_only
+    status: completed
+  - id: DEPLOY-LIVE
+    role: planner
+    effort: high
+    primary_requirement_ids: [R10]
+    target: deployment/proxy/spool mapping, then serial rollout and acceptance
+    depends_on: [TEST-V2, DOCS-V2]
+    execution_mode: read_only_until_dependency
+    branch: null
+    worktree: /home/dev/.codex/worktrees/my-data-hub/record-idea-hub-voice-intake-v2
+    writable_files: []
+    forbidden_files: ['**']
+    expected_output: deployment map followed by integrator-owned live receipts
+    verification_scope: inspection_only
+    status: completed
+  - id: REPORT
+    role: merge_reviewer
+    effort: high
+    primary_requirement_ids: [R12]
+    target: integration, closure audit and final Android prompt
+    depends_on: [AUDIT-DRIFT, CORE-V2, PUBLISH-V2, TEST-V2, DOCS-V2, DEPLOY-LIVE]
+    execution_mode: serial_after_dependency
+    branch: integration/record-idea-hub-voice-intake-v2
+    worktree: /home/dev/.codex/worktrees/my-data-hub/record-idea-hub-voice-intake-v2
+    writable_files:
+      - '**'
+    forbidden_files: []
+    expected_output: integrated clean branch, full gates, live evidence and status matrix
+    verification_scope: full_local
+    status: completed

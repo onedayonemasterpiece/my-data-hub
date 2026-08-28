@@ -24,6 +24,33 @@ def test_control_plane_image_includes_all_wheel_force_include_roots() -> None:
     assert "install -d -o mdh -g mdh -m 0711 /state" in source
 
 
+def test_voice_v2_media_tools_and_private_spool_are_bounded_to_control_plane() -> None:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    assert "apt-get install --yes --no-install-recommends ffmpeg" in dockerfile
+    assert "command -v ffmpeg >/dev/null" in dockerfile
+    assert "command -v ffprobe >/dev/null" in dockerfile
+
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    services = compose["services"]
+    control = services["control-plane"]
+    spool_binding = "${MY_DATA_HUB_VOICE_V2_SPOOL_DIR:-./.state/voice-intake-v2}:/voice-intake-v2"
+    assert control["read_only"] is True
+    assert control["environment"]["MY_DATA_HUB_VOICE_INTAKE_V2_SPOOL"] == "/voice-intake-v2"
+    assert spool_binding in control["volumes"]
+    for name, service in services.items():
+        if name != "control-plane":
+            assert not any("voice-intake-v2" in volume for volume in service.get("volumes", []))
+
+    installer = installer_source()
+    assert 'voice_v2_spool_dir="${MY_DATA_HUB_VOICE_V2_SPOOL_DIR:-$runtime_root/voice-intake-v2}"' in installer
+    assert 'mkdir -p "$env_root" "$secret_root" "$ledger_dir" "$voice_v2_spool_dir"' in installer
+    assert 'private_dirs=("$env_root" "$secret_root" "$ledger_dir" "$voice_v2_spool_dir")' in installer
+    assert '[[ ! -L "$private_dir" ]]' in installer
+    assert '"$(stat -c \'%u\' "$private_dir")" != "$runtime_uid"' in installer
+    assert '"$(stat -c \'%a\' "$private_dir")" != "700"' in installer
+    assert "MY_DATA_HUB_VOICE_V2_SPOOL_DIR=$voice_v2_spool_dir" in installer
+
+
 def provider_oauth_client_probe_source() -> str:
     source = installer_source()
     marker = 'provider_oauth_client_id="$(python3 - "$oauth_env" <<\'PY\'\n'

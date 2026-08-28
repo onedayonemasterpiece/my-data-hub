@@ -83,6 +83,7 @@ files = [
   "src/my_data_hub/orchestrator/master/evidence.py",
   "src/my_data_hub/orchestrator/master/provider.py",
   "src/my_data_hub/voice_intake/*.py",
+  "src/my_data_hub/voice_intake_v2/*.py",
 ]
 
 # The repository deliberately skips imported implementation bodies. FastAPI and
@@ -93,6 +94,8 @@ files = [
 module = [
   "my_data_hub.voice_intake.api",
   "my_data_hub.voice_intake.contracts",
+  "my_data_hub.voice_intake_v2.api",
+  "my_data_hub.voice_intake_v2.contracts",
 ]
 disable_error_code = ["misc", "untyped-decorator"]
 

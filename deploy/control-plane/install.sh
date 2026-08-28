@@ -112,6 +112,7 @@ secret_root="${MY_DATA_HUB_CONTROL_SECRET_DIR:-$runtime_root/secrets}"
 ledger_dir="${MY_DATA_HUB_CONTROL_LEDGER_DIR:-$runtime_root/control-ledger}"
 provider_upload_dir="${MY_DATA_HUB_PROVIDER_UPLOAD_DIR:-$runtime_root/provider-uploads}"
 session_dir="${MY_DATA_HUB_MASTER_SESSION_DIR:-$runtime_root/master-sessions}"
+voice_v2_spool_dir="${MY_DATA_HUB_VOICE_V2_SPOOL_DIR:-$runtime_root/voice-intake-v2}"
 embedding_credential_dir="${MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR:-$runtime_root/embedding-credentials}"
 asset_dir="${MY_DATA_HUB_MASTER_ASSET_DIR:-$runtime_root/master-assets}"
 asset_history_dir="${MY_DATA_HUB_MASTER_ASSET_HISTORY_DIR:-$runtime_root/master-assets-history}"
@@ -174,7 +175,7 @@ if [[ "$google_youtube_analysis" == true && "$acceptance_scenarios" == true ]]; 
   echo "Google YouTube analysis and protected acceptance scenarios require separate operator installs" >&2
   exit 2
 fi
-for path_value in "$env_root" "$secret_root" "$ledger_dir" "$provider_upload_dir" "$session_dir" "$asset_dir" \
+for path_value in "$env_root" "$secret_root" "$ledger_dir" "$provider_upload_dir" "$session_dir" "$voice_v2_spool_dir" "$asset_dir" \
   "$tls_dir" "$tls_ca_file" "$provider_env" "$mcp_env" "$oauth_env" "$oauth_key" "$oauth_overlap_jwks" \
   "$connector_env" \
   "$owner_operator_token" "$owner_portal_state_key" \
@@ -185,8 +186,8 @@ for path_value in "$env_root" "$secret_root" "$ledger_dir" "$provider_upload_dir
     *[$'\n\r\t ']* ) echo "deployment inputs may not contain whitespace" >&2; exit 2 ;;
   esac
 done
-mkdir -p "$env_root" "$secret_root" "$ledger_dir" "$HOME/.config/systemd/user"
-private_dirs=("$env_root" "$secret_root" "$ledger_dir")
+mkdir -p "$env_root" "$secret_root" "$ledger_dir" "$voice_v2_spool_dir" "$HOME/.config/systemd/user"
+private_dirs=("$env_root" "$secret_root" "$ledger_dir" "$voice_v2_spool_dir")
 if [[ "$provider_only" == true || "$operator_profile" == true || "$unified_bootstrap" == true ]]; then
   mkdir -p "$provider_upload_dir"
   private_dirs+=("$provider_upload_dir")
@@ -907,6 +908,7 @@ MY_DATA_HUB_CONTROL_GID=$(id -g)
 MY_DATA_HUB_CONTROL_LEDGER_DIR=$ledger_dir
 MY_DATA_HUB_PROVIDER_UPLOAD_DIR=$provider_upload_dir
 MY_DATA_HUB_MASTER_SESSION_DIR=$session_dir
+MY_DATA_HUB_VOICE_V2_SPOOL_DIR=$voice_v2_spool_dir
 MY_DATA_HUB_MASTER_ASSET_DIR=$asset_dir
 MY_DATA_HUB_MASTER_ASSET_HISTORY_DIR=$asset_history_dir
 MY_DATA_HUB_MASTER_TLS_DIR=$tls_dir
@@ -924,6 +926,7 @@ MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE=$control_gateway_token
 MY_DATA_HUB_CHECKPOINT_UPLOAD_BROKER_KEY_FILE=$checkpoint_upload_broker_key
 MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR=$embedding_credential_dir
 MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED=${MY_DATA_HUB_EMBEDDING_WORKERS_ENABLED:-false}
+MY_DATA_HUB_VOICE_INTAKE_V2_ENABLED=${MY_DATA_HUB_VOICE_INTAKE_V2_ENABLED:-true}
 ENV
 chmod 600 "$compose_env"
 
