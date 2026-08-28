@@ -175,7 +175,15 @@ def attach_voice_intake_routes(
         try:
             if idea_hub is None:
                 raise HTTPException(status_code=503, detail={"code": "voice_intake_disabled"})
-            terminology = await terminology_snapshots.require(session_id)
+            # Deployed clients created before the explicit session-start contract
+            # contact the backend for the first time when uploading chunk zero.
+            # Treat that first authenticated upload as session initialization so
+            # they still get one freshly resolved, durable snapshot rather than a
+            # stale fallback or a permanently retrying 409.
+            terminology = await terminology_snapshots.begin(
+                session_id,
+                idea_hub.resolve_terminology,
+            )
             return await voice_service.transcribe(
                 session_id=session_id,
                 chunk_index=chunk_index,

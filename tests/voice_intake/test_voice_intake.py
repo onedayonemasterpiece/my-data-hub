@@ -309,8 +309,15 @@ def test_one_fresh_terminology_snapshot_is_pinned_for_the_entire_session() -> No
     assert publisher.published_terminology[0].source_commit_sha == "b" * 40
 
 
-def test_chunk_without_successful_session_snapshot_is_rejected() -> None:
-    client = TestClient(build_app())
+def test_first_chunk_lazily_initializes_session_snapshot_for_legacy_client() -> None:
+    publisher = FakePublisher()
+    app = attach_voice_intake_routes(
+        FastAPI(),
+        settings=settings(),
+        service=FakeService(),  # type: ignore[arg-type]
+        publisher=publisher,  # type: ignore[arg-type]
+    )
+    client = TestClient(app)
     audio = wav_bytes()
     response = client.put(
         f"/voice-intake/v1/sessions/{SESSION_ID}/chunks/0",
@@ -322,8 +329,41 @@ def test_chunk_without_successful_session_snapshot_is_rejected() -> None:
             "X-Chunk-Duration-Ms": "1000",
         },
     )
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "voice_session_terminology_not_initialized"
+    assert response.status_code == 200
+    assert response.json()["transcript"]["transcript"] == "Тестовая расшифровка"
+    assert publisher.terminology_calls == 1
+
+
+def test_first_chunk_fails_closed_when_current_terminology_cannot_be_loaded() -> None:
+    class FailingPublisher(FakePublisher):
+        async def resolve_terminology(self) -> object:
+            self.terminology_calls += 1
+            raise VoiceIntakeError(
+                "github_network_error", retryable=True, status_code=503
+            )
+
+    publisher = FailingPublisher()
+    app = attach_voice_intake_routes(
+        FastAPI(),
+        settings=settings(),
+        service=FakeService(),  # type: ignore[arg-type]
+        publisher=publisher,  # type: ignore[arg-type]
+    )
+    client = TestClient(app)
+    audio = wav_bytes()
+    response = client.put(
+        f"/voice-intake/v1/sessions/{SESSION_ID}/chunks/0",
+        content=audio,
+        headers={
+            "Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "audio/wav",
+            "X-Chunk-SHA256": hashlib.sha256(audio).hexdigest(),
+            "X-Chunk-Duration-Ms": "1000",
+        },
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "github_network_error"
+    assert publisher.terminology_calls == 1
 
 
 def test_new_session_never_falls_back_to_previous_snapshot_on_github_error() -> None:

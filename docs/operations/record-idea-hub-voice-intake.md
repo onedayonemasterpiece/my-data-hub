@@ -31,9 +31,9 @@ All routes require `Authorization: Bearer <device token>`.
   resolve the current `idea-hub/main` revision, and pin exactly one terminology
   snapshot to that session.
 - `PUT /voice-intake/v1/sessions/{session_id}/chunks/{chunk_index}` — validate
-  RIFF/WAVE and SHA-256, require the pinned IdeaHub terminology snapshot, perform
-  one accounted Gemini transcription request and return structured transcript
-  JSON.
+  RIFF/WAVE and SHA-256, initialize the pinned IdeaHub terminology snapshot if
+  this is the first server-visible request from a legacy client, perform one
+  accounted Gemini transcription request and return structured transcript JSON.
 - `POST /voice-intake/v1/sessions/{session_id}/complete` — summarize ordered
   client transcripts with the same terminology card and publish one IdeaHub
   intake transaction.
@@ -84,18 +84,22 @@ or a stale fallback. The resulting snapshot is held in bounded process memory,
 durably mirrored to the existing `/ledger` volume, and included unchanged in
 every transcription and the synthesis request for that session. Repeating
 session creation with the same `session_id`, including after a process restart,
-returns the original pin and does not resolve a new card. The pin is removed
-only after verified publication reconciliation. `terminology_card_version` is
+returns the original pin and does not resolve a new card. A deployed legacy
+client that does not call the explicit session-creation route performs the same
+fresh, fail-closed initialization on its first valid chunk upload, before any
+transcription. Later chunks and completion reuse that exact durable pin. The pin
+is removed only after verified publication reconciliation.
+`terminology_card_version` is
 the card schema version and is not used as a freshness key; exact freshness and
 identity come from the Git commit and blob SHA.
 
-If GitHub or the current card cannot be read at session start, session creation
-fails with a typed retryable error. An older snapshot is never relabelled as
-current. If the control-plane restarts during an active recording, it reloads
-the exact pin before accepting chunks or completion. If the durable pin is
-missing or invalid, chunk/complete fails closed with
-`voice_session_terminology_not_initialized` (or a typed state error) rather
-than mixing snapshots.
+If GitHub or the current card cannot be read at explicit session start or the
+legacy client's first chunk, the request fails with a typed retryable error and
+no transcription occurs. An older snapshot is never relabelled as current. If
+the control-plane restarts during an active recording, it reloads the exact pin
+before accepting later chunks or completion. Completion without either an
+explicit start or a successfully initialized chunk fails closed with
+`voice_session_terminology_not_initialized` rather than mixing snapshots.
 
 The generated packet records `terminology_card_path`,
 `terminology_card_version`, `terminology_card_commit`,
