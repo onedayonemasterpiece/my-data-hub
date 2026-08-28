@@ -63,13 +63,16 @@ This endpoint performs no Google request.
   ],
   "typical_gemini_requests": 2,
   "max_session_seconds": 3600,
+  "max_session_bytes": 67108864,
   "server_audio_persistence": "temporary_until_github_readback"
 }
 ```
 
 `max_session_seconds` is configurable but must never be configured below
 3,600 seconds. Twenty minutes is the priority exactly-two-request acceptance
-case, not an API duration limit.
+case, not an API duration limit. `max_session_bytes` is the server's aggregate
+admission bound across all transport chunks; Android must retain local files
+when that bound is rejected and must not keep uploading unchanged data.
 
 ### Create or re-open a durable session
 
@@ -322,18 +325,27 @@ set and HTTP mapping is:
 | 409 | `session_metadata_conflict` | Do not overwrite; surface reconciliation. |
 | 409 | `chunk_conflict` | Same index differs from its durable receipt; reconcile local ledger. |
 | 409 | `complete_manifest_conflict` | Session was already closed with another manifest. |
-| 409 | `chunks_incomplete` | Upload the missing contiguous indices, then repeat complete. |
-| 413 | `request_too_large`, `session_too_large` | Do not retry unchanged data. |
-| 415 | `audio_content_type_unsupported` | Encode the advertised capabilities format. |
-| 422 | `session_invalid`, `chunk_headers_invalid`, `chunk_sha256_mismatch`, `audio_invalid`, `complete_manifest_invalid` | Correct local request/data before retry. |
-| 429 | `google_quota_wait` | No provider POST occurred; schedule no earlier than `retry_after_seconds`/status `retry_at`. |
-| 502/504 | `provider_pre_send_failed` | Retryable only as explicitly reported; no provider POST occurred. |
-| 502/504 | `provider_outcome_ambiguous` | Do not retry the provider stage; `reconciliation_required:true`. |
-| 503 | `voice_intake_disabled`, `spool_unavailable`, `terminology_unavailable` | Preserve local files and retry only if `retryable:true`. |
+| 409 | `chunks_missing` | Upload the missing contiguous indices, then repeat complete. |
+| 409 | `complete_manifest_mismatch` | The close manifest differs from durable chunk receipts; reconcile locally. |
+| 409 | `chunk_sha256_mismatch`, `session_not_receiving` | Do not overwrite server state; reconcile the local segment/session. |
+| 413 | `request_too_large`, `session_size_limit_exceeded`, `session_audio_limit_exceeded` | Do not retry unchanged data. |
+| 415 | `audio_content_type_invalid` | Encode the advertised capabilities format. |
+| 422 | `session_invalid`, `chunk_metadata_invalid`, `audio_invalid`, `audio_probe_invalid`, `audio_container_invalid`, `audio_codec_invalid`, `audio_format_invalid`, `audio_duration_invalid`, `audio_duration_mismatch`, `complete_manifest_invalid`, `complete_time_invalid` | Correct local request/data before retry. |
+| 503 | `voice_intake_disabled`, `voice_intake_v2_disabled`, `voice_intake_v2_worker_unavailable`, `spool_unavailable`, `terminology_resolver_unavailable`, `terminology_unavailable` | Preserve local files and retry only if `retryable:true`. |
 
 An implementation may add more typed codes without changing these meanings.
 It must never label a post-send ambiguous provider result as an ordinary
 retryable error.
+
+Gemini and GitHub work is asynchronous, so quota/provider/publication failures
+are reported by `GET .../sessions/{session_id}` through `state`, `error_code`,
+`retryable`, `retry_at`, and `reconciliation_required`; they are not fictional
+HTTP 429/502/504 responses from `POST .../complete`. Pre-send quota codes are
+`quota_exhausted_rpm`, `quota_exhausted_tpm`, or `quota_exhausted_rpd` and may
+enter `waiting_quota`. Known sent failures include `provider_429` and
+`provider_rejected_request`. `provider_timeout`, `provider_network_error`,
+limiter-finalization ambiguity, and ambiguous GitHub outcomes require
+reconciliation rather than a hidden retry.
 
 ## Retry and polling rules
 

@@ -29,7 +29,7 @@ lanes:
     forbidden_files: ['**']
     expected_output: read-only evidence and safe base recommendation
     verification_scope: inspection_only
-    status: planned
+    status: completed
   - id: CORE-V2
     role: worker
     effort: high
@@ -53,7 +53,7 @@ lanes:
       - docs/**
     expected_output: committed implementation and targeted tests
     verification_scope: targeted
-    status: planned
+    status: completed
   - id: PUBLISH-V2
     role: worker
     effort: high
@@ -72,7 +72,7 @@ lanes:
       - src/my_data_hub/voice_intake/contracts.py
     expected_output: mapping first, committed integration after core contract freezes
     verification_scope: targeted
-    status: planned
+    status: completed
   - id: TEST-V2
     role: worker
     effort: high
@@ -90,7 +90,7 @@ lanes:
       - src/**
     expected_output: committed regression suite and gap report
     verification_scope: full_local
-    status: planned
+    status: completed
   - id: DOCS-V2
     role: worker
     effort: high
@@ -109,7 +109,7 @@ lanes:
       - tests/**
     expected_output: committed authoritative handoff and rollback runbook
     verification_scope: inspection_only
-    status: planned
+    status: completed
   - id: DEPLOY-LIVE
     role: planner
     effort: high
@@ -123,7 +123,7 @@ lanes:
     forbidden_files: ['**']
     expected_output: deployment map followed by integrator-owned live receipts
     verification_scope: inspection_only
-    status: planned
+    status: in_progress
   - id: REPORT
     role: merge_reviewer
     effort: high
@@ -138,4 +138,4 @@ lanes:
     forbidden_files: []
     expected_output: integrated clean branch, full gates, live evidence and status matrix
     verification_scope: full_local
-    status: planned
+    status: in_progress

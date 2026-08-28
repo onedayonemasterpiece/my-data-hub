@@ -89,6 +89,8 @@ receipts. Required properties:
 - host directory mode `0700`; regular files `0600`;
 - read-only container root remains enabled;
 - bounded request body and bounded total session size/duration;
+- default aggregate transport bound 64 MiB, enforced atomically in the ledger
+  independently of the per-chunk bound;
 - upload writes a same-filesystem temp file, calls `fsync`, atomically renames,
   then durably records the receipt before returning success;
 - hashes are computed from actual body bytes; session IDs and indices are
