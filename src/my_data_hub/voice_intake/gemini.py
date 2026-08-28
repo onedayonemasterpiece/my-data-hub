@@ -287,14 +287,14 @@ class GeminiVoiceService:
             preflight.limit.tpm_reserve_extra,
             math.ceil(max_output_tokens * 0.25),
         )
-        requested = text_tokens + audio_tokens + max_output_tokens + completion_margin
+        requested = int(text_tokens + audio_tokens + max_output_tokens + completion_margin)
         if requested > preflight.limit.tpm:
             raise VoiceIntakeError(
                 "voice_request_exceeds_model_tpm",
                 retryable=False,
                 status_code=413,
             )
-        return max(1, requested)
+        return requested
 
     async def _generate(
         self,
