@@ -90,10 +90,13 @@ def attach_voice_intake_v2_routes(
     terminology_resolver: TerminologyResolver | None = None,
     worker: VoiceIntakeV2Worker | None = None,
     require_worker: bool = True,
+    availability_error: str | None = None,
 ) -> FastAPI:
     auth = auth_settings or VoiceIntakeSettings.from_env()
     config = settings or VoiceIntakeV2Settings.from_env()
-    ledger = store or (VoiceIntakeV2Store(config.spool_root) if config.enabled else None)
+    ledger = store
+    if ledger is None and config.enabled and availability_error is None:
+        ledger = VoiceIntakeV2Store(config.spool_root)
     tools = media or BoundedMediaTools(
         ffprobe_timeout=config.ffprobe_timeout_seconds,
         ffmpeg_timeout=config.ffmpeg_timeout_seconds,
@@ -115,6 +118,8 @@ def attach_voice_intake_v2_routes(
         denied = _require_token(auth, authorization)
         if denied is not None:
             return denied
+        if availability_error is not None:
+            return _error(503, availability_error, retryable=True)
         if not config.enabled or ledger is None:
             return _error(503, "voice_intake_v2_disabled")
         if require_worker and worker is None:
@@ -135,6 +140,7 @@ def attach_voice_intake_v2_routes(
             "capture_policies": ["continuous_v1", "voice_activity_auto_pause_v1"],
             "typical_gemini_requests": 2,
             "max_session_seconds": config.max_session_seconds,
+            "max_session_bytes": config.max_session_bytes,
             "server_audio_persistence": "temporary_until_github_readback",
         }
 
@@ -168,7 +174,7 @@ def attach_voice_intake_v2_routes(
     @router.put("/sessions/{session_id}/chunks/{chunk_index}", response_model=None)
     async def upload_chunk(
         session_id: str,
-        chunk_index: int,
+        chunk_index: str,
         request: Request,
         authorization: str | None = Header(default=None),
         chunk_sha256: str | None = Header(default=None, alias="X-Chunk-SHA256"),
@@ -184,7 +190,8 @@ def attach_voice_intake_v2_routes(
         try:
             if not __import__("re").fullmatch(r"voice-[0-9]{8}-[0-9]{6}-[a-f0-9]{8}", session_id):
                 raise ValueError
-            if not 0 <= chunk_index <= 10_000:
+            parsed_chunk_index = _parse_integer(chunk_index)
+            if parsed_chunk_index > 10_000:
                 raise ValueError
             duration = _parse_integer(duration_ms, minimum=1)
             audio_start = _parse_integer(audio_start_ms)
@@ -211,7 +218,7 @@ def attach_voice_intake_v2_routes(
             return _error(400, "content_length_invalid")
         directory = ledger.session_directory(session_id) / "chunks"
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        temporary = directory / f".{chunk_index}.{uuid4().hex}.upload"
+        temporary = directory / f".{parsed_chunk_index}.{uuid4().hex}.upload"
         actual = hashlib.sha256()
         size = 0
         created_final: Path | None = None
@@ -235,7 +242,24 @@ def attach_voice_intake_v2_routes(
                 return _error(422, exc.code)
             if abs(probe.duration_ms - duration) > config.duration_tolerance_ms:
                 return _error(422, "audio_duration_mismatch")
-            final = directory / f"{chunk_index:05d}-{chunk_sha256}.m4a"
+            final = directory / f"{parsed_chunk_index:05d}-{chunk_sha256}.m4a"
+            candidate = ChunkReceipt(
+                session_id=session_id, chunk_index=parsed_chunk_index, sha256=chunk_sha256,
+                duration_ms=duration, audio_start_ms=audio_start, audio_end_ms=audio_end,
+                wall_start_ms=wall_start, wall_end_ms=wall_end, size_bytes=size, path=str(final),
+            )
+            if ledger.get_chunk(session_id, parsed_chunk_index) is not None:
+                receipt, status = ledger.record_chunk(
+                    candidate, max_session_bytes=config.max_session_bytes
+                )
+                receipt_persisted = True
+                return {
+                    "api_version": API_VERSION, "session_id": session_id,
+                    "chunk_index": parsed_chunk_index, "accepted": True,
+                    "duplicate": receipt.duplicate, "sha256": receipt.sha256,
+                    "duration_ms": receipt.duration_ms, "size_bytes": receipt.size_bytes,
+                    "chunks_received": status.chunks_received, "bytes_received": status.bytes_received,
+                }
             if final.exists():
                 temporary.unlink()
             else:
@@ -246,14 +270,13 @@ def attach_voice_intake_v2_routes(
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
-            receipt, status = ledger.record_chunk(ChunkReceipt(
-                session_id=session_id, chunk_index=chunk_index, sha256=chunk_sha256,
-                duration_ms=duration, audio_start_ms=audio_start, audio_end_ms=audio_end,
-                wall_start_ms=wall_start, wall_end_ms=wall_end, size_bytes=size, path=str(final),
-            ))
+            receipt, status = ledger.record_chunk(
+                candidate, max_session_bytes=config.max_session_bytes
+            )
             receipt_persisted = True
             return {
-                "api_version": API_VERSION, "session_id": session_id, "chunk_index": chunk_index,
+                "api_version": API_VERSION, "session_id": session_id,
+                "chunk_index": parsed_chunk_index,
                 "accepted": True, "duplicate": receipt.duplicate, "sha256": receipt.sha256,
                 "duration_ms": receipt.duration_ms, "size_bytes": receipt.size_bytes,
                 "chunks_received": status.chunks_received, "bytes_received": status.bytes_received,

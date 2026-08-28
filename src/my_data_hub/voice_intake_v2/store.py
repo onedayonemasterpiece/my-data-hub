@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -239,7 +240,9 @@ class VoiceIntakeV2Store:
     def _chunk(row: sqlite3.Row) -> ChunkReceipt:
         return ChunkReceipt(**{key: row[key] for key in ChunkReceipt.__dataclass_fields__ if key != "duplicate"})
 
-    def record_chunk(self, receipt: ChunkReceipt) -> tuple[ChunkReceipt, StatusResponse]:
+    def record_chunk(
+        self, receipt: ChunkReceipt, *, max_session_bytes: int | None = None
+    ) -> tuple[ChunkReceipt, StatusResponse]:
         now = self._clock()
         with self._transaction() as connection:
             session = connection.execute(
@@ -268,6 +271,13 @@ class VoiceIntakeV2Store:
                 ), self.status(receipt.session_id, connection=connection)
             if session["state"] != "receiving":
                 raise StoreError("session_not_receiving")
+            if max_session_bytes is not None:
+                aggregate = connection.execute(
+                    "SELECT COALESCE(SUM(size_bytes),0) AS bytes FROM chunks WHERE session_id=?",
+                    (receipt.session_id,),
+                ).fetchone()
+                if aggregate["bytes"] + receipt.size_bytes > max_session_bytes:
+                    raise StoreError("session_size_limit_exceeded", status_code=413)
             connection.execute(
                 """INSERT INTO chunks(
                     session_id,chunk_index,sha256,duration_ms,audio_start_ms,audio_end_ms,
@@ -304,6 +314,9 @@ class VoiceIntakeV2Store:
                         (now, session_id),
                     )
                 return self.status(session_id, connection=connection), True
+            create = json.loads(session["create_json"])
+            if datetime.fromisoformat(request.ended_at) < datetime.fromisoformat(create["started_at"]):
+                raise StoreError("complete_time_invalid", status_code=422)
             rows = connection.execute(
                 "SELECT * FROM chunks WHERE session_id=? ORDER BY chunk_index", (session_id,)
             ).fetchall()
@@ -393,7 +406,8 @@ class VoiceIntakeV2Store:
                 "summarizing" if row["summary_json"] is None else "publishing"
             )
             changed = connection.execute(
-                """UPDATE sessions SET state=?,lease_owner=?,lease_until=?,updated_at=?
+                """UPDATE sessions SET state=?,lease_owner=?,lease_until=?,retryable=0,
+                   retry_at=NULL,error_code=NULL,reconciliation_required=0,updated_at=?
                    WHERE session_id=? AND (lease_until IS NULL OR lease_until<?)""",
                 (state, owner, now + lease_seconds, now, row["session_id"], now),
             ).rowcount

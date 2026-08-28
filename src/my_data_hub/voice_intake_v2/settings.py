@@ -29,6 +29,7 @@ class VoiceIntakeV2Settings:
     ffprobe_timeout_seconds: int
     ffmpeg_timeout_seconds: int
     duration_tolerance_ms: int
+    max_session_bytes: int = 64 * 1024 * 1024
 
     @classmethod
     def from_env(cls) -> VoiceIntakeV2Settings:
@@ -47,6 +48,9 @@ class VoiceIntakeV2Settings:
             ffprobe_timeout_seconds=_integer("MY_DATA_HUB_VOICE_V2_FFPROBE_TIMEOUT_SECONDS", 15),
             ffmpeg_timeout_seconds=_integer("MY_DATA_HUB_VOICE_V2_FFMPEG_TIMEOUT_SECONDS", 600),
             duration_tolerance_ms=_integer("MY_DATA_HUB_VOICE_V2_DURATION_TOLERANCE_MS", 2000),
+            max_session_bytes=_integer(
+                "MY_DATA_HUB_VOICE_V2_MAX_SESSION_BYTES", 64 * 1024 * 1024
+            ),
         )
         result.validate()
         return result
@@ -60,6 +64,8 @@ class VoiceIntakeV2Settings:
             raise VoiceIntakeV2ConfigurationError("v2 JSON bound must be 64 KiB..8 MiB")
         if self.max_session_seconds < 3600:
             raise VoiceIntakeV2ConfigurationError("v2 safety limit must be at least 60 minutes")
+        if self.max_session_bytes < 16 * 1024 * 1024 or self.max_session_bytes > 512 * 1024 * 1024:
+            raise VoiceIntakeV2ConfigurationError("v2 session byte bound must be 16 MiB..512 MiB")
         if self.active_ttl_seconds < 7 * 24 * 3600:
             raise VoiceIntakeV2ConfigurationError("v2 active TTL must be at least seven days")
         if not 30 <= self.lease_seconds <= 3600:
@@ -70,4 +76,3 @@ class VoiceIntakeV2Settings:
             raise VoiceIntakeV2ConfigurationError("ffprobe timeout must be 1..60 seconds")
         if not 10 <= self.ffmpeg_timeout_seconds <= 1800:
             raise VoiceIntakeV2ConfigurationError("ffmpeg timeout must be 10..1800 seconds")
-

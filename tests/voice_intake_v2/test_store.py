@@ -119,3 +119,25 @@ def test_purge_audio_fails_closed_when_recursive_delete_does_not_remove_director
         store.purge_audio(SESSION_ID)
     assert chunks.is_dir()
     assert not store.status(SESSION_ID).server_audio_purged
+
+
+def test_claim_after_waiting_quota_clears_stale_error_fields(
+    tmp_path, create_request, complete_request, terminology
+):
+    now = [1_000_000.0]
+    store = VoiceIntakeV2Store(tmp_path / "spool", clock=lambda: now[0])
+    store.create_session(create_request, terminology=terminology)
+    path = store.session_directory(SESSION_ID) / "chunks" / f"00000-{SHA}.m4a"
+    path.write_bytes(b"audio")
+    store.record_chunk(receipt(path))
+    store.complete(SESSION_ID, complete_request)
+    assert store.claim("worker-1", 30) is not None
+    store.mark_error(
+        SESSION_ID, "worker-1", code="quota_wait", retryable=True, retry_at=now[0] + 10
+    )
+    now[0] += 11
+    assert store.claim("worker-2", 30) is not None
+    status = store.status(SESSION_ID)
+    assert not status.retryable
+    assert status.retry_at is None
+    assert status.error_code is None

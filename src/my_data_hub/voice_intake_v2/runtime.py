@@ -36,7 +36,15 @@ def attach_configured_voice_intake_v2(
             settings=config,
         )
     runtime_publisher = publisher or V2IdeaHubPublisher(auth)
-    store = VoiceIntakeV2Store(config.spool_root)
+    try:
+        store = VoiceIntakeV2Store(config.spool_root)
+    except Exception:
+        # V2 is additive. A broken/unavailable private spool must fail V2
+        # closed without preventing the existing V1 application from serving.
+        return attach_voice_intake_v2_routes(
+            app, auth_settings=auth, settings=config, require_worker=False,
+            availability_error="spool_unavailable",
+        )
     media = BoundedMediaTools(
         ffprobe_timeout=config.ffprobe_timeout_seconds,
         ffmpeg_timeout=config.ffmpeg_timeout_seconds,

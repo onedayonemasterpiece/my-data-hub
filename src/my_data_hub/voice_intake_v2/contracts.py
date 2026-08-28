@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Final, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -40,6 +42,13 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _aware_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("timestamp must include an explicit UTC offset")
+    return parsed
+
+
 class AudioFormat(StrictModel):
     container: Literal["mp4"]
     codec: Literal["aac_lc"]
@@ -71,6 +80,13 @@ class SessionCreateRequest(StrictModel):
     def validate_vad(self) -> SessionCreateRequest:
         if self.capture_policy == "voice_activity_auto_pause_v1" and self.vad is None:
             raise ValueError("VAD metadata is required for automatic pause")
+        started = _aware_datetime(self.started_at)
+        try:
+            zone = ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("timezone must be an IANA timezone") from exc
+        if started.utcoffset() != started.astimezone(zone).utcoffset():
+            raise ValueError("started_at offset does not match timezone")
         return self
 
 
@@ -101,6 +117,7 @@ class SessionCompleteRequest(StrictModel):
 
     @model_validator(mode="after")
     def validate_manifest(self) -> SessionCompleteRequest:
+        _aware_datetime(self.ended_at)
         if self.chunk_count != len(self.chunks):
             raise ValueError("chunk_count does not match chunks")
         if [item.chunk_index for item in self.chunks] != list(range(self.chunk_count)):

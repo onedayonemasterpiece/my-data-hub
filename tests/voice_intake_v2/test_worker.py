@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ from my_data_hub.voice_intake_v2.contracts import (
     PublicationReceipt,
     SessionCompleteRequest,
 )
-from my_data_hub.voice_intake_v2.media import MediaProbe
+from my_data_hub.voice_intake_v2.media import BoundedMediaTools, MediaProbe
 from my_data_hub.voice_intake_v2.settings import VoiceIntakeV2Settings
 from my_data_hub.voice_intake_v2.store import ChunkReceipt, StoreError, VoiceIntakeV2Store
 from my_data_hub.voice_intake_v2.worker import StageFailure, VoiceIntakeV2Worker
@@ -121,6 +122,9 @@ async def test_n_chunks_result_in_exactly_two_aggregate_calls_and_purge_after_re
         "manual_pause_ms": 0, "recorded_audio_ms": 480000,
         "auto_silence_skipped_ms": 0, "chunk_count": 2, "chunks": chunks,
     }))
+    # Re-open the SQLite/spool as a restarted process before either inference
+    # stage; the one pinned terminology snapshot must survive and reach both.
+    store = VoiceIntakeV2Store(store.root)
     inference, publisher = Inference(), Publisher()
     worker = VoiceIntakeV2Worker(
         store, settings(store.root), media=Media(), inference=inference, publisher=publisher,
@@ -139,6 +143,57 @@ async def test_n_chunks_result_in_exactly_two_aggregate_calls_and_purge_after_re
     assert projection.create["client_version"] == "1.1.0"
     assert len(projection.transport_chunks) == 2
     assert projection.transcription_request_uid != projection.summary_request_uid
+    assert all(
+        call[-1]["source_commit_sha"] == terminology["source_commit_sha"]
+        for call in inference.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_two_m4a_worker_pipeline_normalizes_once_and_runs_two_stages(
+    tmp_path, create_request, terminology
+):
+    store = VoiceIntakeV2Store(tmp_path / "spool")
+    store.create_session(create_request, terminology=terminology)
+    media = BoundedMediaTools(ffprobe_timeout=10, ffmpeg_timeout=30)
+    chunks = []
+    audio_cursor = 0
+    for index, frequency in enumerate((440, 660)):
+        path = store.session_directory(SESSION_ID) / "chunks" / f"{index:05d}-fixture.m4a"
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+            f"sine=frequency={frequency}:sample_rate=16000:duration=1", "-ac", "1",
+            "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "32k", "-y", str(path),
+        )
+        assert await process.wait() == 0
+        probe = await media.probe(path)
+        digest = f"{index + 1:064x}"
+        start = audio_cursor
+        audio_cursor += probe.duration_ms
+        store.record_chunk(ChunkReceipt(
+            session_id=SESSION_ID, chunk_index=index, sha256=digest,
+            duration_ms=probe.duration_ms, audio_start_ms=start, audio_end_ms=audio_cursor,
+            wall_start_ms=start, wall_end_ms=audio_cursor, size_bytes=path.stat().st_size,
+            path=str(path),
+        ))
+        chunks.append({
+            "chunk_index": index, "sha256": digest, "duration_ms": probe.duration_ms,
+            "audio_start_ms": start, "audio_end_ms": audio_cursor,
+            "wall_start_ms": start, "wall_end_ms": audio_cursor,
+        })
+    store.complete(SESSION_ID, SessionCompleteRequest.model_validate({
+        "ended_at": "2026-08-28T12:34:58+02:00", "wall_elapsed_ms": audio_cursor,
+        "manual_pause_ms": 0, "recorded_audio_ms": audio_cursor,
+        "auto_silence_skipped_ms": 0, "chunk_count": 2, "chunks": chunks,
+    }))
+    inference = Inference()
+    worker = VoiceIntakeV2Worker(
+        store, settings(store.root), media=media, inference=inference, publisher=Publisher(),
+        owner="worker",
+    )
+    assert await worker.process_once()
+    assert [call[0] for call in inference.calls] == ["transcribe", "summarize"]
+    assert store.status(SESSION_ID).state == "published_verified"
 
 
 @pytest.mark.asyncio
@@ -155,8 +210,9 @@ async def test_verified_receipt_is_durable_before_audio_purge(
         size_bytes=3, path=str(path),
     ))
     store.complete(SESSION_ID, complete_request)
+    inference = Inference()
     worker = VoiceIntakeV2Worker(
-        store, settings(store.root), media=Media(), inference=Inference(), publisher=Publisher(),
+        store, settings(store.root), media=Media(), inference=inference, publisher=Publisher(),
         owner="worker",
     )
     assert await worker.process_once()
@@ -239,8 +295,9 @@ async def test_failed_audio_deletion_never_marks_server_audio_purged(
         raise StoreError("server_audio_purge_failed", status_code=500)
 
     monkeypatch.setattr(store, "purge_audio", fail_purge)
+    inference = Inference()
     worker = VoiceIntakeV2Worker(
-        store, settings(store.root), media=Media(), inference=Inference(), publisher=Publisher(),
+        store, settings(store.root), media=Media(), inference=inference, publisher=Publisher(),
         owner="worker",
     )
     assert await worker.process_once()
@@ -248,7 +305,15 @@ async def test_failed_audio_deletion_never_marks_server_audio_purged(
     assert status.github_verified
     assert not status.server_audio_purged
     assert status.error_code == "server_audio_purge_failed"
+    assert status.retryable
     assert (store.session_directory(SESSION_ID) / "chunks").is_dir()
+    monkeypatch.undo()
+    store.complete(SESSION_ID, complete_request)
+    assert await worker.process_once()
+    recovered = store.status(SESSION_ID)
+    assert recovered.state == "published_verified" and recovered.server_audio_purged
+    assert not recovered.retryable and recovered.error_code is None
+    assert [call[0] for call in inference.calls] == ["transcribe", "summarize"]
 
 
 @pytest.mark.asyncio

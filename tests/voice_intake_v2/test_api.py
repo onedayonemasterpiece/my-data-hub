@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -33,14 +34,15 @@ def config(root: Path) -> VoiceIntakeV2Settings:
     )
 
 
-def build(tmp_path, auth_settings, terminology):
+def build(tmp_path, auth_settings, terminology, *, settings_override=None):
     media = FakeMedia()
 
     async def resolve():
         return terminology
 
     app = attach_voice_intake_v2_routes(
-        FastAPI(), auth_settings=auth_settings, settings=config(tmp_path / "spool"),
+        FastAPI(), auth_settings=auth_settings,
+        settings=settings_override or config(tmp_path / "spool"),
         store=VoiceIntakeV2Store(tmp_path / "spool"), media=media,
         terminology_resolver=resolve, require_worker=False,
     )
@@ -128,6 +130,72 @@ def test_changed_chunk_conflict_removes_unreferenced_final(
     assert response.status_code == 409 and response.json()["detail"]["code"] == "chunk_conflict"
     chunk_dir = app.state.voice_intake_v2_store.session_directory(SESSION_ID) / "chunks"
     assert sorted(path.name for path in chunk_dir.iterdir()) == [f"00000-{first_sha}.m4a"]
+
+
+def test_exact_retry_after_audio_purge_does_not_resurrect_server_audio(
+    tmp_path, auth_settings, terminology, create_request, complete_payload
+):
+    client, _media, app = build(tmp_path, auth_settings, terminology)
+    auth = {"Authorization": f"Bearer {'x' * 32}"}
+    client.post("/voice-intake/v2/sessions", json=create_request.model_dump(mode="json"), headers=auth)
+    audio = b"independent-m4a"
+    sha = hashlib.sha256(audio).hexdigest()
+    assert client.put(
+        f"/voice-intake/v2/sessions/{SESSION_ID}/chunks/0", content=audio, headers=headers(sha)
+    ).status_code == 200
+    complete_payload["chunks"][0]["sha256"] = sha
+    assert client.post(
+        f"/voice-intake/v2/sessions/{SESSION_ID}/complete", json=complete_payload, headers=auth
+    ).status_code == 202
+    store = app.state.voice_intake_v2_store
+    store.purge_audio(SESSION_ID)
+    response = client.put(
+        f"/voice-intake/v2/sessions/{SESSION_ID}/chunks/0", content=audio, headers=headers(sha)
+    )
+    assert response.status_code == 200 and response.json()["duplicate"] is True
+    chunks = store.session_directory(SESSION_ID) / "chunks"
+    assert not tuple(chunks.glob("*.m4a"))
+
+
+def test_non_integer_chunk_index_uses_v2_error_envelope(
+    tmp_path, auth_settings, terminology
+):
+    client, _media, _app = build(tmp_path, auth_settings, terminology)
+    response = client.put(
+        f"/voice-intake/v2/sessions/{SESSION_ID}/chunks/not-an-integer",
+        content=b"x",
+        headers=headers(hashlib.sha256(b"x").hexdigest()),
+    )
+    assert response.status_code == 422
+    assert response.json()["api_version"] == "2.0"
+    assert response.json()["detail"]["code"] == "chunk_metadata_invalid"
+
+
+def test_cumulative_session_bytes_are_bounded_atomically(
+    tmp_path, auth_settings, terminology, create_request
+):
+    bounded = replace(config(tmp_path / "spool"), max_session_bytes=20)
+    client, _media, app = build(
+        tmp_path, auth_settings, terminology, settings_override=bounded
+    )
+    auth = {"Authorization": f"Bearer {'x' * 32}"}
+    client.post("/voice-intake/v2/sessions", json=create_request.model_dump(mode="json"), headers=auth)
+    first = b"a" * 15
+    second = b"b" * 15
+    assert client.put(
+        f"/voice-intake/v2/sessions/{SESSION_ID}/chunks/0",
+        content=first,
+        headers=headers(hashlib.sha256(first).hexdigest()),
+    ).status_code == 200
+    response = client.put(
+        f"/voice-intake/v2/sessions/{SESSION_ID}/chunks/1",
+        content=second,
+        headers=headers(hashlib.sha256(second).hexdigest()),
+    )
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "session_size_limit_exceeded"
+    status = app.state.voice_intake_v2_store.status(SESSION_ID)
+    assert status.chunks_received == 1 and status.bytes_received == len(first)
 
 
 def test_complete_rejects_unaccounted_wall_elapsed(

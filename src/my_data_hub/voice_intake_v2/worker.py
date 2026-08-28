@@ -142,9 +142,18 @@ class VoiceIntakeV2Worker:
                 retry_at=retry_at,
                 reconciliation_required=exc.reconciliation_required,
             )
-        except (MediaError, StoreError) as exc:
+        except MediaError as exc:
             self.store.mark_error(
                 session.session_id, self.owner, code=str(exc), retryable=False,
+                reconciliation_required=False,
+            )
+        except StoreError as exc:
+            # The verified GitHub receipt is already durable when an ordinary
+            # filesystem deletion fails. Expose an explicit retry path without
+            # repeating either inference stage or claiming that audio vanished.
+            retryable = exc.code == "server_audio_purge_failed"
+            self.store.mark_error(
+                session.session_id, self.owner, code=exc.code, retryable=retryable,
                 reconciliation_required=False,
             )
         return True
