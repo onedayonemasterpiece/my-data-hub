@@ -13,15 +13,19 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 
-from my_data_hub.google_ai.contracts import LimiterLease
-from my_data_hub.google_ai.errors import GoogleAIError
+from my_data_hub.google_ai.contracts import LimiterLease, LimiterPreflight
+from my_data_hub.google_ai.errors import GoogleAIError, GoogleAIErrorCode
 from my_data_hub.google_ai.http import (
     AiohttpBoundedJSONRequester,
     BoundedHTTPError,
     BoundedHTTPResponse,
     BoundedJSONRequester,
 )
-from my_data_hub.google_ai.limiter import SupabaseGoogleAILimiter
+from my_data_hub.google_ai.limiter import (
+    BUCKET_STRATEGY,
+    LIMITER_CONTRACT,
+    SupabaseGoogleAILimiter,
+)
 
 from .contracts import (
     ModelUsage,
@@ -37,6 +41,14 @@ from .errors import VoiceIntakeError
 from .settings import VoiceIntakeSettings
 
 T = TypeVar("T", bound=BaseModel)
+
+# Gemini documents audio admission at roughly 32 tokens/second. Keep a small
+# safety margin so duration rounding or prompt overhead cannot under-reserve.
+AUDIO_TOKENS_PER_SECOND = 35
+# Russian text commonly tokenizes more densely than English. Two Unicode
+# characters per token is intentionally conservative without adding a second
+# provider countTokens request to every recording operation.
+TEXT_CHARACTERS_PER_TOKEN = 2
 
 TRANSCRIBE_PROMPT = """Ты выполняешь максимально точную расшифровку русского голосового фрагмента владельца IdeaHub.
 Верни только JSON по заданной схеме.
@@ -71,7 +83,80 @@ SUMMARY_PROMPT = """Ниже находится полная упорядоче�
 
 
 class VoiceLimiter(SupabaseGoogleAILimiter):
-    """Adds generic GenerateContent finalization to the canonical limiter adapter."""
+    """GenerateContent accounting on the canonical shared Google AI ledger."""
+
+    async def reserve_generate_content(
+        self,
+        *,
+        request_uid: str,
+        attempt_no: int,
+        model: str,
+        preflight: LimiterPreflight,
+        consumer: str,
+        account_name: str,
+        reserved_tpm: int,
+    ) -> LimiterLease:
+        if not 1 <= reserved_tpm <= preflight.limit.tpm:
+            raise GoogleAIError(GoogleAIErrorCode.QUOTA_EXHAUSTED_TPM)
+        result = await self._rpc(
+            "google_ai_reserve",
+            {
+                "p_request_uid": request_uid,
+                "p_attempt_no": attempt_no,
+                "p_consumer": consumer,
+                "p_account_name": account_name,
+                "p_model": model,
+                "p_reserved_tpm": reserved_tpm,
+                "p_candidate_key_ids": list(preflight.candidate_key_ids),
+            },
+            attempts=2,
+        )
+        if not isinstance(result, Mapping):
+            raise GoogleAIError(GoogleAIErrorCode.SHARED_LIMITER_UNAVAILABLE, retryable=True)
+        self._validate_reserve_markers(result)
+        if result.get("ok") is not True:
+            reason = str(result.get("blocked_reason") or "")
+            retry_value = result.get("retry_after_ms")
+            retry_after = (
+                retry_value
+                if isinstance(retry_value, int) and not isinstance(retry_value, bool) and retry_value >= 0
+                else None
+            )
+            mapping = {
+                "rpm": GoogleAIErrorCode.QUOTA_EXHAUSTED_RPM,
+                "tpm": GoogleAIErrorCode.QUOTA_EXHAUSTED_TPM,
+                "rpd": GoogleAIErrorCode.QUOTA_EXHAUSTED_RPD,
+                "provider_429": GoogleAIErrorCode.PROVIDER_429,
+                "model_not_found": GoogleAIErrorCode.MODEL_LIMIT_NOT_FOUND,
+            }
+            code = mapping.get(reason, GoogleAIErrorCode.SHARED_LIMITER_UNAVAILABLE)
+            raise GoogleAIError(
+                code,
+                retryable=code is not GoogleAIErrorCode.MODEL_LIMIT_NOT_FOUND,
+                retry_after_ms=retry_after,
+            )
+        env_name = result.get("env_var_name")
+        fields = (
+            result.get("api_key_id"),
+            env_name,
+            result.get("key_alias"),
+            result.get("quota_scope"),
+        )
+        if not all(isinstance(value, str) and value.strip() for value in fields):
+            raise GoogleAIError(GoogleAIErrorCode.KEY_METADATA_MISSING)
+        if env_name not in preflight.candidate_env_names:
+            raise GoogleAIError(GoogleAIErrorCode.KEY_METADATA_MISSING)
+        return LimiterLease(
+            request_uid=request_uid,
+            attempt_no=attempt_no,
+            api_key_id=str(result["api_key_id"]),
+            env_var_name=str(env_name),
+            key_alias=str(result["key_alias"]),
+            quota_scope=str(result["quota_scope"]),
+            reserved_tpm=reserved_tpm,
+            contract=LIMITER_CONTRACT,
+            bucket_strategy=BUCKET_STRATEGY,
+        )
 
     async def finalize_generate_content(
         self,
@@ -184,6 +269,33 @@ class GeminiVoiceService:
             for chunk in chunks
         )
 
+    @staticmethod
+    def _reservation_tpm(
+        *,
+        preflight: LimiterPreflight,
+        prompt: str,
+        duration_ms: int | None,
+        max_output_tokens: int,
+    ) -> int:
+        text_tokens = max(1, math.ceil(len(prompt) / TEXT_CHARACTERS_PER_TOKEN))
+        audio_tokens = (
+            math.ceil(max(0, duration_ms) / 1000 * AUDIO_TOKENS_PER_SECOND)
+            if duration_ms is not None
+            else 0
+        )
+        completion_margin = max(
+            preflight.limit.tpm_reserve_extra,
+            math.ceil(max_output_tokens * 0.25),
+        )
+        requested = text_tokens + audio_tokens + max_output_tokens + completion_margin
+        if requested > preflight.limit.tpm:
+            raise VoiceIntakeError(
+                "voice_request_exceeds_model_tpm",
+                retryable=False,
+                status_code=413,
+            )
+        return max(1, requested)
+
     async def _generate(
         self,
         *,
@@ -203,13 +315,20 @@ class GeminiVoiceService:
         attempt_no = 1
         try:
             preflight = await self._limiter.preflight(model)
-            lease = await self._limiter.reserve(
+            reserved_tpm = self._reservation_tpm(
+                preflight=preflight,
+                prompt=prompt,
+                duration_ms=duration_ms,
+                max_output_tokens=max_output_tokens,
+            )
+            lease = await self._limiter.reserve_generate_content(
                 request_uid=request_uid,
                 attempt_no=attempt_no,
                 model=model,
                 preflight=preflight,
                 consumer=consumer,
                 account_name="record-idea-hub",
+                reserved_tpm=reserved_tpm,
             )
         except GoogleAIError as exc:
             raise self._limiter_error(exc) from exc
@@ -241,7 +360,6 @@ class GeminiVoiceService:
             body = {
                 "contents": [{"role": "user", "parts": parts}],
                 "generationConfig": {
-                    "temperature": 0.0 if audio is not None else 0.1,
                     "maxOutputTokens": max_output_tokens,
                     "responseMimeType": "application/json",
                     "responseJsonSchema": dict(response_schema),
