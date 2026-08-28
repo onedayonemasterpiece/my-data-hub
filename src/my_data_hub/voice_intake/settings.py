@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 class VoiceIntakeConfigurationError(RuntimeError):
@@ -49,6 +50,7 @@ class VoiceIntakeSettings:
     limiter_supabase_url: str
     limiter_supabase_service_key: str
     normal_key_envs: tuple[str, ...]
+    terminology_state_path: str = ""
 
     @classmethod
     def from_env(cls) -> VoiceIntakeSettings:
@@ -76,6 +78,10 @@ class VoiceIntakeSettings:
                 "GOOGLE_AI_LIMITER_SUPABASE_SERVICE_KEY", ""
             ).strip(),
             normal_key_envs=_csv("GOOGLE_AI_NORMAL_KEY_ENVS"),
+            terminology_state_path=os.getenv(
+                "MY_DATA_HUB_VOICE_TERMINOLOGY_STATE_PATH",
+                "/ledger/voice-terminology-snapshots.json",
+            ).strip(),
         )
         settings.validate()
         return settings
@@ -105,3 +111,9 @@ class VoiceIntakeSettings:
             raise VoiceIntakeConfigurationError("dedicated shared-limiter credentials are required")
         if not self.normal_key_envs:
             raise VoiceIntakeConfigurationError("GOOGLE_AI_NORMAL_KEY_ENVS is required")
+        if self.terminology_state_path:
+            state_path = Path(self.terminology_state_path)
+            if not state_path.is_absolute() or state_path.name != "voice-terminology-snapshots.json":
+                raise VoiceIntakeConfigurationError(
+                    "voice terminology state path must be an absolute voice-terminology-snapshots.json path"
+                )

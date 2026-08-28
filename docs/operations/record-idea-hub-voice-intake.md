@@ -17,7 +17,10 @@ Android AudioRecord + SQLite + WorkManager
 ```
 
 No additional Fly application, server database, queue or audio store is
-introduced. Request bytes live only for the duration of the HTTP handler.
+introduced. Request bytes live only for the duration of the HTTP handler. The
+only new server-side session metadata is the bounded terminology snapshot pin,
+stored as a mode-0600 JSON envelope in the existing control-ledger volume so a
+container restart cannot re-pin the same session to another card revision.
 
 ## HTTP contract
 
@@ -77,19 +80,22 @@ inbox/voice/README.md
 project/domain vocabulary. At the start of every new session the runtime reads
 the current branch head and then reads the card at that exact commit. It does
 not use an image-embedded copy, a startup-only copy, a process-global TTL cache,
-or a stale fallback. The resulting snapshot is held in bounded process memory
-and included unchanged in every transcription and the synthesis request for
-that session. `terminology_card_version` is the card schema version and is not
-used as a freshness key; exact freshness and identity come from the Git commit
-and blob SHA.
+or a stale fallback. The resulting snapshot is held in bounded process memory,
+durably mirrored to the existing `/ledger` volume, and included unchanged in
+every transcription and the synthesis request for that session. Repeating
+session creation with the same `session_id`, including after a process restart,
+returns the original pin and does not resolve a new card. The pin is removed
+only after verified publication reconciliation. `terminology_card_version` is
+the card schema version and is not used as a freshness key; exact freshness and
+identity come from the Git commit and blob SHA.
 
 If GitHub or the current card cannot be read at session start, session creation
 fails with a typed retryable error. An older snapshot is never relabelled as
-current. If the control-plane restarts during an active recording, subsequent
-chunk/complete calls fail closed with
-`voice_session_terminology_not_initialized` rather than mixing snapshots; the
-client must not complete that recording from transcripts produced under an
-unknown combination of cards.
+current. If the control-plane restarts during an active recording, it reloads
+the exact pin before accepting chunks or completion. If the durable pin is
+missing or invalid, chunk/complete fails closed with
+`voice_session_terminology_not_initialized` (or a typed state error) rather
+than mixing snapshots.
 
 The generated packet records `terminology_card_path`,
 `terminology_card_version`, `terminology_card_commit`,
@@ -140,6 +146,7 @@ MY_DATA_HUB_VOICE_MAX_JSON_BYTES=2097152
 MY_DATA_HUB_VOICE_GITHUB_TOKEN=<private token from gh auth token>
 MY_DATA_HUB_VOICE_GITHUB_REPOSITORY=onedayonemasterpiece/idea-hub
 MY_DATA_HUB_VOICE_GITHUB_BRANCH=main
+MY_DATA_HUB_VOICE_TERMINOLOGY_STATE_PATH=/ledger/voice-terminology-snapshots.json
 ```
 
 The following existing provider variables are mandatory and must remain in the

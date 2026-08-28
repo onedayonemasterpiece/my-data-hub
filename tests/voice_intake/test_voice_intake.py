@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import stat
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -33,13 +35,16 @@ from my_data_hub.voice_intake.markdown import (
     render_voice_index,
 )
 from my_data_hub.voice_intake.settings import VoiceIntakeSettings
-from my_data_hub.voice_intake.terminology import parse_terminology_card
+from my_data_hub.voice_intake.terminology import (
+    SessionTerminologySnapshots,
+    parse_terminology_card,
+)
 
 TOKEN = "x" * 40
 SESSION_ID = "voice-20260828-123456-abcdef12"
 
 
-def settings() -> VoiceIntakeSettings:
+def settings(*, terminology_state_path: str = "") -> VoiceIntakeSettings:
     return VoiceIntakeSettings(
         enabled=True,
         device_token=TOKEN,
@@ -54,6 +59,7 @@ def settings() -> VoiceIntakeSettings:
         limiter_supabase_url="https://example.supabase.co",
         limiter_supabase_service_key="service-key",
         normal_key_envs=("GOOGLE_API_KEY",),
+        terminology_state_path=terminology_state_path,
     )
 
 
@@ -427,6 +433,108 @@ entries:
     with pytest.raises(VoiceIntakeError) as caught:
         asyncio.run(publisher.resolve_terminology())
     assert caught.value.code == "github_network_error"
+
+
+def test_session_snapshot_survives_restart_and_same_id_cannot_repin(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "voice-terminology-snapshots.json"
+    runtime = settings(terminology_state_path=str(state_path))
+    first_publisher = FakePublisher()
+    first_service = FakeService()
+    first_app = attach_voice_intake_routes(
+        FastAPI(),
+        settings=runtime,
+        service=first_service,  # type: ignore[arg-type]
+        publisher=first_publisher,  # type: ignore[arg-type]
+    )
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    first_client = TestClient(first_app)
+    created = first_client.post(
+        "/voice-intake/v1/sessions", json=create_payload(), headers=auth
+    )
+    assert created.status_code == 200
+    assert created.json()["terminology_card_commit"] == "b" * 40
+    assert state_path.exists()
+    assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
+
+    class NewMainPublisher(FakePublisher):
+        async def resolve_terminology(self) -> object:
+            self.terminology_calls += 1
+            return parse_terminology_card(
+                """
+schema_version: 1.0.0
+card_id: idea-hub-voice-terminology
+rules: [Use the new main card.]
+entries:
+  - canonical: new-main
+    kind: test
+""",
+                source_path="config/voice-terminology.yaml",
+                source_commit_sha="e" * 40,
+                source_blob_sha="f" * 40,
+            )
+
+    second_publisher = NewMainPublisher()
+    second_service = FakeService()
+    restarted_app = attach_voice_intake_routes(
+        FastAPI(),
+        settings=runtime,
+        service=second_service,  # type: ignore[arg-type]
+        publisher=second_publisher,  # type: ignore[arg-type]
+    )
+    restarted_client = TestClient(restarted_app)
+    reopened = restarted_client.post(
+        "/voice-intake/v1/sessions", json=create_payload(), headers=auth
+    )
+    assert reopened.status_code == 200
+    assert reopened.json()["terminology_card_commit"] == "b" * 40
+    assert second_publisher.terminology_calls == 0
+
+    completed = restarted_client.post(
+        f"/voice-intake/v1/sessions/{SESSION_ID}/complete",
+        json=complete_payload(),
+        headers=auth,
+    )
+    assert completed.status_code == 200
+    assert second_publisher.published_terminology[0].source_commit_sha == "b" * 40
+    assert "KenigEvents" in second_service.summary_terminology[0]
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["sessions"] == {}
+
+
+def test_concurrent_duplicate_session_start_resolves_once() -> None:
+    async def scenario() -> tuple[int, object, object]:
+        store = SessionTerminologySnapshots()
+        calls = 0
+
+        async def resolver() -> object:
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.01)
+            return parse_terminology_card(
+                """
+schema_version: 1.0.0
+card_id: idea-hub-voice-terminology
+rules: [Use the current snapshot.]
+entries:
+  - canonical: IdeaHub
+    kind: product
+""",
+                source_path="config/voice-terminology.yaml",
+                source_commit_sha="a" * 40,
+                source_blob_sha="b" * 40,
+            )
+
+        first, second = await asyncio.gather(
+            store.begin(SESSION_ID, resolver),  # type: ignore[arg-type]
+            store.begin(SESSION_ID, resolver),  # type: ignore[arg-type]
+        )
+        return calls, first, second
+
+    calls, first, second = asyncio.run(scenario())
+    assert calls == 1
+    assert first is second
 
 
 def test_markdown_and_registry_are_idempotent() -> None:

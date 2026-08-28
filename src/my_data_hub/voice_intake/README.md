@@ -11,9 +11,11 @@ packet/session registry entry to `onedayonemasterpiece/idea-hub`.
 
 At session creation the runtime resolves the current `idea-hub/main` commit,
 reads the bounded `config/voice-terminology.yaml` card at that exact commit,
-and pins the commit/blob snapshot in memory for every transcription and the
-final synthesis. There is no global TTL or stale fallback; failure to load a
-current card fails session creation, and loss of the session pin fails closed.
+and pins the commit/blob snapshot for every transcription and the final
+synthesis. The bounded pin is mirrored into the existing control-ledger volume,
+so the same session ID cannot silently re-pin after a container restart. There
+is no global TTL or stale fallback; failure to load a current card fails session
+creation, and missing or invalid durable pin state fails closed.
 Successful publication records the exact card provenance and also regenerates
 the stable chronological `inbox/voice/README.md` index and returns a
 `/blob/main/...` navigation URL rather than trapping the Android client on an

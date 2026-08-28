@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
@@ -96,7 +97,11 @@ def attach_voice_intake_routes(
     runtime = settings or VoiceIntakeSettings.from_env()
     voice_service = service or (GeminiVoiceService(runtime) if runtime.enabled else None)
     idea_hub = publisher or (IdeaHubPublisher(runtime) if runtime.enabled else None)
-    terminology_snapshots = SessionTerminologySnapshots()
+    terminology_snapshots = SessionTerminologySnapshots(
+        state_path=Path(runtime.terminology_state_path)
+        if runtime.terminology_state_path
+        else None
+    )
     router = APIRouter(prefix="/voice-intake/v1", tags=["record-idea-hub"])
 
     @router.get("/health")
