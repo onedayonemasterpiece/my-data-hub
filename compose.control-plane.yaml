@@ -94,6 +94,7 @@ services:
       MY_DATA_HUB_EMBEDDING_CREDENTIAL_DIR: /embedding-credentials
       MY_DATA_HUB_MASTER_TUNNEL_KNOWN_HOSTS_PATH: /master-assets/dataset/tunnel-known-hosts
       MY_DATA_HUB_MASTER_ASSET_HISTORY_DIR: /master-assets-history
+      MY_DATA_HUB_VOICE_INTAKE_V2_ENABLED: "${MY_DATA_HUB_VOICE_INTAKE_V2_ENABLED:-false}"
       MY_DATA_HUB_VOICE_INTAKE_V2_SPOOL: /voice-intake-v2
     ports:
       - "127.0.0.1:${MY_DATA_HUB_CONTROL_PORT:-8080}:8080"
