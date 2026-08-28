@@ -64,6 +64,11 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 "notebooks/**" = ["E501"]
 "scripts/validate_repository.py" = ["E501"]
+# Russian prompts and rendered Markdown intentionally contain Unicode glyphs
+# which RUF001 treats as confusable Latin characters. The import order in the
+# large Gemini adapter is kept grouped by transport/domain responsibility.
+"src/my_data_hub/voice_intake/gemini.py" = ["I001", "RUF001"]
+"src/my_data_hub/voice_intake/markdown.py" = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -76,4 +81,5 @@ files = [
   "src/my_data_hub/mcp/contracts.py",
   "src/my_data_hub/orchestrator/master/evidence.py",
   "src/my_data_hub/orchestrator/master/provider.py",
+  "src/my_data_hub/voice_intake/*.py",
 ]
