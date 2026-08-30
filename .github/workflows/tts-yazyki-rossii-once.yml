@@ -1,0 +1,52 @@
+name: tts-yazyki-rossii-once
+
+on:
+  push:
+    branches:
+      - chatgpt/tts-yazyki-rossii-20260830
+    paths:
+      - .github/workflows/tts-yazyki-rossii-once.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tts-yazyki-rossii-once
+  cancel-in-progress: false
+
+jobs:
+  submit-and-wait:
+    runs-on: [self-hosted, linux, my-data-hub-devstand]
+    timeout-minutes: 360
+    env:
+      PYTHONUNBUFFERED: "1"
+      MY_DATA_HUB_MCP_CANARY_ENDPOINT: ${{ vars.MY_DATA_HUB_MCP_CANARY_ENDPOINT || 'https://mcp-datahub.kenigevents.ru/mcp' }}
+    steps:
+      - name: Checkout exact scratch branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install my-data-hub provider client
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev,kaggle]'
+
+      - name: Verify owner-bound devstand OAuth profiles
+        run: python scripts/provider/devstand_acceptance_controller.py preflight
+
+      - name: Submit and monitor Qwen3-TTS Kaggle CPU run
+        run: python scratch/tts-yazyki-rossii/submit.py
+
+      - name: Upload exact provider receipts and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tts-yazyki-rossii-provider-control
+          path: artifacts/tts-yazyki-rossii/
+          if-no-files-found: warn
+          retention-days: 7
