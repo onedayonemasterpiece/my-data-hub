@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from my_data_hub.voice_intake_v2.content_verification import transcript_plausibility
 from my_data_hub.voice_intake_v2.store import (
     ChunkReceipt,
     StoredSegmentReceipt,
@@ -27,6 +28,7 @@ def receipt(path: Path) -> ChunkReceipt:
 
 
 def segment_receipt(*, accepted: bool = True, finish_reason: str = "STOP") -> StoredSegmentReceipt:
+    transcript_text = " ".join(["synthetic"] * 50)
     return StoredSegmentReceipt(
         session_id=SESSION_ID, chunk_index=0, source_sha256=SHA,
         audio_start_ms=0, audio_end_ms=240000, coverage_start_ms=0,
@@ -34,10 +36,18 @@ def segment_receipt(*, accepted: bool = True, finish_reason: str = "STOP") -> St
         finish_reason=finish_reason, schema_version="segment-transcript/1.0",
         accepted=accepted,
         transcript=(
-            {"transcript": "synthetic fixture words", "language": "ru", "uncertain_fragments": []}
+            {"transcript": transcript_text, "language": "ru", "uncertain_fragments": []}
             if accepted else None
         ),
-        coverage={"covered_ms": 240000, "ratio_ppm": 1_000_000},
+        coverage={
+            "covered_ms": 240000,
+            "ratio_ppm": 1_000_000,
+            **(
+                {"plausibility": transcript_plausibility(transcript_text, 240_000)}
+                if accepted
+                else {}
+            ),
+        },
         limiter={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
     )
 
@@ -60,7 +70,7 @@ def prepare_purge_authorization(
         SESSION_ID, "worker-1", {"title": "Fixture", "short_summary": "S", "detailed_summary": "D"},
         "synthetic-summary-request", {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10},
     )
-    assert aggregate["transcript"] == "synthetic fixture words"
+    assert aggregate["transcript"] == " ".join(["synthetic"] * 50)
     store.persist_github_verified(
         SESSION_ID, "worker-1", url="https://example.invalid/synthetic",
         commit_sha="b" * 40,
@@ -354,6 +364,49 @@ def test_failed_or_partial_segment_cannot_verify_content_or_delete_audio(
         store.purge_audio(SESSION_ID)
     assert path.is_file()
     assert not store.verification_state(SESSION_ID).content_verified
+
+
+def test_store_recomputes_plausibility_instead_of_trusting_caller_metadata(
+    tmp_path, create_request, complete_request, terminology
+):
+    store = VoiceIntakeV2Store(tmp_path / "spool")
+    store.create_session(create_request, terminology=terminology)
+    path = store.session_directory(SESSION_ID) / "chunks" / f"00000-{SHA}.m4a"
+    path.write_bytes(b"synthetic-audio")
+    store.record_chunk(receipt(path))
+    store.complete(SESSION_ID, complete_request)
+    assert store.claim("worker-1", 60) is not None
+    candidate = segment_receipt()
+    forged = StoredSegmentReceipt(
+        **{
+            **asdict(candidate),
+            "transcript": {
+                "transcript": "short but schema valid",
+                "language": "ru",
+                "uncertain_fragments": [],
+            },
+        }
+    )
+    with pytest.raises(StoreError, match="segment_content_incomplete"):
+        store.persist_segment_receipt(SESSION_ID, "worker-1", forged)
+    assert store.segment_receipts(SESSION_ID) == ()
+    store.persist_segment_receipt(SESSION_ID, "worker-1", candidate)
+    with store._transaction() as connection:  # simulate a corrupted pre-verifier receipt
+        connection.execute("DROP TRIGGER segment_inference_receipts_immutable_update")
+        connection.execute(
+            "UPDATE segment_inference_receipts SET transcript_json=? WHERE session_id=?",
+            (store._canonical(forged.transcript)[0], SESSION_ID),
+        )
+    with pytest.raises(StoreError, match="content_plausibility_verification_failed"):
+        store.persist_content_verification(
+            SESSION_ID,
+            "worker-1",
+            schema_version="content/1.0",
+            verifier_version="coverage/1.0",
+            verification={"coverage_ppm": 1_000_000},
+        )
+    assert not store.verification_state(SESSION_ID).content_verified
+    assert path.is_file()
 
 
 def test_legacy_migration_twice_is_idempotent_truthful_and_bounded(tmp_path):

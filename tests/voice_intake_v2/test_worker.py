@@ -7,6 +7,7 @@ import pytest
 
 from my_data_hub.voice_intake.contracts import ModelUsage, TranscriptPayload
 from my_data_hub.voice_intake.errors import VoiceIntakeError
+from my_data_hub.voice_intake_v2.content_verification import transcript_plausibility
 from my_data_hub.voice_intake_v2.contracts import (
     InferenceReceipt,
     PublicationReceipt,
@@ -46,9 +47,11 @@ class Inference:
         index = kwargs["chunk_index"]
         start, end = kwargs["source_audio_start_ms"], kwargs["source_audio_end_ms"]
         self.calls.append(("segment", index))
-        value = TranscriptPayload(
-            transcript=f"synthetic verified segment {index}", language="ru-RU"
-        ).model_dump(mode="json")
+        transcript_text = " ".join([f"segment{index}"] * 60)
+        value = TranscriptPayload(transcript=transcript_text, language="ru-RU").model_dump(
+            mode="json"
+        )
+        plausibility = transcript_plausibility(transcript_text, end - start)
         return SegmentInferenceReceipt(
             chunk_index=index,
             source_sha256=kwargs["source_sha256"],
@@ -68,14 +71,7 @@ class Inference:
             usage=ModelUsage(
                 input_tokens=100, output_tokens=50, thought_tokens=0, total_tokens=150
             ),
-            plausibility=SegmentPlausibilityEvidence(
-                expected_speech_ms=end - start,
-                transcript_characters=50,
-                transcript_words=6,
-                alphanumeric_characters=40,
-                alphanumeric_per_speech_second=1,
-                words_per_speech_minute=20,
-            ),
+            plausibility=SegmentPlausibilityEvidence.model_validate(plausibility),
         )
 
     async def summarize(self, **_kwargs) -> InferenceReceipt:

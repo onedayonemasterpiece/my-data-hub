@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from .content_verification import transcript_plausibility, transcript_plausibility_passed
 from .contracts import SessionCompleteRequest, SessionCreateRequest, StatusResponse
 
 
@@ -938,6 +939,18 @@ class VoiceIntakeV2Store:
                 and receipt.transcript_receipt_sha256 != transcript_sha256
             ):
                 raise StoreError("segment_transcript_receipt_mismatch")
+            transcript_text = receipt.transcript.get("transcript")
+            claimed_plausibility = receipt.coverage.get("plausibility")
+            if not isinstance(transcript_text, str) or not isinstance(claimed_plausibility, dict):
+                raise StoreError("segment_plausibility_evidence_missing")
+            observed_plausibility = transcript_plausibility(
+                transcript_text, receipt.audio_end_ms - receipt.audio_start_ms
+            )
+            if (
+                claimed_plausibility != observed_plausibility
+                or not transcript_plausibility_passed(observed_plausibility)
+            ):
+                raise StoreError("segment_content_incomplete")
         payload = {
             "session_id": session_id,
             "chunk_index": receipt.chunk_index,
@@ -1115,6 +1128,22 @@ class VoiceIntakeV2Store:
                     or accepted["finish_reason"] != "STOP"
                 ):
                     raise StoreError("content_coverage_incomplete")
+                transcript_value = json.loads(accepted["transcript_json"])
+                coverage_value = json.loads(accepted["coverage_json"])
+                transcript_text = transcript_value.get("transcript")
+                claimed_plausibility = coverage_value.get("plausibility")
+                if not isinstance(transcript_text, str) or not isinstance(
+                    claimed_plausibility, dict
+                ):
+                    raise StoreError("content_plausibility_evidence_missing")
+                observed_plausibility = transcript_plausibility(
+                    transcript_text, source["audio_end_ms"] - source["audio_start_ms"]
+                )
+                if (
+                    claimed_plausibility != observed_plausibility
+                    or not transcript_plausibility_passed(observed_plausibility)
+                ):
+                    raise StoreError("content_plausibility_verification_failed")
                 expected_start = source["audio_end_ms"]
             receipts = tuple(
                 StoredSegmentReceipt(

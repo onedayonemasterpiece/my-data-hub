@@ -37,6 +37,7 @@ from my_data_hub.voice_intake.gemini import (
 )
 from my_data_hub.voice_intake.settings import VoiceIntakeSettings
 
+from .content_verification import transcript_plausibility, transcript_plausibility_passed
 from .contracts import (
     InferenceReceipt,
     SegmentInferenceReceipt,
@@ -61,8 +62,6 @@ SUMMARY_SCHEMA_NAME = "voice_intake_summary"
 SEGMENT_RECEIPT_SCHEMA_VERSION = "2.0.0"
 SEGMENT_TRANSCRIPTION_MAX_OUTPUT_TOKENS = 16_384
 MAX_SOURCE_SEGMENT_MS = 15 * 60 * 1000
-MIN_ALPHANUMERIC_PER_SPEECH_SECOND = 0.75
-MIN_WORDS_PER_SPEECH_MINUTE = 10.0
 MAX_TOKEN_COUNT = 10_000_000
 MAX_DIAGNOSTIC_FIELDS = 32
 KNOWN_PROVIDER_FINISH_REASONS = frozenset(
@@ -175,10 +174,7 @@ class AggregateGeminiInference:
                     ),
                 )
             evidence = self._plausibility(value.transcript, expected_speech_ms)
-            if (
-                evidence.alphanumeric_per_speech_second < MIN_ALPHANUMERIC_PER_SPEECH_SECOND
-                or evidence.words_per_speech_minute < MIN_WORDS_PER_SPEECH_MINUTE
-            ):
+            if not transcript_plausibility_passed(evidence.model_dump(mode="json")):
                 raise StageFailure(
                     "segment_content_incomplete",
                     sent=True,
@@ -304,18 +300,10 @@ class AggregateGeminiInference:
 
     @staticmethod
     def _plausibility(transcript: str, expected_speech_ms: int) -> SegmentPlausibilityEvidence:
-        transcript_characters = len(transcript)
-        alphanumeric_characters = sum(character.isalnum() for character in transcript)
-        transcript_words = len(re.findall(r"[^\W_]+", transcript, flags=re.UNICODE))
-        speech_seconds = expected_speech_ms / 1000
-        return SegmentPlausibilityEvidence(
-            expected_speech_ms=expected_speech_ms,
-            transcript_characters=transcript_characters,
-            transcript_words=transcript_words,
-            alphanumeric_characters=alphanumeric_characters,
-            alphanumeric_per_speech_second=round(alphanumeric_characters / speech_seconds, 6),
-            words_per_speech_minute=round(transcript_words / speech_seconds * 60, 6),
+        evidence: SegmentPlausibilityEvidence = SegmentPlausibilityEvidence.model_validate(
+            transcript_plausibility(transcript, expected_speech_ms)
         )
+        return evidence
 
     @staticmethod
     def _segment_diagnostics(
