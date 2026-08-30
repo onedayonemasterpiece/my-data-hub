@@ -5,6 +5,9 @@ This runbook deploys and operates the additive, durable
 `/voice-intake/v1`; v1 remains the compatibility path for the currently
 installed APK. The client-facing contract is frozen in
 [`../handoffs/record-idea-hub-android-1.1-api-contract.md`](../handoffs/record-idea-hub-android-1.1-api-contract.md).
+The authoritative deletion proof chain, migration behavior and fail-closed
+rollback matrix are in
+[`voice-v2-content-verification.md`](voice-v2-content-verification.md).
 
 ## Non-negotiable boundaries
 
@@ -15,9 +18,9 @@ installed APK. The client-facing contract is frozen in
 - Use one bounded spool worker with a durable lease/CAS per stage.
 - Keep `gemini-3.1-flash-lite` and only explicitly registered Flash-Lite
   models.
-- A normal successful recording up to approximately 20 minutes uses exactly
-  two physical Gemini `generateContent` POSTs: one aggregate transcription and
-  one summary.
+- A successful recording uses one bounded transcription request for each
+  source chunk, then one summary request only after durable contiguous
+  coverage is verified. Already receipted successful chunks are never replayed.
 - The configurable safety limit is at least 60 minutes. Twenty minutes is the
   priority acceptance duration, not a hard limit.
 - Never log credentials, audio bytes, transcript text or summary text.
@@ -33,14 +36,14 @@ integration. A healthy container or mutable image tag is not sufficient.
 | v2 deployed source SHA | `455f5a836eba29544c5f533f3f173f7639107914` |
 | prior deployed image digest | `sha256:d3cbaa197f1d1b8b9e6180ca733af7428625d693c1908144a29834610dc01af4` |
 | new deployed image digest and source attestation | `sha256:56c09e25940ab43defac8e2289e3be4b09ee5d868c3e178f46a1445bcd248a3c`, source/release `455f5a836eba29544c5f533f3f173f7639107914` |
-| public v2 URL readback | authenticated `GET https://mcp-datahub.kenigevents.ru/voice-intake/v2/capabilities` = `200`, `status=ready`, `api_version=2.0`, `typical_gemini_requests=2`; unauthenticated = `401` |
+| public v2 URL readback | authenticated `GET https://mcp-datahub.kenigevents.ru/voice-intake/v2/capabilities` = `200`, `status=ready`, `api_version=2.0`; the additive request topology must report `one_per_source_chunk` plus one post-coverage summary; unauthenticated = `401` |
 | v1 live WAV regression receipt | session `voice-20260828-163612-28516afe`, transcription UID `514ccbb2-8c13-4ea8-adf7-19b5737ea5f0`, publication/readback `ed070f0fafd89f885b3e9aeba972f396a846abe1` |
 | v2 live session ID | `voice-20260828-163102-f5645802`; two independent AAC-LC/M4A receipts survived a full control-plane restart and replayed as duplicates |
 | transcription request UID / physical POST | `289c6883-db01-4c43-b705-38319b852395`; one durable aggregate transcription result |
 | summary request UID / physical POST | `37cd6bc0-2cbe-46ae-9d19-ca972d0f2d1f`; one durable text-summary result |
 | limiter reserve/sent/finalize receipts | both UIDs completed; transcription `reserved_tpm=266`, `actual_tpm=3045`; summary `reserved_tpm=23156`, `actual_tpm=3321`; shared limiter contract `google_ai_project_model_atomic_v1` |
 | IdeaHub publication commit and exact/current-main readback | atomic four-file commit `fb142c92ff15b8bfaf22ae9e4983a83e273c9d36`; exact and then-current `main` blob `35fcb109d5ea43f674c1cb9b38a82b7b9002ef0f`; disposable v1/v2 sessions closed by follow-up `54e5a26f856c4eebdccf7a8c3edcfcc01e9259de` |
-| server audio purge readback | status `published_verified`, `github_verified=true`, `server_audio_purged=true`; spool retains only `transcript.json` and `summary.json` for the acceptance session |
+| historical pre-#31 purge readback | **not content-verification evidence**; GitHub readback and legacy purge flags must not be reused as authority for any new deletion |
 
 Do not turn a reported checkpoint such as `68bb5bf...`, a branch head, Draft PR
 number or image label into verified evidence without reconciling actual
@@ -78,7 +81,7 @@ data:
   voice-intake-v2.sqlite3-shm
   sessions/<session_id>/
     chunks/<zero-padded-index>.m4a
-    normalized/session.mp3
+    normalized/<zero-padded-index>-<source-sha256>.mp3
     transcript.json
     summary.json
 ```
@@ -100,8 +103,10 @@ receipts. Required properties:
   wake-up cannot run the same stage concurrently;
 - startup recovers expired leases and unfinished durable states;
 - active/recent receipt TTL is at least seven days;
-- audio and `normalized/session.mp3` are deleted only after successful exact
-  publication and current-main readback;
+- audio and normalized derivatives remain until a durable content-verification
+  receipt proves full ordered coverage, exact/current publication readback is
+  durable, a separate purge-authorization receipt binds both facts, and
+  filesystem absence is recorded in an audio-purge receipt;
 - small non-audio reconciliation receipts may remain for idempotency/audit;
 - no audio is added to Git, backups, logs or crash artifacts.
 
@@ -122,26 +127,35 @@ The worker may enter `waiting_quota`, `retryable_error`, or
 `reconciliation_required`. Every transition and lease must be committed before
 external work begins or before success is exposed.
 
-### Normalize
+### Normalize each source chunk
 
-Revalidate every M4A. Run bounded, timeout-controlled ffmpeg concat/normalize
-to a single MP3: mono, 16 kHz, 32 kbit/s. Clean temporary files on error.
-Priority sessions up to 20 minutes are normalized into one provider audio
-input. Longer sessions split only when genuine provider TPM/body constraints
-require it.
+Revalidate every M4A and its durable source receipt. Normalize each independent
+source chunk to its own bounded MP3: mono, 16 kHz, 32 kbit/s. Clean temporary
+files on error. Bind the exact source SHA, normalized-input SHA, source time
+range and coverage range into that chunk's inference receipt.
 
-### Transcribe once
+### Transcribe by bounded source chunk
 
-Perform one structured, complete-transcript audio request and atomically
-persist `transcript.json` before setting `transcription_complete=true` or
-entering summary. Do not issue per-chunk requests, `countTokens`, session model
-probes, or fallback POSTs.
+Perform exactly one structured audio request for each source chunk that lacks a
+successful immutable receipt. Exact `STOP`, schema validation, full source
+range coverage and bounded plausibility evidence are mandatory. `MAX_TOKENS`,
+missing/unknown finish reason, malformed or short schema-valid output,
+ambiguous outcome, missing receipt, source mismatch and any gap/overlap fail
+closed with every audio file retained. A restart reuses accepted receipts and
+does not replay their Gemini calls.
+
+Assemble the complete transcript deterministically from accepted receipts in
+chunk-index order. Persist a separate content-verification receipt containing
+the source-manifest hash, ordered segment-receipt hash, transcript hash and
+full contiguous range. A transcript-shaped JSON value without this receipt is
+not complete content.
 
 ### Summarize once
 
-Perform one text-only Flash-Lite request over the durable transcript using the
-existing detailed structured schema. Atomically persist `summary.json` before
-publication. A summary retry must never repeat a completed transcription.
+Perform one text-only Flash-Lite request over the content-verified deterministic
+transcript using the existing detailed structured schema. Atomically persist
+`summary.json` before publication. Summary is forbidden while coverage is
+incomplete; a summary retry must never repeat a receipted segment.
 
 For each physical provider call retain the existing shared-limiter ordering:
 
@@ -180,10 +194,12 @@ inbox/voice/README.md
 The source packet records `client_version`,
 `api_contract: voice-intake-v2`, capture policy, audio format, wall/manual/
 recorded/auto-silence durations and VAD provenance when present. It stores the
-transcript and summary, never audio. Publication success requires both
-exact-commit and current-main readback. Only then purge chunk audio and the
-normalized derivative, set `server_audio_purged=true`, and expose
-`published_verified`.
+transcript and summary, never audio. It may label a section
+`Полная расшифровка` only when the independent content-verification receipt is
+valid. Publication success requires both exact-commit and current-main
+readback, but that receipt proves only publication durability. Purge requires
+the content receipt, publication receipt and a separate durable authorization;
+`server_audio_purged=true` is set only after physical absence is verified.
 
 If publication outcome is unknown, reconcile by deterministic `session_id`;
 do not create a second provider request or silently publish a divergent packet.
@@ -218,14 +234,16 @@ Run all current repository gates plus the following tests:
    manifest conflict.
 6. Test lease/CAS exclusion, expired-lease recovery and the seven-day minimum
    TTL behavior.
-7. Assert N uploads make zero Gemini calls; complete makes exactly one
-   transcription POST; transcript is durable before exactly one summary POST;
-   successful total is exactly two.
-8. Assert summary and GitHub retries do not repeat transcription; quota
+7. Assert N uploads make zero Gemini calls; processing makes at most one
+   successful transcription POST per source chunk; full coverage is durable
+   before exactly one summary POST; successful total is `N + 1`.
+8. Assert restart, summary and GitHub retries do not repeat successful segment
+   transcription; quota
    pre-send makes zero POST; provider 429/timeout makes one POST with no hidden
    retry; reserve uses recorded audio duration.
-9. Assert purge cannot happen before GitHub readback and does happen after both
-   exact/current readbacks.
+9. Assert exact/current GitHub readback alone cannot purge. Require the durable
+   content-verification and purge-authorization receipts, then verify real
+   source-file absence before exposing the legacy terminal purge flag.
 10. Run full v1 regression, including a short live WAV smoke after rollout.
 11. Verify no secret, audio, transcript or summary appears in logs.
 
@@ -233,11 +251,13 @@ After green CI, run a live v2 multi-M4A fixture through the public route and
 capture safe evidence for:
 
 - zero provider calls during all uploads;
-- the single transcription request UID/POST and its limiter receipt;
+- one successful immutable transcription receipt per source chunk, including
+  source hash, range, exact finish reason and bounded coverage evidence;
 - the single summary request UID/POST and its limiter receipt;
-- exactly two physical provider POSTs total;
+- exactly `N + 1` successful provider POSTs for N source chunks;
 - atomic IdeaHub commit plus exact/current-main readback;
-- `server_audio_purged=true` and absent server audio;
+- a separate content-verification and purge-authorization receipt before
+  `server_audio_purged=true`, plus verified absent server audio;
 - all related containers healthy on the attested image;
 - the unchanged v1 live WAV smoke.
 

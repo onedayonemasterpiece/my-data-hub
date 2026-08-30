@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -22,9 +23,10 @@ def projection(create_request, complete_request, terminology) -> PublicationProj
         transport_chunks=({"chunk_index": 0, "sha256": SHA, "duration_ms": 240000},),
         transcript={"transcript": "Полная запись", "language": "ru-RU", "uncertain_fragments": []},
         summary=summary_value(),
-        transcription_request_uid="transcription-uid",
+        transcription_request_uid=None,
+        content_verification_receipt_sha256="d" * 64,
         summary_request_uid="summary-uid",
-        transcription_limiter={"request_uid": "transcription-uid"},
+        transcription_limiter={"mode": "per_chunk", "segment_count": 1},
         summary_limiter={"request_uid": "summary-uid"},
         model="gemini-3.1-flash-lite",
     )
@@ -212,3 +214,35 @@ async def test_current_markers_without_atomic_origin_require_reconciliation(
         await publisher.publish_and_verify(item)
     assert caught.value.code == "github_publication_reconciliation_required"
     assert caught.value.reconciliation_required
+
+
+@pytest.mark.asyncio
+async def test_github_transport_is_never_started_without_content_verification_receipt(
+    auth_settings, create_request, complete_request, terminology
+) -> None:
+    publisher = MemoryPublisher(auth_settings)
+    item = replace(
+        projection(create_request, complete_request, terminology),
+        content_verification_receipt_sha256="",
+    )
+    with pytest.raises(VoiceIntakeError) as caught:
+        await publisher.publish_and_verify(item)
+    assert caught.value.code == "content_verification_required"
+    assert publisher.created_commits == []
+    assert publisher.head_sha == "1" * 40
+
+
+@pytest.mark.asyncio
+async def test_exact_github_readback_receipt_contains_no_purge_authority(
+    auth_settings, create_request, complete_request, terminology
+) -> None:
+    publisher = MemoryPublisher(auth_settings)
+    receipt = await publisher.publish_and_verify(
+        projection(create_request, complete_request, terminology)
+    )
+    assert receipt.github_verified is True
+    assert set(receipt.model_dump()) == {
+        "github_url",
+        "github_commit_sha",
+        "github_verified",
+    }

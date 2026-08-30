@@ -12,7 +12,11 @@ from my_data_hub.voice_intake.markdown import insert_registry_entry, render_voic
 from my_data_hub.voice_intake.settings import VoiceIntakeSettings
 
 from .contracts import PublicationReceipt
-from .markdown import RenderedPublication, render_publication
+from .markdown import (
+    RenderedPublication,
+    render_publication,
+    require_content_verified_projection,
+)
 from .store import PublicationProjection
 
 
@@ -22,7 +26,7 @@ def _same(left: str, right: str) -> bool:
     ).digest()
 
 
-class V2IdeaHubPublisher(IdeaHubPublisher):
+class V2IdeaHubPublisher(IdeaHubPublisher):  # type: ignore[misc]
     """V2 projection adapter over the already bounded v1 GitHub transport.
 
     Inference artifacts are durable before this object is invoked. Therefore
@@ -38,6 +42,10 @@ class V2IdeaHubPublisher(IdeaHubPublisher):
         return asdict(await super().resolve_terminology())
 
     async def publish_and_verify(self, projection: PublicationProjection) -> PublicationReceipt:
+        # Publication transport/readback is not content verification.  Require
+        # the independently durable coverage receipt before rendering or any
+        # GitHub operation, even if a matching publication already exists.
+        require_content_verified_projection(projection)
         if projection.terminology.get("status") != "current":
             raise VoiceIntakeError(
                 "idea_hub_terminology_not_current", retryable=True, status_code=503
