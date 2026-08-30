@@ -60,7 +60,8 @@ class PublicationProjection:
     transport_chunks: tuple[dict[str, Any], ...]
     transcript: dict[str, Any]
     summary: dict[str, Any]
-    transcription_request_uid: str
+    transcription_request_uid: str | None
+    content_verification_receipt_sha256: str
     summary_request_uid: str
     transcription_limiter: dict[str, Any]
     summary_limiter: dict[str, Any]
@@ -90,6 +91,7 @@ class StoredSegmentReceipt:
     coverage: dict[str, Any]
     limiter: dict[str, Any]
     transcript_receipt_sha256: str | None = None
+    inference_receipt_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +258,7 @@ class VoiceIntakeV2Store:
                     transcript_sha256 TEXT,
                     coverage_json TEXT NOT NULL,
                     limiter_json TEXT NOT NULL,
+                    inference_receipt_sha256 TEXT,
                     receipt_sha256 TEXT NOT NULL,
                     created_at REAL NOT NULL,
                     PRIMARY KEY(session_id, chunk_index, provider_request_uid),
@@ -268,6 +271,15 @@ class VoiceIntakeV2Store:
                 """CREATE UNIQUE INDEX IF NOT EXISTS accepted_segment_receipt_idx
                    ON segment_inference_receipts(session_id,chunk_index) WHERE accepted=1"""
             )
+            segment_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(segment_inference_receipts)")
+            }
+            if "inference_receipt_sha256" not in segment_columns:
+                connection.execute(
+                    "ALTER TABLE segment_inference_receipts "
+                    "ADD COLUMN inference_receipt_sha256 TEXT"
+                )
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS content_verification_receipts (
                     session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE RESTRICT,
@@ -277,12 +289,22 @@ class VoiceIntakeV2Store:
                     transcript_sha256 TEXT NOT NULL,
                     segment_count INTEGER NOT NULL,
                     coverage_start_ms INTEGER NOT NULL,
-                    coverage_end_ms INTEGER NOT NULL,
-                    verification_json TEXT NOT NULL,
-                    receipt_sha256 TEXT NOT NULL UNIQUE,
+                   coverage_end_ms INTEGER NOT NULL,
+                   verification_json TEXT NOT NULL,
+                    segment_receipts_sha256 TEXT NOT NULL,
+                   receipt_sha256 TEXT NOT NULL UNIQUE,
                     created_at REAL NOT NULL
                 )"""
             )
+            content_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(content_verification_receipts)")
+            }
+            if "segment_receipts_sha256" not in content_columns:
+                connection.execute(
+                    "ALTER TABLE content_verification_receipts "
+                    "ADD COLUMN segment_receipts_sha256 TEXT"
+                )
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS purge_authorization_receipts (
                     session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE RESTRICT,
@@ -830,6 +852,11 @@ class VoiceIntakeV2Store:
             raise StoreError("segment_receipt_invalid", status_code=422)
         if not receipt.accepted and receipt.transcript is not None:
             raise StoreError("failed_segment_content_forbidden", status_code=422)
+        if receipt.inference_receipt_sha256 is not None and (
+            len(receipt.inference_receipt_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in receipt.inference_receipt_sha256)
+        ):
+            raise StoreError("segment_inference_receipt_invalid", status_code=422)
         coverage_json, _ = self._bounded_metadata(
             receipt.coverage, code="segment_coverage_metadata_invalid"
         )
@@ -858,6 +885,7 @@ class VoiceIntakeV2Store:
             "schema_version": receipt.schema_version,
             "accepted": receipt.accepted,
             "transcript_sha256": transcript_sha256,
+            "inference_receipt_sha256": receipt.inference_receipt_sha256,
             "coverage": receipt.coverage,
             "limiter": receipt.limiter,
         }
@@ -897,14 +925,16 @@ class VoiceIntakeV2Store:
                        session_id,chunk_index,provider_request_uid,source_sha256,
                        audio_start_ms,audio_end_ms,coverage_start_ms,coverage_end_ms,
                        finish_reason,schema_version,accepted,transcript_json,transcript_sha256,
-                       coverage_json,limiter_json,receipt_sha256,created_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       coverage_json,limiter_json,inference_receipt_sha256,
+                       receipt_sha256,created_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         session_id, receipt.chunk_index, receipt.provider_request_uid,
                         receipt.source_sha256, receipt.audio_start_ms, receipt.audio_end_ms,
                         receipt.coverage_start_ms, receipt.coverage_end_ms, receipt.finish_reason,
                         receipt.schema_version, int(receipt.accepted), transcript_json,
-                        transcript_sha256, coverage_json, limiter_json, receipt_sha256, now,
+                        transcript_sha256, coverage_json, limiter_json,
+                        receipt.inference_receipt_sha256, receipt_sha256, now,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -935,6 +965,7 @@ class VoiceIntakeV2Store:
                 transcript=json.loads(row["transcript_json"]) if row["transcript_json"] else None,
                 coverage=json.loads(row["coverage_json"]), limiter=json.loads(row["limiter_json"]),
                 transcript_receipt_sha256=row["transcript_sha256"],
+                inference_receipt_sha256=row["inference_receipt_sha256"],
             )
             for row in rows
         )
@@ -1025,12 +1056,16 @@ class VoiceIntakeV2Store:
             if transcript is not None and self._canonical(transcript)[1] != self._canonical(assembled)[1]:
                 raise StoreError("aggregate_transcript_not_deterministic")
             transcript_json, transcript_sha256 = self._canonical(assembled)
+            segment_receipts_sha256 = self._canonical(
+                {"ordered_segment_receipts": [row["receipt_sha256"] for row in accepted_rows]}
+            )[1]
             receipt_payload = {
                 "session_id": session_id,
                 "schema_version": schema_version,
                 "verifier_version": verifier_version,
                 "source_manifest_sha256": session["complete_sha256"],
                 "transcript_sha256": transcript_sha256,
+                "segment_receipts_sha256": segment_receipts_sha256,
                 "segment_count": len(receipts),
                 "coverage_start_ms": source_rows[0]["audio_start_ms"],
                 "coverage_end_ms": source_rows[-1]["audio_end_ms"],
@@ -1038,23 +1073,29 @@ class VoiceIntakeV2Store:
             }
             receipt_sha256 = self._canonical(receipt_payload)[1]
             existing = connection.execute(
-                "SELECT receipt_sha256,transcript_sha256 FROM content_verification_receipts WHERE session_id=?",
+                """SELECT receipt_sha256,transcript_sha256,segment_receipts_sha256
+                   FROM content_verification_receipts WHERE session_id=?""",
                 (session_id,),
             ).fetchone()
             if existing is not None:
-                if existing["receipt_sha256"] != receipt_sha256 or existing["transcript_sha256"] != transcript_sha256:
+                if (
+                    existing["receipt_sha256"] != receipt_sha256
+                    or existing["transcript_sha256"] != transcript_sha256
+                    or existing["segment_receipts_sha256"] != segment_receipts_sha256
+                ):
                     raise StoreError("content_verification_receipt_conflict")
                 return assembled
             connection.execute(
                 """INSERT INTO content_verification_receipts(
                    session_id,schema_version,verifier_version,source_manifest_sha256,
                    transcript_sha256,segment_count,coverage_start_ms,coverage_end_ms,
-                   verification_json,receipt_sha256,created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                   verification_json,segment_receipts_sha256,receipt_sha256,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     session_id, schema_version, verifier_version, session["complete_sha256"],
                     transcript_sha256, len(receipts), source_rows[0]["audio_start_ms"],
-                    source_rows[-1]["audio_end_ms"], verification_json, receipt_sha256, now,
+                    source_rows[-1]["audio_end_ms"], verification_json,
+                    segment_receipts_sha256, receipt_sha256, now,
                 ),
             )
             connection.execute(
@@ -1093,7 +1134,9 @@ class VoiceIntakeV2Store:
                 "SELECT * FROM sessions WHERE session_id=? AND lease_owner=?", (session_id, owner)
             ).fetchone()
             content = connection.execute(
-                "SELECT 1 FROM content_verification_receipts WHERE session_id=?", (session_id,)
+                """SELECT receipt_sha256 FROM content_verification_receipts
+                   WHERE session_id=?""",
+                (session_id,),
             ).fetchone()
             if (
                 row is None or not row["transcript_json"] or not row["summary_json"]
@@ -1110,7 +1153,9 @@ class VoiceIntakeV2Store:
             terminology=json.loads(row["terminology_json"]),
             transport_chunks=tuple(dict(chunk) for chunk in chunks),
             transcript=json.loads(row["transcript_json"]), summary=json.loads(row["summary_json"]),
-            transcription_request_uid=row["transcript_request_uid"], summary_request_uid=row["summary_request_uid"],
+            transcription_request_uid=row["transcript_request_uid"],
+            content_verification_receipt_sha256=content["receipt_sha256"],
+            summary_request_uid=row["summary_request_uid"],
             transcription_limiter=json.loads(row["transcript_limiter_json"]),
             summary_limiter=json.loads(row["summary_limiter_json"]),
             model=row["model"],

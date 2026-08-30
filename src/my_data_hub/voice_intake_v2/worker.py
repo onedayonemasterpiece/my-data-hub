@@ -35,6 +35,10 @@ class StageFailure(RuntimeError):
         self, code: str, *, sent: bool, retryable: bool = False,
         retry_after_seconds: int | None = None, ambiguous: bool = False,
         diagnostics: dict[str, Any] | None = None,
+        provider_request_uid: str | None = None,
+        finish_reason: str | None = None,
+        usage: dict[str, int] | None = None,
+        segment_attempt: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(code)
         self.code = code
@@ -43,6 +47,10 @@ class StageFailure(RuntimeError):
         self.retry_after_seconds = retry_after_seconds
         self.ambiguous = ambiguous
         self.diagnostics = dict(diagnostics or {})
+        self.provider_request_uid = provider_request_uid
+        self.finish_reason = finish_reason
+        self.usage = dict(usage or {})
+        self.segment_attempt = dict(segment_attempt or {})
 
 
 class SegmentInference(Protocol):
@@ -139,6 +147,33 @@ class VoiceIntakeV2Worker:
         try:
             await self._process(session)
         except StageFailure as exc:
+            if exc.segment_attempt and exc.provider_request_uid:
+                attempt = exc.segment_attempt
+                self.store.persist_segment_receipt(
+                    session.session_id,
+                    self.owner,
+                    StoredSegmentReceipt(
+                        session_id=session.session_id,
+                        chunk_index=int(attempt["chunk_index"]),
+                        source_sha256=str(attempt["source_sha256"]),
+                        audio_start_ms=int(attempt["audio_start_ms"]),
+                        audio_end_ms=int(attempt["audio_end_ms"]),
+                        coverage_start_ms=int(attempt["coverage_start_ms"]),
+                        coverage_end_ms=int(attempt["coverage_end_ms"]),
+                        provider_request_uid=exc.provider_request_uid,
+                        finish_reason=exc.finish_reason or "MISSING",
+                        schema_version=str(attempt["schema_version"]),
+                        accepted=False,
+                        transcript=None,
+                        coverage={
+                            "verdict": "failed",
+                            "error_code": exc.code,
+                            "usage": exc.usage,
+                            "diagnostics": exc.diagnostics,
+                        },
+                        limiter={},
+                    ),
+                )
             if exc.diagnostics:
                 diagnostic = exc.diagnostics
                 LOGGER.warning(
@@ -234,10 +269,8 @@ class VoiceIntakeV2Worker:
     def _stored_segment(
         session_id: str, receipt: SegmentInferenceReceipt
     ) -> StoredSegmentReceipt:
-        # The inference receipt hash covers provider/source metadata as well as
-        # content, whereas the current store field is the canonical transcript
-        # JSON hash. Preserve the richer hash in bounded coverage metadata and
-        # let the store derive its own content hash rather than conflating them.
+        # Keep the provider/source receipt hash distinct from the canonical
+        # transcript JSON hash derived by the store.
         coverage = {
             "input_audio_sha256": receipt.input_audio_sha256,
             "input_audio_mime_type": receipt.input_audio_mime_type,
@@ -263,6 +296,7 @@ class VoiceIntakeV2Worker:
             coverage=coverage,
             limiter=receipt.limiter,
             transcript_receipt_sha256=None,
+            inference_receipt_sha256=receipt.transcript_receipt_sha256,
         )
 
     def _finish_verified_publication(self, session_id: str) -> None:

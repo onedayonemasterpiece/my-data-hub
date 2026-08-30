@@ -193,19 +193,34 @@ class AggregateGeminiInference:
                     ),
                 )
 
-        generated = await self._generate(
-            prompt=prompt,
-            schema=SEGMENT_TRANSCRIPT_JSON_SCHEMA,
-            output_type=SegmentTranscriptPayload,
-            audio=audio,
-            audio_mime_type="audio/mpeg",
-            reserved_tpm=reserve,
-            max_output_tokens=SEGMENT_TRANSCRIPTION_MAX_OUTPUT_TOKENS,
-            consumer="my-data-hub.voice-intake.transcribe.v2",
-            schema_name=TRANSCRIPT_SCHEMA_NAME,
-            preflight=preflight,
-            value_validator=validate_segment,
-        )
+        try:
+            generated = await self._generate(
+                prompt=prompt,
+                schema=SEGMENT_TRANSCRIPT_JSON_SCHEMA,
+                output_type=SegmentTranscriptPayload,
+                audio=audio,
+                audio_mime_type="audio/mpeg",
+                reserved_tpm=reserve,
+                max_output_tokens=SEGMENT_TRANSCRIPTION_MAX_OUTPUT_TOKENS,
+                consumer="my-data-hub.voice-intake.transcribe.v2",
+                schema_name=TRANSCRIPT_SCHEMA_NAME,
+                preflight=preflight,
+                value_validator=validate_segment,
+            )
+        except StageFailure as exc:
+            if exc.sent:
+                exc.segment_attempt = {
+                    "chunk_index": chunk_index,
+                    "source_sha256": source_sha256,
+                    "audio_start_ms": source_audio_start_ms,
+                    "audio_end_ms": source_audio_end_ms,
+                    # Failed attempts are never credited with partial content;
+                    # the source interval is retained only as bounded evidence.
+                    "coverage_start_ms": source_audio_start_ms,
+                    "coverage_end_ms": source_audio_start_ms,
+                    "schema_version": SEGMENT_RECEIPT_SCHEMA_VERSION,
+                }
+            raise
         assert evidence is not None and generated.usage is not None
         validated = SegmentTranscriptPayload.model_validate(generated.value)
         transcript_value = TranscriptPayload(
@@ -542,6 +557,10 @@ class AggregateGeminiInference:
             if value_validator is not None:
                 value_validator(value)
         except StageFailure as exc:
+            if exc.sent:
+                exc.provider_request_uid = request_uid
+                exc.finish_reason = finish_reason
+                exc.usage = usage.model_dump(mode="json") if usage is not None else {}
             if exc.diagnostics:
                 exc.diagnostics["finish_reason"] = finish_reason
                 exc.diagnostics["token_counts"] = {
@@ -563,22 +582,34 @@ class AggregateGeminiInference:
                 }
                 else "provider_failure"
             )
-            await self._finalize(lease, started, usage, "failed", error)
+            await self._finalize(lease, started, usage, "failed", error, request_uid=request_uid)
             raise
         except (TimeoutError, BoundedHTTPError) as exc:
-            await self._finalize(lease, started, usage, "failed", "provider_outcome_ambiguous")
+            await self._finalize(
+                lease, started, usage, "failed", "provider_outcome_ambiguous",
+                request_uid=request_uid,
+            )
             raise StageFailure(
                 "provider_timeout" if "timeout" in str(exc).lower() else "provider_network_error",
                 sent=True,
                 retryable=False,
                 ambiguous=True,
+                provider_request_uid=request_uid,
+                finish_reason="MISSING",
+                usage=usage.model_dump(mode="json") if usage is not None else {},
             ) from exc
         except (KeyError, TypeError, ValueError, ValidationError) as exc:
-            await self._finalize(lease, started, usage, "failed", "response_schema_invalid")
+            await self._finalize(
+                lease, started, usage, "failed", "response_schema_invalid",
+                request_uid=request_uid,
+            )
             raise StageFailure(
                 "response_schema_invalid",
                 sent=True,
                 retryable=False,
+                provider_request_uid=request_uid,
+                finish_reason=finish_reason,
+                usage=usage.model_dump(mode="json") if usage is not None else {},
                 diagnostics=self._validation_diagnostics(
                     schema=schema,
                     schema_name=schema_name,
@@ -590,7 +621,9 @@ class AggregateGeminiInference:
                     max_output_tokens=max_output_tokens,
                 ),
             ) from exc
-        await self._finalize(lease, started, usage, "succeeded", None)
+        await self._finalize(
+            lease, started, usage, "succeeded", None, request_uid=request_uid
+        )
         public = self.limiter.public_lease(lease, actual_tpm=usage.total_tokens if usage else None)
         return InferenceReceipt(
             value=value.model_dump(mode="json"),
@@ -601,7 +634,8 @@ class AggregateGeminiInference:
         )
 
     async def _finalize(
-        self, lease: LimiterLease, started: float, usage: ModelUsage | None, status: str, error: str | None
+        self, lease: LimiterLease, started: float, usage: ModelUsage | None,
+        status: str, error: str | None, *, request_uid: str,
     ) -> None:
         try:
             await asyncio.shield(
@@ -616,7 +650,12 @@ class AggregateGeminiInference:
                 )
             )
         except Exception as exc:
-            raise StageFailure("limiter_finalization_failed", sent=True, ambiguous=True) from exc
+            raise StageFailure(
+                "limiter_finalization_failed", sent=True, ambiguous=True,
+                provider_request_uid=request_uid,
+                finish_reason="MISSING",
+                usage=usage.model_dump(mode="json") if usage is not None else {},
+            ) from exc
 
     @staticmethod
     def _usage(value: dict[str, Any]) -> ModelUsage | None:
