@@ -147,6 +147,29 @@ def test_single_lease_restart_recovery_and_ttl_preserves_unverified_audio(
     assert store.status(SESSION_ID).state == "reconciliation_required"
 
 
+def test_durable_segment_receipt_atomically_clears_ambiguous_inflight_state(
+    tmp_path, create_request, complete_request, terminology
+):
+    now = [1_000_000.0]
+    store = VoiceIntakeV2Store(tmp_path / "spool", clock=lambda: now[0])
+    store.create_session(create_request, terminology=terminology)
+    path = store.session_directory(SESSION_ID) / "chunks" / f"00000-{SHA}.m4a"
+    path.write_bytes(b"audio")
+    store.record_chunk(receipt(path))
+    store.complete(SESSION_ID, complete_request)
+    assert store.claim("worker-1", 30) is not None
+    store.set_state(SESSION_ID, "worker-1", "transcribing")
+    store.persist_segment_receipt(SESSION_ID, "worker-1", segment_receipt())
+    assert store.status(SESSION_ID).state == "normalizing"
+
+    now[0] += 31
+    assert store.fence_ambiguous_inference() == 0
+    resumed = store.claim("worker-2", 30)
+    assert resumed is not None
+    assert len(store.segment_receipts(SESSION_ID, accepted_only=True)) == 1
+    assert path.is_file()
+
+
 def test_ttl_preserves_old_receiving_session_and_audio(tmp_path, create_request, terminology):
     now = [1_000_000.0]
     store = VoiceIntakeV2Store(tmp_path / "spool", clock=lambda: now[0])
