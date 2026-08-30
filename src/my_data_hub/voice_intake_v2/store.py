@@ -113,6 +113,8 @@ class LegacyMigrationAudit:
     legacy_unverified_purge_observed: int
     long_transcript_rows_observed: int
     suspicious_long_transcript_rows_observed: int
+    finish_coverage_evidence_rows_observed: int
+    transcript_without_finish_coverage_evidence_rows_observed: int
 
 
 class VoiceIntakeV2Store:
@@ -338,6 +340,8 @@ class VoiceIntakeV2Store:
                     legacy_unverified_purge_observed INTEGER NOT NULL,
                     long_transcript_rows_observed INTEGER NOT NULL,
                     suspicious_long_transcript_rows_observed INTEGER NOT NULL,
+                    finish_coverage_evidence_rows_observed INTEGER NOT NULL,
+                    transcript_without_finish_coverage_evidence_rows_observed INTEGER NOT NULL,
                     created_at REAL NOT NULL
                 )"""
             )
@@ -348,6 +352,8 @@ class VoiceIntakeV2Store:
             for column in (
                 "long_transcript_rows_observed",
                 "suspicious_long_transcript_rows_observed",
+                "finish_coverage_evidence_rows_observed",
+                "transcript_without_finish_coverage_evidence_rows_observed",
             ):
                 if column not in audit_columns:
                     connection.execute(
@@ -380,9 +386,23 @@ class VoiceIntakeV2Store:
                 # but neither is evidence of content completeness or authorization.
                 if sessions_existed:
                     sample = connection.execute(
-                        """SELECT github_verified,server_audio_purged,
-                                  complete_json,transcript_json FROM sessions
-                           ORDER BY rowid LIMIT ?""",
+                        """SELECT s.github_verified,s.server_audio_purged,
+                                  s.complete_json,s.transcript_json,
+                                  CASE WHEN EXISTS(
+                                      SELECT 1 FROM chunks c WHERE c.session_id=s.session_id
+                                  ) AND NOT EXISTS(
+                                      SELECT 1 FROM chunks c
+                                      WHERE c.session_id=s.session_id AND NOT EXISTS(
+                                          SELECT 1 FROM segment_inference_receipts r
+                                          WHERE r.session_id=c.session_id
+                                            AND r.chunk_index=c.chunk_index
+                                            AND r.accepted=1 AND r.finish_reason='STOP'
+                                            AND r.source_sha256=c.sha256
+                                            AND r.coverage_start_ms=c.audio_start_ms
+                                            AND r.coverage_end_ms=c.audio_end_ms
+                                      )
+                                  ) THEN 1 ELSE 0 END AS finish_coverage_evidence
+                           FROM sessions s ORDER BY s.rowid LIMIT ?""",
                         (self._AUDIT_LIMIT + 1,),
                     ).fetchall()
                     observed = sample[: self._AUDIT_LIMIT]
@@ -398,8 +418,10 @@ class VoiceIntakeV2Store:
                            migration_version,rows_examined,rows_truncated,
                            publication_verified_observed,audio_purged_observed,
                            legacy_unverified_purge_observed,long_transcript_rows_observed,
-                           suspicious_long_transcript_rows_observed,created_at
-                        ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                           suspicious_long_transcript_rows_observed,
+                           finish_coverage_evidence_rows_observed,
+                           transcript_without_finish_coverage_evidence_rows_observed,created_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                         (
                             self._CONTENT_MIGRATION, len(observed), int(len(sample) > self._AUDIT_LIMIT),
                             sum(int(row["github_verified"]) for row in observed),
@@ -407,6 +429,11 @@ class VoiceIntakeV2Store:
                             sum(int(row["server_audio_purged"]) for row in observed),
                             sum(self._legacy_long_transcript_metrics(row)[0] for row in observed),
                             sum(self._legacy_long_transcript_metrics(row)[1] for row in observed),
+                            sum(int(row["finish_coverage_evidence"]) for row in observed),
+                            sum(
+                                int(bool(row["transcript_json"]) and not row["finish_coverage_evidence"])
+                                for row in observed
+                            ),
                             self._clock(),
                         ),
                     )
@@ -1323,7 +1350,9 @@ class VoiceIntakeV2Store:
                           publication_verified_observed,audio_purged_observed,
                           legacy_unverified_purge_observed,
                           long_transcript_rows_observed,
-                          suspicious_long_transcript_rows_observed
+                          suspicious_long_transcript_rows_observed,
+                          finish_coverage_evidence_rows_observed,
+                          transcript_without_finish_coverage_evidence_rows_observed
                    FROM legacy_content_migration_audit WHERE migration_version=?""",
                 (self._CONTENT_MIGRATION,),
             ).fetchone()
@@ -1338,6 +1367,12 @@ class VoiceIntakeV2Store:
             long_transcript_rows_observed=row["long_transcript_rows_observed"],
             suspicious_long_transcript_rows_observed=(
                 row["suspicious_long_transcript_rows_observed"]
+            ),
+            finish_coverage_evidence_rows_observed=(
+                row["finish_coverage_evidence_rows_observed"]
+            ),
+            transcript_without_finish_coverage_evidence_rows_observed=(
+                row["transcript_without_finish_coverage_evidence_rows_observed"]
             ),
         )
 

@@ -373,10 +373,14 @@ def test_legacy_migration_twice_is_idempotent_truthful_and_bounded(tmp_path):
         "publication_verified_observed", "audio_purged_observed",
         "legacy_unverified_purge_observed",
         "long_transcript_rows_observed", "suspicious_long_transcript_rows_observed",
+        "finish_coverage_evidence_rows_observed",
+        "transcript_without_finish_coverage_evidence_rows_observed",
     }
     assert audit.long_transcript_rows_observed == 2
     assert audit.suspicious_long_transcript_rows_observed == 1
-    assert not any("id" in key or "content" in key for key in asdict(audit))
+    assert audit.finish_coverage_evidence_rows_observed == 0
+    assert audit.transcript_without_finish_coverage_evidence_rows_observed == 2
+    assert not any("session_id" in key or "content" in key for key in asdict(audit))
     github_only = first.verification_state("voice-20260828-000002-00000002")
     assert github_only.publication_verified and not github_only.content_verified
     assert not github_only.purge_authorized
