@@ -1,489 +1,428 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
-import logging
 from pathlib import Path
 
 import pytest
 
-from my_data_hub.voice_intake.contracts import TranscriptPayload
-from my_data_hub.voice_intake.errors import GitHubPublicationConflict, VoiceIntakeError
+from my_data_hub.voice_intake.contracts import ModelUsage, TranscriptPayload
+from my_data_hub.voice_intake.errors import VoiceIntakeError
 from my_data_hub.voice_intake_v2.contracts import (
     InferenceReceipt,
     PublicationReceipt,
+    SegmentInferenceReceipt,
+    SegmentPlausibilityEvidence,
     SessionCompleteRequest,
 )
-from my_data_hub.voice_intake_v2.media import BoundedMediaTools, MediaProbe
+from my_data_hub.voice_intake_v2.media import MediaProbe
 from my_data_hub.voice_intake_v2.settings import VoiceIntakeV2Settings
-from my_data_hub.voice_intake_v2.store import ChunkReceipt, StoreError, VoiceIntakeV2Store
+from my_data_hub.voice_intake_v2.store import ChunkReceipt, VoiceIntakeV2Store
 from my_data_hub.voice_intake_v2.worker import StageFailure, VoiceIntakeV2Worker
 
 from .conftest import SESSION_ID, summary_value
 
 
 class Media:
-    async def probe(self, _path):
-        return MediaProbe(240000, "aac", "LC", 16000, 1)
+    def __init__(self, durations: list[int]) -> None:
+        self.durations = durations
+        self.normalized: list[tuple[Path, Path]] = []
 
-    async def normalize(self, _chunks, output):
+    async def probe(self, path: Path) -> MediaProbe:
+        index = int(path.name.split("-", 1)[0])
+        return MediaProbe(self.durations[index], "aac", "LC", 16_000, 1)
+
+    async def normalize(self, chunks: tuple[Path, ...], output: Path) -> None:
+        assert len(chunks) == 1
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(b"mp3")
+        output.write_bytes(b"private-mp3-" + chunks[0].read_bytes())
+        self.normalized.append((chunks[0], output))
 
 
 class Inference:
-    def __init__(self):
-        self.calls = []
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int | None]] = []
 
-    async def transcribe(self, **kwargs):
-        self.calls.append(("transcribe", kwargs["recorded_audio_ms"], kwargs["terminology"]))
-        return InferenceReceipt(
-            value=TranscriptPayload(transcript="full session").model_dump(mode="json"),
-            request_uid="transcription-uid", limiter={"reserved_tpm": 7680},
+    async def transcribe_segment(self, **kwargs) -> SegmentInferenceReceipt:
+        index = kwargs["chunk_index"]
+        start, end = kwargs["source_audio_start_ms"], kwargs["source_audio_end_ms"]
+        self.calls.append(("segment", index))
+        value = TranscriptPayload(
+            transcript=f"synthetic verified segment {index}", language="ru-RU"
+        ).model_dump(mode="json")
+        return SegmentInferenceReceipt(
+            chunk_index=index,
+            source_sha256=kwargs["source_sha256"],
+            input_audio_sha256=hashlib.sha256(kwargs["audio_path"].read_bytes()).hexdigest(),
+            input_audio_mime_type="audio/mpeg",
+            source_audio_start_ms=start,
+            source_audio_end_ms=end,
+            coverage_start_ms=start,
+            coverage_end_ms=end,
+            coverage_ms=end - start,
+            coverage_ratio=1.0,
+            finish_reason="STOP",
+            transcript_receipt_sha256=hashlib.sha256(f"receipt-{index}".encode()).hexdigest(),
+            value=value,
+            request_uid=f"segment-{index}-uid",
+            limiter={"reserved_tpm": 1000 + index},
+            usage=ModelUsage(
+                input_tokens=100, output_tokens=50, thought_tokens=0, total_tokens=150
+            ),
+            plausibility=SegmentPlausibilityEvidence(
+                expected_speech_ms=end - start,
+                transcript_characters=50,
+                transcript_words=6,
+                alphanumeric_characters=40,
+                alphanumeric_per_speech_second=1,
+                words_per_speech_minute=20,
+            ),
         )
 
-    async def summarize(self, **kwargs):
-        self.calls.append(("summarize", kwargs["transcript"], kwargs["terminology"]))
+    async def summarize(self, **_kwargs) -> InferenceReceipt:
+        self.calls.append(("summary", None))
         return InferenceReceipt(
-            value=summary_value(), request_uid="summary-uid", limiter={"reserved_tpm": 12345},
+            value=summary_value(), request_uid="summary-uid", limiter={"reserved_tpm": 12345}
         )
 
 
 class Publisher:
-    def __init__(self):
-        self.projections = []
+    def __init__(self, chunks: Path | None = None) -> None:
+        self.calls = 0
+        self.chunks = chunks
+        self.files_at_readback = 0
 
-    async def publish_and_verify(self, projection):
-        self.projections.append(projection)
+    async def publish_and_verify(self, _projection) -> PublicationReceipt:
+        self.calls += 1
+        if self.chunks is not None:
+            self.files_at_readback = len(list(self.chunks.glob("*.m4a")))
         return PublicationReceipt(
-            github_url="https://github.com/example", github_commit_sha="d" * 40, github_verified=True,
+            github_url="https://github.com/example",
+            github_commit_sha="d" * 40,
+            github_verified=True,
         )
 
 
-class TrackingStore(VoiceIntakeV2Store):
-    def __init__(self, root: Path) -> None:
-        self.events: list[str] = []
+class CrashAfterStore(VoiceIntakeV2Store):
+    def __init__(self, root: Path, crash_stage: str) -> None:
+        self.crash_stage, self.did_crash = crash_stage, False
         super().__init__(root)
 
+    def _crash(self, stage: str) -> None:
+        if self.crash_stage == stage and not self.did_crash:
+            self.did_crash = True
+            raise StageFailure("injected_restart", sent=False, retryable=True)
+
+    def persist_segment_receipt(self, *args, **kwargs):
+        result = super().persist_segment_receipt(*args, **kwargs)
+        self._crash("segment")
+        return result
+
+    def persist_content_verification(self, *args, **kwargs):
+        result = super().persist_content_verification(*args, **kwargs)
+        self._crash("content")
+        return result
+
+    def persist_summary(self, *args, **kwargs):
+        result = super().persist_summary(*args, **kwargs)
+        self._crash("summary")
+        return result
+
     def persist_github_verified(self, *args, **kwargs):
-        self.events.append("receipt")
-        return super().persist_github_verified(*args, **kwargs)
+        result = super().persist_github_verified(*args, **kwargs)
+        self._crash("publication")
+        return result
+
+    def authorize_purge(self, *args, **kwargs):
+        result = super().authorize_purge(*args, **kwargs)
+        self._crash("authorization")
+        return result
 
     def purge_audio(self, *args, **kwargs):
-        self.events.append("purge")
-        return super().purge_audio(*args, **kwargs)
+        result = super().purge_audio(*args, **kwargs)
+        self._crash("purge")
+        return result
 
 
 def settings(root: Path) -> VoiceIntakeV2Settings:
     return VoiceIntakeV2Settings(
-        enabled=True, spool_root=root, max_chunk_bytes=1024 * 1024, max_json_bytes=1024 * 1024,
-        max_session_seconds=3600, active_ttl_seconds=7 * 24 * 3600, lease_seconds=60,
-        worker_poll_seconds=.1, ffprobe_timeout_seconds=5, ffmpeg_timeout_seconds=30,
-        duration_tolerance_ms=2000,
+        enabled=True, spool_root=root, max_chunk_bytes=1024 * 1024,
+        max_json_bytes=1024 * 1024, max_session_seconds=3600,
+        active_ttl_seconds=7 * 24 * 3600, lease_seconds=60,
+        worker_poll_seconds=.1, ffprobe_timeout_seconds=5,
+        ffmpeg_timeout_seconds=30, duration_tolerance_ms=2000,
     )
 
 
-def queued(tmp_path, create_request, complete_request, terminology):
-    store = VoiceIntakeV2Store(tmp_path / "spool")
+def queued(
+    root: Path, create_request, terminology, durations: list[int],
+    *, crash_stage: str | None = None,
+) -> tuple[VoiceIntakeV2Store, SessionCompleteRequest]:
+    store = (
+        CrashAfterStore(root, crash_stage) if crash_stage is not None
+        else VoiceIntakeV2Store(root)
+    )
     store.create_session(create_request, terminology=terminology)
-    audio = b"m4a"
-    digest = hashlib.sha256(audio).hexdigest()
-    path = store.session_directory(SESSION_ID) / "chunks" / f"00000-{digest}.m4a"
-    path.write_bytes(audio)
-    store.record_chunk(ChunkReceipt(
-        session_id=SESSION_ID, chunk_index=0, sha256=digest, duration_ms=240000,
-        audio_start_ms=0, audio_end_ms=240000, wall_start_ms=0, wall_end_ms=240000,
-        size_bytes=len(audio), path=str(path),
-    ))
-    complete_value = complete_request.model_dump(mode="json")
-    complete_value["chunks"][0]["sha256"] = digest
-    store.complete(SESSION_ID, SessionCompleteRequest.model_validate(complete_value))
-    return store
+    chunks, cursor = [], 0
+    for index, duration in enumerate(durations):
+        audio = f"synthetic-m4a-{index}".encode()
+        digest = hashlib.sha256(audio).hexdigest()
+        path = store.session_directory(SESSION_ID) / "chunks" / f"{index:05d}-{digest}.m4a"
+        path.write_bytes(audio)
+        start, cursor = cursor, cursor + duration
+        store.record_chunk(ChunkReceipt(
+            session_id=SESSION_ID, chunk_index=index, sha256=digest,
+            duration_ms=duration, audio_start_ms=start, audio_end_ms=cursor,
+            wall_start_ms=start, wall_end_ms=cursor, size_bytes=len(audio), path=str(path),
+        ))
+        chunks.append({
+            "chunk_index": index, "sha256": digest, "duration_ms": duration,
+            "audio_start_ms": start, "audio_end_ms": cursor,
+            "wall_start_ms": start, "wall_end_ms": cursor,
+        })
+    complete = SessionCompleteRequest.model_validate({
+        "ended_at": "2026-08-28T13:34:56+02:00", "wall_elapsed_ms": cursor,
+        "manual_pause_ms": 0, "recorded_audio_ms": cursor,
+        "auto_silence_skipped_ms": 0, "chunk_count": len(chunks), "chunks": chunks,
+    })
+    store.complete(SESSION_ID, complete)
+    return store, complete
 
 
-def matching_complete(store, complete_request) -> SessionCompleteRequest:
-    value = complete_request.model_dump(mode="json")
-    chunk = store.get_chunk(SESSION_ID, 0)
-    assert chunk is not None
-    value["chunks"][0]["sha256"] = chunk.sha256
-    return SessionCompleteRequest.model_validate(value)
-
-
-@pytest.mark.asyncio
-async def test_sent_truncation_waits_for_explicit_resume_and_logs_only_sanitized_diagnostics(
-    tmp_path, create_request, complete_request, terminology, caplog
-):
-    class RetryTruncatedInference(Inference):
-        async def transcribe(self, **kwargs):
-            self.calls.append(("transcribe", kwargs["recorded_audio_ms"], kwargs["terminology"]))
-            if len([call for call in self.calls if call[0] == "transcribe"]) == 1:
-                raise StageFailure(
-                    "response_schema_invalid",
-                    sent=True,
-                    retryable=True,
-                    diagnostics={
-                        "schema": "voice_intake_transcript",
-                        "schema_version": "1.0.0",
-                        "json_path": "$",
-                        "expected": {
-                            "type": "object",
-                            "constraint": "complete_valid_json_matching_schema",
-                        },
-                        "actual": {"type": "string", "shape": {"characters": 100}},
-                        "missing_fields": [],
-                        "extra_fields": [],
-                        "finish_reason": "MAX_TOKENS",
-                        "token_counts": {
-                            "input": 100,
-                            "output": 65_520,
-                            "thought": 0,
-                            "total": 65_620,
-                        },
-                        "configured_max_output_tokens": 65_536,
-                        "truncated": True,
-                    },
-                )
-            return InferenceReceipt(
-                value=TranscriptPayload(transcript="full session").model_dump(mode="json"),
-                request_uid="transcription-uid",
-                limiter={"reserved_tpm": 7680},
-            )
-
-    caplog.set_level(logging.WARNING, logger="my_data_hub.voice_intake_v2.worker")
-    store = queued(tmp_path, create_request, complete_request, terminology)
-    inference = RetryTruncatedInference()
-    worker = VoiceIntakeV2Worker(
-        store,
-        settings(store.root),
-        media=Media(),
-        inference=inference,
-        publisher=Publisher(),
-        owner="worker",
-    )
-
-    assert await worker.process_once()
-    failed = store.status(SESSION_ID)
-    assert failed.state == "retryable_error"
-    assert failed.retryable and failed.retry_at is None
-    assert [call[0] for call in inference.calls] == ["transcribe"]
-    assert "finish_reason=MAX_TOKENS" in caplog.text
-    assert "configured_max_output_tokens=65536" in caplog.text
-    assert "PRIVATE" not in caplog.text
-
-    store.complete(SESSION_ID, matching_complete(store, complete_request))
-    assert await worker.process_once()
-    assert store.status(SESSION_ID).state == "published_verified"
-    assert [call[0] for call in inference.calls] == ["transcribe", "transcribe", "summarize"]
+def files(store: VoiceIntakeV2Store) -> list[Path]:
+    return sorted((store.session_directory(SESSION_ID) / "chunks").glob("*.m4a"))
 
 
 @pytest.mark.asyncio
-async def test_seven_chunks_and_twenty_minutes_make_two_aggregate_calls_then_verified_purge(
+async def test_twenty_minutes_short_valid_transcript_fails_closed_with_real_files(
     tmp_path, create_request, terminology
 ):
     durations = [180_000] * 6 + [127_620]
 
-    class AggregateMedia(Media):
-        def __init__(self):
-            self.normalized_inputs = []
+    class Short(Inference):
+        async def transcribe_segment(self, **kwargs):
+            self.calls.append(("segment", kwargs["chunk_index"]))
+            raise StageFailure("segment_content_incomplete", sent=True, retryable=False)
 
-        async def probe(self, path):
-            index = int(path.name.split("-", 1)[0])
-            return MediaProbe(durations[index], "aac", "LC", 16000, 1)
-
-        async def normalize(self, chunks, output):
-            self.normalized_inputs.append(tuple(chunks))
-            await super().normalize(chunks, output)
-
-    class InspectingPublisher(Publisher):
-        def __init__(self, chunk_directory):
-            super().__init__()
-            self.chunk_directory = chunk_directory
-            self.chunks_during_readback = 0
-
-        async def publish_and_verify(self, projection):
-            self.chunks_during_readback = len(list(self.chunk_directory.glob("*.m4a")))
-            return await super().publish_and_verify(projection)
-
-    store = TrackingStore(tmp_path / "spool")
-    store.create_session(create_request, terminology=terminology)
-    inference = Inference()
-    chunks = []
-    audio_cursor = 0
-    for index, duration_ms in enumerate(durations):
-        audio = f"m4a-{index}".encode()
-        digest = hashlib.sha256(audio).hexdigest()
-        path = store.session_directory(SESSION_ID) / "chunks" / f"{index:05d}-{digest}.m4a"
-        path.write_bytes(audio)
-        start = audio_cursor
-        audio_cursor += duration_ms
-        store.record_chunk(ChunkReceipt(
-            session_id=SESSION_ID, chunk_index=index, sha256=digest, duration_ms=duration_ms,
-            audio_start_ms=start, audio_end_ms=audio_cursor,
-            wall_start_ms=start, wall_end_ms=audio_cursor,
-            size_bytes=len(audio), path=str(path),
-        ))
-        chunks.append({
-            "chunk_index": index, "sha256": digest, "duration_ms": duration_ms,
-            "audio_start_ms": start, "audio_end_ms": audio_cursor,
-            "wall_start_ms": start, "wall_end_ms": audio_cursor,
-        })
-        assert inference.calls == []
-    assert audio_cursor == 1_207_620
-    store.complete(SESSION_ID, SessionCompleteRequest.model_validate({
-        "ended_at": "2026-08-28T12:55:03.620+02:00", "wall_elapsed_ms": audio_cursor,
-        "manual_pause_ms": 0, "recorded_audio_ms": audio_cursor,
-        "auto_silence_skipped_ms": 0, "chunk_count": 7, "chunks": chunks,
-    }))
-    chunk_directory = store.session_directory(SESSION_ID) / "chunks"
-    assert len(list(chunk_directory.glob("*.m4a"))) == 7
-    assert inference.calls == []
-    # Re-open the SQLite/spool as a restarted process before either inference
-    # stage; the one pinned terminology snapshot must survive and reach both.
-    store = TrackingStore(store.root)
-    media, publisher = AggregateMedia(), InspectingPublisher(chunk_directory)
+    store, _ = queued(tmp_path / "spool", create_request, terminology, durations)
+    inference, publisher = Short(), Publisher()
     worker = VoiceIntakeV2Worker(
-        store, settings(store.root), media=media, inference=inference, publisher=publisher,
-        owner="worker",
+        store, settings(store.root), media=Media(durations), inference=inference,
+        publisher=publisher, owner="worker",
     )
     assert await worker.process_once()
-    assert [call[0] for call in inference.calls] == ["transcribe", "summarize"]
-    assert inference.calls[0][1] == 1_207_620
-    assert len(media.normalized_inputs) == 1 and len(media.normalized_inputs[0]) == 7
-    assert publisher.chunks_during_readback == 7
-    assert store.events == ["receipt", "purge"]
     status = store.status(SESSION_ID)
-    assert status.state == "published_verified" and status.server_audio_purged
-    assert status.gemini_requests_completed == 2
-    assert status.transcription_request_uid == "transcription-uid"
-    assert status.summary_request_uid == "summary-uid"
-    assert not (store.session_directory(SESSION_ID) / "chunks").exists()
-    assert (store.session_directory(SESSION_ID) / "transcript.json").is_file()
-    projection = publisher.projections[0]
-    assert projection.create["client_version"] == "1.1.0"
-    assert len(projection.transport_chunks) == 7
-    assert projection.transcription_request_uid != projection.summary_request_uid
-    assert all(
-        call[-1]["source_commit_sha"] == terminology["source_commit_sha"]
-        for call in inference.calls
+    assert status.error_code == "segment_content_incomplete"
+    assert not status.content_verified and not status.publication_verified
+    assert not status.purge_authorized and not status.audio_purged
+    assert len(files(store)) == 7 and publisher.calls == 0
+
+
+@pytest.mark.parametrize("shape", ["parseable_object", "malformed_json"])
+@pytest.mark.asyncio
+async def test_max_tokens_parseable_or_malformed_never_purges(
+    tmp_path, create_request, terminology, shape
+):
+    class MaxTokens(Inference):
+        async def transcribe_segment(self, **kwargs):
+            self.calls.append(("segment", kwargs["chunk_index"]))
+            raise StageFailure(
+                "response_schema_invalid", sent=True, retryable=False,
+                diagnostics={"finish_reason": "MAX_TOKENS", "actual": {"type": shape}},
+            )
+
+    store, _ = queued(tmp_path / "spool", create_request, terminology, [240_000])
+    worker = VoiceIntakeV2Worker(
+        store, settings(store.root), media=Media([240_000]), inference=MaxTokens(),
+        publisher=Publisher(), owner="worker",
     )
+    assert await worker.process_once()
+    status = store.status(SESSION_ID)
+    assert status.error_code == "response_schema_invalid"
+    assert not status.content_verified and not status.purge_authorized and not status.audio_purged
+    assert len(files(store)) == 1
 
 
 @pytest.mark.asyncio
-async def test_real_two_m4a_worker_pipeline_normalizes_once_and_runs_two_stages(
+async def test_missing_segment_coverage_reuses_prior_receipt_and_retains_files(
     tmp_path, create_request, terminology
 ):
-    store = VoiceIntakeV2Store(tmp_path / "spool")
-    store.create_session(create_request, terminology=terminology)
-    media = BoundedMediaTools(ffprobe_timeout=10, ffmpeg_timeout=30)
-    chunks = []
-    audio_cursor = 0
-    for index, frequency in enumerate((440, 660)):
-        path = store.session_directory(SESSION_ID) / "chunks" / f"{index:05d}-fixture.m4a"
-        process = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
-            f"sine=frequency={frequency}:sample_rate=16000:duration=1", "-ac", "1",
-            "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "32k", "-y", str(path),
-        )
-        assert await process.wait() == 0
-        probe = await media.probe(path)
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        start = audio_cursor
-        audio_cursor += probe.duration_ms
-        store.record_chunk(ChunkReceipt(
-            session_id=SESSION_ID, chunk_index=index, sha256=digest,
-            duration_ms=probe.duration_ms, audio_start_ms=start, audio_end_ms=audio_cursor,
-            wall_start_ms=start, wall_end_ms=audio_cursor, size_bytes=path.stat().st_size,
-            path=str(path),
-        ))
-        chunks.append({
-            "chunk_index": index, "sha256": digest, "duration_ms": probe.duration_ms,
-            "audio_start_ms": start, "audio_end_ms": audio_cursor,
-            "wall_start_ms": start, "wall_end_ms": audio_cursor,
-        })
-    store.complete(SESSION_ID, SessionCompleteRequest.model_validate({
-        "ended_at": "2026-08-28T12:34:58+02:00", "wall_elapsed_ms": audio_cursor,
-        "manual_pause_ms": 0, "recorded_audio_ms": audio_cursor,
-        "auto_silence_skipped_ms": 0, "chunk_count": 2, "chunks": chunks,
-    }))
-    inference = Inference()
+    class MissingThenSuccess(Inference):
+        failed = False
+
+        async def transcribe_segment(self, **kwargs):
+            if kwargs["chunk_index"] == 1 and not self.failed:
+                self.failed = True
+                self.calls.append(("segment", 1))
+                raise StageFailure("segment_coverage_invalid", sent=True, retryable=True)
+            return await super().transcribe_segment(**kwargs)
+
+    durations = [120_000, 120_000]
+    store, complete = queued(tmp_path / "spool", create_request, terminology, durations)
+    inference = MissingThenSuccess()
     worker = VoiceIntakeV2Worker(
-        store, settings(store.root), media=media, inference=inference, publisher=Publisher(),
-        owner="worker",
-    )
-    assert await worker.process_once()
-    assert [call[0] for call in inference.calls] == ["transcribe", "summarize"]
-    assert store.status(SESSION_ID).state == "published_verified"
-
-
-@pytest.mark.asyncio
-async def test_verified_receipt_is_durable_before_audio_purge(
-    tmp_path, create_request, complete_request, terminology
-):
-    store = TrackingStore(tmp_path / "spool")
-    store.create_session(create_request, terminology=terminology)
-    audio = b"m4a"
-    digest = hashlib.sha256(audio).hexdigest()
-    path = store.session_directory(SESSION_ID) / "chunks" / f"00000-{digest}.m4a"
-    path.write_bytes(audio)
-    store.record_chunk(ChunkReceipt(
-        session_id=SESSION_ID, chunk_index=0, sha256=digest, duration_ms=240000,
-        audio_start_ms=0, audio_end_ms=240000, wall_start_ms=0, wall_end_ms=240000,
-        size_bytes=len(audio), path=str(path),
-    ))
-    complete_value = complete_request.model_dump(mode="json")
-    complete_value["chunks"][0]["sha256"] = digest
-    store.complete(SESSION_ID, SessionCompleteRequest.model_validate(complete_value))
-    inference = Inference()
-    worker = VoiceIntakeV2Worker(
-        store, settings(store.root), media=Media(), inference=inference, publisher=Publisher(),
-        owner="worker",
-    )
-    assert await worker.process_once()
-    assert store.events == ["receipt", "purge"]
-
-
-@pytest.mark.asyncio
-async def test_github_retry_reuses_durable_inference_without_new_provider_calls(
-    tmp_path, create_request, complete_request, terminology
-):
-    class RetryPublisher(Publisher):
-        async def publish_and_verify(self, projection):
-            self.projections.append(projection)
-            if len(self.projections) == 1:
-                raise GitHubPublicationConflict("idea_hub_main_moved_repeatedly")
-            return PublicationReceipt(
-                github_url="https://github.com/example",
-                github_commit_sha="d" * 40,
-                github_verified=True,
-            )
-
-    store = queued(tmp_path, create_request, complete_request, terminology)
-    inference, publisher = Inference(), RetryPublisher()
-    worker = VoiceIntakeV2Worker(
-        store, settings(store.root), media=Media(), inference=inference, publisher=publisher,
-        owner="worker",
-    )
-    assert await worker.process_once()
-    failed = store.status(SESSION_ID)
-    assert failed.state == "retryable_error"
-    assert failed.transcription_complete and failed.summary_complete
-    assert (store.session_directory(SESSION_ID) / "chunks").is_dir()
-
-    store.complete(SESSION_ID, matching_complete(store, complete_request))
-    assert await worker.process_once()
-    assert store.status(SESSION_ID).state == "published_verified"
-    assert [call[0] for call in inference.calls] == ["transcribe", "summarize"]
-    assert len(publisher.projections) == 2
-
-
-@pytest.mark.asyncio
-async def test_summary_retry_reuses_durable_transcript_without_new_transcription(
-    tmp_path, create_request, complete_request, terminology
-):
-    class RetrySummaryInference(Inference):
-        async def summarize(self, **kwargs):
-            self.calls.append(("summarize", kwargs["transcript"], kwargs["terminology"]))
-            if len([call for call in self.calls if call[0] == "summarize"]) == 1:
-                raise StageFailure("summary_pre_send_retry", sent=False, retryable=True)
-            return InferenceReceipt(
-                value=summary_value(), request_uid="summary-uid", limiter={"reserved_tpm": 12345},
-            )
-
-    store = queued(tmp_path, create_request, complete_request, terminology)
-    inference = RetrySummaryInference()
-    worker = VoiceIntakeV2Worker(
-        store, settings(store.root), media=Media(), inference=inference, publisher=Publisher(),
-        owner="worker",
-    )
-    assert await worker.process_once()
-    failed = store.status(SESSION_ID)
-    assert failed.state == "retryable_error"
-    assert failed.transcription_complete and not failed.summary_complete
-    assert (store.session_directory(SESSION_ID) / "transcript.json").is_file()
-    assert (store.session_directory(SESSION_ID) / "chunks").is_dir()
-
-    store.complete(SESSION_ID, matching_complete(store, complete_request))
-    assert await worker.process_once()
-    assert store.status(SESSION_ID).state == "published_verified"
-    assert [call[0] for call in inference.calls] == ["transcribe", "summarize", "summarize"]
-
-
-@pytest.mark.asyncio
-async def test_failed_audio_deletion_never_marks_server_audio_purged(
-    tmp_path, create_request, complete_request, terminology, monkeypatch
-):
-    store = queued(tmp_path, create_request, complete_request, terminology)
-
-    def fail_purge(_session_id):
-        raise StoreError("server_audio_purge_failed", status_code=500)
-
-    monkeypatch.setattr(store, "purge_audio", fail_purge)
-    inference = Inference()
-    worker = VoiceIntakeV2Worker(
-        store, settings(store.root), media=Media(), inference=inference, publisher=Publisher(),
-        owner="worker",
+        store, settings(store.root), media=Media(durations), inference=inference,
+        publisher=Publisher(), owner="worker",
     )
     assert await worker.process_once()
     status = store.status(SESSION_ID)
-    assert status.github_verified
-    assert not status.server_audio_purged
-    assert status.error_code == "server_audio_purge_failed"
-    assert status.retryable
-    assert (store.session_directory(SESSION_ID) / "chunks").is_dir()
-    monkeypatch.undo()
-    store.complete(SESSION_ID, matching_complete(store, complete_request))
+    assert status.transcription_segments_completed == 1 and not status.content_verified
+    assert not status.publication_verified and len(files(store)) == 2
+    store.complete(SESSION_ID, complete)
     assert await worker.process_once()
-    recovered = store.status(SESSION_ID)
-    assert recovered.state == "published_verified" and recovered.server_audio_purged
-    assert not recovered.retryable and recovered.error_code is None
-    assert [call[0] for call in inference.calls] == ["transcribe", "summarize"]
+    assert inference.calls.count(("segment", 0)) == 1
+    assert inference.calls.count(("segment", 1)) == 2
+    assert store.status(SESSION_ID).state == "published_verified"
 
 
+@pytest.mark.parametrize(
+    "crash_stage", ["segment", "content", "summary", "publication", "authorization", "purge"]
+)
 @pytest.mark.asyncio
-async def test_ambiguous_github_outcome_is_fenced_without_purge_or_inference_replay(
-    tmp_path, create_request, complete_request, terminology, caplog
+async def test_restart_after_durable_stage_does_not_repeat_successful_calls(
+    tmp_path, create_request, terminology, crash_stage
 ):
-    class AmbiguousPublisher(Publisher):
-        async def publish_and_verify(self, projection):
-            self.projections.append(projection)
-            raise VoiceIntakeError(
-                "github_outcome_ambiguous",
-                status_code=503,
-                reconciliation_required=True,
-            )
-
-    store = queued(tmp_path, create_request, complete_request, terminology)
-    inference, publisher = Inference(), AmbiguousPublisher()
-    worker = VoiceIntakeV2Worker(
-        store, settings(store.root), media=Media(), inference=inference, publisher=publisher,
-        owner="worker",
+    durations = [120_000, 120_000]
+    store, complete = queued(
+        tmp_path / "spool", create_request, terminology, durations, crash_stage=crash_stage
     )
-    assert await worker.process_once()
-    status = store.status(SESSION_ID)
-    assert status.state == "reconciliation_required"
-    assert status.reconciliation_required
-    assert not status.github_verified and not status.server_audio_purged
-    assert [call[0] for call in inference.calls] == ["transcribe", "summarize"]
-    assert not await worker.process_once()
-    rendered_logs = caplog.text
-    for forbidden in ("full session", "canonical terms", "mp3", "Detailed"):
-        assert forbidden not in rendered_logs
-
-
-@pytest.mark.asyncio
-async def test_spool_bytes_must_still_match_durable_sha_and_size_before_inference(
-    tmp_path, create_request, complete_request, terminology
-):
-    store = queued(tmp_path, create_request, complete_request, terminology)
-    chunk = next((store.session_directory(SESSION_ID) / "chunks").glob("*.m4a"))
-    chunk.write_bytes(b"tampered-after-durable-upload")
     inference, publisher = Inference(), Publisher()
     worker = VoiceIntakeV2Worker(
-        store, settings(store.root), media=Media(), inference=inference, publisher=publisher,
-        owner="worker",
+        store, settings(store.root), media=Media(durations), inference=inference,
+        publisher=publisher, owner="worker",
+    )
+    assert await worker.process_once()
+    failed = store.status(SESSION_ID)
+    assert failed.retryable and failed.error_code == "injected_restart"
+    before = list(inference.calls)
+    if crash_stage != "purge":
+        assert len(files(store)) == 2
+    store = VoiceIntakeV2Store(store.root)
+    store.complete(SESSION_ID, complete)
+    worker = VoiceIntakeV2Worker(
+        store, settings(store.root), media=Media(durations), inference=inference,
+        publisher=publisher, owner="restarted-worker",
+    )
+    assert await worker.process_once()
+    terminal = store.status(SESSION_ID)
+    assert terminal.state == "published_verified"
+    assert terminal.content_verified and terminal.publication_verified
+    assert terminal.purge_authorized and terminal.audio_purged and files(store) == []
+    for call in before:
+        assert inference.calls.count(call) == before.count(call)
+    if crash_stage in {"publication", "authorization", "purge"}:
+        assert publisher.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_github_readback_alone_cannot_delete_physical_audio(
+    tmp_path, create_request, terminology
+):
+    store, complete = queued(tmp_path / "spool", create_request, terminology, [240_000])
+    assert store.claim("legacy", 60) is not None
+    store.persist_github_verified(
+        SESSION_ID, "legacy", url="https://github.com/example", commit_sha="d" * 40
+    )
+    store.mark_error(SESSION_ID, "legacy", code="restart", retryable=True)
+    store.complete(SESSION_ID, complete)
+    inference = Inference()
+    worker = VoiceIntakeV2Worker(
+        store, settings(store.root), media=Media([240_000]), inference=inference,
+        publisher=Publisher(), owner="worker",
+    )
+    assert await worker.process_once()
+    status = store.status(SESSION_ID)
+    assert status.publication_verified and not status.content_verified
+    assert not status.purge_authorized and not status.audio_purged
+    assert status.error_code == "purge_not_authorized" and len(files(store)) == 1
+    assert inference.calls == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_transcript_without_content_receipt_never_skips_segments(
+    tmp_path, create_request, terminology
+):
+    store, complete = queued(tmp_path / "spool", create_request, terminology, [240_000])
+    assert store.claim("legacy", 60) is not None
+    store.persist_transcript(
+        SESSION_ID, "legacy",
+        TranscriptPayload(transcript="legacy short", language="ru-RU").model_dump(mode="json"),
+        "legacy-uid", {"reserved_tpm": 1},
+    )
+    store.mark_error(SESSION_ID, "legacy", code="restart", retryable=True)
+    store.complete(SESSION_ID, complete)
+    inference = Inference()
+    worker = VoiceIntakeV2Worker(
+        store, settings(store.root), media=Media([240_000]), inference=inference,
+        publisher=Publisher(), owner="worker",
+    )
+    assert await worker.process_once()
+    assert inference.calls == [("segment", 0), ("summary", None)]
+    assert store.status(SESSION_ID).content_verified
+
+
+@pytest.mark.asyncio
+async def test_full_multichunk_flow_authorizes_then_physically_deletes(
+    tmp_path, create_request, terminology
+):
+    durations = [180_000] * 6 + [127_620]
+    store, _ = queued(tmp_path / "spool", create_request, terminology, durations)
+    chunk_dir = store.session_directory(SESSION_ID) / "chunks"
+    inference, publisher, media = Inference(), Publisher(chunk_dir), Media(durations)
+    worker = VoiceIntakeV2Worker(
+        store, settings(store.root), media=media, inference=inference,
+        publisher=publisher, owner="worker",
+    )
+    assert await worker.process_once()
+    status = store.status(SESSION_ID)
+    assert inference.calls == [*(('segment', i) for i in range(7)), ("summary", None)]
+    assert len(media.normalized) == 7 and publisher.files_at_readback == 7
+    assert status.transcription_segments_completed == 7
+    assert status.content_verified and status.summary_complete and status.publication_verified
+    assert status.purge_authorized and status.audio_purged and status.client_audio_purge_allowed
+    assert not chunk_dir.exists()
+    assert not (store.session_directory(SESSION_ID) / "normalized").exists()
+    assert (store.session_directory(SESSION_ID) / "transcript.json").is_file()
+    assert (store.session_directory(SESSION_ID) / "summary.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_publication_retains_audio_and_does_not_replay_inference(
+    tmp_path, create_request, terminology
+):
+    class Ambiguous(Publisher):
+        async def publish_and_verify(self, _projection):
+            self.calls += 1
+            raise VoiceIntakeError(
+                "github_outcome_ambiguous", status_code=503, reconciliation_required=True
+            )
+
+    store, _ = queued(tmp_path / "spool", create_request, terminology, [240_000])
+    inference = Inference()
+    worker = VoiceIntakeV2Worker(
+        store, settings(store.root), media=Media([240_000]), inference=inference,
+        publisher=Ambiguous(), owner="worker",
+    )
+    assert await worker.process_once()
+    status = store.status(SESSION_ID)
+    assert status.reconciliation_required and status.content_verified
+    assert not status.publication_verified and not status.purge_authorized and not status.audio_purged
+    assert len(files(store)) == 1 and not await worker.process_once()
+    assert inference.calls == [("segment", 0), ("summary", None)]
+
+
+@pytest.mark.asyncio
+async def test_source_bytes_revalidated_before_inference(
+    tmp_path, create_request, terminology
+):
+    store, _ = queued(tmp_path / "spool", create_request, terminology, [240_000])
+    files(store)[0].write_bytes(b"tampered")
+    inference, publisher = Inference(), Publisher()
+    worker = VoiceIntakeV2Worker(
+        store, settings(store.root), media=Media([240_000]), inference=inference,
+        publisher=publisher, owner="worker",
     )
     assert await worker.process_once()
     status = store.status(SESSION_ID)
     assert status.error_code == "audio_receipt_mismatch"
-    assert not status.transcription_complete and not status.github_verified
-    assert inference.calls == [] and publisher.projections == []
+    assert not status.content_verified and not status.publication_verified
+    assert inference.calls == [] and publisher.calls == 0

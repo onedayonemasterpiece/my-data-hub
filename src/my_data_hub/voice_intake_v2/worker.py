@@ -14,10 +14,16 @@ from uuid import uuid4
 
 from my_data_hub.voice_intake.errors import VoiceIntakeError
 
-from .contracts import InferenceReceipt, PublicationReceipt
+from .contracts import InferenceReceipt, PublicationReceipt, SegmentInferenceReceipt
 from .media import BoundedMediaTools, MediaError
 from .settings import VoiceIntakeV2Settings
-from .store import ClaimedSession, PublicationProjection, StoreError, VoiceIntakeV2Store
+from .store import (
+    ClaimedSession,
+    PublicationProjection,
+    StoredSegmentReceipt,
+    StoreError,
+    VoiceIntakeV2Store,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -39,10 +45,19 @@ class StageFailure(RuntimeError):
         self.diagnostics = dict(diagnostics or {})
 
 
-class AggregateInference(Protocol):
-    async def transcribe(
-        self, *, audio_path: Path, recorded_audio_ms: int, terminology: dict[str, Any]
-    ) -> InferenceReceipt: ...
+class SegmentInference(Protocol):
+    async def transcribe_segment(
+        self,
+        *,
+        audio_path: Path,
+        source_path: Path,
+        chunk_index: int,
+        source_sha256: str,
+        source_audio_start_ms: int,
+        source_audio_end_ms: int,
+        expected_speech_ms: int,
+        terminology: dict[str, Any],
+    ) -> SegmentInferenceReceipt: ...
 
     async def summarize(
         self, *, transcript: dict[str, Any], terminology: dict[str, Any]
@@ -82,7 +97,7 @@ class VoiceIntakeV2Worker:
         settings: VoiceIntakeV2Settings,
         *,
         media: BoundedMediaTools,
-        inference: AggregateInference,
+        inference: SegmentInference,
         publisher: SessionPublisher,
         owner: str | None = None,
         clock: Callable[[], float] = time.time,
@@ -185,46 +200,162 @@ class VoiceIntakeV2Worker:
             )
         return True
 
+    async def _validated_source_paths(
+        self, session: ClaimedSession, directory: Path
+    ) -> dict[int, Path]:
+        """Reconcile every source receipt with a physical file before content work."""
+        paths: dict[int, Path] = {}
+        for chunk in session.chunks:
+            path = Path(chunk.path)
+            if path.resolve().parent != (directory / "chunks").resolve():
+                raise MediaError("audio_path_invalid")
+            digest = hashlib.sha256()
+            observed_size = 0
+            try:
+                with path.open("rb") as handle:
+                    while block := handle.read(1024 * 1024):
+                        observed_size += len(block)
+                        if observed_size > self.settings.max_chunk_bytes:
+                            raise MediaError("audio_receipt_mismatch")
+                        digest.update(block)
+            except OSError as exc:
+                raise MediaError("audio_receipt_mismatch") from exc
+            if observed_size != chunk.size_bytes or digest.hexdigest() != chunk.sha256:
+                raise MediaError("audio_receipt_mismatch")
+            probe = await self.media.probe(path)
+            if abs(probe.duration_ms - chunk.duration_ms) > self.settings.duration_tolerance_ms:
+                raise MediaError("audio_duration_mismatch")
+            paths[chunk.chunk_index] = path
+        if set(paths) != set(range(len(session.chunks))):
+            raise MediaError("chunks_missing")
+        return paths
+
+    @staticmethod
+    def _stored_segment(
+        session_id: str, receipt: SegmentInferenceReceipt
+    ) -> StoredSegmentReceipt:
+        # The inference receipt hash covers provider/source metadata as well as
+        # content, whereas the current store field is the canonical transcript
+        # JSON hash. Preserve the richer hash in bounded coverage metadata and
+        # let the store derive its own content hash rather than conflating them.
+        coverage = {
+            "input_audio_sha256": receipt.input_audio_sha256,
+            "input_audio_mime_type": receipt.input_audio_mime_type,
+            "coverage_ms": receipt.coverage_ms,
+            "coverage_ratio": receipt.coverage_ratio,
+            "usage": receipt.usage.model_dump(mode="json"),
+            "plausibility": receipt.plausibility.model_dump(mode="json"),
+            "inference_receipt_sha256": receipt.transcript_receipt_sha256,
+        }
+        return StoredSegmentReceipt(
+            session_id=session_id,
+            chunk_index=receipt.chunk_index,
+            source_sha256=receipt.source_sha256,
+            audio_start_ms=receipt.source_audio_start_ms,
+            audio_end_ms=receipt.source_audio_end_ms,
+            coverage_start_ms=receipt.coverage_start_ms,
+            coverage_end_ms=receipt.coverage_end_ms,
+            provider_request_uid=receipt.request_uid,
+            finish_reason=receipt.finish_reason,
+            schema_version=receipt.schema_version,
+            accepted=True,
+            transcript=receipt.value,
+            coverage=coverage,
+            limiter=receipt.limiter,
+            transcript_receipt_sha256=None,
+        )
+
+    def _finish_verified_publication(self, session_id: str) -> None:
+        state = self.store.verification_state(session_id)
+        if state.audio_purged:
+            self.store.finish_purge(session_id, self.owner)
+            return
+        if not state.purge_authorized:
+            self.store.authorize_purge(
+                session_id, self.owner, policy_version="voice-v2-content-publication-v1"
+            )
+        self.store.purge_audio(session_id)
+        self.store.finish_purge(session_id, self.owner)
+
     async def _process(self, session: ClaimedSession) -> None:
         directory = self.store.session_directory(session.session_id)
-        normalized = directory / "normalized" / "session.mp3"
-        transcript = session.transcript
+        verification = self.store.verification_state(session.session_id)
+
+        # A crash after durable purge authorization must only finish deletion;
+        # source files may already be partially absent at this point.
+        if verification.purge_authorized or verification.audio_purged:
+            self._finish_verified_publication(session.session_id)
+            return
+
+        paths = await self._validated_source_paths(session, directory)
+        if verification.publication_verified:
+            # Exact GitHub readback is intentionally insufficient on its own:
+            # authorize_purge also requires the independent content receipt.
+            self._finish_verified_publication(session.session_id)
+            return
+
+        transcript = session.transcript if verification.content_verified else None
         summary = session.summary
-        if transcript is None:
-            paths: list[Path] = []
+        if not verification.content_verified:
+            accepted = {
+                receipt.chunk_index: receipt
+                for receipt in self.store.segment_receipts(
+                    session.session_id, accepted_only=True
+                )
+            }
             for chunk in session.chunks:
-                path = Path(chunk.path)
-                if path.resolve().parent != (directory / "chunks").resolve():
-                    raise MediaError("audio_path_invalid")
-                digest = hashlib.sha256()
-                observed_size = 0
-                try:
-                    with path.open("rb") as handle:
-                        while block := handle.read(1024 * 1024):
-                            observed_size += len(block)
-                            if observed_size > self.settings.max_chunk_bytes:
-                                raise MediaError("audio_receipt_mismatch")
-                            digest.update(block)
-                except OSError as exc:
-                    raise MediaError("audio_receipt_mismatch") from exc
-                if observed_size != chunk.size_bytes or digest.hexdigest() != chunk.sha256:
-                    raise MediaError("audio_receipt_mismatch")
-                probe = await self.media.probe(path)
-                if abs(probe.duration_ms - chunk.duration_ms) > self.settings.duration_tolerance_ms:
-                    raise MediaError("audio_duration_mismatch")
-                paths.append(path)
-            await self.media.normalize(tuple(paths), normalized)
-            self.store.set_state(session.session_id, self.owner, "transcribing")
-            receipt = await self.inference.transcribe(
-                audio_path=normalized,
-                recorded_audio_ms=session.complete["recorded_audio_ms"],
-                terminology=session.terminology,
+                durable = accepted.get(chunk.chunk_index)
+                if durable is not None:
+                    if (
+                        durable.source_sha256 != chunk.sha256
+                        or durable.audio_start_ms != chunk.audio_start_ms
+                        or durable.audio_end_ms != chunk.audio_end_ms
+                        or durable.coverage_start_ms != chunk.audio_start_ms
+                        or durable.coverage_end_ms != chunk.audio_end_ms
+                        or durable.finish_reason != "STOP"
+                    ):
+                        raise StoreError("segment_receipt_source_mismatch")
+                    continue
+                normalized = (
+                    directory / "normalized"
+                    / f"{chunk.chunk_index:05d}-{chunk.sha256}.mp3"
+                )
+                await self.media.normalize((paths[chunk.chunk_index],), normalized)
+                self.store.set_state(session.session_id, self.owner, "transcribing")
+                receipt = await self.inference.transcribe_segment(
+                    audio_path=normalized,
+                    source_path=paths[chunk.chunk_index],
+                    chunk_index=chunk.chunk_index,
+                    source_sha256=chunk.sha256,
+                    source_audio_start_ms=chunk.audio_start_ms,
+                    source_audio_end_ms=chunk.audio_end_ms,
+                    expected_speech_ms=chunk.audio_end_ms - chunk.audio_start_ms,
+                    terminology=session.terminology,
+                )
+                self.store.persist_segment_receipt(
+                    session.session_id,
+                    self.owner,
+                    self._stored_segment(session.session_id, receipt),
+                )
+            transcript = self.store.persist_content_verification(
+                session.session_id,
+                self.owner,
+                schema_version="2.0.0",
+                verifier_version="bounded-per-chunk-v1",
+                verification={
+                    "mode": "ordered_exact_source_segments",
+                    "segment_count": len(session.chunks),
+                    "coverage": "contiguous_no_gap_no_overlap",
+                },
             )
-            _atomic_json(directory / "transcript.json", receipt.value)
-            self.store.persist_transcript(
-                session.session_id, self.owner, receipt.value, receipt.request_uid, receipt.limiter
-            )
-            transcript = receipt.value
+            _atomic_json(directory / "transcript.json", transcript)
+            # A summary stored before the independent content receipt may have
+            # been derived from an incomplete legacy aggregate; never reuse it.
+            summary = None
+        elif transcript is not None:
+            _atomic_json(directory / "transcript.json", transcript)
+        if transcript is None:
+            raise StoreError("content_transcript_missing")
         if summary is None:
             self.store.set_state(session.session_id, self.owner, "summarizing")
             receipt = await self.inference.summarize(transcript=transcript, terminology=session.terminology)
@@ -244,5 +375,4 @@ class VoiceIntakeV2Worker:
             session.session_id, self.owner,
             url=published.github_url, commit_sha=published.github_commit_sha,
         )
-        self.store.purge_audio(session.session_id)
-        self.store.finish_purge(session.session_id, self.owner)
+        self._finish_verified_publication(session.session_id)
