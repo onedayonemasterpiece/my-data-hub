@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import yaml
 
@@ -174,16 +174,13 @@ def _legacy_registry_entry(
         chunk_count=len(legacy_chunks),
         chunks=legacy_chunks,
     )
-    entry = cast(
-        dict[str, Any],
-        build_registry_entry(
-            session_id=projection.session_id,
-            request=request,
-            summary=summary,
-            source_path=source_path,
-            detail_path=detail_path,
-            registered_at=registered_at,
-        ),
+    entry = build_registry_entry(
+        session_id=projection.session_id,
+        request=request,
+        summary=summary,
+        source_path=source_path,
+        detail_path=detail_path,
+        registered_at=registered_at,
     )
     entry["quality_flags"].extend(
         [

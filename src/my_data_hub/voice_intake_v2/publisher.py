@@ -26,7 +26,7 @@ def _same(left: str, right: str) -> bool:
     ).digest()
 
 
-class V2IdeaHubPublisher(IdeaHubPublisher):  # type: ignore[misc]
+class V2IdeaHubPublisher(IdeaHubPublisher):
     """V2 projection adapter over the already bounded v1 GitHub transport.
 
     Inference artifacts are durable before this object is invoked. Therefore
