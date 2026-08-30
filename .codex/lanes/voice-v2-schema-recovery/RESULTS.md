@@ -31,6 +31,12 @@ The implementation:
 - leaves a sent retryable failure in `retryable_error` with `retry_at=null`, so only the existing explicit
   identical-complete resume signal can start another aggregate attempt.
 
+The reviewer follow-up strengthened the end-to-end worker/store regression to use seven contiguous synthetic
+chunk receipts totaling exactly 1,207,620 ms. It proves chunk recording makes zero inference calls, restart-safe
+processing normalizes all seven inputs once, successful processing makes one aggregate transcription plus one
+summary, all seven chunks remain present through verified publication readback, and purge happens only after the
+durable verified receipt.
+
 ## Red tests recorded before implementation
 
 Command:
@@ -65,6 +71,15 @@ Result: `16 passed`.
 ```
 
 Result: `53 passed`.
+
+Focused reviewer follow-up:
+
+```text
+.venv/bin/python -m pytest -q tests/voice_intake_v2/test_worker.py \
+  -k seven_chunks_and_twenty_minutes
+```
+
+Result: `1 passed`.
 
 ```text
 .venv/bin/python -m compileall -q src/my_data_hub/voice_intake_v2 tests/voice_intake_v2

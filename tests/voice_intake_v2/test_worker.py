@@ -177,44 +177,80 @@ async def test_sent_truncation_waits_for_explicit_resume_and_logs_only_sanitized
 
 
 @pytest.mark.asyncio
-async def test_n_chunks_result_in_exactly_two_aggregate_calls_and_purge_after_readback(
+async def test_seven_chunks_and_twenty_minutes_make_two_aggregate_calls_then_verified_purge(
     tmp_path, create_request, terminology
 ):
-    store = VoiceIntakeV2Store(tmp_path / "spool")
+    durations = [180_000] * 6 + [127_620]
+
+    class AggregateMedia(Media):
+        def __init__(self):
+            self.normalized_inputs = []
+
+        async def probe(self, path):
+            index = int(path.name.split("-", 1)[0])
+            return MediaProbe(durations[index], "aac", "LC", 16000, 1)
+
+        async def normalize(self, chunks, output):
+            self.normalized_inputs.append(tuple(chunks))
+            await super().normalize(chunks, output)
+
+    class InspectingPublisher(Publisher):
+        def __init__(self, chunk_directory):
+            super().__init__()
+            self.chunk_directory = chunk_directory
+            self.chunks_during_readback = 0
+
+        async def publish_and_verify(self, projection):
+            self.chunks_during_readback = len(list(self.chunk_directory.glob("*.m4a")))
+            return await super().publish_and_verify(projection)
+
+    store = TrackingStore(tmp_path / "spool")
     store.create_session(create_request, terminology=terminology)
+    inference = Inference()
     chunks = []
-    for index in range(2):
+    audio_cursor = 0
+    for index, duration_ms in enumerate(durations):
         audio = f"m4a-{index}".encode()
         digest = hashlib.sha256(audio).hexdigest()
         path = store.session_directory(SESSION_ID) / "chunks" / f"{index:05d}-{digest}.m4a"
         path.write_bytes(audio)
-        start = index * 240000
+        start = audio_cursor
+        audio_cursor += duration_ms
         store.record_chunk(ChunkReceipt(
-            session_id=SESSION_ID, chunk_index=index, sha256=digest, duration_ms=240000,
-            audio_start_ms=start, audio_end_ms=start + 240000,
-            wall_start_ms=start, wall_end_ms=start + 240000,
+            session_id=SESSION_ID, chunk_index=index, sha256=digest, duration_ms=duration_ms,
+            audio_start_ms=start, audio_end_ms=audio_cursor,
+            wall_start_ms=start, wall_end_ms=audio_cursor,
             size_bytes=len(audio), path=str(path),
         ))
         chunks.append({
-            "chunk_index": index, "sha256": digest, "duration_ms": 240000,
-            "audio_start_ms": start, "audio_end_ms": start + 240000,
-            "wall_start_ms": start, "wall_end_ms": start + 240000,
+            "chunk_index": index, "sha256": digest, "duration_ms": duration_ms,
+            "audio_start_ms": start, "audio_end_ms": audio_cursor,
+            "wall_start_ms": start, "wall_end_ms": audio_cursor,
         })
+        assert inference.calls == []
+    assert audio_cursor == 1_207_620
     store.complete(SESSION_ID, SessionCompleteRequest.model_validate({
-        "ended_at": "2026-08-28T12:42:56+02:00", "wall_elapsed_ms": 480000,
-        "manual_pause_ms": 0, "recorded_audio_ms": 480000,
-        "auto_silence_skipped_ms": 0, "chunk_count": 2, "chunks": chunks,
+        "ended_at": "2026-08-28T12:55:03.620+02:00", "wall_elapsed_ms": audio_cursor,
+        "manual_pause_ms": 0, "recorded_audio_ms": audio_cursor,
+        "auto_silence_skipped_ms": 0, "chunk_count": 7, "chunks": chunks,
     }))
+    chunk_directory = store.session_directory(SESSION_ID) / "chunks"
+    assert len(list(chunk_directory.glob("*.m4a"))) == 7
+    assert inference.calls == []
     # Re-open the SQLite/spool as a restarted process before either inference
     # stage; the one pinned terminology snapshot must survive and reach both.
-    store = VoiceIntakeV2Store(store.root)
-    inference, publisher = Inference(), Publisher()
+    store = TrackingStore(store.root)
+    media, publisher = AggregateMedia(), InspectingPublisher(chunk_directory)
     worker = VoiceIntakeV2Worker(
-        store, settings(store.root), media=Media(), inference=inference, publisher=publisher,
+        store, settings(store.root), media=media, inference=inference, publisher=publisher,
         owner="worker",
     )
     assert await worker.process_once()
     assert [call[0] for call in inference.calls] == ["transcribe", "summarize"]
+    assert inference.calls[0][1] == 1_207_620
+    assert len(media.normalized_inputs) == 1 and len(media.normalized_inputs[0]) == 7
+    assert publisher.chunks_during_readback == 7
+    assert store.events == ["receipt", "purge"]
     status = store.status(SESSION_ID)
     assert status.state == "published_verified" and status.server_audio_purged
     assert status.gemini_requests_completed == 2
@@ -224,7 +260,7 @@ async def test_n_chunks_result_in_exactly_two_aggregate_calls_and_purge_after_re
     assert (store.session_directory(SESSION_ID) / "transcript.json").is_file()
     projection = publisher.projections[0]
     assert projection.create["client_version"] == "1.1.0"
-    assert len(projection.transport_chunks) == 2
+    assert len(projection.transport_chunks) == 7
     assert projection.transcription_request_uid != projection.summary_request_uid
     assert all(
         call[-1]["source_commit_sha"] == terminology["source_commit_sha"]
