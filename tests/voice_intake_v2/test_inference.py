@@ -191,6 +191,26 @@ async def test_segment_then_summary_make_one_physical_post_each(tmp_path, auth_s
 
 
 @pytest.mark.asyncio
+async def test_finalizer_failure_preserves_observed_provider_finish_reason(
+    tmp_path, auth_settings, terminology
+):
+    class FinalizerFails(Limiter):
+        async def finalize_generate_content(self, lease: LimiterLease, **kwargs: Any) -> None:
+            raise RuntimeError("synthetic finalizer failure")
+
+    audio, source, source_sha256 = _source(tmp_path)
+    service = AggregateGeminiInference(
+        auth_settings, limiter=FinalizerFails(), requester=Requester()
+    )
+    with pytest.raises(StageFailure) as raised:
+        await _transcribe(service, audio, source, source_sha256, terminology)
+    assert raised.value.code == "limiter_finalization_failed"
+    assert raised.value.sent and raised.value.ambiguous
+    assert raised.value.finish_reason == "STOP"
+    assert raised.value.provider_request_uid
+
+
+@pytest.mark.asyncio
 async def test_quota_denial_before_send_makes_zero_physical_posts(tmp_path, auth_settings, terminology):
     audio, source, source_sha256 = _source(tmp_path)
     requester = Requester()

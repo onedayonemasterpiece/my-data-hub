@@ -582,12 +582,15 @@ class AggregateGeminiInference:
                 }
                 else "provider_failure"
             )
-            await self._finalize(lease, started, usage, "failed", error, request_uid=request_uid)
+            await self._finalize(
+                lease, started, usage, "failed", error,
+                request_uid=request_uid, finish_reason=finish_reason,
+            )
             raise
         except (TimeoutError, BoundedHTTPError) as exc:
             await self._finalize(
                 lease, started, usage, "failed", "provider_outcome_ambiguous",
-                request_uid=request_uid,
+                request_uid=request_uid, finish_reason=finish_reason,
             )
             raise StageFailure(
                 "provider_timeout" if "timeout" in str(exc).lower() else "provider_network_error",
@@ -601,7 +604,7 @@ class AggregateGeminiInference:
         except (KeyError, TypeError, ValueError, ValidationError) as exc:
             await self._finalize(
                 lease, started, usage, "failed", "response_schema_invalid",
-                request_uid=request_uid,
+                request_uid=request_uid, finish_reason=finish_reason,
             )
             raise StageFailure(
                 "response_schema_invalid",
@@ -622,7 +625,8 @@ class AggregateGeminiInference:
                 ),
             ) from exc
         await self._finalize(
-            lease, started, usage, "succeeded", None, request_uid=request_uid
+            lease, started, usage, "succeeded", None,
+            request_uid=request_uid, finish_reason=finish_reason,
         )
         public = self.limiter.public_lease(lease, actual_tpm=usage.total_tokens if usage else None)
         return InferenceReceipt(
@@ -635,7 +639,7 @@ class AggregateGeminiInference:
 
     async def _finalize(
         self, lease: LimiterLease, started: float, usage: ModelUsage | None,
-        status: str, error: str | None, *, request_uid: str,
+        status: str, error: str | None, *, request_uid: str, finish_reason: str,
     ) -> None:
         try:
             await asyncio.shield(
@@ -653,7 +657,7 @@ class AggregateGeminiInference:
             raise StageFailure(
                 "limiter_finalization_failed", sent=True, ambiguous=True,
                 provider_request_uid=request_uid,
-                finish_reason="MISSING",
+                finish_reason=finish_reason,
                 usage=usage.model_dump(mode="json") if usage is not None else {},
             ) from exc
 
