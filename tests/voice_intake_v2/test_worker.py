@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from pathlib import Path
 
 import pytest
@@ -106,6 +107,73 @@ def matching_complete(store, complete_request) -> SessionCompleteRequest:
     assert chunk is not None
     value["chunks"][0]["sha256"] = chunk.sha256
     return SessionCompleteRequest.model_validate(value)
+
+
+@pytest.mark.asyncio
+async def test_sent_truncation_waits_for_explicit_resume_and_logs_only_sanitized_diagnostics(
+    tmp_path, create_request, complete_request, terminology, caplog
+):
+    class RetryTruncatedInference(Inference):
+        async def transcribe(self, **kwargs):
+            self.calls.append(("transcribe", kwargs["recorded_audio_ms"], kwargs["terminology"]))
+            if len([call for call in self.calls if call[0] == "transcribe"]) == 1:
+                raise StageFailure(
+                    "response_schema_invalid",
+                    sent=True,
+                    retryable=True,
+                    diagnostics={
+                        "schema": "voice_intake_transcript",
+                        "schema_version": "1.0.0",
+                        "json_path": "$",
+                        "expected": {
+                            "type": "object",
+                            "constraint": "complete_valid_json_matching_schema",
+                        },
+                        "actual": {"type": "string", "shape": {"characters": 100}},
+                        "missing_fields": [],
+                        "extra_fields": [],
+                        "finish_reason": "MAX_TOKENS",
+                        "token_counts": {
+                            "input": 100,
+                            "output": 32_700,
+                            "thought": 0,
+                            "total": 32_800,
+                        },
+                        "configured_max_output_tokens": 32_768,
+                        "truncated": True,
+                    },
+                )
+            return InferenceReceipt(
+                value=TranscriptPayload(transcript="full session").model_dump(mode="json"),
+                request_uid="transcription-uid",
+                limiter={"reserved_tpm": 7680},
+            )
+
+    caplog.set_level(logging.WARNING, logger="my_data_hub.voice_intake_v2.worker")
+    store = queued(tmp_path, create_request, complete_request, terminology)
+    inference = RetryTruncatedInference()
+    worker = VoiceIntakeV2Worker(
+        store,
+        settings(store.root),
+        media=Media(),
+        inference=inference,
+        publisher=Publisher(),
+        owner="worker",
+    )
+
+    assert await worker.process_once()
+    failed = store.status(SESSION_ID)
+    assert failed.state == "retryable_error"
+    assert failed.retryable and failed.retry_at is None
+    assert [call[0] for call in inference.calls] == ["transcribe"]
+    assert "finish_reason=MAX_TOKENS" in caplog.text
+    assert "configured_max_output_tokens=32768" in caplog.text
+    assert "PRIVATE" not in caplog.text
+
+    store.complete(SESSION_ID, matching_complete(store, complete_request))
+    assert await worker.process_once()
+    assert store.status(SESSION_ID).state == "published_verified"
+    assert [call[0] for call in inference.calls] == ["transcribe", "transcribe", "summarize"]
 
 
 @pytest.mark.asyncio

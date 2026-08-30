@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import time
 from collections.abc import Callable
@@ -18,6 +19,8 @@ from .media import BoundedMediaTools, MediaError
 from .settings import VoiceIntakeV2Settings
 from .store import ClaimedSession, PublicationProjection, StoreError, VoiceIntakeV2Store
 
+LOGGER = logging.getLogger(__name__)
+
 
 class StageFailure(RuntimeError):
     """Typed stage failure; ``sent`` prevents an unsafe hidden provider retry."""
@@ -25,6 +28,7 @@ class StageFailure(RuntimeError):
     def __init__(
         self, code: str, *, sent: bool, retryable: bool = False,
         retry_after_seconds: int | None = None, ambiguous: bool = False,
+        diagnostics: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(code)
         self.code = code
@@ -32,6 +36,7 @@ class StageFailure(RuntimeError):
         self.retryable = retryable
         self.retry_after_seconds = retry_after_seconds
         self.ambiguous = ambiguous
+        self.diagnostics = dict(diagnostics or {})
 
 
 class AggregateInference(Protocol):
@@ -119,6 +124,27 @@ class VoiceIntakeV2Worker:
         try:
             await self._process(session)
         except StageFailure as exc:
+            if exc.diagnostics:
+                diagnostic = exc.diagnostics
+                LOGGER.warning(
+                    "voice_v2_stage_failure session_id=%s code=%s schema=%s "
+                    "schema_version=%s json_path=%s expected=%s actual=%s "
+                    "missing_fields=%s extra_fields=%s finish_reason=%s token_counts=%s "
+                    "configured_max_output_tokens=%s truncated=%s",
+                    session.session_id,
+                    exc.code,
+                    diagnostic.get("schema"),
+                    diagnostic.get("schema_version"),
+                    diagnostic.get("json_path"),
+                    json.dumps(diagnostic.get("expected"), sort_keys=True),
+                    json.dumps(diagnostic.get("actual"), sort_keys=True),
+                    json.dumps(diagnostic.get("missing_fields"), sort_keys=True),
+                    json.dumps(diagnostic.get("extra_fields"), sort_keys=True),
+                    diagnostic.get("finish_reason"),
+                    json.dumps(diagnostic.get("token_counts"), sort_keys=True),
+                    diagnostic.get("configured_max_output_tokens"),
+                    diagnostic.get("truncated"),
+                )
             ambiguous = exc.ambiguous
             retry_at = (
                 self._clock() + exc.retry_after_seconds
