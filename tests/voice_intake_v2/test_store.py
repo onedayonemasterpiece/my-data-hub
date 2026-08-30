@@ -180,6 +180,37 @@ def test_durable_segment_receipt_atomically_clears_ambiguous_inflight_state(
     assert path.is_file()
 
 
+def test_durable_content_receipt_resumes_before_summary_provider_send(
+    tmp_path, create_request, complete_request, terminology
+):
+    now = [1_000_000.0]
+    store = VoiceIntakeV2Store(tmp_path / "spool", clock=lambda: now[0])
+    store.create_session(create_request, terminology=terminology)
+    path = store.session_directory(SESSION_ID) / "chunks" / f"00000-{SHA}.m4a"
+    path.write_bytes(b"audio")
+    store.record_chunk(receipt(path))
+    store.complete(SESSION_ID, complete_request)
+    assert store.claim("worker-1", 30) is not None
+    store.set_state(SESSION_ID, "worker-1", "transcribing")
+    store.persist_segment_receipt(SESSION_ID, "worker-1", segment_receipt())
+    store.persist_content_verification(
+        SESSION_ID,
+        "worker-1",
+        schema_version="content/1.0",
+        verifier_version="coverage/1.0",
+        verification={"coverage_ppm": 1_000_000},
+    )
+    assert store.status(SESSION_ID).state == "normalizing"
+
+    now[0] += 31
+    assert store.fence_ambiguous_inference() == 0
+    reopened = VoiceIntakeV2Store(store.root, clock=lambda: now[0])
+    resumed = reopened.claim("worker-2", 30)
+    assert resumed is not None and resumed.transcript is not None
+    assert reopened.status(SESSION_ID).state == "normalizing"
+    assert path.is_file()
+
+
 def test_failed_segment_receipt_remains_fenced_until_retry_policy_is_durable(
     tmp_path, create_request, complete_request, terminology
 ):

@@ -840,8 +840,7 @@ class VoiceIntakeV2Store:
                 return None
             state = (
                 "verifying" if row["publication_verified"] else
-                "normalizing" if row["transcript_json"] is None else
-                "summarizing" if row["summary_json"] is None else "publishing"
+                "publishing" if row["summary_json"] is not None else "normalizing"
             )
             changed = connection.execute(
                 """UPDATE sessions SET state=?,lease_owner=?,lease_until=?,retryable=0,
@@ -1207,7 +1206,7 @@ class VoiceIntakeV2Store:
             )
             connection.execute(
                 """UPDATE sessions SET transcript_json=?,transcript_request_uid=NULL,
-                   transcript_limiter_json=?,content_verified=1,state='summarizing',updated_at=?
+                   transcript_limiter_json=?,content_verified=1,state='normalizing',updated_at=?
                    WHERE session_id=?""",
                 (
                     transcript_json,
