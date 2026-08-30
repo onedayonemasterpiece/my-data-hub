@@ -749,6 +749,7 @@ class VoiceIntakeV2Store:
                     "publication_verified": bool(row["publication_verified"]),
                     "purge_authorized": bool(row["purge_authorized"]),
                     "audio_purged": audio_purged,
+                    "legacy_unverified_purge": bool(row["legacy_unverified_purge"]),
                     "client_audio_purge_allowed": bool(
                         content_verified and row["publication_verified"] and row["purge_authorized"]
                         and audio_purged

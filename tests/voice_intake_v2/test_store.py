@@ -349,7 +349,8 @@ def test_legacy_migration_twice_is_idempotent_truthful_and_bounded(tmp_path):
                 complete_json = '{"recorded_audio_ms":1200000}'
                 transcript_json = '{"transcript":"' + ("fixture " * 300) + '"}'
             rows.append((
-                f"synthetic-{index:04d}", "{}", "a" * 64, "{}", "model", "published_verified",
+                f"voice-20260828-{index:06d}-{index:08x}", "{}", "a" * 64, "{}", "model",
+                "published_verified",
                 complete_json, transcript_json, int(index % 2 == 0), int(index % 3 == 0),
                 1.0, 1.0,
             ))
@@ -376,12 +377,17 @@ def test_legacy_migration_twice_is_idempotent_truthful_and_bounded(tmp_path):
     assert audit.long_transcript_rows_observed == 2
     assert audit.suspicious_long_transcript_rows_observed == 1
     assert not any("id" in key or "content" in key for key in asdict(audit))
-    github_only = first.verification_state("synthetic-0002")
+    github_only = first.verification_state("voice-20260828-000002-00000002")
     assert github_only.publication_verified and not github_only.content_verified
     assert not github_only.purge_authorized
-    legacy_purged = first.verification_state("synthetic-0000")
+    legacy_session_id = "voice-20260828-000000-00000000"
+    legacy_purged = first.verification_state(legacy_session_id)
     assert legacy_purged.audio_purged and legacy_purged.legacy_unverified_purge
     assert not legacy_purged.content_verified and not legacy_purged.purge_authorized
+    legacy_status = first.status(legacy_session_id)
+    assert legacy_status.server_audio_purged and legacy_status.audio_purged
+    assert legacy_status.legacy_unverified_purge
+    assert not legacy_status.client_audio_purge_allowed
     with sqlite3.connect(db_path) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert connection.execute(
