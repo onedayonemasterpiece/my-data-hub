@@ -40,6 +40,8 @@ evidence, not contract constants:
 These values were filled only from immutable image/source and live GitHub
 readback evidence; a branch name, mutable image tag, healthy container, or
 unverified reported SHA would not be sufficient.
+They are pre-#31 rollout history, not proof of content completeness and not
+authority for current or future audio deletion.
 
 ## Routes
 
@@ -68,15 +70,26 @@ This endpoint performs no Google request.
     "voice_activity_auto_pause_v1"
   ],
   "typical_gemini_requests": 2,
+  "gemini_request_topology": {
+    "transcription": "one_per_source_chunk",
+    "summary": "one_after_complete_coverage",
+    "total_formula": "chunks_expected + 1"
+  },
   "max_session_seconds": 3600,
   "max_session_bytes": 67108864,
-  "server_audio_persistence": "temporary_until_github_readback"
+  "server_audio_persistence": "until_content_and_publication_verified_purge_authorized",
+  "client_audio_purge_policy": "physical_server_audio_deletion_verified"
 }
 ```
 
+`typical_gemini_requests` is retained as the frozen one-chunk compatibility
+hint. It is not the request count for a multi-chunk session. The additive
+topology is authoritative: N accepted source chunks require N independently
+receipted transcription calls and one summary only after full coverage.
+
 `max_session_seconds` is configurable but must never be configured below
-3,600 seconds. Twenty minutes is the priority exactly-two-request acceptance
-case, not an API duration limit. `max_session_bytes` is the server's aggregate
+3,600 seconds. Twenty-plus minutes is the priority multi-chunk acceptance case
+for the N+1 request topology, not an API duration limit. `max_session_bytes` is the server's aggregate
 admission bound across all transport chunks; Android must retain local files
 when that bound is rejected and must not keep uploading unchanged data.
 
@@ -266,10 +279,10 @@ Response schema:
   "bytes_received": 1680000,
   "recorded_audio_ms": 420000,
   "auto_silence_skipped_ms": 720000,
-  "inference_batches_total": 2,
-  "inference_batches_completed": 0,
-  "gemini_requests_total": 2,
-  "gemini_requests_completed": 0,
+  "inference_batches_total": 3,
+  "inference_batches_completed": 1,
+  "gemini_requests_total": 3,
+  "gemini_requests_completed": 1,
   "transcription_complete": false,
   "summary_complete": false,
   "github_verified": false,
@@ -279,7 +292,21 @@ Response schema:
   "retryable": false,
   "retry_at": null,
   "error_code": null,
-  "reconciliation_required": false
+  "reconciliation_required": false,
+  "transcription_request_uid": null,
+  "summary_request_uid": null,
+  "transcription_limiter": null,
+  "summary_limiter": null,
+  "transcription_segments_total": 2,
+  "transcription_segments_completed": 1,
+  "transcription_coverage_complete": false,
+  "content_verification_status": "pending",
+  "content_verified": false,
+  "publication_verified": false,
+  "purge_authorized": false,
+  "audio_purged": false,
+  "client_audio_purge_allowed": false,
+  "legacy_unverified_purge": false
 }
 ```
 
@@ -300,10 +327,22 @@ reconciliation_required
 published_verified
 ```
 
-Only `published_verified` with `github_verified:true` and
-`server_audio_purged:true` is terminal success. `reconciliation_required` is a
-terminal manual-reconciliation condition, not permission to silently resend a
-provider call. Other non-success states remain durable across restart.
+The state strings and historical fields remain frozen. Counters are now
+dynamic: for N source chunks, total inference/Gemini stages are N segment
+transcriptions plus one summary. `transcription_request_uid` is nullable
+because there is no truthful single aggregate transcription request.
+
+New clients may delete local audio only when
+`client_audio_purge_allowed:true`; this requires passed content verification,
+publication verification, separate purge authorization and verified physical
+server deletion. For old Android clients, the legacy terminal triplet
+`state=published_verified`, `github_verified=true`, and
+`server_audio_purged=true` is deliberately impossible until that same physical
+deletion is verified. GitHub readback alone cannot produce it.
+
+`reconciliation_required` is a terminal manual-reconciliation condition, not
+permission to silently resend a provider call or delete local audio. All other
+non-success states remain durable across restart.
 
 ## Error contract
 
@@ -355,8 +394,10 @@ reconciliation rather than a hidden retry.
 
 ## Retry and polling rules
 
-1. Retain every local segment until status is `published_verified` and the
-   server reports `server_audio_purged:true`.
+1. Retain every local segment until `client_audio_purge_allowed:true`. A frozen
+   client that does not understand this additive field must retain audio until
+   the legacy terminal triplet is present; the server emits that triplet only
+   after the same verified physical deletion.
 2. Each `SyncWorker` pass first repeats `POST /v2/sessions`, then uploads only
    segments whose matching durable receipt is absent locally.
 3. Retry create/upload/complete idempotently after connection loss. Query
@@ -370,25 +411,28 @@ reconciliation rather than a hidden retry.
 6. Summary retry never repeats a durable completed transcription. GitHub retry
    never repeats transcription or summary.
 
-## Exactly two physical Gemini requests
+## Bounded per-source-chunk Gemini requests
 
-For an ordinary successful session up to approximately 20 minutes, regardless
-of transport-segment count, manual pauses or automatically skipped silence:
+For a successful session containing N durable source chunks:
 
 1. create and all uploads: zero Gemini requests;
 2. complete queues work and returns: zero synchronous Gemini requests;
-3. worker concatenates/normalizes all verified audio and performs exactly one
-   Flash-Lite `generateContent` audio POST for the complete transcript;
-4. after durably storing that transcript, it performs exactly one text-only
-   Flash-Lite `generateContent` POST for the detailed structured summary;
-5. publication, exact-commit/current-main readback and purge: zero Gemini
+3. worker validates each source file and performs at most one successful
+   Flash-Lite transcription POST for each source chunk, persisting exact finish
+   reason, source/input hashes, range, coverage and bounded plausibility evidence;
+4. worker assembles the transcript deterministically from ordered accepted
+   receipts and durably verifies contiguous full coverage;
+5. only then it performs one text-only Flash-Lite POST for the detailed summary;
+6. publication, exact-commit/current-main readback and purge: zero Gemini
    requests.
 
-Thus the happy path is exactly **two physical `generateContent` POSTs**. No
-per-chunk calls, `countTokens`, model probe, or fallback POST is allowed. A
-longer session may split only when provider TPM/body constraints genuinely
-require it; automatically skipped silence reduces recorded duration and TPM,
-not the normal request count.
+Thus the successful path is exactly **N + 1 successful `generateContent`
+POSTs**. Restart/retry reuses every successful immutable segment receipt. A
+`MAX_TOKENS`, missing/unknown finish reason, malformed or ambiguous response,
+short schema-valid output, source mismatch, missing segment, gap or overlap
+does not produce a successful receipt, does not start summary and never permits
+audio deletion. Automatically skipped silence reduces recorded duration and
+TPM; it does not weaken coverage of the accepted source chunks.
 
 ## Battery-aware capture boundary
 
@@ -433,12 +477,16 @@ The server publishes one atomic `idea-hub/main` commit containing the source
 packet, detail registry record and intake-session registry update. The packet
 contains the client version, `api_contract: voice-intake-v2`, capture policy,
 audio format, wall/manual/recorded/auto-silence durations, optional VAD
-provenance, complete transcript and structured summary—never audio.
+provenance, a content-verified transcript and structured summary—never audio.
+The packet cannot contain the heading `Полная расшифровка` unless the durable
+coverage invariant has passed.
 
-Server audio and normalized derivatives are purged only after both exact-commit
-and current-main GitHub readback succeed. A small non-audio reconciliation
-receipt may remain. Android deletes its local audio only after observing the
-verified/purged terminal status.
+Exact-commit/current-main GitHub readback proves publication durability only.
+Server audio and normalized derivatives are purged only after an independent
+content-verification receipt, publication receipt and separate purge-
+authorization receipt are durable; physical absence is then recorded before
+the server exposes either new or legacy client purge permission. Small
+content-free reconciliation receipts may remain.
 
 ## Short implementation brief for the Android agent
 
@@ -449,8 +497,10 @@ verified/purged terminal status.
 > fixed-point WebRTC VAD with fail-open continuous capture, and no continuous
 > neural inference. Make every SyncWorker pass begin with idempotent session
 > create, upload durable 3–5-minute recorded-audio segments without frequent
-> polling, send complete asynchronously, and retain local audio until status is
-> both GitHub-verified and server-audio-purged. Do not add an app-owned partial
+> polling, send complete asynchronously, and retain local audio until
+> `client_audio_purge_allowed:true` (or, for a frozen client, the legacy
+> terminal triplet that the server withholds until the same verified deletion).
+> Do not add an app-owned partial
 > WakeLock without physical A/B evidence. Preserve manual-pause versus
 > auto-silence microphone semantics and prove restart/idempotency behavior on a
 > physical device. Do not change the server contract.

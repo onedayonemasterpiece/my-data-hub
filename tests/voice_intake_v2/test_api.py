@@ -5,13 +5,14 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from my_data_hub.voice_intake_v2.api import attach_voice_intake_v2_routes
 from my_data_hub.voice_intake_v2.media import MediaProbe
 from my_data_hub.voice_intake_v2.settings import VoiceIntakeV2Settings
-from my_data_hub.voice_intake_v2.store import VoiceIntakeV2Store
+from my_data_hub.voice_intake_v2.store import StoreError, VoiceIntakeV2Store
 
 from .conftest import SESSION_ID
 
@@ -68,6 +69,14 @@ def test_auth_capabilities_and_upload_before_create_zero_provider(
     )
     assert response.status_code == 200
     assert response.json()["typical_gemini_requests"] == 2
+    assert response.json()["gemini_request_topology"] == {
+        "transcription": "one_per_source_chunk",
+        "summary": "one_after_complete_coverage",
+        "total_formula": "chunks_expected + 1",
+    }
+    assert response.json()["client_audio_purge_policy"] == (
+        "physical_server_audio_deletion_verified"
+    )
     audio = b"independent-m4a"
     response = client.put(
         f"/voice-intake/v2/sessions/{SESSION_ID}/chunks/0",
@@ -132,7 +141,7 @@ def test_changed_chunk_conflict_removes_unreferenced_final(
     assert sorted(path.name for path in chunk_dir.iterdir()) == [f"00000-{first_sha}.m4a"]
 
 
-def test_exact_retry_after_audio_purge_does_not_resurrect_server_audio(
+def test_unverified_direct_purge_is_rejected_and_exact_retry_retains_server_audio(
     tmp_path, auth_settings, terminology, create_request, complete_payload
 ):
     client, _media, app = build(tmp_path, auth_settings, terminology)
@@ -148,13 +157,24 @@ def test_exact_retry_after_audio_purge_does_not_resurrect_server_audio(
         f"/voice-intake/v2/sessions/{SESSION_ID}/complete", json=complete_payload, headers=auth
     ).status_code == 202
     store = app.state.voice_intake_v2_store
-    store.purge_audio(SESSION_ID)
+    chunk_path = next((store.session_directory(SESSION_ID) / "chunks").glob("*.m4a"))
+    assert chunk_path.read_bytes() == audio
+    with pytest.raises(StoreError, match="purge_not_authorized"):
+        store.purge_audio(SESSION_ID)
+    assert chunk_path.read_bytes() == audio
     response = client.put(
         f"/voice-intake/v2/sessions/{SESSION_ID}/chunks/0", content=audio, headers=headers(sha)
     )
     assert response.status_code == 200 and response.json()["duplicate"] is True
     chunks = store.session_directory(SESSION_ID) / "chunks"
-    assert not tuple(chunks.glob("*.m4a"))
+    assert tuple(chunks.glob("*.m4a")) == (chunk_path,)
+    status = client.get(f"/voice-intake/v2/sessions/{SESSION_ID}", headers=auth)
+    assert status.status_code == 200
+    value = status.json()
+    assert value["state"] == "queued"
+    assert value["github_verified"] is False
+    assert value["server_audio_purged"] is False
+    assert value["client_audio_purge_allowed"] is False
 
 
 def test_non_integer_chunk_index_uses_v2_error_envelope(

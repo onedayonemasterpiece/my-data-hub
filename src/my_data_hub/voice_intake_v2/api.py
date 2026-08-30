@@ -138,10 +138,22 @@ def attach_voice_intake_v2_routes(
                 "sample_rate_hz": 16000, "channels": 1, "target_bitrate_bps": 32000,
             }],
             "capture_policies": ["continuous_v1", "voice_activity_auto_pause_v1"],
+            # Keep the frozen scalar for old clients.  It is the one-chunk
+            # minimum, not a promise that a multi-chunk session uses two
+            # calls.  The additive topology below is the authoritative
+            # accounting contract for v2 content verification.
             "typical_gemini_requests": 2,
+            "gemini_request_topology": {
+                "transcription": "one_per_source_chunk",
+                "summary": "one_after_complete_coverage",
+                "total_formula": "chunks_expected + 1",
+            },
             "max_session_seconds": config.max_session_seconds,
             "max_session_bytes": config.max_session_bytes,
-            "server_audio_persistence": "temporary_until_github_readback",
+            "server_audio_persistence": (
+                "until_content_and_publication_verified_purge_authorized"
+            ),
+            "client_audio_purge_policy": "physical_server_audio_deletion_verified",
         }
 
     @router.post("/sessions", response_model=None)
