@@ -40,6 +40,8 @@ evidence, not contract constants:
 These values were filled only from immutable image/source and live GitHub
 readback evidence; a branch name, mutable image tag, healthy container, or
 unverified reported SHA would not be sufficient.
+They are pre-#31 rollout history, not proof of content completeness and not
+authority for current or future audio deletion.
 
 ## Routes
 

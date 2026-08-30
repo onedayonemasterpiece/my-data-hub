@@ -29,6 +29,9 @@ rollback matrix are in
 
 Fill these only from actual Git/image/runtime/GitHub readback evidence during
 integration. A healthy container or mutable image tag is not sufficient.
+The populated rows below are retained as pre-#31 rollout history. Aggregate
+transcription and GitHub/purge readbacks in that history are not acceptance
+evidence for the content-verification design and must not authorize deletion.
 
 | Evidence | Verified value |
 |---|---|
