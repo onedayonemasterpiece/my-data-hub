@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from pydantic import ValidationError, create_model
 
 from my_data_hub.google_ai.contracts import LimiterLease, LimiterPreflight, ModelLimit
 from my_data_hub.google_ai.errors import GoogleAIError, GoogleAIErrorCode
@@ -135,6 +136,7 @@ async def test_provider_429_makes_one_physical_post_and_no_hidden_retry(
     assert len(requester.calls) == 1
     assert len(limiter.sent) == 1 and len(limiter.provider_429) == 1
     assert len(limiter.finalized) == 1
+    assert limiter.finalized[0][1]["error_code"] == "provider_failure"
 
 
 @pytest.mark.asyncio
@@ -223,6 +225,7 @@ async def test_max_tokens_truncation_is_retryable_and_diagnostics_never_contain_
     assert failure.sent and failure.retryable and not failure.ambiguous
     assert len(requester.calls) == 1
     assert len(limiter.finalized) == 1
+    assert limiter.finalized[0][1]["error_code"] == "response_schema_invalid"
     assert failure.diagnostics == {
         "schema": "voice_intake_transcript",
         "schema_version": "1.0.0",
@@ -244,10 +247,14 @@ async def test_max_tokens_truncation_is_retryable_and_diagnostics_never_contain_
 async def test_malformed_stop_response_fails_closed_with_sanitized_shape(
     tmp_path, auth_settings, terminology
 ):
+    extra_values = {
+        f"{index:02d}_" + "x" * 150: "PRIVATE_CONTENT_MUST_NOT_BE_LOGGED"
+        for index in range(40)
+    }
     raw_response = json.dumps({
         "transcript": 17,
         "uncertain_fragments": [],
-        "private_extra_field": "PRIVATE_CONTENT_MUST_NOT_BE_LOGGED",
+        **extra_values,
     })
 
     class MalformedRequester(Requester):
@@ -291,7 +298,11 @@ async def test_malformed_stop_response_fails_closed_with_sanitized_shape(
     assert failure.diagnostics["expected"]["constraint"] == "string_type"
     assert failure.diagnostics["actual"] == {"type": "integer", "shape": {}}
     assert failure.diagnostics["missing_fields"] == []
-    assert failure.diagnostics["extra_fields"] == ["private_extra_field"]
+    assert failure.diagnostics["extra_fields"] == sorted(
+        field[:128] for field in extra_values
+    )[:32]
+    assert len(failure.diagnostics["extra_fields"]) == 32
+    assert all(len(field) <= 128 for field in failure.diagnostics["extra_fields"])
     assert failure.diagnostics["finish_reason"] == "STOP"
     assert failure.diagnostics["truncated"] is False
     assert "PRIVATE_CONTENT_MUST_NOT_BE_LOGGED" not in json.dumps(
@@ -299,3 +310,28 @@ async def test_malformed_stop_response_fails_closed_with_sanitized_shape(
     )
     assert len(requester.calls) == 1
     assert len(limiter.finalized) == 1
+
+
+def test_missing_field_diagnostics_are_bounded_to_thirty_two():
+    required_model = create_model(
+        "RequiredDiagnosticModel",
+        **{f"required_{index:02d}": (str, ...) for index in range(40)},
+    )
+    properties = {f"required_{index:02d}": {"type": "string"} for index in range(40)}
+    with pytest.raises(ValidationError) as raised:
+        required_model.model_validate({})
+
+    diagnostics = AggregateGeminiInference._validation_diagnostics(
+        schema={"type": "object", "properties": properties},
+        schema_name="bounded_test_schema",
+        error=raised.value,
+        parsed_value={},
+        response_body=None,
+        finish_reason="STOP",
+        usage=None,
+        max_output_tokens=32_768,
+    )
+
+    assert diagnostics["missing_fields"] == [f"required_{index:02d}" for index in range(32)]
+    assert len(diagnostics["missing_fields"]) == 32
+    assert diagnostics["extra_fields"] == []

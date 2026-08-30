@@ -50,6 +50,7 @@ STRUCTURED_RESPONSE_SCHEMA_VERSION = "1.0.0"
 TRANSCRIPT_SCHEMA_NAME = "voice_intake_transcript"
 SUMMARY_SCHEMA_NAME = "voice_intake_summary"
 TRANSCRIPTION_MAX_OUTPUT_TOKENS = 32_768
+MAX_DIAGNOSTIC_FIELDS = 32
 _MISSING = object()
 
 
@@ -215,8 +216,9 @@ class AggregateGeminiInference:
                 )
             parsed_value = self._json_value(response_body)
             value = output_type.model_validate(parsed_value)
-        except StageFailure:
-            await self._finalize(lease, started, usage, "failed", "provider_failure")
+        except StageFailure as exc:
+            error = "response_schema_invalid" if exc.code == "response_schema_invalid" else "provider_failure"
+            await self._finalize(lease, started, usage, "failed", error)
             raise
         except (TimeoutError, BoundedHTTPError) as exc:
             await self._finalize(lease, started, usage, "failed", "provider_outcome_ambiguous")
@@ -319,12 +321,12 @@ class AggregateGeminiInference:
                 cls._field_name(item.get("loc", ()))
                 for item in errors
                 if item.get("type") == "missing" and cls._field_name(item.get("loc", ()))
-            })
+            })[:MAX_DIAGNOSTIC_FIELDS]
             extra_fields = sorted({
                 cls._field_name(item.get("loc", ()))
                 for item in errors
                 if item.get("type") == "extra_forbidden" and cls._field_name(item.get("loc", ()))
-            })
+            })[:MAX_DIAGNOSTIC_FIELDS]
         elif isinstance(error, json.JSONDecodeError):
             constraint = "valid_json_object"
         elif error is not None:

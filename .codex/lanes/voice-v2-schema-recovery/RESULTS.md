@@ -37,6 +37,12 @@ processing normalizes all seven inputs once, successful processing makes one agg
 summary, all seven chunks remain present through verified publication readback, and purge happens only after the
 durable verified receipt.
 
+The predeploy hardening follow-up caps each missing/extra diagnostic list at 32 field names and keeps the existing
+128-character per-name bound, so the structured warning remains bounded even for adversarial provider objects.
+It also records `response_schema_invalid` in the limiter finalization receipt for explicit `MAX_TOKENS`, while all
+other `StageFailure` paths retain their previous `provider_failure` ledger mapping. Neither change adds an automatic
+retry or changes a public contract.
+
 ## Red tests recorded before implementation
 
 Command:
@@ -70,7 +76,7 @@ Result: `16 passed`.
 .venv/bin/python -m pytest -q tests/voice_intake_v2
 ```
 
-Result: `53 passed`.
+Result: `54 passed`.
 
 Focused reviewer follow-up:
 
@@ -80,6 +86,15 @@ Focused reviewer follow-up:
 ```
 
 Result: `1 passed`.
+
+Focused predeploy hardening:
+
+```text
+.venv/bin/python -m pytest -q tests/voice_intake_v2/test_inference.py \
+  -k 'provider_429 or max_tokens or malformed_stop or missing_field'
+```
+
+Result: `4 passed`.
 
 ```text
 .venv/bin/python -m compileall -q src/my_data_hub/voice_intake_v2 tests/voice_intake_v2
