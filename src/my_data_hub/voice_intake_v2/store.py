@@ -1005,15 +1005,21 @@ class VoiceIntakeV2Store:
                 )
             except sqlite3.IntegrityError as exc:
                 raise StoreError("accepted_segment_receipt_conflict") from exc
-            # The receipt and the post-provider state transition are one
-            # transaction.  An expired `transcribing` lease therefore means
-            # the provider outcome is genuinely missing/ambiguous, while a
-            # crash after this durable receipt resumes from `normalizing` and
-            # reuses the successful segment without replaying Gemini.
-            connection.execute(
-                "UPDATE sessions SET state='normalizing',updated_at=? WHERE session_id=?",
-                (now, session_id),
-            )
+            if receipt.accepted:
+                # The accepted receipt and post-provider state transition are
+                # one transaction. A crash after this point can safely reuse
+                # the successful segment without replaying Gemini.
+                connection.execute(
+                    "UPDATE sessions SET state='normalizing',updated_at=? WHERE session_id=?",
+                    (now, session_id),
+                )
+            else:
+                # Keep a failed/ambiguous attempt in the in-flight state until
+                # mark_error durably records its retry/reconciliation policy.
+                # A crash in between must be fenced, never auto-replayed.
+                connection.execute(
+                    "UPDATE sessions SET updated_at=? WHERE session_id=?", (now, session_id)
+                )
         return False
 
     def segment_receipts(

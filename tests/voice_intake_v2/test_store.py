@@ -170,6 +170,29 @@ def test_durable_segment_receipt_atomically_clears_ambiguous_inflight_state(
     assert path.is_file()
 
 
+def test_failed_segment_receipt_remains_fenced_until_retry_policy_is_durable(
+    tmp_path, create_request, complete_request, terminology
+):
+    now = [1_000_000.0]
+    store = VoiceIntakeV2Store(tmp_path / "spool", clock=lambda: now[0])
+    store.create_session(create_request, terminology=terminology)
+    path = store.session_directory(SESSION_ID) / "chunks" / f"00000-{SHA}.m4a"
+    path.write_bytes(b"audio")
+    store.record_chunk(receipt(path))
+    store.complete(SESSION_ID, complete_request)
+    assert store.claim("worker-1", 30) is not None
+    store.set_state(SESSION_ID, "worker-1", "transcribing")
+    failed = segment_receipt(accepted=False, finish_reason="UNKNOWN")
+    store.persist_segment_receipt(SESSION_ID, "worker-1", failed)
+    assert store.status(SESSION_ID).state == "transcribing"
+
+    now[0] += 31
+    assert store.fence_ambiguous_inference() == 1
+    assert store.status(SESSION_ID).state == "reconciliation_required"
+    assert store.claim("worker-2", 30) is None
+    assert path.is_file()
+
+
 def test_ttl_preserves_old_receiving_session_and_audio(tmp_path, create_request, terminology):
     now = [1_000_000.0]
     store = VoiceIntakeV2Store(tmp_path / "spool", clock=lambda: now[0])
