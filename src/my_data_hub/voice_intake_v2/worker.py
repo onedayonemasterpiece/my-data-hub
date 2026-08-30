@@ -177,11 +177,10 @@ class VoiceIntakeV2Worker:
             if exc.diagnostics:
                 diagnostic = exc.diagnostics
                 LOGGER.warning(
-                    "voice_v2_stage_failure session_id=%s code=%s schema=%s "
+                    "voice_v2_stage_failure code=%s schema=%s "
                     "schema_version=%s json_path=%s expected=%s actual=%s "
                     "missing_fields=%s extra_fields=%s finish_reason=%s token_counts=%s "
                     "configured_max_output_tokens=%s truncated=%s",
-                    session.session_id,
                     exc.code,
                     diagnostic.get("schema"),
                     diagnostic.get("schema_version"),

@@ -220,7 +220,7 @@ async def test_twenty_minutes_short_valid_transcript_fails_closed_with_real_file
 @pytest.mark.parametrize("shape", ["parseable_object", "malformed_json"])
 @pytest.mark.asyncio
 async def test_max_tokens_parseable_or_malformed_never_purges(
-    tmp_path, create_request, terminology, shape
+    tmp_path, create_request, terminology, shape, caplog
 ):
     class MaxTokens(Inference):
         async def transcribe_segment(self, **kwargs):
@@ -240,6 +240,7 @@ async def test_max_tokens_parseable_or_malformed_never_purges(
     assert status.error_code == "response_schema_invalid"
     assert not status.content_verified and not status.purge_authorized and not status.audio_purged
     assert len(files(store)) == 1
+    assert SESSION_ID not in caplog.text
 
 
 @pytest.mark.asyncio

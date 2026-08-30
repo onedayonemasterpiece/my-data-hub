@@ -1488,8 +1488,10 @@ class VoiceIntakeV2Store:
 
         The configured TTL is an admission/operations retention floor, not
         authority to destroy recoverable recordings. Small reconciliation
-        receipts may remain indefinitely; only exact GitHub readback permits
-        audio deletion through :meth:`purge_audio`.
+        receipts may remain indefinitely. Audio deletion requires the complete
+        durable chain: content verification, publication readback, separate
+        purge authorization, and verified physical absence in
+        :meth:`purge_audio`.
         """
         if ttl_seconds < 0:
             raise ValueError("ttl_seconds must be non-negative")

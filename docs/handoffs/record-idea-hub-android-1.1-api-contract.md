@@ -88,8 +88,8 @@ topology is authoritative: N accepted source chunks require N independently
 receipted transcription calls and one summary only after full coverage.
 
 `max_session_seconds` is configurable but must never be configured below
-3,600 seconds. Twenty minutes is the priority exactly-two-request acceptance
-case, not an API duration limit. `max_session_bytes` is the server's aggregate
+3,600 seconds. Twenty-plus minutes is the priority multi-chunk acceptance case
+for the N+1 request topology, not an API duration limit. `max_session_bytes` is the server's aggregate
 admission bound across all transport chunks; Android must retain local files
 when that bound is rejected and must not keep uploading unchanged data.
 
