@@ -111,6 +111,8 @@ class LegacyMigrationAudit:
     publication_verified_observed: int
     audio_purged_observed: int
     legacy_unverified_purge_observed: int
+    long_transcript_rows_observed: int
+    suspicious_long_transcript_rows_observed: int
 
 
 class VoiceIntakeV2Store:
@@ -334,9 +336,24 @@ class VoiceIntakeV2Store:
                     publication_verified_observed INTEGER NOT NULL,
                     audio_purged_observed INTEGER NOT NULL,
                     legacy_unverified_purge_observed INTEGER NOT NULL,
+                    long_transcript_rows_observed INTEGER NOT NULL,
+                    suspicious_long_transcript_rows_observed INTEGER NOT NULL,
                     created_at REAL NOT NULL
                 )"""
             )
+            audit_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(legacy_content_migration_audit)")
+            }
+            for column in (
+                "long_transcript_rows_observed",
+                "suspicious_long_transcript_rows_observed",
+            ):
+                if column not in audit_columns:
+                    connection.execute(
+                        f"ALTER TABLE legacy_content_migration_audit "
+                        f"ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                    )
             for table in (
                 "segment_inference_receipts", "content_verification_receipts",
                 "purge_authorization_receipts", "audio_purge_receipts",
@@ -363,7 +380,8 @@ class VoiceIntakeV2Store:
                 # but neither is evidence of content completeness or authorization.
                 if sessions_existed:
                     sample = connection.execute(
-                        """SELECT github_verified,server_audio_purged FROM sessions
+                        """SELECT github_verified,server_audio_purged,
+                                  complete_json,transcript_json FROM sessions
                            ORDER BY rowid LIMIT ?""",
                         (self._AUDIT_LIMIT + 1,),
                     ).fetchall()
@@ -379,13 +397,17 @@ class VoiceIntakeV2Store:
                         """INSERT INTO legacy_content_migration_audit(
                            migration_version,rows_examined,rows_truncated,
                            publication_verified_observed,audio_purged_observed,
-                           legacy_unverified_purge_observed,created_at
-                        ) VALUES(?,?,?,?,?,?,?)""",
+                           legacy_unverified_purge_observed,long_transcript_rows_observed,
+                           suspicious_long_transcript_rows_observed,created_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?)""",
                         (
                             self._CONTENT_MIGRATION, len(observed), int(len(sample) > self._AUDIT_LIMIT),
                             sum(int(row["github_verified"]) for row in observed),
                             sum(int(row["server_audio_purged"]) for row in observed),
-                            sum(int(row["server_audio_purged"]) for row in observed), self._clock(),
+                            sum(int(row["server_audio_purged"]) for row in observed),
+                            sum(self._legacy_long_transcript_metrics(row)[0] for row in observed),
+                            sum(self._legacy_long_transcript_metrics(row)[1] for row in observed),
+                            self._clock(),
                         ),
                     )
                 connection.execute(
@@ -464,6 +486,22 @@ class VoiceIntakeV2Store:
 
         encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return encoded, hashlib.sha256(encoded.encode()).hexdigest()
+
+    @staticmethod
+    def _legacy_long_transcript_metrics(row: sqlite3.Row) -> tuple[int, int]:
+        """Return bounded counters only; never expose identifiers or content."""
+        if not row["complete_json"] or not row["transcript_json"]:
+            return 0, 0
+        try:
+            duration_ms = int(json.loads(row["complete_json"])["recorded_audio_ms"])
+            transcript = json.loads(row["transcript_json"])["transcript"]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return 0, 0
+        if duration_ms < 10 * 60 * 1000 or not isinstance(transcript, str):
+            return 0, 0
+        alphanumeric = sum(character.isalnum() for character in transcript)
+        suspicious = alphanumeric / max(1.0, duration_ms / 1000) < 0.75
+        return 1, int(suspicious)
 
     @classmethod
     def _bounded_metadata(cls, value: dict[str, Any], *, code: str) -> tuple[str, str]:
@@ -1282,7 +1320,9 @@ class VoiceIntakeV2Store:
             row = connection.execute(
                 """SELECT migration_version,rows_examined,rows_truncated,
                           publication_verified_observed,audio_purged_observed,
-                          legacy_unverified_purge_observed
+                          legacy_unverified_purge_observed,
+                          long_transcript_rows_observed,
+                          suspicious_long_transcript_rows_observed
                    FROM legacy_content_migration_audit WHERE migration_version=?""",
                 (self._CONTENT_MIGRATION,),
             ).fetchone()
@@ -1294,6 +1334,10 @@ class VoiceIntakeV2Store:
             publication_verified_observed=row["publication_verified_observed"],
             audio_purged_observed=row["audio_purged_observed"],
             legacy_unverified_purge_observed=row["legacy_unverified_purge_observed"],
+            long_transcript_rows_observed=row["long_transcript_rows_observed"],
+            suspicious_long_transcript_rows_observed=(
+                row["suspicious_long_transcript_rows_observed"]
+            ),
         )
 
     def purge_audio(self, session_id: str) -> None:

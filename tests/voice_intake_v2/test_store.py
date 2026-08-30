@@ -340,15 +340,25 @@ def test_legacy_migration_twice_is_idempotent_truthful_and_bounded(tmp_path):
         )
         rows = []
         for index in range(1_005):
+            complete_json = None
+            transcript_json = None
+            if index == 7:
+                complete_json = '{"recorded_audio_ms":1200000}'
+                transcript_json = '{"transcript":"short fixture"}'
+            elif index == 8:
+                complete_json = '{"recorded_audio_ms":1200000}'
+                transcript_json = '{"transcript":"' + ("fixture " * 300) + '"}'
             rows.append((
                 f"synthetic-{index:04d}", "{}", "a" * 64, "{}", "model", "published_verified",
-                int(index % 2 == 0), int(index % 3 == 0), 1.0, 1.0,
+                complete_json, transcript_json, int(index % 2 == 0), int(index % 3 == 0),
+                1.0, 1.0,
             ))
         connection.executemany(
             """INSERT INTO sessions(
                session_id,create_json,create_sha256,terminology_json,model,state,
-               github_verified,server_audio_purged,created_at,updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+               complete_json,transcript_json,github_verified,server_audio_purged,
+               created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             rows,
         )
 
@@ -361,7 +371,10 @@ def test_legacy_migration_twice_is_idempotent_truthful_and_bounded(tmp_path):
         "migration_version", "rows_examined", "rows_truncated",
         "publication_verified_observed", "audio_purged_observed",
         "legacy_unverified_purge_observed",
+        "long_transcript_rows_observed", "suspicious_long_transcript_rows_observed",
     }
+    assert audit.long_transcript_rows_observed == 2
+    assert audit.suspicious_long_transcript_rows_observed == 1
     assert not any("id" in key or "content" in key for key in asdict(audit))
     github_only = first.verification_state("synthetic-0002")
     assert github_only.publication_verified and not github_only.content_verified
