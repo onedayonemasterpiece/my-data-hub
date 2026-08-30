@@ -72,7 +72,7 @@ lanes:
     writable_files: [src/my_data_hub/voice_intake_v2/store.py, tests/voice_intake_v2/test_store.py, .codex/lanes/issue31-ledger/RESULTS.md]
     forbidden_files: [src/my_data_hub/voice_intake_v2/inference.py, src/my_data_hub/voice_intake_v2/worker.py]
     verification_scope: targeted
-    status: planned
+    status: completed
   - id: issue31-inference
     role: worker
     requirement_ids: [R03, R04, R05, T02]
@@ -82,7 +82,7 @@ lanes:
     writable_files: [src/my_data_hub/voice_intake_v2/contracts.py, src/my_data_hub/voice_intake_v2/inference.py, tests/voice_intake_v2/test_inference.py, .codex/lanes/issue31-inference/RESULTS.md]
     forbidden_files: [src/my_data_hub/voice_intake_v2/store.py, src/my_data_hub/voice_intake_v2/worker.py]
     verification_scope: targeted
-    status: planned
+    status: completed
   - id: issue31-orchestration
     role: worker
     requirement_ids: [R06, R12]
@@ -92,7 +92,7 @@ lanes:
     worktree: /home/dev/.codex/worktrees/my-data-hub/issue31-orchestration
     writable_files: [src/my_data_hub/voice_intake_v2/worker.py, tests/voice_intake_v2/test_worker.py, .codex/lanes/issue31-orchestration/RESULTS.md]
     verification_scope: targeted
-    status: planned
+    status: completed
   - id: issue31-compatibility
     role: worker
     requirement_ids: [R07, R09]
@@ -102,7 +102,7 @@ lanes:
     worktree: /home/dev/.codex/worktrees/my-data-hub/issue31-compatibility
     writable_files: [src/my_data_hub/voice_intake_v2/api.py, src/my_data_hub/voice_intake_v2/markdown.py, src/my_data_hub/voice_intake_v2/publisher.py, tests/voice_intake_v2/test_api.py, tests/voice_intake_v2/test_markdown.py, tests/voice_intake_v2/test_publisher.py, docs/operations/record-idea-hub-voice-intake-v2.md, docs/handoffs/record-idea-hub-android-1.1-api-contract.md, .codex/lanes/issue31-compatibility/RESULTS.md]
     verification_scope: targeted
-    status: planned
+    status: completed
   - id: issue31-acceptance
     role: worker
     requirement_ids: [T01, T03, T04, T05, T06, T07]
@@ -112,14 +112,14 @@ lanes:
     worktree: /home/dev/.codex/worktrees/my-data-hub/issue31-acceptance
     writable_files: [tests/voice_intake_v2, .codex/lanes/issue31-acceptance/RESULTS.md]
     verification_scope: full_local
-    status: planned
+    status: completed
   - id: issue31-review
     role: reviewer
     requirement_ids: [V01, V02, V03, V04, V05]
     depends_on: [issue31-acceptance]
     execution_mode: serial_after_dependency
     verification_scope: inspection_only
-    status: planned
+    status: completed
 ```
 
 The richer runner's maximum reasoning tier is warranted for ledger, orchestration,
