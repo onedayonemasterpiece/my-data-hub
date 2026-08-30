@@ -49,7 +49,9 @@ AGGREGATE_TRANSCRIBE_PROMPT = """Ты выполняешь максимальн�
 STRUCTURED_RESPONSE_SCHEMA_VERSION = "1.0.0"
 TRANSCRIPT_SCHEMA_NAME = "voice_intake_transcript"
 SUMMARY_SCHEMA_NAME = "voice_intake_summary"
-TRANSCRIPTION_MAX_OUTPUT_TOKENS = 32_768
+# Gemini 3.1 Flash-Lite's documented output ceiling. Long-form aggregate
+# transcription must not silently inherit the smaller historical application cap.
+TRANSCRIPTION_MAX_OUTPUT_TOKENS = 65_536
 MAX_DIAGNOSTIC_FIELDS = 32
 _MISSING = object()
 

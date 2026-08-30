@@ -14,13 +14,15 @@
 The aggregate v2 transcription request configured `maxOutputTokens=8192`. The incident evidence supplied to
 the lane showed 8,178 output tokens immediately before `response_schema_invalid`, which is consistent with a
 completion truncated at that bound. Gemini 3.1 Flash-Lite's official model page documents a 65,536-token output
-limit; the lane uses the more conservative bounded value 32,768:
+limit. A first controlled production resume at 32,768 was also explicitly terminated with `MAX_TOKENS`
+(32,753 output tokens, no hidden retry). After that second like-for-like truncation, the implementation was
+raised to the model's documented hard output ceiling of 65,536 rather than guessing another intermediate value:
 https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite
 
 The implementation:
 
 - keeps one aggregate `generateContent` POST per transcription attempt and one summary POST;
-- raises only the aggregate transcription output bound from 8,192 to 32,768;
+- raises only the aggregate transcription output bound from 8,192 to the documented 65,536 ceiling;
 - checks provider `finishReason` before parsing/validating response content;
 - classifies explicit `MAX_TOKENS` as `response_schema_invalid`, `sent=true`, `retryable=true`, without a hidden
   retry or public error-code/schema change;
@@ -70,7 +72,7 @@ Result: 1 failure because `StageFailure` did not accept sanitized diagnostics.
   tests/voice_intake_v2/test_worker.py
 ```
 
-Result: `16 passed`.
+Result after the documented-ceiling follow-up: `17 passed`.
 
 ```text
 .venv/bin/python -m pytest -q tests/voice_intake_v2

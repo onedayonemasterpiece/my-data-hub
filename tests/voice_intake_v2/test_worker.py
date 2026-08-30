@@ -135,11 +135,11 @@ async def test_sent_truncation_waits_for_explicit_resume_and_logs_only_sanitized
                         "finish_reason": "MAX_TOKENS",
                         "token_counts": {
                             "input": 100,
-                            "output": 32_700,
+                            "output": 65_520,
                             "thought": 0,
-                            "total": 32_800,
+                            "total": 65_620,
                         },
-                        "configured_max_output_tokens": 32_768,
+                        "configured_max_output_tokens": 65_536,
                         "truncated": True,
                     },
                 )
@@ -167,7 +167,7 @@ async def test_sent_truncation_waits_for_explicit_resume_and_logs_only_sanitized
     assert failed.retryable and failed.retry_at is None
     assert [call[0] for call in inference.calls] == ["transcribe"]
     assert "finish_reason=MAX_TOKENS" in caplog.text
-    assert "configured_max_output_tokens=32768" in caplog.text
+    assert "configured_max_output_tokens=65536" in caplog.text
     assert "PRIVATE" not in caplog.text
 
     store.complete(SESSION_ID, matching_complete(store, complete_request))

@@ -177,7 +177,7 @@ async def test_twenty_minute_aggregate_transcription_has_bounded_headroom_and_on
 
     assert len(requester.calls) == 1
     generation = requester.calls[0][2]["json_body"]["generationConfig"]
-    assert generation["maxOutputTokens"] == 32_768
+    assert generation["maxOutputTokens"] == 65_536
     assert limiter.reserves[0]["reserved_tpm"] == 38_644
 
 
@@ -199,9 +199,9 @@ async def test_max_tokens_truncation_is_retryable_and_diagnostics_never_contain_
                     }],
                     "usageMetadata": {
                         "promptTokenCount": 38_644,
-                        "candidatesTokenCount": 32_700,
+                        "candidatesTokenCount": 65_520,
                         "thoughtsTokenCount": 7,
-                        "totalTokenCount": 71_351,
+                        "totalTokenCount": 104_171,
                     },
                 },
                 retry_after=None,
@@ -235,8 +235,8 @@ async def test_max_tokens_truncation_is_retryable_and_diagnostics_never_contain_
         "missing_fields": [],
         "extra_fields": [],
         "finish_reason": "MAX_TOKENS",
-        "token_counts": {"input": 38_644, "output": 32_700, "thought": 7, "total": 71_351},
-        "configured_max_output_tokens": 32_768,
+        "token_counts": {"input": 38_644, "output": 65_520, "thought": 7, "total": 104_171},
+        "configured_max_output_tokens": 65_536,
         "truncated": True,
     }
     assert raw_response not in json.dumps(failure.diagnostics, sort_keys=True)
@@ -329,7 +329,7 @@ def test_missing_field_diagnostics_are_bounded_to_thirty_two():
         response_body=None,
         finish_reason="STOP",
         usage=None,
-        max_output_tokens=32_768,
+        max_output_tokens=65_536,
     )
 
     assert diagnostics["missing_fields"] == [f"required_{index:02d}" for index in range(32)]
