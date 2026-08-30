@@ -45,18 +45,13 @@ only after the durable content/publication/authorization chain completes.
 - `.venv/bin/python -m compileall -q src tests scripts` — PASS.
 - `.venv/bin/mypy --config-file pyproject.toml src/my_data_hub/voice_intake_v2`
   — PASS, `11 source files`.
+- `.venv/bin/mypy --config-file pyproject.toml` — PASS, configured broad target,
+  `26 source files` (mypy `1.20.2`).
 - `.venv/bin/python scripts/validate_repository.py` — PASS, `4,581` checks,
   zero errors and zero notes.
 - `.venv/bin/python scripts/scan_tracked_secrets.py` — PASS.
 - `.venv/bin/pytest -o addopts='' -q tests/test_secret_scan.py` — PASS,
   `5 passed in 0.24s`.
-
-The broader configured-target invocation
-`.venv/bin/mypy --config-file pyproject.toml` was also run with mypy `1.20.2`.
-It reports two annotation-only findings in integrated compatibility files outside
-this lane (`markdown.py:177` redundant cast and `publisher.py:29` unused ignore).
-The complete v2 package, including this lane's exercised implementation, passes
-strict mypy as recorded above; the integrator was notified of the broader result.
 
 ## Commits
 
