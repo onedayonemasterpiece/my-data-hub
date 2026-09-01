@@ -1,0 +1,6 @@
+#!/bin/sh
+export HOME=/home/dev
+export CODEX_HOME=/home/dev/.codex
+unset CONTROL_PLANE_API_KEY OPENAI_API_KEY CODEX_API_KEY OPENAI_ADMIN_KEY
+exec /home/dev/.local/share/openai-codex-mcp/bridge-venv/bin/python \
+  /home/dev/.local/libexec/openai-codex-mcp/codex-chatgpt-bridge.py "$@"

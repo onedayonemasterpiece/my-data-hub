@@ -1,0 +1,13 @@
+{
+  "contains_credentials": false,
+  "contains_runtime_state": false,
+  "files": {
+    "README.md": "2cceef77c8f7a7ecf957c7602d146dcada446c472c4d92b36d0eb82316b33579",
+    "codex-chatgpt-bridge.py": "73756c81b852cb183943c880d5918faadeee25ea9b034504a80df9f5f05d2107",
+    "opencode_backend.py": "56699a39b2d635cdc397774cc25f122b119e7794599b0d50776c7596e6c9af84",
+    "run-codex-mcp": "1c4427fe4e39f2298dee69a68edbddea87a63bc488d09d55053ea97a5ecb91b0"
+  },
+  "observed_bridge_version": "3.6.1",
+  "observed_opencode_version": "1.18.15",
+  "schema": "devcoveer-safe-baseline.v1"
+}
