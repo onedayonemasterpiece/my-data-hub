@@ -231,17 +231,25 @@ async def test_successful_ref_update_with_delayed_contents_readback_is_safely_re
 
 
 @pytest.mark.asyncio
-async def test_current_main_detail_mutation_is_not_accepted_as_verified(
+async def test_later_main_enrichment_reconciles_to_atomic_origin_commit(
     auth_settings, create_request, complete_request, terminology
 ) -> None:
     publisher = MemoryPublisher(auth_settings)
     item = projection(create_request, complete_request, terminology)
-    await publisher.publish_and_verify(item)
+    original = await publisher.publish_and_verify(item)
+    source_path = f"inbox/voice/2026/08/{SESSION_ID}.md"
     detail_path = f"registry/sessions/2026/08/{SESSION_ID}.md"
-    publisher.commits[publisher.head_sha][detail_path] += "mutated\n"
-    with pytest.raises(VoiceIntakeError) as caught:
-        await publisher.publish_and_verify(item)
-    assert caught.value.code == "github_existing_publication_mismatch"
+    later_main = "e" * 40
+    publisher.commits[later_main] = dict(publisher.commits[publisher.head_sha])
+    publisher.commits[later_main][source_path] += "downstream enrichment\n"
+    publisher.commits[later_main][detail_path] += "status: closed\n"
+    publisher.head_sha = later_main
+
+    repeated = await publisher.publish_and_verify(item)
+
+    assert repeated.github_verified
+    assert repeated.github_commit_sha == original.github_commit_sha
+    assert len(publisher.created_commits) == 1
 
 
 @pytest.mark.asyncio

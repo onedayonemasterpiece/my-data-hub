@@ -30,7 +30,17 @@ def _raise_retryable_readback(exc: VoiceIntakeError) -> NoReturn:
     reconciles the deterministic paths on current main and never repeats a
     durable Gemini stage.
     """
-    if exc.retryable or exc.reconciliation_required:
+    transient_read_codes = {
+        "github_content_read_failed",
+        "github_head_read_failed",
+        "github_commit_history_read_failed",
+        "github_commit_read_failed",
+    }
+    if (
+        exc.retryable
+        or exc.reconciliation_required
+        or exc.code not in transient_read_codes
+    ):
         raise exc
     raise VoiceIntakeError(
         "github_readback_retryable",
@@ -169,12 +179,14 @@ class V2IdeaHubPublisher(IdeaHubPublisher):
         if source is None or detail is None or registry is None or voice_index is None:
             raise GitHubPublicationConflict("github_existing_publication_mismatch")
         if (
-            not _same(source[0], rendered.source)
-            or not _same(detail[0], rendered.detail)
-            or f"session_id: {session_id}" not in registry[0]
+            f"session_id: {session_id}" not in registry[0]
             or f"`{session_id}`" not in voice_index[0]
         ):
             raise GitHubPublicationConflict("github_existing_publication_mismatch")
+        # Source and detail are allowed to evolve after intake (for example,
+        # when an IdeaHub workflow reconciles or closes the captured idea).
+        # The immutable proof is the original atomic four-path commit below,
+        # not byte equality with a later main revision.
         commit_sha = await self._publication_commit_from_history(rendered)
         return self._receipt(rendered, commit_sha)
 
