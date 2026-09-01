@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 from dataclasses import asdict
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import quote
 
 from my_data_hub.voice_intake.errors import GitHubPublicationConflict, VoiceIntakeError
@@ -20,6 +20,24 @@ def _same(left: str, right: str) -> bool:
     return hashlib.sha256(left.encode("utf-8")).digest() == hashlib.sha256(
         right.encode("utf-8")
     ).digest()
+
+
+def _raise_retryable_readback(exc: VoiceIntakeError) -> NoReturn:
+    """Keep read-only GitHub failures out of the manual-reconciliation lane.
+
+    A successful ref update may become visible through the Contents API a
+    moment later. Re-running the v2 publication stage is safe: it first
+    reconciles the deterministic paths on current main and never repeats a
+    durable Gemini stage.
+    """
+    if exc.retryable or exc.reconciliation_required:
+        raise exc
+    raise VoiceIntakeError(
+        "github_readback_retryable",
+        retryable=True,
+        retry_after_seconds=exc.retry_after_seconds,
+        status_code=503,
+    ) from exc
 
 
 class V2IdeaHubPublisher(IdeaHubPublisher):
@@ -43,7 +61,10 @@ class V2IdeaHubPublisher(IdeaHubPublisher):
                 "idea_hub_terminology_not_current", retryable=True, status_code=503
             )
         rendered = render_publication(projection)
-        reconciled = await self._reconcile_current(rendered)
+        try:
+            reconciled = await self._reconcile_current(rendered)
+        except VoiceIntakeError as exc:
+            _raise_retryable_readback(exc)
         if reconciled is not None:
             return reconciled
 
@@ -121,11 +142,14 @@ class V2IdeaHubPublisher(IdeaHubPublisher):
             if response.status in {409, 422}:
                 continue
             self._require_success(response, "github_ref_update_failed")
-            await self._verify_publication(
-                commit_sha=commit_sha,
-                expected=expected,
-                rendered=rendered,
-            )
+            try:
+                await self._verify_publication(
+                    commit_sha=commit_sha,
+                    expected=expected,
+                    rendered=rendered,
+                )
+            except VoiceIntakeError as exc:
+                _raise_retryable_readback(exc)
             return self._receipt(rendered, commit_sha)
         raise GitHubPublicationConflict("idea_hub_main_moved_repeatedly")
 

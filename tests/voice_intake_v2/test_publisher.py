@@ -122,6 +122,29 @@ class MemoryPublisher(V2IdeaHubPublisher):
         return BoundedHTTPResponse(200, {}, None, "application/json")
 
 
+class DelayedReadbackPublisher(MemoryPublisher):
+    """Model GitHub accepting the ref update before Contents can read it."""
+
+    def __init__(self, settings) -> None:
+        super().__init__(settings)
+        self.fail_exact_readback_once = True
+
+    async def _content(self, path: str, ref: str) -> tuple[str, str]:
+        if (
+            self.fail_exact_readback_once
+            and ref in self.created_commits
+            and path.startswith("inbox/voice/")
+            and path != self.VOICE_INDEX_PATH
+        ):
+            self.fail_exact_readback_once = False
+            raise VoiceIntakeError(
+                "github_content_read_failed",
+                retryable=False,
+                status_code=409,
+            )
+        return await super()._content(path, ref)
+
+
 @pytest.mark.asyncio
 async def test_atomic_four_file_publication_and_repeat_reconciles_without_new_commit(
     auth_settings, create_request, complete_request, terminology
@@ -184,6 +207,27 @@ async def test_patch_network_error_without_readback_is_explicitly_ambiguous(
         await publisher.publish_and_verify(projection(create_request, complete_request, terminology))
     assert caught.value.code == "github_outcome_ambiguous"
     assert caught.value.reconciliation_required
+
+
+@pytest.mark.asyncio
+async def test_successful_ref_update_with_delayed_contents_readback_is_safely_retryable(
+    auth_settings, create_request, complete_request, terminology
+) -> None:
+    publisher = DelayedReadbackPublisher(auth_settings)
+    item = projection(create_request, complete_request, terminology)
+
+    with pytest.raises(VoiceIntakeError) as caught:
+        await publisher.publish_and_verify(item)
+
+    assert caught.value.code == "github_readback_retryable"
+    assert caught.value.retryable
+    assert not caught.value.reconciliation_required
+    assert len(publisher.created_commits) == 1
+
+    receipt = await publisher.publish_and_verify(item)
+    assert receipt.github_verified
+    assert receipt.github_commit_sha == publisher.created_commits[0]
+    assert len(publisher.created_commits) == 1
 
 
 @pytest.mark.asyncio
