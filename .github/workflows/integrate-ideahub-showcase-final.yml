@@ -82,15 +82,8 @@ jobs:
             tests/test_control_plane_deployment.py
           python -m compileall -q src tests/showcase
 
-      - name: Verify Astro renderer
-        run: |
-          if npm run --prefix showcase-site | grep -q 'test:all'; then
-            npm run --prefix showcase-site test:all
-          elif npm run --prefix showcase-site | grep -q 'test:build'; then
-            npm run --prefix showcase-site test:build
-          else
-            npm run --prefix showcase-site build
-          fi
+      - name: Verify real prefixed Astro renderer
+        run: pytest -q tests/showcase/test_astro_build.py
 
       - name: Verify isolated production image
         run: docker build -f deploy/showcase-runtime/Dockerfile -t my-data-hub-showcase:final-check .
