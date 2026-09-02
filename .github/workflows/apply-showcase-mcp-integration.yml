@@ -30,6 +30,7 @@ jobs:
             -e 's/\.readOnlyHint/.read_only_hint/g' \
             -e 's/\.destructiveHint/.destructive_hint/g' \
             -e 's/\.idempotentHint/.idempotent_hint/g' \
+            -e 's/assert SHOWCASE_TOOLS <= set(tools)/assert set(tools) >= SHOWCASE_TOOLS/' \
             tests/showcase/test_main_mcp_integration.py
       - name: Install project
         run: python -m pip install -e '.[dev]'
