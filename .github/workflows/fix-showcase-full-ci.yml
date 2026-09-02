@@ -58,7 +58,8 @@ jobs:
             src/my_data_hub/mcp/server.py \
             src/my_data_hub/mcp/catalog.py \
             tests/test_architecture_invariants.py \
+            tests/test_remote_mcp_verifier.py \
             docs/operations/ideahub-showcase-runtime.md
           git diff --cached --check
-          git commit -m "fix(showcase): preserve remote MCP and closed inventories"
+          git commit -m "fix(showcase): preserve masked reader list and closed inventories"
           git push origin HEAD:${GITHUB_REF_NAME}
