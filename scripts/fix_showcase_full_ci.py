@@ -133,6 +133,25 @@ def patch_remote_verifier_test() -> None:
     write(path, source)
 
 
+def patch_showcase_contract_test() -> None:
+    path = "tests/showcase/test_env_contract_v2.py"
+    source = read(path)
+    import_line = "from my_data_hub.mcp.catalog import TOOL_CONTRACTS\n"
+    if import_line not in source:
+        source = source.replace("import yaml\n", "import yaml\n\n" + import_line, 1)
+    source = replace_once(
+        source,
+        '    catalog = (ROOT / "src/my_data_hub/mcp/catalog.py").read_text(encoding="utf-8")\n'
+        '    assert \'("showcase.get_link", "showcase:write")\' in catalog\n',
+        '    contract = TOOL_CONTRACTS["showcase.get_link"]\n'
+        '    assert contract.scope == "showcase:write"\n'
+        '    assert contract.role == "operator"\n'
+        '    assert contract.read_only is True\n',
+        "semantic full-link contract expectation",
+    )
+    write(path, source)
+
+
 def patch_runbook() -> None:
     path = "docs/operations/ideahub-showcase-runtime.md"
     source = read(path)
@@ -156,6 +175,7 @@ def main() -> None:
     patch_catalog()
     patch_architecture_test()
     patch_remote_verifier_test()
+    patch_showcase_contract_test()
     patch_runbook()
     print("showcase full-CI compatibility patch applied")
 
