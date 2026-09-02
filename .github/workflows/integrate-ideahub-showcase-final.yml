@@ -48,6 +48,7 @@ jobs:
           sed -i \
             '/^"showcase-site" = "my_data_hub\/showcase_site"$/d' \
             pyproject.toml
+          python -c 'from pathlib import Path; p=Path("deploy/showcase-runtime/Dockerfile"); s=p.read_text(encoding="utf-8"); old="COPY src ./src\nRUN python -m pip install ."; new="COPY src ./src\nCOPY sql ./sql\nCOPY schemas ./schemas\nRUN python -m pip install ."; assert old in s; p.write_text(s.replace(old, new, 1), encoding="utf-8")'
 
       - name: Install renderer and Python dependencies
         run: |
@@ -82,6 +83,8 @@ jobs:
             echo 'general Python wheel must not bundle the Astro renderer' >&2
             exit 1
           fi
+          grep -Fq 'COPY sql ./sql' deploy/showcase-runtime/Dockerfile
+          grep -Fq 'COPY schemas ./schemas' deploy/showcase-runtime/Dockerfile
           pytest -q \
             tests/showcase \
             tests/test_mcp_sdk_v2_contract.py \
