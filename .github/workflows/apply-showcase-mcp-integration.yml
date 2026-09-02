@@ -24,7 +24,13 @@ jobs:
         with:
           python-version: '3.12'
       - name: Apply deterministic source patch
-        run: python scripts/apply_showcase_mcp_integration.py
+        run: |
+          python scripts/apply_showcase_mcp_integration.py
+          sed -i \
+            -e 's/\.readOnlyHint/.read_only_hint/g' \
+            -e 's/\.destructiveHint/.destructive_hint/g' \
+            -e 's/\.idempotentHint/.idempotent_hint/g' \
+            tests/showcase/test_main_mcp_integration.py
       - name: Install project
         run: python -m pip install -e '.[dev]'
       - name: Verify MCP and showcase contracts
