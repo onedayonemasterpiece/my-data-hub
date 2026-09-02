@@ -42,6 +42,9 @@ jobs:
           python scripts/repair_showcase_integration_script.py
           python scripts/integrate_showcase_runtime.py
           python scripts/finalize_showcase_runtime.py
+          sed -i \
+            's/serialized = json.dumps(result)/serialized = json.dumps(result, ensure_ascii=False)/' \
+            tests/showcase/test_runtime_v2.py
 
       - name: Install renderer and Python dependencies
         run: |
