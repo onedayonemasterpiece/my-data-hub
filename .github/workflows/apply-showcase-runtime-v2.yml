@@ -1,0 +1,131 @@
+name: Apply Showcase Runtime V2
+
+on:
+  push:
+    branches:
+      - chatgpt/ideahub-showcase-runtime-v2-20260902
+    paths:
+      - scripts/apply_showcase_runtime_v2.py
+      - scripts/showcase_runtime_v2_marker.txt
+      - src/my_data_hub/showcase/gateway.py
+      - src/my_data_hub/showcase/runtime.py
+      - deploy/showcase-runtime/Dockerfile
+      - compose.showcase.yaml
+      - tests/showcase/test_runtime_v2.py
+      - tests/showcase/test_deployment_boundary_v2.py
+      - .github/workflows/apply-showcase-runtime-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: showcase-site/package.json
+
+      - name: Apply deterministic source integration
+        run: python scripts/apply_showcase_runtime_v2.py
+
+      - name: Pin and install Astro renderer dependencies
+        working-directory: showcase-site
+        run: |
+          npm install --package-lock-only --no-audit --no-fund
+          npm ci --no-audit --no-fund
+
+      - name: Install Python project
+        run: python -m pip install -e '.[dev]'
+
+      - name: Format and lint changed Python
+        run: |
+          ruff check --fix \
+            src/my_data_hub/showcase/gateway.py \
+            src/my_data_hub/showcase/runtime.py \
+            src/my_data_hub/showcase/manager.py \
+            src/my_data_hub/mcp/server.py \
+            src/my_data_hub/config.py \
+            tests/showcase/test_runtime_v2.py \
+            tests/showcase/test_deployment_boundary_v2.py
+          ruff format \
+            src/my_data_hub/showcase/gateway.py \
+            src/my_data_hub/showcase/runtime.py \
+            src/my_data_hub/showcase/manager.py \
+            src/my_data_hub/mcp/server.py \
+            src/my_data_hub/config.py \
+            tests/showcase/test_runtime_v2.py \
+            tests/showcase/test_deployment_boundary_v2.py
+          ruff check \
+            src/my_data_hub/showcase/gateway.py \
+            src/my_data_hub/showcase/runtime.py \
+            src/my_data_hub/showcase/manager.py \
+            src/my_data_hub/mcp/server.py \
+            src/my_data_hub/config.py \
+            tests/showcase/test_runtime_v2.py \
+            tests/showcase/test_deployment_boundary_v2.py
+
+      - name: Verify showcase and existing MCP contracts
+        run: >-
+          pytest -q
+          tests/showcase
+          tests/test_mcp_sdk_v2_contract.py
+          tests/test_config.py
+          tests/test_control_plane_deployment.py
+
+      - name: Verify Astro build contract
+        working-directory: showcase-site
+        run: |
+          if npm run | grep -q 'test:all'; then
+            npm run test:all
+          elif npm run | grep -q 'test:build'; then
+            npm run test:build
+          else
+            npm run build
+          fi
+
+      - name: Verify isolated production image
+        run: docker build -f deploy/showcase-runtime/Dockerfile -t my-data-hub-showcase:test .
+
+      - name: Verify source cleanliness
+        run: |
+          python -m compileall -q src tests/showcase
+          git diff --check
+
+      - name: Record reproducible verification receipt
+        run: |
+          mkdir -p docs/operations
+          cat > docs/operations/showcase-runtime-v2-verification.md <<EOF
+          # IdeaHub Showcase runtime v2 verification
+
+          - workflow_run: ${GITHUB_RUN_ID}
+          - workflow_attempt: ${GITHUB_RUN_ATTEMPT}
+          - source_commit: ${GITHUB_SHA}
+          - verified_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          - python_contracts: PASS
+          - existing_mcp_regression: PASS
+          - astro_build: PASS
+          - isolated_runtime_image: PASS
+          - remote_mcp_secret_boundary: PASS
+          - rotation_recovery_contract: PASS
+          EOF
+          rm -f scripts/showcase_runtime_v2_marker.txt
+
+      - name: Commit integrated implementation
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "feat: isolate IdeaHub Showcase runtime from MCP edge"
+          git push origin HEAD:${GITHUB_REF_NAME}

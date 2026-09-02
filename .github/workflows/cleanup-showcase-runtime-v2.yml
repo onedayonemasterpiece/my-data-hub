@@ -1,0 +1,49 @@
+name: Cleanup Showcase Runtime V2 Integration
+
+on:
+  push:
+    branches:
+      - chatgpt/ideahub-showcase-runtime-v2-20260902
+    paths:
+      - .github/workflows/cleanup-showcase-runtime-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Verify integrated source is present
+        run: |
+          test -f docs/operations/showcase-runtime-v2-verification.md
+          test -f src/my_data_hub/showcase/gateway.py
+          test -f src/my_data_hub/showcase/runtime.py
+          test -f showcase-site/package-lock.json
+          python -m pip install -e '.[dev]'
+          pytest -q tests/showcase/test_runtime_v2.py tests/showcase/test_deployment_boundary_v2.py
+      - name: Remove one-shot integration machinery
+        run: |
+          rm -f \
+            .github/workflows/apply-showcase-runtime-v2.yml \
+            .github/workflows/export-showcase-v2-snapshot.yml \
+            .github/workflows/cleanup-showcase-runtime-v2.yml \
+            scripts/apply_showcase_runtime_v2.py \
+            scripts/showcase_runtime_v2_marker.txt
+          git diff --check
+      - name: Commit clean product tree
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "chore: remove one-shot showcase integration machinery"
+          git push origin HEAD:${GITHUB_REF_NAME}
