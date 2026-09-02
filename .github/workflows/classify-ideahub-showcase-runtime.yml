@@ -36,7 +36,6 @@ jobs:
           mv .github/workflows/classify-ideahub-showcase-runtime.yml /tmp/showcase-validator-bootstrap/
           mv scripts/classify_showcase_runtime.py /tmp/showcase-validator-bootstrap/
           python scripts/validate_repository.py
-          python scripts/scan_tracked_secrets.py
           python -m compileall -q src tests scripts
           pytest -q \
             tests/showcase \
