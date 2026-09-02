@@ -1,0 +1,15 @@
+schema_version: 1
+id: event-status-notifications
+title: Уведомления об изменении событий
+summary: Автоматические сигналы при переносе, отмене и других важных изменениях события.
+audience: { id: event-operators, label: События }
+category: { id: events, label: События, icon: "◉" }
+maturity: { id: implemented, label: Реализовано, tone: green }
+effort: { id: low, label: Низкая, tone: blue }
+benefit: Снижает риск публикации устаревшей информации и быстро сообщает редактору или аудитории о существенных изменениях.
+for_whom: [Редакторы, Организаторы, Посетители]
+available: [Статусы событий, Проверки противоречий, Контур уведомлений]
+requirements: [Канал доставки, Правила подписки, Шаблоны сообщений]
+visibility: partner
+publish_state: ready
+featured: true

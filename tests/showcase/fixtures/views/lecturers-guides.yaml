@@ -1,0 +1,16 @@
+schema_version: 1
+id: lecturers-guides
+title: Витрина для лекторов и гидов
+subtitle: Голосовые, исследовательские и презентационные инструменты для авторов образовательного контента.
+access_label: Отдельная секретная ссылка
+visibility_ceiling: partner
+item_ids:
+  - voice-cloning-audioguides
+  - lecturer-voice-assistant
+  - presentation-autogeneration
+  - examples-case-library
+contact:
+  title: Обсудить сотрудничество
+  label: Telegram
+  value: "@owner"
+  href: https://t.me/owner

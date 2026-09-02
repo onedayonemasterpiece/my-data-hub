@@ -1,0 +1,15 @@
+schema_version: 1
+id: short-video-automation
+title: Автогенерация коротких видео
+summary: Сборка коротких роликов из текста, изображений и подготовленных материалов.
+audience: { id: media-teams, label: Контент-команды }
+category: { id: content, label: Контент, icon: "▶" }
+maturity: { id: idea, label: Идея, tone: blue }
+effort: { id: medium, label: Средняя, tone: orange }
+benefit: Ускоряет выпуск регулярных роликов и позволяет переиспользовать уже подготовленный текстовый и визуальный материал.
+for_whom: [Редакции, Социальные проекты, Эксперты]
+available: [Сценарии генерации изображений, Контентные датасеты, Каналы публикации]
+requirements: [Шаблон ролика, Монтажный конвейер, Проверка результата]
+visibility: partner
+publish_state: ready
+featured: false

@@ -1,0 +1,101 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import IdeaCard from '../components/IdeaCard.astro';
+import { loadShowcase } from '../lib/showcase-data.mjs';
+
+const showcase = loadShowcase();
+const { view, items } = showcase;
+const options = (key) => [...new Map(items.map((item) => [item[key].id, item[key].label])).entries()]
+  .sort((a, b) => a[1].localeCompare(b[1], 'ru'));
+---
+<BaseLayout title={view.title} description={view.subtitle}>
+  <header class="hero">
+    <p class="eyebrow">IdeaHub Showcase</p>
+    <h1>{view.title}</h1>
+    <p class="hero__subtitle">{view.subtitle}</p>
+    <p class="secret-note"><span aria-hidden="true">⌁</span> {view.access_label}</p>
+  </header>
+
+  <section class="controls" aria-label="Поиск и фильтры">
+    <label class="search-field">
+      <span class="sr-only">Поиск</span>
+      <span aria-hidden="true">⌕</span>
+      <input id="showcase-search" type="search" placeholder="Поиск идей, задач, возможностей…" autocomplete="off" />
+    </label>
+    <div class="filter-row">
+      <label>
+        <span class="sr-only">Для кого</span>
+        <select data-showcase-filter="audience">
+          <option value="">Для кого</option>
+          {options('audience').map(([value, label]) => <option value={value}>{label}</option>)}
+        </select>
+      </label>
+      <label>
+        <span class="sr-only">Задача</span>
+        <select data-showcase-filter="category">
+          <option value="">Задача</option>
+          {options('category').map(([value, label]) => <option value={value}>{label}</option>)}
+        </select>
+      </label>
+      <label>
+        <span class="sr-only">Готовность</span>
+        <select data-showcase-filter="maturity">
+          <option value="">Готовность</option>
+          {options('maturity').map(([value, label]) => <option value={value}>{label}</option>)}
+        </select>
+      </label>
+      <label>
+        <span class="sr-only">Ресурсоёмкость</span>
+        <select data-showcase-filter="effort">
+          <option value="">Ресурсоёмкость</option>
+          {options('effort').map(([value, label]) => <option value={value}>{label}</option>)}
+        </select>
+      </label>
+    </div>
+  </section>
+
+  <main>
+    <p id="showcase-result-count" class="result-count" aria-live="polite">{items.length} возможностей</p>
+    <div class="card-list">
+      {items.map((item) => <IdeaCard item={item} />)}
+    </div>
+    <p id="showcase-empty" class="empty-state" hidden>По этим условиям карточек пока нет.</p>
+  </main>
+
+  <footer class="contact-card">
+    <span class="contact-card__icon" aria-hidden="true">💬</span>
+    <div>
+      <strong>{view.contact.title}</strong>
+      <p>{view.contact.label}: <a href={view.contact.href} rel="noreferrer">{view.contact.value}</a></p>
+    </div>
+  </footer>
+
+  <script is:inline>
+    (() => {
+      const search = document.querySelector('#showcase-search');
+      const filters = [...document.querySelectorAll('[data-showcase-filter]')];
+      const cards = [...document.querySelectorAll('[data-showcase-card]')];
+      const count = document.querySelector('#showcase-result-count');
+      const empty = document.querySelector('#showcase-empty');
+      const normalize = (value) => String(value || '').toLocaleLowerCase('ru').trim();
+      const update = () => {
+        const query = normalize(search?.value);
+        let visible = 0;
+        for (const card of cards) {
+          const filterMatch = filters.every((filter) => {
+            const value = filter.value;
+            return !value || card.dataset[filter.dataset.showcaseFilter] === value;
+          });
+          const queryMatch = !query || normalize(card.dataset.search).includes(query);
+          const show = filterMatch && queryMatch;
+          card.hidden = !show;
+          if (show) visible += 1;
+        }
+        if (count) count.textContent = `${visible} ${visible === 1 ? 'возможность' : 'возможностей'}`;
+        if (empty) empty.hidden = visible !== 0;
+      };
+      search?.addEventListener('input', update);
+      filters.forEach((filter) => filter.addEventListener('change', update));
+    })();
+  </script>
+</BaseLayout>

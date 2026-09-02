@@ -1,0 +1,15 @@
+schema_version: 1
+id: partner-mcp-access
+title: MCP-доступ для партнёров
+summary: Управление ролями, доступами и рабочими действиями партнёров через MCP.
+audience: { id: partners, label: Партнёры }
+category: { id: partners, label: Партнёрские процессы, icon: "∞" }
+maturity: { id: concept, label: Концепт, tone: purple }
+effort: { id: high, label: Высокая, tone: red }
+benefit: Позволяет партнёру работать с разрешёнными функциями напрямую, без обязательной привязки к одному пользовательскому интерфейсу.
+for_whom: [Организаторы, Площадки, Лекторы и гиды]
+available: [Ролевая модель, MCP-контур, Идея токенизированного подключения]
+requirements: [Авторизация, Матрица прав, Аудит действий, Отзыв доступа]
+visibility: partner
+publish_state: ready
+featured: false

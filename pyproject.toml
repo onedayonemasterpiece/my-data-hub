@@ -39,6 +39,8 @@ kaggle = ["kaggle==2.2.4"]
 [project.scripts]
 my-data-hub = "my_data_hub.cli:main"
 my-data-hub-mcp = "my_data_hub.mcp.server:main"
+my-data-hub-showcase = "my_data_hub.showcase.cli:main"
+my-data-hub-showcase-mcp = "my_data_hub.showcase.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/my_data_hub"]
@@ -48,6 +50,7 @@ packages = ["src/my_data_hub"]
 "sql/admin/bootstrap_roles.sql" = "my_data_hub/master_runtime/sql/admin/bootstrap_roles.sql"
 "sql/admin/role_contract.sql" = "my_data_hub/master_runtime/sql/admin/role_contract.sql"
 "schemas/blogger-discovery-batch.v1.schema.json" = "my_data_hub/schemas/blogger-discovery-batch.v1.schema.json"
+"showcase-site" = "my_data_hub/showcase_site"
 
 [tool.pytest.ini_options]
 addopts = "-q"

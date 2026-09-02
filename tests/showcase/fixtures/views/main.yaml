@@ -1,0 +1,17 @@
+schema_version: 1
+id: main
+title: Что уже умеем и что можем сделать
+subtitle: Технические, продуктовые и организационные решения для проектов, бизнеса, образования и контента.
+access_label: Доступ по секретной ссылке
+visibility_ceiling: partner
+item_ids:
+  - voice-cloning-audioguides
+  - personal-ai-assistant-business
+  - short-video-automation
+  - partner-mcp-access
+  - event-status-notifications
+contact:
+  title: Обсудить идею
+  label: Telegram
+  value: "@owner"
+  href: https://t.me/owner

@@ -1,0 +1,45 @@
+---
+import Badge from './Badge.astro';
+
+interface Props {
+  item: {
+    id: string;
+    title: string;
+    summary: string;
+    audience: { id: string; label: string };
+    category: { id: string; label: string; icon: string };
+    maturity: { id: string; label: string; tone: string };
+    effort: { id: string; label: string; tone: string };
+    search_text: string;
+  };
+}
+const { item } = Astro.props;
+const basePath = import.meta.env.BASE_URL.replace(/\/$/u, '');
+---
+<article
+  class="idea-card"
+  data-showcase-card
+  data-audience={item.audience.id}
+  data-category={item.category.id}
+  data-maturity={item.maturity.id}
+  data-effort={item.effort.id}
+  data-search={item.search_text}
+>
+  <div class:list={["idea-card__icon", `idea-card__icon--${item.category.id}`]} aria-hidden="true">
+    {item.category.icon}
+  </div>
+  <div class="idea-card__body">
+    <div class="idea-card__heading">
+      <h2>{item.title}</h2>
+      <Badge label={item.audience.label} tone="blue" />
+    </div>
+    <p>{item.summary}</p>
+    <div class="idea-card__meta">
+      <Badge label={item.maturity.label} tone={item.maturity.tone as any} />
+      <Badge label={item.effort.label} tone={item.effort.tone as any} />
+      <a class="idea-card__link" href={`${basePath}/ideas/${item.id}/`}>
+        Подробнее <span aria-hidden="true">→</span>
+      </a>
+    </div>
+  </div>
+</article>

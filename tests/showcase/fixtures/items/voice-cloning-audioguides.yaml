@@ -1,0 +1,15 @@
+schema_version: 1
+id: voice-cloning-audioguides
+title: Клонирование голоса для аудиогидов
+summary: Чистая озвучка текста голосом реального гида или автора.
+audience: { id: guides, label: Гиды и авторы }
+category: { id: voice, label: Голос и аудио, icon: "◖" }
+maturity: { id: prototype, label: Прототип, tone: purple }
+effort: { id: medium, label: Средняя, tone: orange }
+benefit: Сохраняет узнаваемый голос автора, сокращает повторную запись и помогает быстро выпускать качественные аудиоматериалы.
+for_whom: [Гиды, Лекторы, Авторы аудиокурсов]
+available: [Проверенный контур клонирования, CPU-базовая сборка, Тестовые аудиофайлы]
+requirements: [Чистый образец голоса, Точный исходный текст, Настройка интонации]
+visibility: partner
+publish_state: ready
+featured: true

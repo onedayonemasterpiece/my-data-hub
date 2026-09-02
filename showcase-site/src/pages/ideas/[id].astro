@@ -1,0 +1,59 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Badge from '../../components/Badge.astro';
+import { loadShowcase } from '../../lib/showcase-data.mjs';
+
+export function getStaticPaths() {
+  const { items } = loadShowcase();
+  return items.map((item) => ({ params: { id: item.id }, props: { item } }));
+}
+
+const { item } = Astro.props;
+---
+<BaseLayout title={item.title} description={item.summary} backHref="/">
+  <main class="detail-page">
+    <article class="detail-hero">
+      <div class:list={["idea-card__icon", `idea-card__icon--${item.category.id}`]} aria-hidden="true">
+        {item.category.icon}
+      </div>
+      <div>
+        <h1>{item.title}</h1>
+        <p>{item.summary}</p>
+        <div class="detail-hero__badges">
+          <Badge label={item.maturity.label} tone={item.maturity.tone} />
+          <Badge label={item.effort.label} tone={item.effort.tone} />
+          <Badge label={item.audience.label} tone="blue" />
+        </div>
+      </div>
+    </article>
+
+    <section class="detail-section">
+      <div class="detail-section__icon" aria-hidden="true">✦</div>
+      <div><h2>Что это даёт</h2><p>{item.benefit}</p></div>
+    </section>
+
+    <section class="detail-section">
+      <div class="detail-section__icon detail-section__icon--purple" aria-hidden="true">◎</div>
+      <div><h2>Для кого</h2><ul>{item.for_whom.map((value) => <li>{value}</li>)}</ul></div>
+    </section>
+
+    <section class="detail-section">
+      <div class="detail-section__icon" aria-hidden="true">☷</div>
+      <div><h2>Что уже есть</h2><ul>{item.available.map((value) => <li>{value}</li>)}</ul></div>
+    </section>
+
+    <section class="detail-section">
+      <div class="detail-section__icon detail-section__icon--orange" aria-hidden="true">⌁</div>
+      <div><h2>Что потребуется</h2><ul>{item.requirements.map((value) => <li>{value}</li>)}</ul></div>
+    </section>
+
+    <section class="contact-card contact-card--detail">
+      <span class="contact-card__icon" aria-hidden="true">💬</span>
+      <div>
+        <strong>{item.contact.title}</strong>
+        <p>{item.contact.label}: <a href={item.contact.href} rel="noreferrer">{item.contact.value}</a></p>
+      </div>
+      <a class="primary-button" href={item.contact.href} rel="noreferrer">Обсудить</a>
+    </section>
+  </main>
+</BaseLayout>

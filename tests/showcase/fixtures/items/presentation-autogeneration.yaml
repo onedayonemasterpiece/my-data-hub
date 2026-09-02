@@ -1,0 +1,15 @@
+schema_version: 1
+id: presentation-autogeneration
+title: Автогенерация презентации
+summary: Сборка структуры лекции, карточек слайдов и проверочного презентационного пакета.
+audience: { id: lecturers, label: Лекторы }
+category: { id: content, label: Контент, icon: "▤" }
+maturity: { id: concept, label: Концепт, tone: purple }
+effort: { id: medium, label: Средняя, tone: orange }
+benefit: Сокращает ручную сборку презентации и связывает слайды с тезисами, источниками и проверенными примерами.
+for_whom: [Лекторы, Методисты, Организаторы обучения]
+available: [Шаблоны структуры, Датасеты лекций, Проверочный формат]
+requirements: [Тема и аудитория, Визуальный шаблон, Финальное авторское ревью]
+visibility: partner
+publish_state: ready
+featured: false

@@ -1,0 +1,15 @@
+schema_version: 1
+id: lecturer-voice-assistant
+title: Голосовой лектор-ассистент
+summary: Подготовка тезисов, сценария лекции и ответов на вопросы в голосовом режиме.
+audience: { id: lecturers, label: Лекторы }
+category: { id: voice, label: Голос и аудио, icon: "◖" }
+maturity: { id: designed, label: Проработано, tone: green }
+effort: { id: medium, label: Средняя, tone: orange }
+benefit: Позволяет автору обсуждать материал естественным голосом, фиксировать решения и быстро превращать разговор в рабочий пакет лекции.
+for_whom: [Лекторы, Преподаватели, Эксперты]
+available: [Голосовой intake, Структурирование тезисов, Исследовательские датасеты]
+requirements: [Контекст лекции, Голосовой клиент, Проверка фактов]
+visibility: partner
+publish_state: ready
+featured: true

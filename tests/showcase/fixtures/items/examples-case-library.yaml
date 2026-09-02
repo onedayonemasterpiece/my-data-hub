@@ -1,0 +1,15 @@
+schema_version: 1
+id: examples-case-library
+title: Библиотека примеров и кейсов
+summary: Подбор фактов, аналогий, пограничных случаев и историй под конкретную тему.
+audience: { id: lecturers, label: Лекторы }
+category: { id: content, label: Исследования, icon: "▥" }
+maturity: { id: implemented, label: Реализовано, tone: green }
+effort: { id: low, label: Низкая, tone: blue }
+benefit: Делает материал конкретнее и помогает быстро находить проверенные примеры для объяснения сложных идей разным аудиториям.
+for_whom: [Лекторы, Авторы, Редакторы]
+available: [Исследовательские датасеты, Источники и доказательства, Тематические подборки]
+requirements: [Формулировка темы, Критерии качества, Авторский отбор]
+visibility: partner
+publish_state: ready
+featured: true

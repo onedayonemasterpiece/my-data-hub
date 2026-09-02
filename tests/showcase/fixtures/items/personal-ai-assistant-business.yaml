@@ -1,0 +1,15 @@
+schema_version: 1
+id: personal-ai-assistant-business
+title: Персональный ИИ-помощник для бизнеса
+summary: Голосовой агент для задач, аналитики, статистики и повседневной рутины.
+audience: { id: business, label: Бизнес }
+category: { id: business, label: Управление, icon: "▣" }
+maturity: { id: designed, label: Проработано, tone: green }
+effort: { id: high, label: Высокая, tone: red }
+benefit: Помогает справляться с рутиной, быстро получать ключевую статистику, работать голосом и принимать решения на основе данных.
+for_whom: [Руководители, Предприниматели, Эксперты]
+available: [Голосовой сценарий, Агентная логика, Модель продуктовых ролей]
+requirements: [Доступы к рабочим системам, Выбор моделей, Интеграции, Настройка прав]
+visibility: partner
+publish_state: ready
+featured: true
