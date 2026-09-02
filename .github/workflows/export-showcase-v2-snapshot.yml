@@ -1,0 +1,31 @@
+name: Export Showcase V2 snapshot
+
+on:
+  push:
+    branches:
+      - chatgpt/ideahub-showcase-runtime-v2-20260902
+    paths:
+      - .github/workflows/export-showcase-v2-snapshot.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Export exact source snapshot
+        run: |
+          mkdir -p /tmp/export
+          tar --exclude=.git -czf /tmp/export/my-data-hub-showcase-v2-source.tar.gz .
+          git rev-parse HEAD > /tmp/export/source-commit.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: my-data-hub-showcase-v2-source
+          path: /tmp/export
+          if-no-files-found: error
+          retention-days: 1
