@@ -1,0 +1,137 @@
+name: dataset-loop-public-preflight
+
+on:
+  push:
+    branches: [preflight/dataset-loop-devcoveer-20260903]
+    paths:
+      - ".preflight/dataset-loop-public.json"
+
+permissions:
+  contents: read
+
+jobs:
+  external-read-only-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Collect public DNS TLS and HTTP evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import datetime as dt
+          import http.client
+          import json
+          import os
+          import socket
+          import ssl
+          from pathlib import Path
+          from typing import Any
+
+          HOSTS = {
+              "events_mcp": "mcp.kenigevents.ru",
+              "datahub_mcp": "mcp-datahub.kenigevents.ru",
+              "identity": "identity.kenigevents.ru",
+              "dataset_loop_planned": "mcp-dataset-loop.kenigevents.ru",
+          }
+
+          def dns(host: str) -> dict[str, Any]:
+              try:
+                  rows = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+                  ipv4 = sorted({row[4][0] for row in rows if row[0] == socket.AF_INET})
+                  ipv6 = sorted({row[4][0] for row in rows if row[0] == socket.AF_INET6})
+                  return {"resolved": True, "ipv4": ipv4, "ipv6": ipv6}
+              except Exception as exc:
+                  return {"resolved": False, "error": type(exc).__name__, "detail": str(exc)[:300]}
+
+          def tls(host: str) -> dict[str, Any]:
+              try:
+                  context = ssl.create_default_context()
+                  with socket.create_connection((host, 443), timeout=10) as raw:
+                      remote = raw.getpeername()[0]
+                      with context.wrap_socket(raw, server_hostname=host) as wrapped:
+                          cert = wrapped.getpeercert()
+                          sans = [value for key, value in cert.get("subjectAltName", ()) if key == "DNS"]
+                          return {
+                              "verified": True,
+                              "remote_ip": remote,
+                              "protocol": wrapped.version(),
+                              "cipher": wrapped.cipher()[0] if wrapped.cipher() else None,
+                              "not_before": cert.get("notBefore"),
+                              "not_after": cert.get("notAfter"),
+                              "san_dns": sans,
+                          }
+              except Exception as exc:
+                  return {"verified": False, "error": type(exc).__name__, "detail": str(exc)[:500]}
+
+          def http(host: str, path: str) -> dict[str, Any]:
+              try:
+                  connection = http.client.HTTPSConnection(host, timeout=10, context=ssl.create_default_context())
+                  connection.request(
+                      "GET",
+                      path,
+                      headers={
+                          "User-Agent": "dataset-loop-public-preflight/1",
+                          "Accept": "application/json, text/event-stream, */*",
+                      },
+                  )
+                  response = connection.getresponse()
+                  body = response.read(512)
+                  result = {
+                      "reachable": True,
+                      "status": response.status,
+                      "reason": response.reason,
+                      "content_type": response.getheader("content-type"),
+                      "server": response.getheader("server"),
+                      "location": response.getheader("location"),
+                      "body_prefix_utf8": body.decode("utf-8", errors="replace"),
+                  }
+                  connection.close()
+                  return result
+              except Exception as exc:
+                  return {"reachable": False, "error": type(exc).__name__, "detail": str(exc)[:500]}
+
+          dns_rows = {name: dns(host) for name, host in HOSTS.items()}
+          existing_ipv4 = {
+              ip
+              for name in ("events_mcp", "datahub_mcp", "identity")
+              for ip in dns_rows[name].get("ipv4", [])
+          }
+          planned_ipv4 = set(dns_rows["dataset_loop_planned"].get("ipv4", []))
+
+          evidence = {
+              "schema_version": 1,
+              "captured_at": dt.datetime.now(dt.UTC).isoformat(),
+              "source": "GitHub-hosted ubuntu-latest; external read-only probes",
+              "side_effects": "none",
+              "hosts": HOSTS,
+              "dns": dns_rows,
+              "dns_contract": {
+                  "existing_ipv4_union": sorted(existing_ipv4),
+                  "planned_ipv4": sorted(planned_ipv4),
+                  "planned_resolves_to_existing_ipv4": bool(planned_ipv4) and planned_ipv4.issubset(existing_ipv4),
+              },
+              "tls": {name: tls(host) for name, host in HOSTS.items()},
+              "http": {
+                  "events_mcp": http(HOSTS["events_mcp"], "/mcp"),
+                  "datahub_mcp": http(HOSTS["datahub_mcp"], "/mcp"),
+                  "identity_metadata": http(HOSTS["identity"], "/.well-known/openid-configuration"),
+                  "dataset_loop_health": http(HOSTS["dataset_loop_planned"], "/health"),
+                  "dataset_loop_mcp": http(HOSTS["dataset_loop_planned"], "/mcp"),
+              },
+          }
+
+          output = Path(os.environ["RUNNER_TEMP"]) / "dataset-loop-public-preflight.json"
+          output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+          print(f"wrote {output}; bytes={output.stat().st_size}")
+          PY
+
+      - name: Upload secret-free public preflight evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: dataset-loop-public-preflight
+          path: ${{ runner.temp }}/dataset-loop-public-preflight.json
+          if-no-files-found: error
+          retention-days: 3
