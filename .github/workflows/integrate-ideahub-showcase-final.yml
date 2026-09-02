@@ -35,12 +35,11 @@ jobs:
           git checkout origin/chatgpt/ideahub-showcase-runtime-v2-20260902 -- \
             compose.showcase.yaml \
             deploy/showcase-runtime/Dockerfile \
-            scripts/apply_showcase_runtime_v2.py \
             src/my_data_hub/showcase/gateway.py \
             src/my_data_hub/showcase/runtime.py \
             tests/showcase/test_deployment_boundary_v2.py \
             tests/showcase/test_runtime_v2.py
-          python scripts/apply_showcase_runtime_v2.py
+          python scripts/integrate_showcase_runtime.py
           python scripts/finalize_showcase_runtime.py
 
       - name: Install renderer and Python dependencies
@@ -125,6 +124,7 @@ jobs:
           rm -f \
             scripts/apply_showcase_runtime_v2.py \
             scripts/showcase_runtime_v2_marker.txt \
+            scripts/integrate_showcase_runtime.py \
             scripts/finalize_showcase_runtime.py
           git diff --check
           git config user.name github-actions[bot]
