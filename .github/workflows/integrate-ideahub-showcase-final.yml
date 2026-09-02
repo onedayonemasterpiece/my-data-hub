@@ -39,6 +39,7 @@ jobs:
             src/my_data_hub/showcase/runtime.py \
             tests/showcase/test_deployment_boundary_v2.py \
             tests/showcase/test_runtime_v2.py
+          python scripts/repair_showcase_integration_script.py
           python scripts/integrate_showcase_runtime.py
           python scripts/finalize_showcase_runtime.py
 
@@ -125,7 +126,8 @@ jobs:
             scripts/apply_showcase_runtime_v2.py \
             scripts/showcase_runtime_v2_marker.txt \
             scripts/integrate_showcase_runtime.py \
-            scripts/finalize_showcase_runtime.py
+            scripts/finalize_showcase_runtime.py \
+            scripts/repair_showcase_integration_script.py
           git diff --check
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
