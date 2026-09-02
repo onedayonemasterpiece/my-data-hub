@@ -55,7 +55,7 @@ _READ = (
     ("data.query", "data:read"),
     ("data.change.status", "operation:read"),
     ("showcase.list", "showcase:read"),
-    ("showcase.get_link", "showcase:read"),
+    ("showcase.get_link", "showcase:write"),
 )
 
 _WRITES = (
@@ -64,9 +64,7 @@ _WRITES = (
     ToolContract("checkpoint.restore.request", "recovery:request", False, idempotent=True, role="operator"),
     ToolContract("connector.coverage", "acceptance:probe", True, idempotent=True, role="operator"),
     ToolContract("runtime.stale_epoch.probe", "acceptance:probe", True, idempotent=True, role="operator"),
-    ToolContract(
-        "provider.protected_resource.probe", "acceptance:probe", True, idempotent=True, role="operator"
-    ),
+    ToolContract("provider.protected_resource.probe", "acceptance:probe", True, idempotent=True, role="operator"),
     ToolContract("runtime.events.history", "acceptance:probe", True, idempotent=True, role="operator"),
     ToolContract(
         "acceptance.scenario.request",
@@ -84,12 +82,8 @@ _WRITES = (
     ),
     ToolContract("data.change.preview", "data:write", False, role="operator"),
     ToolContract("data.change.apply", "data:write", False, destructive=True, role="operator"),
-    ToolContract(
-        "submit_discovery_batch", "bloggers:write", False, role="connector"
-    ),
-    ToolContract(
-        "bloggers.import.preview", "bloggers:write", False, role="canonical_committer"
-    ),
+    ToolContract("submit_discovery_batch", "bloggers:write", False, role="connector"),
+    ToolContract("bloggers.import.preview", "bloggers:write", False, role="canonical_committer"),
     ToolContract(
         "bloggers.import.apply",
         "bloggers:write",
@@ -97,9 +91,7 @@ _WRITES = (
         destructive=True,
         role="canonical_committer",
     ),
-    ToolContract(
-        "bloggers.import.status", "bloggers:write", True, role="canonical_committer"
-    ),
+    ToolContract("bloggers.import.status", "bloggers:write", True, role="canonical_committer"),
     ToolContract(
         "region_talk.pipeline.run",
         "region-talk:operate",
@@ -238,9 +230,7 @@ OWNER_OPERATOR_PROFILE_SCOPES = ALL_SCOPES
 def visible_tools(identity: AccessIdentity | None) -> frozenset[str]:
     if identity is None:
         return frozenset()
-    return frozenset(
-        name for name, contract in TOOL_CONTRACTS.items() if contract.scope in identity.scopes
-    )
+    return frozenset(name for name, contract in TOOL_CONTRACTS.items() if contract.scope in identity.scopes)
 
 
 def security_catalog(identity: AccessIdentity | None) -> dict[str, Any]:

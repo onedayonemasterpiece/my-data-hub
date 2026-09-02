@@ -46,8 +46,7 @@ def _secret_map(name: str) -> tuple[tuple[str, str], ...]:
     except json.JSONDecodeError as exc:
         raise ConfigurationError(f"{name} must be a JSON object") from exc
     if not isinstance(value, dict) or not all(
-        isinstance(key, str) and key and isinstance(secret, str) and secret
-        for key, secret in value.items()
+        isinstance(key, str) and key and isinstance(secret, str) and secret for key, secret in value.items()
     ):
         raise ConfigurationError(f"{name} must map connector IDs to non-empty secrets")
     secrets = tuple(value.values())
@@ -111,26 +110,16 @@ class Settings:
             environment=os.getenv("MY_DATA_HUB_ENVIRONMENT", "development").strip().lower(),
             instance_id=os.getenv("MY_DATA_HUB_INSTANCE_ID", "local").strip(),
             log_level=os.getenv("MY_DATA_HUB_LOG_LEVEL", "INFO").strip().upper(),
-            artifact_root=Path(
-                os.getenv("MY_DATA_HUB_ARTIFACT_ROOT", "./artifacts")
-            ).expanduser().resolve(),
+            artifact_root=Path(os.getenv("MY_DATA_HUB_ARTIFACT_ROOT", "./artifacts")).expanduser().resolve(),
             api_host=os.getenv("MY_DATA_HUB_API_HOST", "127.0.0.1").strip(),
             api_port=_int("MY_DATA_HUB_API_PORT", 8080),
             worker_result_token=os.getenv("MY_DATA_HUB_WORKER_RESULT_TOKEN") or None,
-            worker_result_max_bytes=_int(
-                "MY_DATA_HUB_WORKER_RESULT_MAX_BYTES", 4 * 1024 * 1024
-            ),
+            worker_result_max_bytes=_int("MY_DATA_HUB_WORKER_RESULT_MAX_BYTES", 4 * 1024 * 1024),
             scheduler_enabled=_bool("MY_DATA_HUB_SCHEDULER_ENABLED", False),
-            production_publish_enabled=_bool(
-                "MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED", False
-            ),
-            orchestrator_interval_seconds=_int(
-                "MY_DATA_HUB_ORCHESTRATOR_INTERVAL_SECONDS", 60
-            ),
+            production_publish_enabled=_bool("MY_DATA_HUB_PRODUCTION_PUBLISH_ENABLED", False),
+            orchestrator_interval_seconds=_int("MY_DATA_HUB_ORCHESTRATOR_INTERVAL_SECONDS", 60),
             orchestrator_batch_size=_int("MY_DATA_HUB_ORCHESTRATOR_BATCH_SIZE", 25),
-            orchestrator_lease_seconds=_int(
-                "MY_DATA_HUB_ORCHESTRATOR_LEASE_SECONDS", 1800
-            ),
+            orchestrator_lease_seconds=_int("MY_DATA_HUB_ORCHESTRATOR_LEASE_SECONDS", 1800),
             mcp_remote_enabled=_bool("MY_DATA_HUB_MCP_REMOTE_ENABLED", False),
             mcp_write_enabled=_bool("MY_DATA_HUB_MCP_WRITE_ENABLED", False),
             mcp_host=os.getenv("MY_DATA_HUB_MCP_HOST", "127.0.0.1").strip(),
@@ -141,12 +130,8 @@ class Settings:
                     "http://127.0.0.1,http://localhost",
                 )
             ),
-            mcp_allowed_hosts=_csv(
-                os.getenv("MY_DATA_HUB_MCP_ALLOWED_HOSTS", "127.0.0.1,localhost")
-            ),
-            mcp_auth_mode=os.getenv(
-                "MY_DATA_HUB_MCP_AUTH_MODE", "stdio-environment"
-            ).strip(),
+            mcp_allowed_hosts=_csv(os.getenv("MY_DATA_HUB_MCP_ALLOWED_HOSTS", "127.0.0.1,localhost")),
+            mcp_auth_mode=os.getenv("MY_DATA_HUB_MCP_AUTH_MODE", "stdio-environment").strip(),
             mcp_development_token=os.getenv("MY_DATA_HUB_MCP_DEVELOPMENT_TOKEN") or None,
             mcp_scopes=frozenset(
                 _csv(
@@ -157,57 +142,29 @@ class Settings:
                     )
                 )
             ),
-            connector_credentials=_secret_map(
-                "MY_DATA_HUB_CONNECTOR_CREDENTIALS_JSON"
-            ),
-            connector_intake_max_bytes=_int(
-                "MY_DATA_HUB_CONNECTOR_INTAKE_MAX_BYTES", 2 * 1024 * 1024
-            ),
+            connector_credentials=_secret_map("MY_DATA_HUB_CONNECTOR_CREDENTIALS_JSON"),
+            connector_intake_max_bytes=_int("MY_DATA_HUB_CONNECTOR_INTAKE_MAX_BYTES", 2 * 1024 * 1024),
             mcp_oauth_issuer=os.getenv("MY_DATA_HUB_MCP_OAUTH_ISSUER", "").strip(),
             mcp_oauth_audience=os.getenv("MY_DATA_HUB_MCP_OAUTH_AUDIENCE", "").strip(),
             mcp_oauth_resource=os.getenv("MY_DATA_HUB_MCP_OAUTH_RESOURCE", "").strip(),
             mcp_oauth_jwks_url=os.getenv("MY_DATA_HUB_MCP_OAUTH_JWKS_URL", "").strip(),
-            mcp_oauth_algorithms=_csv(
-                os.getenv("MY_DATA_HUB_MCP_OAUTH_ALGORITHMS", "RS256")
-            ),
-            mcp_trusted_proxies=_csv(
-                os.getenv("MY_DATA_HUB_MCP_TRUSTED_PROXIES", "")
-            ),
-            mcp_token_max_lifetime_seconds=_int(
-                "MY_DATA_HUB_MCP_TOKEN_MAX_LIFETIME_SECONDS", 3600
-            ),
-            mcp_operator_profile_enabled=_bool(
-                "MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED", False
-            ),
-            mcp_provider_profile_enabled=_bool(
-                "MY_DATA_HUB_MCP_PROVIDER_PROFILE_ENABLED", False
-            ),
-            mcp_unified_bootstrap_profile_enabled=_bool(
-                "MY_DATA_HUB_MCP_UNIFIED_BOOTSTRAP_PROFILE_ENABLED", False
-            ),
-            mcp_acceptance_scenarios_enabled=_bool(
-                "MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED", False
-            ),
-            mcp_control_gateway_url=os.getenv(
-                "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL", ""
-            ).strip(),
+            mcp_oauth_algorithms=_csv(os.getenv("MY_DATA_HUB_MCP_OAUTH_ALGORITHMS", "RS256")),
+            mcp_trusted_proxies=_csv(os.getenv("MY_DATA_HUB_MCP_TRUSTED_PROXIES", "")),
+            mcp_token_max_lifetime_seconds=_int("MY_DATA_HUB_MCP_TOKEN_MAX_LIFETIME_SECONDS", 3600),
+            mcp_operator_profile_enabled=_bool("MY_DATA_HUB_MCP_OPERATOR_PROFILE_ENABLED", False),
+            mcp_provider_profile_enabled=_bool("MY_DATA_HUB_MCP_PROVIDER_PROFILE_ENABLED", False),
+            mcp_unified_bootstrap_profile_enabled=_bool("MY_DATA_HUB_MCP_UNIFIED_BOOTSTRAP_PROFILE_ENABLED", False),
+            mcp_acceptance_scenarios_enabled=_bool("MY_DATA_HUB_MCP_ACCEPTANCE_SCENARIOS_ENABLED", False),
+            mcp_control_gateway_url=os.getenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL", "").strip(),
             mcp_control_gateway_token_file=(
                 Path(os.environ["MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE"]).expanduser()
                 if os.getenv("MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE")
                 else None
             ),
-            application_database_url=os.getenv(
-                "MY_DATA_HUB_APPLICATION_DATABASE_URL", ""
-            ).strip(),
-            connector_intake_database_url=os.getenv(
-                "MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL", ""
-            ).strip(),
-            orchestrator_database_url=os.getenv(
-                "MY_DATA_HUB_ORCHESTRATOR_DATABASE_URL", ""
-            ).strip(),
-            canonical_committer_database_url=os.getenv(
-                "MY_DATA_HUB_CANONICAL_COMMITTER_DATABASE_URL", ""
-            ).strip(),
+            application_database_url=os.getenv("MY_DATA_HUB_APPLICATION_DATABASE_URL", "").strip(),
+            connector_intake_database_url=os.getenv("MY_DATA_HUB_CONNECTOR_INTAKE_DATABASE_URL", "").strip(),
+            orchestrator_database_url=os.getenv("MY_DATA_HUB_ORCHESTRATOR_DATABASE_URL", "").strip(),
+            canonical_committer_database_url=os.getenv("MY_DATA_HUB_CANONICAL_COMMITTER_DATABASE_URL", "").strip(),
         )
         settings.validate()
         return settings
@@ -222,13 +179,9 @@ class Settings:
         if not 1 <= self.mcp_port <= 65535:
             raise ConfigurationError("MY_DATA_HUB_MCP_PORT must be a valid TCP port")
         if not 1024 <= self.worker_result_max_bytes <= 64 * 1024 * 1024:
-            raise ConfigurationError(
-                "MY_DATA_HUB_WORKER_RESULT_MAX_BYTES must be between 1 KiB and 64 MiB"
-            )
+            raise ConfigurationError("MY_DATA_HUB_WORKER_RESULT_MAX_BYTES must be between 1 KiB and 64 MiB")
         if not 1024 <= self.connector_intake_max_bytes <= 16 * 1024 * 1024:
-            raise ConfigurationError(
-                "MY_DATA_HUB_CONNECTOR_INTAKE_MAX_BYTES must be between 1 KiB and 16 MiB"
-            )
+            raise ConfigurationError("MY_DATA_HUB_CONNECTOR_INTAKE_MAX_BYTES must be between 1 KiB and 16 MiB")
         if self.orchestrator_interval_seconds < 1:
             raise ConfigurationError("orchestrator interval must be positive")
         if not 1 <= self.orchestrator_batch_size <= 500:
@@ -239,9 +192,7 @@ class Settings:
             raise ConfigurationError(f"unsupported MCP auth mode: {self.mcp_auth_mode}")
         if self.environment in {"prod", "production"}:
             if self.mcp_auth_mode == "development-token":
-                raise ConfigurationError(
-                    "development-token MCP authentication is forbidden in production"
-                )
+                raise ConfigurationError("development-token MCP authentication is forbidden in production")
             if self.mcp_remote_enabled and self.mcp_auth_mode != "oauth":
                 raise ConfigurationError("production remote MCP requires OAuth")
             configured_runtime_urls = tuple(
@@ -261,9 +212,7 @@ class Settings:
                 )
         if self.mcp_remote_enabled and self.mcp_auth_mode == "stdio-environment":
             raise ConfigurationError("remote MCP cannot use stdio-environment authentication")
-        provider_only_scopes = frozenset(
-            {"platform:read", "provider:read", "provider:write"}
-        )
+        provider_only_scopes = frozenset({"platform:read", "provider:read", "provider:write"})
         if self.mcp_provider_profile_enabled and (
             self.mcp_operator_profile_enabled
             or not self.mcp_write_enabled
@@ -337,9 +286,7 @@ class Settings:
             (not self.mcp_write_enabled and not self.mcp_scopes <= remote_read_scopes)
             or (self.mcp_write_enabled and not self.mcp_scopes <= remote_read_scopes | remote_write_scopes)
         ):
-            raise ConfigurationError(
-                "remote MCP scopes exceed the selected reader or guarded owner/operator profile"
-            )
+            raise ConfigurationError("remote MCP scopes exceed the selected reader or guarded owner/operator profile")
         if self.mcp_remote_enabled and self.mcp_auth_mode == "oauth":
             oauth_values = {
                 "MY_DATA_HUB_MCP_OAUTH_ISSUER": self.mcp_oauth_issuer,
@@ -349,9 +296,7 @@ class Settings:
             }
             missing = sorted(name for name, value in oauth_values.items() if not value)
             if missing:
-                raise ConfigurationError(
-                    "production OAuth configuration is incomplete: " + ", ".join(missing)
-                )
+                raise ConfigurationError("production OAuth configuration is incomplete: " + ", ".join(missing))
             if not self.mcp_oauth_jwks_url.startswith("https://"):
                 raise ConfigurationError("OAuth JWKS URL must use HTTPS")
             issuer = urlsplit(self.mcp_oauth_issuer)
@@ -373,21 +318,15 @@ class Settings:
                 or resource.query
                 or resource.fragment
             ):
-                raise ConfigurationError(
-                    "OAuth resource must be an HTTPS URL without credentials, query, or fragment"
-                )
+                raise ConfigurationError("OAuth resource must be an HTTPS URL without credentials, query, or fragment")
             if self.mcp_oauth_audience != self.mcp_oauth_resource:
                 raise ConfigurationError("OAuth audience must equal the exact protected resource")
             resource_authority = resource.hostname or ""
             if resource.port not in {None, 443}:
                 resource_authority = f"{resource_authority}:{resource.port}"
-            allowed_authorities = {
-                value.casefold().removesuffix(":443") for value in self.mcp_allowed_hosts
-            }
+            allowed_authorities = {value.casefold().removesuffix(":443") for value in self.mcp_allowed_hosts}
             if resource_authority.casefold().removesuffix(":443") not in allowed_authorities:
-                raise ConfigurationError(
-                    "OAuth resource authority must be present in the MCP Host allowlist"
-                )
+                raise ConfigurationError("OAuth resource authority must be present in the MCP Host allowlist")
             allowed_algorithms = {"RS256", "RS384", "RS512", "ES256", "ES384"}
             if not self.mcp_oauth_algorithms or not set(self.mcp_oauth_algorithms) <= allowed_algorithms:
                 raise ConfigurationError("OAuth algorithms must be an asymmetric allowlist")

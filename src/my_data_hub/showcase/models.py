@@ -120,7 +120,7 @@ class ShowcaseBundle(StrictModel):
     items: list[ShowcaseItem]
 
     @model_validator(mode="after")
-    def enforce_publication_policy(self) -> "ShowcaseBundle":
+    def enforce_publication_policy(self) -> ShowcaseBundle:
         by_id = {item.id: item for item in self.items}
         if len(by_id) != len(self.items):
             raise ValueError("duplicate item ids")

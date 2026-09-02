@@ -69,7 +69,7 @@ class CommandPublisher:
         self.timeout_seconds = timeout_seconds
 
     @classmethod
-    def from_json_env(cls, *, origin: str) -> "CommandPublisher":
+    def from_json_env(cls, *, origin: str) -> CommandPublisher:
         try:
             publish = json.loads(os.environ["MY_DATA_HUB_SHOWCASE_PUBLISH_COMMAND_JSON"])
             revoke = json.loads(os.environ["MY_DATA_HUB_SHOWCASE_REVOKE_COMMAND_JSON"])

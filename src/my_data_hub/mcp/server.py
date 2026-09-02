@@ -46,6 +46,7 @@ from my_data_hub.mcp.region_talk_schemas import (
 from my_data_hub.mcp.service import HubService
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
 from my_data_hub.mcp.transport import ToolSecurityMetadataMiddleware
+from my_data_hub.showcase.gateway import ShowcaseGatewayClient
 from my_data_hub.showcase.manager import ShowcaseManager
 from my_data_hub.workloads.bloggers.discovery import (
     SubmitDiscoveryBatch,
@@ -86,6 +87,7 @@ READER_PROFILE_TOOLS = frozenset(
         "region_talk.queue.list",
         "region_talk.queue.summary",
         "region_talk.pipeline.status",
+        "showcase.list",
     }
 )
 
@@ -136,7 +138,7 @@ class MCPDependencies:
     reader_profile_enabled: bool = False
     region_talk_controller: RegionTalkPipelineController | None = None
     region_talk_pipeline_run_enabled: bool = False
-    showcase_manager: ShowcaseManager | None = None
+    showcase_manager: ShowcaseManager | ShowcaseGatewayClient | None = None
 
 
 def _showcase_enabled() -> bool:
@@ -148,10 +150,27 @@ def _showcase_enabled() -> bool:
     }
 
 
-def _with_showcase_manager(dependencies: MCPDependencies) -> MCPDependencies:
+def _showcase_backend_from_env(
+    settings: Settings,
+    fallback: AccessIdentity | None,
+) -> ShowcaseManager | ShowcaseGatewayClient:
+    if settings.mcp_remote_enabled:
+        return ShowcaseGatewayClient.from_env(default_identity=fallback)
+    return ShowcaseManager.from_env()
+
+
+def _with_showcase_manager(
+    dependencies: MCPDependencies,
+    *,
+    settings: Settings,
+    fallback: AccessIdentity | None,
+) -> MCPDependencies:
     if dependencies.showcase_manager is not None or not _showcase_enabled():
         return dependencies
-    return replace(dependencies, showcase_manager=ShowcaseManager.from_env())
+    return replace(
+        dependencies,
+        showcase_manager=_showcase_backend_from_env(settings, fallback),
+    )
 
 
 def _local_identity(settings: Settings) -> AccessIdentity | None:
@@ -175,10 +194,7 @@ def _auth_error(resource_metadata_url: str, *, insufficient_scope: bool = True):
 
     code = "insufficient_scope" if insufficient_scope else "invalid_token"
     description = "The authenticated identity is not authorized for this tool."
-    challenge = (
-        f'Bearer resource_metadata="{resource_metadata_url}", '
-        f'error="{code}", error_description="{description}"'
-    )
+    challenge = f'Bearer resource_metadata="{resource_metadata_url}", error="{code}", error_description="{description}"'
     return CallToolResult(
         content=[TextContent(type="text", text="Authentication or additional authorization is required.")],
         isError=True,
@@ -192,10 +208,7 @@ def _profile_tool_names(dependencies: MCPDependencies) -> set[str]:
         names -= _SHOWCASE_TOOL_NAMES
     if not dependencies.acceptance_scenarios_enabled:
         names -= {"acceptance.scenario.request", "acceptance.scenario.status"}
-    if (
-        dependencies.region_talk_controller is None
-        or not dependencies.region_talk_pipeline_run_enabled
-    ):
+    if dependencies.region_talk_controller is None or not dependencies.region_talk_pipeline_run_enabled:
         names.discard("region_talk.pipeline.run")
     if dependencies.provider_only_profile_enabled:
         names &= PROVIDER_ONLY_TOOLS
@@ -206,9 +219,7 @@ def _profile_tool_names(dependencies: MCPDependencies) -> set[str]:
     return names
 
 
-def _configured_security_schemes(
-    settings: Settings, dependencies: MCPDependencies
-) -> list[dict[str, Any]]:
+def _configured_security_schemes(settings: Settings, dependencies: MCPDependencies) -> list[dict[str, Any]]:
     scopes = sorted(
         {
             TOOL_CONTRACTS[name].scope
@@ -231,10 +242,14 @@ def create_server(
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("install my-data-hub to run the MCP server") from exc
 
-    deps = _with_showcase_manager(dependencies or MCPDependencies())
+    fallback = default_identity or _local_identity(settings)
+    deps = _with_showcase_manager(
+        dependencies or MCPDependencies(),
+        settings=settings,
+        fallback=fallback,
+    )
     profile_tools = _profile_tool_names(deps)
     server_security_schemes = _configured_security_schemes(settings, deps)
-    fallback = default_identity or _local_identity(settings)
     metadata_url = (
         oauth_resource_metadata_url(settings.mcp_oauth_resource)
         if settings.mcp_oauth_resource
@@ -260,12 +275,7 @@ def create_server(
             identity = self._identity()
             contract = TOOL_CONTRACTS.get(name)
             profile_denied = str(name) not in profile_tools
-            if (
-                contract is None
-                or identity is None
-                or contract.scope not in identity.scopes
-                or profile_denied
-            ):
+            if contract is None or identity is None or contract.scope not in identity.scopes or profile_denied:
                 if identity is not None and deps.audit is not None:
                     recorded = deps.audit.record_mcp_audit(
                         OAuthAuditEvent(
@@ -283,7 +293,39 @@ def create_server(
                 return _auth_error(metadata_url, insufficient_scope=identity is not None)
             if str(name).startswith("region_talk."):
                 validate_region_talk_arguments(str(name), arguments or {})
-            return await super().call_tool(name, arguments, context)
+            try:
+                result = await super().call_tool(name, arguments, context)
+            except Exception:
+                if str(name).startswith("showcase.") and identity is not None and deps.audit is not None:
+                    showcase_tool_audit = deps.audit.record_mcp_audit(
+                        OAuthAuditEvent(
+                            event="mcp_tool",
+                            outcome="denied_or_failed",
+                            issuer=identity.issuer,
+                            client_id=identity.client_id,
+                            subject=identity.subject,
+                            token_id=identity.token_id,
+                            tool=str(name),
+                        )
+                    )
+                    if inspect.isawaitable(showcase_tool_audit):
+                        await showcase_tool_audit
+                raise
+            if str(name).startswith("showcase.") and identity is not None and deps.audit is not None:
+                showcase_tool_audit = deps.audit.record_mcp_audit(
+                    OAuthAuditEvent(
+                        event="mcp_tool",
+                        outcome="accepted",
+                        issuer=identity.issuer,
+                        client_id=identity.client_id,
+                        subject=identity.subject,
+                        token_id=identity.token_id,
+                        tool=str(name),
+                    )
+                )
+                if inspect.isawaitable(showcase_tool_audit):
+                    await showcase_tool_audit
+            return result
 
     service = HubService(
         deps.resolver,
@@ -325,7 +367,7 @@ def create_server(
     async def checkpoint_status() -> dict[str, Any]:
         return await service.invoke("checkpoint.status", {})
 
-    def showcase_manager() -> ShowcaseManager:
+    def showcase_manager() -> ShowcaseManager | ShowcaseGatewayClient:
         if deps.showcase_manager is None:
             raise RuntimeError("IdeaHub Showcase is not enabled")
         return deps.showcase_manager
@@ -336,27 +378,37 @@ def create_server(
     async def showcase_get_link(view_id: str) -> dict[str, Any]:
         return await asyncio.to_thread(showcase_manager().get_link, view_id)
 
-    async def showcase_rebuild(view_id: str) -> dict[str, Any]:
-        return await asyncio.to_thread(showcase_manager().rebuild, view_id)
+    async def showcase_rebuild(view_id: str, idempotency_key: str) -> dict[str, Any] | list[Any]:
+        return await asyncio.to_thread(
+            showcase_manager().rebuild,
+            view_id,
+            idempotency_key=idempotency_key,
+        )
 
-    async def showcase_create_view(view_id: str, publish: bool = True) -> dict[str, Any]:
+    async def showcase_create_view(view_id: str, idempotency_key: str) -> dict[str, Any] | list[Any]:
         return await asyncio.to_thread(
             showcase_manager().create_view,
             view_id,
-            publish=publish,
+            idempotency_key=idempotency_key,
         )
 
-    async def showcase_rotate_link(view_id: str) -> dict[str, Any]:
-        return await asyncio.to_thread(showcase_manager().rotate_link, view_id)
+    async def showcase_rotate_link(view_id: str, idempotency_key: str) -> dict[str, Any] | list[Any]:
+        return await asyncio.to_thread(
+            showcase_manager().rotate_link,
+            view_id,
+            idempotency_key=idempotency_key,
+        )
 
-    async def showcase_revoke_link(view_id: str) -> dict[str, Any]:
-        return await asyncio.to_thread(showcase_manager().revoke_link, view_id)
+    async def showcase_revoke_link(view_id: str, idempotency_key: str) -> dict[str, Any] | list[Any]:
+        return await asyncio.to_thread(
+            showcase_manager().revoke_link,
+            view_id,
+            idempotency_key=idempotency_key,
+        )
 
     async def acceptance_scenario_request(
         task_id: str,
-        scenario: Literal[
-            "FM04", "FM05", "FM07", "FM08", "FM09", "FM10", "FM11", "FM12", "FM14", "FM15", "FM24"
-        ],
+        scenario: Literal["FM04", "FM05", "FM07", "FM08", "FM09", "FM10", "FM11", "FM12", "FM14", "FM15", "FM24"],
         idempotency_key: str,
         source_revision: str,
         target_operation_id: str | None = None,
@@ -388,9 +440,7 @@ def create_server(
     async def connector_coverage() -> dict[str, Any]:
         return await service.invoke("connector.coverage", {})
 
-    async def runtime_stale_epoch_probe(
-        expected_active_epoch: int, submitted_epoch: int
-    ) -> dict[str, Any]:
+    async def runtime_stale_epoch_probe(expected_active_epoch: int, submitted_epoch: int) -> dict[str, Any]:
         return await service.invoke("runtime.stale_epoch.probe", locals())
 
     async def provider_protected_resource_probe(resource_ref: str) -> dict[str, Any]:
@@ -405,9 +455,7 @@ def create_server(
     async def provider_status(limit: int = 100) -> dict[str, Any]:
         return await service.invoke("provider.resources.status", {"limit": limit})
 
-    async def runtime_events_history(
-        run_id: str, attempt_id: str, epoch: int, limit: int = 100
-    ) -> dict[str, Any]:
+    async def runtime_events_history(run_id: str, attempt_id: str, epoch: int, limit: int = 100) -> dict[str, Any]:
         return await service.invoke("runtime.events.history", locals())
 
     async def provider_acceptance_dataset_lifecycle(
@@ -440,9 +488,7 @@ def create_server(
     ) -> dict[str, Any]:
         return await service.invoke("provider.acceptance.notebook.lifecycle", locals())
 
-    async def provider_acceptance_claim_get(
-        scenario_id: str, task_id: str
-    ) -> dict[str, Any]:
+    async def provider_acceptance_claim_get(scenario_id: str, task_id: str) -> dict[str, Any]:
         return await service.invoke("provider.acceptance.claim.get", locals())
 
     async def provider_acceptance_claim_cleanup(
@@ -476,17 +522,13 @@ def create_server(
         return await service.invoke("bloggers.search", locals())
 
     async def bloggers_provenance(blogger_id: str, limit: int = 50) -> dict[str, Any]:
-        return await service.invoke(
-            "bloggers.provenance", {"blogger_id": blogger_id, "limit": limit}
-        )
+        return await service.invoke("bloggers.provenance", {"blogger_id": blogger_id, "limit": limit})
 
     async def bloggers_statistics(project_slug: str) -> dict[str, Any]:
         return await service.invoke("bloggers.statistics", locals())
 
     async def bloggers_migration_accounting(export_batch_id: str) -> dict[str, Any]:
-        return await service.invoke(
-            "bloggers.migration.accounting", {"export_batch_id": export_batch_id}
-        )
+        return await service.invoke("bloggers.migration.accounting", {"export_batch_id": export_batch_id})
 
     async def region_talk_inventory() -> dict[str, Any]:
         return await service.invoke("region_talk.inventory", {})
@@ -608,9 +650,7 @@ def create_server(
     async def data_change_status(operation_id: str) -> dict[str, Any]:
         return await service.invoke("data.change.status", {"operation_id": operation_id})
 
-    async def bloggers_import_preview(
-        batch_id: str, expected_revision: int, idempotency_key: str
-    ) -> dict[str, Any]:
+    async def bloggers_import_preview(batch_id: str, expected_revision: int, idempotency_key: str) -> dict[str, Any]:
         return await service.invoke("bloggers.import.preview", locals())
 
     async def bloggers_import_apply(
@@ -625,9 +665,7 @@ def create_server(
         # The MCP SDK advertises the closed structural model.  Revalidate the
         # received JSON through the official two-stage validator before any
         # ACTIVE-master or connector action.
-        validated = validate_submit_discovery_batch(
-            payload.model_dump(mode="json", exclude_none=True)
-        )
+        validated = validate_submit_discovery_batch(payload.model_dump(mode="json", exclude_none=True))
         return await service.invoke(
             "submit_discovery_batch",
             {"payload": validated.model_dump(mode="json", exclude_none=True)},
@@ -932,9 +970,7 @@ def create_streamable_http_app(
             Route(metadata_path, metadata, methods=["GET"]),
             Mount(
                 "/",
-                app=ToolSecurityMetadataMiddleware(
-                    mcp_app, security_schemes=configured_security_schemes
-                ),
+                app=ToolSecurityMetadataMiddleware(mcp_app, security_schemes=configured_security_schemes),
             ),
         ],
         lifespan=lifespan,

@@ -104,7 +104,7 @@ class GitHubShowcaseSource:
             },
         )
         try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310 - fixed GitHub host
+            with urlopen(request, timeout=self.timeout_seconds) as response:
                 payload = json.load(response)
         except HTTPError as exc:
             raise ShowcaseSourceError(f"GitHub returned HTTP {exc.code}") from exc
@@ -139,9 +139,7 @@ class GitHubShowcaseSource:
     def load_bundle(self, view_id: str) -> ShowcaseBundle:
         revision = self._revision()
         view_path = f"views/{view_id}.yaml"
-        view = ShowcaseView.model_validate(
-            _parse_yaml(self._read_at_revision(view_path, revision), label=view_path)
-        )
+        view = ShowcaseView.model_validate(_parse_yaml(self._read_at_revision(view_path, revision), label=view_path))
         if view.id != view_id:
             raise ShowcaseSourceError(f"view id mismatch: requested {view_id}, found {view.id}")
         items: list[ShowcaseItem] = []

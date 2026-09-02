@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from .builder import AstroShowcaseBuilder
-from .models import BuildReceipt, RegistryState, SurfaceState
+from .models import RegistryState, SurfaceState
 from .publisher import CommandPublisher, LocalDirectoryPublisher, ShowcasePublisher
 from .source import FilesystemShowcaseSource, GitHubShowcaseSource, ShowcaseSource
 from .state import ShowcaseStateStore
@@ -37,7 +37,7 @@ class ShowcaseManager:
         self._lock = threading.RLock()
 
     @classmethod
-    def from_env(cls) -> "ShowcaseManager":
+    def from_env(cls) -> ShowcaseManager:
         artifact_root = Path(os.getenv("MY_DATA_HUB_ARTIFACT_ROOT", "./artifacts")).expanduser().resolve()
         origin = os.getenv("MY_DATA_HUB_SHOWCASE_ORIGIN", "https://ideas.kenigevents.ru").rstrip("/")
         source_root = os.getenv("MY_DATA_HUB_SHOWCASE_SOURCE_ROOT", "").strip()
@@ -58,9 +58,7 @@ class ShowcaseManager:
         source_site_root = repository_root / "showcase-site"
         packaged_site_root = Path(__file__).resolve().parents[1] / "showcase_site"
         default_site_root = source_site_root if source_site_root.is_dir() else packaged_site_root
-        site_root = Path(
-            os.getenv("MY_DATA_HUB_SHOWCASE_SITE_ROOT", str(default_site_root))
-        )
+        site_root = Path(os.getenv("MY_DATA_HUB_SHOWCASE_SITE_ROOT", str(default_site_root)))
         builder = AstroShowcaseBuilder(
             site_root=site_root,
             origin=origin,
@@ -147,7 +145,7 @@ class ShowcaseManager:
             raise RuntimeError(f"showcase surface {view_id} is revoked; rotate or create it explicitly")
         return surface
 
-    def rebuild(self, view_id: str) -> dict[str, Any]:
+    def rebuild(self, view_id: str, *, idempotency_key: str | None = None) -> dict[str, Any]:
         with self._lock:
             bundle = self.source.load_bundle(view_id)
             with self.state.transaction() as state:
@@ -163,9 +161,7 @@ class ShowcaseManager:
                 if surface.slug != slug:
                     raise RuntimeError("showcase slug changed during build")
                 now = datetime.now(UTC)
-                state.surfaces[view_id] = surface.model_copy(
-                    update={"updated_at": now, "last_build": receipt}
-                )
+                state.surfaces[view_id] = surface.model_copy(update={"updated_at": now, "last_build": receipt})
             return {
                 "schema_version": 1,
                 "status": "published",
@@ -174,7 +170,13 @@ class ShowcaseManager:
                 "receipt": receipt.model_dump(mode="json"),
             }
 
-    def create_view(self, view_id: str, *, publish: bool = True) -> dict[str, Any]:
+    def create_view(
+        self,
+        view_id: str,
+        *,
+        publish: bool = True,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             self.source.load_bundle(view_id)
             with self.state.transaction() as state:
@@ -185,40 +187,47 @@ class ShowcaseManager:
                     state.surfaces[view_id] = SurfaceState(view_id=view_id, slug=self._new_slug())
                     created = True
             if publish:
-                result = self.rebuild(view_id)
+                result = self.rebuild(view_id, idempotency_key=idempotency_key)
                 result["created"] = created
                 return result
             link = self.get_link(view_id)
             return {"schema_version": 1, "status": "created", "created": created, **link}
 
-    def rotate_link(self, view_id: str) -> dict[str, Any]:
+    def rotate_link(
+        self,
+        view_id: str,
+        *,
+        slug: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             bundle = self.source.load_bundle(view_id)
-            state = self.state.load()
-            previous = state.surfaces.get(view_id)
+            previous_state = self.state.load()
+            previous = previous_state.surfaces.get(view_id)
             if previous is None:
                 raise ShowcaseNotFoundError(view_id)
             old_slug = previous.slug
-            new_slug = self._new_slug()
+            new_slug = slug or self._new_slug()
             with TemporaryDirectory(prefix=f"showcase-rotate-{view_id}-") as temp:
                 output = Path(temp) / "dist"
                 receipt = self.builder.build(bundle, slug=new_slug, output_dir=output)
                 published_url = self.publisher.publish(output, receipt)
-            self.publisher.revoke(view_id=view_id, slug=old_slug)
             receipt = receipt.model_copy(update={"url": published_url})
             now = datetime.now(UTC)
-            with self.state.transaction() as current:
-                current_surface = current.surfaces.get(view_id)
-                if current_surface is None or current_surface.slug != old_slug:
-                    raise RuntimeError("showcase state changed during link rotation")
-                current.surfaces[view_id] = SurfaceState(
-                    view_id=view_id,
-                    slug=new_slug,
-                    active=True,
-                    created_at=current_surface.created_at,
-                    updated_at=now,
-                    last_build=receipt,
-                )
+            current = self.state.load()
+            current_surface = current.surfaces.get(view_id)
+            if current_surface is None or current_surface.slug != old_slug:
+                raise RuntimeError("showcase state changed during link rotation")
+            current.surfaces[view_id] = SurfaceState(
+                view_id=view_id,
+                slug=new_slug,
+                active=True,
+                created_at=current_surface.created_at,
+                updated_at=now,
+                last_build=receipt,
+            )
+            self.state.save(current)
+            self.publisher.revoke(view_id=view_id, slug=old_slug)
             return {
                 "schema_version": 1,
                 "status": "rotated",
@@ -228,7 +237,7 @@ class ShowcaseManager:
                 "receipt": receipt.model_dump(mode="json"),
             }
 
-    def revoke_link(self, view_id: str) -> dict[str, Any]:
+    def revoke_link(self, view_id: str, *, idempotency_key: str | None = None) -> dict[str, Any]:
         with self._lock:
             with self.state.transaction() as state:
                 surface = state.surfaces.get(view_id)
@@ -236,9 +245,7 @@ class ShowcaseManager:
                     raise ShowcaseNotFoundError(view_id)
                 slug = surface.slug
                 self.publisher.revoke(view_id=view_id, slug=slug)
-                state.surfaces[view_id] = surface.model_copy(
-                    update={"active": False, "updated_at": datetime.now(UTC)}
-                )
+                state.surfaces[view_id] = surface.model_copy(update={"active": False, "updated_at": datetime.now(UTC)})
             return {
                 "schema_version": 1,
                 "status": "revoked",

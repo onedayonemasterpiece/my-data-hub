@@ -48,20 +48,25 @@ def create_server(manager: ShowcaseManager | None = None):  # type: ignore[no-un
         return await asyncio.to_thread(control.get_link, view_id)
 
     @tool("showcase.rebuild", read_only=False, idempotent=True)
-    async def showcase_rebuild(view_id: str) -> dict[str, Any]:
-        return await asyncio.to_thread(control.rebuild, view_id)
+    async def showcase_rebuild(view_id: str, idempotency_key: str) -> dict[str, Any]:
+        return await asyncio.to_thread(control.rebuild, view_id, idempotency_key=idempotency_key)
 
     @tool("showcase.create_view", read_only=False, idempotent=True)
-    async def showcase_create_view(view_id: str, publish: bool = True) -> dict[str, Any]:
-        return await asyncio.to_thread(control.create_view, view_id, publish=publish)
+    async def showcase_create_view(view_id: str, idempotency_key: str, publish: bool = True) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            control.create_view,
+            view_id,
+            publish=publish,
+            idempotency_key=idempotency_key,
+        )
 
     @tool("showcase.rotate_link", read_only=False, destructive=True, idempotent=False)
-    async def showcase_rotate_link(view_id: str) -> dict[str, Any]:
-        return await asyncio.to_thread(control.rotate_link, view_id)
+    async def showcase_rotate_link(view_id: str, idempotency_key: str) -> dict[str, Any]:
+        return await asyncio.to_thread(control.rotate_link, view_id, idempotency_key=idempotency_key)
 
     @tool("showcase.revoke_link", read_only=False, destructive=True, idempotent=True)
-    async def showcase_revoke_link(view_id: str) -> dict[str, Any]:
-        return await asyncio.to_thread(control.revoke_link, view_id)
+    async def showcase_revoke_link(view_id: str, idempotency_key: str) -> dict[str, Any]:
+        return await asyncio.to_thread(control.revoke_link, view_id, idempotency_key=idempotency_key)
 
     return mcp
 
