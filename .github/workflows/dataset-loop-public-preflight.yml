@@ -22,7 +22,7 @@ jobs:
           from __future__ import annotations
 
           import datetime as dt
-          import http.client
+          import http.client as http_client
           import json
           import os
           import socket
@@ -66,14 +66,18 @@ jobs:
               except Exception as exc:
                   return {"verified": False, "error": type(exc).__name__, "detail": str(exc)[:500]}
 
-          def http(host: str, path: str) -> dict[str, Any]:
+          def http_probe(host: str, path: str) -> dict[str, Any]:
               try:
-                  connection = http.client.HTTPSConnection(host, timeout=10, context=ssl.create_default_context())
+                  connection = http_client.HTTPSConnection(
+                      host,
+                      timeout=10,
+                      context=ssl.create_default_context(),
+                  )
                   connection.request(
                       "GET",
                       path,
                       headers={
-                          "User-Agent": "dataset-loop-public-preflight/1",
+                          "User-Agent": "dataset-loop-public-preflight/2",
                           "Accept": "application/json, text/event-stream, */*",
                       },
                   )
@@ -102,7 +106,7 @@ jobs:
           planned_ipv4 = set(dns_rows["dataset_loop_planned"].get("ipv4", []))
 
           evidence = {
-              "schema_version": 1,
+              "schema_version": 2,
               "captured_at": dt.datetime.now(dt.UTC).isoformat(),
               "source": "GitHub-hosted ubuntu-latest; external read-only probes",
               "side_effects": "none",
@@ -115,11 +119,11 @@ jobs:
               },
               "tls": {name: tls(host) for name, host in HOSTS.items()},
               "http": {
-                  "events_mcp": http(HOSTS["events_mcp"], "/mcp"),
-                  "datahub_mcp": http(HOSTS["datahub_mcp"], "/mcp"),
-                  "identity_metadata": http(HOSTS["identity"], "/.well-known/openid-configuration"),
-                  "dataset_loop_health": http(HOSTS["dataset_loop_planned"], "/health"),
-                  "dataset_loop_mcp": http(HOSTS["dataset_loop_planned"], "/mcp"),
+                  "events_mcp": http_probe(HOSTS["events_mcp"], "/mcp"),
+                  "datahub_mcp": http_probe(HOSTS["datahub_mcp"], "/mcp"),
+                  "identity_metadata": http_probe(HOSTS["identity"], "/.well-known/openid-configuration"),
+                  "dataset_loop_health": http_probe(HOSTS["dataset_loop_planned"], "/health"),
+                  "dataset_loop_mcp": http_probe(HOSTS["dataset_loop_planned"], "/mcp"),
               },
           }
 
