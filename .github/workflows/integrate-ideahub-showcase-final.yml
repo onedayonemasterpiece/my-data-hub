@@ -48,13 +48,7 @@ jobs:
           sed -i \
             '/^"showcase-site" = "my_data_hub\/showcase_site"$/d' \
             pyproject.toml
-          cat >> tests/showcase/test_deployment_boundary_v2.py <<'PY'
-
-
-def test_general_python_wheel_does_not_bundle_the_renderer() -> None:
-    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert '"showcase-site" = "my_data_hub/showcase_site"' not in pyproject
-PY
+          python -c 'from pathlib import Path; p=Path("tests/showcase/test_deployment_boundary_v2.py"); p.write_text(p.read_text(encoding="utf-8") + "\n\ndef test_general_python_wheel_does_not_bundle_the_renderer() -> None:\n    pyproject = (ROOT / \\"pyproject.toml\\").read_text(encoding=\\"utf-8\\")\n    assert \\"\\\"showcase-site\\\" = \\\"my_data_hub/showcase_site\\\"\\" not in pyproject\n", encoding="utf-8")'
 
       - name: Install renderer and Python dependencies
         run: |
