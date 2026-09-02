@@ -28,9 +28,14 @@ def patch_server() -> None:
     start = source.index("READER_PROFILE_TOOLS = frozenset(")
     end = source.index("\n)\n\nPROVIDER_ONLY_TOOLS", start)
     profile = source[start:end]
-    profile = profile.replace('        "showcase.list",\n', "")
-    if '"showcase.list"' in profile or '"showcase.get_link"' in profile:
-        raise RuntimeError("showcase tools must not enter the generic reader profile")
+    if '"showcase.list"' not in profile:
+        marker = '        "region_talk.pipeline.status",\n'
+        if marker not in profile:
+            raise RuntimeError("reader profile showcase insertion point is missing")
+        profile = profile.replace(marker, marker + '        "showcase.list",\n', 1)
+    profile = profile.replace('        "showcase.get_link",\n', "")
+    if '"showcase.list"' not in profile or '"showcase.get_link"' in profile:
+        raise RuntimeError("showcase reader profile split is unsafe")
     source = source[:start] + profile + source[end:]
 
     source = replace_once(
@@ -49,18 +54,19 @@ def patch_server() -> None:
 def patch_catalog() -> None:
     path = "src/my_data_hub/mcp/catalog.py"
     source = read(path)
-    source = source.replace('    ("showcase.list", "showcase:read"),\n', "")
+    if '("showcase.list", "showcase:read")' not in source:
+        marker = '    ("data.change.status", "operation:read"),\n'
+        if marker not in source:
+            raise RuntimeError("showcase.list catalog insertion point is missing")
+        source = source.replace(
+            marker,
+            marker + '    ("showcase.list", "showcase:read"),\n',
+            1,
+        )
     source = source.replace('    ("showcase.get_link", "showcase:write"),\n', "")
     marker = "_WRITES = (\n"
     explicit = (
         "_WRITES = (\n"
-        "    ToolContract(\n"
-        '        "showcase.list",\n'
-        '        "showcase:read",\n'
-        "        True,\n"
-        "        idempotent=True,\n"
-        '        role="operator",\n'
-        "    ),\n"
         "    ToolContract(\n"
         '        "showcase.get_link",\n'
         '        "showcase:write",\n'
@@ -69,7 +75,7 @@ def patch_catalog() -> None:
         '        role="operator",\n'
         "    ),\n"
     )
-    source = replace_once(source, marker, explicit, "explicit showcase read contracts")
+    source = replace_once(source, marker, explicit, "owner-only full-link contract")
     write(path, source)
 
 
@@ -104,20 +110,44 @@ def patch_architecture_test() -> None:
         "            }",
         "YAML service inventory expectation",
     )
+    source = replace_once(
+        source,
+        '        "deploy/same-host/install.sh",\n',
+        '        "deploy/same-host/install.sh",\n'
+        '        "deploy/showcase-runtime/Dockerfile",\n'
+        '        "deploy/showcase-runtime/runtime.env.example",\n',
+        "deployment file inventory expectation",
+    )
+    write(path, source)
+
+
+def patch_remote_verifier_test() -> None:
+    path = "tests/test_remote_mcp_verifier.py"
+    source = read(path)
+    source = replace_once(
+        source,
+        "    } == READ_ONLY_TOOLS\n",
+        '    } == READ_ONLY_TOOLS | {"showcase.list"}\n',
+        "optional showcase reader contract expectation",
+    )
     write(path, source)
 
 
 def patch_runbook() -> None:
     path = "docs/operations/ideahub-showcase-runtime.md"
     source = read(path)
-    source = source.replace(
+    old = (
         "The OAuth owner/operator client receives `showcase:read` and\n"
         "`showcase:write`. A generic reader may receive only `showcase:read`:\n"
-        "it can call `showcase.list` and receives masked URLs.\n",
-        "The OAuth owner/operator client receives `showcase:read` and\n"
-        "`showcase:write`. Showcase tools are not added to the generic reader\n"
-        "profile. `showcase.list` still returns only masked URLs.\n",
+        "it can call `showcase.list` and receives masked URLs.\n"
     )
+    new = (
+        "The OAuth owner/operator client receives `showcase:read` and\n"
+        "`showcase:write`. A reader explicitly granted `showcase:read` may call\n"
+        "only `showcase.list`, which returns masked URLs.\n"
+    )
+    if old in source:
+        source = source.replace(old, new, 1)
     write(path, source)
 
 
@@ -125,6 +155,7 @@ def main() -> None:
     patch_server()
     patch_catalog()
     patch_architecture_test()
+    patch_remote_verifier_test()
     patch_runbook()
     print("showcase full-CI compatibility patch applied")
 
