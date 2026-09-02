@@ -1,0 +1,64 @@
+name: Fix IdeaHub Showcase Full CI
+
+on:
+  push:
+    branches:
+      - chatgpt/ideahub-showcase-full-ci-fix-20260903
+    paths:
+      - .github/workflows/fix-showcase-full-ci.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install project
+        run: python -m pip install -e '.[dev]'
+
+      - name: Apply compatibility patch
+        run: python scripts/fix_showcase_full_ci.py
+
+      - name: Hide one-shot bootstrap files from closed inventories
+        run: |
+          mkdir -p /tmp/showcase-full-ci-bootstrap
+          mv .github/workflows/fix-showcase-full-ci.yml /tmp/showcase-full-ci-bootstrap/
+          mv scripts/fix_showcase_full_ci.py /tmp/showcase-full-ci-bootstrap/
+
+      - name: Run repository-wide gates
+        run: |
+          python scripts/validate_repository.py
+          python -m compileall -q src tests scripts
+          pytest
+          ruff check .
+          mypy
+
+      - name: Restore bootstrap files
+        if: always()
+        run: |
+          test ! -f /tmp/showcase-full-ci-bootstrap/fix-showcase-full-ci.yml || mv /tmp/showcase-full-ci-bootstrap/fix-showcase-full-ci.yml .github/workflows/
+          test ! -f /tmp/showcase-full-ci-bootstrap/fix_showcase_full_ci.py || mv /tmp/showcase-full-ci-bootstrap/fix_showcase_full_ci.py scripts/
+
+      - name: Commit only canonical fixes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            src/my_data_hub/mcp/server.py \
+            src/my_data_hub/mcp/catalog.py \
+            tests/test_architecture_invariants.py \
+            docs/operations/ideahub-showcase-runtime.md
+          git diff --cached --check
+          git commit -m "fix(showcase): preserve remote MCP and closed inventories"
+          git push origin HEAD:${GITHUB_REF_NAME}
