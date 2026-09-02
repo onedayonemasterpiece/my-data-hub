@@ -59,6 +59,7 @@ jobs:
             src/my_data_hub/mcp/catalog.py \
             tests/test_architecture_invariants.py \
             tests/test_remote_mcp_verifier.py \
+            tests/showcase/test_env_contract_v2.py \
             docs/operations/ideahub-showcase-runtime.md
           git diff --cached --check
           git commit -m "fix(showcase): preserve masked reader list and closed inventories"
