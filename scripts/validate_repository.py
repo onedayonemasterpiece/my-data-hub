@@ -1759,12 +1759,14 @@ def validate_deployment(report: Report) -> None:
     ]
     compose_files = {path.relative_to(ROOT).as_posix() for path in repository_files if is_compose_filename(path)}
     report.check(
-        compose_files == {"compose.yaml", "compose.control-plane.yaml"},
+        compose_files == {"compose.yaml", "compose.control-plane.yaml", "compose.showcase.yaml"},
         f"unclassified Compose deployment profile exists: {sorted(compose_files)}",
     )
     deploy_files = {path.relative_to(ROOT).as_posix() for path in (ROOT / "deploy").rglob("*") if path.is_file()}
     expected_deploy_files = {
         "deploy/control-plane/Dockerfile",
+        "deploy/showcase-runtime/Dockerfile",
+        "deploy/showcase-runtime/runtime.env.example",
         "deploy/control-plane/collect_deployment_evidence.py",
         "deploy/control-plane/install.sh",
         "deploy/control-plane/install_master_tunnel_broker.sh",
@@ -1834,7 +1836,13 @@ def validate_deployment(report: Report) -> None:
         if path.is_file() and path.suffix.lower() in {".yml", ".yaml"}
     }
     report.check(
-        workflows == {"ci.yml", "nightly.yml", "post-deploy.yml", "provider-real.yml"},
+        workflows == {
+            "ci.yml",
+            "ideahub-showcase.yml",
+            "nightly.yml",
+            "post-deploy.yml",
+            "provider-real.yml",
+        },
         "workflow inventory drifted or gained an unclassified execution path",
     )
     expected_scheduled_jobs = {
@@ -1909,7 +1917,7 @@ def validate_deployment(report: Report) -> None:
             continue
         relative = path.relative_to(ROOT).as_posix()
         report.check(
-            relative in {"compose.yaml", "compose.control-plane.yaml"},
+            relative in {"compose.yaml", "compose.control-plane.yaml", "compose.showcase.yaml"},
             f"unclassified YAML service/deployment document exists: {relative}",
         )
     for command in (
