@@ -318,6 +318,7 @@ class Settings:
             "migration:read",
             "connector:read",
             "provider:read",
+            "showcase:read",
         }
         remote_write_scopes = {
             "master:ensure",
@@ -330,6 +331,7 @@ class Settings:
             "bloggers:write",
             "region-talk:operate",
             "provider:write",
+            "showcase:write",
         }
         if self.mcp_remote_enabled and (
             (not self.mcp_write_enabled and not self.mcp_scopes <= remote_read_scopes)

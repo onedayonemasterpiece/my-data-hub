@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 from uuid import UUID
 
@@ -44,9 +46,21 @@ from my_data_hub.mcp.region_talk_schemas import (
 from my_data_hub.mcp.service import HubService
 from my_data_hub.mcp.sql_policy import BoundedSQLPolicy
 from my_data_hub.mcp.transport import ToolSecurityMetadataMiddleware
+from my_data_hub.showcase.manager import ShowcaseManager
 from my_data_hub.workloads.bloggers.discovery import (
     SubmitDiscoveryBatch,
     validate_submit_discovery_batch,
+)
+
+_SHOWCASE_TOOL_NAMES = frozenset(
+    {
+        "showcase.list",
+        "showcase.get_link",
+        "showcase.rebuild",
+        "showcase.create_view",
+        "showcase.rotate_link",
+        "showcase.revoke_link",
+    }
 )
 
 READER_PROFILE_TOOLS = frozenset(
@@ -122,6 +136,22 @@ class MCPDependencies:
     reader_profile_enabled: bool = False
     region_talk_controller: RegionTalkPipelineController | None = None
     region_talk_pipeline_run_enabled: bool = False
+    showcase_manager: ShowcaseManager | None = None
+
+
+def _showcase_enabled() -> bool:
+    return os.getenv("MY_DATA_HUB_SHOWCASE_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _with_showcase_manager(dependencies: MCPDependencies) -> MCPDependencies:
+    if dependencies.showcase_manager is not None or not _showcase_enabled():
+        return dependencies
+    return replace(dependencies, showcase_manager=ShowcaseManager.from_env())
 
 
 def _local_identity(settings: Settings) -> AccessIdentity | None:
@@ -158,6 +188,8 @@ def _auth_error(resource_metadata_url: str, *, insufficient_scope: bool = True):
 
 def _profile_tool_names(dependencies: MCPDependencies) -> set[str]:
     names = set(TOOL_CONTRACTS)
+    if dependencies.showcase_manager is None:
+        names -= _SHOWCASE_TOOL_NAMES
     if not dependencies.acceptance_scenarios_enabled:
         names -= {"acceptance.scenario.request", "acceptance.scenario.status"}
     if (
@@ -199,7 +231,7 @@ def create_server(
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("install my-data-hub to run the MCP server") from exc
 
-    deps = dependencies or MCPDependencies()
+    deps = _with_showcase_manager(dependencies or MCPDependencies())
     profile_tools = _profile_tool_names(deps)
     server_security_schemes = _configured_security_schemes(settings, deps)
     fallback = default_identity or _local_identity(settings)
@@ -292,6 +324,33 @@ def create_server(
 
     async def checkpoint_status() -> dict[str, Any]:
         return await service.invoke("checkpoint.status", {})
+
+    def showcase_manager() -> ShowcaseManager:
+        if deps.showcase_manager is None:
+            raise RuntimeError("IdeaHub Showcase is not enabled")
+        return deps.showcase_manager
+
+    async def showcase_list() -> dict[str, Any]:
+        return await asyncio.to_thread(showcase_manager().list_surfaces)
+
+    async def showcase_get_link(view_id: str) -> dict[str, Any]:
+        return await asyncio.to_thread(showcase_manager().get_link, view_id)
+
+    async def showcase_rebuild(view_id: str) -> dict[str, Any]:
+        return await asyncio.to_thread(showcase_manager().rebuild, view_id)
+
+    async def showcase_create_view(view_id: str, publish: bool = True) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            showcase_manager().create_view,
+            view_id,
+            publish=publish,
+        )
+
+    async def showcase_rotate_link(view_id: str) -> dict[str, Any]:
+        return await asyncio.to_thread(showcase_manager().rotate_link, view_id)
+
+    async def showcase_revoke_link(view_id: str) -> dict[str, Any]:
+        return await asyncio.to_thread(showcase_manager().revoke_link, view_id)
 
     async def acceptance_scenario_request(
         task_id: str,
@@ -750,6 +809,12 @@ def create_server(
         "master.ensure": master_ensure,
         "operation.get": operation_get,
         "checkpoint.status": checkpoint_status,
+        "showcase.list": showcase_list,
+        "showcase.get_link": showcase_get_link,
+        "showcase.rebuild": showcase_rebuild,
+        "showcase.create_view": showcase_create_view,
+        "showcase.rotate_link": showcase_rotate_link,
+        "showcase.revoke_link": showcase_revoke_link,
         "acceptance.scenario.request": acceptance_scenario_request,
         "acceptance.scenario.status": acceptance_scenario_status,
         "checkpoint.restore.request": checkpoint_restore_request,
@@ -827,6 +892,7 @@ def create_streamable_http_app(
 
     from my_data_hub.mcp.admission import AdmissionLimits, OAuthAdmissionSecurity
 
+    dependencies = _with_showcase_manager(dependencies)
     server = create_server(settings, dependencies=dependencies)
     mcp_app = server.streamable_http_app(
         host=settings.mcp_host,

@@ -37,14 +37,17 @@ The standalone contract server in `my_data_hub.showcase.mcp_server` exposes:
 - `showcase.rotate_link(view_id)` — build under a new slug and revoke the old prefix;
 - `showcase.revoke_link(view_id)` — remove or disable the current prefix.
 
-`my-data-hub-showcase-mcp` is initially a stdio entry point for contract testing. The final
-deployment mounts the same manager behind the existing my-data-hub OAuth boundary rather
-than introducing a second authorization system.
+The standard `my-data-hub` MCP server exposes the same six tools when
+`MY_DATA_HUB_SHOWCASE_ENABLED=true` and the authenticated owner/operator token carries
+`showcase:read` and `showcase:write`. They therefore use the existing OAuth boundary,
+security metadata and audit path. `my-data-hub-showcase-mcp` remains only a local stdio
+entry point for focused contract testing.
 
 ## Runtime inputs
 
 | Variable | Purpose |
 |---|---|
+| `MY_DATA_HUB_SHOWCASE_ENABLED` | Enables the six tools in the standard my-data-hub MCP catalog. |
 | `MY_DATA_HUB_SHOWCASE_GITHUB_TOKEN` | Read-only token for private `idea-hub` source files. |
 | `MY_DATA_HUB_SHOWCASE_GITHUB_REPOSITORY` | Defaults to `onedayonemasterpiece/idea-hub`. |
 | `MY_DATA_HUB_SHOWCASE_GITHUB_REF` | Defaults to `main`; every build resolves it to one exact commit. |
