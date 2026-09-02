@@ -45,6 +45,16 @@ jobs:
           sed -i \
             's/serialized = json.dumps(result)/serialized = json.dumps(result, ensure_ascii=False)/' \
             tests/showcase/test_runtime_v2.py
+          sed -i \
+            '/^"showcase-site" = "my_data_hub\/showcase_site"$/d' \
+            pyproject.toml
+          cat >> tests/showcase/test_deployment_boundary_v2.py <<'PY'
+
+
+def test_general_python_wheel_does_not_bundle_the_renderer() -> None:
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert '"showcase-site" = "my_data_hub/showcase_site"' not in pyproject
+PY
 
       - name: Install renderer and Python dependencies
         run: |
@@ -112,6 +122,7 @@ jobs:
               "- environment_inventory_drift_test: PASS",
               "- loopback_topology_contract: PASS",
               "- rotation_recovery_contract: PASS",
+              "- general_python_wheel_renderer_isolation: PASS",
               "- reduced_default_resource_budget: PASS",
           ]
           Path("docs/operations/showcase-runtime-v2-verification.md").write_text(
