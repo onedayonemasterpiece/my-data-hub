@@ -161,6 +161,9 @@ def prepare_site_runtime(settings: ShowcaseRuntimeSettings) -> None:
         shutil.rmtree(runtime)
     runtime.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(template, runtime, ignore=shutil.ignore_patterns("node_modules", "dist"))
+    # copytree preserves the immutable template root mode. Restore owner write
+    # permission on the private runtime copy before adding its dependency link.
+    runtime.chmod(stat.S_IMODE(runtime.stat().st_mode) | stat.S_IWUSR)
     (runtime / "node_modules").symlink_to(node_modules, target_is_directory=True)
 
 

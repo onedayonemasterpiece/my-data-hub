@@ -18,13 +18,34 @@ from my_data_hub.showcase.runtime import (
     PrincipalDocument,
     ShowcaseOperationController,
     ShowcaseOperationJournal,
+    ShowcaseRuntimeSettings,
     create_app,
+    prepare_site_runtime,
     read_runtime_token,
 )
 
 TOKEN = "showcase-runtime-test-token-0123456789abcdef"
 OLD_SLUG = "old_showcase_slug_0123456789abcdef"
 NEW_SLUG = "new_showcase_slug_0123456789abcdef"
+
+
+def test_prepare_site_runtime_accepts_read_only_image_template(tmp_path: Path) -> None:
+    template = tmp_path / "template"
+    (template / "node_modules").mkdir(parents=True)
+    (template / "package.json").write_text("{}", encoding="utf-8")
+    template.chmod(0o555)
+    runtime = tmp_path / "work" / "site"
+    settings = ShowcaseRuntimeSettings(
+        token_file=tmp_path / "gateway.key",
+        operation_journal=tmp_path / "operations.json",
+        site_template_dir=template,
+        site_runtime_dir=runtime,
+    )
+
+    prepare_site_runtime(settings)
+
+    assert (runtime / "node_modules").is_symlink()
+    assert (runtime / "package.json").read_text(encoding="utf-8") == "{}"
 
 
 def token_file(tmp_path: Path) -> Path:
