@@ -165,7 +165,10 @@ summary; GitHub retry repeats neither inference stage.
 
 Complete verifies a contiguous manifest against durable receipts, including
 SHA and timeline, then durably commits close plus queued job before returning
-HTTP `202`. Repeating the same manifest is idempotent; changing it is a `409`.
+HTTP `202`. Audio ranges must be exactly contiguous. Adjacent wall-clock
+ranges tolerate at most 50 ms overlap to cover one-frame Android wall-clock
+jitter around blocking capture reads; larger overlaps remain invalid.
+Repeating the same manifest is idempotent; changing it is a `409`.
 
 Reuse the verified IdeaHub publisher. One atomic non-force update to
 `idea-hub/main` creates:

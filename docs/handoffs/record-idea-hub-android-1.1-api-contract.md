@@ -182,6 +182,12 @@ Upload before durable create returns typed `409` and makes **zero** provider
 calls. Every upload, including a duplicate, makes **zero** Gemini calls and
 never returns a synthetic transcript.
 
+Adjacent audio ranges remain exactly contiguous. Adjacent wall-clock ranges
+may overlap by at most 50 ms (less than two 30 ms capture frames) because
+Android derives them from wall-clock samples around blocking `AudioRecord`
+reads. A larger overlap is an invalid complete manifest. This bounded clock
+jitter never changes audio order, duration, hashes, or provider input.
+
 ### Finish recording
 
 ```http

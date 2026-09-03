@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from my_data_hub.voice_intake.contracts import SESSION_ID_PATTERN, SHA256_PATTERN
 
 API_VERSION: Final = "2.0"
+WALL_TIMELINE_OVERLAP_TOLERANCE_MS: Final = 50
 CAPTURE_POLICIES = ("continuous_v1", "voice_activity_auto_pause_v1")
 SESSION_STATES = (
     "receiving",
@@ -127,7 +128,10 @@ class SessionCompleteRequest(StrictModel):
         for previous, current in zip(self.chunks, self.chunks[1:], strict=False):
             if current.audio_start_ms != previous.audio_end_ms:
                 raise ValueError("audio timeline must be contiguous")
-            if current.wall_start_ms < previous.wall_end_ms:
+            if (
+                current.wall_start_ms + WALL_TIMELINE_OVERLAP_TOLERANCE_MS
+                < previous.wall_end_ms
+            ):
                 raise ValueError("wall timeline must not overlap")
         if abs(self.chunks[-1].audio_end_ms - self.recorded_audio_ms) > 2_000:
             raise ValueError("audio timeline does not match recorded duration")

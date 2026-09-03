@@ -31,6 +31,53 @@ def test_complete_requires_aware_timestamp(complete_payload) -> None:
         )
 
 
+def test_complete_accepts_one_frame_wall_clock_jitter(complete_payload) -> None:
+    first = complete_payload["chunks"][0]
+    second = {
+        **first,
+        "chunk_index": 1,
+        "sha256": "b" * 64,
+        "audio_start_ms": first["audio_end_ms"],
+        "audio_end_ms": first["audio_end_ms"] + first["duration_ms"],
+        "wall_start_ms": first["wall_end_ms"] - 7,
+        "wall_end_ms": first["wall_end_ms"] + first["duration_ms"],
+    }
+    payload = {
+        **complete_payload,
+        "wall_elapsed_ms": second["wall_end_ms"],
+        "recorded_audio_ms": second["audio_end_ms"],
+        "chunk_count": 2,
+        "chunks": [first, second],
+    }
+
+    validated = SessionCompleteRequest.model_validate(payload)
+
+    assert validated.chunks[1].wall_start_ms == validated.chunks[0].wall_end_ms - 7
+
+
+def test_complete_rejects_wall_overlap_beyond_clock_jitter(complete_payload) -> None:
+    first = complete_payload["chunks"][0]
+    second = {
+        **first,
+        "chunk_index": 1,
+        "sha256": "b" * 64,
+        "audio_start_ms": first["audio_end_ms"],
+        "audio_end_ms": first["audio_end_ms"] + first["duration_ms"],
+        "wall_start_ms": first["wall_end_ms"] - 51,
+        "wall_end_ms": first["wall_end_ms"] + first["duration_ms"],
+    }
+    payload = {
+        **complete_payload,
+        "wall_elapsed_ms": second["wall_end_ms"],
+        "recorded_audio_ms": second["audio_end_ms"],
+        "chunk_count": 2,
+        "chunks": [first, second],
+    }
+
+    with pytest.raises(ValidationError, match="wall timeline must not overlap"):
+        SessionCompleteRequest.model_validate(payload)
+
+
 def test_complete_cannot_end_before_durable_session_start(
     tmp_path, create_request, terminology
 ) -> None:
