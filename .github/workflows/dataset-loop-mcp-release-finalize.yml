@@ -1,0 +1,158 @@
+name: dataset-loop-mcp-release-finalize
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ops/dataset-loop-mcp/release-finalize-request.json"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dataset-loop-mcp-release-finalize
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: [self-hosted, linux, my-data-hub-devstand]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build, publish or reconcile immutable alpha.3 using host GitHub authority
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/dataset-loop-release-finalize"
+          rm -rf "$work"
+          mkdir -p "$work"
+          unset GH_TOKEN GITHUB_TOKEN
+          gh auth status >/dev/null
+          gh repo clone onedayonemasterpiece/dataset-loop-mcp "$work/repo" -- --filter=blob:none
+          cd "$work/repo"
+          git fetch --force --tags origin
+          if git rev-parse --verify 'refs/tags/v0.1.0-alpha.3^{commit}' >/dev/null 2>&1; then
+            target=$(git rev-parse 'refs/tags/v0.1.0-alpha.3^{commit}')
+            test "$(git cat-file -t refs/tags/v0.1.0-alpha.3)" = tag
+            create_tag=false
+          else
+            target=$(git rev-parse origin/main)
+            create_tag=true
+          fi
+          git checkout --detach "$target"
+          git cat-file -e "$target:docs/releases/0.1.0-alpha.3.md"
+          git cat-file -e "$target:docs/deployment/CODEX-DEPLOYMENT-ONLY-v0.1.0-alpha.3.md"
+          python3 - <<'PY'
+          import ast
+          import pathlib
+          import tomllib
+          version=tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']
+          if version!='0.1.0a3': raise SystemExit(f'wrong pyproject version: {version!r}')
+          tree=ast.parse(pathlib.Path('src/dataset_loop_mcp/__init__.py').read_text())
+          values={
+              node.targets[0].id:ast.literal_eval(node.value)
+              for node in tree.body
+              if isinstance(node,ast.Assign) and len(node.targets)==1 and isinstance(node.targets[0],ast.Name)
+          }
+          if values.get('__version__')!='0.1.0-alpha.3': raise SystemExit('wrong runtime version')
+          prompt=pathlib.Path('docs/deployment/CODEX-DEPLOYMENT-ONLY-v0.1.0-alpha.3.md').read_text()
+          for exact in ('https://mcp-dataset-loop.kenigevents.ru/mcp','https://identity.kenigevents.ru'):
+              if exact not in prompt: raise SystemExit(f'deployment prompt lacks {exact}')
+          PY
+          if ! command -v uv >/dev/null; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+          fi
+          uv sync --extra dev --frozen --no-install-project
+          uv run --no-sync ruff check .
+          uv run --no-sync mypy
+          uv run --no-sync pytest
+          uv run --no-sync python -m native_pack verify
+          uv run --no-sync python scripts/secret_scan.py
+          export DATASET_LOOP_DATABASE_PATH="$work/migration.sqlite3"
+          uv run --no-sync alembic upgrade head
+          uv run --no-sync alembic downgrade base
+          docker compose config >/dev/null
+          docker build -t dataset-loop-mcp:0.1.0-alpha.3 .
+          rm -rf dist "$work/assets"
+          uv run --no-sync python -m build
+          mkdir -p "$work/assets"
+          cp dist/dataset_loop_mcp-0.1.0a3-py3-none-any.whl "$work/assets/"
+          cp dist/dataset_loop_mcp-0.1.0a3.tar.gz "$work/assets/"
+          (cd "$work/assets" && sha256sum dataset_loop_mcp-0.1.0a3-* > SHA256SUMS)
+          if [ "$create_tag" = true ]; then
+            git config user.name 'dataset-loop-release-bot'
+            git config user.email 'dataset-loop-release-bot@users.noreply.github.com'
+            git tag -a v0.1.0-alpha.3 "$target" -m 'Dataset Loop MCP 0.1.0-alpha.3 operational prerelease'
+            git push origin refs/tags/v0.1.0-alpha.3
+          fi
+          git fetch --force --tags origin
+          test "$(git cat-file -t refs/tags/v0.1.0-alpha.3)" = tag
+          test "$(git rev-parse 'refs/tags/v0.1.0-alpha.3^{commit}')" = "$target"
+          test "$(git ls-remote origin 'refs/tags/v0.1.0-alpha.3^{}' | awk '{print $1}')" = "$target"
+          if gh release view v0.1.0-alpha.3 --repo onedayonemasterpiece/dataset-loop-mcp >/dev/null 2>&1; then
+            test "$(gh release view v0.1.0-alpha.3 --repo onedayonemasterpiece/dataset-loop-mcp --json isPrerelease --jq '.isPrerelease')" = true
+            gh release upload v0.1.0-alpha.3 "$work/assets"/* --clobber --repo onedayonemasterpiece/dataset-loop-mcp
+          else
+            gh release create v0.1.0-alpha.3 "$work/assets"/* \
+              --repo onedayonemasterpiece/dataset-loop-mcp \
+              --verify-tag --prerelease \
+              --title 'Dataset Loop MCP 0.1.0-alpha.3' \
+              --notes-file docs/releases/0.1.0-alpha.3.md
+          fi
+          rm -rf "$work/download"
+          mkdir -p "$work/download"
+          gh release download v0.1.0-alpha.3 --repo onedayonemasterpiece/dataset-loop-mcp --dir "$work/download"
+          (cd "$work/download" && sha256sum -c SHA256SUMS)
+          cmp "$work/assets/SHA256SUMS" "$work/download/SHA256SUMS"
+          python3 -m venv "$work/venv"
+          "$work/venv/bin/pip" install --disable-pip-version-check "$work/download/dataset_loop_mcp-0.1.0a3-py3-none-any.whl"
+          "$work/venv/bin/dataset-loop-mcp" --help >/dev/null
+          gh api repos/onedayonemasterpiece/dataset-loop-mcp/git/ref/tags/v0.1.0-alpha.3 > "$work/tag-ref.json"
+          tag_object=$(jq -r '.object.sha' "$work/tag-ref.json")
+          gh api "repos/onedayonemasterpiece/dataset-loop-mcp/git/tags/$tag_object" > "$work/tag-object.json"
+          gh api repos/onedayonemasterpiece/dataset-loop-mcp/releases/tags/v0.1.0-alpha.3 > "$work/release.json"
+          echo "$target" > "$work/target"
+
+      - name: Write sanitized finalizer evidence to my-data-hub
+        if: always()
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/dataset-loop-release-finalize"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          work=pathlib.Path(os.environ['RUNNER_TEMP'])/'dataset-loop-release-finalize'
+          if all((work/name).is_file() for name in ('tag-ref.json','tag-object.json','release.json','target')):
+              ref=json.loads((work/'tag-ref.json').read_text())
+              tag=json.loads((work/'tag-object.json').read_text())
+              release=json.loads((work/'release.json').read_text())
+              target=(work/'target').read_text().strip()
+              assets={}
+              for path in sorted((work/'download').iterdir()):
+                  if path.is_file():
+                      remote=next(item for item in release['assets'] if item['name']==path.name)
+                      digest=hashlib.sha256(path.read_bytes()).hexdigest()
+                      if remote['size']!=path.stat().st_size: raise SystemExit('asset size mismatch')
+                      if remote.get('digest') and remote['digest']!=f'sha256:{digest}': raise SystemExit('asset digest mismatch')
+                      assets[path.name]={'id':remote['id'],'bytes':path.stat().st_size,'sha256':digest,'digest':remote.get('digest') or f'sha256:{digest}'}
+              status='READY' if ref['object']['type']=='tag' and tag['object']['type']=='commit' and tag['object']['sha']==target and release['prerelease'] and not release['draft'] else 'FAILED'
+              result={'schema_version':1,'status':status,'tag':{'name':'v0.1.0-alpha.3','tag_object_sha':ref['object']['sha'],'peeled_commit_sha':tag['object']['sha']},'release':{'id':release['id'],'prerelease':release['prerelease'],'draft':release['draft'],'assets':assets},'canonical_mcp_url':'https://mcp-dataset-loop.kenigevents.ru/mcp','workflow_run_id':int(os.environ['GITHUB_RUN_ID'])}
+          else:
+              result={'schema_version':1,'status':'FAILED_BEFORE_READBACK','canonical_mcp_url':'https://mcp-dataset-loop.kenigevents.ru/mcp','workflow_run_id':int(os.environ['GITHUB_RUN_ID'])}
+          pathlib.Path(os.environ['RUNNER_TEMP'],'dataset-loop-release-finalize-result.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          PY
+          git fetch origin main
+          git reset --hard origin/main
+          mkdir -p ops/dataset-loop-mcp/evidence
+          cp "$RUNNER_TEMP/dataset-loop-release-finalize-result.json" ops/dataset-loop-mcp/evidence/release-finalize.json
+          cp "$RUNNER_TEMP/dataset-loop-release-finalize-result.json" ops/dataset-loop-mcp/release-finalize.completed.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ops/dataset-loop-mcp/evidence/release-finalize.json ops/dataset-loop-mcp/release-finalize.completed.json
+          if ! git diff --cached --quiet; then
+            git commit -m 'evidence: finalize Dataset Loop MCP alpha.3 release'
+            git push origin HEAD:main
+          fi
+          test "$(jq -r '.status' "$RUNNER_TEMP/dataset-loop-release-finalize-result.json")" = READY
