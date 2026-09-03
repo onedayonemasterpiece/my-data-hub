@@ -75,6 +75,15 @@ only `showcase.list`, which returns masked URLs.
 owner/operator scope `showcase:write`, despite being annotated as a
 read-only operation.
 
+The protected-resource document at
+`/.well-known/oauth-protected-resource/mcp` must advertise both Showcase
+scopes whenever the runtime is enabled. This document and `tools/list` must be
+built from the same env-backed dependency graph; otherwise OAuth clients such
+as ChatGPT keep requesting their previously known scope set and hide the
+Showcase tools even though the backend is live. After adding scopes, verify the
+document before reconnecting the client account (a catalog refresh alone does
+not enlarge an existing OAuth grant).
+
 ## Build and start
 
 ```bash

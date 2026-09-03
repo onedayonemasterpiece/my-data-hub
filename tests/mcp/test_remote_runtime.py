@@ -44,6 +44,7 @@ READER_SCOPES = frozenset(
 )
 OAUTH_PROTOCOL_SCOPES = frozenset({"openid", "offline_access"})
 UNIFIED_SCOPES = READER_SCOPES | {"provider:write"}
+SHOWCASE_SCOPES = frozenset({"showcase:read", "showcase:write"})
 
 
 def _configure(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
@@ -532,6 +533,58 @@ def test_unified_bootstrap_profile_has_exact_bounded_catalog_and_provider_only_w
     assert {
         tool["name"] for tool in actual_catalog["result"]["tools"]  # type: ignore[index]
     } == (UNIFIED_BOOTSTRAP_TOOLS & TOOL_CONTRACTS.keys()) - {"showcase.list"}
+
+
+@pytest.mark.asyncio
+async def test_remote_runtime_advertises_env_enabled_showcase_scopes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The wrapper metadata must use the same env-backed dependencies as tools/list."""
+
+    _configure(monkeypatch, tmp_path)
+    granted = UNIFIED_SCOPES | SHOWCASE_SCOPES
+    monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_UNIFIED_BOOTSTRAP_PROFILE_ENABLED", "true")
+    monkeypatch.setenv("MY_DATA_HUB_MCP_SCOPES", ",".join(sorted(granted)))
+    monkeypatch.setenv("MY_DATA_HUB_SHOWCASE_ENABLED", "true")
+
+    for name in ("unified-write-gate.key", "control-gateway.token", "showcase-gateway.key"):
+        path = tmp_path / name
+        path.write_text(name[0] * 32, encoding="ascii")
+        path.chmod(0o600)
+    monkeypatch.setenv("MY_DATA_HUB_MCP_WRITE_GATE_SECRET_FILE", str(tmp_path / "unified-write-gate.key"))
+    monkeypatch.setenv(
+        "MY_DATA_HUB_MCP_CONTROL_GATEWAY_URL",
+        "http://control-plane:8080/internal/mcp-provider/invoke",
+    )
+    monkeypatch.setenv(
+        "MY_DATA_HUB_MCP_CONTROL_GATEWAY_TOKEN_FILE",
+        str(tmp_path / "control-gateway.token"),
+    )
+    monkeypatch.setenv(
+        "MY_DATA_HUB_SHOWCASE_GATEWAY_URL",
+        "http://127.0.0.1:8790/internal/mcp-showcase/invoke",
+    )
+    monkeypatch.setenv(
+        "MY_DATA_HUB_SHOWCASE_GATEWAY_TOKEN_FILE",
+        str(tmp_path / "showcase-gateway.key"),
+    )
+
+    runtime = build_remote_runtime(
+        decoder=lambda _token: _claims(scopes=sorted(granted)),
+        provider_control=object(),
+    )
+    transport = httpx.ASGITransport(app=runtime.app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://mcp-datahub.kenigevents.ru"
+    ) as client:
+        response = await client.get(
+            "/.well-known/oauth-protected-resource/mcp",
+            headers={"Host": "mcp-datahub.kenigevents.ru"},
+        )
+
+    assert response.status_code == 200
+    assert set(response.json()["scopes_supported"]) >= SHOWCASE_SCOPES
 
 
 def test_unified_bootstrap_gate_allows_provider_effect_during_active_master_only() -> None:

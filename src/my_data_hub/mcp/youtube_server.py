@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MethodType
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
@@ -19,6 +19,7 @@ from my_data_hub.mcp.server import (
     _configured_security_schemes,
     _local_identity,
     _profile_tool_names,
+    _with_showcase_manager,
     oauth_resource_metadata_url,
 )
 from my_data_hub.mcp.server import create_server as create_base_server
@@ -50,6 +51,22 @@ class YouTubeMCPDependencies:
     base: MCPDependencies
     analyzer: YouTubeVideoAnalyzer | None = None
     feature_enabled: bool = False
+
+
+def _with_env_backends(
+    settings: Settings,
+    dependencies: YouTubeMCPDependencies,
+    *,
+    fallback: Any = None,
+) -> YouTubeMCPDependencies:
+    """Hydrate wrapper metadata and the base server from one dependency graph."""
+
+    base = _with_showcase_manager(
+        dependencies.base,
+        settings=settings,
+        fallback=fallback,
+    )
+    return dependencies if base is dependencies.base else replace(dependencies, base=base)
 
 
 def _youtube_exposed(settings: Settings, dependencies: YouTubeMCPDependencies) -> bool:
@@ -104,6 +121,7 @@ def create_server(
         raise RuntimeError("install my-data-hub to run the MCP server") from exc
 
     fallback = default_identity or _local_identity(settings)
+    dependencies = _with_env_backends(settings, dependencies, fallback=fallback)
     server = create_base_server(
         settings,
         dependencies=dependencies.base,
@@ -221,6 +239,7 @@ def create_streamable_http_app(
     from my_data_hub.mcp.admission import AdmissionLimits, OAuthAdmissionSecurity
     from my_data_hub.mcp.transport import ToolSecurityMetadataMiddleware
 
+    dependencies = _with_env_backends(settings, dependencies)
     server = create_server(settings, dependencies=dependencies)
     mcp_app = server.streamable_http_app(
         host=settings.mcp_host,
