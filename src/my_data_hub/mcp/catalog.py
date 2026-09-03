@@ -55,10 +55,16 @@ _READ = (
     ("data.query", "data:read"),
     ("data.change.status", "operation:read"),
     ("showcase.list", "showcase:read"),
-    ("showcase.get_link", "showcase:write"),
 )
 
 _WRITES = (
+    ToolContract(
+        "showcase.get_link",
+        "showcase:write",
+        True,
+        idempotent=True,
+        role="operator",
+    ),
     ToolContract("master.ensure", "master:ensure", False, idempotent=True, role="operator"),
     ToolContract("master.rotation.request", "master:rotate", False, idempotent=True, role="operator"),
     ToolContract("checkpoint.restore.request", "recovery:request", False, idempotent=True, role="operator"),

@@ -43,8 +43,8 @@ MY_DATA_HUB_MCP_SCOPES_WITH_SHOWCASE=<existing-owner-scopes>,showcase:read,showc
 ```
 
 The OAuth owner/operator client receives `showcase:read` and
-`showcase:write`. A generic reader may receive only `showcase:read`:
-it can call `showcase.list` and receives masked URLs.
+`showcase:write`. A reader explicitly granted `showcase:read` may call
+only `showcase.list`, which returns masked URLs.
 `showcase.get_link` returns the full secret URL and therefore requires
 owner/operator scope `showcase:write`, despite being annotated as a
 read-only operation.

@@ -466,7 +466,9 @@ def test_unified_bootstrap_profile_has_exact_bounded_catalog_and_provider_only_w
         default_identity=identity,
     )
     catalog = {tool.name for tool in asyncio.run(server.list_tools())}
-    assert catalog == UNIFIED_BOOTSTRAP_TOOLS & TOOL_CONTRACTS.keys()
+    # This direct fixture intentionally injects no Showcase backend; profile
+    # allowlists never make unavailable tools discoverable.
+    assert catalog == (UNIFIED_BOOTSTRAP_TOOLS & TOOL_CONTRACTS.keys()) - {"showcase.list"}
     assert "bloggers.search" in catalog
     assert "provider.resources.create" in catalog
     assert "data.change.apply" not in catalog
@@ -529,7 +531,7 @@ def test_unified_bootstrap_profile_has_exact_bounded_catalog_and_provider_only_w
     ]
     assert {
         tool["name"] for tool in actual_catalog["result"]["tools"]  # type: ignore[index]
-    } == UNIFIED_BOOTSTRAP_TOOLS & TOOL_CONTRACTS.keys()
+    } == (UNIFIED_BOOTSTRAP_TOOLS & TOOL_CONTRACTS.keys()) - {"showcase.list"}
 
 
 def test_unified_bootstrap_gate_allows_provider_effect_during_active_master_only() -> None:
