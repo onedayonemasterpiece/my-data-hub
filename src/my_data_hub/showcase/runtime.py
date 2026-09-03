@@ -355,8 +355,10 @@ def _publisher_revoke(manager: Any, *, view_id: str, slug: str) -> None:
     method = getattr(publisher, "revoke", None)
     if not callable(method):
         raise ShowcaseRuntimeError("showcase publisher cannot revoke a stale slug")
-    parameters = list(inspect.signature(method).parameters)
-    if len(parameters) <= 1:
+    parameters = inspect.signature(method).parameters
+    if "view_id" in parameters and "slug" in parameters:
+        method(view_id=view_id, slug=slug)
+    elif len(parameters) <= 1:
         method(slug)
     else:
         method(view_id, slug)

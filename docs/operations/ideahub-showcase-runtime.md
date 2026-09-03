@@ -14,6 +14,8 @@ Astro and Vite caches live under the writable runtime copy's `.cache` directory,
 never under the immutable `node_modules` symlink.
 `TMPDIR=/work` keeps the transient Git checkout, renderer cache, and Astro output
 on the same private filesystem, preserving Astro's atomic asset renames.
+Rotation recovery invokes the publisher's explicit `view_id`/`slug` contract,
+including keyword-only production publishers.
 
 ## Ownership boundary
 

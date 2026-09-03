@@ -87,7 +87,8 @@ class FakePublisher:
     def __init__(self) -> None:
         self.revoked: list[str] = []
 
-    def revoke(self, slug: str) -> None:
+    def revoke(self, *, view_id: str, slug: str) -> None:
+        assert view_id == "main"
         self.revoked.append(slug)
 
 
@@ -133,7 +134,7 @@ class FakeManager:
         previous = self.links[view_id]
         next_slug = slug or NEW_SLUG
         self.links[view_id] = f"https://ideas.example/v/{next_slug}/"
-        self._publisher.revoke(previous.rstrip("/").split("/")[-1])
+        self._publisher.revoke(view_id=view_id, slug=previous.rstrip("/").split("/")[-1])
         return {"view_id": view_id, "url": self.links[view_id]}
 
 
