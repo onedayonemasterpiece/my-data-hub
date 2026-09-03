@@ -1766,6 +1766,7 @@ def validate_deployment(report: Report) -> None:
     expected_deploy_files = {
         "deploy/control-plane/Dockerfile",
         "deploy/showcase-runtime/Dockerfile",
+        "deploy/showcase-runtime/nginx.conf",
         "deploy/showcase-runtime/runtime.env.example",
         "deploy/control-plane/collect_deployment_evidence.py",
         "deploy/control-plane/install.sh",
