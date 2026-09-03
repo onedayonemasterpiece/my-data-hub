@@ -1,0 +1,159 @@
+name: dataset-loop-mcp-sync-evidence
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ops/dataset-loop-mcp/deployment.completed.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dataset-loop-mcp-evidence-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: [self-hosted, linux, my-data-hub-devstand]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize the factual terminal result through host GitHub authority
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN
+          gh auth status >/dev/null
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import json
+          import pathlib
+          import subprocess
+          from datetime import UTC, datetime
+
+          root = pathlib.Path.cwd()
+          marker = json.loads((root / "ops/dataset-loop-mcp/deployment.completed.json").read_text())
+          ready = marker.get("status") == "PUBLIC_INFRASTRUCTURE_READY"
+          evidence_path = root / (
+              "ops/dataset-loop-mcp/evidence/deployment-result.json"
+              if ready
+              else "ops/dataset-loop-mcp/evidence/deployment-failure.json"
+          )
+          evidence = json.loads(evidence_path.read_text()) if evidence_path.is_file() else {
+              "schema_version": 1,
+              "status": marker.get("status", "UNKNOWN"),
+              "error": marker.get("error"),
+          }
+          summary = {
+              "schema_version": 1,
+              "recorded_at": datetime.now(UTC).isoformat(),
+              "status": marker.get("status"),
+              "canonical_mcp_url": "https://mcp-dataset-loop.kenigevents.ru/mcp",
+              "release_tag": "v0.1.0-alpha.3",
+              "host_repository": "onedayonemasterpiece/my-data-hub",
+              "host_evidence": str(evidence_path.relative_to(root)) if evidence_path.is_file() else None,
+              "owner_pct_plaintext_in_repository": False,
+              "encrypted_owner_handoff": marker.get("encrypted_owner_handoff"),
+              "runtime": evidence.get("runtime"),
+              "kaggle": evidence.get("kaggle"),
+              "ingress": evidence.get("ingress"),
+              "public_mcp_probe": evidence.get("public_mcp_probe"),
+              "error": evidence.get("error"),
+          }
+          markdown = "\n".join(
+              [
+                  "# Dataset Loop MCP — factual DevCoveer deployment result",
+                  "",
+                  f"Date: {summary['recorded_at']}",
+                  f"Status: **{summary['status']}**",
+                  "",
+                  "Canonical endpoint: `https://mcp-dataset-loop.kenigevents.ru/mcp`.",
+                  "",
+                  "Immutable server release: `v0.1.0-alpha.3`.",
+                  "",
+                  "The owner PCT plaintext is never stored in Git. A successful deployment stores only an RSA/AES encrypted handoff envelope in `my-data-hub`; the owner receives the decrypted `0600` file through the initiating ChatGPT execution environment.",
+                  "",
+                  "Canonical machine-readable evidence:",
+                  "",
+                  "- `onedayonemasterpiece/my-data-hub/ops/dataset-loop-mcp/deployment.completed.json`;",
+                  f"- `{summary['host_evidence']}`.",
+                  "",
+                  (f"Failure: `{summary['error']}`" if summary.get("error") else "No terminal error was recorded."),
+                  "",
+              ]
+          )
+
+          def gh(args: list[str], *, input_text: str | None = None) -> str:
+              result = subprocess.run(
+                  ["gh", *args],
+                  input=input_text,
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.STDOUT,
+                  check=False,
+              )
+              if result.returncode != 0:
+                  raise SystemExit(f"gh failed: {' '.join(args[:4])}: {result.stdout[-2000:]}")
+              return result.stdout
+
+          def upsert(repo: str, path: str, content: str, message: str) -> str:
+              existing = subprocess.run(
+                  ["gh", "api", f"repos/{repo}/contents/{path}?ref=main", "--jq", ".sha"],
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.DEVNULL,
+                  check=False,
+              )
+              args = [
+                  "api", "--method", "PUT", f"repos/{repo}/contents/{path}",
+                  "-f", f"message={message}",
+                  "-f", f"content={base64.b64encode(content.encode()).decode()}",
+                  "-f", "branch=main",
+              ]
+              if existing.returncode == 0 and existing.stdout.strip():
+                  args += ["-f", f"sha={existing.stdout.strip()}"]
+              value = json.loads(gh(args))
+              return str(value["commit"]["sha"])
+
+          json_text = json.dumps(summary, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+          idea_md = "continuations/dataset-loop-mcp/devcoveer-deployment-factual-result-20260903.md"
+          idea_json = "continuations/dataset-loop-mcp/devcoveer-deployment-factual-evidence-20260903.json"
+          idea_sha_1 = upsert(
+              "onedayonemasterpiece/idea-hub",
+              idea_md,
+              markdown,
+              "record: Dataset Loop MCP factual DevCoveer deployment result",
+          )
+          idea_sha_2 = upsert(
+              "onedayonemasterpiece/idea-hub",
+              idea_json,
+              json_text,
+              "record: Dataset Loop MCP factual DevCoveer deployment evidence",
+          )
+          target_path = "evidence/deployment/devcoveer-factual-result.json"
+          target_sha = upsert(
+              "onedayonemasterpiece/dataset-loop-mcp",
+              target_path,
+              json_text,
+              "evidence: record factual DevCoveer deployment result",
+          )
+          readbacks = {
+              "idea_hub_markdown_commit": idea_sha_1,
+              "idea_hub_json_commit": idea_sha_2,
+              "dataset_loop_commit": target_sha,
+          }
+          pathlib.Path("/tmp/dataset-loop-evidence-sync.json").write_text(
+              json.dumps(readbacks, indent=2, sort_keys=True) + "\n"
+          )
+          for repo, path in (
+              ("onedayonemasterpiece/idea-hub", idea_md),
+              ("onedayonemasterpiece/idea-hub", idea_json),
+              ("onedayonemasterpiece/dataset-loop-mcp", target_path),
+          ):
+              gh(["api", f"repos/{repo}/contents/{path}?ref=main"])
+          PY
