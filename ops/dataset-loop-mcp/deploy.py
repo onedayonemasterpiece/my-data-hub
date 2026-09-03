@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import os
@@ -100,9 +99,7 @@ def run(
     except Exception as exc:
         raise DeployError(f"command could not execute: {argv[0]}: {type(exc).__name__}") from exc
     if check and result.returncode != 0:
-        raise DeployError(
-            f"command failed ({result.returncode}): {' '.join(argv[:4])}\n{safe_text(result.stdout)}"
-        )
+        raise DeployError(f"command failed ({result.returncode}): {' '.join(argv[:4])}\n{safe_text(result.stdout)}")
     return Completed(argv, result.stdout)
 
 
@@ -159,11 +156,14 @@ def choose_port(preferred: int | None = None) -> int:
 
 
 def service_active() -> bool:
-    return run(
-        ["systemctl", "--user", "is-active", "--quiet", SERVICE_NAME],
-        check=False,
-        timeout=20,
-    ).stdout == ""
+    return (
+        run(
+            ["systemctl", "--user", "is-active", "--quiet", SERVICE_NAME],
+            check=False,
+            timeout=20,
+        ).stdout
+        == ""
+    )
 
 
 def release_metadata() -> dict[str, Any]:
@@ -268,13 +268,21 @@ def install_release(release_dir: Path, metadata: dict[str, Any]) -> tuple[Path, 
     new.unlink(missing_ok=True)
     new.symlink_to(release_root)
     os.replace(new, current)
-    atomic_private_text(STATE_ROOT / "release.json", json.dumps({
-        "tag": RELEASE_TAG,
-        "tag_object_sha": metadata["tag_object_sha"],
-        "release_commit_sha": metadata["peeled_commit_sha"],
-        "release_id": metadata["release_id"],
-        "installed_at": utcnow(),
-    }, indent=2, sort_keys=True) + "\n")
+    atomic_private_text(
+        STATE_ROOT / "release.json",
+        json.dumps(
+            {
+                "tag": RELEASE_TAG,
+                "tag_object_sha": metadata["tag_object_sha"],
+                "release_commit_sha": metadata["peeled_commit_sha"],
+                "release_id": metadata["release_id"],
+                "installed_at": utcnow(),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
     return source, venv
 
 
@@ -381,7 +389,10 @@ def install_service(source: Path, venv: Path, port: int) -> None:
                 "Type=simple",
                 f"WorkingDirectory={source}",
                 f"EnvironmentFile={STATE_ROOT / 'service.env'}",
-                f"ExecStart={venv / 'bin/uvicorn'} dataset_loop_mcp.main:app --host 127.0.0.1 --port {port} --proxy-headers",
+                (
+                    f"ExecStart={venv / 'bin/uvicorn'} dataset_loop_mcp.main:app "
+                    f"--host 127.0.0.1 --port {port} --proxy-headers"
+                ),
                 "Restart=on-failure",
                 "RestartSec=5",
                 "NoNewPrivileges=true",
@@ -529,7 +540,13 @@ def smoke_payload(schema: dict[str, Any], profile_id: str, minutes: int = 5) -> 
     return payload
 
 
-def start_run(port: int, connection: dict[str, Any], payload: dict[str, Any], *, public: bool = False) -> dict[str, Any]:
+def start_run(
+    port: int,
+    connection: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    public: bool = False,
+) -> dict[str, Any]:
     value = api_request(port, connection, "POST", "/v1/runs", payload, public=public)
     if not isinstance(value, dict) or not value.get("id"):
         raise DeployError("start_run returned invalid data")
@@ -612,23 +629,31 @@ def parse_nginx() -> tuple[dict[Path, str], str]:
 
 def source_edge_patch() -> dict[str, Any]:
     candidates: list[tuple[int, Path]] = []
+    allowed_suffixes = {
+        ".py",
+        ".sh",
+        ".conf",
+        ".j2",
+        ".jinja",
+        ".tmpl",
+        ".yaml",
+        ".yml",
+        ".toml",
+    }
     for path in Path.cwd().rglob("*"):
         try:
             if not path.is_file() or path.is_symlink() or path.stat().st_size > 2_000_000:
                 continue
             if ".git" in path.parts or "ops/dataset-loop-mcp" in path.as_posix():
                 continue
-            if path.suffix.casefold() not in {".py", ".sh", ".conf", ".j2", ".jinja", ".tmpl", ".yaml", ".yml", ".toml"}:
+            if path.suffix.casefold() not in allowed_suffixes:
                 continue
             text = path.read_text(errors="ignore")
         except OSError:
             continue
         if "mcp-datahub.kenigevents.ru" not in text or "identity.kenigevents.ru" not in text:
             continue
-        score = sum(
-            token in text
-            for token in ("ssl_preread", "127.0.0.1:8444", "stream", "server_name")
-        )
+        score = sum(token in text for token in ("ssl_preread", "127.0.0.1:8444", "stream", "server_name"))
         candidates.append((score, path))
     candidates.sort(key=lambda item: (-item[0], len(str(item[1]))))
     if not candidates:
@@ -677,9 +702,7 @@ def ensure_dns(ip: str) -> None:
     if len(matching) != 1:
         raise DeployError("Yandex DNS zone kenigevents.ru. is unavailable or ambiguous")
     zone_id = str(matching[0]["id"])
-    records = json.loads(
-        run(["yc", "dns", "zone", "list-records", "--id", zone_id, "--format", "json"]).stdout
-    )
+    records = json.loads(run(["yc", "dns", "zone", "list-records", "--id", zone_id, "--format", "json"]).stdout)
     for item in records:
         if item.get("name") != "mcp-dataset-loop.kenigevents.ru.":
             continue
@@ -902,8 +925,31 @@ def public_mcp_probe(connection: dict[str, Any]) -> dict[str, Any]:
     if missing != "401":
         raise DeployError(f"public MCP missing bearer returned {missing}, expected 401")
     for url in EXISTING_MCP_URLS:
-        run(["curl", "--silent", "--show-error", "--location", "--output", "/dev/null", "--write-out", "%{http_code}", url], check=False)
-    run(["curl", "--fail", "--silent", "--show-error", f"{OAUTH_ISSUER}/.well-known/oauth-authorization-server", "--output", "/dev/null"])
+        run(
+            [
+                "curl",
+                "--silent",
+                "--show-error",
+                "--location",
+                "--output",
+                "/dev/null",
+                "--write-out",
+                "%{http_code}",
+                url,
+            ],
+            check=False,
+        )
+    run(
+        [
+            "curl",
+            "--fail",
+            "--silent",
+            "--show-error",
+            f"{OAUTH_ISSUER}/.well-known/oauth-authorization-server",
+            "--output",
+            "/dev/null",
+        ]
+    )
     return {"authenticated_initialize": True, "missing_bearer_rejected": True}
 
 
@@ -937,8 +983,7 @@ def public_acceptance(port: int, connection: dict[str, Any], profile_id: str) ->
     deadline = time.monotonic() + 12 * 60
     while time.monotonic() < deadline:
         assigned = {
-            run_id: api_request(port, connection, "GET", f"/v1/runs/{run_id}", public=True)
-            for run_id in run_ids
+            run_id: api_request(port, connection, "GET", f"/v1/runs/{run_id}", public=True) for run_id in run_ids
         }
         if all(item.get("slot_id") and item.get("kernel_id") for item in assigned.values()):
             break
@@ -950,9 +995,7 @@ def public_acceptance(port: int, connection: dict[str, Any], profile_id: str) ->
         raise DeployError(f"stable slots were not isolated: {slots}")
     run(["systemctl", "--user", "restart", SERVICE_NAME])
     wait_local_health(port)
-    terminal = {
-        run_id: wait_run(port, connection, run_id, public=True, timeout=1800) for run_id in run_ids
-    }
+    terminal = {run_id: wait_run(port, connection, run_id, public=True, timeout=1800) for run_id in run_ids}
     if any(item.get("state") != "succeeded" for item in terminal.values()):
         raise DeployError(f"two-slot runs did not both succeed: {terminal}")
     if {str(item.get("slot_id")) for item in terminal.values()} != {"s01", "s02"}:
@@ -1011,7 +1054,7 @@ def encrypt_owner_connection(venv: Path) -> dict[str, Any]:
         raise DeployError("owner handoff public key is absent or unsafe")
     envelope = RUNTIME_DIR / "owner-connection.envelope.json"
     envelope.parent.mkdir(parents=True, exist_ok=True)
-    code = r'''
+    code = r"""
 import base64, hashlib, json, os, pathlib, secrets
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -1035,7 +1078,7 @@ value={
  "contains_plaintext_token":False,
 }
 pathlib.Path(os.environ["ENVELOPE"]).write_text(json.dumps(value,indent=2,sort_keys=True)+"\n")
-'''
+"""
     run(
         [str(venv / "bin/python"), "-c", code],
         env={
