@@ -1,0 +1,5 @@
+{
+  "requested_at": "2026-09-03",
+  "schema_version": 1,
+  "scope": "independently build, test, publish or reconcile v0.1.0-alpha.3 and verify downloaded assets"
+}
